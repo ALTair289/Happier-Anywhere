@@ -16,20 +16,14 @@ import { createAgentSessionMediaPersister } from '@/session/sessionMedia/createA
 import { createSessionMediaAccessPolicy } from '@/session/sessionMedia/createSessionMediaAccessPolicy';
 import { AGENTS_CORE, getProviderCliRuntimeSpec, isAgentMediaCapabilitySupported } from '@happier-dev/agents';
 import { getSessionNotificationTitle } from '@/agent/runtime/readyNotificationContext';
-import { createSessionProviderPendingDrainAdapter } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 import { createVendorResumeIdMetadataPublisher } from '@/session/metadata/createVendorResumeIdMetadataPublisher';
 
 export type CatalogProviderSessionIdentityPublication =
   | Readonly<{ kind: 'manifest-metadata' }>
-  | Readonly<{
-    kind: 'custom';
-    persistBound: (event: AcpBoundSessionIdentity) => Promise<void>;
-  }>
+  | Readonly<{ kind: 'custom'; persistBound: (event: AcpBoundSessionIdentity) => Promise<void> }>
   | Readonly<{ kind: 'external-owner' }>
-  | Readonly<{
-    kind: 'runtime-only';
-    reason: 'vendor-resume-unsupported';
-  }>;
+  | Readonly<{ kind: 'runtime-only'; reason: 'vendor-resume-unsupported' }>;
 
 type CatalogAcpProviderRuntimeParams<TBackendOptions extends object> = {
   provider: Parameters<typeof createCatalogAcpBackend>[0];
@@ -55,8 +49,10 @@ type CatalogAcpProviderRuntimeParams<TBackendOptions extends object> = {
   resolveSessionModelConfigUpdate?: Parameters<typeof createAcpRuntime>[0]['resolveSessionModelConfigUpdate'];
   deriveSessionModelsFromConfigOptions?: Parameters<typeof createAcpRuntime>[0]['deriveSessionModelsFromConfigOptions'];
   resolveSessionConfigOptionUpdate?: Parameters<typeof createAcpRuntime>[0]['resolveSessionConfigOptionUpdate'];
+  sessionMediaProviderRoots?: readonly (string | null | undefined)[];
   startupOverrides?: Parameters<typeof createAcpRuntime>[0]['startupOverrides'];
   pendingQueueDrainMaxPopPerWake?: number;
+  providerInputConsumer: SessionProviderInputConsumer<unknown, unknown>;
 };
 
 export function createCatalogProviderAcpRuntime<TBackendOptions extends object = Record<string, never>>(
@@ -110,13 +106,9 @@ export function createCatalogProviderAcpRuntime<TBackendOptions extends object =
     if (params.sessionIdentity.kind === 'custom') {
       return { kind: 'persist-bound' as const, persistBound: params.sessionIdentity.persistBound };
     }
-    if (params.sessionIdentity.kind === 'runtime-only') {
-      if (AGENTS_CORE[params.provider].resume.vendorResume !== 'unsupported') {
-        throw new Error(
-          `Agent ${params.provider} advertises vendor resume and cannot use runtime-only session identity`,
-        );
-      }
-      return params.sessionIdentity;
+    if (params.sessionIdentity.kind === 'runtime-only'
+      && AGENTS_CORE[params.provider].resume.vendorResume !== 'unsupported') {
+      throw new Error(`Agent ${params.provider} advertises vendor resume and cannot use runtime-only session identity`);
     }
     return params.sessionIdentity;
   })();
@@ -142,10 +134,7 @@ export function createCatalogProviderAcpRuntime<TBackendOptions extends object =
     pendingQueue: {
       drainAfterStartOrLoad: true,
       maxPopPerWake: params.pendingQueueDrainMaxPopPerWake,
-      waitForMetadataUpdate: (signal) => params.session.waitForMetadataUpdate(signal),
-      inputConsumer: createSessionProviderPendingDrainAdapter(params.session, {
-        maxPopPerWake: params.pendingQueueDrainMaxPopPerWake,
-      }),
+      inputConsumer: params.providerInputConsumer,
     },
     ...(shouldPersistSessionMedia
       ? {
@@ -154,6 +143,7 @@ export function createCatalogProviderAcpRuntime<TBackendOptions extends object =
             sessionId: params.session.sessionId,
             accessPolicy: createSessionMediaAccessPolicy({
               workingDirectory: params.directory,
+              providerMediaRoots: params.sessionMediaProviderRoots,
             }),
           }),
         }

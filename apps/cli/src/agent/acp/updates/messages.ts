@@ -49,11 +49,11 @@ export function handleAgentMessageChunk(
     ctx.transport.getIdleTimeout?.() ??
     DEFAULT_IDLE_TIMEOUT_MS;
   ctx.setIdleTimeout(() => {
-    if (ctx.activeToolCalls.size === 0) {
+    if (ctx.toolCalls.activeSize === 0) {
       logger.debug('[AcpBackend] No more chunks received, emitting idle status');
       ctx.emitIdleStatus();
     } else {
-      logger.debug(`[AcpBackend] Delaying idle status - ${ctx.activeToolCalls.size} active tool calls`);
+      logger.debug(`[AcpBackend] Delaying idle status - ${ctx.toolCalls.activeSize} active tool calls`);
     }
   }, idleTimeoutMs);
 
@@ -72,8 +72,8 @@ export function handleAgentThoughtChunk(
   if (!text.trim()) return { handled: true };
 
   // Log thinking chunks when tool calls are active.
-  if (ctx.activeToolCalls.size > 0) {
-    const activeToolCallsList = Array.from(ctx.activeToolCalls);
+  if (ctx.toolCalls.activeSize > 0) {
+    const activeToolCallsList = ctx.toolCalls.activeCallIds();
     logger.debug(
       `[AcpBackend] 💭 Thinking chunk received (${text.length} chars) during active tool calls: ${activeToolCallsList.join(', ')}`,
     );
@@ -94,11 +94,11 @@ export function handleAgentThoughtChunk(
     ctx.transport.getIdleTimeout?.() ??
     DEFAULT_IDLE_TIMEOUT_MS;
   ctx.setIdleTimeout(() => {
-    if (ctx.activeToolCalls.size === 0) {
+    if (ctx.toolCalls.activeSize === 0) {
       logger.debug('[AcpBackend] No more thought chunks received, emitting idle status');
       ctx.emitIdleStatus();
     } else {
-      logger.debug(`[AcpBackend] Delaying idle status after thought chunk - ${ctx.activeToolCalls.size} active tool calls`);
+      logger.debug(`[AcpBackend] Delaying idle status after thought chunk - ${ctx.toolCalls.activeSize} active tool calls`);
     }
   }, idleTimeoutMs);
 

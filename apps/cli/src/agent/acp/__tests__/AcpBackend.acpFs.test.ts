@@ -35,6 +35,21 @@ describe('AcpBackend ACP FS capability experiment', () => {
     expect(req.clientCapabilities?.fs?.writeTextFile).toBe(true);
   });
 
+  it('advertises the SDK plan lifecycle capability only when its canonical publisher is active', () => {
+    const withoutPublisher = buildInitializeRequest({
+      clientName: 'test',
+      clientVersion: '0.0.0',
+      planUpdates: false,
+    });
+    const withPublisher = buildInitializeRequest({
+      clientName: 'test',
+      clientVersion: '0.0.0',
+      planUpdates: true,
+    });
+    expect(withoutPublisher.clientCapabilities?.plan).toBeUndefined();
+    expect(withPublisher.clientCapabilities?.plan).toEqual({});
+  });
+
   it('writeTextFile is permission-gated when ACP fs is enabled', async () => {
     envScope.patch({ HAPPIER_ACP_FS: '1' });
 

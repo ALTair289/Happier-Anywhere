@@ -580,6 +580,7 @@ function writeFakeAcpPendingToolThenSecondPromptAgentScript(params: {
           if (promptCount === 1) {
             sendPendingToolCall();
             setTimeout(sendLateStaleUpdates, ${lateStaleUpdateDelayMs});
+            setTimeout(() => ok(id, { stopReason: 'end_turn' }), ${lateStaleUpdateDelayMs + 10});
             continue;
           }
 
@@ -615,7 +616,6 @@ function writeFakeAcpClosedTurnThenSecondPromptStaleChunksAgentScript(params: {
   secondPromptAckDelayMs: number;
   secondPromptOutputDelayMs: number;
   emitStaleUpdates?: boolean;
-  staleUpdateAfterSecondPromptAckDelayMs?: number;
   firstStopReason?: string;
   secondPromptUpdateKind?: 'agent_message_chunk' | 'agent_thought_chunk';
   secondPromptUpdateText?: string;
@@ -625,9 +625,6 @@ function writeFakeAcpClosedTurnThenSecondPromptStaleChunksAgentScript(params: {
   const secondPromptAckDelayMs = Math.max(1, Math.trunc(params.secondPromptAckDelayMs));
   const secondPromptOutputDelayMs = Math.max(1, Math.trunc(params.secondPromptOutputDelayMs));
   const emitStaleUpdates = params.emitStaleUpdates ?? true;
-  const staleUpdateAfterSecondPromptAckDelayMs = Number.isFinite(params.staleUpdateAfterSecondPromptAckDelayMs)
-    ? Math.max(1, Math.trunc(params.staleUpdateAfterSecondPromptAckDelayMs ?? 0))
-    : null;
   const firstStopReason = params.firstStopReason ?? 'end_turn';
   const secondPromptUpdateKind = params.secondPromptUpdateKind ?? 'agent_message_chunk';
   const secondPromptUpdateText = params.secondPromptUpdateText ?? 'second turn output';
@@ -706,10 +703,6 @@ function writeFakeAcpClosedTurnThenSecondPromptStaleChunksAgentScript(params: {
 
           setTimeout(() => {
             ok(id, {});
-            const staleAfterAckDelay = ${staleUpdateAfterSecondPromptAckDelayMs == null ? 'null' : JSON.stringify(staleUpdateAfterSecondPromptAckDelayMs)};
-            if (staleAfterAckDelay !== null) {
-              setTimeout(sendStaleFirstTurnChunks, staleAfterAckDelay);
-            }
           }, ${secondPromptAckDelayMs});
           setTimeout(() => {
             send({
@@ -1068,6 +1061,9 @@ function writeFakeAcpToolPhasesWithLateUpdatesAgentScript(params: {
 }
 
 describe('AcpBackend.waitForResponseComplete', () => {
+  const readDispatchedPromptTurnGeneration = (backend: AcpBackend): number | null =>
+    (backend as unknown as { dispatchedPromptTurnGeneration: number | null }).dispatchedPromptTurnGeneration;
+
   it('does not apply a default timeout when timeoutMs is omitted', async () => {
     vi.useFakeTimers();
 
@@ -1137,6 +1133,7 @@ describe('AcpBackend.waitForResponseComplete', () => {
         await backend.cancel(started.sessionId);
 
         await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
+        expect(readDispatchedPromptTurnGeneration(backend)).toBeNull();
       } finally {
         await backendForCleanup?.dispose().catch(() => {});
       }
@@ -1167,6 +1164,7 @@ describe('AcpBackend.waitForResponseComplete', () => {
         backendForCleanup = undefined;
 
         await waitingExpectation;
+        expect(readDispatchedPromptTurnGeneration(backend)).toBeNull();
       } finally {
         await backendForCleanup?.dispose().catch(() => {});
       }
@@ -1198,6 +1196,7 @@ describe('AcpBackend.waitForResponseComplete', () => {
         await backend.sendPrompt(started.sessionId, 'hi');
 
         await expect(backend.waitForResponseComplete(250)).resolves.toBeUndefined();
+        expect(readDispatchedPromptTurnGeneration(backend)).toBeNull();
       } finally {
         await backendForCleanup?.dispose().catch(() => {});
       }
@@ -1360,25 +1359,26 @@ describe('AcpBackend.waitForResponseComplete', () => {
       await backend.sendPrompt(started.sessionId, 'first prompt leaves a tool pending');
 
       await expect(backend.waitForResponseComplete(60)).rejects.toThrow(/Timeout waiting for response/i);
+      expect(readDispatchedPromptTurnGeneration(backend)).toBeNull();
 
       await new Promise((resolve) => setTimeout(resolve, 140));
 
       expect(chunks).toEqual([]);
       expect(thinkingEvents).toEqual([]);
-      expect(toolResults).toEqual([]);
+      expect(toolResults).toEqual(['{"status":"abandoned"}']);
 
       await backend.sendPrompt(started.sessionId, 'second prompt emits a legitimate update');
       await expect(backend.waitForResponseComplete(1_000)).resolves.toBeUndefined();
 
       expect(chunks).toEqual(['second turn output']);
       expect(thinkingEvents).toEqual([]);
-      expect(toolResults).toEqual([]);
+      expect(toolResults).toEqual(['{"status":"abandoned"}']);
     } finally {
       await backendForCleanup?.dispose().catch(() => {});
     }
   }
 
-  it('clears pending active tool state after response-wait timeout so the next turn can idle', async () => {
+  it('abandons pending active tool state after response-wait timeout so the next turn can idle', async () => {
     await withTempDir('happier-acp-response-wait-clears-active-tools-', async (dir) => {
       await expectSecondTurnAfterPendingToolTerminalPath({ dir });
     });
@@ -1479,15 +1479,13 @@ describe('AcpBackend.waitForResponseComplete', () => {
     });
   }, 20_000);
 
-  it('drops prior-turn chunks that arrive after the next prompt starts waiting', async () => {
+  it('drops prior-turn chunks before the next prompt is dispatched', async () => {
     await withTempDir('happier-acp-second-prompt-stale-first-turn-chunks-', async (dir) => {
       const scriptPath = writeFakeAcpClosedTurnThenSecondPromptStaleChunksAgentScript({
         dir,
-        staleUpdateDelayMs: 500,
-        secondPromptAckDelayMs: 20,
-        staleUpdateAfterSecondPromptAckDelayMs: 10,
-        secondPromptOutputDelayMs: 90,
-        emitStaleUpdates: false,
+        staleUpdateDelayMs: 20,
+        secondPromptAckDelayMs: 90,
+        secondPromptOutputDelayMs: 20,
       });
       let backendForCleanup: AcpBackend | undefined;
 
@@ -1525,7 +1523,11 @@ describe('AcpBackend.waitForResponseComplete', () => {
           stopReason: 'end_turn',
         });
 
-        await backend.sendPrompt(started.sessionId, 'second prompt starts before stale chunks arrive');
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        expect(chunks).toEqual([]);
+        expect(thinkingEvents).toEqual([]);
+
+        await backend.sendPrompt(started.sessionId, 'second prompt starts after stale chunks were rejected');
         await expect(backend.waitForResponseComplete(1_000)).resolves.toBeUndefined();
 
         expect(chunks).toEqual(['second turn output']);
@@ -1641,6 +1643,70 @@ describe('AcpBackend.waitForResponseComplete', () => {
     });
   }, 20_000);
 
+  it.each([
+    ['agent_message_chunk', 'second turn message before ACK after refusal'],
+    ['agent_thought_chunk', 'second turn thought before ACK after refusal'],
+  ] as const)(
+    'accepts an active %s emitted before prompt ACK after a refused turn',
+    async (secondPromptUpdateKind, secondPromptUpdateText) => {
+      await withTempDir('happier-acp-second-prompt-after-refused-stop-reason-', async (dir) => {
+        const scriptPath = writeFakeAcpClosedTurnThenSecondPromptStaleChunksAgentScript({
+          dir,
+          staleUpdateDelayMs: 500,
+          secondPromptAckDelayMs: 90,
+          secondPromptOutputDelayMs: 20,
+          emitStaleUpdates: false,
+          firstStopReason: 'refusal',
+          secondPromptUpdateKind,
+          secondPromptUpdateText,
+        });
+        let backendForCleanup: AcpBackend | undefined;
+
+        try {
+          const backend = new AcpBackend({
+            agentName: 'test',
+            cwd: dir,
+            command: process.execPath,
+            args: [scriptPath],
+            transportHandler: createAcpTestTransportHandler({
+              idleTimeoutMs: 15,
+              promptLivenessTimeoutMs: 500,
+            }),
+          });
+          backendForCleanup = backend;
+
+          const emittedText: string[] = [];
+          backend.onMessage((msg) => {
+            if (msg.type === 'model-output' && typeof msg.textDelta === 'string') {
+              emittedText.push(msg.textDelta);
+              return;
+            }
+            if (msg.type !== 'event' || msg.name !== 'thinking') return;
+            const payload = msg.payload;
+            if (!payload || typeof payload !== 'object') return;
+            const text = (payload as { text?: unknown }).text;
+            if (typeof text === 'string') emittedText.push(text);
+          });
+
+          const started = await backend.startSession();
+          await backend.sendPrompt(started.sessionId, 'first prompt is refused');
+          await expect(backend.waitForResponseComplete(500)).resolves.toEqual({
+            kind: 'refused',
+            stopReason: 'refusal',
+          });
+
+          await backend.sendPrompt(started.sessionId, 'second prompt emits before ACK');
+          await expect(backend.waitForResponseComplete(1_000)).resolves.toBeUndefined();
+
+          expect(emittedText).toEqual([secondPromptUpdateText]);
+        } finally {
+          await backendForCleanup?.dispose().catch(() => {});
+        }
+      });
+    },
+    20_000,
+  );
+
   it('accepts a second-turn thought chunk before the second prompt ACK', async () => {
     await withTempDir('happier-acp-second-prompt-thought-before-ack-', async (dir) => {
       const scriptPath = writeFakeAcpClosedTurnThenSecondPromptStaleChunksAgentScript({
@@ -1693,122 +1759,6 @@ describe('AcpBackend.waitForResponseComplete', () => {
 
         expect(chunks).toEqual([]);
         expect(thinkingEvents).toEqual(['second turn thought before ACK']);
-      } finally {
-        await backendForCleanup?.dispose().catch(() => {});
-      }
-    });
-  }, 20_000);
-
-  it('drops prior-turn chunks that arrive after the next prompt ACK before the first next-turn update', async () => {
-    await withTempDir('happier-acp-second-prompt-stale-first-turn-chunks-after-ack-', async (dir) => {
-      const scriptPath = writeFakeAcpClosedTurnThenSecondPromptStaleChunksAgentScript({
-        dir,
-        staleUpdateDelayMs: 500,
-        secondPromptAckDelayMs: 20,
-        staleUpdateAfterSecondPromptAckDelayMs: 10,
-        secondPromptOutputDelayMs: 90,
-        emitStaleUpdates: false,
-      });
-      let backendForCleanup: AcpBackend | undefined;
-
-      try {
-        const backend = new AcpBackend({
-          agentName: 'test',
-          cwd: dir,
-          command: process.execPath,
-          args: [scriptPath],
-          transportHandler: createAcpTestTransportHandler({
-            idleTimeoutMs: 15,
-            promptLivenessTimeoutMs: 500,
-          }),
-        });
-        backendForCleanup = backend;
-
-        const chunks: string[] = [];
-        const thinkingEvents: string[] = [];
-        backend.onMessage((msg) => {
-          if (msg.type === 'model-output' && typeof msg.textDelta === 'string') {
-            chunks.push(msg.textDelta);
-            return;
-          }
-          if (msg.type !== 'event' || msg.name !== 'thinking') return;
-          const payload = msg.payload;
-          if (!payload || typeof payload !== 'object') return;
-          const text = (payload as { text?: unknown }).text;
-          if (typeof text === 'string') thinkingEvents.push(text);
-        });
-
-        const started = await backend.startSession();
-        await backend.sendPrompt(started.sessionId, 'first prompt closes before delayed stale chunks');
-        await expect(backend.waitForResponseComplete(500)).resolves.toEqual({
-          kind: 'completed',
-          stopReason: 'end_turn',
-        });
-
-        await backend.sendPrompt(started.sessionId, 'second prompt ACKs before stale chunks arrive');
-        await expect(backend.waitForResponseComplete(1_000)).resolves.toBeUndefined();
-
-        expect(chunks).toEqual(['second turn output']);
-        expect(thinkingEvents).toEqual([]);
-      } finally {
-        await backendForCleanup?.dispose().catch(() => {});
-      }
-    });
-  }, 20_000);
-
-  it('drops prior-turn chunks after an explicit response-wait timeout and the next prompt starts waiting', async () => {
-    await withTempDir('happier-acp-terminal-stale-update-after-next-prompt-', async (dir) => {
-      const scriptPath = writeFakeAcpPendingToolThenSecondPromptAgentScript({
-        dir,
-        lateStaleUpdateDelayMs: 360,
-        secondPromptAckDelayMs: 90,
-        secondPromptOutputDelayMs: 160,
-      });
-      let backendForCleanup: AcpBackend | undefined;
-
-      try {
-        const backend = new AcpBackend({
-          agentName: 'test',
-          cwd: dir,
-          command: process.execPath,
-          args: [scriptPath],
-          transportHandler: createAcpTestTransportHandler({
-            idleTimeoutMs: 1,
-            promptLivenessTimeoutMs: 500,
-          }),
-        });
-        backendForCleanup = backend;
-
-        const chunks: string[] = [];
-        const thinkingEvents: string[] = [];
-        const toolResults: string[] = [];
-        backend.onMessage((msg) => {
-          if (msg.type === 'model-output' && typeof msg.textDelta === 'string') {
-            chunks.push(msg.textDelta);
-            return;
-          }
-          if (msg.type === 'tool-result') {
-            toolResults.push(JSON.stringify(msg.result));
-            return;
-          }
-          if (msg.type !== 'event' || msg.name !== 'thinking') return;
-          const payload = msg.payload;
-          if (!payload || typeof payload !== 'object') return;
-          const text = (payload as { text?: unknown }).text;
-          if (typeof text === 'string') thinkingEvents.push(text);
-        });
-
-        const started = await backend.startSession();
-        await backend.sendPrompt(started.sessionId, 'first prompt leaves a tool pending');
-        await expect(backend.waitForResponseComplete(260)).rejects.toThrow(/Timeout waiting for response/i);
-
-        await backend.sendPrompt(started.sessionId, 'second prompt starts before stale chunks arrive');
-        await expect(backend.waitForResponseComplete(1_000)).resolves.toBeUndefined();
-        await new Promise((resolve) => setTimeout(resolve, 460));
-
-        expect(chunks).toEqual(['second turn output']);
-        expect(thinkingEvents).toEqual([]);
-        expect(toolResults).toEqual([]);
       } finally {
         await backendForCleanup?.dispose().catch(() => {});
       }

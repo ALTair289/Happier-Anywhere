@@ -1,6 +1,7 @@
 import type { Metadata } from '@/api/types';
 import { updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
 import { normalizeAcpConfigOptionChoices } from '@/agent/acp/configOptionChoiceNormalization';
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 import { readNewestSessionModelsMetadataStateV1 } from '@happier-dev/agents';
 
 type NormalizedConfigOptionValue = string | number | boolean | null;
@@ -76,7 +77,7 @@ export function normalizeConfigOptionsArray(raw: unknown): NormalizedConfigOptio
   const out: NormalizedConfigOption[] = [];
   for (const entry of raw) {
     const o = asRecord(entry);
-    const id = typeof o?.id === 'string' ? String(o.id).trim() : '';
+    const id = readNonBlankSessionControlIdentifier(o?.id) ?? '';
     const name = typeof o?.name === 'string' ? String(o.name).trim() : '';
     const type = typeof o?.type === 'string' ? String(o.type).trim() : '';
     if (!id || !name || !type) continue;

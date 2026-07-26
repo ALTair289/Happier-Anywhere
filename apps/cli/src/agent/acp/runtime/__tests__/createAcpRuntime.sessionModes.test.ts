@@ -368,6 +368,41 @@ describe('createAcpRuntime (session modes)', () => {
     });
   });
 
+  it('does not apply a deferred prior-lifecycle mode update after reset', async () => {
+    const backend = createFakeAcpRuntimeBackend();
+    let metadata = createTestMetadata();
+    let deferredUpdater: ((current: Metadata) => Metadata) | null = null;
+    const session = createBasicSessionClientWithOverrides({
+      updateMetadata: (updater) => {
+        deferredUpdater = updater;
+      },
+    });
+    const runtime = createAcpRuntime({
+      provider: 'codex',
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+    });
+
+    await runtime.startOrLoad({ resumeId: null });
+    backend.emit({
+      type: 'event',
+      name: 'current_mode_update',
+      payload: { currentModeId: 'plan' },
+    });
+    expect(deferredUpdater).not.toBeNull();
+
+    await runtime.reset();
+    metadata = deferredUpdater!(metadata);
+
+    expect(metadata.sessionModesV1).toBeUndefined();
+    expect(metadata.acpSessionModesV1).toBeUndefined();
+  });
+
   it('publishes session modes derived from ACP mode config options', async () => {
     const backend = createFakeAcpRuntimeBackend();
     const { session, getMetadata } = createSessionClientWithMetadata({
@@ -528,7 +563,6 @@ describe('createAcpRuntime (session modes)', () => {
             return { materialized: 0, stoppedReason: 'no_pending' };
           },
         },
-        waitForMetadataUpdate: async () => false,
       },
     });
 
@@ -573,7 +607,6 @@ describe('createAcpRuntime (session modes)', () => {
             return { materialized: 0, stoppedReason: 'no_pending' };
           },
         },
-        waitForMetadataUpdate: async () => false,
       },
     });
 

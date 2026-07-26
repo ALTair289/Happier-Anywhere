@@ -89,4 +89,113 @@ describe('AcpAgentPeer', () => {
     await expect(connection.peer.requestExtension('example/after-close', {}))
       .rejects.toThrow(/connection is closed/i);
   });
+
+  it('rejects and cancels an in-flight extension request when the connection closes', async () => {
+    let observedCancellation = false;
+    let resolveStarted: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
+    const connection = createConnection(agent({ name: 'peer-close-test-agent' })
+      .onRequest('example/slow', objectParams, async (context) => {
+        resolveStarted?.();
+        await new Promise<void>((_resolve, reject) => {
+          context.signal.addEventListener('abort', () => {
+            observedCancellation = true;
+            reject(RequestError.requestCancelled());
+          }, { once: true });
+        });
+        return {};
+      }));
+
+    const request = connection.peer.requestExtension('example/slow', {});
+    await started;
+    connection.close(new Error('test connection close'));
+
+    await expect(request).rejects.toThrow();
+    await connection.closed;
+    expect(observedCancellation).toBe(true);
+  });
+
+  it('preserves bounded upstream diagnostic details on standard request failures', async () => {
+    const testAgent = agent({ name: 'peer-error-details-agent' })
+      .onRequest('session/load', async () => {
+        throw RequestError.internalError({ details: 'No previous sessions found for this project.' });
+      });
+    const connection = createConnection(testAgent);
+
+    try {
+      await expect(connection.peer.loadSession({
+        sessionId: 'missing',
+        cwd: '/tmp',
+        mcpServers: [],
+      })).rejects.toThrow(/No previous sessions found for this project/);
+    } finally {
+      connection.close();
+      await connection.closed;
+    }
+  });
+
+  it('redacts secrets from upstream diagnostic details before surfacing them', async () => {
+    const testAgent = agent({ name: 'peer-secret-details-agent' })
+      .onRequest('session/load', async () => {
+        throw RequestError.internalError({
+          details: 'Upstream rejected the request: token=provider-secret-value trace=trace-123',
+        });
+      });
+    const connection = createConnection(testAgent);
+
+    try {
+      const failure = await connection.peer.loadSession({
+        sessionId: 'missing',
+        cwd: '/tmp',
+        mcpServers: [],
+      }).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain('Upstream rejected the request');
+      expect((failure as Error).message).toContain('[REDACTED]');
+      expect((failure as Error).message).not.toContain('provider-secret-value');
+      expect(JSON.stringify((failure as Error & { data?: unknown }).data))
+        .not.toContain('provider-secret-value');
+      expect((failure as Error).stack ?? '').not.toContain('provider-secret-value');
+    } finally {
+      connection.close();
+      await connection.closed;
+    }
+  });
+
+  it('redacts and bounds every upstream diagnostic data field before surfacing it', async () => {
+    const testAgent = agent({ name: 'peer-secret-data-agent' })
+      .onRequest('session/load', async () => {
+        throw RequestError.internalError({
+          details: 'Provider request failed',
+          token: 'provider-secret-value',
+          nested: {
+            authorization: 'Bearer nested-secret-value',
+            repeated: 'x'.repeat(100_000),
+          },
+        });
+      });
+    const connection = createConnection(testAgent);
+
+    try {
+      const failure = await connection.peer.loadSession({
+        sessionId: 'missing',
+        cwd: '/tmp',
+        mcpServers: [],
+      }).catch((error: unknown) => error);
+      const serializedData = JSON.stringify((failure as Error & { data?: unknown }).data);
+
+      expect(serializedData).not.toContain('provider-secret-value');
+      expect(serializedData).not.toContain('nested-secret-value');
+      expect((failure as Error & { data?: unknown }).data).toEqual({
+        details: 'Provider request failed',
+      });
+      expect(failure).toMatchObject({ code: -32603 });
+      expect((failure as Error).message).toContain('Provider request failed');
+      expect(serializedData.length).toBeLessThan(20_000);
+    } finally {
+      connection.close();
+      await connection.closed;
+    }
+  });
 });

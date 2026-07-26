@@ -101,7 +101,7 @@ function writeFakePermissionAgentScript(params: { dir: string }): string {
                 sessionUpdate: 'tool_call_update',
                 toolCallId: 'tool_call_1',
                 status: 'completed',
-                output: {
+                rawOutput: {
                   output: [
                     {
                       type: 'content',

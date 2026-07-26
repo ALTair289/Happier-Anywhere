@@ -261,7 +261,7 @@ export function extractPermissionInput(
 export function extractPermissionInputWithFallback(
   params: PermissionRequestLike,
   toolCallId: string,
-  toolCallIdToInputMap?: Map<string, Record<string, unknown>>,
+  toolCallIdToInputMap?: Pick<ReadonlyMap<string, Record<string, unknown>>, 'get'>,
   options?: ExtractPermissionInputOptions,
 ): Record<string, unknown> {
   const extracted = extractPermissionInput(params, options);
@@ -386,7 +386,7 @@ export function shouldReplaceCachedPermissionToolName(currentToolName: string, n
 export function resolvePermissionToolName(opts: {
   toolNameHint: string;
   toolCallId: string;
-  toolCallIdToNameMap?: Map<string, string>;
+  toolCallIdToNameMap?: Pick<ReadonlyMap<string, string>, 'get'>;
 }): string {
   const mapped = opts.toolCallIdToNameMap?.get(opts.toolCallId);
   if (typeof mapped === 'string' && mapped.trim().length > 0) {

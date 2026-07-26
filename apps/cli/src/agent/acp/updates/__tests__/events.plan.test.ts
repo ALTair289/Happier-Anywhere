@@ -1,19 +1,40 @@
 import { describe, expect, it } from 'vitest';
 
 import { DefaultTransport } from '@/agent/transport';
-import type { TransportHandler } from '@/agent/transport';
-import { ACP_PLAN_TOOL_CALL_ID, handlePlanUpdate } from '../events';
+import { handlePlanUpdate } from '../events';
 import type { HandlerContext, SessionUpdate } from '../types';
+import type { NormalizedAcpPlanSnapshot } from '@/agent/acp/plans';
 
-function makeCtx(transport: TransportHandler) {
+function makeCtx() {
   const emitted: any[] = [];
-  const ctx = { transport, emit: (m: any) => emitted.push(m) } as unknown as HandlerContext;
-  return { ctx, emitted };
+  const projected: NormalizedAcpPlanSnapshot[] = [];
+  const removed: Array<{
+    providerId: string;
+    turnId: string;
+    source: 'standard';
+    correlationId: string;
+  }> = [];
+  const ctx = {
+    transport: new DefaultTransport('test-acp'),
+    turnId: 'turn-1',
+    plans: {
+      project: async (snapshot: NormalizedAcpPlanSnapshot) => {
+        projected.push(snapshot);
+        return { kind: 'published' as const };
+      },
+      remove: async (input: (typeof removed)[number]) => {
+        removed.push(input);
+        return { kind: 'published' as const };
+      },
+    },
+    emit: (m: any) => emitted.push(m),
+  } as unknown as HandlerContext;
+  return { ctx, emitted, projected, removed };
 }
 
-describe('handlePlanUpdate (generic ACP plan -> shared TodoWrite checklist)', () => {
-  it('normalizes a standard ACP plan update into a TodoWrite tool-call + tool-result', () => {
-    const { ctx, emitted } = makeCtx(new DefaultTransport('test'));
+describe('handlePlanUpdate (generic ACP plan -> canonical plan owner)', () => {
+  it('routes a standard full snapshot without emitting synthetic TodoWrite transcript rows', async () => {
+    const { ctx, emitted, projected } = makeCtx();
     const update: SessionUpdate = {
       sessionUpdate: 'plan',
       entries: [
@@ -23,41 +44,100 @@ describe('handlePlanUpdate (generic ACP plan -> shared TodoWrite checklist)', ()
       ],
     };
 
-    const result = handlePlanUpdate(update, ctx);
+    const result = await handlePlanUpdate(update, ctx);
 
-    expect(result).toEqual({ handled: true });
-    expect(emitted).toHaveLength(2);
-    const todos = [
-      { content: 'Analyze the codebase', status: 'pending', priority: 'high' },
-      { content: 'Write tests', status: 'in_progress', priority: 'medium' },
-      { content: 'Ship it', status: 'completed', priority: 'low' },
-    ];
-    expect(emitted[0]).toEqual({ type: 'tool-call', toolName: 'TodoWrite', args: { todos }, callId: ACP_PLAN_TOOL_CALL_ID });
-    expect(emitted[1]).toEqual({ type: 'tool-result', toolName: 'TodoWrite', result: { todos }, callId: ACP_PLAN_TOOL_CALL_ID });
-  });
-
-  it('reuses a stable callId so full-replace plan updates refresh the same checklist', () => {
-    const { ctx, emitted } = makeCtx(new DefaultTransport('test'));
-    handlePlanUpdate({ sessionUpdate: 'plan', entries: [{ content: 'a', status: 'pending' }] }, ctx);
-    handlePlanUpdate({ sessionUpdate: 'plan', entries: [{ content: 'a', status: 'completed' }] }, ctx);
-    const callIds = emitted.map((m) => m.callId);
-    expect(new Set(callIds)).toEqual(new Set([ACP_PLAN_TOOL_CALL_ID]));
-  });
-
-  it('suppresses the generic render when the transport opts out (provider delivers plans elsewhere)', () => {
-    const transport = { ...new DefaultTransport('cursor-like'), suppressAcpPlanUpdate: () => true } as unknown as TransportHandler;
-    const { ctx, emitted } = makeCtx(transport);
-    const result = handlePlanUpdate(
-      { sessionUpdate: 'plan', entries: [{ content: 'x', status: 'pending' }] },
-      ctx,
-    );
     expect(result).toEqual({ handled: true });
     expect(emitted).toHaveLength(0);
+    expect(projected).toEqual([{
+      providerId: 'test-acp',
+      turnId: 'turn-1',
+      source: 'standard',
+      merge: false,
+      items: [
+        { title: 'Analyze the codebase', status: 'pending', priority: 'high', order: 0 },
+        { title: 'Write tests', status: 'active', priority: 'medium', order: 1 },
+        { title: 'Ship it', status: 'complete', priority: 'low', order: 2 },
+      ],
+    }]);
   });
 
-  it('returns not-handled when there is no plan payload', () => {
-    const { ctx, emitted } = makeCtx(new DefaultTransport('test'));
-    expect(handlePlanUpdate({ sessionUpdate: 'tool_call' }, ctx)).toEqual({ handled: false });
+  it('routes every standard update as full replacement through one owner', async () => {
+    const { ctx, projected } = makeCtx();
+    await handlePlanUpdate({ sessionUpdate: 'plan', entries: [{ content: 'a', status: 'pending' }] }, ctx);
+    await handlePlanUpdate({ sessionUpdate: 'plan', entries: [{ content: 'a', status: 'completed' }] }, ctx);
+    expect(projected.map((snapshot) => snapshot.items[0]?.status)).toEqual(['pending', 'complete']);
+  });
+
+  it('routes stable item, markdown, and file plan updates as exact-id full replacements', async () => {
+    const { ctx, projected } = makeCtx();
+
+    await handlePlanUpdate({
+      sessionUpdate: 'plan_update',
+      plan: {
+        type: 'items',
+        planId: ' plan-id ',
+        entries: [{ content: 'Implement', status: 'in_progress' }],
+      },
+    }, ctx);
+    await handlePlanUpdate({
+      sessionUpdate: 'plan_update',
+      plan: { type: 'markdown', planId: ' plan-id ', content: '# Revised plan' },
+    }, ctx);
+    await handlePlanUpdate({
+      sessionUpdate: 'plan_update',
+      plan: { type: 'file', planId: ' plan-id ', uri: 'file:///workspace/PLAN.md' },
+    }, ctx);
+
+    expect(projected).toEqual([
+      {
+        providerId: 'test-acp',
+        turnId: 'turn-1',
+        correlationId: ' plan-id ',
+        source: 'standard',
+        merge: false,
+        items: [{ title: 'Implement', status: 'active', order: 0 }],
+      },
+      {
+        providerId: 'test-acp',
+        turnId: 'turn-1',
+        correlationId: ' plan-id ',
+        source: 'standard',
+        merge: false,
+        markdown: '# Revised plan',
+        items: [],
+      },
+      {
+        providerId: 'test-acp',
+        turnId: 'turn-1',
+        correlationId: ' plan-id ',
+        source: 'standard',
+        merge: false,
+        fileUri: 'file:///workspace/PLAN.md',
+        items: [],
+      },
+    ]);
+  });
+
+  it('routes stable plan removal to the canonical owner using the exact plan id', async () => {
+    const { ctx, projected, removed } = makeCtx();
+
+    await expect(handlePlanUpdate({
+      sessionUpdate: 'plan_removed',
+      planId: ' plan-id ',
+    }, ctx)).resolves.toEqual({ handled: true });
+
+    expect(projected).toHaveLength(0);
+    expect(removed).toEqual([{
+      providerId: 'test-acp',
+      turnId: 'turn-1',
+      source: 'standard',
+      correlationId: ' plan-id ',
+    }]);
+  });
+
+  it('returns not-handled when there is no plan payload', async () => {
+    const { ctx, emitted } = makeCtx();
+    await expect(handlePlanUpdate({ sessionUpdate: 'tool_call' }, ctx)).resolves.toEqual({ handled: false });
     expect(emitted).toHaveLength(0);
   });
 });

@@ -22,12 +22,9 @@ export {
 export {
   formatDuration,
   formatDurationMinutes,
-  startToolCall,
-  completeToolCall,
-  failToolCall,
   handleToolCallUpdate,
   handleToolCall,
-} from './toolCalls';
+} from './toolCalls/index';
 
 export {
   handleAvailableCommandsUpdate,

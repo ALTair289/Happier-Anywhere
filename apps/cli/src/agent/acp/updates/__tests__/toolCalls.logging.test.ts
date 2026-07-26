@@ -8,7 +8,8 @@ import { logger } from '@/ui/logger';
 import type { AgentMessage } from '@/agent/core';
 import type { TransportHandler } from '@/agent/transport';
 
-import { startToolCall } from '../toolCalls';
+import { handleToolCallUpdate } from '../toolCalls/handleToolCallUpdate';
+import { createAcpToolCallLifecycle } from '../toolCalls/createAcpToolCallLifecycle';
 import type { HandlerContext, SessionUpdate } from '../types';
 
 function createHandlerContext(): HandlerContext {
@@ -21,13 +22,11 @@ function createHandlerContext(): HandlerContext {
 
   const ctx: HandlerContext = {
     transport,
-    activeToolCalls: new Set<string>(),
-    finalizedToolCalls: new Set<string>(),
-    toolCallLifecycleStates: new Map(),
-    toolCallStartTimes: new Map<string, number>(),
-    toolCallTimeouts: new Map<string, NodeJS.Timeout>(),
-    toolCallIdToNameMap: new Map<string, string>(),
-    toolCallIdToInputMap: new Map<string, Record<string, unknown>>(),
+    toolCalls: createAcpToolCallLifecycle({
+      transport,
+      emit: () => undefined,
+      getToolNameContext: () => ({ recentPromptHadChangeTitle: false, toolCallCountSincePrompt: 0 }),
+    }),
     idleTimeout: null,
     toolCallCountSincePrompt: 0,
     emit: (_msg: AgentMessage) => {},
@@ -49,9 +48,8 @@ describe('ACP tool call logging', () => {
       rawInput: { objective: 'SUPER_SECRET_OBJECTIVE' },
     } as any as SessionUpdate;
 
-    startToolCall('t1', 'investigator', update, ctx, 'tool_call_update');
+    handleToolCallUpdate(update, ctx);
 
     expect(JSON.stringify((logger as any).debug.mock.calls)).not.toContain('SUPER_SECRET_OBJECTIVE');
   });
 });
-

@@ -71,6 +71,58 @@ function writeFakeAcpAgentScript(params: { dir: string }): string {
 }
 
 describe('AcpBackend loadSession cleanup on failure', () => {
+  it('captures transcript replay notifications emitted during session/load before live generation filtering', async () => {
+    await withTempDir('happier-acp-load-replay-', async (dir) => {
+      const scriptPath = writeAcpTestAgentScript({
+        dir,
+        fileName: 'fake-acp-replay-agent.mjs',
+        source: `
+          import readline from 'node:readline';
+          const rl = readline.createInterface({ input: process.stdin });
+          const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
+          rl.on('line', (line) => {
+            const request = JSON.parse(line);
+            if (request.method === 'initialize') {
+              send({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1, authMethods: [] } });
+              return;
+            }
+            if (request.method === 'session/load') {
+              send({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: request.params.sessionId,
+                  update: {
+                    sessionUpdate: 'agent_message_chunk',
+                    content: { type: 'text', text: 'restored transcript' },
+                  },
+                },
+              });
+              send({ jsonrpc: '2.0', id: request.id, result: { sessionId: request.params.sessionId } });
+              return;
+            }
+            send({ jsonrpc: '2.0', id: request.id, result: {} });
+          });
+        `,
+      });
+      const backend = new AcpBackend({
+        agentName: 'test',
+        cwd: dir,
+        command: process.execPath,
+        args: [scriptPath],
+      });
+
+      try {
+        await expect(backend.loadSessionWithReplayCapture('resume-1')).resolves.toEqual({
+          sessionId: 'resume-1',
+          replay: [{ type: 'message', role: 'agent', text: 'restored transcript' }],
+        });
+      } finally {
+        await backend.dispose();
+      }
+    });
+  }, 20_000);
+
   it('allows a second loadSession attempt after an upstream load failure without staying initialized', async () => {
     await withTempDir('happier-acp-load-cleanup-', async (dir) => {
       const scriptPath = writeFakeAcpAgentScript({ dir });

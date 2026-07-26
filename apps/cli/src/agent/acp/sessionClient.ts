@@ -30,10 +30,6 @@ export type AcpReplayHistorySessionClient = AcpReplaySidechainSessionClient & Re
 
 export type AcpRuntimeSessionClient = AcpReplayHistorySessionClient & Readonly<{
   keepAlive: (thinking: boolean, mode: 'local' | 'remote') => void;
-  confirmUserMessageDeliveredToProvider?: (
-    seq: number | null | undefined,
-    opts?: { localIds?: readonly string[] | null },
-  ) => void;
   sendSessionEvent?: (event: SessionEventMessage, id?: string) => void;
   sendAgentMessage: (
     provider: ACPProvider,

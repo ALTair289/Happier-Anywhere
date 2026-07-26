@@ -81,7 +81,7 @@ describe('createAcpAgentMessageForwarder', () => {
     });
   });
 
-  it('forwards tool-result isError when provided', () => {
+  it('seeds a terminal-only call before forwarding a result with isError', () => {
     const sent: ACPMessageData[] = [];
     const sendAcp = vi.fn((_provider: any, body: ACPMessageData) => {
       sent.push(body);
@@ -95,8 +95,13 @@ describe('createAcpAgentMessageForwarder', () => {
 
     forwarder.forward({ type: 'tool-result', callId: 'tool_1', toolName: 'read', result: { ok: false }, isError: true } as any);
 
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(2);
     expect(sent[0]).toMatchObject({
+      type: 'tool-call',
+      callId: 'tool_1',
+      name: 'read',
+    });
+    expect(sent[1]).toMatchObject({
       type: 'tool-result',
       callId: 'tool_1',
       isError: true,

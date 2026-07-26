@@ -210,6 +210,62 @@ function writeFakeAcpAgentAckWithoutUpdatesScript(params: { dir: string }): stri
 }
 
 describe('AcpBackend.sendPrompt (prompt ACK vs first session/update)', () => {
+  it('accepts a session/update emitted re-entrantly from peer.prompt before the prompt promise resolves', async () => {
+    const backend = new AcpBackend({
+      agentName: 'test',
+      cwd: process.cwd(),
+      command: process.execPath,
+      args: [],
+      transportHandler: createAcpTestTransportHandler({ idleTimeoutMs: 1 }),
+    });
+    const chunks: string[] = [];
+    let resolvePrompt!: (response: Record<string, never>) => void;
+    const promptResponse = new Promise<Record<string, never>>((resolve) => {
+      resolvePrompt = resolve;
+    });
+
+    const backendInternals = backend as unknown as {
+      connection: unknown;
+      acpSessionId: string | null;
+      dispatchedPromptTurnGeneration: number | null;
+      handleSessionUpdate(params: unknown): Promise<void>;
+    };
+    backendInternals.acpSessionId = 'test-session';
+    backendInternals.connection = {
+      peer: {
+        prompt: () => {
+          void backendInternals.handleSessionUpdate({
+            sessionId: 'test-session',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 're-entrant chunk' },
+            },
+          });
+          return promptResponse;
+        },
+        cancel: async () => ({}),
+      },
+      close: () => {},
+      closed: Promise.resolve(),
+    };
+    backend.onMessage((message) => {
+      if (message.type === 'model-output' && typeof message.textDelta === 'string') {
+        chunks.push(message.textDelta);
+      }
+    });
+
+    try {
+      await expect(backend.sendPrompt('test-session', 'hi')).resolves.toBeUndefined();
+      await vi.waitFor(() => expect(chunks).toEqual(['re-entrant chunk']));
+      resolvePrompt({});
+      await expect(backend.waitForResponseComplete(500)).resolves.toBeUndefined();
+      expect(backendInternals.dispatchedPromptTurnGeneration).toBeNull();
+    } finally {
+      resolvePrompt({});
+      await backend.dispose();
+    }
+  });
+
   it('resolves once a session/update arrives even when the prompt ACK is delayed', async () => {
     await withTempDir('happier-acp-sendprompt-first-update-', async (dir) => {
       const scriptPath = writeFakeAcpAgentScript({ dir, promptAckDelayMs: 5_000 });
@@ -238,7 +294,7 @@ describe('AcpBackend.sendPrompt (prompt ACK vs first session/update)', () => {
     });
   }, 20_000);
 
-  it('ignores late Gemini empty-stream errors when sendPrompt returns early on first session/update', async () => {
+  it('surfaces a late Gemini empty-stream error after sendPrompt returns on generic first-update liveness', async () => {
     await withTempDir('happier-acp-sendprompt-gemini-late-error-', async (dir) => {
       const scriptPath = writeFakeAcpAgentScript({
         dir,
@@ -270,12 +326,14 @@ describe('AcpBackend.sendPrompt (prompt ACK vs first session/update)', () => {
         ]);
         expect(sendOutcome).toBe('resolved');
 
-        await backend.waitForResponseComplete(2_000);
+        await expect(backend.waitForResponseComplete(2_000)).rejects.toThrow(
+          'Model stream ended with empty response text',
+        );
         await delay(200);
 
         const errorStatuses = emitted.filter((m) => m?.type === 'status' && m?.status === 'error');
-        expect(errorStatuses).toHaveLength(0);
-        expect((backend as any).responseCompletionError).toBeNull();
+        expect(errorStatuses).toHaveLength(1);
+        expect((backend as any).responseCompletionError).toBeTruthy();
       } finally {
         await backendForCleanup?.dispose().catch(() => {});
       }

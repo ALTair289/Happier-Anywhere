@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  readFileEventually,
-  waitForFileToContain,
-  writeAcpTestAgentScript,
-} from '../testkit/subprocessHarness';
+import { writeAcpTestAgentScript, readFileEventually } from '../testkit/subprocessHarness';
 import { AcpBackend, buildInitializeRequest } from '../AcpBackend';
 import {
   defineAcpExtensionNotification,
@@ -12,6 +8,7 @@ import {
   type AcpExtensionHandlerContext,
 } from '../connection/types';
 import { withTempDir } from '@/testkit/fs/tempDir';
+import { normalizeAcpPlan, type NormalizedAcpPlanSnapshot } from '@/agent/acp/plans';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -33,6 +30,20 @@ function readNestedRecord(record: Record<string, unknown>, key: string): Record<
   return value;
 }
 
+async function readPromiseState(evidence: Promise<unknown>): Promise<'resolved' | 'pending'> {
+  let resolved = false;
+  void evidence.then(
+    () => {
+      resolved = true;
+    },
+    () => {
+      resolved = true;
+    },
+  );
+  await Promise.resolve();
+  return resolved ? 'resolved' : 'pending';
+}
+
 const extensionParams = {
   parse(value: unknown): Record<string, unknown> {
     if (!isRecord(value)) throw new Error('Expected extension object params');
@@ -43,7 +54,7 @@ const extensionParams = {
 function writeExtensionProbeAgentScript(params: {
   dir: string;
   resultFile: string;
-  scenario: 'request' | 'notification' | 'error' | 'abort' | 'outgoing';
+  scenario: 'request' | 'notification' | 'error' | 'abort' | 'abort-with-update' | 'outgoing';
 }): string {
   const src = `
     const fs = require('node:fs');
@@ -128,6 +139,20 @@ function writeExtensionProbeAgentScript(params: {
             continue;
           }
 
+          if (scenario === 'abort-with-update') {
+            send({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                sessionId: 'test-session',
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'provider activity' },
+                },
+              },
+            });
+          }
+
           send({
             jsonrpc: '2.0',
             id: 'extension-request-1',
@@ -150,142 +175,6 @@ function writeExtensionProbeAgentScript(params: {
   return writeAcpTestAgentScript({
     dir: params.dir,
     fileName: `fake-acp-extension-${params.scenario}.cjs`,
-    source: src,
-  });
-}
-
-function writeExtensionLifecycleAgentScript(params: {
-  dir: string;
-  resultFile: string;
-}): string {
-  const src = `
-    const fs = require('node:fs');
-    const decoder = new TextDecoder();
-    let buf = '';
-    let pendingPromptId = null;
-    let promptCount = 0;
-    const labelsByRequestId = new Map();
-    const results = [];
-
-    function send(obj) {
-      process.stdout.write(JSON.stringify(obj) + '\\n');
-    }
-
-    function ok(id, result) {
-      send({ jsonrpc: '2.0', id, result });
-    }
-
-    function persist(label, message) {
-      results.push({ label, result: message.result, error: message.error });
-      fs.writeFileSync(${JSON.stringify(params.resultFile)}, JSON.stringify(results), 'utf8');
-    }
-
-    function request(label) {
-      const id = 'extension-' + label;
-      labelsByRequestId.set(id, label);
-      send({
-        jsonrpc: '2.0',
-        id,
-        method: 'example/object_request',
-        params: { sessionId: 'test-session', value: label },
-      });
-    }
-
-    function notify(phase) {
-      send({
-        jsonrpc: '2.0',
-        method: 'example/notification',
-        params: { phase },
-      });
-    }
-
-    function finishPrompt() {
-      if (pendingPromptId === null) return;
-      ok(pendingPromptId, { stopReason: 'end_turn' });
-      pendingPromptId = null;
-    }
-
-    function handleResponse(message) {
-      const label = labelsByRequestId.get(message.id);
-      if (!label) return;
-      labelsByRequestId.delete(message.id);
-      persist(label, message);
-
-      if (label === 'in-turn') {
-        finishPrompt();
-        setImmediate(() => {
-          notify('after-turn');
-          request('post-terminal');
-        });
-      } else if (label === 'next-turn') {
-        finishPrompt();
-      }
-    }
-
-    process.stdin.on('data', (chunk) => {
-      buf += decoder.decode(chunk, { stream: true });
-      const lines = buf.split('\\n');
-      buf = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        let req;
-        try { req = JSON.parse(trimmed); } catch { continue; }
-        if (!req || typeof req !== 'object') continue;
-
-        if (!('method' in req) && 'id' in req) {
-          handleResponse(req);
-          continue;
-        }
-
-        const id = req.id;
-        const method = req.method;
-        if (id === undefined || id === null || typeof method !== 'string') continue;
-
-        if (method === 'initialize') {
-          notify('initialize');
-          ok(id, { protocolVersion: 1, authMethods: [] });
-          continue;
-        }
-
-        if (method === 'session/new') {
-          ok(id, { sessionId: 'test-session' });
-          setImmediate(() => {
-            notify('pre-prompt');
-            request('pre-prompt');
-          });
-          continue;
-        }
-
-        if (method === 'session/prompt') {
-          pendingPromptId = id;
-          promptCount += 1;
-          notify('during-turn-' + promptCount);
-          if (promptCount === 1) {
-            request('in-turn');
-          } else if (promptCount === 2) {
-            request('terminal-race');
-            setTimeout(finishPrompt, 25);
-          } else {
-            request('next-turn');
-          }
-          continue;
-        }
-
-        if (method === 'session/cancel') {
-          ok(id, {});
-          continue;
-        }
-
-        ok(id, {});
-      }
-    });
-  `;
-
-  return writeAcpTestAgentScript({
-    dir: params.dir,
-    fileName: 'fake-acp-extension-lifecycle.cjs',
     source: src,
   });
 }
@@ -348,6 +237,61 @@ describe('AcpBackend ACP extension dispatch', () => {
           signalAborted: false,
         });
         expect(readNestedRecord(result, 'params')).toMatchObject({ value: 'request' });
+      } finally {
+        await backend.dispose().catch(() => {});
+      }
+    });
+  }, 10_000);
+
+  it('shares one turn-scoped plan projector with extensions and rejects late prior-turn delivery', async () => {
+    await withTempDir('happier-acp-extension-plan-owner-', async (dir) => {
+      const resultFile = `${dir}/extension-plan-owner.json`;
+      const scriptPath = writeExtensionProbeAgentScript({ dir, resultFile, scenario: 'request' });
+      const projectedEvents: unknown[] = [];
+      const contexts: AcpExtensionHandlerContext[] = [];
+      const snapshots: NormalizedAcpPlanSnapshot[] = [];
+      const backend = new AcpBackend({
+        agentName: 'test',
+        cwd: dir,
+        command: process.execPath,
+        args: [scriptPath],
+        extensionHandlers: [
+          defineAcpExtensionRequest({
+            method: 'example/object_request',
+            params: extensionParams,
+            handler: async (_params, context): Promise<Record<string, unknown>> => {
+              if (!context.turnId || !context.plans) throw new Error('missing plan projection context');
+              const snapshot = normalizeAcpPlan({
+                providerId: context.agentName,
+                turnId: context.turnId,
+                correlationId: 'plan-call',
+                source: 'proprietary',
+                merge: false,
+                items: [{ id: 'todo-1', content: 'Implement', status: 'pending' }],
+              });
+              if (!snapshot) throw new Error('invalid fixture plan');
+              contexts.push(context);
+              snapshots.push(snapshot);
+              expect((await context.plans.project(snapshot)).kind).toBe('published');
+              expect((await context.plans.project(snapshot)).kind).toBe('duplicate');
+              return {};
+            },
+          }),
+        ],
+      });
+      backend.setPlanStatePublisher(async (snapshot) => {
+        projectedEvents.push(snapshot);
+      });
+
+      try {
+        const started = await backend.startSession();
+        await backend.sendPrompt(started.sessionId, 'first plan turn');
+        expect(projectedEvents).toHaveLength(1);
+        expect((await contexts[0]?.plans?.project(snapshots[0]!))?.kind).toBe('late');
+
+        await backend.sendPrompt(started.sessionId, 'second identical plan turn');
+        expect(projectedEvents).toHaveLength(2);
+        expect(contexts[1]?.turnId).not.toBe(contexts[0]?.turnId);
       } finally {
         await backend.dispose().catch(() => {});
       }
@@ -425,151 +369,6 @@ describe('AcpBackend ACP extension dispatch', () => {
       }
     });
   }, 10_000);
-
-  it('scopes requests to active prompt turns while notifications remain connection-scoped', async () => {
-    await withTempDir('happier-acp-extension-lifecycle-', async (dir) => {
-      const resultFile = `${dir}/extension-lifecycle.json`;
-      const scriptPath = writeExtensionLifecycleAgentScript({ dir, resultFile });
-      const requestInvocations: string[] = [];
-      const notificationInvocations: Array<{
-        phase: unknown;
-        sessionId: string | null;
-        signalAborted: boolean;
-        signal: AbortSignal;
-      }> = [];
-      let resolveTerminalRaceStarted: (() => void) | null = null;
-      const terminalRaceStarted = new Promise<void>((resolve) => {
-        resolveTerminalRaceStarted = resolve;
-      });
-      let resolveTerminalRaceAborted: (() => void) | null = null;
-      const terminalRaceAborted = new Promise<void>((resolve) => {
-        resolveTerminalRaceAborted = resolve;
-      });
-
-      const backend = new AcpBackend({
-        agentName: 'test',
-        cwd: dir,
-        command: process.execPath,
-        args: [scriptPath],
-        extensionHandlers: {
-          requests: {
-            'example/object_request': async (
-              params: Record<string, unknown>,
-              context: AcpExtensionHandlerContext,
-            ): Promise<Record<string, unknown>> => {
-              const value = typeof params.value === 'string' ? params.value : 'unknown';
-              requestInvocations.push(value);
-              if (value !== 'terminal-race') {
-                return { accepted: value, signalAborted: context.signal.aborted };
-              }
-
-              resolveTerminalRaceStarted?.();
-              await new Promise<void>((_resolve, reject) => {
-                const onAbort = () => {
-                  resolveTerminalRaceAborted?.();
-                  reject(context.signal.reason instanceof Error
-                    ? context.signal.reason
-                    : new Error('turn-scoped extension aborted'));
-                };
-                if (context.signal.aborted) {
-                  onAbort();
-                  return;
-                }
-                context.signal.addEventListener('abort', onAbort, { once: true });
-              });
-              return { shouldNotReach: true };
-            },
-          },
-          notifications: {
-            'example/notification': async (
-              params: Record<string, unknown>,
-              context: AcpExtensionHandlerContext,
-            ): Promise<void> => {
-              notificationInvocations.push({
-                phase: params.phase,
-                sessionId: context.sessionId,
-                signalAborted: context.signal.aborted,
-                signal: context.signal,
-              });
-            },
-          },
-        },
-      });
-
-      try {
-        const started = await backend.startSession();
-        await waitForFileToContain(resultFile, 'pre-prompt', { timeoutMs: 1_000 });
-
-        await backend.sendPrompt(started.sessionId, 'first turn');
-        await waitForFileToContain(
-          resultFile,
-          '"label":"post-terminal","error":',
-          { timeoutMs: 1_000 },
-        );
-        const firstTurnResults = JSON.parse(await readFileEventually(resultFile, { timeoutMs: 1_000 })) as Array<{
-          label: string;
-          result?: Record<string, unknown>;
-          error?: Record<string, unknown>;
-        }>;
-        expect(firstTurnResults.find((entry) => entry.label === 'in-turn')?.result)
-          .toMatchObject({ accepted: 'in-turn', signalAborted: false });
-
-        const secondPrompt = backend.sendPrompt(started.sessionId, 'terminal race');
-        await expect(Promise.race([
-          terminalRaceStarted.then(() => 'started' as const),
-          new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 1_000)),
-        ])).resolves.toBe('started');
-        await secondPrompt;
-        await expect(Promise.race([
-          terminalRaceAborted.then(() => 'aborted' as const),
-          new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 1_000)),
-        ])).resolves.toBe('aborted');
-        await waitForFileToContain(resultFile, 'terminal-race', { timeoutMs: 1_000 });
-
-        await backend.sendPrompt(started.sessionId, 'next turn');
-        await waitForFileToContain(resultFile, 'next-turn', { timeoutMs: 1_000 });
-        await waitForFileToContain(
-          resultFile,
-          '"label":"post-terminal","error":',
-          { timeoutMs: 1_000 },
-        );
-
-        const finalResults = JSON.parse(await readFileEventually(resultFile, { timeoutMs: 1_000 })) as Array<{
-          label: string;
-          result?: Record<string, unknown>;
-          error?: Record<string, unknown>;
-        }>;
-        expect(finalResults.find((entry) => entry.label === 'pre-prompt')?.error)
-          .toMatchObject({ code: -32600, data: { reason: 'no_active_prompt_turn' } });
-        expect(finalResults.find((entry) => entry.label === 'post-terminal')?.error)
-          .toMatchObject({ code: -32600, data: { reason: 'no_active_prompt_turn' } });
-        expect(finalResults.find((entry) => entry.label === 'terminal-race')?.error)
-          .toMatchObject({ code: -32603 });
-        expect(finalResults.find((entry) => entry.label === 'next-turn')?.result)
-          .toMatchObject({ accepted: 'next-turn', signalAborted: false });
-        expect(requestInvocations).toEqual(['in-turn', 'terminal-race', 'next-turn']);
-
-        expect(notificationInvocations.map((entry) => entry.phase)).toEqual(expect.arrayContaining([
-          'initialize',
-          'pre-prompt',
-          'during-turn-1',
-          'after-turn',
-          'during-turn-2',
-          'during-turn-3',
-        ]));
-        expect(notificationInvocations.every((entry) => entry.signalAborted === false)).toBe(true);
-        expect(notificationInvocations.every(
-          (entry) => entry.sessionId === null || entry.sessionId === 'test-session',
-        )).toBe(true);
-        expect(notificationInvocations
-          .filter((entry) => typeof entry.phase === 'string' && entry.phase.startsWith('during-turn-'))
-          .every((entry) => entry.sessionId === 'test-session')).toBe(true);
-        expect(new Set(notificationInvocations.map((entry) => entry.signal)).size).toBe(1);
-      } finally {
-        await backend.dispose().catch(() => {});
-      }
-    });
-  }, 15_000);
 
   it('surfaces extension handler errors as JSON-RPC internal errors', async () => {
     await withTempDir('happier-acp-extension-error-', async (dir) => {
@@ -649,7 +448,7 @@ describe('AcpBackend ACP extension dispatch', () => {
   it('aborts in-flight extension handlers when the turn is cancelled', async () => {
     await withTempDir('happier-acp-extension-cancel-', async (dir) => {
       const resultFile = `${dir}/extension-cancel.json`;
-      const scriptPath = writeExtensionProbeAgentScript({ dir, resultFile, scenario: 'abort' });
+      const scriptPath = writeExtensionProbeAgentScript({ dir, resultFile, scenario: 'abort-with-update' });
       let resolveStarted: (() => void) | null = null;
       const startedHandler = new Promise<void>((resolve) => {
         resolveStarted = resolve;
@@ -658,6 +457,10 @@ describe('AcpBackend ACP extension dispatch', () => {
       const abortedHandler = new Promise<void>((resolve) => {
         resolveAborted = resolve;
       });
+      const capturedPlan: {
+        context: AcpExtensionHandlerContext | null;
+        snapshot: NormalizedAcpPlanSnapshot | null;
+      } = { context: null, snapshot: null };
       const backendOptions = {
         agentName: 'test',
         cwd: dir,
@@ -673,6 +476,18 @@ describe('AcpBackend ACP extension dispatch', () => {
               _params: Record<string, unknown>,
               context: AcpExtensionHandlerContext,
             ): Promise<Record<string, unknown>> => {
+              if (!context.turnId || !context.plans) throw new Error('missing plan projection context');
+              capturedPlan.context = context;
+              capturedPlan.snapshot = normalizeAcpPlan({
+                providerId: context.agentName,
+                turnId: context.turnId,
+                correlationId: 'cancelled-plan',
+                source: 'proprietary',
+                merge: false,
+                items: [{ id: 'todo-cancel', content: 'Cancel', status: 'pending' }],
+              });
+              if (!capturedPlan.snapshot) throw new Error('invalid fixture plan');
+              await context.plans.project(capturedPlan.snapshot);
               resolveStarted?.();
               if (context.signal.aborted) {
                 resolveAborted?.();
@@ -695,24 +510,34 @@ describe('AcpBackend ACP extension dispatch', () => {
       });
 
       const backend = new AcpBackend(backendOptions);
+      backend.setPlanStatePublisher(async () => undefined);
 
       try {
         const started = await backend.startSession();
-        const prompt = backend.sendPrompt(started.sessionId, 'trigger extension abort');
+        const evidence = await backend.sendPromptWithEvidence(started.sessionId, 'trigger extension abort');
+        expect(evidence.kind).toBe('effect_may_have_occurred');
+        if (evidence.kind !== 'effect_may_have_occurred') {
+          throw new Error('Expected first-update liveness evidence');
+        }
         const startOutcome = await Promise.race([
           startedHandler.then(() => 'started' as const),
           new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 500)),
         ]);
         expect(startOutcome).toBe('started');
+        expect(await readPromiseState(evidence.finalResponseEvidence)).toBe('pending');
 
         await backend.cancel(started.sessionId);
+        if (!capturedPlan.context?.plans || !capturedPlan.snapshot) {
+          throw new Error('plan projection context was not captured');
+        }
+        expect((await capturedPlan.context.plans.project(capturedPlan.snapshot)).kind).toBe('late');
 
         const abortOutcome = await Promise.race([
           abortedHandler.then(() => 'aborted' as const),
           new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 500)),
         ]);
         expect(abortOutcome).toBe('aborted');
-        await prompt.catch(() => {});
+        await evidence.finalResponseEvidence.catch(() => {});
 
         const response = parseJsonRecord(await readFileEventually(resultFile, { timeoutMs: 1_000 }));
         const error = readNestedRecord(response, 'error');

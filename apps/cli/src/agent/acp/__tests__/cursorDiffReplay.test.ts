@@ -4,6 +4,7 @@ import type { HandlerContext, SessionUpdate } from '../sessionUpdateHandlers';
 import { handleToolCallUpdate } from '../sessionUpdateHandlers';
 import { DefaultTransport } from '../../transport';
 import { CursorTransport } from '@/backends/cursor/acp/transport';
+import { createAcpToolCallLifecycle } from '../updates/toolCalls/createAcpToolCallLifecycle';
 
 type EmittedMessage = Parameters<HandlerContext['emit']>[0];
 
@@ -11,13 +12,11 @@ function createCtx(transport: HandlerContext['transport']): HandlerContext & { e
   const emitted: EmittedMessage[] = [];
   return {
     transport,
-    activeToolCalls: new Set(),
-    finalizedToolCalls: new Set(),
-    toolCallLifecycleStates: new Map(),
-    toolCallStartTimes: new Map(),
-    toolCallTimeouts: new Map(),
-    toolCallIdToNameMap: new Map(),
-    toolCallIdToInputMap: new Map(),
+    toolCalls: createAcpToolCallLifecycle({
+      transport,
+      emit: (msg) => emitted.push(msg),
+      getToolNameContext: () => ({ recentPromptHadChangeTitle: false, toolCallCountSincePrompt: 0 }),
+    }),
     idleTimeout: null,
     recentPromptHadChangeTitle: false,
     toolCallCountSincePrompt: 0,

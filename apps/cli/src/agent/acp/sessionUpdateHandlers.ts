@@ -32,16 +32,15 @@ export {
   formatDurationMinutes,
   markToolCallRunningAfterPermission,
   markToolCallWaitingForPermission,
-  startToolCall,
-  completeToolCall,
-  failToolCall,
   handleToolCallUpdate,
   handleToolCall,
-} from './updates/toolCalls';
+} from './updates/toolCalls/index';
 
 export {
   handleAvailableCommandsUpdate,
   handleCurrentModeUpdate,
+  readCurrentModeId,
+  handleSessionInfoUpdate,
   handlePlanUpdate,
   handleThinkingUpdate,
 } from './updates/events';

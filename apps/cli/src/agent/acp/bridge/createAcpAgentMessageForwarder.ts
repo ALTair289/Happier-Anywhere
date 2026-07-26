@@ -44,6 +44,20 @@ export function createAcpAgentMessageForwarder(params: {
     return sidechainId ? ({ ...body, sidechainId } as any) : body;
   };
 
+  const readToolSnapshotLifecycle = (input: unknown): Readonly<{
+    revision?: number;
+  }> => {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+    const acp = (input as { _acp?: unknown })._acp;
+    if (!acp || typeof acp !== 'object' || Array.isArray(acp)) return {};
+    const revision = (acp as { snapshotRevision?: unknown }).snapshotRevision;
+    return {
+      ...(typeof revision === 'number' && Number.isSafeInteger(revision) && revision > 0
+        ? { revision }
+        : {}),
+    };
+  };
+
   const ensureTerminalToolCall = (): void => {
     if (terminalToolCallSent) return;
     terminalToolCallSent = true;
@@ -74,10 +88,12 @@ export function createAcpAgentMessageForwarder(params: {
           }
           return;
         }
+        const lifecycle = readToolSnapshotLifecycle(msg.args);
         toolPublisher.publishCall({
           callId: ns(msg.callId),
           toolName: msg.toolName,
           input: msg.args,
+          ...lifecycle,
           ...(sidechainId ? { sidechainId } : {}),
         });
         return;
@@ -89,6 +105,7 @@ export function createAcpAgentMessageForwarder(params: {
         }
         toolPublisher.publishResult({
           callId: ns(msg.callId),
+          toolName: msg.toolName,
           output: msg.result,
           ...(typeof (msg as any).isError === 'boolean' ? { isError: (msg as any).isError } : {}),
           ...(sidechainId ? { sidechainId } : {}),
@@ -183,6 +200,7 @@ export function createAcpAgentMessageForwarder(params: {
         const callId = ns(String(patchEndMsg.call_id ?? patchEndMsg.callId ?? params.makeId()));
         toolPublisher.publishResult({
           callId,
+          toolName: 'patch',
           output: {
             success: Boolean(patchEndMsg.success),
             stdout: patchEndMsg.stdout,

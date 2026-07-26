@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { AcpBackend } from '../AcpBackend';
 
 describe('AcpBackend session usage_update', () => {
-  it('emits token-count telemetry from usage_update notifications', () => {
+  it('emits token-count telemetry from usage_update notifications', async () => {
     const backend = new AcpBackend({
       agentName: 'test',
       cwd: process.cwd(),
@@ -13,7 +13,7 @@ describe('AcpBackend session usage_update', () => {
     const emitted: any[] = [];
     backend.onMessage((msg) => emitted.push(msg));
 
-    (backend as any).handleSessionUpdate({
+    await (backend as any).handleSessionUpdate({
       update: {
         sessionUpdate: 'usage_update',
         used: 123,
@@ -26,7 +26,7 @@ describe('AcpBackend session usage_update', () => {
     expect(token.tokens).toEqual({ total: 123, used: 123, size: 1000 });
   });
 
-  it('accepts input/output token fields in usage_update notifications', () => {
+  it('accepts input/output token fields in usage_update notifications', async () => {
     const backend = new AcpBackend({
       agentName: 'test',
       cwd: process.cwd(),
@@ -36,7 +36,7 @@ describe('AcpBackend session usage_update', () => {
     const emitted: any[] = [];
     backend.onMessage((msg) => emitted.push(msg));
 
-    (backend as any).handleSessionUpdate({
+    await (backend as any).handleSessionUpdate({
       update: {
         sessionUpdate: 'usage_update',
         input_tokens: 10,
@@ -57,7 +57,7 @@ describe('AcpBackend session usage_update', () => {
     });
   });
 
-  it('preserves cumulative USD cost fields from usage_update notifications', () => {
+  it('preserves cumulative USD cost fields from usage_update notifications', async () => {
     const backend = new AcpBackend({
       agentName: 'test',
       cwd: process.cwd(),
@@ -67,7 +67,7 @@ describe('AcpBackend session usage_update', () => {
     const emitted: any[] = [];
     backend.onMessage((msg) => emitted.push(msg));
 
-    (backend as any).handleSessionUpdate({
+    await (backend as any).handleSessionUpdate({
       update: {
         sessionUpdate: 'usage_update',
         input_tokens: 10,
@@ -81,7 +81,7 @@ describe('AcpBackend session usage_update', () => {
     expect(token.cost).toEqual({ total: 0.125 });
   });
 
-  it('preserves ACP Cost object amount as cumulative USD cost', () => {
+  it('preserves ACP Cost object amount as cumulative USD cost', async () => {
     const backend = new AcpBackend({
       agentName: 'test',
       cwd: process.cwd(),
@@ -91,7 +91,7 @@ describe('AcpBackend session usage_update', () => {
     const emitted: any[] = [];
     backend.onMessage((msg) => emitted.push(msg));
 
-    (backend as any).handleSessionUpdate({
+    await (backend as any).handleSessionUpdate({
       update: {
         sessionUpdate: 'usage_update',
         input_tokens: 10,
@@ -100,7 +100,7 @@ describe('AcpBackend session usage_update', () => {
       },
     });
 
-    (backend as any).handleSessionUpdate({
+    await (backend as any).handleSessionUpdate({
       update: {
         sessionUpdate: 'usage_update',
         input_tokens: 20,
@@ -113,7 +113,7 @@ describe('AcpBackend session usage_update', () => {
     expect(tokens.map((token) => token.cost)).toEqual([{ total: 0.25 }, { total: 0.5 }]);
   });
 
-  it('handles SessionNotification updates[] arrays (does not drop later updates)', () => {
+  it('handles SessionNotification updates[] arrays (does not drop later updates)', async () => {
     const backend = new AcpBackend({
       agentName: 'test',
       cwd: process.cwd(),
@@ -123,7 +123,7 @@ describe('AcpBackend session usage_update', () => {
     const emitted: any[] = [];
     backend.onMessage((msg) => emitted.push(msg));
 
-    (backend as any).handleSessionUpdate({
+    await (backend as any).handleSessionUpdate({
       updates: [
         {
           sessionUpdate: 'agent_message_chunk',
@@ -143,7 +143,7 @@ describe('AcpBackend session usage_update', () => {
     expect(token.tokens).toEqual({ total: 123, used: 123, size: 1000 });
   });
 
-  it('emits token-count telemetry when task_complete includes a usage payload', () => {
+  it('emits token-count telemetry when task_complete includes a usage payload', async () => {
     const backend = new AcpBackend({
       agentName: 'test',
       cwd: process.cwd(),
@@ -153,7 +153,7 @@ describe('AcpBackend session usage_update', () => {
     const emitted: any[] = [];
     backend.onMessage((msg) => emitted.push(msg));
 
-    (backend as any).handleSessionUpdate({
+    await (backend as any).handleSessionUpdate({
       update: {
         sessionUpdate: 'task_complete',
         id: 'task_1',

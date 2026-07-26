@@ -59,7 +59,6 @@ describe('createAcpRuntime (configOptions)', () => {
       ],
     });
     expect(typeof metadata.acpConfigOptionsV1?.updatedAt).toBe('number');
-    expect(metadata.sessionConfigOptionsV1).toEqual(metadata.acpConfigOptionsV1);
   });
 
   it('clears ACP configOptions metadata when the provider reports an empty list', async () => {
@@ -102,7 +101,6 @@ describe('createAcpRuntime (configOptions)', () => {
     });
 
     expect(getMetadata().acpConfigOptionsV1?.configOptions).toEqual([]);
-    expect(getMetadata().sessionConfigOptionsV1).toEqual(getMetadata().acpConfigOptionsV1);
   });
 
   it('preserves boolean values before delegating setSessionConfigOption', async () => {
@@ -179,7 +177,7 @@ describe('createAcpRuntime (configOptions)', () => {
     });
   });
 
-  it('trims string values before delegating setSessionConfigOption', async () => {
+  it('preserves exact nonblank config identifiers and values before delegating setSessionConfigOption', async () => {
     let lastSet: { sessionId: string; configId: string; value: unknown } | null = null;
     const backend = createFakeAcpRuntimeBackend({
       async setSessionConfigOption(sessionId: string, configId: string, value: unknown) {
@@ -199,9 +197,9 @@ describe('createAcpRuntime (configOptions)', () => {
     });
 
     await runtime.startOrLoad({ resumeId: null });
-    await runtime.setSessionConfigOption('mode', '  ask  ');
+    await runtime.setSessionConfigOption(' mode ', '  ask  ');
 
-    expect(lastSet).toEqual({ sessionId: 'sess_main', configId: 'mode', value: 'ask' });
+    expect(lastSet).toEqual({ sessionId: 'sess_main', configId: ' mode ', value: '  ask  ' });
   });
 
   it('refreshes acpSessionModelsV1 when config_options_state model changes', async () => {

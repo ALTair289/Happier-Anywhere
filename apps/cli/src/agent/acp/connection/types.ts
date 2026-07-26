@@ -2,6 +2,7 @@ import type {
   AgentApp,
   ClientApp,
   ParamsParser,
+  PromptResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
   RequestPermissionRequest,
@@ -12,6 +13,8 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
+import type { AcpPlanProjection, NormalizedAcpPlanSnapshot } from '../plans';
+import type { AcpToolCallTracker } from '../updates/toolCalls/AcpToolCallTracker';
 
 export type AcpClientTransport = Stream | AgentApp;
 
@@ -29,6 +32,17 @@ export type AcpExtensionHandlerContext = Readonly<{
   sessionId: string | null;
   signal: AbortSignal;
   agentName: string;
+  turnId?: string;
+  plans?: Pick<AcpPlanProjection, 'project'>;
+  toolCalls?: Pick<AcpToolCallTracker, 'enrich'>;
+  promptCompletion?: Readonly<{
+    settle: (params: Readonly<{
+      correlationId: string;
+      outcome:
+        | Readonly<{ kind: 'completed'; response: PromptResponse }>
+        | Readonly<{ kind: 'failed'; error: Error }>;
+    }>) => boolean;
+  }>;
 }>;
 
 export type AcpExtensionContextFactory = (
@@ -71,20 +85,12 @@ export function defineAcpExtensionRequest<Params, Response extends Record<string
     kind: 'request',
     method: definition.method,
     register: (app, createContext) => {
-      app.onRequest(definition.method, wrapExtensionParamsParser(definition.params), async (context) => {
-        const extensionContext = createContext(definition.method, context.signal);
-        const response = await definition.handler(
+      app.onRequest(definition.method, wrapExtensionParamsParser(definition.params), (context) => (
+        definition.handler(
           context.params,
-          extensionContext,
-        );
-        if (extensionContext.signal.aborted) {
-          throw RequestError.invalidRequest(
-            { reason: 'prompt_turn_ended' },
-            'ACP extension request outlived its prompt turn',
-          );
-        }
-        return response;
-      });
+          createContext(definition.method, context.signal),
+        )
+      ));
     },
   };
 }

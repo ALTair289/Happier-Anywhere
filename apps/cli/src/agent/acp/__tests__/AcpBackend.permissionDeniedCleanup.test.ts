@@ -4,7 +4,25 @@ import { AcpBackend } from '../AcpBackend';
 import { createAcpTestTransportHandler, writeAcpTestAgentScript } from '../testkit/subprocessHarness';
 import { withTempDir } from '@/testkit/fs/tempDir';
 
-function writeFakePermissionAgentScript(params: { dir: string; promptResponse?: Record<string, unknown> }): string {
+async function readPromiseState(evidence: Promise<unknown>): Promise<'resolved' | 'pending'> {
+  let resolved = false;
+  void evidence.then(
+    () => {
+      resolved = true;
+    },
+    () => {
+      resolved = true;
+    },
+  );
+  await Promise.resolve();
+  return resolved ? 'resolved' : 'pending';
+}
+
+function writeFakePermissionAgentScript(params: {
+  dir: string;
+  promptResponse?: Record<string, unknown>;
+  deferPromptResponse?: boolean;
+}): string {
   const promptResponse = JSON.stringify(params.promptResponse ?? {});
   const src = `
     const decoder = new TextDecoder();
@@ -45,7 +63,9 @@ function writeFakePermissionAgentScript(params: { dir: string; promptResponse?: 
         }
 
         if (method === 'session/prompt') {
-          ok(id, ${promptResponse});
+          if (!${params.deferPromptResponse === true}) {
+            ok(id, ${promptResponse});
+          }
           send({
             jsonrpc: '2.0',
             method: 'session/update',
@@ -206,6 +226,46 @@ describe('AcpBackend permission deny cleanup', () => {
         await backend.sendPrompt(started.sessionId, 'please run bash with permission');
 
         await expect(backend.waitForResponseComplete(250)).rejects.toMatchObject({ name: 'AbortError' });
+      } finally {
+        await backendForCleanup?.dispose().catch(() => {});
+      }
+    });
+  });
+
+  it('keeps an uncorrelated permission request ambiguous before denial cancels a pending prompt response', async () => {
+    await withTempDir('happier-acp-perm-deny-provider-effect-', async (dir) => {
+      const scriptPath = writeFakePermissionAgentScript({
+        dir,
+        deferPromptResponse: true,
+      });
+      let backendForCleanup: AcpBackend | undefined;
+
+      try {
+        const backend = new AcpBackend({
+          agentName: 'test',
+          cwd: dir,
+          command: process.execPath,
+          args: [scriptPath],
+          permissionHandler: {
+            handleToolCall: async () => ({ decision: 'denied' }),
+          },
+          transportHandler: createAcpTestTransportHandler({
+            initTimeoutMs: 1_000,
+            idleTimeoutMs: 1,
+          }),
+        });
+        backendForCleanup = backend;
+
+        const started = await backend.startSession();
+        const evidence = await backend.sendPromptWithEvidence(
+          started.sessionId,
+          'please run bash with permission',
+        );
+        expect(evidence.kind).toBe('effect_may_have_occurred');
+        if (evidence.kind !== 'effect_may_have_occurred') return;
+
+        await expect(backend.waitForResponseComplete(250)).rejects.toMatchObject({ name: 'AbortError' });
+        expect(await readPromiseState(evidence.finalResponseEvidence)).toBe('pending');
       } finally {
         await backendForCleanup?.dispose().catch(() => {});
       }

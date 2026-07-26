@@ -86,6 +86,40 @@ describe('createAcpRuntime (turn hooks)', () => {
     expect(diffToolResultIdx).toBeLessThan(taskCompleteIdx);
   });
 
+  it('clears result-less tool identity at a successful turn boundary', async () => {
+    const backend = createFakeAcpRuntimeBackend();
+    const observedToolNames: string[] = [];
+    const runtime = createAcpRuntime({
+      provider: 'opencode',
+      directory: '/tmp',
+      session: createBasicSessionClient(),
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+      hooks: {
+        onToolResult: ({ toolName }) => observedToolNames.push(toolName),
+      },
+    });
+
+    await runtime.startOrLoad({ resumeId: null });
+    runtime.beginTurn();
+    backend.emit({ type: 'tool-call', toolName: 'Task', args: {}, callId: 'reused-call-id' });
+    await runtime.flushTurn();
+
+    runtime.beginTurn();
+    backend.emit({
+      type: 'tool-result',
+      toolName: 'Read',
+      callId: 'reused-call-id',
+      result: { ok: true },
+    });
+    await runtime.flushTurn();
+
+    expect(observedToolNames).toEqual(['Read']);
+  });
+
   it('uses one provider turn id for task start, task completion, and completed projection', async () => {
     const backend = createFakeAcpRuntimeBackend();
     const sent: any[] = [];

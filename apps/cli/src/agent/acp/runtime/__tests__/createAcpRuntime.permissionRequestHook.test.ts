@@ -27,13 +27,13 @@ describe('createAcpRuntime (permission-request hook)', () => {
 
     backend.emit({
       type: 'permission-request',
-      id: 'perm-1',
+      id: ' perm-1\n',
       reason: 'Read',
       payload: { toolName: 'Read', input: { path: 'a' } },
     } as any);
 
     expect(onPermissionRequest).toHaveBeenCalledWith(expect.objectContaining({
-      permissionId: 'perm-1',
+      permissionId: ' perm-1\n',
       toolName: 'Read',
     }));
   });

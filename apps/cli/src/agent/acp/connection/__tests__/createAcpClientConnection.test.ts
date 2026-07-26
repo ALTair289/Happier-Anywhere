@@ -203,4 +203,87 @@ describe('createAcpClientConnection', () => {
       await connection.closed;
     }
   });
+
+  it('returns method-not-found for an unregistered outgoing extension', async () => {
+    const connection = createAcpClientConnection({
+      name: 'unknown-extension-test-client',
+      transport: agent({ name: 'unknown-extension-test-agent' }),
+      handlers: {
+        requestPermission: () => ({ outcome: { outcome: 'cancelled' } }),
+        sessionUpdate: () => {},
+      },
+    });
+
+    try {
+      await expect(connection.peer.requestExtension('example/missing', {}))
+        .rejects.toMatchObject({ code: -32601 });
+    } finally {
+      connection.close();
+      await connection.closed;
+    }
+  });
+
+  it('aborts an in-flight inbound extension handler before connection close settles', async () => {
+    let handlerAborted = false;
+    let resolveStarted: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
+    const testAgent = agent({ name: 'inbound-close-test-agent' })
+      .onRequest(methods.agent.session.prompt, async (context) => {
+        await context.client.request('example/client-slow', { value: 'request' });
+        return { stopReason: 'end_turn' };
+      });
+    const connection = createAcpClientConnection({
+      name: 'inbound-close-test-client',
+      transport: testAgent,
+      handlers: {
+        requestPermission: () => ({ outcome: { outcome: 'cancelled' } }),
+        sessionUpdate: () => {},
+      },
+      extensions: [
+        defineAcpExtensionRequest({
+          method: 'example/client-slow',
+          params: objectWithStringValue,
+          handler: async (_params, context) => {
+            resolveStarted?.();
+            await new Promise<void>((_resolve, reject) => {
+              context.signal.addEventListener('abort', () => {
+                handlerAborted = true;
+                reject(RequestError.requestCancelled());
+              }, { once: true });
+            });
+            return {};
+          },
+        }),
+      ],
+    });
+
+    const prompt = connection.peer.prompt({
+      sessionId: 'session-1',
+      prompt: [{ type: 'text', text: 'go' }],
+    });
+    await started;
+    connection.close(new Error('test connection close'));
+
+    await expect(prompt).rejects.toThrow();
+    await connection.closed;
+    expect(handlerAborted).toBe(true);
+  });
+
+  it('rejects duplicate registrations for the same extension direction and method', () => {
+    const duplicate = defineAcpExtensionRequest({
+      method: 'example/duplicate',
+      params: objectWithStringValue,
+      handler: () => ({}),
+    });
+
+    expect(() => createAcpClientConnection({
+      name: 'duplicate-extension-test-client',
+      transport: agent({ name: 'duplicate-extension-test-agent' }),
+      handlers: {
+        requestPermission: () => ({ outcome: { outcome: 'cancelled' } }),
+        sessionUpdate: () => {},
+      },
+      extensions: [duplicate, duplicate],
+    })).toThrow(/Duplicate ACP extension request registration/);
+  });
 });

@@ -6,7 +6,7 @@ import { AGENTS_CORE, getProviderCliRuntimeSpec } from '@happier-dev/agents';
 import type { Credentials } from '@/persistence';
 import type { PermissionMode } from '@/api/types';
 import { logger } from '@/ui/logger';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import { formatProviderPromptErrorMessage } from '@/agent/runtime/formatProviderPromptErrorMessage';
 import { runStandardAcpProvider, type StandardAcpProviderRunOptions } from '@/agent/runtime/runStandardAcpProvider';
 import { createCatalogProviderAcpRuntime } from '@/agent/acp/runtime/createCatalogProviderAcpRuntime';
@@ -53,6 +53,7 @@ export async function runCatalogDefinedAcpAgent(
       getPermissionMode,
       memoryRecallGuidanceEnabled,
       pendingQueueDrainMaxPopPerWake,
+      providerInputConsumer,
     }) =>
       createCatalogProviderAcpRuntime({
         provider: agentId,
@@ -72,6 +73,7 @@ export async function runCatalogDefinedAcpAgent(
           machineId,
         },
         pendingQueueDrainMaxPopPerWake,
+        providerInputConsumer,
       }),
     onAttachMetadataSnapshotMissing: (error) => {
       logger.debug(

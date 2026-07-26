@@ -66,6 +66,28 @@ describe('importAcpReplaySidechainV1', () => {
     expect(committed[0].body).toEqual({ type: 'thinking', text: 'Hello', sidechainId: 'tool_task_1' });
   });
 
+  it('preserves exact whitespace-bearing opaque tool ids during sidechain replay', async () => {
+    const { session, committed } = createFakeSession();
+
+    await importAcpReplaySidechainV1({
+      session,
+      provider: 'opencode',
+      remoteSessionId: 'ses_123',
+      sidechainId: 'tool_task_1',
+      replay: [
+        { type: 'tool_call', toolCallId: ' opaque\ncall ', kind: 'read', rawInput: {} },
+        { type: 'tool_result', toolCallId: ' opaque\ncall ', status: 'success', rawOutput: { ok: true } },
+      ],
+    });
+
+    expect(committed.map(({ body }) => (
+      body.type === 'tool-call' || body.type === 'tool-result' ? body.callId : null
+    ))).toEqual([
+      'sc:tool_task_1: opaque\ncall ',
+      'sc:tool_task_1: opaque\ncall ',
+    ]);
+  });
+
   it('generates MySQL-safe localIds (<= 191 chars) even when sidechainId is long', async () => {
     const { session, committed } = createFakeSession();
 
@@ -174,6 +196,20 @@ describe('importAcpReplaySidechainV1', () => {
       provider: 'opencode',
       remoteSessionId: 'ses_123',
       sidechainId: 'task / bad',
+      replay: [{ type: 'message', role: 'agent', text: 'hello' }],
+    });
+
+    expect(committed).toHaveLength(0);
+  });
+
+  it('rejects rather than normalizing a whitespace-wrapped sidechain id', async () => {
+    const { session, committed } = createFakeSession();
+
+    await importAcpReplaySidechainV1({
+      session,
+      provider: 'opencode',
+      remoteSessionId: 'ses_123',
+      sidechainId: ' tool_task_1 ',
       replay: [{ type: 'message', role: 'agent', text: 'hello' }],
     });
 

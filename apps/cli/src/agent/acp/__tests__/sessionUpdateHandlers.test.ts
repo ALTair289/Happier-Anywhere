@@ -6,21 +6,23 @@ import { DefaultTransport, defaultTransport } from '../../transport';
 import { CodexAcpTransport } from '@/backends/codex/acp/transport';
 import { GeminiTransport } from '@/backends/gemini/acp/transport';
 import { KimiTransport } from '@/backends/kimi/acp/transport';
+import { createAcpToolCallLifecycle } from '../updates/toolCalls/createAcpToolCallLifecycle';
 
-function createCtx(opts?: { transport?: HandlerContext['transport'] }): HandlerContext & {
-  emitted: any[];
-  toolCallLifecycleStates: Map<string, string>;
-} {
+function createCtx(opts?: { transport?: HandlerContext['transport'] }): HandlerContext & { emitted: any[] } {
   const emitted: any[] = [];
-  return {
-    transport: opts?.transport ?? defaultTransport,
-    activeToolCalls: new Set(),
-    finalizedToolCalls: new Set(),
-    toolCallLifecycleStates: new Map(),
-    toolCallStartTimes: new Map(),
-    toolCallTimeouts: new Map(),
-    toolCallIdToNameMap: new Map(),
-    toolCallIdToInputMap: new Map(),
+  const transport = opts?.transport ?? defaultTransport;
+  let ctx: HandlerContext & { emitted: any[] };
+  const toolCalls = createAcpToolCallLifecycle({
+    transport,
+    emit: (msg) => emitted.push(msg),
+    getToolNameContext: () => ({
+      recentPromptHadChangeTitle: ctx.recentPromptHadChangeTitle === true,
+      toolCallCountSincePrompt: ctx.toolCallCountSincePrompt,
+    }),
+  });
+  ctx = {
+    transport,
+    toolCalls,
     idleTimeout: null,
     recentPromptHadChangeTitle: false,
     toolCallCountSincePrompt: 0,
@@ -30,6 +32,7 @@ function createCtx(opts?: { transport?: HandlerContext['transport'] }): HandlerC
     setIdleTimeout: () => {},
     emitted,
   };
+  return ctx;
 }
 
 describe('sessionUpdateHandlers tool call tracking', () => {
@@ -160,9 +163,8 @@ describe('sessionUpdateHandlers tool call tracking', () => {
     };
 
 	    handleToolCall(pendingUpdate, ctx);
-	    expect(ctx.activeToolCalls.has('call_test_pending')).toBe(true);
-	    expect(ctx.toolCallTimeouts.has('call_test_pending')).toBe(false);
-	    expect(ctx.toolCallLifecycleStates.get('call_test_pending')).toBe('waiting_for_permission');
+	    ctx.toolCalls.markWaitingForPermission('call_test_pending');
+	    expect(ctx.toolCalls.get('call_test_pending')?.snapshot.status).toBe('pending');
 
 	    const inProgressUpdate: SessionUpdate = {
 	      sessionUpdate: 'tool_call_update',
@@ -175,12 +177,10 @@ describe('sessionUpdateHandlers tool call tracking', () => {
 	    };
 
 	    handleToolCallUpdate(inProgressUpdate, ctx);
-	    expect(ctx.toolCallTimeouts.has('call_test_pending')).toBe(false);
-	    expect(ctx.toolCallLifecycleStates.get('call_test_pending')).toBe('waiting_for_permission');
+	    expect(ctx.toolCalls.get('call_test_pending')?.snapshot.status).toBe('pending');
 
 	    markToolCallRunningAfterPermission('call_test_pending', ctx);
-	    expect(ctx.toolCallTimeouts.has('call_test_pending')).toBe(true);
-	    expect(ctx.toolCallLifecycleStates.get('call_test_pending')).toBe('running');
+	    expect(ctx.toolCalls.get('call_test_pending')?.snapshot.status).toBe('in_progress');
 
 	    vi.useRealTimers();
 	  });
@@ -196,7 +196,8 @@ describe('sessionUpdateHandlers tool call tracking', () => {
     const ctx = createCtx({
       transport: new ShortTimeoutTransport(defaultTransport.agentName),
     });
-    ctx.toolCallLifecycleStates.set('call_waiting_1', 'waiting_for_permission');
+    ctx.toolCalls.observe({ toolCallId: 'call_waiting_1', kind: 'edit', status: 'pending' });
+    ctx.toolCalls.markWaitingForPermission('call_waiting_1');
 
     handleToolCall(
       {
@@ -209,9 +210,7 @@ describe('sessionUpdateHandlers tool call tracking', () => {
       ctx,
     );
 
-    expect(ctx.activeToolCalls.has('call_waiting_1')).toBe(true);
-    expect(ctx.toolCallTimeouts.has('call_waiting_1')).toBe(false);
-    expect(ctx.toolCallLifecycleStates.get('call_waiting_1')).toBe('waiting_for_permission');
+    expect(ctx.toolCalls.get('call_waiting_1')?.snapshot.status).toBe('pending');
 
     vi.advanceTimersByTime(11);
     const timedOut = ctx.emitted.filter(
@@ -232,12 +231,10 @@ describe('sessionUpdateHandlers tool call tracking', () => {
 	      ctx,
 	    );
 
-	    expect(ctx.toolCallTimeouts.has('call_waiting_1')).toBe(false);
-	    expect(ctx.toolCallLifecycleStates.get('call_waiting_1')).toBe('waiting_for_permission');
+	    expect(ctx.toolCalls.get('call_waiting_1')?.snapshot.status).toBe('pending');
 
 	    markToolCallRunningAfterPermission('call_waiting_1', ctx);
-	    expect(ctx.toolCallTimeouts.has('call_waiting_1')).toBe(true);
-	    expect(ctx.toolCallLifecycleStates.get('call_waiting_1')).toBe('running');
+	    expect(ctx.toolCalls.get('call_waiting_1')?.snapshot.status).toBe('in_progress');
 
 	    vi.useRealTimers();
 	  });
@@ -268,7 +265,7 @@ describe('sessionUpdateHandlers tool call tracking', () => {
     expect(toolResult.isError).toBe(true);
     expect(toolResult.result?._acp?.kind).toBe('read');
 
-    expect(ctx.toolCallTimeouts.size).toBe(0);
+    expect(ctx.toolCalls.activeSize).toBe(0);
     vi.useRealTimers();
   });
 
@@ -332,12 +329,11 @@ describe('sessionUpdateHandlers tool call tracking', () => {
       ctx,
     );
 
-    expect(ctx.toolCallTimeouts.has('call_no_timeout_1')).toBe(false);
     vi.advanceTimersByTime(10 * 60 * 1000);
 
     const toolResult = ctx.emitted.find((m) => m.type === 'tool-result' && m.callId === 'call_no_timeout_1');
     expect(toolResult).toBeUndefined();
-    expect(ctx.activeToolCalls.has('call_no_timeout_1')).toBe(true);
+    expect(ctx.toolCalls.get('call_no_timeout_1')).not.toBeNull();
 
     vi.useRealTimers();
   });
@@ -533,8 +529,8 @@ describe('sessionUpdateHandlers tool call tracking', () => {
       ctx,
     );
 
-    expect(ctx.toolCallLifecycleStates.get('call_perm_wait_1')).toBe('waiting_for_permission');
-    expect(ctx.toolCallTimeouts.has('call_perm_wait_1')).toBe(false);
+	    ctx.toolCalls.markWaitingForPermission('call_perm_wait_1');
+	    expect(ctx.toolCalls.get('call_perm_wait_1')?.snapshot.status).toBe('pending');
 
     // Some ACP agents can incorrectly emit in_progress liveness updates while still permission-gated.
     handleToolCallUpdate(
@@ -550,8 +546,7 @@ describe('sessionUpdateHandlers tool call tracking', () => {
       ctx,
     );
 
-    expect(ctx.toolCallLifecycleStates.get('call_perm_wait_1')).toBe('waiting_for_permission');
-    expect(ctx.toolCallTimeouts.has('call_perm_wait_1')).toBe(false);
+	    expect(ctx.toolCalls.get('call_perm_wait_1')?.snapshot.status).toBe('pending');
 
     // Ensure we do not emit a timeout tool-result while waiting for a permission decision.
     vi.advanceTimersByTime(50);
@@ -562,8 +557,7 @@ describe('sessionUpdateHandlers tool call tracking', () => {
 
     // Once permission is granted, we should transition to running and arm the execution timeout.
     markToolCallRunningAfterPermission('call_perm_wait_1', ctx);
-    expect(ctx.toolCallLifecycleStates.get('call_perm_wait_1')).toBe('running');
-    expect(ctx.toolCallTimeouts.has('call_perm_wait_1')).toBe(true);
+	    expect(ctx.toolCalls.get('call_perm_wait_1')?.snapshot.status).toBe('in_progress');
 
     vi.useRealTimers();
   });
@@ -584,7 +578,7 @@ describe('sessionUpdateHandlers tool call tracking', () => {
     const toolCall = ctx.emitted.find((m) => m.type === 'tool-call' && m.callId === 'opaque-tool-id');
     expect(toolCall).toBeTruthy();
     expect(toolCall.toolName).toBe('read');
-    expect(ctx.toolCallIdToNameMap.get('opaque-tool-id')).toBe('read');
+    expect(ctx.toolCalls.get('opaque-tool-id')?.toolName).toBe('read');
   });
 
   it('extracts tool output from update.result when output/rawOutput/content are absent', () => {
@@ -651,7 +645,7 @@ describe('sessionUpdateHandlers tool call tracking', () => {
     const ctx = createCtx();
 
     // Simulate permission handler seeding the tool name before any tool_call/tool_call_update in_progress.
-    ctx.toolCallIdToNameMap.set('call_perm_1', 'execute');
+    ctx.toolCalls.observe({ toolCallId: 'call_perm_1', kind: 'execute', status: 'pending' });
 
     const completedUpdate: SessionUpdate = {
       sessionUpdate: 'tool_call_update',
@@ -678,9 +672,11 @@ describe('sessionUpdateHandlers tool call tracking', () => {
     const ctx = createCtx();
 
     // Simulate permission request seeding real tool input before any tool_call/tool_call_update payload includes it.
-    ctx.toolCallIdToNameMap.set('call_perm_args_1', 'execute');
-    ctx.toolCallIdToInputMap.set('call_perm_args_1', {
-      command: ['/bin/zsh', '-lc', 'echo hi'],
+    ctx.toolCalls.observe({
+      toolCallId: 'call_perm_args_1',
+      kind: 'execute',
+      status: 'pending',
+      rawInput: { command: ['/bin/zsh', '-lc', 'echo hi'] },
     });
 
     const pendingUpdate: SessionUpdate = {
@@ -779,7 +775,7 @@ describe('sessionUpdateHandlers tool call tracking', () => {
     );
     expect(toolCall).toBeTruthy();
     expect(toolCall?.toolName).toBe('mcp__qa_marker_stdio_20260306__get_marker');
-    expect(ctx.toolCallIdToNameMap.get('call_codex_custom_mcp_1')).toBe(
+    expect(ctx.toolCalls.get('call_codex_custom_mcp_1')?.toolName).toBe(
       'mcp__qa_marker_stdio_20260306__get_marker',
     );
   });

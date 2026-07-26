@@ -3,7 +3,7 @@ import React from 'react';
 import type { Credentials } from '@/persistence';
 import type { PermissionMode } from '@/api/types';
 import { logger } from '@/ui/logger';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import { formatProviderPromptErrorMessage } from '@/agent/runtime/formatProviderPromptErrorMessage';
 import { runStandardAcpProvider, type StandardAcpProviderRunOptions } from '@/agent/runtime/runStandardAcpProvider';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
@@ -63,7 +63,7 @@ export async function runConfiguredAcpBackend(
         title: backend.title,
       }));
     },
-    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake }) =>
+    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake, providerInputConsumer }) =>
       createConfiguredAcpRuntime({
         backend,
         loggerLabel: `${backend.title}ACP`,
@@ -80,6 +80,7 @@ export async function runConfiguredAcpBackend(
           machineId,
         },
         pendingQueueDrainMaxPopPerWake,
+        providerInputConsumer,
       }),
     onAttachMetadataSnapshotMissing: (error) => {
       logger.debug(

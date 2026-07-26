@@ -1,5 +1,7 @@
 import type { AgentMessage } from '../../core';
 import type { TransportHandler } from '../../transport';
+import type { AcpToolCallTracker } from './toolCalls/AcpToolCallTracker';
+import type { AcpPlanProjection } from '../plans';
 
 /**
  * Default timeout for idle detection after message chunks (ms).
@@ -12,13 +14,6 @@ export const DEFAULT_IDLE_TIMEOUT_MS = 500;
  */
 export const DEFAULT_TOOL_CALL_TIMEOUT_MS = 120_000;
 
-export type ToolCallLifecycleState =
-  | 'waiting_for_permission'
-  | 'running'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
-
 /**
  * Extended session update structure with all possible fields.
  */
@@ -27,7 +22,8 @@ export interface SessionUpdate {
   toolCallId?: string;
   status?: string;
   kind?: string | unknown;
-  title?: string;
+  title?: string | null;
+  updatedAt?: string | null;
   rawInput?: unknown;
   rawOutput?: unknown;
   input?: unknown;
@@ -61,20 +57,12 @@ export interface SessionUpdate {
 export interface HandlerContext {
   /** Transport handler for agent-specific behavior */
   transport: TransportHandler;
-  /** Set of active tool call IDs */
-  activeToolCalls: Set<string>;
-  /** Set of tool call IDs that have already emitted a terminal tool-result (prevents duplicate terminalization) */
-  finalizedToolCalls: Set<string>;
-  /** Map of tool call ID to the current lifecycle state */
-  toolCallLifecycleStates: Map<string, ToolCallLifecycleState>;
-  /** Map of tool call ID to start time */
-  toolCallStartTimes: Map<string, number>;
-  /** Map of tool call ID to timeout handle */
-  toolCallTimeouts: Map<string, NodeJS.Timeout>;
-  /** Map of tool call ID to tool name */
-  toolCallIdToNameMap: Map<string, string>;
-  /** Map of tool call ID to the most-recent raw input (for permission prompts that omit args) */
-  toolCallIdToInputMap: Map<string, Record<string, unknown>>;
+  /** Sole lifecycle, merge, timeout, terminalization, and lookup owner. */
+  toolCalls: AcpToolCallTracker;
+  /** Current provider turn/correlation namespace for standard and proprietary plan sources. */
+  turnId?: string;
+  /** Sole plan replace/merge/fingerprint owner. */
+  plans?: AcpPlanProjection;
   /** Current idle timeout handle */
   idleTimeout: NodeJS.Timeout | null;
   /** Whether the most recent prompt included change-title instructions */

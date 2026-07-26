@@ -6,12 +6,14 @@ import { join } from 'node:path';
 import { AcpBackend } from '../AcpBackend';
 import { writeAcpTestAgentScript } from '../testkit/subprocessHarness';
 import type { AgentMessage } from '../../core';
+import { withExecutionRunBackendModelOptions } from '@/agent/executionRuns/runtime/applyExecutionRunBackendModelOptions';
 import { withTempDir } from '@/testkit/fs/tempDir';
 
 function writeFakeAcpAgentScript(params: {
   dir: string;
   recordedParamsPath?: string;
   modelSetResponse?: 'empty' | 'staleEcho';
+  includeExactOpaqueOption?: boolean;
 }): string {
   const src = `
     import { writeFileSync } from 'node:fs';
@@ -20,6 +22,7 @@ function writeFakeAcpAgentScript(params: {
     let buf = '';
     const recordedParamsPath = ${JSON.stringify(params.recordedParamsPath ?? '')};
     const modelSetResponse = ${JSON.stringify(params.modelSetResponse ?? 'empty')};
+    const includeExactOpaqueOption = ${JSON.stringify(params.includeExactOpaqueOption === true)};
 
     function send(obj) {
       process.stdout.write(JSON.stringify(obj) + '\\n');
@@ -54,6 +57,17 @@ function writeFakeAcpAgentScript(params: {
           ok(id, {
             sessionId: 'test-session',
             configOptions: [
+              ...(includeExactOpaqueOption ? [{
+                id: ' effort ',
+                name: 'Exact effort',
+                category: ' model_config ',
+                type: 'select',
+                currentValue: ' high ',
+                options: [
+                  { value: ' high ', name: 'High exact' },
+                  { value: 'high', name: 'High distinct' },
+                ],
+              }] : []),
               {
                 id: 'model',
                 name: 'Model',
@@ -337,6 +351,88 @@ describe('AcpBackend session configOptions', () => {
           configId: 'telemetry',
           value: true,
           type: 'boolean',
+        });
+      } finally {
+        try {
+          await backend?.dispose();
+        } catch {}
+      }
+    });
+  });
+
+  it('converts finite persisted execution-run override numbers to ACP strings and rejects non-finite values', async () => {
+    await withTempDir('happier-acp-config-options-number-', async (dir) => {
+      const recordedParamsPath = join(dir, 'set-config-option-number-params.json');
+      const scriptPath = writeFakeAcpAgentScript({ dir, recordedParamsPath });
+      let backend: AcpBackend | null = null;
+
+      try {
+        backend = new AcpBackend({
+          agentName: 'test',
+          cwd: dir,
+          command: process.execPath,
+          args: [scriptPath],
+        });
+
+        const wrapped = withExecutionRunBackendModelOptions(backend, {
+          sessionConfigOptionOverrides: {
+            v: 1,
+            updatedAt: 1,
+            overrides: { maxRetries: { updatedAt: 1, value: 3 } },
+          },
+        });
+
+        const started = await wrapped.startSession();
+
+        expect(await readRecordedParams(recordedParamsPath)).toMatchObject({
+          sessionId: 'test-session',
+          configId: 'maxRetries',
+          value: '3',
+        });
+        await expect(backend.setSessionConfigOption(started.sessionId, 'maxRetries', Number.NaN))
+          .rejects.toThrow('Config value is required');
+      } finally {
+        try {
+          await backend?.dispose();
+        } catch {}
+      }
+    });
+  });
+
+  it('preserves exact opaque config identifiers and values from ingestion through set_config_option', async () => {
+    await withTempDir('happier-acp-config-options-exact-', async (dir) => {
+      const recordedParamsPath = join(dir, 'set-config-option-exact-params.json');
+      const scriptPath = writeFakeAcpAgentScript({
+        dir,
+        recordedParamsPath,
+        includeExactOpaqueOption: true,
+      });
+      let backend: AcpBackend | null = null;
+
+      try {
+        backend = new AcpBackend({
+          agentName: 'test',
+          cwd: dir,
+          command: process.execPath,
+          args: [scriptPath],
+        });
+
+        const started = await backend.startSession();
+        expect(backend.getSessionConfigOptionsState()?.[0]).toMatchObject({
+          id: ' effort ',
+          category: ' model_config ',
+          currentValue: ' high ',
+          options: [
+            { value: ' high ', name: 'High exact' },
+            { value: 'high', name: 'High distinct' },
+          ],
+        });
+
+        await backend.setSessionConfigOption(started.sessionId, ' effort ', ' high ');
+        expect(await readRecordedParams(recordedParamsPath)).toMatchObject({
+          sessionId: 'test-session',
+          configId: ' effort ',
+          value: ' high ',
         });
       } finally {
         try {

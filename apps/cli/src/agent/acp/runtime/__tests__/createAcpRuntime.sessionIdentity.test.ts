@@ -32,7 +32,6 @@ function createRuntime(params: Readonly<{
       ? {
           pendingQueue: {
             drainAfterStartOrLoad: true,
-            waitForMetadataUpdate: async () => false,
             inputConsumer: {
               drainPending: async () => {
                 await params.drainPending?.();

@@ -97,7 +97,7 @@ export async function importAcpReplaySidechainV1(params: {
     return;
   }
 
-  const sidechainId = String(params.sidechainId ?? '').trim();
+  const sidechainId = String(params.sidechainId ?? '');
   if (!sidechainId || !isSafeSidechainId(sidechainId)) {
     logger.debug('[ACP Sidechain Import] Invalid sidechainId; skipping sidechain import', {
       provider: params.provider,
@@ -153,8 +153,8 @@ export async function importAcpReplaySidechainV1(params: {
     }
 
     if (eventType === 'tool_call') {
-      let toolCallId = (getString(event, 'toolCallId') ?? '').trim();
-      if (!toolCallId) {
+      let toolCallId = getString(event, 'toolCallId') ?? '';
+      if (!toolCallId.trim()) {
         toolCallId = `synthetic_${syntheticToolCallCounter++}`;
         pendingSyntheticToolCallIds.push(toolCallId);
         logger.debug('[ACP Sidechain Import] Missing toolCallId on tool_call event; using synthetic id', {
@@ -203,8 +203,8 @@ export async function importAcpReplaySidechainV1(params: {
     }
 
     if (eventType === 'tool_result') {
-      let toolCallId = (getString(event, 'toolCallId') ?? '').trim();
-      if (!toolCallId) {
+      let toolCallId = getString(event, 'toolCallId') ?? '';
+      if (!toolCallId.trim()) {
         const queuedSyntheticId = pendingSyntheticToolCallIds.shift() ?? null;
         toolCallId = queuedSyntheticId ?? `synthetic_${syntheticToolCallCounter++}`;
         const details = {

@@ -7,10 +7,10 @@
   resolved "https://registry.npmjs.org/@0no-co/graphql.web/-/graphql.web-1.2.0.tgz"
   integrity sha512-/1iHy9TTr63gE1YcR5idjx8UREz1s0kFhydf3bBLCXyqjhkIc6igAzTOx3zPifCwFR87tsh/4Pa9cNts6d2otw==
 
-"@agentclientprotocol/sdk@^0.14.1":
-  version "0.14.1"
-  resolved "https://registry.npmjs.org/@agentclientprotocol/sdk/-/sdk-0.14.1.tgz"
-  integrity sha512-b6r3PS3Nly+Wyw9U+0nOr47bV8tfS476EgyEMhoKvJCZLbgqoDFN7DJwkxL88RR0aiOqOYV1ZnESHqb+RmdH8w==
+"@agentclientprotocol/sdk@^1.2.1":
+  version "1.2.1"
+  resolved "https://registry.npmjs.org/@agentclientprotocol/sdk/-/sdk-1.2.1.tgz#c98952123d2b202a143ab5ec68782eec2775003a"
+  integrity sha512-jwYUdOQR7tc+Zfch53VL4JJyUNK/46q03uUTYb+PjECsmnNl94XFXOfYLJ8RBpMNidXd1rpOAVgb0vqD98xImA==
 
 "@ai-sdk/gateway@2.0.29":
   version "2.0.29"

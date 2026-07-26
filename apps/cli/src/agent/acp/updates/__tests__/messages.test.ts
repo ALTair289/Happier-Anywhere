@@ -11,6 +11,7 @@ import type { TransportHandler } from '@/agent/transport';
 
 import { handleAgentMessageChunk, handleAgentThoughtChunk } from '../messages';
 import type { HandlerContext } from '../types';
+import { createAcpToolCallLifecycle } from '../toolCalls/createAcpToolCallLifecycle';
 
 function createHandlerContext(options?: Readonly<{
   transport?: Partial<TransportHandler>;
@@ -31,13 +32,14 @@ function createHandlerContext(options?: Readonly<{
 
   const ctx: HandlerContext = {
     transport,
-    activeToolCalls: new Set<string>(),
-    finalizedToolCalls: new Set<string>(),
-    toolCallLifecycleStates: new Map(),
-    toolCallStartTimes: new Map<string, number>(),
-    toolCallTimeouts: new Map<string, NodeJS.Timeout>(),
-    toolCallIdToNameMap: new Map<string, string>(),
-    toolCallIdToInputMap: new Map<string, Record<string, unknown>>(),
+    toolCalls: createAcpToolCallLifecycle({
+      transport,
+      emit: (msg) => emitted.push(msg),
+      getToolNameContext: () => ({
+        recentPromptHadChangeTitle: false,
+        toolCallCountSincePrompt: options?.toolCallCountSincePrompt ?? 0,
+      }),
+    }),
     idleTimeout: null,
     toolCallCountSincePrompt: options?.toolCallCountSincePrompt ?? 0,
     emit: (msg) => emitted.push(msg),

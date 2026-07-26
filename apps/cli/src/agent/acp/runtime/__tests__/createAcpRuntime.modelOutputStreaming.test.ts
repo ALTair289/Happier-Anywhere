@@ -2,13 +2,14 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
 import type { ACPMessageData } from '@/api/session/sessionMessageTypes';
 import type { AgentMessage } from '@/agent';
 import { createTurnAssistantPreviewTracker } from '@/agent/runtime/turnAssistantPreviewTracker';
 import { createAgentSessionMediaPersister } from '@/session/sessionMedia/createAgentSessionMediaPersister';
+import { logger } from '@/ui/logger';
 
 import { createTestAcpRuntime as createAcpRuntime } from '@/testkit/backends/acpRuntime';
 import { createFakeAcpRuntimeBackend } from '@/testkit/backends/acpRuntimeBackend';
@@ -21,6 +22,10 @@ const pngBytes = Buffer.from(
 );
 
 describe('createAcpRuntime (transcript streaming vNext)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('tracks the current turn assistant preview from structured model output and resets between turns', async () => {
     const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
     const tracker = createTurnAssistantPreviewTracker();
@@ -293,7 +298,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
       sessionMedia: {
         persist: async (msg: AgentMessage) => {
           persisted.push(msg);
-          return [persistedMediaItem];
+          return { media: [persistedMediaItem], unavailable: [] };
         },
       },
     });
@@ -340,6 +345,482 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
     });
     expect(JSON.stringify(finalCommit?.meta)).not.toContain('iVBORw0KGgo=');
     expect(JSON.stringify(finalCommit?.meta)).not.toContain('attachments.v1');
+  });
+
+  it('deduplicates one generated local file across provider-extension and final-tool projections', async () => {
+    const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
+    const persisted: AgentMessage[] = [];
+    const persistedMediaItem = {
+      id: 'media-image-1',
+      role: 'output',
+      category: 'generated',
+      mediaKind: 'image',
+      mimeType: 'image/png',
+      name: 'image.png',
+      path: '.happier/uploads/generated/image-1/media-image-1.png',
+      sizeBytes: 67,
+      origin: { source: 'provider-generated', agentId: 'cursor', toolCallId: 'image-1' },
+    } as const;
+    const runtime = createAcpRuntime({
+      provider: 'cursor',
+      directory: '/workspace',
+      session: createBasicSessionClientWithOverrides(),
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+      sessionMedia: {
+        persist: async (message: AgentMessage) => {
+          persisted.push(message);
+          return { media: [persistedMediaItem], unavailable: [] };
+        },
+      },
+    });
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+    const path = '/workspace/generated/image.png';
+
+    backend.emit({
+      type: 'session-media',
+      source: 'cursor-generate-image',
+      media: [{
+        kind: 'local-file',
+        path,
+        origin: { source: 'provider-generated', agentId: 'cursor', toolCallId: 'image-1' },
+      }],
+    } satisfies AgentMessage);
+    backend.emit({
+      type: 'session-media',
+      source: 'acp-tool-result',
+      media: [{
+        kind: 'local-file',
+        path,
+        origin: { source: 'tool-output', toolCallId: 'image-1', contentIndex: 0 },
+      }],
+    } satisfies AgentMessage);
+
+    await runtime.flushTurn();
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]?.type === 'session-media' ? persisted[0].media : []).toHaveLength(1);
+  });
+
+  it('retries the terminal projection when an earlier duplicate media source was not persisted', async () => {
+    const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
+    const persisted: AgentMessage[] = [];
+    const durableCalls: Array<{ body: ACPMessageData; meta?: Record<string, unknown> }> = [];
+    const persistedMediaItem = {
+      id: 'media-image-1',
+      role: 'output',
+      category: 'generated',
+      mediaKind: 'image',
+      mimeType: 'image/png',
+      name: 'image.png',
+      path: '.happier/uploads/generated/image-1/media-image-1.png',
+      sizeBytes: 67,
+      sha256: 'b'.repeat(64),
+      origin: { source: 'provider-generated', agentId: 'cursor', toolCallId: 'image-1' },
+    } as const;
+    const runtime = createAcpRuntime({
+      provider: 'cursor',
+      directory: '/workspace',
+      session: createBasicSessionClientWithOverrides({
+        sendAgentMessageCommitted: async (_provider, body, opts) => {
+          durableCalls.push({ body, meta: opts.meta });
+        },
+      }),
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+      sessionMedia: {
+        persist: async (message: AgentMessage) => {
+          persisted.push(message);
+          return persisted.length === 1
+            ? {
+                media: [],
+                unavailable: [{
+                  id: 'c'.repeat(64),
+                  role: 'output',
+                  category: 'generated',
+                  mediaKind: 'image',
+                  code: 'provider_file_unavailable',
+                  origin: { source: 'provider-generated' },
+                }],
+              }
+            : { media: [persistedMediaItem], unavailable: [] };
+        },
+      },
+    });
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+    const path = '/workspace/generated/image.png';
+
+    backend.emit({ type: 'model-output', textDelta: 'Generated image.' } satisfies AgentMessage);
+    backend.emit({
+      type: 'session-media',
+      source: 'cursor-generate-image',
+      media: [{
+        kind: 'local-file',
+        path,
+        origin: { source: 'provider-generated', agentId: 'cursor', toolCallId: 'image-1' },
+      }],
+    } satisfies AgentMessage);
+    await vi.waitFor(() => expect(persisted).toHaveLength(1));
+
+    backend.emit({
+      type: 'session-media',
+      source: 'acp-tool-result',
+      media: [{
+        kind: 'local-file',
+        path,
+        origin: { source: 'tool-output', toolCallId: 'image-1', contentIndex: 0 },
+      }],
+    } satisfies AgentMessage);
+    await runtime.flushTurn();
+
+    expect(persisted).toHaveLength(2);
+    expect(durableCalls.at(-1)?.meta).toMatchObject({
+      happier: {
+        kind: 'session_media.v1',
+        payload: { media: [persistedMediaItem] },
+      },
+    });
+    expect((durableCalls.at(-1)?.meta?.happier as { payload?: { unavailable?: unknown } } | undefined)?.payload?.unavailable).toBeUndefined();
+  });
+
+  it('caps one turn at the durable session-media envelope limit and releases capacity on the next turn', async () => {
+    const logSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+    const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
+    const durableCalls: Array<{ body: ACPMessageData; meta?: Record<string, unknown> }> = [];
+    const persistedSourceIds: string[] = [];
+    const runtime = createAcpRuntime({
+      provider: 'cursor',
+      directory: '/workspace',
+      session: createBasicSessionClientWithOverrides({
+        sendAgentMessageCommitted: async (_provider, body, opts) => {
+          durableCalls.push({ body, meta: opts.meta });
+        },
+      }),
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+      sessionMedia: {
+        persist: async (message: AgentMessage) => {
+          const source = message.type === 'session-media' ? message.media[0] : undefined;
+          const sourceId = source?.origin.providerEventId;
+          if (!sourceId) throw new Error('expected provider event id');
+          persistedSourceIds.push(sourceId);
+          return {
+            media: [{
+              id: `media-${sourceId}`,
+              role: 'output',
+              category: 'generated',
+              mediaKind: 'image',
+              mimeType: 'image/png',
+              name: `${sourceId}.png`,
+              path: `.happier/uploads/generated/${sourceId}.png`,
+              sizeBytes: 67,
+              origin: { source: 'provider-generated', providerEventId: sourceId },
+            }],
+            unavailable: [],
+          };
+        },
+      },
+    });
+    await runtime.startOrLoad({});
+
+    const emitMedia = (sourceId: string) => backend.emit({
+      type: 'session-media',
+      source: 'cursor-generate-image',
+      media: [{
+        kind: 'local-file',
+        path: `/workspace/generated/${sourceId}.png`,
+        origin: { source: 'provider-generated', providerEventId: sourceId },
+        dedupeKey: `cursor-generate-image:${sourceId}`,
+      }],
+    } satisfies AgentMessage);
+
+    runtime.beginTurn();
+    for (let index = 0; index < 257; index += 1) emitMedia(`first-${index}`);
+    await runtime.flushTurn();
+
+    const firstEnvelope = durableCalls.at(-1)?.meta?.happier;
+    const { SessionMediaMessageMetaEnvelopeV1Schema } = await import('@happier-dev/protocol');
+    expect(SessionMediaMessageMetaEnvelopeV1Schema.safeParse(firstEnvelope).success).toBe(true);
+    expect((firstEnvelope as { payload: { media: unknown[] } }).payload.media).toHaveLength(256);
+    expect(persistedSourceIds).toHaveLength(256);
+
+    runtime.beginTurn();
+    emitMedia('second-turn');
+    await runtime.flushTurn();
+
+    const secondEnvelope = durableCalls.at(-1)?.meta?.happier;
+    expect(SessionMediaMessageMetaEnvelopeV1Schema.safeParse(secondEnvelope).success).toBe(true);
+    expect((secondEnvelope as { payload: { media: Array<{ id: string }> } }).payload.media)
+      .toEqual([expect.objectContaining({ id: 'media-second-turn' })]);
+    expect(persistedSourceIds).toHaveLength(257);
+    const overflowLogs = logSpy.mock.calls.filter(
+      ([message]) => message === '[cursor] Bounded excess session media sources for the turn',
+    );
+    expect(overflowLogs).toEqual([[
+      '[cursor] Bounded excess session media sources for the turn',
+      { droppedCount: 1, maxEntries: 256 },
+    ]]);
+  });
+
+  it('lets a later success replace an admitted unavailable item without admitting an overflowing unique source', async () => {
+    const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
+    const durableCalls: Array<{ body: ACPMessageData; meta?: Record<string, unknown> }> = [];
+    const attemptsBySourceId = new Map<string, number>();
+    const runtime = createAcpRuntime({
+      provider: 'cursor',
+      directory: '/workspace',
+      session: createBasicSessionClientWithOverrides({
+        sendAgentMessageCommitted: async (_provider, body, opts) => {
+          durableCalls.push({ body, meta: opts.meta });
+        },
+      }),
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+      sessionMedia: {
+        persist: async (message: AgentMessage) => {
+          const source = message.type === 'session-media' ? message.media[0] : undefined;
+          const sourceId = source?.origin.providerEventId;
+          if (!sourceId) throw new Error('expected provider event id');
+          const attempt = (attemptsBySourceId.get(sourceId) ?? 0) + 1;
+          attemptsBySourceId.set(sourceId, attempt);
+          if (sourceId === 'retry' && attempt <= 2) {
+            return {
+              media: [],
+              unavailable: [{
+                id: 'unavailable-retry',
+                role: 'output',
+                category: 'generated',
+                mediaKind: 'image',
+                code: 'provider_file_unavailable',
+                origin: { source: 'provider-generated' },
+              }],
+            };
+          }
+          return {
+            media: [{
+              id: `media-${sourceId}`,
+              role: 'output',
+              category: 'generated',
+              mediaKind: 'image',
+              mimeType: 'image/png',
+              name: `${sourceId}.png`,
+              path: `.happier/uploads/generated/${sourceId}.png`,
+              sizeBytes: 67,
+              origin: { source: 'provider-generated', providerEventId: sourceId },
+            }],
+            unavailable: [],
+          };
+        },
+      },
+    });
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    const emitMedia = (sourceId: string) => backend.emit({
+      type: 'session-media',
+      source: 'cursor-generate-image',
+      media: [{
+        kind: 'local-file',
+        path: `/workspace/generated/${sourceId}.png`,
+        origin: { source: 'provider-generated', providerEventId: sourceId },
+        dedupeKey: `cursor-generate-image:${sourceId}`,
+      }],
+    } satisfies AgentMessage);
+
+    for (let index = 0; index < 255; index += 1) emitMedia(`success-${index}`);
+    emitMedia('retry');
+    await vi.waitFor(() => expect(attemptsBySourceId.get('retry')).toBe(1));
+    emitMedia('retry');
+    await vi.waitFor(() => expect(attemptsBySourceId.get('retry')).toBe(2));
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 0));
+    emitMedia('overflow');
+    emitMedia('retry');
+    await runtime.flushTurn();
+
+    const envelope = durableCalls.at(-1)?.meta?.happier as {
+      payload: { media: Array<{ id: string }>; unavailable?: unknown[] };
+    };
+    const { SessionMediaMessageMetaEnvelopeV1Schema } = await import('@happier-dev/protocol');
+    expect(SessionMediaMessageMetaEnvelopeV1Schema.safeParse(envelope).success).toBe(true);
+    expect(envelope.payload.media).toHaveLength(256);
+    expect(envelope.payload.media).toContainEqual(expect.objectContaining({ id: 'media-retry' }));
+    expect(envelope.payload.unavailable).toBeUndefined();
+    expect(attemptsBySourceId.get('retry')).toBe(3);
+    expect(attemptsBySourceId.has('overflow')).toBe(false);
+  });
+
+  it('prioritizes later usable media over earlier unavailable diagnostics for distinct and retried keys', async () => {
+    const logSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+    const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
+    const durableCalls: Array<{ body: ACPMessageData; meta?: Record<string, unknown> }> = [];
+    const attemptsBySourceId = new Map<string, number>();
+    const runtime = createAcpRuntime({
+      provider: 'cursor',
+      directory: '/workspace',
+      session: createBasicSessionClientWithOverrides({
+        sendAgentMessageCommitted: async (_provider, body, opts) => {
+          durableCalls.push({ body, meta: opts.meta });
+        },
+      }),
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+      sessionMedia: {
+        persist: async (message: AgentMessage) => {
+          const source = message.type === 'session-media' ? message.media[0] : undefined;
+          const sourceId = source?.origin.providerEventId;
+          if (!sourceId) throw new Error('expected provider event id');
+          const attempt = (attemptsBySourceId.get(sourceId) ?? 0) + 1;
+          attemptsBySourceId.set(sourceId, attempt);
+          const mediaCount = sourceId === 'distinct-success'
+            ? 5
+            : sourceId === 'retry' && attempt > 1
+              ? 10
+              : 0;
+          if (mediaCount > 0) {
+            return {
+              media: Array.from({ length: mediaCount }, (_, index) => ({
+                id: `media-${sourceId}-${index}`,
+                role: 'output' as const,
+                category: 'generated' as const,
+                mediaKind: 'image' as const,
+                mimeType: 'image/png' as const,
+                name: `${sourceId}-${index}.png`,
+                path: `.happier/uploads/generated/${sourceId}-${index}.png`,
+                sizeBytes: 67,
+                origin: { source: 'provider-generated' as const, providerEventId: sourceId },
+              })),
+              unavailable: [],
+            };
+          }
+          return {
+            media: [],
+            unavailable: [{
+              id: `unavailable-${sourceId}`,
+              role: 'output',
+              category: 'generated',
+              mediaKind: 'image',
+              code: 'provider_file_unavailable',
+              origin: { source: 'provider-generated' },
+            }],
+          };
+        },
+      },
+    });
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    const emitMedia = (sourceId: string) => backend.emit({
+      type: 'session-media',
+      source: 'cursor-generate-image',
+      media: [{
+        kind: 'local-file',
+        path: `/workspace/generated/${sourceId}.png`,
+        origin: { source: 'provider-generated', providerEventId: sourceId },
+        dedupeKey: `cursor-generate-image:${sourceId}`,
+      }],
+    } satisfies AgentMessage);
+
+    emitMedia('retry');
+    for (let index = 0; index < 254; index += 1) emitMedia(`unavailable-${index}`);
+    await vi.waitFor(() => expect(attemptsBySourceId.size).toBe(255));
+    emitMedia('distinct-success');
+    await vi.waitFor(() => expect(attemptsBySourceId.get('distinct-success')).toBe(1));
+    emitMedia('retry');
+    await runtime.flushTurn();
+
+    const envelope = durableCalls.at(-1)?.meta?.happier as {
+      payload: { media: Array<{ id: string }>; unavailable?: Array<{ id: string }> };
+    };
+    const { SessionMediaMessageMetaEnvelopeV1Schema } = await import('@happier-dev/protocol');
+    expect(SessionMediaMessageMetaEnvelopeV1Schema.safeParse(envelope).success).toBe(true);
+    expect(envelope.payload.media).toHaveLength(15);
+    expect(envelope.payload.media.filter(({ id }) => id.startsWith('media-distinct-success-'))).toHaveLength(5);
+    expect(envelope.payload.media.filter(({ id }) => id.startsWith('media-retry-'))).toHaveLength(10);
+    expect(envelope.payload.unavailable).toHaveLength(241);
+    expect(envelope.payload.unavailable).not.toContainEqual(expect.objectContaining({ id: 'unavailable-retry' }));
+    expect(attemptsBySourceId.get('retry')).toBe(2);
+    expect(logSpy.mock.calls.filter(
+      ([message]) => message === '[cursor] Bounded excess session media sources for the turn',
+    )).toEqual([[
+      '[cursor] Bounded excess session media sources for the turn',
+      { droppedCount: 13, maxEntries: 256 },
+    ]]);
+    logSpy.mockRestore();
+  });
+
+  it('commits a path-free unavailable-media state when generated bytes cannot be persisted', async () => {
+    const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
+    const durableCalls: Array<{ body: ACPMessageData; meta?: Record<string, unknown> }> = [];
+    const unavailable = {
+      id: 'd'.repeat(64),
+      role: 'output',
+      category: 'generated',
+      mediaKind: 'image',
+      code: 'provider_file_unavailable',
+      origin: {
+        source: 'provider-generated',
+        agentId: 'cursor',
+        toolCallIdHash: 'e'.repeat(64),
+      },
+    } as const;
+    const runtime = createAcpRuntime({
+      provider: 'cursor',
+      directory: '/workspace',
+      session: createBasicSessionClientWithOverrides({
+        sendAgentMessageCommitted: async (_provider, body, opts) => {
+          durableCalls.push({ body, meta: opts.meta });
+        },
+      }),
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+      sessionMedia: {
+        persist: async () => ({ media: [], unavailable: [unavailable] }),
+      },
+    });
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    backend.emit({
+      type: 'session-media',
+      source: 'cursor-generate-image',
+      media: [{
+        kind: 'local-file',
+        path: '/workspace/generated/missing-secret-name.png',
+        origin: { source: 'provider-generated', agentId: 'cursor', toolCallId: 'secret-call-id' },
+      }],
+    } satisfies AgentMessage);
+    await runtime.flushTurn();
+
+    expect(durableCalls.at(-1)).toMatchObject({
+      body: { type: 'message', message: '' },
+      meta: {
+        happier: {
+          kind: 'session_media.v1',
+          payload: { media: [], unavailable: [unavailable] },
+        },
+      },
+    });
+    expect(JSON.stringify(durableCalls)).not.toContain('missing-secret-name.png');
+    expect(JSON.stringify(durableCalls)).not.toContain('secret-call-id');
   });
 
   it('attaches ACP tool-result media to the tool-result row secondary media slot', async () => {
@@ -411,7 +892,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
       sessionMedia: {
         persist: async (msg: AgentMessage) => {
           persisted.push(msg);
-          return [persistedMediaItem];
+          return { media: [persistedMediaItem], unavailable: [] };
         },
       },
     });

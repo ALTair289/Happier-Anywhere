@@ -4,6 +4,7 @@ import { AcpBackend } from '../AcpBackend';
 import { defaultTransport } from '../../transport';
 import { logger } from '@/ui/logger';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
+import { createAcpToolCallLifecycle } from '../updates/toolCalls/createAcpToolCallLifecycle';
 
 const envScope = createEnvKeyScope(['HAPPIER_ACP_MAX_UPDATES_PER_NOTIFICATION']);
 
@@ -13,27 +14,26 @@ describe('AcpBackend session/update max updates guard', () => {
     envScope.patch({ HAPPIER_ACP_MAX_UPDATES_PER_NOTIFICATION: '1' });
     try {
       const emitted: any[] = [];
+      const toolCalls = createAcpToolCallLifecycle({
+        transport: defaultTransport,
+        emit: (msg) => emitted.push(msg),
+        getToolNameContext: () => ({ recentPromptHadChangeTitle: false, toolCallCountSincePrompt: 0 }),
+      });
       const fakeBackend: any = {
         options: { agentName: 'test' },
         transport: defaultTransport,
         replayCapture: null,
         sessionUpdateShapeLogger: { log: () => {} },
-        activeToolCalls: new Set<string>(),
-        finalizedToolCalls: new Set<string>(),
-        toolCallLifecycleStates: new Map<string, string>(),
-        toolCallStartTimes: new Map<string, number>(),
-        toolCallTimeouts: new Map<string, any>(),
-        toolCallIdToNameMap: new Map<string, string>(),
-        toolCallIdToInputMap: new Map<string, unknown>(),
+        toolCalls,
         idleTimeout: null,
-        prePromptResponseUpdateGuard: 'none',
-        dropPromptTurnUpdatesUntilPromptResponse: false,
+        turnGeneration: 1,
+        dispatchedPromptTurnGeneration: 1,
         toolCallCountSincePrompt: 0,
         emit: (msg: any) => emitted.push(msg),
         emitIdleStatus: () => emitted.push({ type: 'status', status: 'idle' }),
         isCurrentTurnGenerationClosed: () => false,
       };
-      fakeBackend.filterPrePromptResponseUpdates = (AcpBackend as any).prototype.filterPrePromptResponseUpdates;
+      fakeBackend.filterPromptTurnUpdatesByDispatch = (AcpBackend as any).prototype.filterPromptTurnUpdatesByDispatch;
       fakeBackend.createHandlerContext = (AcpBackend as any).prototype.createHandlerContext;
 
       const handleSessionUpdate = (AcpBackend as any).prototype.handleSessionUpdate as (params: any) => void;
@@ -58,13 +58,37 @@ describe('AcpBackend session/update max updates guard', () => {
         ],
       });
 
-      expect(fakeBackend.toolCallIdToNameMap.has('call_1')).toBe(true);
-      expect(fakeBackend.toolCallIdToNameMap.has('call_2')).toBe(false);
+      expect(toolCalls.get('call_1')).not.toBeNull();
+      expect(toolCalls.get('call_2')).toBeNull();
       expect(emitted.filter((m) => m.type === 'tool-call').length).toBe(1);
       expect(warnSpy).toHaveBeenCalledTimes(1);
     } finally {
       envScope.restore();
       warnSpy.mockRestore();
     }
+  });
+
+  it('captures replay updates before the live prompt-generation filter rejects them', async () => {
+    const captured: unknown[] = [];
+    const fakeBackend: any = {
+      options: { agentName: 'test' },
+      replayCapture: { handleUpdate: (update: unknown) => captured.push(update) },
+      sessionUpdateShapeLogger: { log: () => {} },
+      waitingForResponse: false,
+      turnGeneration: 0,
+      dispatchedPromptTurnGeneration: null,
+      filterPromptTurnUpdatesByDispatch: (AcpBackend as any).prototype.filterPromptTurnUpdatesByDispatch,
+    };
+
+    await (AcpBackend as any).prototype.handleSessionUpdate.call(fakeBackend, {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'restored transcript' },
+      },
+    });
+
+    expect(captured).toEqual([
+      expect.objectContaining({ sessionUpdate: 'agent_message_chunk' }),
+    ]);
   });
 });

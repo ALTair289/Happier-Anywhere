@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -96,7 +96,7 @@ function writeSteerableAcpAgentScript(params: { dir: string }): string {
 }
 
 describe('createAcpRuntime (in-flight steer, real process)', () => {
-  it('sends steerPrompt into an in-flight turn without aborting', async () => {
+  it('routes an exact steer ACK through the typed singleton outcome bridge without broad settlement', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'happier-acp-steer-proc-'));
     const scriptPath = writeSteerableAcpAgentScript({ dir });
 
@@ -156,7 +156,10 @@ describe('createAcpRuntime (in-flight steer, real process)', () => {
       const primaryPromise = (runtime as any).sendPrompt('hello');
       await new Promise((r) => setTimeout(r, 10));
 
-      await (runtime as any).steerPrompt('steer-now');
+      await (runtime as any).steerPrompt('steer-now', {
+        localId: 'local-steer-1',
+        userMessageSeq: 41,
+      });
       await primaryPromise;
       await runtime.flushTurn();
 

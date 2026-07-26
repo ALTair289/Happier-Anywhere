@@ -5,7 +5,8 @@ import { writeAcpTestAgentScript } from '../testkit/subprocessHarness';
 import type { AgentMessage } from '../../core/AgentMessage';
 import { withTempDir } from '@/testkit/fs/tempDir';
 
-function writeFakeAcpAgentScript(params: { dir: string }): string {
+function writeFakeAcpAgentScript(params: { dir: string; sessionId?: string }): string {
+  const sessionId = params.sessionId ?? ' test-session ';
   const src = `
     const decoder = new TextDecoder();
     let buf = '';
@@ -41,7 +42,7 @@ function writeFakeAcpAgentScript(params: { dir: string }): string {
 
         if (method === 'session/new') {
           ok(id, {
-            sessionId: 'test-session',
+            sessionId: ${JSON.stringify(sessionId)},
             modes: {
               currentModeId: 'ask',
               availableModes: [
@@ -54,8 +55,11 @@ function writeFakeAcpAgentScript(params: { dir: string }): string {
         }
 
         if (method === 'session/set_mode') {
-          // Echo OK. The backend should treat success as mode switch completion.
-          ok(id, {});
+          if (!params || params.sessionId !== ' test-session ' || params.modeId !== 'code' || 'currentModeId' in params) {
+            send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'directionally invalid mode params' } });
+          } else {
+            ok(id, {});
+          }
           continue;
         }
 
@@ -91,7 +95,7 @@ describe('AcpBackend session modes', () => {
         });
 
         const started = await backend.startSession();
-        expect(started.sessionId).toBe('test-session');
+        expect(started.sessionId).toBe(' test-session ');
 
         const modes = backend.getSessionModeState();
         expect(modes).toEqual({
@@ -129,13 +133,30 @@ describe('AcpBackend session modes', () => {
         });
 
         const started = await backend.startSession();
-        expect(started.sessionId).toBe('test-session');
+        expect(started.sessionId).toBe(' test-session ');
 
         await expect(backend.setSessionMode('not-the-session', 'code')).rejects.toThrow(
           /Session ID does not match the active ACP session/,
         );
       } finally {
         await backend?.dispose().catch(() => {});
+      }
+    });
+  });
+
+  it('rejects a blank session id returned by the ACP agent', async () => {
+    await withTempDir('happier-acp-modes-', async (dir) => {
+      const backend = new AcpBackend({
+        agentName: 'test',
+        cwd: dir,
+        command: process.execPath,
+        args: [writeFakeAcpAgentScript({ dir, sessionId: '   ' })],
+      });
+
+      try {
+        await expect(backend.startSession()).rejects.toThrow(/session id/i);
+      } finally {
+        await backend.dispose().catch(() => {});
       }
     });
   });

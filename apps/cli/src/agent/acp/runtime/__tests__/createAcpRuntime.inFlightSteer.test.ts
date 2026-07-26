@@ -44,14 +44,10 @@ describe('createAcpRuntime (in-flight steer)', () => {
   it('forwards steerPrompt delivery identity to the backend when provided', async () => {
     const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_1' }) as any;
     backend.sendSteerPrompt = vi.fn(async () => {});
-    const confirmUserMessageDeliveredToProvider = vi.fn();
-
     const runtime = createAcpRuntime({
       provider: 'codex',
       directory: '/tmp',
-      session: createBasicSessionClientWithOverrides({
-        confirmUserMessageDeliveredToProvider,
-      } as any),
+      session: createBasicSessionClientWithOverrides({}),
       messageBuffer: new MessageBuffer(),
       mcpServers: {},
       permissionHandler: createApprovedPermissionHandler(),
@@ -62,28 +58,25 @@ describe('createAcpRuntime (in-flight steer)', () => {
 
     await (runtime as any).startOrLoad({});
     await (runtime as any).steerPrompt('steer text', {
-      localId: 'local-1',
-      localIds: ['local-1'],
+      localId: ' local-1\n',
+      localIds: [' local-1\n'],
       userMessageSeq: 1,
       userMessageSeqs: [1],
     });
 
     expect(backend.sendSteerPrompt).toHaveBeenCalledWith('sess_1', 'steer text', {
-      localId: 'local-1',
-      localIds: ['local-1'],
+      localId: ' local-1\n',
+      localIds: [' local-1\n'],
       userMessageSeq: 1,
       userMessageSeqs: [1],
     });
-    expect(confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(1, {
-      localIds: ['local-1'],
-    });
   });
 
-  it('does not leak pendingQueue metadata listeners when poll wake wins', async () => {
+  it('owns one shared Pending pump and cancels it at the turn boundary', async () => {
     const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_1' }) as any;
     backend.sendSteerPrompt = vi.fn(async () => {});
 
-    let activeMetadataWaits = 0;
+    let activePumps = 0;
     const runtime = createAcpRuntime({
       provider: 'codex',
       directory: '/tmp',
@@ -96,19 +89,19 @@ describe('createAcpRuntime (in-flight steer)', () => {
       inFlightSteer: { enabled: true },
       pendingQueue: {
         drainDuringTurn: true,
-        pollIntervalMs: 5,
         inputConsumer: {
           drainPending: async () => ({ materialized: 0, stoppedReason: 'no_pending' }),
-        },
-        waitForMetadataUpdate: async (signal?: AbortSignal) => {
-          activeMetadataWaits += 1;
-          return await new Promise<boolean>((resolve) => {
-            const onAbort = () => {
-              activeMetadataWaits -= 1;
-              resolve(false);
-            };
-            signal?.addEventListener('abort', onAbort, { once: true });
-          });
+          pumpPendingWhileActive: async ({ abortSignal }: { abortSignal: AbortSignal }) => {
+            activePumps += 1;
+            try {
+              await new Promise<void>((resolve) => {
+                if (abortSignal.aborted) return resolve();
+                abortSignal.addEventListener('abort', () => resolve(), { once: true });
+              });
+            } finally {
+              activePumps -= 1;
+            }
+          },
         },
       },
     } as any);
@@ -116,18 +109,16 @@ describe('createAcpRuntime (in-flight steer)', () => {
     runtime.beginTurn();
     await (runtime as any).startOrLoad({});
 
-    // Let the pump spin a few times. If poll wake does not cancel the metadata wait,
-    // this counter will grow quickly and trip the assertion.
     await vi.waitFor(
       () => {
-        expect(activeMetadataWaits).toBeLessThanOrEqual(1);
+        expect(activePumps).toBe(1);
       },
       { timeout: 250 },
     );
 
     await runtime.flushTurn();
     await vi.waitFor(() => {
-      expect(activeMetadataWaits).toBe(0);
+      expect(activePumps).toBe(0);
     });
   });
 
@@ -158,7 +149,6 @@ describe('createAcpRuntime (in-flight steer)', () => {
       inFlightSteerSupported: true,
       inFlightSteerAvailable: false,
     });
-    expect(agentState.capabilities.modelScopedConfigTombstonesV1).toBeUndefined();
 
     runtime.beginTurn();
     expect(agentState.capabilities).toMatchObject({

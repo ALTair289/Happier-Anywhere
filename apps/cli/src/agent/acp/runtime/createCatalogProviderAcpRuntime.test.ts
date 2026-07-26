@@ -16,6 +16,13 @@ function createParams() {
     mcpServers: {},
     permissionHandler: createApprovedPermissionHandler(),
     onThinkingChange: () => {},
+    providerInputConsumer: {
+      waitForNextInput: async () => null,
+      runProviderInputDispatch: async <Value>({ dispatch }: { dispatch: () => Promise<Value> }) => ({ status: 'dispatched' as const, value: await dispatch() }),
+      closeProviderInputAdmissionAndWaitForDispatches: async () => {},
+      drainPending: async () => ({ materialized: 0, stoppedReason: 'no_pending' as const }),
+      pumpPendingWhileActive: async () => {},
+    },
   };
 }
 
