@@ -51,6 +51,12 @@ Prefer existing domain folders and module owners before creating new top-level f
   - keep provider-specific Postgres/SQLite/MySQL schemas and migrations in sync when affected,
   - inspect generated SQL for data-loss or downtime risks,
   - validate with the relevant server test/build lane.
+- Classify migration history before editing it:
+  - migrations that have not shipped in a supported stable or preview artifact may be edited or consolidated before the next supported release; shared development branches and `*-dev.*` artifacts require development-database reconciliation, not permanent product compatibility;
+  - stable/preview migration names and bytes are immutable and corrections are append-only;
+  - do not keep draft add/rename/contract/drop chains or checksum/name compatibility solely because a retained development database applied an unpublished revision.
+- Reconcile a retained development database separately from product migration history: back it up, inspect its actual schema and migration ledger, prepare a provider-specific procedure, and obtain explicit approval before mutating retained data. See `docs/compatibility.md`.
+- Treat an edited migration and its retained-development reconciliation as one conceptual seam. After the final migration edit—and again before handoff—refresh the procedure against the current bytes and complete physical schema, including index, constraint, and foreign-key names; any later edit makes earlier checksum/ledger reconciliation evidence stale.
 - Custom migration SQL, backfills, `db push`, or reset-style commands are allowed only when appropriate for the task and target database.
   - Safe for disposable local/test databases when clearly scoped.
   - Requires explicit approval for shared, staging, production, or user-data databases.
