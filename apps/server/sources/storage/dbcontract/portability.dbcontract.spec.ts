@@ -1,6 +1,8 @@
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { db, initDbMysql, initDbPostgres, isPrismaErrorCode } from "@/storage/db";
+import { reconcileSessionPendingQueueState } from "@/app/session/pending/reconcileSessionPendingQueueState";
+import { inTx } from "@/storage/inTx";
 
 function resolveContractProviderFromEnv(): "postgres" | "mysql" {
     const raw = (process.env.HAPPIER_DB_PROVIDER ?? process.env.HAPPY_DB_PROVIDER ?? "postgres")
@@ -30,8 +32,6 @@ describe("db portability contract", () => {
         if (provider === "mysql") {
             await initDbMysql();
         } else {
-            // initDbPostgres is synchronous (PrismaClient is bundled in the main server build).
-            // MySQL/SQLite init paths are async because they may dynamically import generated clients.
             initDbPostgres();
         }
         await db.$connect();
@@ -144,4 +144,56 @@ describe("db portability contract", () => {
 
         expect(reread.sessionId).toBeNull();
     });
+
+    it("preserves Queue V2 pending counts without hidden attempt rows", async () => {
+        const account = await db.account.create({
+            data: { publicKey: uniq("contract-queue-pubkey") },
+            select: { id: true },
+        });
+        const session = await db.session.create({
+            data: {
+                accountId: account.id,
+                tag: uniq("contract-queue-session"),
+                metadata: "{}",
+                pendingCount: 0,
+            },
+            select: { id: true, pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+        });
+
+        const queuedLocalIds = [uniq("contract-queue-first"), uniq("contract-queue-second")];
+        await db.sessionPendingMessage.createMany({
+            data: queuedLocalIds.map((localId, index) => ({
+                sessionId: session.id,
+                localId,
+                content: { t: "encrypted", c: `ciphertext-${index}` },
+                status: "queued",
+                position: index + 1,
+                authorAccountId: account.id,
+                requestedAction: { v: 1, kind: "enqueue" },
+            })),
+        });
+
+        await expect(reconcileSessionPendingQueueState({
+            sessionId: session.id,
+            pendingCount: session.pendingCount,
+            pendingBlockedCount: session.pendingBlockedCount,
+            pendingVersion: session.pendingVersion,
+        })).resolves.toMatchObject({ pendingCount: 2, pendingBlockedCount: 0, didRepair: true });
+        await expect(db.sessionMessage.count({
+            where: { sessionId: session.id, localId: { in: queuedLocalIds } },
+        })).resolves.toBe(0);
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id },
+            select: { localId: true, status: true },
+            orderBy: { position: "asc" },
+        })).resolves.toEqual([
+            { localId: queuedLocalIds[0], status: "queued" },
+            { localId: queuedLocalIds[1], status: "queued" },
+        ]);
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true },
+        })).resolves.toEqual({ pendingCount: 2, pendingBlockedCount: 0 });
+    });
+
 });

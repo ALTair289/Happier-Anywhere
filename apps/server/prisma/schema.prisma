@@ -614,7 +614,7 @@ model SessionSystemRecord {
     session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
     @@unique([accountId, sessionId, namespace, localId])
-    @@index([accountId, sessionId, namespace, kind, updatedAt(sort: Desc), id(sort: Desc)])
+    @@index([accountId, sessionId, namespace, kind, updatedAt(sort: Desc), id(sort: Desc)], map: "ssr_account_session_kind_updated_id_idx")
     @@index([sessionId, namespace, kind, updatedAt(sort: Desc), id(sort: Desc)])
 }
 
@@ -989,7 +989,7 @@ model ConnectedServiceAuthGroupMember {
     group      ConnectedServiceAuthGroup @relation(fields: [groupDbId], references: [id], onDelete: Cascade)
     credential ServiceAccountToken @relation("ConnectedServiceCredentialMembers", fields: [accountId, vendor, profileId], references: [accountId, vendor, profileId], onDelete: Cascade, onUpdate: Cascade)
 
-    @@unique([accountId, vendor, groupId, profileId])
+    @@unique([accountId, vendor, groupId, profileId], map: "csagm_account_vendor_group_profile_key")
     @@index([groupDbId])
     @@index([accountId, vendor, profileId])
 }
