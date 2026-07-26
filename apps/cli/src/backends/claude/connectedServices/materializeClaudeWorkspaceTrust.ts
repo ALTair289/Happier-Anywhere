@@ -106,13 +106,7 @@ async function resolveWorkspaceTrustProjection(params: Readonly<{
       return null;
     }
   }
-  // QAC-1: no source config carries any trust state for this directory (typical for new
-  // directories, worktrees, and scratch workspaces never opened with native claude). Creating a
-  // Happier session in a directory IS the user's trust decision, and Claude Code's interactive
-  // TUI silently skips EXECUTING all hooks (SessionStart/Stop/PreToolUse/...) in untrusted
-  // workspaces — which kills session-id persistence, lifecycle detection, and permission hooks.
-  // Default to trusting the session directory in the Happier-managed materialized home.
-  return { hasTrustDialogAccepted: true };
+  return null;
 }
 
 async function resolveClaudeOauthAccountProjection(params: Readonly<{
@@ -127,6 +121,21 @@ async function resolveClaudeOauthAccountProjection(params: Readonly<{
     if (!rootConfig) continue;
     const sanitized = sanitizeClaudeOauthAccountProjection(rootConfig.oauthAccount);
     if (sanitized) return sanitized;
+  }
+  return null;
+}
+
+async function resolveClaudeCompletedOnboardingProjection(params: Readonly<{
+  sourceEnv: NodeJS.ProcessEnv;
+  targetDir: string;
+}>): Promise<true | null> {
+  const targetRoot = resolve(params.targetDir);
+  const candidates = resolveClaudeRootConfigPathCandidates(params.sourceEnv)
+    .filter((candidate) => resolve(candidate.rootDir) !== targetRoot);
+  for (const candidate of candidates) {
+    const rootConfig = await readClaudeRootConfigFile(candidate.path);
+    if (!rootConfig || typeof rootConfig.hasCompletedOnboarding !== 'boolean') continue;
+    return rootConfig.hasCompletedOnboarding === true ? true : null;
   }
   return null;
 }
@@ -169,30 +178,44 @@ export async function materializeClaudeWorkspaceTrust(params: Readonly<{
     sessionDirectory,
     targetDir: params.targetDir,
   });
-  if (!projection) return;
+  const hasCompletedOnboarding = await resolveClaudeCompletedOnboardingProjection({
+    sourceEnv: params.sourceEnv,
+    targetDir: params.targetDir,
+  });
+  if (!projection && !hasCompletedOnboarding) return;
+
   const existingRoot = await readClaudeRootConfigFile(join(params.targetDir, '.claude.json')) ?? {};
-  const oauthAccount = params.preserveExistingOauthAccountProjection === true
-    ? sanitizeClaudeOauthAccountProjection(existingRoot.oauthAccount)
-    : await resolveClaudeOauthAccountProjection({
-        sourceEnv: params.sourceEnv,
-        targetDir: params.targetDir,
-      });
-  const existingProjects = readObject(existingRoot.projects) ?? {};
+  const oauthAccount = projection
+    ? params.preserveExistingOauthAccountProjection === true
+      ? sanitizeClaudeOauthAccountProjection(existingRoot.oauthAccount)
+      : await resolveClaudeOauthAccountProjection({
+          sourceEnv: params.sourceEnv,
+          targetDir: params.targetDir,
+        })
+    : null;
+  const existingProjects = projection ? (readObject(existingRoot.projects) ?? {}) : null;
   // Merge the trust projection into any claude-written project entry instead of replacing it, so
   // rematerialization does not clobber per-project state (allowedTools, history, ...).
-  const existingProjectEntry = readObject(existingProjects[sessionDirectory]) ?? {};
+  const existingProjectEntry = projection && existingProjects
+    ? (readObject(existingProjects[sessionDirectory]) ?? {})
+    : null;
   await writeClaudeRootConfig({
     targetDir: params.targetDir,
     rootConfig: {
       ...existingRoot,
       ...(oauthAccount ? { oauthAccount } : {}),
-      projects: {
-        ...existingProjects,
-        [sessionDirectory]: {
-          ...existingProjectEntry,
-          ...projection,
-        },
-      },
+      ...(hasCompletedOnboarding ? { hasCompletedOnboarding } : {}),
+      ...(projection && existingProjects && existingProjectEntry
+        ? {
+            projects: {
+              ...existingProjects,
+              [sessionDirectory]: {
+                ...existingProjectEntry,
+                ...projection,
+              },
+            },
+          }
+        : {}),
     },
   });
 }

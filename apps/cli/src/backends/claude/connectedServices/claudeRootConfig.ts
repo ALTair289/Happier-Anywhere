@@ -49,6 +49,45 @@ export async function sanitizeClaudeRootConfigFile(path: string): Promise<void> 
   await writeJsonAtomic(path, sanitizeClaudeRootConfig(rootConfig));
 }
 
+const CLAUDE_ACCOUNT_SCOPED_ROOT_KEYS = [
+  'oauthAccount',
+  'modelAccessCache',
+  'additionalModelOptionsCache',
+  'cachedExtraUsageDisabledReason',
+] as const;
+
+export function reconcileClaudeAccountScopedRootConfig(params: Readonly<{
+  rootConfig: ClaudeRootConfigJson;
+  preserveExistingAccountState: boolean;
+  providerAccountId: string | null;
+  providerEmail: string | null;
+}>): ClaudeRootConfigJson {
+  if (params.preserveExistingAccountState) return sanitizeClaudeRootConfig(params.rootConfig);
+  const next = { ...params.rootConfig };
+  for (const key of CLAUDE_ACCOUNT_SCOPED_ROOT_KEYS) delete next[key];
+  const oauthAccount = {
+    ...(params.providerAccountId ? { accountUuid: params.providerAccountId } : {}),
+    ...(params.providerEmail ? { emailAddress: params.providerEmail } : {}),
+  };
+  return Object.keys(oauthAccount).length > 0 ? { ...next, oauthAccount } : next;
+}
+
+export async function reconcileClaudeAccountScopedRootConfigFile(params: Readonly<{
+  path: string;
+  preserveExistingAccountState: boolean;
+  providerAccountId: string | null;
+  providerEmail: string | null;
+}>): Promise<void> {
+  const rootConfig = await readClaudeRootConfigFile(params.path);
+  if (!rootConfig) return;
+  await writeJsonAtomic(params.path, reconcileClaudeAccountScopedRootConfig({
+    rootConfig,
+    preserveExistingAccountState: params.preserveExistingAccountState,
+    providerAccountId: params.providerAccountId,
+    providerEmail: params.providerEmail,
+  }));
+}
+
 function readNonBlankString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }

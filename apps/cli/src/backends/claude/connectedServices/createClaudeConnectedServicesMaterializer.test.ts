@@ -795,10 +795,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
 
     expect(result).not.toBeNull();
     const targetConfig = JSON.parse(await readFile(join(existingTargetDir, '.claude.json'), 'utf8'));
-    expect(targetConfig.oauthAccount).toEqual({
-      emailAddress: 'probe@example.test',
-      displayName: 'Probe User',
-    });
+    expect(targetConfig).not.toHaveProperty('oauthAccount');
     expect(targetConfig.projects).toEqual({
       '/Users/leeroy/Documents/Development/happier/remote-dev': {
         hasTrustDialogAccepted: true,
@@ -896,10 +893,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
     expect(result).not.toBeNull();
     await expect(readFile(join(existingTargetDir, 'settings.json'), 'utf8')).resolves.toBe('{"theme":"target"}\n');
     const targetConfig = JSON.parse(await readFile(join(existingTargetDir, '.claude.json'), 'utf8'));
-    expect(targetConfig.oauthAccount).toEqual({
-      emailAddress: 'target@example.test',
-      displayName: 'Target Home',
-    });
+    expect(targetConfig).not.toHaveProperty('oauthAccount');
     const credential = JSON.parse(await readFile(join(existingTargetDir, '.credentials.json'), 'utf8'));
     expect(credential.claudeAiOauth.accessToken).toBe('selected-access-placeholder');
     await expect(readFile(join(existingTargetDir, 'provider-state-marker.txt'), 'utf8')).resolves.toBe(
@@ -983,10 +977,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
 
     expect(result).not.toBeNull();
     const targetConfig = JSON.parse(await readFile(join(existingTargetDir, '.claude.json'), 'utf8'));
-    expect(targetConfig.oauthAccount).toEqual({
-      emailAddress: 'fresh@example.test',
-      displayName: 'Fresh Source',
-    });
+    expect(targetConfig).not.toHaveProperty('oauthAccount');
     await expect(readFile(join(existingTargetDir, 'settings.json'), 'utf8')).resolves.toBe('{"theme":"source"}\n');
   });
 
@@ -1069,10 +1060,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
     expect(result).not.toBeNull();
     await expect(readFile(join(existingTargetDir, 'settings.json'), 'utf8')).resolves.toBe('{"theme":"home-source"}\n');
     const targetConfig = JSON.parse(await readFile(join(existingTargetDir, '.claude.json'), 'utf8'));
-    expect(targetConfig.oauthAccount).toEqual({
-      emailAddress: 'home@example.test',
-      displayName: 'Home Source',
-    });
+    expect(targetConfig).not.toHaveProperty('oauthAccount');
   });
 
   it('preserves credentials when the source and target Claude config dirs are the same', async () => {

@@ -22,7 +22,11 @@ import {
   readClaudeConnectedServiceHomeProvenance,
   writeClaudeConnectedServiceHomeProvenance,
 } from '../claudeConnectedServiceHomeProvenance';
-import { sanitizeClaudeRootConfigFile } from '../claudeRootConfig';
+import {
+  readClaudeOauthAccountIdentity,
+  readClaudeRootConfigFile,
+  reconcileClaudeAccountScopedRootConfigFile,
+} from '../claudeRootConfig';
 import { materializeClaudeWorkspaceTrust } from '../materializeClaudeWorkspaceTrust';
 import {
   buildClaudeCodeCredentialPayload,
@@ -398,6 +402,29 @@ async function shouldPreserveNewerExistingCredential(params: Readonly<{
   );
 }
 
+async function shouldPreserveClaudeAccountScopedState(params: Readonly<{
+  record: ConnectedServiceCredentialRecordV1;
+  targetClaudeConfigDir: string;
+}>): Promise<boolean> {
+  if (params.record.kind !== 'oauth') return false;
+  const provenance = await readClaudeConnectedServiceHomeProvenance(params.targetClaudeConfigDir);
+  if (provenance?.credentialProfileId !== params.record.profileId) return false;
+  const existingCredential = await readClaudeCodeNativeCredentialFile(params.targetClaudeConfigDir);
+  const incomingCredential = buildClaudeCodeCredentialPayload(params.record);
+  if (!existingCredential || incomingCredential.status !== 'ok') return false;
+  const existingOauth = existingCredential.payload.claudeAiOauth;
+  const incomingOauth = incomingCredential.payload.claudeAiOauth;
+  if (
+    existingOauth.subscriptionType !== incomingOauth.subscriptionType
+    || existingOauth.rateLimitTier !== incomingOauth.rateLimitTier
+  ) return false;
+  const root = await readClaudeRootConfigFile(join(params.targetClaudeConfigDir, '.claude.json'));
+  const identity = readClaudeOauthAccountIdentity(root?.oauthAccount);
+  if (params.record.oauth.providerAccountId && identity.accountId !== params.record.oauth.providerAccountId) return false;
+  if (params.record.oauth.providerEmail && identity.email !== params.record.oauth.providerEmail) return false;
+  return true;
+}
+
 async function stripLegacyRefreshTokensFromManagedClaudeHome(claudeConfigDir: string): Promise<void> {
   if (!await readClaudeConnectedServiceHomeProvenance(claudeConfigDir)) return;
   await stripClaudeCodeCredentialFileRefreshTokenFields(claudeConfigDir);
@@ -429,6 +456,16 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
     selectionDescriptor: params.selectionDescriptor,
     targetClaudeConfigDir: params.targetClaudeConfigDir,
   });
+  const preserveExistingAccountState = await shouldPreserveClaudeAccountScopedState({
+    record: params.record,
+    targetClaudeConfigDir: params.targetClaudeConfigDir,
+  });
+  const oauthIdentity = params.record.kind === 'oauth'
+    ? {
+        providerAccountId: params.record.oauth.providerAccountId,
+        providerEmail: params.record.oauth.providerEmail,
+      }
+    : { providerAccountId: null, providerEmail: null };
   const identityDiagnostic = buildClaudeSubscriptionNativeAuthIdentityDiagnostic({
     record: params.record,
     selectionDescriptor: params.selectionDescriptor,
@@ -481,7 +518,6 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
       sessionDirectory: params.sessionDirectory ?? null,
       preserveExistingOauthAccountProjection: true,
     });
-    await sanitizeClaudeRootConfigFile(join(params.targetClaudeConfigDir, '.claude.json'));
     const credentialFileAlreadyCurrent = await isClaudeSubscriptionNativeCredentialFileCurrent({
       record: params.record,
       selectionDescriptor: params.selectionDescriptor,
@@ -504,6 +540,11 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
         identityDiagnostic,
       };
     }
+    await reconcileClaudeAccountScopedRootConfigFile({
+      path: join(params.targetClaudeConfigDir, '.claude.json'),
+      preserveExistingAccountState,
+      ...oauthIdentity,
+    });
     if (!credentialFileAlreadyCurrent) {
       await writeClaudeConnectedServiceHomeProvenance({
         claudeConfigDir: params.targetClaudeConfigDir,
@@ -545,7 +586,6 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
         sessionDirectory: params.sessionDirectory ?? null,
         preserveExistingOauthAccountProjection: true,
       });
-      await sanitizeClaudeRootConfigFile(join(params.targetClaudeConfigDir, '.claude.json'));
       const credentialFileAlreadyCurrent = await isClaudeSubscriptionNativeCredentialFileCurrent({
         record: params.record,
         selectionDescriptor: params.selectionDescriptor,
@@ -568,6 +608,11 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
           identityDiagnostic,
         };
       }
+      await reconcileClaudeAccountScopedRootConfigFile({
+        path: join(params.targetClaudeConfigDir, '.claude.json'),
+        preserveExistingAccountState,
+        ...oauthIdentity,
+      });
       if (!credentialFileAlreadyCurrent) {
         await writeClaudeConnectedServiceHomeProvenance({
           claudeConfigDir: params.targetClaudeConfigDir,
@@ -607,7 +652,6 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
         vendorResumeId: params.vendorResumeId ?? null,
         candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
       });
-      await sanitizeClaudeRootConfigFile(join(stagedClaudeConfigDir, '.claude.json'));
       const materialized = await materializeClaudeCodeNativeAuth({
         record: params.record,
         claudeConfigDir: stagedClaudeConfigDir,
@@ -625,6 +669,11 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
           identityDiagnostic,
         };
       }
+      await reconcileClaudeAccountScopedRootConfigFile({
+        path: join(stagedClaudeConfigDir, '.claude.json'),
+        preserveExistingAccountState,
+        ...oauthIdentity,
+      });
       await writeClaudeConnectedServiceHomeProvenance({
         claudeConfigDir: stagedClaudeConfigDir,
         provenance: buildClaudeConnectedServiceHomeProvenance({
