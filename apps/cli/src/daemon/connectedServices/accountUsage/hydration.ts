@@ -3,7 +3,6 @@ import {
   ProviderAccountUsageRecordIdSchema,
   ProviderAccountUsageSnapshotV1Schema,
   openProviderAccountUsageSnapshotCiphertext,
-  readProviderAccountUsageRecordIdsFromMetadata,
   type ConnectedServiceUsageSourceV1,
   type ProviderAccountUsageRecordId,
   type ProviderAccountUsageSnapshotV1,
@@ -49,15 +48,17 @@ function parseConnectedServiceUsageSources(value: unknown): readonly ConnectedSe
   return parsed.success ? parsed.data : [];
 }
 
-function connectedServiceUsageSourceKey(source: ConnectedServiceUsageSourceV1): string {
+export function buildProviderAccountUsageCurrentSourceKey(source: ConnectedServiceUsageSourceV1): string {
   const parsed = ConnectedServiceUsageSourceV1Schema.parse(source);
-  return JSON.stringify([
-    parsed.serviceId,
-    parsed.profileId,
-    parsed.bindingKind,
-    parsed.groupId ?? '',
-    parsed.groupGeneration ?? null,
-  ]);
+  return parsed.bindingKind === 'profile'
+    ? JSON.stringify(['profile', parsed.serviceId, parsed.profileId])
+    : JSON.stringify([
+      'group_member',
+      parsed.serviceId,
+      parsed.profileId,
+      parsed.groupId,
+      parsed.groupGeneration ?? null,
+    ]);
 }
 
 function isProviderCompatibleWithConnectedServiceSource(input: Readonly<{
@@ -71,15 +72,6 @@ function isProviderCompatibleWithConnectedServiceSource(input: Readonly<{
     connectedServices?: Readonly<{ supportedServiceIds: readonly string[] }> | null;
   }>>>)[providerId];
   return provider?.connectedServices?.supportedServiceIds.includes(input.source.serviceId) === true;
-}
-
-type HydrationTrackedSession = Readonly<{
-  happySessionId?: unknown;
-  happySessionMetadataFromLocalWebhook?: unknown;
-}>;
-
-function normalizeSessionId(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
 function accountScopedMaterial(credentials: Credentials): Parameters<typeof openProviderAccountUsageSnapshotCiphertext>[0]['material'] {
@@ -154,7 +146,12 @@ export async function hydrateProviderAccountUsageStoreFromCurrentSources(input: 
   sources: Iterable<ConnectedServiceUsageSourceV1>;
   resolveRecordIdForSource: (
     source: ConnectedServiceUsageSourceV1,
-  ) => Promise<Readonly<{ recordId: ProviderAccountUsageRecordId }> | null>;
+  ) => Promise<Readonly<{
+    recordId: ProviderAccountUsageRecordId;
+    providerAccountId: string;
+    fetchedAt: number | null;
+    staleAfterMs: number | null;
+  }> | null>;
   api: ProviderAccountUsageHydrationApi;
   credentials: Credentials;
   store: Pick<ProviderAccountUsageStore, 'recordSnapshot'>;
@@ -168,7 +165,7 @@ export async function hydrateProviderAccountUsageStoreFromCurrentSources(input: 
   for (const rawSource of input.sources) {
     const parsed = ConnectedServiceUsageSourceV1Schema.safeParse(rawSource);
     if (!parsed.success) continue;
-    sourcesByKey.set(connectedServiceUsageSourceKey(parsed.data), parsed.data);
+    sourcesByKey.set(buildProviderAccountUsageCurrentSourceKey(parsed.data), parsed.data);
   }
 
   const hydratedRecordIds = new Set<ProviderAccountUsageRecordId>();
@@ -176,6 +173,9 @@ export async function hydrateProviderAccountUsageStoreFromCurrentSources(input: 
   const refreshSources: ConnectedServiceUsageSourceV1[] = [];
   const snapshotsByRecordId = new Map<ProviderAccountUsageRecordId, HydratedProviderAccountUsageSnapshot | null>();
   const nowMs = Number.isFinite(input.nowMs) ? Math.max(0, Math.trunc(input.nowMs)) : 0;
+  const accountEncryptionMode = input.api.getAccountEncryptionMode
+    ? await input.api.getAccountEncryptionMode().catch(() => 'unknown' as const)
+    : 'unknown';
 
   for (const source of sourcesByKey.values()) {
     const resolved = await input.resolveRecordIdForSource(source).catch(() => null);
@@ -192,6 +192,7 @@ export async function hydrateProviderAccountUsageStoreFromCurrentSources(input: 
         api: input.api,
         credentials: input.credentials,
         recordId: parsedRecordId.data,
+        accountEncryptionMode,
       });
       snapshotsByRecordId.set(parsedRecordId.data, hydrated);
     }
@@ -201,11 +202,17 @@ export async function hydrateProviderAccountUsageStoreFromCurrentSources(input: 
       continue;
     }
 
-    const exactSourceKey = connectedServiceUsageSourceKey(source);
+    const exactSourceKey = buildProviderAccountUsageCurrentSourceKey(source);
     const sourceProven = hydrated.sources.some(
-      (candidate) => connectedServiceUsageSourceKey(candidate) === exactSourceKey,
+      (candidate) => buildProviderAccountUsageCurrentSourceKey(candidate) === exactSourceKey,
     );
-    if (!sourceProven || !isProviderCompatibleWithConnectedServiceSource({
+    const providerAccountId = resolved?.providerAccountId?.trim() ?? '';
+    const accountIdentityProven = hydrated.snapshot.recordKey.subjectKind === 'account'
+      && providerAccountId.length > 0
+      && hydrated.snapshot.recordKey.accountSubjectId === providerAccountId;
+    const freshnessProven = (resolved?.fetchedAt === null || resolved?.fetchedAt === hydrated.snapshot.fetchedAtMs)
+      && (resolved?.staleAfterMs === null || resolved?.staleAfterMs === hydrated.snapshot.staleAfterMs);
+    if (!sourceProven || !accountIdentityProven || !freshnessProven || !isProviderCompatibleWithConnectedServiceSource({
       providerId: hydrated.snapshot.providerId,
       source,
     })) {
@@ -216,7 +223,9 @@ export async function hydrateProviderAccountUsageStoreFromCurrentSources(input: 
 
     input.store.recordSnapshot(hydrated.snapshot, { sources: [source] });
     hydratedRecordIds.add(parsedRecordId.data);
-    const staleAtMs = hydrated.snapshot.fetchedAtMs + hydrated.snapshot.staleAfterMs;
+    const fetchedAtMs = resolved?.fetchedAt ?? hydrated.snapshot.fetchedAtMs;
+    const staleAfterMs = resolved?.staleAfterMs ?? hydrated.snapshot.staleAfterMs;
+    const staleAtMs = fetchedAtMs + staleAfterMs;
     const isFresh = nowMs < staleAtMs;
     dispositions.push({
       source,
@@ -237,10 +246,11 @@ async function openProviderAccountUsageSnapshotForHydration(input: Readonly<{
   api: ProviderAccountUsageHydrationApi;
   credentials: Credentials;
   recordId: ProviderAccountUsageRecordId;
+  accountEncryptionMode?: 'plain' | 'e2ee' | 'unknown';
 }>): Promise<HydratedProviderAccountUsageSnapshot | null> {
-  const mode = input.api.getAccountEncryptionMode
+  const mode = input.accountEncryptionMode ?? (input.api.getAccountEncryptionMode
     ? await input.api.getAccountEncryptionMode().catch(() => 'unknown' as const)
-    : 'unknown';
+    : 'unknown');
   if (mode === 'plain') {
     return await openPlainProviderAccountUsageSnapshot(input);
   }
@@ -249,50 +259,4 @@ async function openProviderAccountUsageSnapshotForHydration(input: Readonly<{
   }
   return await openPlainProviderAccountUsageSnapshot(input)
     ?? await openSealedProviderAccountUsageSnapshot(input);
-}
-
-export async function hydrateProviderAccountUsageStoreFromSessionMetadata<TTracked extends HydrationTrackedSession>(input: Readonly<{
-  trackedSessions: Iterable<TTracked>;
-  resolvePersistedSessionMetadata?: (input: Readonly<{
-    sessionId: string;
-    tracked: TTracked;
-  }>) => Promise<unknown> | unknown;
-  api: ProviderAccountUsageHydrationApi;
-  credentials: Credentials;
-  store: Pick<ProviderAccountUsageStore, 'recordSnapshot'>;
-}>): Promise<Readonly<{ hydratedRecordIds: ProviderAccountUsageRecordId[] }>> {
-  const seenRecordIds = new Set<string>();
-  const hydratedRecordIds: ProviderAccountUsageRecordId[] = [];
-
-  for (const tracked of input.trackedSessions) {
-    const sessionId = normalizeSessionId(tracked.happySessionId);
-    const metadataCandidates: unknown[] = [];
-    if (sessionId && input.resolvePersistedSessionMetadata) {
-      try {
-        metadataCandidates.push(await input.resolvePersistedSessionMetadata({ sessionId, tracked }));
-      } catch {
-        metadataCandidates.push(null);
-      }
-    }
-    metadataCandidates.push(tracked.happySessionMetadataFromLocalWebhook);
-
-    for (const metadata of metadataCandidates) {
-      const recordIds = readProviderAccountUsageRecordIdsFromMetadata(metadata);
-      for (const rawRecordId of recordIds) {
-        const parsedRecordId = ProviderAccountUsageRecordIdSchema.safeParse(rawRecordId);
-        if (!parsedRecordId.success || seenRecordIds.has(parsedRecordId.data)) continue;
-        seenRecordIds.add(parsedRecordId.data);
-        const hydrated = await openProviderAccountUsageSnapshotForHydration({
-          api: input.api,
-          credentials: input.credentials,
-          recordId: parsedRecordId.data,
-        });
-        if (!hydrated) continue;
-        input.store.recordSnapshot(hydrated.snapshot, hydrated.sources.length ? { sources: hydrated.sources } : undefined);
-        hydratedRecordIds.push(parsedRecordId.data);
-      }
-    }
-  }
-
-  return { hydratedRecordIds };
 }

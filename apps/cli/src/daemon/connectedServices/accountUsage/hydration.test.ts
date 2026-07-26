@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   buildProviderAccountUsageRecordId,
   ProviderAccountUsageSnapshotV1Schema,
-  writeProviderAccountUsageRecordIdToMetadata,
   type ConnectedServiceUsageSourceV1,
   type ProviderAccountUsageSnapshotV1,
 } from '@happier-dev/protocol';
@@ -12,7 +11,6 @@ import type { Credentials } from '@/persistence';
 
 import {
   hydrateProviderAccountUsageStoreFromCurrentSources,
-  hydrateProviderAccountUsageStoreFromSessionMetadata,
 } from './hydration';
 import { createProviderAccountUsageStore } from './store';
 
@@ -48,45 +46,22 @@ function createCredentials(): Credentials {
   };
 }
 
-describe('hydrateProviderAccountUsageStoreFromSessionMetadata', () => {
-  it('hydrates canonical usage records and durable connected-service sources referenced by session metadata', async () => {
-    const snapshot = createUsageSnapshot();
-    const source: ConnectedServiceUsageSourceV1 = {
-      serviceId: 'openai-codex',
-      profileId: 'work',
-      bindingKind: 'group_member',
-      groupId: 'team',
-      groupGeneration: 4,
-    };
-    const metadata = writeProviderAccountUsageRecordIdToMetadata({}, {
-      recordId: snapshot.recordId,
-      updatedAtMs: snapshot.fetchedAtMs,
-    });
-    const store = createProviderAccountUsageStore();
-    const getProviderAccountUsageSnapshotPlain = vi.fn(async () => ({
-      content: { t: 'plain' as const, v: snapshot },
-      sources: [source],
-    }));
-
-    const result = await hydrateProviderAccountUsageStoreFromSessionMetadata({
-      trackedSessions: [{
-        happySessionId: 'session-1',
-        happySessionMetadataFromLocalWebhook: metadata,
-      }],
-      api: {
-        getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
-        getProviderAccountUsageSnapshotPlain,
-      },
-      credentials: createCredentials(),
-      store,
-    });
-
-    expect(result.hydratedRecordIds).toEqual([snapshot.recordId]);
-    expect(getProviderAccountUsageSnapshotPlain).toHaveBeenCalledWith({ recordId: snapshot.recordId });
-    expect(store.resolveRecordId(snapshot.recordId)?.accountLabel).toBe('work@example.com');
-    expect(store.resolveBySource(source)?.recordId).toBe(snapshot.recordId);
-  });
-});
+function createSourceResolution(
+  snapshot: ProviderAccountUsageSnapshotV1,
+  overrides: Partial<Readonly<{
+    providerAccountId: string;
+    fetchedAt: number | null;
+    staleAfterMs: number | null;
+  }>> = {},
+) {
+  return {
+    recordId: snapshot.recordId,
+    providerAccountId: snapshot.recordKey.accountSubjectId,
+    fetchedAt: snapshot.fetchedAtMs,
+    staleAfterMs: snapshot.staleAfterMs,
+    ...overrides,
+  };
+}
 
 describe('hydrateProviderAccountUsageStoreFromCurrentSources', () => {
   const source = {
@@ -100,7 +75,7 @@ describe('hydrateProviderAccountUsageStoreFromCurrentSources', () => {
   it('passively hydrates a fresh canonical record only after exact current-source proof', async () => {
     const snapshot = createUsageSnapshot();
     const store = createProviderAccountUsageStore();
-    const resolveRecordIdForSource = vi.fn(async () => ({ recordId: snapshot.recordId }));
+    const resolveRecordIdForSource = vi.fn(async () => createSourceResolution(snapshot));
 
     const result = await hydrateProviderAccountUsageStoreFromCurrentSources({
       sources: [source, source],
@@ -133,7 +108,7 @@ describe('hydrateProviderAccountUsageStoreFromCurrentSources', () => {
 
     const result = await hydrateProviderAccountUsageStoreFromCurrentSources({
       sources: [source],
-      resolveRecordIdForSource: async () => ({ recordId: snapshot.recordId }),
+      resolveRecordIdForSource: async () => createSourceResolution(snapshot),
       api: {
         getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
         getProviderAccountUsageSnapshotPlain: vi.fn(async () => ({
@@ -151,13 +126,38 @@ describe('hydrateProviderAccountUsageStoreFromCurrentSources', () => {
     expect(store.listSnapshots()).toEqual([]);
   });
 
+  it('rejects a source resolution whose provider-account identity does not match the fetched record', async () => {
+    const snapshot = createUsageSnapshot();
+    const store = createProviderAccountUsageStore();
+
+    const result = await hydrateProviderAccountUsageStoreFromCurrentSources({
+      sources: [source],
+      resolveRecordIdForSource: async () => createSourceResolution(snapshot, {
+        providerAccountId: 'acct-other',
+      }),
+      api: {
+        getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
+        getProviderAccountUsageSnapshotPlain: vi.fn(async () => ({
+          content: { t: 'plain' as const, v: snapshot },
+          sources: [source],
+        })),
+      },
+      credentials: createCredentials(),
+      store,
+      nowMs: snapshot.fetchedAtMs + 1,
+    });
+
+    expect(result.dispositions).toEqual([{ source, status: 'ownership_unproven' }]);
+    expect(store.listSnapshots()).toEqual([]);
+  });
+
   it('hydrates stale evidence for passive display but returns it for bounded refresh scheduling', async () => {
     const snapshot = createUsageSnapshot();
     const store = createProviderAccountUsageStore();
 
     const result = await hydrateProviderAccountUsageStoreFromCurrentSources({
       sources: [source],
-      resolveRecordIdForSource: async () => ({ recordId: snapshot.recordId }),
+      resolveRecordIdForSource: async () => createSourceResolution(snapshot),
       api: {
         getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
         getProviderAccountUsageSnapshotPlain: vi.fn(async () => ({
