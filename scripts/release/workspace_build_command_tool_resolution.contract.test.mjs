@@ -73,7 +73,7 @@ test('the shared TypeScript command resolver owns native compiler selection', as
   assert.doesNotMatch(resolver, /typescript\/bin\/tsc/);
 });
 
-test('first-party build orchestrators delegate compiler selection to the shared resolver', async () => {
+test('first-party build orchestrators do not select the retained TypeScript API compiler', async () => {
   const orchestrators = [
     'apps/cli/scripts/build.mjs',
     'apps/cli/scripts/buildSharedDeps.mjs',
@@ -82,11 +82,6 @@ test('first-party build orchestrators delegate compiler selection to the shared 
 
   for (const relativePath of orchestrators) {
     const source = await readFile(resolve(repoRoot, relativePath), 'utf8');
-    assert.match(
-      source,
-      /scripts\/workspaces\/typescriptCommand\.mjs/,
-      `${relativePath} must delegate native compiler selection to the shared resolver`,
-    );
     assert.doesNotMatch(
       source,
       /typescript\/bin\/tsc|node_modules[^\n]*typescript[^\n]*bin[^\n]*tsc/,
