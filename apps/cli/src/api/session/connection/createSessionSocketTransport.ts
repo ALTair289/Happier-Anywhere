@@ -11,6 +11,7 @@ import { configuration } from '@/configuration';
 import { getSocketIoProxyOptions } from '@/utils/proxy/socketIoProxy';
 import { normalizeServerHttpBaseUrl, resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 import { resolveSessionControlSocketConnectTimeoutMs } from '@/session/transport/shared/sessionTimeouts';
+import { buildCurrentCliClientCompatibilityHttpHeaders, buildCurrentCliClientCompatibilitySocketAuth } from '@/api/clientCompatibility/cliClientCompatibility';
 
 const ACCESS_KEY_BINDING_CACHE_TTL_MS = 30_000;
 const MAX_ACCESS_KEY_BINDING_CACHE_ENTRIES = 2_048;
@@ -97,6 +98,7 @@ async function ensureSessionSocketAccessKeyBindingUncached(params: Readonly<{
         headers: {
             Authorization: `Bearer ${params.token}`,
             'Content-Type': 'application/json',
+            ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
         },
         timeout: configuration.sessionControlHttpTimeoutMs,
         validateStatus: () => true,
@@ -152,6 +154,7 @@ export function createSessionSocketTransport(params: Readonly<{
             clientType: 'session-scoped' as const,
             sessionId: params.sessionId,
             ...(params.machineId ? { machineId: params.machineId } : null),
+            ...buildCurrentCliClientCompatibilitySocketAuth('session-runner'),
         },
         path: '/v1/updates',
         reconnection: false,

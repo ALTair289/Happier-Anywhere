@@ -47,7 +47,8 @@ vi.mock('@happier-dev/connection-supervisor', () => ({
   }),
 }));
 
-vi.mock('./sessionChangesSyncOnConnect', () => ({
+vi.mock('./sessionChangesSyncOnConnect', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./sessionChangesSyncOnConnect')>(),
   isV2ChangesSyncEnabled: () => true,
   runSessionChangesSyncOnConnect: runSessionChangesSyncOnConnectMock,
 }));

@@ -11,14 +11,15 @@ export function updateAgentStateBestEffort(
   updater: (state: AgentState) => AgentState,
   logPrefix: string,
   reason: string,
-): void {
+): Promise<void> {
   try {
     const result = session.updateAgentState(updater);
-    void Promise.resolve(result).catch((error) => {
+    return Promise.resolve(result).catch((error) => {
       logBestEffortWriteFailure(`${logPrefix} Failed to update agent state (${reason}) (non-fatal)`, error);
     });
   } catch (error) {
     logBestEffortWriteFailure(`${logPrefix} Failed to update agent state (${reason}) (non-fatal)`, error);
+    return Promise.resolve();
   }
 }
 

@@ -1,6 +1,7 @@
 import type { ACPMessageData, ACPProvider } from './sessionMessageTypes';
 import type { EphemeralSendResult } from './ephemeralSendOutcome';
 import { createUnavailableEphemeralSendOutcome } from './ephemeralSendOutcome';
+import type { StreamedTranscriptCommitOptions, StreamedTranscriptEnqueueOptions } from './streamedTranscriptWriter/types';
 
 type TranscriptPortSession = Readonly<{
   sendAgentMessage?: (
@@ -11,12 +12,12 @@ type TranscriptPortSession = Readonly<{
   sendAgentMessageCommitted: (
     provider: ACPProvider,
     body: ACPMessageData,
-    opts: { localId: string; meta?: Record<string, unknown> },
+    opts: StreamedTranscriptCommitOptions,
   ) => Promise<void>;
   enqueueAgentMessageCommitted?: (
     provider: ACPProvider,
     body: ACPMessageData,
-    opts: { localId: string; meta?: Record<string, unknown> },
+    opts: StreamedTranscriptEnqueueOptions,
   ) => Promise<Readonly<{ persisted: boolean; delivered: boolean }>>;
   sendAgentMessageEphemeral?: (
     provider: ACPProvider,
@@ -67,7 +68,7 @@ export function createCurrentSessionTranscriptPort(
       return (
         provider: ACPProvider,
         body: ACPMessageData,
-        opts: { localId: string; meta?: Record<string, unknown> },
+        opts: StreamedTranscriptEnqueueOptions,
       ) => getSession().enqueueAgentMessageCommitted?.(provider, body, opts) ?? Promise.resolve({ persisted: false, delivered: false });
     },
     get sendAgentMessageEphemeral() {

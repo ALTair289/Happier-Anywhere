@@ -79,6 +79,90 @@ describe('snapshotSync.fetchSessionSnapshotUpdateFromServer', () => {
     });
   });
 
+  it('preserves the latest-turn observation timestamp from the authoritative snapshot', async () => {
+    const getSpy = vi.spyOn(axios, 'get');
+    getSpy.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        session: createSessionRecordFixture({
+          id: 's1',
+          latestTurnStatus: 'in_progress',
+          latestTurnStatusObservedAt: 12_345,
+          metadataVersion: 0,
+          agentStateVersion: 0,
+        } as any),
+      },
+    } as any);
+
+    const res = await fetchSessionSnapshotUpdateFromServer({
+      token: 't',
+      sessionId: 's1',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'legacy',
+      currentMetadataVersion: 0,
+      currentAgentStateVersion: 0,
+    });
+
+    expect(res).toMatchObject({
+      latestTurnStatus: 'in_progress',
+      latestTurnStatusObservedAt: 12_345,
+    });
+  });
+
+  it.each([
+    [
+      'idle',
+      {
+        runtimeActivityState: 'idle',
+        runtimeActivityActiveCount: 0,
+        runtimeActivityObservedAt: 12_000,
+        runtimeActivityRevision: 17,
+      },
+    ],
+    [
+      'active',
+      {
+        runtimeActivityState: 'active',
+        runtimeActivityActiveCount: 1,
+        runtimeActivityObservedAt: 13_000,
+        runtimeActivityRevision: 18,
+      },
+    ],
+    [
+      'unknown',
+      {
+        runtimeActivityState: 'unknown',
+        runtimeActivityActiveCount: 0,
+        runtimeActivityObservedAt: null,
+        runtimeActivityRevision: 19,
+      },
+    ],
+  ] as const)('returns the authoritative %s runtime-activity projection from snapshot refresh', async (_state, projection) => {
+    const getSpy = vi.spyOn(axios, 'get');
+    getSpy.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        session: createSessionRecordFixture({
+          id: 's1',
+          metadataVersion: 0,
+          agentStateVersion: 0,
+          ...projection,
+        } as any),
+      },
+    } as any);
+
+    const res = await fetchSessionSnapshotUpdateFromServer({
+      token: 't',
+      sessionId: 's1',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'legacy',
+      currentMetadataVersion: 0,
+      currentAgentStateVersion: 0,
+    });
+
+    expect(res).toMatchObject({ runtimeActivityProjection: projection });
+  });
+
   it('coalesces concurrent reads of the same raw session snapshot', async () => {
     const getSpy = vi.spyOn(axios, 'get');
     const serverMetadata = createTestMetadata({ path: '/tmp/server', host: 'localhost' });

@@ -2,17 +2,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import axios from 'axios';
 
 import {
-    blockPendingQueueV2ProviderDeliveriesOnAttach,
     blockPendingQueueV2Delivery,
+    enqueuePendingQueueV2MessageViaHttp,
     readBlockedPendingQueueV2DeliveryByLocalIdFromServer,
+    listPendingQueueV2LocalIdsFromServer,
     listPendingQueueV2DeliveryStatusesFromServer,
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer,
     markPendingQueueV2DeliveryHandled,
     materializeNextPendingQueueV2Message,
+    materializeNextPendingQueueV2MessageOnReleasedServer,
     materializeNextPendingQueueV2MessageViaHttp,
-    reconcileAcceptedPendingQueueV2DeliveriesThroughSeq,
+    PendingQueueMaterializationTransportAmbiguousError,
+    readAcceptedPendingQueueV2DeliveryRetryDirective,
     resolveAcceptedPendingQueueV2Delivery,
-    retryPendingQueueV2Delivery,
 } from './pendingQueueV2Transport';
 
 const { mockGet, mockPost } = vi.hoisted(() => ({
@@ -33,30 +35,223 @@ describe('pendingQueueV2Transport', () => {
         mockPost.mockReset();
     });
 
-    it('uses legacy HTTP materialization unless provider delivery state is explicitly requested', async () => {
+    it('accepts a terminal enqueue rejoin only with the exact committed-message localId', async () => {
+        const localId = ' exact-cli-local ';
+        const requestedAction = { v: 1, kind: 'enqueue' } as const;
         mockPost.mockResolvedValueOnce({
             data: {
-                ok: true,
-                didMaterialize: false,
-                pendingCount: 0,
-                pendingVersion: 1,
+                didWrite: false,
+                terminal: true,
+                message: { id: 'message-1', seq: 5, localId, requestedAction },
             },
         });
 
-        await expect(materializeNextPendingQueueV2MessageViaHttp({
+        await expect(enqueuePendingQueueV2MessageViaHttp({
             token: 'token',
             sessionId: 'session-1',
-        })).resolves.toMatchObject({
-            didMaterialize: false,
-            pendingQueueState: {
-                known: true,
-                pendingCount: 0,
-                pendingVersion: 1,
+            body: {
+                localId,
+                ciphertext: 'cipher',
+                requestedAction,
+            },
+        })).resolves.toEqual({ didWrite: false, terminal: true, suppressed: false });
+
+        mockPost.mockResolvedValueOnce({
+            data: {
+                didWrite: false,
+                terminal: true,
+                message: { id: 'message-1', seq: 5, localId: 'different-local', requestedAction },
             },
         });
+        await expect(enqueuePendingQueueV2MessageViaHttp({
+            token: 'token',
+            sessionId: 'session-1',
+            body: {
+                localId,
+                ciphertext: 'cipher',
+                requestedAction,
+            },
+        })).rejects.toThrow('Invalid Pending enqueue terminal proof');
 
-        expect(mockPost).toHaveBeenCalledTimes(1);
-        expect(mockPost.mock.calls[0]?.[1]).toEqual({});
+        mockPost.mockResolvedValueOnce({
+            data: {
+                didWrite: false,
+                terminal: true,
+                message: {
+                    id: 'message-1',
+                    seq: 5,
+                    localId,
+                    requestedAction: { v: 1, kind: 'send_now' },
+                },
+            },
+        });
+        await expect(enqueuePendingQueueV2MessageViaHttp({
+            token: 'token',
+            sessionId: 'session-1',
+            body: {
+                localId,
+                ciphertext: 'cipher',
+                requestedAction,
+            },
+        })).rejects.toThrow('Invalid Pending enqueue terminal proof');
+    });
+
+    it('preserves conditional continuation admission and parses suppression', async () => {
+        mockPost.mockResolvedValueOnce({
+            data: { didWrite: false, suppressed: true },
+        });
+
+        await expect(enqueuePendingQueueV2MessageViaHttp({
+            token: 'token',
+            sessionId: 'session-1',
+            body: {
+                localId: 'connected-service-continuation:test',
+                ciphertext: 'cipher',
+                requestedAction: { v: 1, kind: 'send_now' },
+                deliveryMode: 'continuation_if_no_queued_user_input',
+            },
+        })).resolves.toEqual({ didWrite: false, terminal: false, suppressed: true });
+        expect(mockPost).toHaveBeenCalledWith(
+            expect.stringContaining('/v2/sessions/session-1/pending'),
+            expect.objectContaining({
+                localId: 'connected-service-continuation:test',
+                deliveryMode: 'continuation_if_no_queued_user_input',
+            }),
+            expect.any(Object),
+        );
+    });
+
+    it('rejects whitespace-only enqueue identity before transport', async () => {
+        await expect(enqueuePendingQueueV2MessageViaHttp({
+            token: 'token',
+            sessionId: 'session-1',
+            body: {
+                localId: ' \t\r\n ',
+                ciphertext: 'cipher',
+                requestedAction: { v: 1, kind: 'enqueue' },
+            },
+        })).rejects.toThrow('Pending localId must not be blank');
+        expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('rejects whitespace-only action and settlement identities before transport', async () => {
+        const socket = {
+            connected: true,
+            emitWithAck: vi.fn(),
+            timeout: vi.fn().mockReturnThis(),
+        };
+
+        await expect(resolveAcceptedPendingQueueV2Delivery({
+            socket: socket as any,
+            sessionId: 'session-1',
+            localId: ' \t ',
+        })).rejects.toThrow('Pending localId must not be blank');
+        await expect(blockPendingQueueV2Delivery({
+            token: 'token',
+            sessionId: 'session-1',
+            localId: ' \t ',
+            reason: 'payload_too_large',
+        })).rejects.toThrow('Pending localId must not be blank');
+        await expect(markPendingQueueV2DeliveryHandled({
+            token: 'token',
+            sessionId: 'session-1',
+            localId: ' \t ',
+        })).rejects.toThrow('Pending localId must not be blank');
+        await expect(readBlockedPendingQueueV2DeliveryByLocalIdFromServer({
+            token: 'token',
+            sessionId: 'session-1',
+            localId: ' \t ',
+        })).rejects.toThrow('Pending localId must not be blank');
+
+        expect(socket.emitWithAck).not.toHaveBeenCalled();
+        expect(mockGet).not.toHaveBeenCalled();
+        expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('emits only the immutable released materialize payload and accepts its exact positive ACK', async () => {
+        const socket = {
+            connected: true,
+            emitWithAck: vi.fn().mockResolvedValue({
+                ok: true,
+                didMaterialize: true,
+                didWrite: true,
+                message: { id: 'message-1', seq: 4, localId: 'local-1' },
+            }),
+            timeout: vi.fn().mockReturnThis(),
+        };
+
+        await expect(materializeNextPendingQueueV2MessageOnReleasedServer({
+            sessionId: 'session-1',
+            socket: socket as any,
+        })).resolves.toEqual({
+            ok: true,
+            didMaterialize: true,
+            didWrite: true,
+            message: { id: 'message-1', seq: 4, localId: 'local-1' },
+        });
+        expect(socket.emitWithAck).toHaveBeenCalledWith('pending-materialize-next', { sid: 'session-1' });
+    });
+
+    it.each([
+        { ok: true, didMaterialize: false, extra: true },
+        { ok: true, didMaterialize: true, message: { id: 'message-1', seq: 4, localId: 'local-1' } },
+        { ok: true, didMaterialize: true, didWrite: true, message: { id: '', seq: 4, localId: 'local-1' } },
+        { ok: true, didMaterialize: true, didWrite: true, message: { id: 'message-1', seq: -1, localId: 'local-1' } },
+        { ok: false, error: 'unknown' },
+        { ok: false, error: 'forbidden', extra: true },
+        { ok: true, didMaterialize: false, pendingCount: 0 },
+    ])('rejects a non-exact released ACK %#', async (ack) => {
+        const socket = {
+            connected: true,
+            emitWithAck: vi.fn().mockResolvedValue(ack),
+            timeout: vi.fn().mockReturnThis(),
+        };
+
+        await expect(materializeNextPendingQueueV2MessageOnReleasedServer({
+            sessionId: 'session-1',
+            socket: socket as any,
+        })).rejects.toThrow('Invalid released server pending materialize acknowledgement');
+    });
+
+    it('reads only the accepted-settlement overload directive with typed delay before Retry-After', () => {
+        expect(readAcceptedPendingQueueV2DeliveryRetryDirective({
+            response: {
+                status: 503,
+                headers: { 'Retry-After': '9' },
+                data: {
+                    error: 'transaction-unavailable',
+                    retryAfterMs: 1_250,
+                    correlationId: 'req-accepted-busy',
+                },
+            },
+        })).toEqual({
+            retryAfterMs: 1_250,
+            correlationId: 'req-accepted-busy',
+        });
+        expect(readAcceptedPendingQueueV2DeliveryRetryDirective({
+            response: {
+                status: 503,
+                headers: { 'Retry-After': '2.5' },
+                data: { error: 'transaction-unavailable' },
+            },
+        })).toEqual({ retryAfterMs: 2_500 });
+        expect(readAcceptedPendingQueueV2DeliveryRetryDirective({
+            response: {
+                status: 500,
+                headers: { 'Retry-After': '1' },
+                data: { error: 'internal', correlationId: 'req-generic-500' },
+            },
+        })).toBeNull();
+    });
+
+    it('fails closed instead of using HTTP provider materialization when the selected socket disconnects', async () => {
+        await expect(materializeNextPendingQueueV2Message({
+            token: 'token',
+            sessionId: 'session-1',
+            socket: { connected: false } as any,
+        })).rejects.toBeInstanceOf(PendingQueueMaterializationTransportAmbiguousError);
+
+        expect(mockPost).not.toHaveBeenCalled();
     });
 
     it('sends runtime-idle delivery timing in HTTP materialization requests', async () => {
@@ -66,7 +261,36 @@ describe('pendingQueueV2Transport', () => {
                 didMaterialize: false,
                 pendingCount: 1,
                 pendingVersion: 2,
-                deferredReason: 'runtime_activity_active',
+                deferredReason: 'waiting_for_runtime_activity',
+            },
+        });
+
+        await expect(materializeNextPendingQueueV2MessageViaHttp({
+            token: 'token',
+            sessionId: 'session-1',
+            deliveryTiming: 'after_runtime_idle',
+            expectedRuntimeActivityRevision: 41,
+        })).resolves.toMatchObject({
+            didMaterialize: false,
+            deferredReason: 'waiting_for_runtime_activity',
+        });
+
+        expect(mockPost).toHaveBeenCalledTimes(1);
+        expect(mockPost.mock.calls[0]?.[1]).toEqual({
+            deliveryTiming: 'after_runtime_idle',
+            expectedRuntimeActivityRevision: 41,
+        });
+    });
+
+    it('preserves the server-owned unknown-activity deadline over HTTP materialization', async () => {
+        mockPost.mockResolvedValueOnce({
+            data: {
+                ok: true,
+                didMaterialize: false,
+                pendingCount: 1,
+                pendingVersion: 2,
+                deferredReason: 'runtime_activity_unknown',
+                retryAfterMs: 29_750,
             },
         });
 
@@ -76,11 +300,9 @@ describe('pendingQueueV2Transport', () => {
             deliveryTiming: 'after_runtime_idle',
         })).resolves.toMatchObject({
             didMaterialize: false,
-            deferredReason: 'runtime_activity_active',
+            deferredReason: 'runtime_activity_unknown',
+            retryAfterMs: 29_750,
         });
-
-        expect(mockPost).toHaveBeenCalledTimes(1);
-        expect(mockPost.mock.calls[0]?.[1]).toEqual({ deliveryTiming: 'after_runtime_idle' });
     });
 
     it('preserves unresolved-head backpressure from HTTP materialization', async () => {
@@ -91,7 +313,7 @@ describe('pendingQueueV2Transport', () => {
                 pendingCount: 2,
                 pendingBlockedCount: 0,
                 pendingVersion: 7,
-                deferredReason: 'blocked_by_earlier',
+                deferredReason: 'waiting_for_predecessor',
             },
         });
 
@@ -101,7 +323,7 @@ describe('pendingQueueV2Transport', () => {
             deliveryStateOptIn: true,
         })).resolves.toMatchObject({
             didMaterialize: false,
-            deferredReason: 'blocked_by_earlier',
+            deferredReason: 'waiting_for_predecessor',
             pendingQueueState: {
                 known: true,
                 pendingCount: 2,
@@ -125,14 +347,13 @@ describe('pendingQueueV2Transport', () => {
         expect(mockPost.mock.calls[0]?.[1]).toEqual({ deliveryState: 'provider' });
     });
 
-    it('fails closed through the socket/http materializer when provider delivery opt-in is rejected', async () => {
+    it('fails closed through explicit HTTP materialization when no session socket is selected', async () => {
         const error = { response: { status: 422 } };
         mockPost.mockRejectedValueOnce(error);
 
         await expect(materializeNextPendingQueueV2Message({
             token: 'token',
             sessionId: 'session-1',
-            socket: { connected: false } as any,
             deliveryStateOptIn: true,
         })).rejects.toBe(error);
 
@@ -140,7 +361,7 @@ describe('pendingQueueV2Transport', () => {
         expect(mockPost.mock.calls[0]?.[1]).toEqual({ deliveryState: 'provider' });
     });
 
-    it('rejects legacy committed materialization responses under provider delivery opt-in', async () => {
+    it('returns a fail-closed contract result for HTTP materialization without a provider action', async () => {
         mockPost.mockResolvedValueOnce({
             data: {
                 ok: true,
@@ -172,13 +393,59 @@ describe('pendingQueueV2Transport', () => {
             token: 'token',
             sessionId: 'session-1',
             deliveryStateOptIn: true,
-        })).rejects.toThrow(/provider delivery/i);
+        })).resolves.toMatchObject({
+            didMaterialize: true,
+            localId: 'legacy-local',
+            message: null,
+            providerDeliveryContractInvalid: true,
+        });
 
         expect(mockPost).toHaveBeenCalledTimes(1);
         expect(mockPost.mock.calls[0]?.[1]).toEqual({ deliveryState: 'provider' });
     });
 
-    it('rejects incompatible provider delivery socket ACKs without falling back to HTTP', async () => {
+    it('fails closed on a missing provider action even when the legacy opt-in flag is false', async () => {
+        mockPost.mockResolvedValueOnce({
+            data: {
+                ok: true,
+                didMaterialize: true,
+                localId: 'hard-cutover-local',
+                didWriteMessage: false,
+                pendingCount: 0,
+                pendingVersion: 3,
+                message: {
+                    id: null,
+                    seq: null,
+                    localId: 'hard-cutover-local',
+                    messageRole: 'user',
+                    content: {
+                        t: 'plain',
+                        v: {
+                            role: 'user',
+                            content: { type: 'text', text: 'hard cutover prompt' },
+                            localId: 'hard-cutover-local',
+                        },
+                    },
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    createdAt: 1_000,
+                    updatedAt: 1_000,
+                },
+            },
+        });
+
+        await expect(materializeNextPendingQueueV2MessageViaHttp({
+            token: 'token',
+            sessionId: 'session-1',
+            deliveryStateOptIn: false,
+        })).resolves.toMatchObject({
+            didMaterialize: true,
+            localId: 'hard-cutover-local',
+            message: null,
+            providerDeliveryContractInvalid: true,
+        });
+    });
+
+    it('returns a fail-closed contract result for socket materialization without a provider action', async () => {
         const socket = {
             connected: true,
             timeout: vi.fn(() => socket),
@@ -213,7 +480,12 @@ describe('pendingQueueV2Transport', () => {
             sessionId: 'session-1',
             socket: socket as any,
             deliveryStateOptIn: true,
-        })).rejects.toThrow(/provider delivery/i);
+        })).resolves.toMatchObject({
+            didMaterialize: true,
+            localId: 'legacy-socket-local',
+            message: null,
+            providerDeliveryContractInvalid: true,
+        });
 
         expect(socket.emitWithAck).toHaveBeenCalledWith('pending-materialize-next', {
             sid: 'session-1',
@@ -231,7 +503,7 @@ describe('pendingQueueV2Transport', () => {
                 didMaterialize: false,
                 pendingCount: 1,
                 pendingVersion: 2,
-                deferredReason: 'runtime_activity_active',
+                deferredReason: 'waiting_for_runtime_activity',
             })),
         };
 
@@ -242,7 +514,7 @@ describe('pendingQueueV2Transport', () => {
             deliveryTiming: 'after_runtime_idle',
         })).resolves.toMatchObject({
             didMaterialize: false,
-            deferredReason: 'runtime_activity_active',
+            deferredReason: 'waiting_for_runtime_activity',
         });
 
         expect(socket.emitWithAck).toHaveBeenCalledWith('pending-materialize-next', {
@@ -252,7 +524,63 @@ describe('pendingQueueV2Transport', () => {
         expect(mockPost).not.toHaveBeenCalled();
     });
 
-    it('reuses the socket expected pending version for HTTP fallback after a lost socket response', async () => {
+    it('preserves the server-owned unknown-activity deadline over socket materialization', async () => {
+        const socket = {
+            connected: true,
+            timeout: vi.fn(() => socket),
+            emitWithAck: vi.fn(async () => ({
+                ok: true,
+                didMaterialize: false,
+                pendingCount: 1,
+                pendingVersion: 2,
+                deferredReason: 'runtime_activity_unknown',
+                retryAfterMs: 29_750,
+            })),
+        };
+
+        await expect(materializeNextPendingQueueV2Message({
+            token: 'token',
+            sessionId: 'session-1',
+            socket: socket as any,
+            deliveryTiming: 'after_runtime_idle',
+        })).resolves.toMatchObject({
+            didMaterialize: false,
+            deferredReason: 'runtime_activity_unknown',
+            retryAfterMs: 29_750,
+        });
+        expect(mockPost).not.toHaveBeenCalled();
+    });
+
+
+    it('preserves unresolved-head backpressure from socket materialization', async () => {
+        const socket = {
+            connected: true,
+            timeout: vi.fn(() => socket),
+            emitWithAck: vi.fn(async () => ({
+                ok: true,
+                didMaterialize: false,
+                pendingCount: 2,
+                pendingBlockedCount: 0,
+                pendingVersion: 9,
+                deferredReason: 'waiting_for_predecessor',
+            })),
+        };
+
+        await expect(materializeNextPendingQueueV2Message({
+            token: 'token',
+            sessionId: 'session-1',
+            socket: socket as any,
+            deliveryStateOptIn: true,
+        })).resolves.toMatchObject({
+            didMaterialize: false,
+            deferredReason: 'waiting_for_predecessor',
+            pendingQueueState: { pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 9 },
+        });
+
+        expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('does not redrive through HTTP after a connected socket response is lost', async () => {
         const socket = {
             connected: true,
             timeout: vi.fn(() => socket),
@@ -260,33 +588,38 @@ describe('pendingQueueV2Transport', () => {
                 throw new Error('socket response lost');
             }),
         };
-        mockPost.mockResolvedValueOnce({
-            data: {
-                ok: true,
-                didMaterialize: false,
-                pendingCount: 1,
-                pendingBlockedCount: 0,
-                pendingVersion: 8,
-                deferredReason: 'pending_version_mismatch',
-            },
-        });
-
         await expect(materializeNextPendingQueueV2Message({
             token: 'token',
             sessionId: 'session-1',
             socket: socket as any,
             expectedPendingVersion: 7,
-        })).resolves.toMatchObject({
-            didMaterialize: false,
-            deferredReason: 'pending_version_mismatch',
-            pendingQueueState: { pendingCount: 1, pendingVersion: 8 },
+        })).rejects.toMatchObject({
+            code: 'pending_queue_materialization_transport_ambiguous',
         });
 
         expect(socket.emitWithAck).toHaveBeenCalledWith('pending-materialize-next', {
             sid: 'session-1',
             expectedPendingVersion: 7,
         });
-        expect(mockPost.mock.calls[0]?.[1]).toEqual({ expectedPendingVersion: 7 });
+        expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('does not redrive through HTTP after an invalid connected socket ACK', async () => {
+        const socket = {
+            connected: true,
+            timeout: vi.fn(() => socket),
+            emitWithAck: vi.fn(async () => ({ ok: 'not-a-boolean' })),
+        };
+
+        await expect(materializeNextPendingQueueV2Message({
+            token: 'token',
+            sessionId: 'session-1',
+            socket: socket as any,
+        })).rejects.toMatchObject({
+            code: 'pending_queue_materialization_transport_ambiguous',
+        });
+
+        expect(mockPost).not.toHaveBeenCalled();
     });
 
     it('parses row-first provider delivery materialization with a durable transcript row', async () => {
@@ -304,6 +637,8 @@ describe('pendingQueueV2Transport', () => {
                     id: 'm-row-first',
                     seq: 42,
                     localId: 'row-first-local',
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    providerAction: 'send',
                     messageRole: 'user',
                     content: {
                         t: 'plain',
@@ -363,6 +698,8 @@ describe('pendingQueueV2Transport', () => {
                     id: 'm-row-first-socket',
                     seq: 43,
                     localId: 'row-first-socket-local',
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    providerAction: 'send',
                     messageRole: 'user',
                     content: {
                         t: 'plain',
@@ -413,6 +750,8 @@ describe('pendingQueueV2Transport', () => {
                     id: null,
                     seq: null,
                     localId: 'claimed-local',
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    providerAction: 'send',
                     messageRole: 'user',
                     content: {
                         t: 'plain',
@@ -468,6 +807,8 @@ describe('pendingQueueV2Transport', () => {
                     id: null,
                     seq: null,
                     localId: 'legacy-claimed-local',
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    providerAction: 'send',
                     messageRole: 'user',
                     content: {
                         t: 'plain',
@@ -523,6 +864,8 @@ describe('pendingQueueV2Transport', () => {
                     id: 'opaque-pending-materialization-id',
                     seq: null,
                     localId: 'opaque-id-claimed-local',
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    providerAction: 'send',
                     messageRole: 'user',
                     content: {
                         t: 'plain',
@@ -579,6 +922,8 @@ describe('pendingQueueV2Transport', () => {
                     id: 'opaque-resolved-state-materialization-id',
                     seq: null,
                     localId: 'resolved-state-claimed-local',
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    providerAction: 'send',
                     messageRole: 'user',
                     content: {
                         t: 'plain',
@@ -625,6 +970,8 @@ describe('pendingQueueV2Transport', () => {
                     id: null,
                     seq: null,
                     localId: null,
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    providerAction: 'send',
                     messageRole: 'user',
                     content: {
                         t: 'plain',
@@ -664,7 +1011,7 @@ describe('pendingQueueV2Transport', () => {
         });
     });
 
-    it('rejects provider delivery claims whose transcript identity is only null after parser normalization', async () => {
+    it('returns a fail-closed contract result when transcript identity is only null after parser normalization', async () => {
         mockPost.mockResolvedValueOnce({
             data: {
                 ok: true,
@@ -696,10 +1043,15 @@ describe('pendingQueueV2Transport', () => {
             token: 'token',
             sessionId: 'session-1',
             deliveryStateOptIn: true,
-        })).rejects.toThrow(/provider delivery/i);
+        })).resolves.toMatchObject({
+            didMaterialize: true,
+            localId: 'malformed-seq-claimed-local',
+            message: null,
+            providerDeliveryContractInvalid: true,
+        });
     });
 
-    it('rejects provider delivery claims without an explicit false write marker', async () => {
+    it('returns a fail-closed contract result without an explicit false write marker', async () => {
         mockPost.mockResolvedValueOnce({
             data: {
                 ok: true,
@@ -730,7 +1082,12 @@ describe('pendingQueueV2Transport', () => {
             token: 'token',
             sessionId: 'session-1',
             deliveryStateOptIn: true,
-        })).rejects.toThrow(/provider delivery/i);
+        })).resolves.toMatchObject({
+            didMaterialize: true,
+            localId: 'missing-write-marker-local',
+            message: null,
+            providerDeliveryContractInvalid: true,
+        });
     });
 
     it('does not fall back on authentication failures', async () => {
@@ -754,12 +1111,14 @@ describe('pendingQueueV2Transport', () => {
         );
     });
 
-    it('posts provider-accepted delivery resolution to the dedicated pending route', async () => {
-        mockPost.mockResolvedValueOnce({
-            data: {
+    it('settles provider-accepted delivery only through the current session publisher socket', async () => {
+        const socket = {
+            connected: true,
+            emitWithAck: vi.fn().mockResolvedValue({
                 ok: true,
                 didResolve: true,
                 pendingCount: 1,
+                pendingBlockedCount: 0,
                 pendingVersion: 9,
                 message: {
                     id: 'm-accepted',
@@ -777,11 +1136,12 @@ describe('pendingQueueV2Transport', () => {
                     createdAt: 1_000,
                     updatedAt: 1_000,
                 },
-            },
-        });
+            }),
+            timeout: vi.fn().mockReturnThis(),
+        };
 
         await expect(resolveAcceptedPendingQueueV2Delivery({
-            token: 'token',
+            socket: socket as any,
             sessionId: 'session-1',
             localId: 'local/with spaces',
         })).resolves.toEqual({
@@ -811,28 +1171,29 @@ describe('pendingQueueV2Transport', () => {
             },
         });
 
-        expect(mockPost).toHaveBeenCalledWith(
-            expect.stringContaining('/v2/sessions/session-1/pending/local%2Fwith%20spaces/delivery/accepted'),
-            {},
-            expect.objectContaining({
-                headers: expect.objectContaining({ Authorization: 'Bearer token' }),
-            }),
-        );
+        expect(socket.emitWithAck).toHaveBeenCalledWith('pending-delivery-accepted-v1', {
+            v: 1,
+            sessionId: 'session-1',
+            localId: 'local/with spaces',
+        });
+        expect(mockPost).not.toHaveBeenCalled();
     });
 
     it('preserves didResolve false for a successful no-op accepted delivery', async () => {
-        mockPost.mockResolvedValueOnce({
-            data: {
+        const socket = {
+            connected: true,
+            emitWithAck: vi.fn().mockResolvedValue({
                 ok: true,
                 didResolve: false,
                 pendingCount: 1,
                 pendingBlockedCount: 1,
                 pendingVersion: 10,
-            },
-        });
+            }),
+            timeout: vi.fn().mockReturnThis(),
+        };
 
         await expect(resolveAcceptedPendingQueueV2Delivery({
-            token: 'token',
+            socket: socket as any,
             sessionId: 'session-1',
             localId: 'blocked-local',
         })).resolves.toEqual({
@@ -847,75 +1208,122 @@ describe('pendingQueueV2Transport', () => {
         });
     });
 
-    it('posts provider-accepted seq reconciliation to the dedicated pending route', async () => {
-        mockPost.mockResolvedValueOnce({
-            data: {
+    it('preserves the exact committed message proof for a replayed accepted delivery', async () => {
+        const socket = {
+            connected: true,
+            emitWithAck: vi.fn().mockResolvedValue({
                 ok: true,
+                didResolve: false,
                 pendingCount: 0,
-                pendingVersion: 13,
-                resolvedLocalIds: ['resolved-1', 'resolved-2'],
-            },
-        });
-
-        await expect(reconcileAcceptedPendingQueueV2DeliveriesThroughSeq({
-            token: 'token',
-            sessionId: 'session-1',
-            maxAcceptedSeq: 42,
-        })).resolves.toEqual({
-            pendingQueueState: {
-                known: true,
-                pendingCount: 0,
-                pendingVersion: 13,
                 pendingBlockedCount: 0,
-            },
-            resolvedLocalIds: ['resolved-1', 'resolved-2'],
-        });
-
-        expect(mockPost).toHaveBeenCalledWith(
-            expect.stringContaining('/v2/sessions/session-1/pending/delivery/accepted-through-seq'),
-            { maxAcceptedSeq: 42 },
-            expect.objectContaining({
-                headers: expect.objectContaining({ Authorization: 'Bearer token' }),
+                pendingVersion: 11,
+                message: {
+                    id: 'm-replayed-accepted',
+                    seq: 44,
+                    localId: ' replayed-accepted ',
+                    messageRole: 'user',
+                    content: {
+                        t: 'plain',
+                        v: {
+                            role: 'user',
+                            content: { type: 'text', text: 'accepted prompt' },
+                            localId: ' replayed-accepted ',
+                        },
+                    },
+                    createdAt: 1_000,
+                    updatedAt: 1_001,
+                },
             }),
-        );
-    });
+            timeout: vi.fn().mockReturnThis(),
+        };
 
-    it('posts provider-attach stale-claim blocking to the dedicated pending route', async () => {
-        mockPost.mockResolvedValueOnce({
-            data: {
-                ok: true,
-                pendingCount: 2,
-                pendingBlockedCount: 1,
-                pendingVersion: 14,
-                blockedCount: 1,
-            },
-        });
-
-        await expect(blockPendingQueueV2ProviderDeliveriesOnAttach({
-            token: 'token',
-            sessionId: 'session/with spaces',
-            mode: 'attach',
+        await expect(resolveAcceptedPendingQueueV2Delivery({
+            socket: socket as any,
+            sessionId: 'session-1',
+            localId: ' replayed-accepted ',
         })).resolves.toEqual({
+            didResolve: false,
             pendingQueueState: {
                 known: true,
-                pendingCount: 2,
-                pendingBlockedCount: 1,
-                pendingVersion: 14,
+                pendingCount: 0,
+                pendingBlockedCount: 0,
+                pendingVersion: 11,
+            },
+            message: {
+                id: 'm-replayed-accepted',
+                seq: 44,
+                localId: ' replayed-accepted ',
+                messageRole: 'user',
+                content: {
+                    t: 'plain',
+                    v: {
+                        role: 'user',
+                        content: { type: 'text', text: 'accepted prompt' },
+                        localId: ' replayed-accepted ',
+                    },
+                },
+                createdAt: 1_000,
+                updatedAt: 1_001,
+                deliveryState: null,
             },
         });
-
-        expect(mockPost).toHaveBeenCalledWith(
-            expect.stringContaining('/v2/sessions/session%2Fwith%20spaces/pending/delivery/provider-attach'),
-            { recovery: 'attach' },
-            expect.objectContaining({
-                headers: expect.objectContaining({
-                    Authorization: 'Bearer token',
-                    'Content-Type': 'application/json',
-                }),
-                timeout: 10_000,
-            }),
-        );
     });
+
+    it.each([
+        { ok: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 10 },
+        { ok: true, didResolve: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 10 },
+        { ok: true, didResolve: false, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 10, extra: true },
+        { ok: false, error: 'transaction-unavailable' },
+        {
+            ok: true,
+            didResolve: true,
+            pendingCount: 0,
+            pendingBlockedCount: 0,
+            pendingVersion: 10,
+            message: {},
+        },
+        {
+            ok: true,
+            didResolve: true,
+            pendingCount: 0,
+            pendingBlockedCount: 0,
+            pendingVersion: 10,
+            message: {
+                id: 'm-wrong-local-id',
+                seq: 43,
+                localId: 'different-local-id',
+                content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'wrong row' } } },
+                createdAt: 1_000,
+                updatedAt: 1_000,
+            },
+        },
+    ])('fails closed on a malformed accepted settlement acknowledgement %#', async (ack) => {
+        const socket = {
+            connected: true,
+            emitWithAck: vi.fn().mockResolvedValue(ack),
+            timeout: vi.fn().mockReturnThis(),
+        };
+
+        await expect(resolveAcceptedPendingQueueV2Delivery({
+            socket: socket as any,
+            sessionId: 'session-1',
+            localId: 'accepted-local',
+        })).rejects.toThrow('Invalid pending delivery accepted settlement acknowledgement');
+        expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('fails closed without HTTP fallback when the publisher socket is disconnected', async () => {
+        await expect(resolveAcceptedPendingQueueV2Delivery({
+            socket: { connected: false } as any,
+            sessionId: 'session-1',
+            localId: 'accepted-local',
+        })).rejects.toMatchObject({
+            code: 'socket_not_connected',
+            event: 'pending-delivery-accepted-v1',
+        });
+        expect(mockPost).not.toHaveBeenCalled();
+    });
+
 
     it('posts provider delivery block state to the dedicated pending route', async () => {
         mockPost.mockResolvedValueOnce({
@@ -953,12 +1361,11 @@ describe('pendingQueueV2Transport', () => {
         mockGet.mockResolvedValueOnce({
             data: {
                 pending: [
-                    { localId: 'typed-provider', status: 'queued', deliveryState: null, deliveryStatus: { status: 'delivering' } },
+                    { localId: 'typed-provider', status: 'queued', deliveryState: 'delivering', deliveryStatus: { status: 'delivering' } },
                     { localId: 'provider-1', status: 'queued', deliveryState: 'delivering' },
                     { localId: 'regular-queued', status: 'queued', deliveryState: null },
                     { localId: 'provider-blocked', status: 'queued', deliveryState: 'blocked' },
-                    { localId: 'discarded-provider', status: 'discarded', deliveryState: 'delivering' },
-                    { localId: 'provider-1', status: 'queued', deliveryState: 'delivering' },
+                    { localId: 'discarded-provider', status: 'discarded' },
                     { localId: 'provider-2', status: 'queued', deliveryState: 'delivering' },
                 ],
             },
@@ -982,10 +1389,10 @@ describe('pendingQueueV2Transport', () => {
         mockGet.mockResolvedValueOnce({
             data: {
                 pending: [
-                    { localId: 'delivering-1', status: 'queued', deliveryStatus: { status: 'delivering' } },
+                    { localId: 'typed-only', deliveryStatus: { status: 'queued' } },
+                    { localId: 'delivering-1', status: 'queued', deliveryState: 'delivering', deliveryStatus: { status: 'delivering' } },
                     { localId: 'blocked-1', status: 'queued', deliveryState: 'blocked', deliveryBlockedReason: 'provider_acceptance_timeout' },
                     { localId: 'discarded-1', status: 'discarded', discardedReason: 'manual' },
-                    { localId: 'delivering-1', status: 'queued', deliveryStatus: { status: 'delivering' } },
                 ],
             },
         });
@@ -994,6 +1401,7 @@ describe('pendingQueueV2Transport', () => {
             token: 'token',
             sessionId: 'session/with spaces',
         })).resolves.toEqual([
+            { localId: 'typed-only', status: 'queued' },
             { localId: 'delivering-1', status: 'delivering' },
             { localId: 'blocked-1', status: 'blocked' },
             { localId: 'discarded-1', status: 'discarded' },
@@ -1008,6 +1416,75 @@ describe('pendingQueueV2Transport', () => {
         );
     });
 
+    it.each([
+        ['missing pending projection', {}],
+        ['non-array pending projection', { pending: null }],
+        ['malformed pending row', { pending: [{ status: 'queued' }] }],
+        ['missing delivery status fields', { pending: [{ localId: 'missing-status' }] }],
+        ['unknown legacy delivery status', { pending: [{ localId: 'unknown-status', status: 'future' }] }],
+        ['invalid typed delivery status', {
+            pending: [{ localId: 'invalid-typed', deliveryStatus: { status: 'future' } }],
+        }],
+        ['contradictory typed and persisted delivery status', {
+            pending: [{
+                localId: 'contradictory',
+                status: 'queued',
+                deliveryState: 'delivering',
+                deliveryStatus: { status: 'discarded', reason: null },
+            }],
+        }],
+        ['duplicate local id with identical status', {
+            pending: [
+                { localId: 'duplicate-identical', status: 'queued', deliveryState: 'delivering' },
+                { localId: 'duplicate-identical', status: 'queued', deliveryState: 'delivering' },
+            ],
+        }],
+        ['conflicting duplicate row', {
+            pending: [
+                { localId: 'duplicate', status: 'queued', deliveryState: 'delivering' },
+                { localId: 'duplicate', status: 'discarded' },
+            ],
+        }],
+    ])('rejects a non-authoritative delivery-status snapshot: %s', async (_case, data) => {
+        mockGet.mockResolvedValueOnce({ data });
+
+        await expect(listPendingQueueV2DeliveryStatusesFromServer({
+            token: 'token',
+            sessionId: 'session-1',
+        })).rejects.toThrow('Invalid pending queue delivery status projection');
+    });
+
+    it.each([
+        ['local-id reader', () => listPendingQueueV2LocalIdsFromServer({ token: 'token', sessionId: 'session-1' })],
+        ['delivery-status reader', () => listPendingQueueV2DeliveryStatusesFromServer({ token: 'token', sessionId: 'session-1' })],
+        ['provider-delivery reader', () => listPendingQueueV2ProviderDeliveryLocalIdsFromServer({ token: 'token', sessionId: 'session-1' })],
+        ['blocked-delivery reader', () => readBlockedPendingQueueV2DeliveryByLocalIdFromServer({ token: 'token', sessionId: 'session-1', localId: 'target' })],
+    ])('uses the same strict canonical projection parser for the %s', async (_case, readProjection) => {
+        const invalidProjections = [
+            {},
+            { pending: [{ localId: 'malformed-without-status' }] },
+            {
+                pending: [{
+                    localId: 'contradictory',
+                    status: 'queued',
+                    deliveryState: 'delivering',
+                    deliveryStatus: { status: 'discarded', reason: null },
+                }],
+            },
+            {
+                pending: [
+                    { localId: 'duplicate', status: 'queued', deliveryState: 'delivering' },
+                    { localId: 'duplicate', status: 'queued', deliveryState: 'delivering' },
+                ],
+            },
+        ];
+
+        for (const data of invalidProjections) {
+            mockGet.mockResolvedValueOnce({ data });
+            await expect(readProjection()).rejects.toThrow('Invalid pending queue delivery status projection');
+        }
+    });
+
     it('reads blocked provider delivery state for a specific local id', async () => {
         mockGet.mockResolvedValueOnce({
             data: {
@@ -1016,8 +1493,8 @@ describe('pendingQueueV2Transport', () => {
                     {
                         localId: 'blocked-local',
                         status: 'queued',
-                        deliveryState: null,
-                        deliveryBlockedReason: null,
+                        deliveryState: 'blocked',
+                        deliveryBlockedReason: 'runtime_disposed_before_delivery',
                         deliveryStatus: { status: 'blocked', reason: 'runtime_disposed_before_delivery' },
                     },
                     { localId: 'delivering-local', status: 'queued', deliveryState: 'delivering' },
@@ -1040,37 +1517,6 @@ describe('pendingQueueV2Transport', () => {
             expect.objectContaining({
                 headers: expect.objectContaining({ Authorization: 'Bearer token' }),
                 timeout: 10_000,
-            }),
-        );
-    });
-
-    it('posts pending delivery retry to the dedicated pending route', async () => {
-        mockPost.mockResolvedValueOnce({
-            data: {
-                ok: true,
-                pendingCount: 1,
-                pendingVersion: 11,
-            },
-        });
-
-        await expect(retryPendingQueueV2Delivery({
-            token: 'token',
-            sessionId: 'session-1',
-            localId: 'local-1',
-        })).resolves.toEqual({
-            pendingQueueState: {
-                known: true,
-                pendingCount: 1,
-                pendingVersion: 11,
-                pendingBlockedCount: 0,
-            },
-        });
-
-        expect(mockPost).toHaveBeenCalledWith(
-            expect.stringContaining('/v2/sessions/session-1/pending/local-1/delivery/retry'),
-            {},
-            expect.objectContaining({
-                headers: expect.objectContaining({ Authorization: 'Bearer token' }),
             }),
         );
     });

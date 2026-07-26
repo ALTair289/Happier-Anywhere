@@ -3,6 +3,7 @@ import {
     resolveSessionMutationMaxAttempts,
 } from './sessionMutationBackoff';
 import { createSessionMutationDeadLetterEntry } from './sessionMutationPersistence';
+import type { SessionRuntimeActivityProjection } from '@happier-dev/protocol';
 import type { QueuedSessionMutation } from './sessionMutationTypes';
 import type { SessionMutationDeadLetterEntry } from './sessionMutationPersistence';
 import { isAuthoritativeSessionMutation } from './sessionMutationDurabilityPolicy';
@@ -14,7 +15,14 @@ export type SessionMutationDeliveredPath =
     | 'legacy_socket_proof';
 
 export type SessionMutationDeliveryOutcome =
-    | Readonly<{ status: 'delivered'; path: SessionMutationDeliveredPath }>
+    | Readonly<{
+        status: 'delivered';
+        path: SessionMutationDeliveredPath;
+        runtimeActivityEvidence?: Readonly<{
+            disposition: 'applied' | 'unchanged';
+            projection: SessionRuntimeActivityProjection;
+        }>;
+    }>
     | Readonly<{
         status: 'ignored_lossy';
         reason: string;

@@ -1,14 +1,69 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { SESSION_USER_MESSAGE_DELIVERY_INTENT_META_KEY } from '@happier-dev/protocol';
 
-import { createMockSession, createPlainSessionFixture } from '@/testkit/backends/sessionFixtures';
-import { createApiSessionSocketStub, flushApiSessionClientMessageCommitQueue, type ApiSessionSocketStub } from '@/testkit/backends/apiSessionSocketHarness';
+import {
+  createMockSession as createMockSessionBase,
+  createPlainSessionFixture as createPlainSessionFixtureBase,
+} from '@/testkit/backends/sessionFixtures';
+import {
+  createApiSessionSocketStub as createApiSessionSocketStubBase,
+  flushApiSessionClientMessageCommitQueue,
+  type ApiSessionSocketStub,
+} from '@/testkit/backends/apiSessionSocketHarness';
 import { waitForCondition } from '@/testkit/async/waitFor';
 import { decodeBase64, decrypt } from '../encryption';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
 
 let sessionSocketStub: ApiSessionSocketStub | null = null;
 let userSocketStub: ApiSessionSocketStub | null = null;
+let materializedEnqueueCallCount = 0;
+
+const CURRENT_PENDING_INPUT_COMPATIBILITY = {
+  v: 1,
+  compatibility: {
+    v: 1,
+    sessionSync: {
+      v: 1,
+      enforcement: 'observe',
+      minimumSessionSyncProtocolVersion: 1,
+      currentSessionSyncProtocolVersion: 2,
+      declarationTransport: 'headers-v1',
+    },
+    pendingInput: { currentPendingInputProtocolVersion: 1 },
+  },
+} as const;
+
+function createApiSessionSocketStub(
+  options: Parameters<typeof createApiSessionSocketStubBase>[0] = {},
+): ApiSessionSocketStub {
+  return createApiSessionSocketStubBase({
+    ...options,
+    emitWithAck: async (event, payload, socket) => {
+      if (event === 'ping') return CURRENT_PENDING_INPUT_COMPATIBILITY;
+      if (options.emitWithAck) return await options.emitWithAck(event, payload, socket);
+      return options.emitWithAckResult ?? { ok: true, id: 'm1', seq: 1, localId: 'l1' };
+    },
+  });
+}
+
+function createPlainSessionFixture(
+  ...args: Parameters<typeof createPlainSessionFixtureBase>
+): ReturnType<typeof createPlainSessionFixtureBase> {
+  const fixture = createPlainSessionFixtureBase(...args);
+  return {
+    ...fixture,
+    metadata: { ...fixture.metadata, machineId: 'machine-1' },
+  };
+}
+
+function createMockSession(
+  ...args: Parameters<typeof createMockSessionBase>
+): ReturnType<typeof createMockSessionBase> {
+  const fixture = createMockSessionBase(...args);
+  return {
+    ...fixture,
+    metadata: { ...fixture.metadata, machineId: 'machine-1' },
+  };
+}
 
 vi.mock('./sockets', () => ({
   createUserScopedSocket: () => {
@@ -48,22 +103,26 @@ vi.mock('@happier-dev/connection-supervisor', () => ({
 }));
 
 const {
-  blockPendingQueueV2ProviderDeliveriesOnAttachMock,
   enqueuePendingQueueV2MessageViaHttpMock,
   materializeNextPendingQueueV2MessageMock,
-  resolveCliFeatureDecisionForServerMock,
+  listPendingQueueV2DeliveryStatusesFromServerMock,
+  notifyDaemonConnectedServiceTurnLifecycleMock,
+  blockPendingQueueV2DeliveryMock,
+  resolveAcceptedPendingQueueV2DeliveryMock,
 } = vi.hoisted(() => ({
-  blockPendingQueueV2ProviderDeliveriesOnAttachMock: vi.fn(),
   enqueuePendingQueueV2MessageViaHttpMock: vi.fn(),
   materializeNextPendingQueueV2MessageMock: vi.fn(),
-  resolveCliFeatureDecisionForServerMock: vi.fn(),
+  listPendingQueueV2DeliveryStatusesFromServerMock: vi.fn(),
+  notifyDaemonConnectedServiceTurnLifecycleMock: vi.fn(),
+  blockPendingQueueV2DeliveryMock: vi.fn(),
+  resolveAcceptedPendingQueueV2DeliveryMock: vi.fn(),
 }));
 
-vi.mock('@/features/featureDecisionService', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/features/featureDecisionService')>();
+vi.mock('@/daemon/controlClient', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/daemon/controlClient')>();
   return {
     ...actual,
-    resolveCliFeatureDecisionForServer: (...args: unknown[]) => resolveCliFeatureDecisionForServerMock(...args),
+    notifyDaemonConnectedServiceTurnLifecycle: (...args: unknown[]) => notifyDaemonConnectedServiceTurnLifecycleMock(...args),
   };
 });
 
@@ -71,88 +130,433 @@ vi.mock('./pendingQueueV2Transport', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./pendingQueueV2Transport')>();
   return {
     ...actual,
-    blockPendingQueueV2ProviderDeliveriesOnAttach: (...args: unknown[]) => blockPendingQueueV2ProviderDeliveriesOnAttachMock(...args),
+    blockPendingQueueV2Delivery: (...args: unknown[]) => blockPendingQueueV2DeliveryMock(...args),
     enqueuePendingQueueV2MessageViaHttp: (...args: unknown[]) => enqueuePendingQueueV2MessageViaHttpMock(...args),
     materializeNextPendingQueueV2Message: (...args: unknown[]) => materializeNextPendingQueueV2MessageMock(...args),
+    listPendingQueueV2DeliveryStatusesFromServer: (...args: unknown[]) => listPendingQueueV2DeliveryStatusesFromServerMock(...args),
+    resolveAcceptedPendingQueueV2Delivery: (...args: unknown[]) => resolveAcceptedPendingQueueV2DeliveryMock(...args),
   };
 });
 
 import { ApiSessionClient } from './sessionClient';
 
-function createPendingDeliveryStateFeatureDecision(state: 'enabled' | 'unsupported' = 'enabled') {
+function createPlainClaudeSessionFixture(id: string) {
+  const session = createPlainSessionFixture({ id });
   return {
-    featureId: 'sharing.pendingDeliveryState',
-    state,
-    evaluatedAt: Date.now(),
-    scope: { scopeKind: 'runtime' },
-    diagnostics: [],
+    ...session,
+    metadata: { ...session.metadata, flavor: 'claude' as const },
   };
 }
 
-async function enableProviderAcceptanceMode(client: ApiSessionClient): Promise<void> {
-  client.deferDeliveredUserMessageWatermarkToProviderAcceptance();
-  await waitForCondition(
-    () => (client as any).deliveredUserMessageWatermarkDeferredToProviderAcceptance === true,
-    { timeoutMs: 1_000, intervalMs: 5, label: 'provider acceptance mode activation' },
-  );
-  await Promise.resolve();
+function createProviderInputOutcomeProducer(
+  overrides?: Readonly<{ providerId?: 'claude' | 'codex' | 'customAcp'; mode?: string; matchesCurrentSession?: boolean }>,
+) {
+  return {
+    providerId: overrides?.providerId ?? 'claude',
+    mode: overrides?.mode ?? 'unifiedTerminal',
+    matchesCurrentSession: () => overrides?.matchesCurrentSession ?? true,
+  } as const;
+}
+
+async function waitForCurrentPendingInputContract(client: ApiSessionClient): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if ((client as any).sessionSyncPendingInputServerContract?.mode === 'session_sync_v2_pending_input_v1') return;
+    await Promise.resolve();
+  }
+  throw new Error('Timed out waiting for current Pending-input server contract');
 }
 
 describe('ApiSessionClient session.userMessage.send delivery', () => {
   beforeEach(() => {
-    resolveCliFeatureDecisionForServerMock.mockReset();
-    resolveCliFeatureDecisionForServerMock.mockResolvedValue({
-      decision: createPendingDeliveryStateFeatureDecision('enabled'),
-    });
-    blockPendingQueueV2ProviderDeliveriesOnAttachMock.mockReset();
-    blockPendingQueueV2ProviderDeliveriesOnAttachMock.mockResolvedValue({});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      features: {
+        sharing: {
+          pendingQueueV2: { enabled: true },
+          pendingDeliveryState: { enabled: true },
+        },
+      },
+      capabilities: {
+        compatibility: CURRENT_PENDING_INPUT_COMPATIBILITY.compatibility,
+      },
+    }), { status: 200 })));
     enqueuePendingQueueV2MessageViaHttpMock.mockReset();
     enqueuePendingQueueV2MessageViaHttpMock.mockResolvedValue(undefined);
     materializeNextPendingQueueV2MessageMock.mockReset();
-    materializeNextPendingQueueV2MessageMock.mockResolvedValue({
-      didMaterialize: false,
-      localId: null,
-      didWrite: false,
-      pendingQueueState: { known: true, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 1 },
+    listPendingQueueV2DeliveryStatusesFromServerMock.mockReset();
+    listPendingQueueV2DeliveryStatusesFromServerMock.mockResolvedValue([]);
+    blockPendingQueueV2DeliveryMock.mockReset();
+    blockPendingQueueV2DeliveryMock.mockResolvedValue({
+      pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 1, pendingVersion: 3 },
+    });
+    resolveAcceptedPendingQueueV2DeliveryMock.mockReset();
+    resolveAcceptedPendingQueueV2DeliveryMock.mockImplementation(async ({ localId }: { localId: string }) => ({
+      didResolve: true,
+      message: { localId, seq: 41 },
+      pendingQueueState: { known: true, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 3 },
+    }));
+    materializedEnqueueCallCount = 0;
+    materializeNextPendingQueueV2MessageMock.mockImplementation(async () => {
+      const enqueueCall = enqueuePendingQueueV2MessageViaHttpMock.mock.calls[materializedEnqueueCallCount];
+      if (!enqueueCall) {
+        return {
+          didMaterialize: false,
+          localId: null,
+          didWrite: false,
+          pendingQueueState: { known: true, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 1 },
+        };
+      }
+      materializedEnqueueCallCount += 1;
+      // HTTP Queue transport is the genuine boundary under test; mirror the committed
+      // materialization response produced for the exact row that was enqueued.
+      const request = enqueueCall[0] as Readonly<{
+        body: Readonly<{
+          localId: string;
+          messageRole: 'user';
+          content?: unknown;
+          ciphertext?: string;
+        }>;
+      }>;
+      return {
+        didMaterialize: true,
+        localId: request.body.localId,
+        didWrite: true,
+        pendingQueueState: { known: true, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 2 },
+        message: {
+          id: `m-${request.body.localId}`,
+          seq: materializedEnqueueCallCount,
+          localId: request.body.localId,
+          messageRole: request.body.messageRole,
+          content: request.body.content ?? request.body.ciphertext,
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        },
+      };
+    });
+    notifyDaemonConnectedServiceTurnLifecycleMock.mockReset();
+    notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValue({});
+  });
+
+  it('settles typed provider outcomes only for the exact claimed local input', async () => {
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainClaudeSessionFixture('s1'));
+    (client as any).sessionConnectionSupervisor = null;
+    (client as any).canonicalPendingDeliveryByLocalId.set('accepted-local', { mode: 'provider', unresolved: true });
+    (client as any).canonicalPendingDeliveryByLocalId.set('rejected-local', { mode: 'provider', unresolved: true });
+    (client as any).canonicalPendingDeliveryByLocalId.set('custody-local', { mode: 'provider', unresolved: true });
+    (client as any).canonicalPendingDeliveryByLocalId.set('uncertain-local', { mode: 'provider', unresolved: true });
+
+    const observe = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer());
+    observe({ kind: 'custody_observed', localId: 'custody-local' });
+    observe({ kind: 'effect_may_have_occurred', localId: 'uncertain-local' });
+    observe({ kind: 'effect_may_have_occurred', localId: 'uncertain-local' });
+    observe({ kind: 'accepted', localId: 'unknown-local' });
+    observe({ kind: 'accepted', localId: 'accepted-local' });
+    observe({
+      kind: 'rejected_before_effect',
+      localId: 'rejected-local',
+      reason: 'provider_rejected_before_acceptance',
+    });
+
+    await vi.waitFor(() => expect(resolveAcceptedPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(2));
+    expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 's1',
+      localId: 'uncertain-local',
+      reason: 'delivery_outcome_uncertain',
+    }));
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('uncertain-local')).toBe(true);
+    observe({ kind: 'accepted', localId: 'uncertain-local' });
+    await vi.waitFor(() => expect(resolveAcceptedPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(
+      (client as any).canonicalPendingDeliveryByLocalId.has('accepted-local'),
+    ).toBe(false));
+    expect(resolveAcceptedPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      socket: sessionSocketStub,
+      sessionId: 's1',
+      localId: 'accepted-local',
+    }));
+    expect(resolveAcceptedPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      socket: sessionSocketStub,
+      sessionId: 's1',
+      localId: 'uncertain-local',
+    }));
+    expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 's1',
+      localId: 'rejected-local',
+      reason: 'provider_rejected_before_acceptance',
+    }));
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('custody-local')).toBe(true);
+    await vi.waitFor(() => expect(
+      (client as any).canonicalPendingDeliveryByLocalId.has('uncertain-local'),
+    ).toBe(false));
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('unknown-local')).toBe(false);
+    expect(resolveAcceptedPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('publishes the model captured at provider acceptance without changing the selected model', async () => {
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const fixture = createPlainClaudeSessionFixture('s1');
+    const client = new ApiSessionClient('tok', {
+      ...fixture,
+      metadata: {
+        ...fixture.metadata,
+        sessionModelsV1: {
+          v: 1,
+          provider: 'claude',
+          updatedAt: 20,
+          currentModelId: 'claude-selected-next',
+          availableModels: [],
+        },
+      },
+    });
+    (client as any).sessionConnectionSupervisor = null;
+    // Metadata persistence is the socket boundary; exercise the real owner updater against local state.
+    vi.spyOn(client, 'updateMetadata').mockImplementation(async (updater) => {
+      (client as any).metadata = updater((client as any).metadata);
+    });
+
+    const observe = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer());
+    observe({
+      kind: 'accepted',
+      localId: 'immediate-local',
+      appliedModelId: 'claude-applied-to-this-prompt',
+    });
+
+    await vi.waitFor(() => expect(client.getMetadataSnapshot()?.sessionAppliedModelV1).toMatchObject({
+      v: 1,
+      provider: 'claude',
+      modelId: 'claude-applied-to-this-prompt',
+    }));
+    expect(client.getMetadataSnapshot()?.sessionModelsV1?.currentModelId).toBe('claude-selected-next');
+    expect(resolveAcceptedPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
+  });
+
+  it('binds configured ACP flavor aliases to the canonical custom ACP outcome producer', async () => {
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const fixture = createPlainClaudeSessionFixture('s1');
+    const client = new ApiSessionClient('tok', {
+      ...fixture,
+      metadata: { ...fixture.metadata, flavor: 'acp:configured-backend' },
+    });
+    (client as any).sessionConnectionSupervisor = null;
+    (client as any).canonicalPendingDeliveryByLocalId.set('configured-acp-local', { mode: 'provider', unresolved: true });
+
+    const observe = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer({
+      providerId: 'customAcp',
+      mode: 'acp',
+    }));
+    observe({
+      kind: 'rejected_before_effect',
+      localId: 'configured-acp-local',
+      reason: 'provider_rejected_before_acceptance',
+    });
+
+    await vi.waitFor(() => expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(1));
+    expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 's1',
+      localId: 'configured-acp-local',
+      reason: 'provider_rejected_before_acceptance',
+    }));
+  });
+
+  it('rejects an ambiguous blocked reason presented as proven pre-effect rejection', async () => {
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainClaudeSessionFixture('s1'));
+    (client as any).sessionConnectionSupervisor = null;
+    (client as any).canonicalPendingDeliveryByLocalId.set('ambiguous-local', { mode: 'provider', unresolved: true });
+
+    const observe = client.bindProviderInputOutcomeProducer(
+      createProviderInputOutcomeProducer(),
+    ) as (outcome: unknown) => void;
+    observe({
+      kind: 'rejected_before_effect',
+      localId: 'ambiguous-local',
+      userMessageSeq: 16,
+      reason: 'provider_acceptance_timeout',
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(blockPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
+    expect(resolveAcceptedPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
+    expect((client as any).providerInputTerminalOutcomeByLocalId.has('ambiguous-local')).toBe(false);
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('ambiguous-local')).toBe(true);
+  });
+
+  it('does not downgrade effect-possible custody to pre-effect rejection during runtime shutdown', async () => {
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainClaudeSessionFixture('s1'));
+    (client as any).sessionConnectionSupervisor = null;
+    (client as any).canonicalPendingDeliveryByLocalId.set('uncertain-shutdown', { mode: 'provider', unresolved: true });
+    const observe = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer());
+
+    observe({ kind: 'effect_may_have_occurred', localId: 'uncertain-shutdown' });
+    await vi.waitFor(() => expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(1));
+    await (client as any).blockUnresolvedCanonicalPendingDeliveriesBeforeClose();
+
+    expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(2);
+    expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 's1',
+      localId: 'uncertain-shutdown',
+      reason: 'delivery_outcome_uncertain',
+    }));
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('uncertain-shutdown')).toBe(true);
+  });
+
+  it('keeps exact terminal outcomes monotonic, idempotent, and producer-generation fenced', async () => {
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainClaudeSessionFixture('s1'));
+    (client as any).sessionConnectionSupervisor = null;
+    for (const localId of [
+      'accepted-first',
+      'rejected-first',
+      'failure-race',
+      'stale-generation',
+      'wrong-provider',
+      'wrong-mode',
+      'missing-validation',
+      'valid-before-invalid',
+      'terminating-generation',
+    ]) {
+      (client as any).canonicalPendingDeliveryByLocalId.set(localId, { mode: 'provider', unresolved: true });
+    }
+
+    const wrongProviderObserve = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer({
+      providerId: 'codex',
+      mode: 'appServer',
+      matchesCurrentSession: false,
+    }));
+    wrongProviderObserve({ kind: 'accepted', localId: 'wrong-provider' });
+    const staleObserve = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer());
+    const observe = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer());
+    staleObserve({ kind: 'accepted', localId: 'stale-generation' });
+    observe({ kind: 'accepted', localId: 'accepted-first' });
+    observe({ kind: 'accepted', localId: 'accepted-first' });
+    observe({
+      kind: 'rejected_before_effect',
+      localId: 'accepted-first',
+      reason: 'provider_rejected_before_acceptance',
+    });
+    observe({
+      kind: 'rejected_before_effect',
+      localId: 'rejected-first',
+      reason: 'provider_rejected_before_acceptance',
+    });
+    observe({ kind: 'accepted', localId: 'rejected-first' });
+    observe({ kind: 'effect_may_have_occurred', localId: 'failure-race' });
+    observe({ kind: 'accepted', localId: 'failure-race' });
+    const validBeforeInvalidObserve = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer());
+    const wrongModeObserve = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer({
+      mode: 'agentSdk',
+      matchesCurrentSession: false,
+    }));
+    const missingValidationObserve = client.bindProviderInputOutcomeProducer({
+      providerId: 'claude',
+      mode: 'unifiedTerminal',
+      // Runtime-shape regression fixture: old producers without canonical validation must fail closed.
+    } as never);
+    wrongModeObserve({ kind: 'accepted', localId: 'wrong-mode' });
+    missingValidationObserve({ kind: 'accepted', localId: 'missing-validation' });
+    validBeforeInvalidObserve({ kind: 'accepted', localId: 'valid-before-invalid' });
+    client.beginRuntimeTermination();
+    validBeforeInvalidObserve({ kind: 'accepted', localId: 'terminating-generation' });
+
+    await vi.waitFor(() => expect(resolveAcceptedPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(2));
+    expect(resolveAcceptedPendingQueueV2DeliveryMock.mock.calls.map(([input]) => input.localId).sort()).toEqual([
+      'accepted-first',
+      'failure-race',
+      'valid-before-invalid',
+    ]);
+    expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({ localId: 'rejected-first' }));
+    expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      localId: 'failure-race',
+      reason: 'delivery_outcome_uncertain',
+    }));
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('stale-generation')).toBe(true);
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('wrong-provider')).toBe(true);
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('wrong-mode')).toBe(true);
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('missing-validation')).toBe(true);
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('terminating-generation')).toBe(true);
+  });
+
+  it('abandons an operation-local settlement rejoin when its session connection is replaced', async () => {
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const timeoutError = Object.assign(new Error('socket acknowledgement timed out'), {
+      code: 'socket_ack_timeout' as const,
+      retryable: true as const,
+    });
+    resolveAcceptedPendingQueueV2DeliveryMock.mockRejectedValue(timeoutError);
+    const client = new ApiSessionClient('tok', createPlainClaudeSessionFixture('s1'));
+    (client as any).sessionConnectionSupervisor = null;
+    (client as any).canonicalPendingDeliveryByLocalId.set('stale-connection', { mode: 'provider', unresolved: true });
+    const observe = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer());
+
+    vi.useFakeTimers();
+    observe({ kind: 'accepted', localId: 'stale-connection' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolveAcceptedPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(1);
+
+    (client as any).sessionConnectionEpoch += 1;
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(resolveAcceptedPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(1);
+    expect((client as any).canonicalPendingDeliveryByLocalId.has('stale-connection')).toBe(true);
+  });
+
+  it('serializes exact daemon turn lifecycle notifications in mutation order', async () => {
+    // Boundary fixture: private transport sequencing is the observable contract under test.
+    const client = Object.create(ApiSessionClient.prototype) as any;
+    client.sessionId = 's1';
+    client.startedByDaemonProcess = true;
+    client.daemonTurnLifecycleNotifyTail = Promise.resolve();
+    let releaseBegin: (() => void) | null = null;
+    notifyDaemonConnectedServiceTurnLifecycleMock
+      .mockImplementationOnce(async () => await new Promise<void>((resolve) => {
+        releaseBegin = resolve;
+      }))
+      .mockResolvedValueOnce({});
+
+    const begin = client.notifyDaemonConnectedServiceTurnLifecycle(
+      'prompt_or_steer',
+      undefined,
+      'session-turn:exact-1',
+    );
+    const terminal = client.notifyDaemonConnectedServiceTurnLifecycle(
+      'assistant_message_end',
+      'completed',
+      'session-turn:exact-1',
+    );
+
+    await Promise.resolve();
+    expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledTimes(1);
+    expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenNthCalledWith(1, {
+      sessionId: 's1',
+      event: 'prompt_or_steer',
+      turnId: 'session-turn:exact-1',
+    });
+
+    const release = ((value: unknown): (() => void) => {
+      if (typeof value !== 'function') throw new Error('Expected the begin notification to be pending');
+      return value as () => void;
+    })(releaseBegin);
+    release();
+    await Promise.all([begin, terminal]);
+    expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenNthCalledWith(2, {
+      sessionId: 's1',
+      event: 'assistant_message_end',
+      terminalStatus: 'completed',
+      turnId: 'session-turn:exact-1',
     });
   });
 
-  it('holds explicit server-pending materialized rows during active turns until authorized catch-up', () => {
-    const client = Object.create(ApiSessionClient.prototype) as any;
-    client.sessionId = 's1';
-    client.latestTurnStatus = 'in_progress';
-    client.userMessageCallbackAttachedAtMs = null;
-    client.canonicalPendingDeliveryByLocalId = new Map();
-
-    const message = {
-      role: 'user',
-      content: { type: 'text', text: 'queue after turn' },
-      localId: 'pending-local',
-      meta: {
-        source: 'ui',
-        [SESSION_USER_MESSAGE_DELIVERY_INTENT_META_KEY]: 'explicit_pending',
-      },
-      createdAt: Date.now(),
-    };
-    const update = {
-      id: 'u-explicit-pending',
-      body: {
-        t: 'new-message',
-        message: { seq: 11 },
-      },
-    };
-
-    expect(client.shouldDeliverUserMessageToAgentQueueFromUpdate(message, update, {})).toBe(false);
-    expect(client.shouldDeliverUserMessageToAgentQueueFromUpdate(message, {
-      ...update,
-      id: 'catchup-explicit-pending',
-    }, {
-      catchUpAfterSeq: 10,
-      catchUpAuthorization: 'explicit_cursor',
-    })).toBe(true);
-  });
-
-  it('delivers the prompt to the agent queue eagerly and suppresses later transcript echo updates', async () => {
+  it('routes an unconfigured RPC prompt through durable Queue V2 before provider input and ignores its transcript echo', async () => {
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,
       emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
@@ -160,9 +564,33 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
 
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    await waitForCurrentPendingInputContract(client);
 
     const received: any[] = [];
     client.onUserMessage((msg) => received.push(msg));
+    materializeNextPendingQueueV2MessageMock.mockResolvedValueOnce({
+      didMaterialize: true,
+      localId: 'l1',
+      didWrite: true,
+      pendingQueueState: { known: true, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 2 },
+      message: {
+        id: 'm1',
+        seq: 1,
+        localId: 'l1',
+        messageRole: 'user',
+        content: {
+          t: 'plain',
+          v: {
+            role: 'user',
+            content: { type: 'text', text: 'hello' },
+            localId: 'l1',
+            meta: { source: 'ui', sentFrom: 'ios' },
+          },
+        },
+        createdAt: 1_000,
+        updatedAt: 1_000,
+      },
+    });
 
     // Simulate the daemon/UI invoking the session-scoped RPC handler, which calls the internal enqueue.
     await (client as any).enqueueSessionUserMessage({
@@ -171,6 +599,10 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       meta: { source: 'ui', sentFrom: 'ios' },
     });
 
+    expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 's1',
+      body: expect.objectContaining({ localId: 'l1', messageRole: 'user' }),
+    }));
     expect(received).toHaveLength(1);
     expect(received[0]?.content?.type).toBe('text');
     expect(received[0]?.content?.text).toBe('hello');
@@ -204,6 +636,241 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     expect(received).toHaveLength(1);
   });
 
+  it('revalidates paused recovery exactly once before accepting a fresh direct prompt', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    const checkUsageLimitRecoveryNow = vi.fn(async () => ({ ok: true, status: 'ready' }));
+    (client as any).sessionRuntimeControls.checkUsageLimitRecoveryNow = checkUsageLimitRecoveryNow;
+    const received: any[] = [];
+    client.onUserMessage((message) => received.push(message));
+
+    await (client as any).enqueueSessionUserMessage({
+      text: 'retry after daemon restart',
+      localId: 'request-once',
+      meta: { source: 'ui' },
+    });
+    await (client as any).enqueueSessionUserMessage({
+      text: 'retry after daemon restart',
+      localId: 'request-once',
+      meta: { source: 'ui' },
+    });
+
+    expect(checkUsageLimitRecoveryNow).toHaveBeenCalledExactlyOnceWith({
+      sessionId: 's1',
+      operation: 'check_now',
+    });
+    expect(received).toHaveLength(1);
+  });
+
+  it('coalesces exact replays without collapsing whitespace-distinct recovery request ids', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1 },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    const checkUsageLimitRecoveryNow = vi.fn(async () => ({ ok: true, status: 'waiting' }));
+    (client as any).sessionRuntimeControls.checkUsageLimitRecoveryNow = checkUsageLimitRecoveryNow;
+    client.onUserMessage(() => undefined);
+
+    for (const localId of [' request-1', 'request-1 ', ' request-1'] as const) {
+      await (client as any).enqueueSessionUserMessage({ text: 'retry', localId, meta: { source: 'ui' } });
+    }
+
+    expect(checkUsageLimitRecoveryNow).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns typed unavailable and does not deliver when explicit recovery revalidation throws', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    const checkUsageLimitRecoveryNow = vi.fn(async () => {
+      throw new Error('recovery store unavailable');
+    });
+    (client as any).sessionRuntimeControls.checkUsageLimitRecoveryNow = checkUsageLimitRecoveryNow;
+    const received: any[] = [];
+    client.onUserMessage((message) => received.push(message));
+
+    await expect((client as any).enqueueSessionUserMessage({
+      text: 'still deliver me',
+      localId: 'request-error',
+      meta: { source: 'ui' },
+    })).resolves.toEqual({
+      recoveryBlocked: {
+        status: 'unavailable',
+        errorCode: 'session_user_message_recovery_control_unavailable',
+      },
+    });
+
+    expect(checkUsageLimitRecoveryNow).toHaveBeenCalledTimes(1);
+    expect(received).toHaveLength(0);
+  });
+
+  it('bounds a stalled recovery decision and never delivers when that stale decision resolves late', async () => {
+    vi.useFakeTimers();
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    let resolveRecovery!: (value: { ok: true; status: 'ready' }) => void;
+    const checkUsageLimitRecoveryNow = vi.fn(() => new Promise<{ ok: true; status: 'ready' }>((resolve) => {
+      resolveRecovery = resolve;
+    }));
+    (client as any).sessionRuntimeControls.checkUsageLimitRecoveryNow = checkUsageLimitRecoveryNow;
+    const received: any[] = [];
+    client.onUserMessage((message) => received.push(message));
+
+    const delivery = (client as any).enqueueSessionUserMessage({
+      text: 'must not arrive after the authority deadline',
+      localId: 'request-stalled-recovery',
+      meta: { source: 'ui' },
+    });
+    await vi.advanceTimersByTimeAsync(7_500);
+    await expect(delivery).resolves.toEqual({
+      recoveryBlocked: {
+        status: 'unavailable',
+        errorCode: 'session_user_message_recovery_control_unavailable',
+      },
+    });
+    resolveRecovery({ ok: true, status: 'ready' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(checkUsageLimitRecoveryNow).toHaveBeenCalledTimes(1);
+    expect(received).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it('keeps a waiting recovery prompt out of provider delivery and coalesces the request id', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    const checkUsageLimitRecoveryNow = vi.fn(async () => ({ ok: true, status: 'waiting' }));
+    (client as any).sessionRuntimeControls.checkUsageLimitRecoveryNow = checkUsageLimitRecoveryNow;
+    const received: any[] = [];
+    client.onUserMessage((message) => received.push(message));
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect((client as any).enqueueSessionUserMessage({
+        text: 'retry after daemon restart',
+        localId: 'request-waiting',
+        meta: { source: 'ui' },
+      })).resolves.toEqual({
+        recoveryBlocked: {
+          status: 'waiting',
+          errorCode: 'session_user_message_recovery_pending',
+        },
+      });
+    }
+
+    expect(checkUsageLimitRecoveryNow).toHaveBeenCalledTimes(1);
+    expect(received).toHaveLength(0);
+  });
+
+  it('delivers ordinary input while provider-ready recovery remains paused for later exact proof', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'ready-to-try' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({
+      id: 's1',
+      metadata: {
+        ...createPlainSessionFixture({ id: 'metadata-seed' }).metadata,
+        sessionUsageLimitRecoveryV1: {
+          v: 1,
+          status: 'paused',
+          issueFingerprint: 'usage-limit:openai-codex:ready-to-try',
+          armedAtMs: 100,
+          runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:ready-to-try',
+          resetAtMs: null,
+          nextCheckAtMs: null,
+          attemptCount: 1,
+          maxAttempts: 3,
+          lastProbeError: null,
+          resumePromptMode: 'standard',
+          selectedAuth: {
+            kind: 'group',
+            serviceId: 'openai-codex',
+            groupId: 'team',
+            profileId: 'backup',
+          },
+        },
+      },
+    }));
+    await waitForCurrentPendingInputContract(client);
+    const checkUsageLimitRecoveryNow = vi.fn(async () => ({ ok: true, status: 'waiting' }));
+    (client as any).sessionRuntimeControls.checkUsageLimitRecoveryNow = checkUsageLimitRecoveryNow;
+    const received: any[] = [];
+    client.onUserMessage((message) => received.push(message));
+
+    await expect((client as any).enqueueSessionUserMessage({
+      text: 'try the exact applied account',
+      localId: 'ready-to-try',
+      meta: { source: 'ui' },
+    })).resolves.toEqual({ providerAcceptancePending: true });
+
+    expect(checkUsageLimitRecoveryNow).not.toHaveBeenCalled();
+    expect(received).toHaveLength(1);
+    expect((client as any).getMetadataSnapshot().sessionUsageLimitRecoveryV1).toMatchObject({
+      status: 'paused',
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:ready-to-try',
+    });
+  });
+
+  it('fails closed when persisted blocking recovery has no provider decision control', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({
+      id: 's1',
+      metadata: {
+        ...createPlainSessionFixture({ id: 'metadata-seed' }).metadata,
+        sessionUsageLimitRecoveryV1: {
+          v: 1,
+          status: 'waiting',
+          issueFingerprint: 'usage-limit:claude:turn-1',
+          armedAtMs: 100,
+          resetAtMs: null,
+          nextCheckAtMs: 200,
+          attemptCount: 0,
+          maxAttempts: 3,
+          lastProbeError: null,
+          resumePromptMode: 'standard',
+          selectedAuth: { kind: 'native' },
+        },
+      },
+    }));
+    const received: any[] = [];
+    client.onUserMessage((message) => received.push(message));
+
+    await expect((client as any).enqueueSessionUserMessage({
+      text: 'fresh Claude prompt',
+      localId: 'request-missing-control',
+      meta: { source: 'ui' },
+    })).resolves.toEqual({
+      recoveryBlocked: {
+        status: 'unavailable',
+        errorCode: 'session_user_message_recovery_control_unavailable',
+      },
+    });
+
+    expect(received).toHaveLength(0);
+  });
+
   it('delivers fresh direct prompts while runtime activity projection is active', async () => {
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,
@@ -213,17 +880,18 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
 
     const session = createPlainSessionFixture({
       id: 's1',
+      runtimeActivityState: 'active',
       runtimeActivityActiveCount: 1,
       runtimeActivityObservedAt: Date.now(),
-      runtimeActivityExpiresAt: Date.now() + 60_000,
-      runtimeActivitySourceClass: 'provider_detached_task',
+      runtimeActivityRevision: 1,
     } as Parameters<typeof createPlainSessionFixture>[0] & {
+      runtimeActivityState: 'active';
       runtimeActivityActiveCount: number;
       runtimeActivityObservedAt: number;
-      runtimeActivityExpiresAt: number;
-      runtimeActivitySourceClass: 'provider_detached_task';
+      runtimeActivityRevision: number;
     });
     const client = new ApiSessionClient('tok', session);
+    await waitForCurrentPendingInputContract(client);
 
     const received: any[] = [];
     client.onUserMessage((msg) => received.push(msg));
@@ -236,7 +904,12 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
 
     expect(received).toHaveLength(1);
     expect(received[0]?.content?.text).toBe('fresh while background runtime is active');
-    expect(materializeNextPendingQueueV2MessageMock).not.toHaveBeenCalled();
+    expect(materializeNextPendingQueueV2MessageMock).toHaveBeenCalledTimes(1);
+    expect(materializeNextPendingQueueV2MessageMock).toHaveBeenCalledWith(expect.objectContaining({
+      token: 'tok',
+      sessionId: 's1',
+      deliveryStateOptIn: true,
+    }));
   });
 
   it('suppresses a transcript echo that arrives reentrantly during eager RPC prompt delivery', async () => {
@@ -247,6 +920,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
 
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    await waitForCurrentPendingInputContract(client);
 
     const received: any[] = [];
     let triggeredEcho = false;
@@ -291,25 +965,17 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     expect(received[0]?.localId).toBe('l1');
   });
 
-  it('refreshes echo suppression when the local user-message commit is acknowledged before a delayed transcript echo', async () => {
+  it('keeps echo suppression across a delayed transcript echo without a legacy socket commit acknowledgement', async () => {
     vi.useFakeTimers();
     try {
-      let resolveMessageAck: (() => void) | null = null;
       sessionSocketStub = createApiSessionSocketStub({
         connected: true,
-        emitWithAck: async (event) => {
-          if (event !== 'message') {
-            return { ok: true };
-          }
-          await new Promise<void>((resolve) => {
-            resolveMessageAck = resolve;
-          });
-          return { ok: true, id: 'm1', seq: 1, localId: 'l1' };
-        },
+        emitWithAckResult: { ok: true },
       });
       userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
 
       const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+      await waitForCurrentPendingInputContract(client);
 
       const received: any[] = [];
       client.onUserMessage((msg) => received.push(msg));
@@ -322,14 +988,8 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       expect(received).toHaveLength(1);
 
       await vi.advanceTimersByTimeAsync(8_000);
-      const releaseAck = ((release: (() => void) | null): (() => void) => {
-        if (typeof release !== 'function') {
-          throw new Error('expected delayed message ack to be pending');
-        }
-        return release;
-      })(resolveMessageAck);
-      releaseAck();
       await flushApiSessionClientMessageCommitQueue(client as any);
+      expect(sessionSocketStub.emitWithAck.mock.calls.some(([event]) => event === 'message')).toBe(false);
 
       sessionSocketStub.trigger('update', {
         id: 'u1',
@@ -360,63 +1020,6 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it('does not advance the delivered watermark from a transcript echo while provider acceptance owns delivery proof', async () => {
-    sessionSocketStub = createApiSessionSocketStub({
-      connected: true,
-      emitWithAck: async (event, payload) => {
-        if (event === 'update-metadata') {
-          return { result: 'success', version: 1, metadata: (payload as { metadata?: unknown })?.metadata };
-        }
-        return { ok: true, id: 'm1', seq: 1, localId: 'l1' };
-      },
-    });
-    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-
-    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
-    await enableProviderAcceptanceMode(client);
-    await waitForCondition(
-      () => client.getMetadataSnapshot()?.userMessageDeliveryWatermarkModeV1 === 'providerAcceptance',
-      { timeoutMs: 1_000, intervalMs: 5, label: 'provider acceptance watermark mode persistence' },
-    );
-
-    client.sendUserTextMessage('hello', {
-      localId: 'l1',
-      meta: { source: 'cli', sentFrom: 'cli' },
-    });
-
-    sessionSocketStub.trigger('update', {
-      id: 'u1',
-      createdAt: Date.now(),
-      body: {
-        t: 'new-message',
-        sid: 's1',
-        message: {
-          id: 'm1',
-          seq: 1,
-          content: {
-            t: 'plain',
-            v: {
-              role: 'user',
-              content: { type: 'text', text: 'hello' },
-              localId: 'l1',
-              meta: { source: 'cli', sentFrom: 'cli' },
-            },
-          },
-          localId: 'l1',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        },
-      },
-    });
-
-    expect(client.getMetadataSnapshot()?.deliveredUserMessageSeqV1).toBeUndefined();
-    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(false);
-
-    client.confirmUserMessageDeliveredToProvider(1);
-
-    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(true);
   });
 
   it('routes provider-acceptance RPC prompts through the server pending claim instead of committing a transcript row', async () => {
@@ -467,7 +1070,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       pendingBlockedCount: 0,
       pendingVersion: 1,
     }) as any);
-    await enableProviderAcceptanceMode(client);
+    await waitForCurrentPendingInputContract(client);
 
     const received: any[] = [];
     client.onUserMessage((msg) => received.push(msg));
@@ -515,7 +1118,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       pendingBlockedCount: 0,
       pendingVersion: 1,
     }));
-    await enableProviderAcceptanceMode(client);
+    await waitForCurrentPendingInputContract(client);
 
     const result = await client.rpcHandlerManager.invokeLocal(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND, {
       text: 'send now with durable custody',
@@ -548,7 +1151,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       pendingBlockedCount: 0,
       pendingVersion: 1,
     }));
-    await enableProviderAcceptanceMode(client);
+    await waitForCurrentPendingInputContract(client);
 
     (client as any).canonicalPendingDeliveryByLocalId.set('earlier-local', {
       mode: 'provider',
@@ -594,7 +1197,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       pendingBlockedCount: 0,
       pendingVersion: 1,
     }));
-    await enableProviderAcceptanceMode(client);
+    await waitForCurrentPendingInputContract(client);
 
     const received: any[] = [];
     client.onUserMessage((msg) => received.push(msg));
@@ -615,475 +1218,6 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     expect(received[0]?.localId).toBe('send-now-local');
   });
 
-  it('can defer the provider-accepted watermark without claiming pending delivery state', async () => {
-    const encryptionKey = new Uint8Array(32);
-    encryptionKey.fill(8);
-    let pendingContent: unknown = null;
-
-    sessionSocketStub = createApiSessionSocketStub({
-      connected: true,
-      emitWithAck: async (event, payload) => {
-        if (event === 'update-metadata') {
-          return { result: 'success', version: 1, metadata: (payload as { metadata?: unknown })?.metadata };
-        }
-        return { ok: true };
-      },
-    });
-    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-    enqueuePendingQueueV2MessageViaHttpMock.mockImplementationOnce(async (params: any) => {
-      const body = params?.body;
-      pendingContent = typeof body?.ciphertext === 'string'
-        ? { t: 'encrypted', c: body.ciphertext }
-        : body?.content ?? null;
-    });
-    materializeNextPendingQueueV2MessageMock.mockImplementationOnce(async () => ({
-      didMaterialize: true,
-      localId: 'l1',
-      didWrite: true,
-      pendingQueueState: { known: true, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 2 },
-      message: {
-        id: 'm1',
-        seq: 1,
-        localId: 'l1',
-        messageRole: 'user',
-        content: pendingContent,
-        createdAt: 1_000,
-        updatedAt: 1_000,
-      },
-    }));
-
-    const client = new ApiSessionClient('tok', createMockSession({
-      id: 's1',
-      encryptionMode: 'e2ee',
-      encryptionKey,
-      encryptionVariant: 'legacy',
-      pendingCount: 0,
-      pendingBlockedCount: 0,
-      pendingVersion: 1,
-    }) as any);
-    client.deferDeliveredUserMessageWatermarkToProviderAcceptance({
-      pendingMaterialization: 'commitAtMaterialize',
-    });
-    await waitForCondition(
-      () => (client as any).deliveredUserMessageWatermarkDeferredToProviderAcceptance === true,
-      { timeoutMs: 1_000, intervalMs: 5, label: 'provider acceptance watermark-only mode activation' },
-    );
-
-    const received: any[] = [];
-    client.onUserMessage((msg) => received.push(msg));
-
-    await (client as any).enqueueSessionUserMessage({
-      text: 'hello from provider-accepted commit path',
-      localId: 'l1',
-      meta: { source: 'ui', sentFrom: 'web' },
-    });
-    await flushApiSessionClientMessageCommitQueue(client as any);
-
-    expect(resolveCliFeatureDecisionForServerMock).not.toHaveBeenCalled();
-    expect(materializeNextPendingQueueV2MessageMock).toHaveBeenCalledWith(expect.objectContaining({
-      token: 'tok',
-      sessionId: 's1',
-      deliveryStateOptIn: false,
-    }));
-    expect(received).toHaveLength(1);
-    expect(received[0]?.localId).toBe('l1');
-    expect(received[0]?.content?.text).toBe('hello from provider-accepted commit path');
-    expect(client.getMetadataSnapshot()?.deliveredUserMessageSeqV1).toBeUndefined();
-
-    client.confirmUserMessageDeliveredToProvider(1);
-    await waitForCondition(
-      () => client.getMetadataSnapshot()?.deliveredUserMessageSeqV1 === 1,
-      { timeoutMs: 1_000, intervalMs: 5, label: 'provider accepted commit watermark persistence' },
-    );
-  });
-
-  it('keeps provider-acceptance RPC prompts durable when delivery-state claims are unsupported', async () => {
-    sessionSocketStub = createApiSessionSocketStub({
-      connected: true,
-      emitWithAckResult: { ok: true },
-    });
-    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-    resolveCliFeatureDecisionForServerMock.mockResolvedValueOnce({
-      decision: createPendingDeliveryStateFeatureDecision('unsupported'),
-    });
-    materializeNextPendingQueueV2MessageMock.mockResolvedValueOnce({
-      didMaterialize: true,
-      localId: 'unsupported-claim-local',
-      didWrite: true,
-      pendingQueueState: { known: true, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 2 },
-      message: {
-        id: 'm-unsupported-claim',
-        seq: 7,
-        localId: 'unsupported-claim-local',
-        messageRole: 'user',
-        content: {
-          t: 'plain',
-          v: {
-            role: 'user',
-            content: { type: 'text', text: 'durable unsupported claim fallback' },
-            meta: { source: 'ui', sentFrom: 'web' },
-          },
-        },
-        createdAt: 1_000,
-        updatedAt: 1_000,
-      },
-    });
-
-    const client = new ApiSessionClient('tok', createPlainSessionFixture({
-      id: 's1',
-      pendingCount: 0,
-      pendingBlockedCount: 0,
-      pendingVersion: 1,
-    }));
-    client.deferDeliveredUserMessageWatermarkToProviderAcceptance();
-
-    const received: any[] = [];
-    client.onUserMessage((msg) => received.push(msg));
-
-    await (client as any).enqueueSessionUserMessage({
-      text: 'durable unsupported claim fallback',
-      localId: 'unsupported-claim-local',
-      meta: { source: 'ui', sentFrom: 'web' },
-    });
-
-    expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledTimes(1);
-    expect(materializeNextPendingQueueV2MessageMock).toHaveBeenCalledWith(expect.objectContaining({
-      token: 'tok',
-      sessionId: 's1',
-      deliveryStateOptIn: false,
-    }));
-    expect(received).toHaveLength(1);
-    expect(received[0]?.localId).toBe('unsupported-claim-local');
-  });
-
-  it('delivers row-first unresolved daemon initial prompts through provider delivery instead of echo suppression', async () => {
-    const encryptionKey = new Uint8Array(32);
-    encryptionKey.fill(9);
-    const committedPayloads: unknown[] = [];
-    let pendingContent: unknown = null;
-    const localId = 'daemon-initial-prompt:s1';
-
-    sessionSocketStub = createApiSessionSocketStub({
-      connected: true,
-      emitWithAck: async (event, payload) => {
-        if (event === 'message') {
-          committedPayloads.push(payload);
-        }
-        return { ok: true };
-      },
-    });
-    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-    enqueuePendingQueueV2MessageViaHttpMock.mockImplementationOnce(async (params: any) => {
-      const body = params?.body;
-      pendingContent = typeof body?.ciphertext === 'string'
-        ? { t: 'encrypted', c: body.ciphertext }
-        : body?.content ?? null;
-    });
-    materializeNextPendingQueueV2MessageMock.mockImplementationOnce(async () => ({
-      didMaterialize: true,
-      localId,
-      didWrite: true,
-      pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 2 },
-      message: {
-        id: 'm-row-first-l1',
-        seq: 1,
-        localId,
-        messageRole: 'user',
-        content: pendingContent,
-        createdAt: 1_000,
-        updatedAt: 1_000,
-        deliveryState: { mode: 'provider', unresolved: true },
-      },
-    }));
-
-    const client = new ApiSessionClient('tok', createMockSession({
-      id: 's1',
-      encryptionMode: 'e2ee',
-      encryptionKey,
-      encryptionVariant: 'legacy',
-      pendingCount: 0,
-      pendingBlockedCount: 0,
-      pendingVersion: 1,
-    }) as any);
-    await enableProviderAcceptanceMode(client);
-
-    const received: any[] = [];
-    const receivedInfos: any[] = [];
-    client.onUserMessage((msg, info) => {
-      received.push(msg);
-      receivedInfos.push(info);
-    });
-
-    await (client as any).enqueueSessionUserMessage({
-      text: 'hello from row-first provider delivery',
-      localId,
-      meta: { source: 'daemon-initial-prompt', sentFrom: 'cli' },
-    });
-    await flushApiSessionClientMessageCommitQueue(client as any);
-
-    expect(materializeNextPendingQueueV2MessageMock).toHaveBeenCalledWith(expect.objectContaining({
-      token: 'tok',
-      sessionId: 's1',
-      deliveryStateOptIn: true,
-    }));
-    expect(received).toHaveLength(1);
-    expect(received[0]?.localId).toBe(localId);
-    expect(received[0]?.content?.text).toBe('hello from row-first provider delivery');
-    expect(receivedInfos[0]).toEqual({ seq: null, providerAcceptancePending: true });
-    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(false);
-    expect(committedPayloads).toHaveLength(0);
-  });
-
-  it('persists a deferred delivered watermark when provider acceptance resolves a prior echo seq by localId', async () => {
-    sessionSocketStub = createApiSessionSocketStub({
-      connected: true,
-      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
-    });
-    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-
-    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
-    await enableProviderAcceptanceMode(client);
-
-    sessionSocketStub.trigger('update', {
-      id: 'u1',
-      createdAt: Date.now(),
-      body: {
-        t: 'new-message',
-        sid: 's1',
-        message: {
-          id: 'm1',
-          seq: 1,
-          content: {
-            t: 'plain',
-            v: {
-              role: 'user',
-              content: { type: 'text', text: 'hello' },
-              localId: 'l1',
-              meta: { source: 'ui', sentFrom: 'ios' },
-            },
-          },
-          localId: 'l1',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        },
-      },
-    });
-
-    expect(client.getMetadataSnapshot()?.deliveredUserMessageSeqV1).toBeUndefined();
-    expect(client.hasUserMessageProviderAcceptance({ localIds: ['l1'] })).toBe(false);
-
-    client.confirmUserMessageDeliveredToProvider(null, { localIds: ['l1'] });
-
-    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(true);
-  });
-
-  it('persists a deferred delivered watermark when a committed echo arrives after provider acceptance by localId', async () => {
-    sessionSocketStub = createApiSessionSocketStub({
-      connected: true,
-      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
-    });
-    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-
-    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
-    await enableProviderAcceptanceMode(client);
-
-    client.confirmUserMessageDeliveredToProvider(null, { localIds: ['l1'] });
-
-    expect((client as any).highestDeliveredUserMessageSeq).toBeNull();
-
-    sessionSocketStub.trigger('update', {
-      id: 'u1',
-      createdAt: Date.now(),
-      body: {
-        t: 'new-message',
-        sid: 's1',
-        message: {
-          id: 'm1',
-          seq: 1,
-          content: {
-            t: 'plain',
-            v: {
-              role: 'user',
-              content: { type: 'text', text: 'hello' },
-              localId: 'l1',
-              meta: { source: 'ui', sentFrom: 'ios' },
-            },
-          },
-          localId: 'l1',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        },
-      },
-    });
-
-    expect((client as any).highestDeliveredUserMessageSeq).toBe(1);
-  });
-
-  it('persists a deferred delivered watermark when a commit ack arrives after provider acceptance by localId', async () => {
-    const commitAck = { resolve: null as ((value: unknown) => void) | null };
-    sessionSocketStub = createApiSessionSocketStub({
-      connected: true,
-      emitWithAck: async (event, payload) => {
-        if (event === 'update-metadata') {
-          return { result: 'success', version: 1, metadata: (payload as { metadata?: unknown })?.metadata };
-        }
-        if (event !== 'message') {
-          return { ok: true };
-        }
-        return new Promise((resolve) => {
-          commitAck.resolve = resolve;
-        }).then(() => ({
-          ok: true,
-          id: 'm1',
-          seq: 1,
-          localId: (payload as { localId?: string } | null)?.localId ?? 'l1',
-        }));
-      },
-    });
-    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-
-    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
-    await enableProviderAcceptanceMode(client);
-    await waitForCondition(
-      () => client.getMetadataSnapshot()?.userMessageDeliveryWatermarkModeV1 === 'providerAcceptance',
-      { timeoutMs: 1_000, intervalMs: 5, label: 'provider acceptance watermark mode persistence' },
-    );
-
-    client.sendUserTextMessage('hello', {
-      localId: 'l1',
-      meta: { source: 'cli', sentFrom: 'cli' },
-    });
-
-    client.confirmUserMessageDeliveredToProvider(null, { localIds: ['l1'] });
-    expect((client as any).highestDeliveredUserMessageSeq).toBeNull();
-
-    await vi.waitFor(() => {
-      expect(commitAck.resolve).toBeTypeOf('function');
-    });
-    const releaseCommitAck = commitAck.resolve;
-    if (typeof releaseCommitAck !== 'function') {
-      throw new Error('expected message commit to be waiting for ack');
-    }
-    releaseCommitAck(undefined);
-    await flushApiSessionClientMessageCommitQueue(client as any);
-
-    expect((client as any).highestDeliveredUserMessageSeq).toBe(1);
-  });
-
-  it('keeps waiting for uncommitted local ids when a mixed provider-accepted batch has a partial seq watermark', async () => {
-    const commitAck = { resolve: null as ((value: unknown) => void) | null };
-    sessionSocketStub = createApiSessionSocketStub({
-      connected: true,
-      emitWithAck: async (event, payload) => {
-        if (event !== 'message') {
-          return { ok: true };
-        }
-        return new Promise((resolve) => {
-          commitAck.resolve = resolve;
-        }).then(() => ({
-          ok: true,
-          id: 'm2',
-          seq: 2,
-          localId: (payload as { localId?: string } | null)?.localId ?? 'l2',
-        }));
-      },
-    });
-    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-
-    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
-    await enableProviderAcceptanceMode(client);
-
-    sessionSocketStub.trigger('update', {
-      id: 'u1',
-      createdAt: Date.now(),
-      body: {
-        t: 'new-message',
-        sid: 's1',
-        message: {
-          id: 'm1',
-          seq: 1,
-          content: {
-            t: 'plain',
-            v: {
-              role: 'user',
-              content: { type: 'text', text: 'first' },
-              localId: 'l1',
-              meta: { source: 'ui', sentFrom: 'ios' },
-            },
-          },
-          localId: 'l1',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        },
-      },
-    });
-
-    client.sendUserTextMessage('second', {
-      localId: 'l2',
-      meta: { source: 'cli', sentFrom: 'cli' },
-    });
-
-    await vi.waitFor(() => {
-      expect(commitAck.resolve).toBeTypeOf('function');
-    });
-
-    client.confirmUserMessageDeliveredToProvider(1, { localIds: ['l1', 'l2'] });
-    expect((client as any).highestDeliveredUserMessageSeq).toBe(1);
-
-    const releaseCommitAck = commitAck.resolve;
-    if (typeof releaseCommitAck !== 'function') {
-      throw new Error('expected message commit to be waiting for ack');
-    }
-    releaseCommitAck(undefined);
-    await flushApiSessionClientMessageCommitQueue(client as any);
-
-    expect((client as any).highestDeliveredUserMessageSeq).toBe(2);
-  });
-
-  it('does not advance the delivered watermark from a self echo while provider acceptance owns delivery proof', async () => {
-    sessionSocketStub = createApiSessionSocketStub({
-      connected: true,
-      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'cli-1' },
-    });
-    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-
-    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
-    await enableProviderAcceptanceMode(client);
-    (client as any).markCommittedLocalIdAwaitingEcho('cli-1');
-
-    sessionSocketStub.trigger('update', {
-      id: 'u1',
-      createdAt: Date.now(),
-      body: {
-        t: 'new-message',
-        sid: 's1',
-        message: {
-          id: 'm1',
-          seq: 1,
-          content: {
-            t: 'plain',
-            v: {
-              role: 'user',
-              content: { type: 'text', text: 'typed from cli' },
-              localId: 'cli-1',
-              meta: { source: 'cli', sentFrom: 'cli' },
-            },
-          },
-          localId: 'cli-1',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        },
-      },
-    });
-
-    expect(client.getMetadataSnapshot()?.deliveredUserMessageSeqV1).toBeUndefined();
-    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(false);
-
-    client.confirmUserMessageDeliveredToProvider(1);
-
-    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(true);
-  });
-
   it('does not wait for daemon lifecycle notification before delivering the prompt', async () => {
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,
@@ -1092,6 +1226,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
 
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    await waitForCurrentPendingInputContract(client);
     const received: any[] = [];
     const slowLifecycleNotify = vi.fn(() => new Promise<void>(() => {}));
 
@@ -1135,6 +1270,15 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
         meta: { source: 'ui', sentFrom: 'ios' },
       });
 
+      // Fresh prompts now cross the mandatory recovery-decision boundary before lifecycle
+      // notification. Let that decision's promise settle while keeping the notification blocked.
+      await waitForCondition(
+        () => slowLifecycleNotify.mock.calls.length === 1,
+        {
+          timeoutMs: 1_000,
+          label: 'fresh-prompt recovery decision to reach daemon lifecycle notification',
+        },
+      );
       expect(slowLifecycleNotify).toHaveBeenCalledWith('prompt_or_steer');
       expect(received).toHaveLength(0);
 
@@ -1187,8 +1331,8 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
 
     expect(received).toHaveLength(1);
     expect(received[0]?.content?.text).toBe('hello');
-    expect(committedPayloads).toHaveLength(2);
-    expect(committedPayloads.map((payload) => payload?.localId)).toEqual(['l1', 'l1']);
+    expect(enqueuePendingQueueV2MessageViaHttpMock.mock.calls.map(([request]) => request?.body?.localId)).toEqual(['l1', 'l1']);
+    expect(committedPayloads).toHaveLength(0);
   });
 
   it('does not deliver a buffered transcript echo and buffered RPC prompt with the same body localId', async () => {
@@ -1199,6 +1343,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
 
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    await waitForCurrentPendingInputContract(client);
 
     sessionSocketStub.trigger('update', {
       id: 'u1',
@@ -1245,6 +1390,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
 
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    await waitForCurrentPendingInputContract(client);
 
     await (client as any).enqueueSessionUserMessage({
       text: 'hello',
@@ -1291,6 +1437,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
 
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    await waitForCurrentPendingInputContract(client);
 
     const received: any[] = [];
     client.onUserMessage((msg) => received.push(msg));
@@ -1324,21 +1471,14 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
   });
 
   it('defaults session.userMessage.send meta source/sentFrom to ui when missing', async () => {
-    let lastMessagePayload: any = null;
-
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,
       emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
-      emitWithAck: async (event, payload) => {
-        if (event === 'message') {
-          lastMessagePayload = payload;
-        }
-        return { ok: true, id: 'm1', seq: 1, localId: 'l1' };
-      },
     });
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
 
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    await waitForCurrentPendingInputContract(client);
 
     const received: any[] = [];
     client.onUserMessage((msg) => received.push(msg));
@@ -1351,11 +1491,26 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
 
     await flushApiSessionClientMessageCommitQueue(client as any);
 
-    expect(lastMessagePayload?.sid).toBe('s1');
-    expect(lastMessagePayload?.localId).toBe('l1');
-    expect(lastMessagePayload?.message?.t).toBe('plain');
-    expect(lastMessagePayload?.message?.v?.meta?.source).toBe('ui');
-    expect(lastMessagePayload?.message?.v?.meta?.sentFrom).toBe('ui');
+    const enqueueRequest = enqueuePendingQueueV2MessageViaHttpMock.mock.calls[0]?.[0] as Readonly<{
+      sessionId: string;
+      body: Readonly<{
+        localId: string;
+        content: {
+          t: 'plain';
+          v: { meta?: Readonly<{ source?: string; sentFrom?: string }> };
+        };
+      }>;
+    }>;
+    expect(enqueueRequest).toEqual(expect.objectContaining({
+      sessionId: 's1',
+      body: expect.objectContaining({ localId: 'l1' }),
+    }));
+    expect(enqueueRequest.body.content.t).toBe('plain');
+    expect(enqueueRequest.body.content.v.meta).toEqual(expect.objectContaining({
+      source: 'ui',
+      sentFrom: 'ui',
+    }));
+    expect(sessionSocketStub.emitWithAck.mock.calls.some(([event]) => event === 'message')).toBe(false);
 
     sessionSocketStub.trigger('update', {
       id: 'u1',
@@ -1366,7 +1521,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
         message: {
           id: 'm1',
           seq: 1,
-          content: lastMessagePayload.message,
+          content: enqueueRequest.body.content,
           localId: 'l1',
           createdAt: Date.now(),
           updatedAt: Date.now(),

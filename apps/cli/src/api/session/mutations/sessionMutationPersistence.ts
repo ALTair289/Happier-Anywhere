@@ -1,22 +1,28 @@
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { readFile, unlink } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
 
 import {
     SessionMessageRoleSchema,
+    SessionRuntimeActivitySnapshotSchema,
     SessionStoredMessageContentSchema,
     SessionTurnMutationV1Schema,
+    ExactSessionTurnEndMutationV1Schema,
 } from '@happier-dev/protocol';
 
-import { configuration } from '@/configuration';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
+import { writeJsonAtomic } from '@/utils/fs/writeJsonAtomic';
 
 import type {
     QueuedSessionMutation,
-    SessionEndMutationV1,
     SessionTurnMutationV1,
-    TranscriptMessageAppendMutationV1,
+    PersistedTranscriptMessageAppendMutationV1,
+    RuntimeActivitySnapshotMutationV1,
 } from './sessionMutationTypes';
-import { resolveTranscriptMessageAppendMutationId } from './sessionMutationTypes';
+import {
+    resolveRuntimeActivitySnapshotMutationId,
+    resolveTranscriptMessageAppendMutationId,
+} from './sessionMutationTypes';
 import { isAuthoritativeSessionMutation, isAuthoritativeSessionMutationKind } from './sessionMutationDurabilityPolicy';
 
 type SessionMutationOutboxFileV1 = Readonly<{
@@ -36,9 +42,13 @@ export type SessionMutationDeadLetterEntry = Readonly<{
     dependencyMutationId?: string;
     diagnostic?: Record<string, unknown>;
     payloadSummary?: Record<string, unknown>;
+    /** Byte/content-preserving recovery custody; never used as a live mutation without re-admission. */
+    recoveryPayload?: unknown;
     queuedMutation?: QueuedSessionMutation;
     recoveryAttemptedAt?: number;
 }>;
+
+const daemonQuarantineEvidenceFingerprints = new WeakMap<SessionMutationDeadLetterEntry, string>();
 
 type SessionMutationDeadLetterFileV1 = Readonly<{
     v: 1;
@@ -49,29 +59,84 @@ export type QueuedMutationParseResult =
     | Readonly<{ ok: true; mutation: QueuedSessionMutation }>
     | Readonly<{ ok: false; deadLetter: SessionMutationDeadLetterEntry }>;
 
+export type SessionMutationJournalCustody = 'runtime' | 'daemon-terminal';
+
+export type SessionMutationJournalPaths = Readonly<{
+    queuePath: string;
+    deadLetterPath: string;
+}>;
+
+export type SessionMutationJournalAdmission = (
+    value: unknown,
+    expectedSessionId: string,
+) => QueuedMutationParseResult;
+
+export type SessionMutationPersistenceContext = Readonly<{
+    custody: SessionMutationJournalCustody;
+    sessionId: string;
+    paths: SessionMutationJournalPaths;
+    parseQueuedMutation: SessionMutationJournalAdmission;
+}>;
+
+export function createSessionMutationPersistenceContext(params: Readonly<{
+    activeServerDir: string;
+    custody: SessionMutationJournalCustody;
+    sessionId: string;
+    parseQueuedMutation: SessionMutationJournalAdmission;
+}>): SessionMutationPersistenceContext {
+    return {
+        custody: params.custody,
+        sessionId: params.sessionId,
+        paths: resolveSessionMutationJournalPaths(params),
+        parseQueuedMutation: params.parseQueuedMutation,
+    };
+}
+
 function sanitizeSessionIdForFileName(sessionId: string): string {
     const sanitized = String(sessionId).replace(/[^a-zA-Z0-9_.-]/g, '_');
-    return sanitized || 'unknown-session';
+    if (!sanitized || sanitized !== sessionId) {
+        throw new Error('Session id cannot be represented losslessly in a mutation journal filename');
+    }
+    return sanitized;
 }
 
-export function resolveSessionMutationOutboxPath(sessionId: string): string {
-    return join(
-        configuration.activeServerDir,
-        'session-mutations',
-        `session-${sanitizeSessionIdForFileName(sessionId)}.json`,
-    );
-}
-
-export function resolveSessionMutationDeadLetterPath(sessionId: string): string {
-    return join(
-        configuration.activeServerDir,
-        'session-mutations',
-        `session-${sanitizeSessionIdForFileName(sessionId)}.dead-letter.json`,
-    );
+export function resolveSessionMutationJournalPaths(params: Readonly<{
+    activeServerDir: string;
+    sessionId: string;
+    custody: SessionMutationJournalCustody;
+}>): SessionMutationJournalPaths {
+    const safeSessionId = sanitizeSessionIdForFileName(params.sessionId);
+    const baseName = params.custody === 'daemon-terminal'
+        ? `session-${safeSessionId}.daemon-terminal`
+        : `session-${safeSessionId}`;
+    return {
+        queuePath: join(params.activeServerDir, 'session-mutations', `${baseName}.json`),
+        deadLetterPath: join(params.activeServerDir, 'session-mutations', `${baseName}.dead-letter.json`),
+    };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeEvidenceValue(value: unknown): unknown {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
+    if (Array.isArray(value)) return value.map(normalizeEvidenceValue);
+    if (isRecord(value)) {
+        return Object.fromEntries(
+            Object.keys(value)
+                .sort()
+                .map((key) => [key, normalizeEvidenceValue(value[key])]),
+        );
+    }
+    return String(value);
+}
+
+function createEvidenceFingerprint(value: unknown): string {
+    return createHash('sha256')
+        .update(JSON.stringify(normalizeEvidenceValue(value)))
+        .digest('hex');
 }
 
 function summarizePayload(value: unknown): Record<string, unknown> | undefined {
@@ -107,7 +172,7 @@ function createDeadLetterEntry(params: Readonly<{
     queuedMutation?: QueuedSessionMutation;
     recoveryAttemptedAt?: number;
 }>): SessionMutationDeadLetterEntry {
-    return {
+    const entry: SessionMutationDeadLetterEntry = {
         v: 1,
         kind: params.kind,
         sessionId: params.sessionId,
@@ -119,9 +184,14 @@ function createDeadLetterEntry(params: Readonly<{
         ...(params.dependencyMutationId ? { dependencyMutationId: params.dependencyMutationId } : {}),
         ...(params.diagnostic ? { diagnostic: params.diagnostic } : {}),
         ...(params.payload !== undefined ? { payloadSummary: summarizePayload(params.payload) } : {}),
+        ...(params.payload !== undefined ? { recoveryPayload: params.payload } : {}),
         ...(params.queuedMutation ? { queuedMutation: params.queuedMutation } : {}),
         ...(typeof params.recoveryAttemptedAt === 'number' ? { recoveryAttemptedAt: params.recoveryAttemptedAt } : {}),
     };
+    if (params.payload !== undefined) {
+        daemonQuarantineEvidenceFingerprints.set(entry, createEvidenceFingerprint(params.payload));
+    }
+    return entry;
 }
 
 function parseSessionTurnPayload(value: unknown): Readonly<{
@@ -140,26 +210,9 @@ function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: ReadonlySet<st
     return Object.keys(value).every((key) => allowedKeys.has(key));
 }
 
-function parseSessionEndPayload(value: unknown): SessionEndMutationV1 | null {
+function parseTranscriptMessageAppendPayload(value: unknown): PersistedTranscriptMessageAppendMutationV1 | null {
     if (!isRecord(value)) return null;
-    const allowedKeys = new Set(['v', 'source', 'sessionId', 'mutationId', 'observedAt', 'exit']);
-    if (
-        !hasOnlyKeys(value, allowedKeys)
-        || value.v !== 1
-        || value.source !== 'session_end'
-        || typeof value.sessionId !== 'string'
-        || typeof value.mutationId !== 'string'
-        || typeof value.observedAt !== 'number'
-        || !Number.isFinite(value.observedAt)
-        || value.observedAt < 0
-    ) {
-        return null;
-    }
-    return value as unknown as SessionEndMutationV1;
-}
-
-function parseTranscriptMessageAppendPayload(value: unknown): TranscriptMessageAppendMutationV1 | null {
-    if (!isRecord(value)) return null;
+    const localId = readNonBlankOpaqueIdentifier(value.localId);
     const allowedKeys = new Set([
         'v',
         'source',
@@ -171,6 +224,7 @@ function parseTranscriptMessageAppendPayload(value: unknown): TranscriptMessageA
         'content',
         'createdAt',
         'updatedAt',
+        'provenance',
         'sessionEventType',
     ]);
     if (
@@ -179,8 +233,7 @@ function parseTranscriptMessageAppendPayload(value: unknown): TranscriptMessageA
         || value.source !== 'transcript_message_append'
         || typeof value.sessionId !== 'string'
         || typeof value.mutationId !== 'string'
-        || typeof value.localId !== 'string'
-        || value.localId.trim().length === 0
+        || localId === null
         || typeof value.createdAt !== 'number'
         || !Number.isFinite(value.createdAt)
         || value.createdAt < 0
@@ -200,11 +253,34 @@ function parseTranscriptMessageAppendPayload(value: unknown): TranscriptMessageA
     }
     if (value.mutationId !== resolveTranscriptMessageAppendMutationId({
         sessionId: value.sessionId,
-        localId: value.localId,
+        localId,
     })) {
         return null;
     }
-    return value as unknown as TranscriptMessageAppendMutationV1;
+    return value as unknown as PersistedTranscriptMessageAppendMutationV1;
+}
+
+function parseRuntimeActivitySnapshotPayload(value: unknown): RuntimeActivitySnapshotMutationV1 | null {
+    if (!isRecord(value)) return null;
+    const allowedKeys = new Set(['v', 'source', 'sessionId', 'mutationId', 'snapshot']);
+    if (
+        !hasOnlyKeys(value, allowedKeys)
+        || value.v !== 1
+        || value.source !== 'runtime_activity_snapshot'
+        || typeof value.sessionId !== 'string'
+        || typeof value.mutationId !== 'string'
+    ) {
+        return null;
+    }
+    const snapshot = SessionRuntimeActivitySnapshotSchema.safeParse(value.snapshot);
+    if (!snapshot.success) return null;
+    return {
+        v: 1,
+        source: 'runtime_activity_snapshot',
+        sessionId: value.sessionId,
+        mutationId: value.mutationId,
+        snapshot: snapshot.data,
+    };
 }
 
 export function parseQueuedSessionMutation(value: unknown, sessionId: string): QueuedMutationParseResult {
@@ -227,6 +303,16 @@ export function parseQueuedSessionMutation(value: unknown, sessionId: string): Q
         && value.intentOrder > 0
         ? value.intentOrder
         : null;
+    const admissionOrder = typeof value.admissionOrder === 'number'
+        && Number.isSafeInteger(value.admissionOrder)
+        && value.admissionOrder > 0
+        ? value.admissionOrder
+        : null;
+    const unknownGuardSegment = typeof value.unknownGuardSegment === 'number'
+        && Number.isSafeInteger(value.unknownGuardSegment)
+        && value.unknownGuardSegment >= 0
+        ? value.unknownGuardSegment
+        : null;
     const mutationId = typeof value.mutationId === 'string' ? value.mutationId : undefined;
     if (value.kind === 'session_turn') {
         const parsedPayload = parseSessionTurnPayload(value.payload);
@@ -245,28 +331,17 @@ export function parseQueuedSessionMutation(value: unknown, sessionId: string): Q
                 }),
             };
         }
-        return {
-            ok: true,
-            mutation: {
-                kind: 'session_turn',
-                mutationId: parsedPayload.payload.mutationId,
-                payload: parsedPayload.payload,
-                createdAt,
-                attempts,
-                nextAttemptAt,
-            },
-        };
-    }
-    if (value.kind === 'session_end') {
-        const payload = parseSessionEndPayload(value.payload);
-        if (!payload) {
+        if (
+            parsedPayload.payload.action === 'end_session'
+            && (typeof parsedPayload.payload.turnId !== 'string' || parsedPayload.payload.turnId.length === 0)
+        ) {
             return {
                 ok: false,
                 deadLetter: createDeadLetterEntry({
                     sessionId,
-                    kind: 'session_end',
-                    reason: 'invalid_session_end_payload',
-                    mutationId,
+                    kind: 'session_turn',
+                    reason: 'broad_session_end_requires_exact_turn',
+                    mutationId: parsedPayload.payload.mutationId,
                     attempts,
                     createdAt,
                     payload: value.payload,
@@ -276,9 +351,9 @@ export function parseQueuedSessionMutation(value: unknown, sessionId: string): Q
         return {
             ok: true,
             mutation: {
-                kind: 'session_end',
-                mutationId: payload.mutationId,
-                payload,
+                kind: 'session_turn',
+                mutationId: parsedPayload.payload.mutationId,
+                payload: parsedPayload.payload,
                 createdAt,
                 attempts,
                 nextAttemptAt,
@@ -314,6 +389,42 @@ export function parseQueuedSessionMutation(value: unknown, sessionId: string): Q
             },
         };
     }
+    if (value.kind === 'runtime_activity_snapshot') {
+        const payload = parseRuntimeActivitySnapshotPayload(value.payload);
+        const expectedMutationId = resolveRuntimeActivitySnapshotMutationId(sessionId);
+        if (
+            !payload
+            || payload.sessionId !== sessionId
+            || payload.mutationId !== expectedMutationId
+            || mutationId !== expectedMutationId
+            || admissionOrder === null
+        ) {
+            return {
+                ok: false,
+                deadLetter: createDeadLetterEntry({
+                    sessionId,
+                    kind: 'runtime_activity_snapshot',
+                    reason: 'invalid_runtime_activity_snapshot_payload',
+                    mutationId,
+                    attempts,
+                    createdAt,
+                    payload: value.payload,
+                }),
+            };
+        }
+        return {
+            ok: true,
+            mutation: {
+                kind: 'runtime_activity_snapshot',
+                mutationId: expectedMutationId,
+                payload,
+                admissionOrder,
+                createdAt,
+                attempts,
+                nextAttemptAt,
+            },
+        };
+    }
     return {
         ok: false,
         deadLetter: createDeadLetterEntry({
@@ -328,12 +439,50 @@ export function parseQueuedSessionMutation(value: unknown, sessionId: string): Q
     };
 }
 
-export async function loadSessionMutationOutbox(sessionId: string): Promise<QueuedSessionMutation[]> {
-    const filePath = resolveSessionMutationOutboxPath(sessionId);
+export function parseDaemonTerminalQueuedSessionMutation(
+    value: unknown,
+    expectedSessionId: string,
+): QueuedMutationParseResult {
+    const broad = parseQueuedSessionMutation(value, expectedSessionId);
+    if (!broad.ok) return broad;
+    const rawMutationId = isRecord(value) && typeof value.mutationId === 'string' ? value.mutationId : undefined;
+    const exact = broad.mutation.kind === 'session_turn'
+        ? ExactSessionTurnEndMutationV1Schema.safeParse(broad.mutation.payload)
+        : null;
+    if (
+        !exact?.success
+        || exact.data.sessionId !== expectedSessionId
+        || rawMutationId !== exact.data.mutationId
+        || broad.mutation.mutationId !== exact.data.mutationId
+    ) {
+        return {
+            ok: false,
+            deadLetter: createDeadLetterEntry({
+                sessionId: expectedSessionId,
+                kind: broad.mutation.kind,
+                reason: 'invalid_daemon_terminal_mutation',
+                mutationId: rawMutationId,
+                attempts: broad.mutation.attempts,
+                createdAt: broad.mutation.createdAt,
+                payload: isRecord(value) ? value.payload : value,
+            }),
+        };
+    }
+    return broad;
+}
+
+export async function loadSessionMutationOutbox(
+    context: SessionMutationPersistenceContext,
+    onQuarantined?: (count: number) => void,
+): Promise<QueuedSessionMutation[]> {
+    const { sessionId } = context;
+    const filePath = context.paths.queuePath;
+    let fileContents: string | undefined;
     try {
-        const parsed = JSON.parse(await readFile(filePath, 'utf8')) as unknown;
+        fileContents = await readFile(filePath, 'utf8');
+        const parsed = JSON.parse(fileContents) as unknown;
         if (!isRecord(parsed) || parsed.v !== 1 || !Array.isArray(parsed.mutations)) {
-            await appendSessionMutationDeadLetters(sessionId, [
+            await appendSessionMutationQuarantine(context, [
                 createDeadLetterEntry({
                     sessionId,
                     kind: 'outbox_file',
@@ -341,12 +490,13 @@ export async function loadSessionMutationOutbox(sessionId: string): Promise<Queu
                     payload: parsed,
                 }),
             ]);
+            onQuarantined?.(1);
             return [];
         }
         const mutations: QueuedSessionMutation[] = [];
         const deadLetters: SessionMutationDeadLetterEntry[] = [];
         for (const rawMutation of parsed.mutations) {
-            const parsedMutation = parseQueuedSessionMutation(rawMutation, sessionId);
+            const parsedMutation = context.parseQueuedMutation(rawMutation, sessionId);
             if (parsedMutation.ok) {
                 mutations.push(parsedMutation.mutation);
             } else {
@@ -354,13 +504,14 @@ export async function loadSessionMutationOutbox(sessionId: string): Promise<Queu
             }
         }
         if (deadLetters.length > 0) {
-            await appendSessionMutationDeadLetters(sessionId, deadLetters);
+            await appendSessionMutationQuarantine(context, deadLetters);
+            onQuarantined?.(deadLetters.length);
         }
         return mutations;
     } catch (error) {
         const err = error as NodeJS.ErrnoException;
         if (err?.code !== 'ENOENT') {
-            await appendSessionMutationDeadLetters(sessionId, [
+            await appendSessionMutationQuarantine(context, [
                 createDeadLetterEntry({
                     sessionId,
                     kind: 'outbox_file',
@@ -368,38 +519,12 @@ export async function loadSessionMutationOutbox(sessionId: string): Promise<Queu
                     diagnostic: {
                         errorName: error instanceof Error ? error.name : 'unknown',
                     },
+                    payload: fileContents,
                 }),
             ]);
+            onQuarantined?.(1);
         }
         return [];
-    }
-}
-
-async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
-    await mkdir(dirname(filePath), { recursive: true });
-    const tmpPath = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
-    try {
-        await writeFile(tmpPath, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
-        if (process.platform !== 'win32') {
-            await chmod(tmpPath, 0o600).catch(() => {});
-        }
-        try {
-            await rename(tmpPath, filePath);
-        } catch (error) {
-            const err = error as NodeJS.ErrnoException;
-            if (err?.code !== 'EEXIST' && err?.code !== 'EPERM') throw error;
-            await unlink(filePath).catch((unlinkError) => {
-                const unlinkErr = unlinkError as NodeJS.ErrnoException;
-                if (unlinkErr?.code !== 'ENOENT') throw unlinkError;
-            });
-            await rename(tmpPath, filePath);
-        }
-        if (process.platform !== 'win32') {
-            await chmod(filePath, 0o600).catch(() => {});
-        }
-    } catch (error) {
-        await unlink(tmpPath).catch(() => {});
-        throw error;
     }
 }
 
@@ -414,21 +539,88 @@ async function loadDeadLetterFile(filePath: string): Promise<SessionMutationDead
 }
 
 export async function appendSessionMutationDeadLetters(
-    sessionId: string,
+    context: SessionMutationPersistenceContext,
     entries: readonly SessionMutationDeadLetterEntry[],
 ): Promise<void> {
+    await appendSessionMutationDeadLettersWithPolicy(context, entries, false);
+}
+
+function stableDeadLetterIdentity(entry: SessionMutationDeadLetterEntry): string {
+    const payloadSummaryEntries = entry.payloadSummary
+        ? Object.entries(entry.payloadSummary).filter(([key]) => key !== 'fingerprint')
+        : [];
+    const payloadSummary = payloadSummaryEntries.length > 0
+        ? Object.fromEntries(payloadSummaryEntries)
+        : null;
+    const evidenceFingerprint = daemonQuarantineEvidenceFingerprints.get(entry)
+        ?? (typeof entry.payloadSummary?.fingerprint === 'string' ? entry.payloadSummary.fingerprint : null);
+    return JSON.stringify(normalizeEvidenceValue({
+        kind: entry.kind,
+        sessionId: entry.sessionId,
+        mutationId: entry.mutationId ?? null,
+        reason: entry.reason,
+        dependencyMutationId: entry.dependencyMutationId ?? null,
+        diagnostic: entry.diagnostic ?? null,
+        payloadSummary,
+        evidenceFingerprint,
+        queuedMutation: entry.queuedMutation ?? null,
+    }));
+}
+
+function prepareDaemonQuarantineEntryForPersistence(
+    entry: SessionMutationDeadLetterEntry,
+): SessionMutationDeadLetterEntry {
+    const evidenceFingerprint = daemonQuarantineEvidenceFingerprints.get(entry);
+    if (!evidenceFingerprint) return entry;
+    return {
+        ...entry,
+        payloadSummary: {
+            ...(entry.payloadSummary ?? {}),
+            fingerprint: evidenceFingerprint,
+        },
+    };
+}
+
+async function appendSessionMutationQuarantine(
+    context: SessionMutationPersistenceContext,
+    entries: readonly SessionMutationDeadLetterEntry[],
+): Promise<void> {
+    await appendSessionMutationDeadLettersWithPolicy(context, entries, context.custody === 'daemon-terminal');
+}
+
+async function appendSessionMutationDeadLettersWithPolicy(
+    context: SessionMutationPersistenceContext,
+    entries: readonly SessionMutationDeadLetterEntry[],
+    dedupeStableDaemonQuarantine: boolean,
+): Promise<void> {
     if (entries.length === 0) return;
-    const filePath = resolveSessionMutationDeadLetterPath(sessionId);
+    const filePath = context.paths.deadLetterPath;
     const existing = await loadDeadLetterFile(filePath);
+    const boundedEntries = dedupeStableDaemonQuarantine
+        ? entries.filter((entry, index) => {
+            const key = stableDeadLetterIdentity(entry);
+            const alreadyPersisted = existing.some((candidate) => stableDeadLetterIdentity(candidate) === key);
+            if (alreadyPersisted) return false;
+            return entries.findIndex((candidate) => stableDeadLetterIdentity(candidate) === key) === index;
+        })
+        : entries;
+    if (boundedEntries.length === 0) return;
     await writeJsonAtomic(filePath, {
         v: 1,
-        entries: [...existing, ...entries],
+        entries: [
+            ...existing,
+            ...boundedEntries.map((entry) => (
+                dedupeStableDaemonQuarantine
+                    ? prepareDaemonQuarantineEntryForPersistence(entry)
+                    : entry
+            )),
+        ],
     } satisfies SessionMutationDeadLetterFileV1);
 }
 
 function readRecoverableQueuedMutation(
     entry: SessionMutationDeadLetterEntry,
-    sessionId: string,
+    context: SessionMutationPersistenceContext,
 ): QueuedSessionMutation | null {
     if (!isAuthoritativeSessionMutationKind(entry.kind as QueuedSessionMutation['kind'])) return null;
     if (typeof entry.recoveryAttemptedAt === 'number') return null;
@@ -443,10 +635,10 @@ function readRecoverableQueuedMutation(
                 attempts: entry.attempts,
                 nextAttemptAt: 0,
             }
-            : readQueuedMutationFromPayloadSummary(entry, sessionId)
+            : readQueuedMutationFromPayloadSummary(entry, context.sessionId)
     );
     if (!rawQueuedMutation) return null;
-    const parsed = parseQueuedSessionMutation(rawQueuedMutation, sessionId);
+    const parsed = context.parseQueuedMutation(rawQueuedMutation, context.sessionId);
     if (!parsed.ok || !isAuthoritativeSessionMutation(parsed.mutation)) return null;
     return {
         ...parsed.mutation,
@@ -481,12 +673,7 @@ function readQueuedMutationFromPayloadSummary(
         const turnId = typeof summary.turnId === 'string' && summary.turnId.trim().length > 0
             ? summary.turnId
             : null;
-        const action = turnId || summary.action === 'end_session'
-            ? summary.action
-            : summary.action === 'complete' || summary.action === 'fail' || summary.action === 'cancel'
-                ? 'end_session'
-                : null;
-        if (!action) return null;
+        if (!turnId) return null;
         return {
             kind: 'session_turn',
             mutationId,
@@ -494,27 +681,10 @@ function readQueuedMutationFromPayloadSummary(
                 v: 1,
                 sessionId: recoveredSessionId,
                 mutationId,
-                action,
-                ...(turnId ? { turnId } : {}),
+                action: summary.action,
+                turnId,
                 ...(typeof summary.provider === 'string' && summary.provider.trim().length > 0 ? { provider: summary.provider } : {}),
                 ...(typeof summary.providerTurnId === 'string' && summary.providerTurnId.trim().length > 0 ? { providerTurnId: summary.providerTurnId } : {}),
-                observedAt: createdAt,
-            },
-            createdAt,
-            attempts,
-            nextAttemptAt: 0,
-        } as QueuedSessionMutation;
-    }
-
-    if (entry.kind === 'session_end') {
-        return {
-            kind: 'session_end',
-            mutationId,
-            payload: {
-                v: 1,
-                sessionId: recoveredSessionId,
-                mutationId,
-                source: 'session_end',
                 observedAt: createdAt,
             },
             createdAt,
@@ -527,34 +697,51 @@ function readQueuedMutationFromPayloadSummary(
 }
 
 export async function recoverAuthoritativeSessionMutationDeadLetters(
-    sessionId: string,
+    context: SessionMutationPersistenceContext,
+    persistRecovered: (mutations: readonly QueuedSessionMutation[]) => Promise<void>,
     limit = 100,
 ): Promise<QueuedSessionMutation[]> {
-    const filePath = resolveSessionMutationDeadLetterPath(sessionId);
+    const { sessionId } = context;
+    const filePath = context.paths.deadLetterPath;
     const existing = await loadDeadLetterFile(filePath);
     if (existing.length === 0) return [];
 
     const recovered: QueuedSessionMutation[] = [];
-    let didMark = false;
-    const now = Date.now();
-    const updated = existing.map((entry) => {
-        if (recovered.length >= limit) return entry;
-        const queuedMutation = readRecoverableQueuedMutation(entry, sessionId);
-        if (!queuedMutation) return entry;
+    const selectedEntries: SessionMutationDeadLetterEntry[] = [];
+    for (const entry of existing) {
+        if (recovered.length >= limit) break;
+        const queuedMutation = readRecoverableQueuedMutation(entry, context);
+        if (!queuedMutation) continue;
         recovered.push(queuedMutation);
-        didMark = true;
+        selectedEntries.push(entry);
+    }
+
+    if (recovered.length === 0) return [];
+
+    await persistRecovered(recovered);
+
+    const selectedIdentityCounts = new Map<string, number>();
+    for (const entry of selectedEntries) {
+        const identity = stableDeadLetterIdentity(entry);
+        selectedIdentityCounts.set(identity, (selectedIdentityCounts.get(identity) ?? 0) + 1);
+    }
+    const now = Date.now();
+    const current = await loadDeadLetterFile(filePath);
+    const updated = current.map((entry) => {
+        if (typeof entry.recoveryAttemptedAt === 'number') return entry;
+        const identity = stableDeadLetterIdentity(entry);
+        const remaining = selectedIdentityCounts.get(identity) ?? 0;
+        if (remaining === 0) return entry;
+        selectedIdentityCounts.set(identity, remaining - 1);
         return {
             ...entry,
             recoveryAttemptedAt: now,
         } satisfies SessionMutationDeadLetterEntry;
     });
-
-    if (didMark) {
-        await writeJsonAtomic(filePath, {
-            v: 1,
-            entries: updated,
-        } satisfies SessionMutationDeadLetterFileV1);
-    }
+    await writeJsonAtomic(filePath, {
+        v: 1,
+        entries: updated,
+    } satisfies SessionMutationDeadLetterFileV1);
     return recovered;
 }
 
@@ -579,8 +766,11 @@ export function createSessionMutationDeadLetterEntry(params: Readonly<{
     });
 }
 
-export async function saveSessionMutationOutbox(sessionId: string, mutations: readonly QueuedSessionMutation[]): Promise<void> {
-    const filePath = resolveSessionMutationOutboxPath(sessionId);
+export async function saveSessionMutationOutbox(
+    context: SessionMutationPersistenceContext,
+    mutations: readonly QueuedSessionMutation[],
+): Promise<void> {
+    const filePath = context.paths.queuePath;
     if (mutations.length === 0) {
         await unlink(filePath).catch((error) => {
             const err = error as NodeJS.ErrnoException;

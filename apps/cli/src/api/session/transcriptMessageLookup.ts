@@ -9,6 +9,9 @@ import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBas
 import { SessionMessageContentSchema, type SessionMessageContent } from '../types';
 import { readAuthenticationStatus, readHttpStatus } from '@/api/client/httpStatusError';
 import { TranscriptRecoveryCoordinator, type TranscriptRecoveryResult } from './recovery/TranscriptRecoveryCoordinator';
+import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
+import { readPendingLocalId } from '@happier-dev/protocol';
 
 const KEEP_ALIVE_HTTP_AGENT = new HttpAgent({ keepAlive: true, maxSockets: 16 });
 const KEEP_ALIVE_HTTPS_AGENT = new HttpsAgent({ keepAlive: true, maxSockets: 16 });
@@ -35,6 +38,7 @@ function createAxiosGetConfig(params: { token: string; timeoutMs?: number }) {
         headers: {
             Authorization: `Bearer ${params.token}`,
             'Content-Type': 'application/json',
+            ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
         },
         timeout: params.timeoutMs ?? configuration.transcriptLookupRequestTimeoutMs,
         ...(configuration.transcriptLookupKeepAliveEnabled
@@ -130,16 +134,21 @@ function parseTranscriptLookupMessageFromUnknown(found: unknown): TranscriptMess
     if (!content.success) return null;
     if (typeof record.id !== 'string') return null;
     if (typeof record.seq !== 'number') return null;
-    const foundLocalId = typeof record.localId === 'string' ? record.localId : null;
-    const sidechainIdRaw = record.sidechainId;
-    const sidechainId = typeof sidechainIdRaw === 'string' ? (sidechainIdRaw.trim() || null) : null;
+    const foundLocalId = readPendingLocalId(record.localId);
+    const sidechainId = readNonBlankOpaqueIdentifier(record.sidechainId);
     const createdAtRaw = record.createdAt;
-    if (!(typeof createdAtRaw === 'number' && Number.isFinite(createdAtRaw) && createdAtRaw >= 0)) return null;
-    const createdAt = Math.trunc(createdAtRaw);
+    if (!(typeof createdAtRaw === 'number' && Number.isSafeInteger(createdAtRaw) && createdAtRaw >= 0)) return null;
     const updatedAtRaw = record.updatedAt;
-    if (!(typeof updatedAtRaw === 'number' && Number.isFinite(updatedAtRaw) && updatedAtRaw >= 0)) return null;
-    const updatedAt = Math.trunc(updatedAtRaw);
-    return { id: record.id, seq: record.seq, localId: foundLocalId, sidechainId, createdAt, updatedAt, content: content.data };
+    if (!(typeof updatedAtRaw === 'number' && Number.isSafeInteger(updatedAtRaw) && updatedAtRaw >= 0)) return null;
+    return {
+        id: record.id,
+        seq: record.seq,
+        localId: foundLocalId,
+        sidechainId,
+        createdAt: createdAtRaw,
+        updatedAt: updatedAtRaw,
+        content: content.data,
+    };
 }
 
 export async function findTranscriptEncryptedMessageByLocalIdV2(params: {
@@ -149,6 +158,9 @@ export async function findTranscriptEncryptedMessageByLocalIdV2(params: {
     localId: string;
     timeoutMs?: number;
 }): Promise<TranscriptLookupOutcome> {
+    if (readPendingLocalId(params.localId) === null) {
+        return { type: 'protocol_error', error: new Error('Pending localId must not be blank') };
+    }
     try {
         const response = await axios.get(
             `${params.serverUrl}/v2/sessions/${params.sessionId}/messages/by-local-id/${encodeURIComponent(params.localId)}`,

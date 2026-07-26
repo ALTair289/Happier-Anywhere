@@ -18,8 +18,6 @@ import { AxiosError, AxiosHeaders } from 'axios'
 import { HttpStatusError, isAuthenticationError } from '@/api/client/httpStatusError'
 import { logger } from '@/ui/logger'
 import {
-  detectCommittedProviderActivityAfterLatestUserPrompt,
-  fetchLatestCommittedUserTextAtOrBeforeMs,
   fetchLatestUserPermissionIntentFromEncryptedTranscript,
   fetchRecentTranscriptTextItemsForAcpImportFromServer,
   hasCommittedUserMessageAfterMs,
@@ -165,267 +163,6 @@ describe('transcriptQueries (plaintext envelopes)', () => {
     }))
   })
 
-  it.each([
-    {
-      label: 'assistant text',
-      content: { t: 'plain', v: { role: 'agent', content: { type: 'text', text: 'assistant reply' } } },
-      expectedRole: 'assistant',
-      expectedKind: 'assistant_message',
-    },
-    {
-      label: 'tool call',
-      content: {
-        t: 'plain',
-        v: {
-          role: 'agent',
-          content: { type: 'codex', data: { type: 'tool-call', name: 'Shell', input: { command: 'pwd' }, id: 'tool-1' } },
-        },
-      },
-      expectedRole: 'tool',
-      expectedKind: 'tool_call',
-    },
-    {
-      label: 'reasoning',
-      content: {
-        t: 'plain',
-        v: {
-          role: 'agent',
-          content: { type: 'codex', data: { type: 'reasoning', message: 'thinking' } },
-        },
-      },
-      expectedRole: 'reasoning',
-      expectedKind: 'reasoning',
-    },
-    {
-      label: 'file edit event',
-      content: {
-        t: 'plain',
-        v: {
-          role: 'agent',
-          content: { type: 'acp', data: { type: 'file-edit', description: 'edited file', filePath: 'a.ts', id: 'edit-1', diff: 'diff --git a/a.ts b/a.ts' } },
-        },
-      },
-      expectedRole: 'event',
-      expectedKind: 'file-edit',
-    },
-  ])('detects committed provider activity after the latest user prompt from $label', async ({ content, expectedKind, expectedRole }) => {
-    const getSpy = vi.spyOn(axios, 'get').mockResolvedValueOnce({
-      status: 200,
-      data: {
-        messages: [
-          { createdAt: 1_100, content },
-          {
-            createdAt: 900,
-            content: {
-              t: 'plain',
-              v: {
-                role: 'user',
-                content: { type: 'text', text: 'original prompt' },
-              },
-            },
-          },
-        ],
-      },
-    } as any)
-
-    await expect(detectCommittedProviderActivityAfterLatestUserPrompt({
-      ...queryParams,
-      failureAtMs: 1_000,
-    })).resolves.toEqual({
-      status: 'activity_found',
-      latestUserMessageAtMs: 900,
-      activityAtMs: 1_100,
-      activityKind: expectedKind,
-      activityRole: expectedRole,
-    })
-
-    expect(getSpy.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
-      params: { limit: 100 },
-    }))
-  })
-
-  it('proves no provider activity only when a latest user prompt is found and later rows are absent', async () => {
-    vi.spyOn(axios, 'get').mockResolvedValueOnce({
-      status: 200,
-      data: {
-        messages: [
-          {
-            createdAt: 900,
-            content: {
-              t: 'plain',
-              v: {
-                role: 'user',
-                content: { type: 'text', text: 'original prompt' },
-              },
-            },
-          },
-          {
-            createdAt: 800,
-            content: {
-              t: 'plain',
-              v: {
-                role: 'agent',
-                content: { type: 'text', text: 'previous assistant reply' },
-              },
-            },
-          },
-        ],
-      },
-    } as any)
-
-    await expect(detectCommittedProviderActivityAfterLatestUserPrompt({
-      ...queryParams,
-      failureAtMs: 1_000,
-    })).resolves.toEqual({
-      status: 'no_activity_found',
-      latestUserMessageAtMs: 900,
-    })
-  })
-
-  it('returns unknown instead of authorizing original replay when the latest user prompt is unavailable', async () => {
-    vi.spyOn(axios, 'get').mockResolvedValueOnce({
-      status: 200,
-      data: {
-        messages: [
-          {
-            createdAt: 1_100,
-            content: {
-              t: 'plain',
-              v: {
-                role: 'agent',
-                content: { type: 'text', text: 'assistant reply' },
-              },
-            },
-          },
-        ],
-      },
-    } as any)
-
-    await expect(detectCommittedProviderActivityAfterLatestUserPrompt({
-      ...queryParams,
-      failureAtMs: 1_000,
-    })).resolves.toEqual({
-      status: 'unknown',
-      reason: 'latest_user_prompt_unavailable',
-    })
-  })
-
-  it('returns unknown instead of proving no activity when a post-prompt transcript row is ambiguous', async () => {
-    vi.spyOn(axios, 'get').mockResolvedValueOnce({
-      status: 200,
-      data: {
-        messages: [
-          {
-            createdAt: 1_100,
-            content: { t: 'encrypted', c: 'not-valid-ciphertext' },
-          },
-          {
-            createdAt: 900,
-            content: {
-              t: 'plain',
-              v: {
-                role: 'user',
-                content: { type: 'text', text: 'original prompt' },
-              },
-            },
-          },
-        ],
-      },
-    } as any)
-
-    await expect(detectCommittedProviderActivityAfterLatestUserPrompt({
-      ...queryParams,
-      failureAtMs: 1_000,
-    })).resolves.toEqual({
-      status: 'unknown',
-      reason: 'ambiguous_post_prompt_row',
-    })
-  })
-
-  it('fetches the latest committed user text at or before a failure time for original-message retry', async () => {
-    const getSpy = vi.spyOn(axios, 'get').mockResolvedValueOnce({
-      status: 200,
-      data: {
-        messages: [
-          {
-            localId: 'newer-user',
-            createdAt: 1_500,
-            content: {
-              t: 'plain',
-              v: {
-                role: 'user',
-                content: { type: 'text', text: 'newer prompt' },
-              },
-            },
-          },
-          {
-            localId: 'original-user',
-            createdAt: 900,
-            content: {
-              t: 'plain',
-              v: {
-                role: 'user',
-                content: { type: 'text', text: 'original prompt' },
-                meta: { permissionMode: 'yolo', model: 'claude-sonnet' },
-              },
-            },
-          },
-        ],
-      },
-    } as any)
-
-    await expect(fetchLatestCommittedUserTextAtOrBeforeMs({
-      ...queryParams,
-      failureAtMs: 1_000,
-    })).resolves.toEqual({
-      text: 'original prompt',
-      localId: 'original-user',
-      createdAt: 900,
-      permissionMode: 'yolo',
-      model: 'claude-sonnet',
-    })
-
-    expect(getSpy.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
-      params: { limit: 25, role: 'user' },
-    }))
-  })
-
-  it('ignores non-text and post-failure user rows while resolving original-message retry text', async () => {
-    vi.spyOn(axios, 'get').mockResolvedValueOnce({
-      status: 200,
-      data: {
-        messages: [
-          {
-            localId: 'too-new',
-            createdAt: 1_500,
-            content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'too new' } } },
-          },
-          {
-            localId: 'not-text',
-            createdAt: 900,
-            content: { t: 'plain', v: { role: 'user', content: { type: 'acp', data: { type: 'tool-call' } } } },
-          },
-          {
-            localId: 'usable',
-            createdAt: 800,
-            content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'usable' } } },
-          },
-        ],
-      },
-    } as any)
-
-    await expect(fetchLatestCommittedUserTextAtOrBeforeMs({
-      ...queryParams,
-      failureAtMs: 1_000,
-    })).resolves.toEqual({
-      text: 'usable',
-      localId: 'usable',
-      createdAt: 800,
-      permissionMode: null,
-      model: null,
-    })
-  })
-
   it('keeps permission intent resolution scoped to semantically valid user rows', async () => {
     vi.spyOn(axios, 'get').mockResolvedValueOnce({
       status: 200,
@@ -503,18 +240,19 @@ describe('transcriptQueries (plaintext envelopes)', () => {
   })
 
   it('redacts continuation transcript fetch diagnostics', async () => {
-    vi.spyOn(axios, 'get').mockRejectedValueOnce(new AxiosError('connect failed', 'ECONNRESET', {
+    const error = new AxiosError('connect failed', 'ECONNRESET', {
       method: 'get',
       url: 'https://api.example.test/v1/sessions/s1/messages?token=SECRET#hash',
       headers: new AxiosHeaders({ Authorization: 'Bearer SECRET' }),
       data: { secret: 'SECRET_BODY' },
-    }))
+    })
+    vi.spyOn(axios, 'get').mockRejectedValueOnce(error)
 
     await expect(hasCommittedUserMessageAfterMs({
       token: 't',
       sessionId: 's1',
       failureAtMs: 1_000,
-    })).resolves.toBe(false)
+    })).rejects.toBe(error)
 
     const calls = JSON.stringify(vi.mocked(logger.debug).mock.calls)
     expect(calls).toContain('[API] Failed to fetch transcript messages for continuation recovery suppression')

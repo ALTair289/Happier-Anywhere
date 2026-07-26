@@ -95,7 +95,7 @@ describe('ApiSessionClient user socket lifecycle', () => {
     await client.close();
   });
 
-  it('does not treat user-scoped socket connect as a session-detail catch-up wake', async () => {
+  it('treats user-scoped socket reconnect as a metadata wake without fetching session detail', async () => {
     vi.resetModules();
     sessionSocketStub = createApiSessionSocketStub({ id: 'session-socket', connected: true });
     userSocketStub = createApiSessionSocketStub({ id: 'user-socket', connected: false });
@@ -117,11 +117,8 @@ describe('ApiSessionClient user socket lifecycle', () => {
 
     expect(userSocketStub.connect).toHaveBeenCalledTimes(1);
     expect(snapshotSync).not.toHaveBeenCalled();
-    expect(observedResults).toEqual([]);
-
-    abortController.abort();
-    await expect(waitPromise).resolves.toBe(false);
-    expect(observedResults).toEqual([false]);
+    expect(observedResults).toEqual([true]);
+    await expect(waitPromise).resolves.toBe(true);
 
     await client.close();
   });
@@ -155,6 +152,48 @@ describe('ApiSessionClient user socket lifecycle', () => {
 
     expect(snapshots).toEqual(['/tmp/fresh']);
     expect(client.getMetadataSnapshot()?.path).toBe('/tmp/fresh');
+
+    await client.close();
+  });
+
+  it('requests an authoritative snapshot when a socket Activity tuple conflicts at the current revision', async () => {
+    vi.resetModules();
+    sessionSocketStub = createApiSessionSocketStub({ id: 'session-socket', connected: true });
+    userSocketStub = createApiSessionSocketStub({ id: 'user-socket', connected: false });
+
+    const { ApiSessionClient } = await import('./sessionClient');
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    (client as any).runtimeActivityProjection = {
+      runtimeActivityState: 'active',
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 10,
+      runtimeActivityRevision: 4,
+    };
+    const snapshotSync = vi.fn(async () => true);
+    (client as any).syncSessionSnapshotFromServer = snapshotSync;
+
+    sessionSocketStub.trigger('update', {
+      id: 'u-runtime-conflict',
+      seq: 1,
+      createdAt: Date.now(),
+      body: {
+        t: 'update-session',
+        sid: 's1',
+        runtimeActivityState: 'idle',
+        runtimeActivityActiveCount: 0,
+        runtimeActivityObservedAt: 20,
+        runtimeActivityRevision: 4,
+      },
+    });
+    await Promise.resolve();
+
+    expect((client as any).runtimeActivityProjection).toMatchObject({
+      runtimeActivityState: 'active',
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 10,
+      runtimeActivityRevision: 4,
+    });
+    expect(snapshotSync).toHaveBeenCalledWith({ reason: 'runtime-activity-conflict' });
 
     await client.close();
   });

@@ -140,6 +140,7 @@ describe('createCurrentSessionTranscriptPort', () => {
       checkpointIntervalMs: 10_000,
       checkpointMinChars: 999,
     });
+    writer.setCommitProvenance({ kind: 'non_dependent', source: 'external' });
 
     currentSession = secondSession;
     writer.appendAssistantDelta('final');
@@ -153,6 +154,66 @@ describe('createCurrentSessionTranscriptPort', () => {
       'codex',
       { type: 'message', message: 'final' },
       expect.objectContaining({ localId: 'segment-1' }),
+    );
+  });
+
+  it('keeps no-provenance committed snapshots on the direct commit path', async () => {
+    const session = {
+      sendAgentMessageCommitted: vi.fn(async () => {}),
+      enqueueAgentMessageCommitted: vi.fn(async () => ({ persisted: true as const, delivered: false })),
+    };
+    const writer = createStreamedTranscriptWriter({
+      provider: 'codex',
+      session,
+      makeLocalId: () => 'segment-no-provenance',
+      initialCheckpointDelayMs: 10_000,
+      checkpointIntervalMs: 10_000,
+      checkpointMinChars: 999,
+    });
+
+    writer.appendAssistantDelta('direct');
+    await writer.flushAll({ reason: 'turn-end' });
+
+    expect(session.sendAgentMessageCommitted).toHaveBeenCalledWith(
+      'codex',
+      { type: 'message', message: 'direct' },
+      expect.objectContaining({ localId: 'segment-no-provenance' }),
+    );
+    expect(session.enqueueAgentMessageCommitted).not.toHaveBeenCalled();
+  });
+
+  it('retries the same retained segment after an unavailable session is replaced', async () => {
+    const offlineSession = {
+      sendAgentMessageCommitted: vi.fn(async () => {
+        throw new Error('Offline transcript write was not persisted');
+      }),
+    };
+    const attachedSession = {
+      sendAgentMessageCommitted: vi.fn(async () => {}),
+    };
+    let currentSession: typeof offlineSession | typeof attachedSession = offlineSession;
+    const writer = createStreamedTranscriptWriter({
+      provider: 'gemini',
+      session: createCurrentSessionTranscriptPort(() => currentSession),
+      makeLocalId: () => 'retained-segment-1',
+      initialCheckpointDelayMs: 10_000,
+      checkpointIntervalMs: 10_000,
+      checkpointMinChars: 999,
+    });
+
+    writer.appendAssistantDelta('retained');
+    await writer.flushAll({ reason: 'turn-end' });
+    await settleCommittedSnapshot();
+    expect(offlineSession.sendAgentMessageCommitted).toHaveBeenCalled();
+
+    currentSession = attachedSession;
+    await writer.flushAll({ reason: 'turn-end' });
+    await settleCommittedSnapshot();
+
+    expect(attachedSession.sendAgentMessageCommitted).toHaveBeenCalledWith(
+      'gemini',
+      { type: 'message', message: 'retained' },
+      expect.objectContaining({ localId: 'retained-segment-1' }),
     );
   });
 

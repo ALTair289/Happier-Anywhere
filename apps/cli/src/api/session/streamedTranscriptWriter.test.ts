@@ -41,6 +41,7 @@ function createSessionStub(opts: { withLive?: boolean } = {}) {
               createdAt: Number(opts.createdAt),
               updatedAt: Number(opts.updatedAt),
             });
+            return { accepted: true as const, epoch: 0 };
           },
         }
       : {}),
@@ -139,6 +140,7 @@ describe('createStreamedTranscriptWriter', () => {
           createdAt: Number(opts.createdAt),
           updatedAt: Number(opts.updatedAt),
         });
+        return { accepted: true as const, epoch: 0 };
       },
     };
 
@@ -192,6 +194,7 @@ describe('createStreamedTranscriptWriter', () => {
           createdAt: Number(opts.createdAt),
           updatedAt: Number(opts.updatedAt),
         });
+        return { accepted: true as const, epoch: 0 };
       },
     };
 
@@ -206,6 +209,7 @@ describe('createStreamedTranscriptWriter', () => {
       liveSnapshotMinChars: 1,
     });
 
+    writer.setCommitProvenance({ kind: 'non_dependent', source: 'external' });
     writer.appendAssistantDelta('partial');
     await settleCommittedSnapshot();
 
@@ -1018,6 +1022,7 @@ function createDeltaSessionStub() {
         updatedAt: Number(opts.updatedAt),
         ...(typeof opts.tick === 'number' ? { tick: opts.tick } : {}),
       } as LiveCall);
+      return { accepted: true as const, epoch: connectionEpoch };
     },
     sendAgentMessageEphemeralDelta: (provider: any, body: any, opts: any) => {
       deltaCalls.push({
@@ -1030,6 +1035,7 @@ function createDeltaSessionStub() {
         createdAt: Number(opts.createdAt),
         updatedAt: Number(opts.updatedAt),
       });
+      return { accepted: true as const, epoch: connectionEpoch };
     },
     getEphemeralStreamConnectionEpoch: () => connectionEpoch,
   };

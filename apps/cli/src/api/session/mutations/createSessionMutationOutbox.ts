@@ -1,4 +1,9 @@
 import { logger } from '@/ui/logger';
+import type {
+    SessionRuntimeActivityProjection,
+    SessionRuntimeActivitySnapshot,
+} from '@happier-dev/protocol';
+import { configuration } from '@/configuration';
 import { serializeAxiosErrorForLog } from '@/api/client/serializeAxiosErrorForLog';
 import { isAuthenticationError } from '@/api/client/httpStatusError';
 
@@ -12,12 +17,19 @@ import {
     loadSessionMutationOutbox,
     parseQueuedSessionMutation,
     recoverAuthoritativeSessionMutationDeadLetters,
-    resolveSessionMutationOutboxPath,
+    resolveSessionMutationJournalPaths,
     saveSessionMutationOutbox,
+    type SessionMutationJournalAdmission,
+    type SessionMutationJournalCustody,
+    type SessionMutationJournalPaths,
+    type SessionMutationPersistenceContext,
 } from './sessionMutationPersistence';
 import { deliverSessionTurnMutation, type UnsupportedSessionTurnMutationDiagnostic } from './deliverSessionTurnMutation';
-import { deliverSessionEndMutation } from './deliverSessionEndMutation';
-import { deliverTranscriptMessageMutation } from './deliverTranscriptMessageMutation';
+import {
+    deliverTranscriptMessageMutation,
+    deliverTranscriptMessageMutationToReleasedServerV021,
+} from './deliverTranscriptMessageMutation';
+import { deliverRuntimeActivitySnapshot } from './deliverRuntimeActivitySnapshot';
 import {
     createDeliveryDiagnostic,
     deadLetterDependentMutations,
@@ -27,13 +39,20 @@ import {
 import { withSessionMutationDeliverySlot } from './sessionMutationDeliveryLimiter';
 import type {
     QueuedSessionMutation,
-    SessionEndMutationV1,
-    TranscriptMessageAppendMutationV1,
+    RuntimeActivitySnapshotMutationV1,
     SessionTurnMutationV1,
+    TranscriptMessageAppendMutationV1,
 } from './sessionMutationTypes';
-import { resolveTranscriptMessageAppendMutationId } from './sessionMutationTypes';
+import {
+    hasSameTranscriptMessageAppendMutationProvenance,
+    resolveTranscriptMessageAppendMutationId,
+    validateTranscriptMessageAppendMutationProvenance,
+} from './sessionMutationTypes';
 import type { SessionMutationDeadLetterEntry } from './sessionMutationPersistence';
 import { isAuthoritativeSessionMutationKind } from './sessionMutationDurabilityPolicy';
+import type {
+    SessionSyncPendingInputServerContractResult,
+} from '@/api/clientCompatibility/sessionSyncPendingInputServerContract';
 
 export type SessionMutationSocket = {
     connected?: boolean;
@@ -42,27 +61,96 @@ export type SessionMutationSocket = {
     timeout?: (ms: number) => SessionMutationSocket;
 };
 
+export type SessionMutationEnqueueResult = Readonly<{
+    persisted: boolean;
+    delivered: boolean;
+}>;
+
+export class SessionMutationJournalAdmissionBlockedError extends Error {
+    override readonly cause: unknown;
+
+    constructor(cause: unknown) {
+        super(cause instanceof Error ? cause.message : String(cause));
+        this.name = 'SessionMutationJournalAdmissionBlockedError';
+        this.cause = cause;
+    }
+}
+
+export type RuntimeActivitySnapshotTail = Readonly<{
+    sequence: number;
+    custody: Readonly<{
+        identity: Readonly<{
+            mutationKey: string;
+            admissionOrder: number;
+        }>;
+        value: SessionRuntimeActivitySnapshot;
+    }> | null;
+    settlement: Readonly<{
+        identity: Readonly<{
+            mutationKey: string;
+            admissionOrder: number;
+        }>;
+        desiredValue: SessionRuntimeActivitySnapshot;
+        result: 'applied' | 'unchanged';
+        committedProjection: SessionRuntimeActivityProjection;
+        committedRevision: number;
+    }> | null;
+}>;
+
 export type SessionMutationOutbox = Readonly<{
     enqueueSessionTurn(mutation: SessionTurnMutationV1): Promise<void>;
-    enqueueSessionEnd(mutation: SessionEndMutationV1): Promise<void>;
     enqueueTranscriptMessage(mutation: TranscriptMessageAppendMutationV1): Promise<Readonly<{
         persisted: boolean;
         delivered: boolean;
     }>>;
+    enqueueRuntimeActivitySnapshot(mutation: RuntimeActivitySnapshotMutationV1): Promise<Readonly<{
+        persisted: boolean;
+        delivered: boolean;
+    }>>;
+    setSessionSyncPendingInputServerContract(
+        result: SessionSyncPendingInputServerContractResult,
+    ): Promise<void>;
+    readRuntimeActivitySnapshotTail(): RuntimeActivitySnapshotTail;
+    waitForRuntimeActivitySnapshotTailChange(sequence: number, signal?: AbortSignal): Promise<boolean>;
+    awaitReady(): Promise<void>;
     flush(reason: 'connect' | 'timer' | 'flush' | 'startup' | 'enqueue'): Promise<void>;
     close(): Promise<void>;
 }>;
 
-type CreateSessionMutationOutboxParams = Readonly<{
+export type SessionMutationJournal = SessionMutationOutbox & Readonly<{
+    enqueueSessionTurnDurably(mutation: SessionTurnMutationV1): Promise<SessionMutationEnqueueResult>;
+}>;
+
+type SessionMutationOutboxInstance = Omit<SessionMutationOutbox, 'enqueueSessionTurn'> & Readonly<{
+    enqueueSessionTurn(mutation: SessionTurnMutationV1): Promise<SessionMutationEnqueueResult>;
+}>;
+
+export type CreateSessionMutationOutboxParams = Readonly<{
     token: string;
     sessionId: string;
     getSocket: () => SessionMutationSocket;
     requestReconnect: (reason: string) => void;
 }>;
 
+export type CreateSessionMutationJournalParams = Readonly<{
+    custody: SessionMutationJournalCustody;
+    sessionId: string;
+    paths: SessionMutationJournalPaths;
+    admission: SessionMutationJournalAdmission;
+    token: string;
+    getSocket: () => SessionMutationSocket;
+    requestReconnect: (reason: string) => void;
+    deliverRuntimeActivitySnapshot?: (
+        mutation: RuntimeActivitySnapshotMutationV1,
+    ) => Promise<SessionMutationDeliveryOutcome>;
+}>;
+
 type SessionMutationOutboxSharedEntry = Readonly<{
-    outbox: SessionMutationOutbox;
-    handles: Map<symbol, CreateSessionMutationOutboxParams>;
+    outbox: SessionMutationOutboxInstance;
+    handles: Map<symbol, CreateSessionMutationJournalParams>;
+    sessionId: string;
+    custody: SessionMutationJournalCustody;
+    deadLetterPath: string;
 }>;
 
 const sharedSessionMutationOutboxes = new Map<string, SessionMutationOutboxSharedEntry>();
@@ -82,8 +170,8 @@ function createQueuedSessionTurn(mutation: SessionTurnMutationV1): QueuedSession
 }
 
 function selectActiveOutboxHandle(
-    handles: Map<symbol, CreateSessionMutationOutboxParams>,
-): CreateSessionMutationOutboxParams {
+    handles: Map<symbol, CreateSessionMutationJournalParams>,
+): CreateSessionMutationJournalParams {
     const allHandles = [...handles.values()];
     const connectedHandle = allHandles.find((handle) => {
         try {
@@ -96,13 +184,58 @@ function selectActiveOutboxHandle(
 }
 
 export function createSessionMutationOutbox(params: CreateSessionMutationOutboxParams): SessionMutationOutbox {
-    const outboxPath = resolveSessionMutationOutboxPath(params.sessionId);
-    let shared = sharedSessionMutationOutboxes.get(outboxPath);
-    if (!shared) {
-        const handles = new Map<symbol, CreateSessionMutationOutboxParams>();
-        const adapterParams: CreateSessionMutationOutboxParams = {
-            token: params.token,
+    return createSessionMutationJournal({
+        ...params,
+        custody: 'runtime',
+        paths: resolveSessionMutationJournalPaths({
+            activeServerDir: configuration.activeServerDir,
             sessionId: params.sessionId,
+            custody: 'runtime',
+        }),
+        admission: parseQueuedSessionMutation,
+        deliverRuntimeActivitySnapshot: async (mutation) => await deliverRuntimeActivitySnapshot({
+            socket: params.getSocket(),
+            mutation,
+        }),
+    });
+}
+
+export function createSessionMutationJournal(params: CreateSessionMutationJournalParams): SessionMutationJournal {
+    const outboxPath = params.paths.queuePath;
+    let shared = sharedSessionMutationOutboxes.get(outboxPath);
+    if (shared && (
+        shared.sessionId !== params.sessionId
+        || shared.custody !== params.custody
+        || shared.deadLetterPath !== params.paths.deadLetterPath
+    )) {
+        throw new Error('Session mutation journal path is already owned by different custody facts');
+    }
+    if (!shared) {
+        const handles = new Map<symbol, CreateSessionMutationJournalParams>();
+        const adapterParams: CreateSessionMutationJournalParams = {
+            get token() {
+                return selectActiveOutboxHandle(handles).token;
+            },
+            sessionId: params.sessionId,
+            custody: params.custody,
+            paths: params.paths,
+            admission: params.admission,
+            deliverRuntimeActivitySnapshot: async (mutation) => {
+                const candidateHandles = [...handles.values()].filter((handle) => (
+                    handle.deliverRuntimeActivitySnapshot !== undefined
+                ));
+                const selected = candidateHandles.find((handle) => {
+                    try {
+                        return handle.getSocket().connected === true;
+                    } catch {
+                        return false;
+                    }
+                }) ?? candidateHandles[candidateHandles.length - 1];
+                if (!selected?.deliverRuntimeActivitySnapshot) {
+                    return { status: 'retryable', reason: 'runtime_activity_snapshot_delivery_unavailable' };
+                }
+                return await selected.deliverRuntimeActivitySnapshot(mutation);
+            },
             getSocket: () => selectActiveOutboxHandle(handles).getSocket(),
             requestReconnect: (reason) => {
                 for (const handle of handles.values()) {
@@ -120,6 +253,9 @@ export function createSessionMutationOutbox(params: CreateSessionMutationOutboxP
         shared = {
             handles,
             outbox: createSessionMutationOutboxInstance(adapterParams),
+            sessionId: params.sessionId,
+            custody: params.custody,
+            deadLetterPath: params.paths.deadLetterPath,
         };
         sharedSessionMutationOutboxes.set(outboxPath, shared);
     }
@@ -156,19 +292,34 @@ export function createSessionMutationOutbox(params: CreateSessionMutationOutboxP
         enqueueSessionTurn: async (mutation) => {
             await enqueueIfOpen(
                 () => sharedEntry.outbox.enqueueSessionTurn(mutation),
-                undefined,
+                { persisted: false, delivered: false },
             );
         },
-        enqueueSessionEnd: async (mutation) => {
-            await enqueueIfOpen(
-                () => sharedEntry.outbox.enqueueSessionEnd(mutation),
-                undefined,
-            );
-        },
+        enqueueSessionTurnDurably: async (mutation) => await enqueueIfOpen(
+            () => sharedEntry.outbox.enqueueSessionTurn(mutation),
+            { persisted: false, delivered: false },
+        ),
         enqueueTranscriptMessage: async (mutation) => await enqueueIfOpen(
             () => sharedEntry.outbox.enqueueTranscriptMessage(mutation),
             { persisted: false, delivered: false },
         ),
+        enqueueRuntimeActivitySnapshot: async (mutation) => await enqueueIfOpen(
+            () => sharedEntry.outbox.enqueueRuntimeActivitySnapshot(mutation),
+            { persisted: false, delivered: false },
+        ),
+        setSessionSyncPendingInputServerContract: async (result) => {
+            if (handleClosed) return;
+            await sharedEntry.outbox.setSessionSyncPendingInputServerContract(result);
+        },
+        readRuntimeActivitySnapshotTail: () => sharedEntry.outbox.readRuntimeActivitySnapshotTail(),
+        waitForRuntimeActivitySnapshotTailChange: async (sequence, signal) => {
+            if (handleClosed) return false;
+            return await sharedEntry.outbox.waitForRuntimeActivitySnapshotTailChange(sequence, signal);
+        },
+        awaitReady: async () => {
+            if (handleClosed) return;
+            await sharedEntry.outbox.awaitReady();
+        },
         flush: async (reason) => {
             if (handleClosed) return;
             await sharedEntry.outbox.flush(reason);
@@ -177,22 +328,14 @@ export function createSessionMutationOutbox(params: CreateSessionMutationOutboxP
     };
 }
 
-function createQueuedSessionEnd(mutation: SessionEndMutationV1): QueuedSessionMutation {
-    const now = Date.now();
-    return {
-        kind: 'session_end',
-        mutationId: mutation.mutationId,
-        payload: mutation,
-        createdAt: now,
-        attempts: 0,
-        nextAttemptAt: 0,
-    };
-}
-
 function createQueuedTranscriptMessage(
     mutation: TranscriptMessageAppendMutationV1,
     intentOrder: number,
 ): QueuedSessionMutation {
+    validateTranscriptMessageAppendMutationProvenance({
+        sessionId: mutation.sessionId,
+        provenance: mutation.provenance,
+    });
     const now = Date.now();
     const canonicalMutationId = resolveTranscriptMessageAppendMutationId({
         sessionId: mutation.sessionId,
@@ -212,6 +355,21 @@ function createQueuedTranscriptMessage(
     };
 }
 
+function createQueuedRuntimeActivitySnapshot(
+    mutation: RuntimeActivitySnapshotMutationV1,
+    admissionOrder: number,
+): QueuedSessionMutation {
+    return {
+        kind: 'runtime_activity_snapshot',
+        mutationId: mutation.mutationId,
+        payload: mutation,
+        admissionOrder,
+        createdAt: Date.now(),
+        attempts: 0,
+        nextAttemptAt: 0,
+    };
+}
+
 function readTranscriptSidechain(mutation: QueuedSessionMutation): string | null | undefined {
     if (mutation.kind !== 'transcript_message_append') return undefined;
     return mutation.payload.sidechainId ?? null;
@@ -225,18 +383,12 @@ function readTranscriptCoalesceKey(mutation: QueuedSessionMutation): string | nu
     });
 }
 
-function readQueuedMutationObservedAt(mutation: QueuedSessionMutation): number {
-    if (mutation.kind === 'transcript_message_append') {
-        return Number.isFinite(mutation.payload.updatedAt) ? mutation.payload.updatedAt : mutation.createdAt;
-    }
-    const observedAt = mutation.payload.observedAt;
-    return Number.isFinite(observedAt) ? observedAt : mutation.createdAt;
-}
-
 function readQueuedMutationCoalesceKey(mutation: QueuedSessionMutation): string | null {
     const transcriptKey = readTranscriptCoalesceKey(mutation);
     if (transcriptKey) return transcriptKey;
-    if (mutation.kind === 'session_end') return `session_end:${mutation.payload.sessionId}`;
+    if (mutation.kind === 'runtime_activity_snapshot') {
+        return mutation.mutationId;
+    }
     return null;
 }
 
@@ -255,6 +407,12 @@ function readTranscriptIntentOrder(mutation: QueuedSessionMutation): number | nu
 }
 
 function shouldReplaceCoalescedMutation(existing: QueuedSessionMutation, next: QueuedSessionMutation): boolean {
+    if (existing.kind === 'session_turn' && next.kind === 'session_turn') {
+        // A turn mutation id identifies one immutable observation. Marker replay may
+        // reconstruct the same deterministic id after the row was persisted; retain
+        // the first accepted payload instead of silently changing its receipt identity.
+        return false;
+    }
     if (existing.kind === 'transcript_message_append' && next.kind === 'transcript_message_append') {
         const existingIntentOrder = readTranscriptIntentOrder(existing);
         const nextIntentOrder = readTranscriptIntentOrder(next);
@@ -264,8 +422,8 @@ function shouldReplaceCoalescedMutation(existing: QueuedSessionMutation, next: Q
         if (existingIntentOrder !== null) return false;
         return readTranscriptUpdatedAt(next) >= readTranscriptUpdatedAt(existing);
     }
-    if (existing.kind === 'session_end' && next.kind === 'session_end') {
-        return readQueuedMutationObservedAt(next) >= readQueuedMutationObservedAt(existing);
+    if (existing.kind === 'runtime_activity_snapshot' && next.kind === 'runtime_activity_snapshot') {
+        return next.admissionOrder > existing.admissionOrder;
     }
     return true;
 }
@@ -277,13 +435,17 @@ function assertTranscriptCoalescingCompatible(
     if (mutation.kind !== 'transcript_message_append') return;
     const nextCoalesceKey = readTranscriptCoalesceKey(mutation);
     const nextSidechainId = readTranscriptSidechain(mutation);
-    const conflicting = queued.find((candidate) => (
+    const existing = queued.find((candidate) => (
         readTranscriptCoalesceKey(candidate) === nextCoalesceKey
         && candidate.kind === 'transcript_message_append'
-        && readTranscriptSidechain(candidate) !== nextSidechainId
     ));
-    if (!conflicting) return;
-    throw new Error('Cannot coalesce transcript snapshot with reused localId across different sidechains');
+    if (!existing || existing.kind !== 'transcript_message_append') return;
+    if (readTranscriptSidechain(existing) !== nextSidechainId) {
+        throw new Error('Cannot coalesce transcript snapshot with reused localId across different sidechains');
+    }
+    if (!hasSameTranscriptMessageAppendMutationProvenance(existing.payload, mutation.payload)) {
+        throw new Error('Cannot coalesce transcript snapshot across different causal provenance');
+    }
 }
 
 function resolveUnsupportedDiagnosticKey(diagnostic: UnsupportedSessionTurnMutationDiagnostic): string {
@@ -328,38 +490,86 @@ function mergeQueuedSessionMutations(
     return merged;
 }
 
-function pruneSessionEndsSupersededByLaterTurnBegins(
-    queued: readonly QueuedSessionMutation[],
-): QueuedSessionMutation[] {
-    let latestTurnBeginObservedAt = -Infinity;
-    for (const mutation of queued) {
-        if (mutation.kind !== 'session_turn' || mutation.payload.action !== 'begin') continue;
-        latestTurnBeginObservedAt = Math.max(latestTurnBeginObservedAt, readQueuedMutationObservedAt(mutation));
-    }
-    if (!Number.isFinite(latestTurnBeginObservedAt)) return [...queued];
-    return queued.filter((mutation) => (
-        mutation.kind !== 'session_end'
-        || readQueuedMutationObservedAt(mutation) >= latestTurnBeginObservedAt
-    ));
+function runtimeActivitySnapshotsEqual(
+    left: SessionRuntimeActivitySnapshot,
+    right: SessionRuntimeActivitySnapshot,
+): boolean {
+    return left.state === right.state
+        && left.activeCount === right.activeCount;
 }
 
-function createSessionMutationOutboxInstance(params: CreateSessionMutationOutboxParams): SessionMutationOutbox {
+function createSessionMutationOutboxInstance(params: CreateSessionMutationJournalParams): SessionMutationOutboxInstance {
+    const persistenceContext: SessionMutationPersistenceContext = {
+        custody: params.custody,
+        sessionId: params.sessionId,
+        paths: params.paths,
+        parseQueuedMutation: params.admission,
+    };
     let closed = false;
     let mutations: QueuedSessionMutation[] = [];
-    let inFlightMutations: QueuedSessionMutation[] = [];
+    let inFlightBatch: {
+        batch: readonly QueuedSessionMutation[];
+        remaining: readonly QueuedSessionMutation[];
+        nextIndex: number;
+    } | null = null;
     let flushInFlight: Promise<void> | null = null;
     let persistTail: Promise<void> = Promise.resolve();
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let loadedMutationsNeedPersist = false;
+    // Set only when already-observed transcript output remains resident after its admission save failed.
+    let mutationsNeedPersistBeforeDelivery = false;
     let deadLetterRecoveryTail: Promise<void> = Promise.resolve();
+    let pendingEnqueuePersistenceCount = 0;
+    const pendingEnqueuePersistenceWaiters = new Set<() => void>();
     let nextTranscriptIntentOrder = 1;
+    let nextRuntimeActivityAdmissionOrder: number | null = 1;
+    let runtimeActivityAdmissionTail: Promise<void> = Promise.resolve();
+    let runtimeActivitySnapshotInitialized = false;
+    let sessionSyncPendingInputServerContract: SessionSyncPendingInputServerContractResult | null = null;
+    let runtimeActivityTail: RuntimeActivitySnapshotTail = {
+        sequence: 0,
+        custody: null,
+        settlement: null,
+    };
+    const runtimeActivityTailWaiters = new Set<() => void>();
 
+    function publishRuntimeActivityTail(next: Omit<RuntimeActivitySnapshotTail, 'sequence'>): void {
+        runtimeActivityTail = {
+            sequence: Math.min(Number.MAX_SAFE_INTEGER, runtimeActivityTail.sequence + 1),
+            ...next,
+        };
+        for (const resolve of runtimeActivityTailWaiters) resolve();
+        runtimeActivityTailWaiters.clear();
+    }
+
+    function readInFlightMutations(): QueuedSessionMutation[] {
+        if (!inFlightBatch) return [];
+        return mergeQueuedSessionMutations(
+            inFlightBatch.remaining,
+            inFlightBatch.batch.slice(inFlightBatch.nextIndex),
+        );
+    }
+
+    function advanceInFlightBatch(nextIndex: number): void {
+        if (!inFlightBatch) return;
+        inFlightBatch.nextIndex = nextIndex;
+    }
     async function recoverDeadLetteredAuthoritativeMutations(): Promise<void> {
         const recover = async () => {
-            const recovered = await recoverAuthoritativeSessionMutationDeadLetters(params.sessionId);
+            const recovered = await recoverAuthoritativeSessionMutationDeadLetters(
+                persistenceContext,
+                async (candidateMutations) => {
+                    const previousMutations = mutations;
+                    mutations = mergeQueuedSessionMutations(mutations, candidateMutations);
+                    try {
+                        await persist();
+                    } catch (error) {
+                        mutations = previousMutations;
+                        throw error;
+                    }
+                },
+            );
             if (recovered.length === 0) return;
-            mutations = mergeQueuedSessionMutations(mutations, recovered);
-            loadedMutationsNeedPersist = true;
             logger.debug('[API] Re-queued authoritative session mutations from dead letters', {
                 sessionId: params.sessionId,
                 recoveredCount: recovered.length,
@@ -370,14 +580,45 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
         await recoveryPromise;
     }
 
-    const ready = loadSessionMutationOutbox(params.sessionId)
+    let quarantinedLoadedMutationCount = 0;
+    const loaded = loadSessionMutationOutbox(
+        persistenceContext,
+        (count) => { quarantinedLoadedMutationCount += count; },
+    )
         .then(async (loaded) => {
-            mutations = mergeQueuedSessionMutations([], pruneSessionEndsSupersededByLaterTurnBegins(loaded));
+            mutations = mergeQueuedSessionMutations([], loaded);
             const highestPersistedIntentOrder = mutations.reduce((highest, mutation) => (
                 Math.max(highest, readTranscriptIntentOrder(mutation) ?? 0)
             ), 0);
             nextTranscriptIntentOrder = Math.min(Number.MAX_SAFE_INTEGER, highestPersistedIntentOrder + 1);
-            loadedMutationsNeedPersist = mutations.length !== loaded.length;
+            const queuedRuntimeActivity = mutations.find((mutation) => mutation.kind === 'runtime_activity_snapshot');
+            const highestRuntimeActivityAdmissionOrder = mutations.reduce((highest, mutation) => (
+                mutation.kind === 'runtime_activity_snapshot'
+                    ? Math.max(highest, mutation.admissionOrder)
+                    : highest
+            ), 0);
+            nextRuntimeActivityAdmissionOrder = highestRuntimeActivityAdmissionOrder >= Number.MAX_SAFE_INTEGER
+                ? null
+                : highestRuntimeActivityAdmissionOrder + 1;
+            if (queuedRuntimeActivity?.kind === 'runtime_activity_snapshot') {
+                runtimeActivityTail = {
+                    sequence: 1,
+                    custody: {
+                        identity: {
+                            mutationKey: queuedRuntimeActivity.mutationId,
+                            admissionOrder: queuedRuntimeActivity.admissionOrder,
+                        },
+                        value: queuedRuntimeActivity.payload.snapshot,
+                    },
+                    settlement: null,
+                };
+            }
+            loadedMutationsNeedPersist = quarantinedLoadedMutationCount > 0
+                || mutations.length !== loaded.length;
+            if (loadedMutationsNeedPersist) {
+                await persist();
+                loadedMutationsNeedPersist = false;
+            }
             await recoverDeadLetteredAuthoritativeMutations();
         })
         .catch((error) => {
@@ -385,20 +626,34 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
                 sessionId: params.sessionId,
                 error: serializeAxiosErrorForLog(error),
             });
+            throw error;
         });
 
     async function persist(): Promise<void> {
         const runPersist = async () => {
             await saveSessionMutationOutbox(
-                params.sessionId,
-                pruneSessionEndsSupersededByLaterTurnBegins(
-                    mergeQueuedSessionMutations(inFlightMutations, mutations),
-                ),
+                persistenceContext,
+                mergeQueuedSessionMutations(readInFlightMutations(), mutations),
             );
         };
         const persistPromise = persistTail.then(runPersist, runPersist);
         persistTail = persistPromise.catch(() => {});
         await persistPromise;
+    }
+
+    const ready = loaded;
+
+    async function waitForPendingEnqueuePersistence(): Promise<void> {
+        while (pendingEnqueuePersistenceCount > 0) {
+            await new Promise<void>((resolve) => pendingEnqueuePersistenceWaiters.add(resolve));
+        }
+    }
+
+    function finishPendingEnqueuePersistence(): void {
+        pendingEnqueuePersistenceCount -= 1;
+        if (pendingEnqueuePersistenceCount !== 0) return;
+        for (const resolve of pendingEnqueuePersistenceWaiters) resolve();
+        pendingEnqueuePersistenceWaiters.clear();
     }
 
     function clearRetryTimer(): void {
@@ -407,14 +662,19 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
         retryTimer = null;
     }
 
-    function scheduleRetry(): void {
+    function scheduleRetry(minimumDelayMs = 0): void {
         if (closed || retryTimer || mutations.length === 0) return;
         const now = Date.now();
         const nextAttemptAt = Math.min(...mutations.map((mutation) => mutation.nextAttemptAt || now));
-        const delayMs = Math.max(0, nextAttemptAt - now);
+        const delayMs = Math.max(minimumDelayMs, 0, nextAttemptAt - now);
         retryTimer = setTimeout(() => {
             retryTimer = null;
-            void flush('timer');
+            void flush('timer').catch((error) => {
+                logger.debug('[API] Durable session mutation retry flush failed', {
+                    sessionId: params.sessionId,
+                    error: serializeAxiosErrorForLog(error),
+                });
+            });
         }, delayMs);
         retryTimer.unref?.();
     }
@@ -432,27 +692,44 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
             return result;
         }
         if (mutation.kind === 'transcript_message_append') {
+            if (sessionSyncPendingInputServerContract?.mode === 'released_server_v0_2_1') {
+                return await deliverTranscriptMessageMutationToReleasedServerV021({
+                    socket: params.getSocket(),
+                    mutation: mutation.payload,
+                });
+            }
             return await deliverTranscriptMessageMutation({
                 token: params.token,
                 socket: params.getSocket(),
                 mutation: mutation.payload,
             });
         }
-        return await deliverSessionEndMutation({
-            token: params.token,
-            socket: params.getSocket(),
-            mutation: mutation.payload,
-        });
+        if (mutation.kind === 'runtime_activity_snapshot') {
+            if (!params.deliverRuntimeActivitySnapshot) {
+                return { status: 'retryable', reason: 'runtime_activity_snapshot_delivery_unavailable' };
+            }
+            return await params.deliverRuntimeActivitySnapshot(mutation.payload);
+        }
+        return { status: 'permanent_invalid_payload', reason: 'unsupported_session_mutation_kind' };
     }
 
     async function flush(reason: 'connect' | 'timer' | 'flush' | 'startup' | 'enqueue'): Promise<void> {
         await ready;
+        // Enqueue mutates the in-memory queue before persisting it. A startup,
+        // reconnect, or timer flush can race that write, so never expose the
+        // candidate queue to delivery until every in-flight admission has
+        // either committed or restored the prior durable queue shape.
+        await waitForPendingEnqueuePersistence();
         await recoverDeadLetteredAuthoritativeMutations().catch((error) => {
             logger.debug('[API] Failed to recover dead-lettered authoritative session mutations', {
                 sessionId: params.sessionId,
                 error: serializeAxiosErrorForLog(error),
             });
         });
+        // Dead-letter inspection is asynchronous, so a new enqueue may begin
+        // after the first custody barrier. Close that window before the queue
+        // is captured for delivery.
+        await waitForPendingEnqueuePersistence();
         if (closed && reason !== 'flush') return;
         if (flushInFlight) {
             await flushInFlight;
@@ -463,45 +740,64 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
         }
         flushInFlight = (async () => {
             clearRetryTimer();
+            if (mutationsNeedPersistBeforeDelivery) {
+                await persist();
+                mutationsNeedPersistBeforeDelivery = false;
+            }
             const now = Date.now();
             let didChange = loadedMutationsNeedPersist;
             loadedMutationsNeedPersist = false;
             let shouldRequestReconnect = false;
+            let runtimeActivitySettlementAfterPersist: RuntimeActivitySnapshotTail['settlement'] = null;
+            let runtimeActivityRetirementAfterPersist: number | null = null;
             const remaining: QueuedSessionMutation[] = [];
-            const prunedMutations = pruneSessionEndsSupersededByLaterTurnBegins(mutations);
-            if (prunedMutations.length !== mutations.length) {
-                mutations = prunedMutations;
-                didChange = true;
-            }
             const batch = mutations;
             mutations = [];
-            inFlightMutations = batch;
+            inFlightBatch = { batch, remaining, nextIndex: 0 };
             const deadLetters: SessionMutationDeadLetterEntry[] = [];
             const transcriptFlushBatchLimit = reason === 'flush'
                 ? Number.POSITIVE_INFINITY
                 : resolveSessionMutationTranscriptFlushBatchLimit();
             let transcriptDeliveriesThisFlush = 0;
             const refreshInFlightMutations = (nextIndex: number) => {
-                inFlightMutations = mergeQueuedSessionMutations(remaining, batch.slice(nextIndex));
+                advanceInFlightBatch(nextIndex);
             };
             for (let index = 0; index < batch.length; index += 1) {
                 const mutation = batch[index];
+                if (mutation.kind === 'runtime_activity_snapshot') {
+                    if (sessionSyncPendingInputServerContract?.mode !== 'session_sync_v2_pending_input_v1') {
+                        if (sessionSyncPendingInputServerContract?.mode === 'released_server_v0_2_1') {
+                            didChange = true;
+                            runtimeActivityRetirementAfterPersist = mutation.admissionOrder;
+                            refreshInFlightMutations(index + 1);
+                            continue;
+                        }
+                        remaining.push(mutation);
+                        refreshInFlightMutations(index + 1);
+                        continue;
+                    }
+                }
+                if (mutation.kind === 'runtime_activity_snapshot' && !runtimeActivitySnapshotInitialized) {
+                    remaining.push(mutation);
+                    refreshInFlightMutations(index + 1);
+                    continue;
+                }
                 const shouldRedriveAuthoritative = (
                     (reason === 'connect' || reason === 'startup')
                     && isAuthoritativeSessionMutationKind(mutation.kind)
                 );
                 if (!shouldRedriveAuthoritative && reason !== 'flush' && mutation.nextAttemptAt > now) {
-                    if (mutation.kind === 'transcript_message_append') {
+                    if (mutation.kind === 'transcript_message_append' || mutation.kind === 'runtime_activity_snapshot') {
                         remaining.push(mutation);
                         refreshInFlightMutations(index + 1);
                         continue;
                     }
                     remaining.push(mutation);
                     remaining.push(...batch.slice(index + 1));
-                    inFlightMutations = [];
+                    inFlightBatch = null;
                     break;
                 }
-                const parsedMutation = parseQueuedSessionMutation(mutation, params.sessionId);
+                const parsedMutation = params.admission(mutation, params.sessionId);
                 if (!parsedMutation.ok) {
                     deadLetters.push(parsedMutation.deadLetter);
                     const nextIndex = deadLetterDependentMutations({
@@ -537,8 +833,26 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
                 try {
                     const outcome = await withSessionMutationDeliverySlot(() => deliver(mutation));
                     if (outcome.status === 'delivered' || outcome.status === 'ignored_lossy') {
+                        const exactSettlement = mutation.kind === 'runtime_activity_snapshot'
+                            && outcome.status === 'delivered'
+                            && outcome.runtimeActivityEvidence
+                            ? {
+                                identity: {
+                                    mutationKey: mutation.mutationId,
+                                    admissionOrder: mutation.admissionOrder,
+                                },
+                                desiredValue: mutation.payload.snapshot,
+                                result: outcome.runtimeActivityEvidence.disposition,
+                                committedProjection: outcome.runtimeActivityEvidence.projection,
+                                committedRevision: outcome.runtimeActivityEvidence.projection.revision,
+                            }
+                            : null;
                         didChange = true;
                         refreshInFlightMutations(index + 1);
+                        if (exactSettlement) {
+                            // The durable dequeue save below is the commit point for exact evidence.
+                            runtimeActivitySettlementAfterPersist = exactSettlement;
+                        }
                         continue;
                     }
                     const attempts = mutation.attempts + 1;
@@ -547,6 +861,12 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
                         attempts,
                         nextAttemptAt: Date.now() + resolveSessionMutationRetryDelayMs(attempts),
                     } as QueuedSessionMutation;
+                    if (mutation.kind === 'runtime_activity_snapshot') {
+                        remaining.push(failedMutation);
+                        refreshInFlightMutations(index + 1);
+                        didChange = true;
+                        continue;
+                    }
                     if (shouldDeadLetterFailedMutation(failedMutation, Date.now(), outcome)) {
                         deadLetters.push(createSessionMutationDeadLetterEntry({
                             sessionId: params.sessionId,
@@ -567,7 +887,7 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
                     }
                     remaining.push(failedMutation);
                     remaining.push(...batch.slice(index + 1));
-                    inFlightMutations = [];
+                    inFlightBatch = null;
                     didChange = true;
                     shouldRequestReconnect = true;
                     break;
@@ -578,7 +898,7 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
                             nextAttemptAt: Date.now() + resolveSessionMutationRetryDelayMs(mutation.attempts + 1),
                         } as QueuedSessionMutation);
                         remaining.push(...batch.slice(index + 1));
-                        inFlightMutations = [];
+                        inFlightBatch = null;
                         didChange = true;
                         break;
                     }
@@ -619,18 +939,49 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
                 }
                 remaining.push(failedMutation);
                 remaining.push(...batch.slice(index + 1));
-                inFlightMutations = [];
+                inFlightBatch = null;
                 didChange = true;
                 shouldRequestReconnect = true;
                 break;
             }
             mutations = mergeQueuedSessionMutations(remaining, mutations);
-            inFlightMutations = [];
+            inFlightBatch = null;
             if (didChange) {
-                await appendSessionMutationDeadLetters(params.sessionId, deadLetters);
-                await persist();
+                try {
+                    await appendSessionMutationDeadLetters(persistenceContext, deadLetters);
+                    await persist();
+                } catch (error) {
+                    // Delivery success is not a dequeue until the resulting queue has
+                    // durably committed. Restore the attempted batch in process so a
+                    // retry can rejoin the server result (normally as unchanged).
+                    mutations = mergeQueuedSessionMutations(batch, mutations);
+                    scheduleRetry(resolveSessionMutationRetryDelayMs(1));
+                    throw error;
+                }
             }
-            if (!closed && mutations.length > 0) {
+            if (
+                runtimeActivitySettlementAfterPersist
+                && runtimeActivityTail.custody?.identity.admissionOrder
+                    === runtimeActivitySettlementAfterPersist.identity.admissionOrder
+            ) {
+                publishRuntimeActivityTail({
+                    custody: null,
+                    settlement: runtimeActivitySettlementAfterPersist,
+                });
+            } else if (
+                runtimeActivityRetirementAfterPersist !== null
+                && runtimeActivityTail.custody?.identity.admissionOrder === runtimeActivityRetirementAfterPersist
+            ) {
+                publishRuntimeActivityTail({ custody: null, settlement: null });
+            }
+            const hasDeliverableMutation = mutations.some((mutation) => (
+                mutation.kind !== 'runtime_activity_snapshot'
+                || (
+                    runtimeActivitySnapshotInitialized
+                    && sessionSyncPendingInputServerContract?.mode === 'session_sync_v2_pending_input_v1'
+                )
+            ));
+            if (!closed && hasDeliverableMutation) {
                 if (shouldRequestReconnect) {
                     params.requestReconnect(reason);
                 }
@@ -645,33 +996,86 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
     function hasQueuedMutation(mutationId: string): boolean {
         return (
             mutations.some((queued) => queued.mutationId === mutationId)
-            || inFlightMutations.some((queued) => queued.mutationId === mutationId)
+            || readInFlightMutations().some((queued) => queued.mutationId === mutationId)
         );
     }
 
     async function enqueue(
         mutation: QueuedSessionMutation,
-        opts: Readonly<{ awaitFlush?: boolean }> = {},
+        opts: Readonly<{
+            awaitFlush?: boolean;
+            initializesRuntimeActivitySnapshot?: boolean;
+            onPersisted?: () => void;
+        }> = {},
     ): Promise<Readonly<{ persisted: boolean; delivered: boolean }>> {
         await ready;
         if (closed) return { persisted: false, delivered: false };
         assertTranscriptCoalescingCompatible(mutation, mutations);
-        assertTranscriptCoalescingCompatible(mutation, inFlightMutations);
+        assertTranscriptCoalescingCompatible(mutation, readInFlightMutations());
+        pendingEnqueuePersistenceCount += 1;
+        const wasRuntimeActivitySnapshotInitialized = runtimeActivitySnapshotInitialized;
+        const isInitialRuntimeActivitySnapshot = opts.initializesRuntimeActivitySnapshot === true
+            && !wasRuntimeActivitySnapshotInitialized;
+        if (opts.initializesRuntimeActivitySnapshot === true) {
+            runtimeActivitySnapshotInitialized = true;
+        }
         const mutationCoalesceKey = readQueuedMutationCoalesceKey(mutation);
         const existingIndex = mutations.findIndex((queued) => (
             mutationCoalesceKey
                 ? readQueuedMutationCoalesceKey(queued) === mutationCoalesceKey
                 : queued.mutationId === mutation.mutationId
         ));
+        const previousMutation = existingIndex >= 0 ? mutations[existingIndex] : null;
+        let didChangeQueue = false;
         if (existingIndex >= 0) {
             if (shouldReplaceCoalescedMutation(mutations[existingIndex], mutation)) {
-                mutations[existingIndex] = mutation;
+                if (isInitialRuntimeActivitySnapshot) {
+                    mutations.splice(existingIndex, 1);
+                    mutations.unshift(mutation);
+                } else {
+                    mutations[existingIndex] = mutation;
+                }
+                didChangeQueue = true;
             }
         } else {
-            mutations.push(mutation);
+            if (isInitialRuntimeActivitySnapshot) mutations.unshift(mutation);
+            else mutations.push(mutation);
+            didChangeQueue = true;
         }
-        mutations = pruneSessionEndsSupersededByLaterTurnBegins(mutations);
-        await persist();
+        try {
+            await persist();
+            mutationsNeedPersistBeforeDelivery = false;
+        } catch (error) {
+            runtimeActivitySnapshotInitialized = wasRuntimeActivitySnapshotInitialized;
+            // Transcript mutations describe provider output that has already been
+            // observed. When storage is temporarily unavailable, retain that
+            // candidate in the canonical in-process journal so an explicit or
+            // lifecycle flush can persist it after recovery. Pre-effect admission
+            // mutations still roll back and fail closed before provider dispatch.
+            if (didChangeQueue && mutation.kind !== 'transcript_message_append') {
+                const candidateIndex = mutations.findIndex((queued) => (
+                    mutationCoalesceKey
+                        ? readQueuedMutationCoalesceKey(queued) === mutationCoalesceKey
+                        : queued.mutationId === mutation.mutationId
+                ));
+                if (candidateIndex >= 0 && mutations[candidateIndex] === mutation) {
+                    if (previousMutation && isInitialRuntimeActivitySnapshot) {
+                        mutations.splice(candidateIndex, 1);
+                        mutations.splice(Math.min(existingIndex, mutations.length), 0, previousMutation);
+                    } else if (previousMutation) {
+                        mutations[candidateIndex] = previousMutation;
+                    } else {
+                        mutations.splice(candidateIndex, 1);
+                    }
+                }
+            } else if (didChangeQueue) {
+                mutationsNeedPersistBeforeDelivery = true;
+            }
+            throw new SessionMutationJournalAdmissionBlockedError(error);
+        } finally {
+            finishPendingEnqueuePersistence();
+        }
+        opts.onPersisted?.();
         const flushPromise = flush('enqueue').catch((error) => {
             logger.debug('[API] Durable session mutation enqueue flush failed', {
                 sessionId: params.sessionId,
@@ -688,22 +1092,123 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
         return { persisted: true, delivered: !hasQueuedMutation(mutation.mutationId) };
     }
 
-    void ready.then(() => flush('startup')).catch(() => {});
+    void ready.then(() => flush('startup')).catch((error) => {
+        logger.debug('[API] Durable session mutation startup flush failed', {
+            sessionId: params.sessionId,
+            error: serializeAxiosErrorForLog(error),
+        });
+    });
 
     return {
         async enqueueSessionTurn(mutation) {
-            await enqueue(createQueuedSessionTurn(mutation), {
+            return await enqueue(createQueuedSessionTurn(mutation), {
                 awaitFlush: mutation.action === 'fail' || mutation.action === 'cancel',
             });
         },
-        async enqueueSessionEnd(mutation) {
-            await enqueue(createQueuedSessionEnd(mutation));
-        },
         async enqueueTranscriptMessage(mutation) {
+            if (mutation.sessionId !== params.sessionId) {
+                throw new Error('Transcript append mutation sessionId must match outbox sessionId');
+            }
             const intentOrder = nextTranscriptIntentOrder;
             nextTranscriptIntentOrder = Math.min(Number.MAX_SAFE_INTEGER, nextTranscriptIntentOrder + 1);
             const result = await enqueue(createQueuedTranscriptMessage(mutation, intentOrder), { awaitFlush: true });
             return { persisted: result.persisted, delivered: result.delivered };
+        },
+        async enqueueRuntimeActivitySnapshot(mutation) {
+            const previousAdmission = runtimeActivityAdmissionTail;
+            let releaseAdmission!: () => void;
+            const currentAdmission = new Promise<void>((resolve) => {
+                releaseAdmission = resolve;
+            });
+            runtimeActivityAdmissionTail = previousAdmission.then(
+                () => currentAdmission,
+                () => currentAdmission,
+            );
+            await previousAdmission;
+            try {
+                const currentCustody = runtimeActivityTail.custody;
+                if (
+                    currentCustody?.identity.mutationKey === mutation.mutationId
+                    && runtimeActivitySnapshotsEqual(currentCustody.value, mutation.snapshot)
+                ) {
+                    if (!runtimeActivitySnapshotInitialized) {
+                        runtimeActivitySnapshotInitialized = true;
+                        releaseAdmission();
+                        await flush('flush').catch((error) => {
+                            logger.debug('[API] Hydrated Runtime Activity custody activation flush failed', {
+                                sessionId: params.sessionId,
+                                mutationId: mutation.mutationId,
+                                error: serializeAxiosErrorForLog(error),
+                            });
+                        });
+                    }
+                    return {
+                        persisted: true,
+                        delivered: !hasQueuedMutation(mutation.mutationId),
+                    };
+                }
+                const admissionOrder = nextRuntimeActivityAdmissionOrder;
+                if (admissionOrder === null) {
+                    throw new RangeError('Runtime Activity admission order exhausted');
+                }
+                const queued = createQueuedRuntimeActivitySnapshot(mutation, admissionOrder);
+                const result = await enqueue(queued, {
+                    awaitFlush: true,
+                    initializesRuntimeActivitySnapshot: true,
+                    onPersisted: () => {
+                        nextRuntimeActivityAdmissionOrder = admissionOrder >= Number.MAX_SAFE_INTEGER
+                            ? null
+                            : admissionOrder + 1;
+                        publishRuntimeActivityTail({
+                            custody: {
+                                identity: {
+                                    mutationKey: queued.mutationId,
+                                    admissionOrder,
+                                },
+                                value: mutation.snapshot,
+                            },
+                            settlement: null,
+                        });
+                        releaseAdmission();
+                    },
+                });
+                return result;
+            } finally {
+                releaseAdmission();
+            }
+        },
+        async setSessionSyncPendingInputServerContract(result) {
+            await ready;
+            if (closed || sessionSyncPendingInputServerContract === result) return;
+            const previousMode = sessionSyncPendingInputServerContract?.mode ?? 'indeterminate';
+            sessionSyncPendingInputServerContract = result;
+            if (result.mode === 'released_server_v0_2_1' && previousMode !== result.mode) await flush('flush');
+        },
+        readRuntimeActivitySnapshotTail() {
+            return runtimeActivityTail;
+        },
+        async waitForRuntimeActivitySnapshotTailChange(sequence, signal) {
+            if (!Number.isSafeInteger(sequence) || sequence < 0) return true;
+            if (runtimeActivityTail.sequence !== sequence) return true;
+            if (signal?.aborted) return false;
+            return await new Promise<boolean>((resolve) => {
+                let settled = false;
+                const finish = (changed: boolean) => {
+                    if (settled) return;
+                    settled = true;
+                    runtimeActivityTailWaiters.delete(onChanged);
+                    signal?.removeEventListener('abort', onAbort);
+                    resolve(changed);
+                };
+                const onChanged = () => finish(true);
+                const onAbort = () => finish(false);
+                runtimeActivityTailWaiters.add(onChanged);
+                signal?.addEventListener('abort', onAbort, { once: true });
+                if (runtimeActivityTail.sequence !== sequence) finish(true);
+            });
+        },
+        async awaitReady() {
+            await ready;
         },
         flush,
         async close() {

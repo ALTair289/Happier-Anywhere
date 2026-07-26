@@ -1,5 +1,7 @@
 import type { StreamedTranscriptSegmentKey, StreamedTranscriptSegmentKind } from './segmentKey';
 import type { LiveDeliveryState } from './liveDeliveryState';
+import type { SessionTranscriptObservationProvenanceV1 } from '@happier-dev/protocol';
+import type { SessionMessageCommitResult } from '../sessionMessageCommitResult';
 
 export type StreamedTranscriptSegmentState = 'streaming' | 'complete' | 'interrupted';
 
@@ -8,6 +10,7 @@ export type StreamedTranscriptSegmentRuntime = {
   kind: StreamedTranscriptSegmentKind;
   sidechainId: string | null;
   segmentLocalId: string;
+  commitMode: 'compatibility' | 'exact';
   startedAtMs: number;
   accumulatedText: string;
   textVersion: number;
@@ -19,8 +22,11 @@ export type StreamedTranscriptSegmentRuntime = {
   lastCommittedTextVersion: number;
   lastCommittedState: StreamedTranscriptSegmentState | null;
   lastCommitFailedAtMs: number;
+  lastCommitError: unknown | null;
+  lastCommitResult: SessionMessageCommitResult | null;
   liveDelivery: LiveDeliveryState;
   additionalMeta: Record<string, unknown>;
+  provenance?: SessionTranscriptObservationProvenanceV1;
   durableCheckpointTimer: ReturnType<typeof setTimeout> | null;
   liveSnapshotTimer: ReturnType<typeof setTimeout> | null;
   isCommittingDurable: boolean;

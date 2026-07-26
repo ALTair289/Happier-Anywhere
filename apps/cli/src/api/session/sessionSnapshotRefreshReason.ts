@@ -9,8 +9,8 @@ export type SessionSnapshotRefreshReason =
     | 'manual-recovery'
     | 'prompt-dispatch-boundary'
     | 'override-flush-readback'
-    | 'degraded-socket'
-    | 'legacy-compat-proof';
+    | 'legacy-compat-proof'
+    | 'runtime-activity-conflict';
 
 export type LegacySessionSnapshotRefreshReason = 'connect' | 'waitForMetadataUpdate';
 

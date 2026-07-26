@@ -316,6 +316,22 @@ describe('ApiSessionClient transcript vNext transport', () => {
     );
   });
 
+  it('uses a supplied session event id as the stable transcript insertion identity', async () => {
+    vi.resetModules();
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'notice-1', didWrite: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const { ApiSessionClient } = await import('./sessionClient');
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    client.sendSessionEvent({ type: 'message', message: 'Activity telemetry was unavailable.' }, 'notice-1');
+    await flushQueuedCommits(client as unknown as ClientWithQueuedCommits);
+
+    expect(sessionSocketStub.emitWithAck).toHaveBeenCalledWith(
+      'message',
+      expect.objectContaining({ localId: 'notice-1', messageRole: 'event' }),
+    );
+  });
+
   it('uses ephemeral assistant transcript snapshots as the current turn fallback', async () => {
     vi.resetModules();
     sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1', didWrite: true } });
@@ -382,14 +398,14 @@ describe('ApiSessionClient transcript vNext transport', () => {
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
     await client.sendAgentMessageCommitted(
       'codex' as any,
-      { type: 'message', message: 'hi', sidechainId: 'sc-1' } as any,
+      { type: 'message', message: 'hi', sidechainId: ' sc-1\n' } as any,
       { localId: 'l1' },
     );
 
     expect(sessionSocketStub.emitWithAck).toHaveBeenCalledTimes(1);
     expect(sessionSocketStub.emitWithAck).toHaveBeenCalledWith(
       'message',
-      expect.objectContaining({ sidechainId: 'sc-1' }),
+      expect.objectContaining({ sidechainId: ' sc-1\n' }),
     );
   });
 
@@ -405,7 +421,7 @@ describe('ApiSessionClient transcript vNext transport', () => {
       {
         type: 'assistant',
         uuid: 'sidechain-uuid',
-        sidechainId: 'tool_agent_1',
+        sidechainId: ' tool_agent_1\n',
         isSidechain: true,
         message: {
           role: 'assistant',
@@ -420,7 +436,7 @@ describe('ApiSessionClient transcript vNext transport', () => {
     expect(sessionSocketStub.emitWithAck).toHaveBeenCalledTimes(1);
     expect(sessionSocketStub.emitWithAck).toHaveBeenCalledWith(
       'message',
-      expect.objectContaining({ sidechainId: 'tool_agent_1' }),
+      expect.objectContaining({ sidechainId: ' tool_agent_1\n' }),
     );
   });
 

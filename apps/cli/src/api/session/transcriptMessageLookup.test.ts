@@ -149,6 +149,18 @@ describe('findTranscriptEncryptedMessageByLocalIdV2', () => {
       async () => expect(findTranscriptEncryptedMessageByLocalIdV2(lookupParams())).resolves.toMatchObject({ type: 'protocol_error' }),
     );
   });
+
+  it.each([
+    ['fractional createdAt', { ...createLookupMessage(), createdAt: 111.5 }],
+    ['fractional updatedAt', { ...createLookupMessage(), updatedAt: 222.5 }],
+    ['unsafe createdAt', { ...createLookupMessage(), createdAt: Number.MAX_SAFE_INTEGER + 1 }],
+    ['unsafe updatedAt', { ...createLookupMessage(), updatedAt: Number.MAX_SAFE_INTEGER + 1 }],
+  ])('returns protocol_error for a non-canonical %s timestamp', async (_name, message) => {
+    await withAxiosGetMock(
+      { resolve: createAxiosResponse({ message }) },
+      async () => expect(findTranscriptEncryptedMessageByLocalIdV2(lookupParams())).resolves.toMatchObject({ type: 'protocol_error' }),
+    );
+  });
 });
 
 describe('findTranscriptEncryptedMessageByLocalId', () => {
@@ -503,13 +515,19 @@ describe('waitForTranscriptEncryptedMessageByLocalId', () => {
 
     app = fastify({ logger: false });
     app.get('/v2/sessions/:sid/messages/by-local-id/:localId', async (_req, reply) => {
-      return reply.code(200).send({ message: createLookupMessage() });
+      return reply.code(200).send({
+        message: {
+          ...createLookupMessage(),
+          localId: ' l1 ',
+          sidechainId: ' sc-1 ',
+        },
+      });
     });
     await installAdapterForCurrentApp();
 
     const result = await waitForTranscriptEncryptedMessageByLocalId(waitLookupParams());
 
-    expect(result).toMatchObject({ id: 'm1', seq: 1, localId: 'l1', sidechainId: 'sc-1', createdAt: 111, updatedAt: 222, content: { t: 'plain' } });
+    expect(result).toMatchObject({ id: 'm1', seq: 1, localId: ' l1 ', sidechainId: ' sc-1 ', createdAt: 111, updatedAt: 222, content: { t: 'plain' } });
   });
 
   it('returns null when the v2 localId route omits timestamps instead of inventing local clock values', async () => {

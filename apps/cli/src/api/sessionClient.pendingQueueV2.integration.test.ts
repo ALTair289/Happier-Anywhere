@@ -16,7 +16,11 @@ vi.mock('socket.io-client', () => ({
   io: mockIo,
 }));
 
-type PendingRow = { localId?: unknown };
+type PendingRow = {
+  localId?: unknown;
+  status?: unknown;
+  deliveryState?: unknown;
+};
 type AuthStatus = 401 | 403;
 type SupervisedClientInternals = Readonly<{
   currentConnectionState: ManagedConnectionState;
@@ -152,14 +156,26 @@ describe('ApiSessionClient pending queue V2 helpers', () => {
   });
 
   it('lists pending localIds from /v2/sessions/:id/pending', async () => {
-    pendingRows = [{ localId: 'a' }, { localId: 'b' }, { localId: 123 }, {}];
+    pendingRows = [
+      { localId: 'a', status: 'queued', deliveryState: null },
+      { localId: 'b', status: 'queued', deliveryState: null },
+    ];
     const client = await createClient();
 
     await expect(client.listPendingMessageQueueV2LocalIds()).resolves.toEqual(['a', 'b']);
   });
 
+  it('rejects a malformed successful pending projection instead of treating it as absence', async () => {
+    pendingRows = [{ localId: 'a' }, { localId: 123 }];
+    const client = await createClient();
+
+    await expect(client.listPendingMessageQueueV2LocalIds()).rejects.toThrow(
+      'Invalid pending queue delivery status projection',
+    );
+  });
+
   it('peeks pending count via list when local pending state is already known non-empty', async () => {
-    pendingRows = [{ localId: 'a' }];
+    pendingRows = [{ localId: 'a', status: 'queued', deliveryState: null }];
     const client = await createClient();
     (client as any).pendingQueueState = {
       known: true,
@@ -205,7 +221,10 @@ describe('ApiSessionClient pending queue V2 helpers', () => {
   });
 
   it('discards all pending messages via /discard endpoint', async () => {
-    pendingRows = [{ localId: 'a' }, { localId: 'b' }];
+    pendingRows = [
+      { localId: 'a', status: 'queued', deliveryState: null },
+      { localId: 'b', status: 'queued', deliveryState: null },
+    ];
     const client = await createClient();
 
     await expect(client.discardPendingMessageQueueV2All({ reason: 'manual' })).resolves.toBe(2);
@@ -213,7 +232,7 @@ describe('ApiSessionClient pending queue V2 helpers', () => {
   });
 
   it('reports authentication failures from pending discard calls to the session supervisor', async () => {
-    pendingRows = [{ localId: 'a' }];
+    pendingRows = [{ localId: 'a', status: 'queued', deliveryState: null }];
     discardStatusesByLocalId.set('a', 403);
     const client = await createClient();
     const reportProbeResult = vi.spyOn(supervisedInternals(client).sessionConnectionSupervisor, 'reportProbeResult');
@@ -227,7 +246,7 @@ describe('ApiSessionClient pending queue V2 helpers', () => {
   });
 
   it('fails pending discard calls before HTTP when the session supervisor is auth_failed', async () => {
-    pendingRows = [{ localId: 'a' }];
+    pendingRows = [{ localId: 'a', status: 'queued', deliveryState: null }];
     const client = await createClient();
     supervisedInternals(client).sessionConnectionSupervisor.reportProbeResult({
       status: 'auth_failed',
@@ -242,7 +261,10 @@ describe('ApiSessionClient pending queue V2 helpers', () => {
   });
 
   it('rejects non-auth pending discard failures instead of treating partial discard as success', async () => {
-    pendingRows = [{ localId: 'a' }, { localId: 'b' }];
+    pendingRows = [
+      { localId: 'a', status: 'queued', deliveryState: null },
+      { localId: 'b', status: 'queued', deliveryState: null },
+    ];
     discardStatusesByLocalId.set('a', 500);
     const client = await createClient();
 

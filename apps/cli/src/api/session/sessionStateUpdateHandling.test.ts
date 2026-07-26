@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { handleSessionStateUpdate } from './sessionStateUpdateHandling';
+import {
+  applyAcknowledgedRuntimeActivityProjection,
+  handleSessionStateUpdate,
+} from './sessionStateUpdateHandling';
 
 describe('handleSessionStateUpdate', () => {
   it('parses plaintext metadata updates when sessionEncryptionMode=plain', () => {
@@ -105,19 +108,22 @@ describe('handleSessionStateUpdate', () => {
     });
   });
 
-  it('preserves the complete runtime activity projection from update-session events', () => {
+  it('accepts only newer complete target Runtime Activity projections', () => {
+    const current = {
+      runtimeActivityState: 'active' as const,
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 10,
+      runtimeActivityRevision: 4,
+    };
     const result = handleSessionStateUpdate({
       update: {
-        id: 'u1',
-        seq: 1,
-        createdAt: Date.now(),
+        id: 'u-runtime', seq: 2, createdAt: 20,
         body: {
-          t: 'update-session',
-          sid: 's1',
-          runtimeActivityActiveCount: 1,
-          runtimeActivityObservedAt: 1_000,
-          runtimeActivityExpiresAt: 2_000,
-          runtimeActivitySourceClass: 'provider_detached_task',
+          t: 'update-session', sid: 's1',
+          runtimeActivityState: 'idle',
+          runtimeActivityActiveCount: 0,
+          runtimeActivityObservedAt: 20,
+          runtimeActivityRevision: 5,
         },
       } as any,
       updateSource: 'session-scoped',
@@ -128,19 +134,86 @@ describe('handleSessionStateUpdate', () => {
       agentState: null,
       agentStateVersion: 0,
       pendingWakeSeq: 0,
-      pendingQueueState: { known: false },
+      runtimeActivityProjection: current,
       encryptionKey: new Uint8Array(),
       encryptionVariant: 'dataKey',
       onMetadataUpdated: () => {},
       onWarning: () => {},
-    } as any);
+    });
 
     expect(result.runtimeActivityProjection).toEqual({
-      runtimeActivityActiveCount: 1,
-      runtimeActivityObservedAt: 1_000,
-      runtimeActivityExpiresAt: 2_000,
-      runtimeActivitySourceClass: 'provider_detached_task',
+      runtimeActivityState: 'idle',
+      runtimeActivityActiveCount: 0,
+      runtimeActivityObservedAt: 20,
+      runtimeActivityRevision: 5,
     });
+    expect(result.pendingWakeSeq).toBe(1);
+  });
+
+  it('retains the current Runtime Activity projection and requests a typed resync on an equal-revision conflict', () => {
+    const current = {
+      runtimeActivityState: 'active' as const,
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 10,
+      runtimeActivityRevision: 4,
+    };
+    const onRuntimeActivityResyncRequired = vi.fn();
+
+    const result = handleSessionStateUpdate({
+      update: {
+        id: 'u-runtime-conflict', seq: 2, createdAt: 20,
+        body: {
+          t: 'update-session', sid: 's1',
+          runtimeActivityState: 'idle',
+          runtimeActivityActiveCount: 0,
+          runtimeActivityObservedAt: 20,
+          runtimeActivityRevision: 4,
+        },
+      } as any,
+      updateSource: 'session-scoped',
+      sessionId: 's1',
+      sessionEncryptionMode: 'e2ee',
+      metadata: null,
+      metadataVersion: 0,
+      agentState: null,
+      agentStateVersion: 0,
+      pendingWakeSeq: 0,
+      runtimeActivityProjection: current,
+      encryptionKey: new Uint8Array(),
+      encryptionVariant: 'dataKey',
+      onMetadataUpdated: () => {},
+      onRuntimeActivityResyncRequired,
+      onWarning: () => {},
+    });
+
+    expect(result.runtimeActivityProjection).toBe(current);
+    expect(result.pendingWakeSeq).toBe(0);
+    expect(onRuntimeActivityResyncRequired).toHaveBeenCalledWith({
+      reason: 'equal_revision_conflict',
+      current: { state: 'active', activeCount: 1, observedAt: 10, revision: 4 },
+      incoming: { state: 'idle', activeCount: 0, observedAt: 20, revision: 4 },
+    });
+  });
+
+  it('applies a target snapshot acknowledgement idempotently', () => {
+    const current = {
+      runtimeActivityState: 'active' as const,
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 10,
+      runtimeActivityRevision: 4,
+    };
+    const first = applyAcknowledgedRuntimeActivityProjection({
+      current,
+      projection: { state: 'idle', activeCount: 0, observedAt: 20, revision: 5 },
+    });
+    const duplicate = applyAcknowledgedRuntimeActivityProjection({
+      current: first.projection,
+      projection: { state: 'idle', activeCount: 0, observedAt: 20, revision: 5 },
+    });
+
+    expect(first.didBecomeIdle).toBe(true);
+    expect(duplicate.didBecomeIdle).toBe(false);
+    expect(duplicate.projection).toBe(first.projection);
   });
 
   it('warns when session-scoped socket receives update-machine', () => {

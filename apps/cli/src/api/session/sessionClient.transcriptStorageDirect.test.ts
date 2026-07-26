@@ -16,6 +16,7 @@ const sessionTransportParamsHistory: Array<Record<string, unknown>> = [];
 let supervisorOnConnected: (() => Promise<void> | void) | null = null;
 let supervisorOnDisconnected: ((params: { event: { reason?: string } }) => Promise<void> | void) | null = null;
 let supervisorReportProbeResult: ReturnType<typeof vi.fn> | null = null;
+let supervisorCreateTransport: (() => unknown) | null = null;
 
 function getSessionAliveEmitCalls(socket: ApiSessionSocketStub): unknown[][] {
   return socket.emit.mock.calls.filter((call) => call[0] === 'session-alive');
@@ -62,6 +63,7 @@ vi.mock('@happier-dev/connection-supervisor', () => ({
     start: async () => {
       supervisorOnConnected = params.onConnected ?? null;
       supervisorOnDisconnected = params.onDisconnected ?? null;
+      supervisorCreateTransport = params.createTransport;
       params.createTransport();
       await params.onConnected?.();
     },
@@ -77,6 +79,7 @@ describe('ApiSessionClient (HAPPIER_TRANSCRIPT_STORAGE=direct)', () => {
     supervisorOnConnected = null;
     supervisorOnDisconnected = null;
     supervisorReportProbeResult = vi.fn();
+    supervisorCreateTransport = null;
   });
 
   afterEach(async () => {
@@ -228,7 +231,7 @@ describe('ApiSessionClient (HAPPIER_TRANSCRIPT_STORAGE=direct)', () => {
     );
   });
 
-  it('delivers a server-echoed user message to the agent queue even when the localId was committed locally (prevents deadlocks)', async () => {
+  it('projects a server echo as transcript observation without bypassing Queue-owned provider input', async () => {
     vi.resetModules();
     sessionSocketStub = createApiSessionSocketStub({ connected: true });
     userSocketStub = createApiSessionSocketStub({ connected: true });
@@ -240,7 +243,9 @@ describe('ApiSessionClient (HAPPIER_TRANSCRIPT_STORAGE=direct)', () => {
     createdClients.push(client);
 
     const onUserMessage = vi.fn();
+    const onObservedUserMessage = vi.fn();
     client.onUserMessage(onUserMessage);
+    client.on('user-message', onObservedUserMessage);
 
     client.sendUserTextMessage('hello', {
       localId: 'local-1',
@@ -276,16 +281,14 @@ describe('ApiSessionClient (HAPPIER_TRANSCRIPT_STORAGE=direct)', () => {
       },
     });
 
-    expect(onUserMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        role: 'user',
-        localId: 'local-1',
-      }),
-      { seq: 1 },
-    );
+    expect(onUserMessage).not.toHaveBeenCalled();
+    expect(onObservedUserMessage).toHaveBeenCalledWith(expect.objectContaining({
+      role: 'user',
+      localId: 'local-1',
+    }));
   });
 
-  it('does not double-deliver a user message that was already enqueued locally before committing it', async () => {
+  it('does not treat either durable enqueue or its transcript echo as provider input', async () => {
     vi.resetModules();
     sessionSocketStub = createApiSessionSocketStub({ connected: true });
     userSocketStub = createApiSessionSocketStub({ connected: true });
@@ -297,7 +300,9 @@ describe('ApiSessionClient (HAPPIER_TRANSCRIPT_STORAGE=direct)', () => {
     createdClients.push(client);
 
     const onUserMessage = vi.fn();
+    const onObservedUserMessage = vi.fn();
     client.onUserMessage(onUserMessage);
+    client.on('user-message', onObservedUserMessage);
 
     await client.rpcHandlerManager.handleRequest({
       method: `s1:${SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND}`,
@@ -308,7 +313,7 @@ describe('ApiSessionClient (HAPPIER_TRANSCRIPT_STORAGE=direct)', () => {
       },
     } as any);
 
-    expect(onUserMessage).toHaveBeenCalledTimes(1);
+    expect(onUserMessage).not.toHaveBeenCalled();
 
     sessionSocketStub.trigger('update', {
       id: 'u2',
@@ -336,7 +341,8 @@ describe('ApiSessionClient (HAPPIER_TRANSCRIPT_STORAGE=direct)', () => {
       },
     });
 
-    expect(onUserMessage).toHaveBeenCalledTimes(1);
+    expect(onUserMessage).not.toHaveBeenCalled();
+    expect(onObservedUserMessage).toHaveBeenCalledOnce();
   });
 
   it('includes machineId in the session-scoped socket bootstrap when session metadata declares it', async () => {
@@ -363,6 +369,52 @@ describe('ApiSessionClient (HAPPIER_TRANSCRIPT_STORAGE=direct)', () => {
 
     expect(sessionTransportParamsHistory).toHaveLength(1);
     expect(sessionTransportParamsHistory[0]).toMatchObject({
+      token: 'tok',
+      sessionId: 's1',
+      machineId: 'machine-1',
+    });
+  });
+
+  it('keeps the launch machine binding when mutable session metadata loses machineId before reconnect', async () => {
+    vi.resetModules();
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAck: async (event, payload) => {
+        if (event === 'update-metadata') {
+          const request = payload as { expectedVersion: number; metadata: string };
+          return {
+            result: 'success',
+            version: request.expectedVersion + 1,
+            metadata: request.metadata,
+          };
+        }
+        return { ok: true };
+      },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true });
+
+    vi.stubEnv('HAPPIER_TRANSCRIPT_STORAGE', 'direct');
+
+    const { ApiSessionClient } = await import('./sessionClient');
+    const session = createPlainSessionFixture({ id: 's1' });
+    const client = new ApiSessionClient('tok', {
+      ...session,
+      metadata: {
+        ...session.metadata,
+        machineId: 'machine-1',
+      },
+    });
+    createdClients.push(client);
+
+    await client.updateMetadata((current) => {
+      const next = { ...current };
+      delete next.machineId;
+      return next;
+    });
+    supervisorCreateTransport?.();
+
+    expect(sessionTransportParamsHistory).toHaveLength(2);
+    expect(sessionTransportParamsHistory[1]).toMatchObject({
       token: 'tok',
       sessionId: 's1',
       machineId: 'machine-1',

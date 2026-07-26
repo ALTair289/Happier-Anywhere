@@ -2,6 +2,18 @@ import type { ACPMessageData, ACPProvider } from '../sessionMessageTypes';
 import type { StreamedTranscriptSegmentKind } from './segmentKey';
 import type { StreamedTranscriptSegmentState } from './segmentRuntime';
 import type { EphemeralSendResult } from '../ephemeralSendOutcome';
+import type { SessionTranscriptObservationProvenanceV1 } from '@happier-dev/protocol';
+import type { SessionMessageCommitResult } from '../sessionMessageCommitResult';
+
+export type StreamedTranscriptCommitOptions = {
+  localId: string;
+  meta?: Record<string, unknown>;
+  provenance?: SessionTranscriptObservationProvenanceV1;
+};
+
+export type StreamedTranscriptEnqueueOptions = StreamedTranscriptCommitOptions & Readonly<{
+  provenance: SessionTranscriptObservationProvenanceV1;
+}>;
 
 export type StreamedTranscriptWriterSession = Readonly<{
   sendAgentMessage?: (
@@ -12,12 +24,17 @@ export type StreamedTranscriptWriterSession = Readonly<{
   sendAgentMessageCommitted?: (
     provider: ACPProvider,
     body: ACPMessageData,
-    opts: { localId: string; meta?: Record<string, unknown> },
+    opts: StreamedTranscriptCommitOptions,
   ) => Promise<void>;
+  sendAgentMessageCommittedExact?: (
+    provider: ACPProvider,
+    body: ACPMessageData,
+    opts: StreamedTranscriptCommitOptions,
+  ) => Promise<SessionMessageCommitResult>;
   enqueueAgentMessageCommitted?: (
     provider: ACPProvider,
     body: ACPMessageData,
-    opts: { localId: string; meta?: Record<string, unknown> },
+    opts: StreamedTranscriptEnqueueOptions,
   ) => Promise<Readonly<{ persisted: boolean; delivered: boolean }>>;
   sendAgentMessageEphemeral?: (
     provider: ACPProvider,
@@ -57,10 +74,12 @@ export type StreamedTranscriptWriterSession = Readonly<{
 
 export type StreamedTranscriptWriter = Readonly<{
   appendAssistantDelta: (deltaText: string, opts?: { sidechainId?: string | null }) => void;
+  appendAssistantDeltaExact: (deltaText: string, opts: { localId: string; sidechainId?: string | null }) => void;
   appendThinkingDelta: (deltaText: string, opts?: { sidechainId?: string | null }) => void;
   overrideAssistantText: (text: string, opts?: { sidechainId?: string | null }) => boolean;
   overrideThinkingText: (text: string, opts?: { sidechainId?: string | null }) => boolean;
   mergeAssistantMeta: (meta: Record<string, unknown>, opts?: { sidechainId?: string | null }) => boolean;
+  setCommitProvenance: (provenance: SessionTranscriptObservationProvenanceV1 | null) => void;
   enableDurableCommits: () => void;
   discard: () => void;
   flushAll: (opts: {
@@ -72,9 +91,11 @@ export type StreamedTranscriptWriter = Readonly<{
 export type StreamedTranscriptSegmentFlushSummary = Readonly<{
   kind: StreamedTranscriptSegmentKind;
   sidechainId: string | null;
+  localId: string;
   sawText: boolean;
   didDurablyFlush: boolean;
   lastCommittedState: StreamedTranscriptSegmentState | null;
+  commitResult: SessionMessageCommitResult | null;
 }>;
 
 export type StreamedTranscriptFlushSummary = Readonly<{

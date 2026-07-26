@@ -9,13 +9,13 @@ import {
 } from '@/testkit/backends/apiSessionSocketHarness';
 import { installAxiosFastifyAdapter } from '@/testkit/http/axiosAdapter';
 
-type Ack = { ok: true; id: string; seq: number; localId: string };
+type Ack = { ok: true; id: string; seq: number; localId: string; didWrite?: boolean };
 
 type CommittedUserMessageSeqApi = {
   getCommittedUserMessageSeq: (localId: string) => number | null;
   waitForCommittedUserMessageSeq: (
     localId: string,
-    opts?: { timeoutMs?: number; pollMs?: number },
+    opts?: { timeoutMs?: number },
   ) => Promise<number | null>;
 };
 
@@ -428,11 +428,124 @@ describe('ApiSessionClient message commit queue', () => {
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
     expectCommittedUserMessageSeqApi(client);
 
-    const waiter = client.waitForCommittedUserMessageSeq('prompt-1', { timeoutMs: 1_000, pollMs: 5 });
+    const waiter = client.waitForCommittedUserMessageSeq('prompt-1', { timeoutMs: 1_000 });
     await client.sendUserTextMessageCommitted('hello', { localId: 'prompt-1' });
 
     await expect(waiter).resolves.toBe(42);
     expect(client.getCommittedUserMessageSeq('prompt-1')).toBe(42);
+  });
+
+  it('awaits caller-identified Codex transcript custody and reports an idempotent duplicate', async () => {
+    vi.resetModules();
+    supervisorStartCount = 0;
+    const firstAck = createDeferred<Ack>();
+    const messagePayloads: any[] = [];
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAck: async (event: string, payload: any) => {
+        if (event !== 'message') return { ok: true };
+        messagePayloads.push(payload);
+        if (messagePayloads.length === 1) return await firstAck.promise;
+        return { ok: true, id: 'message-1', seq: 41, localId: payload.localId, didWrite: false };
+      },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const { ApiSessionClient } = await import('./sessionClient');
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    const exactClient = client;
+    expect(typeof exactClient.sendCodexMessageCommitted).toBe('function');
+
+    let firstResolved = false;
+    const firstCommit = Promise.resolve().then(() => exactClient.sendCodexMessageCommitted(
+      { type: 'tool-call', callId: 'call-1', name: 'Bash', input: { cmd: 'pwd' } },
+      { localId: 'rollout-effect-1' },
+    )).then((result) => {
+      firstResolved = true;
+      return result;
+    });
+    await flushMicrotasks();
+
+    expect(firstResolved).toBe(false);
+    expect(messagePayloads[0]).toEqual(expect.objectContaining({ localId: 'rollout-effect-1' }));
+
+    firstAck.resolve({ ok: true, id: 'message-1', seq: 41, localId: 'rollout-effect-1', didWrite: true });
+    await expect(firstCommit).resolves.toEqual({
+      localId: 'rollout-effect-1',
+      messageId: 'message-1',
+      seq: 41,
+      didWrite: true,
+    });
+
+    await expect(exactClient.sendCodexMessageCommitted(
+      { type: 'tool-call', callId: 'call-1', name: 'Bash', input: { cmd: 'pwd' } },
+      { localId: 'rollout-effect-1' },
+    )).resolves.toEqual({
+      localId: 'rollout-effect-1',
+      messageId: 'message-1',
+      seq: 41,
+      didWrite: false,
+    });
+    expect(messagePayloads.map((payload) => payload.localId)).toEqual([
+      'rollout-effect-1',
+      'rollout-effect-1',
+    ]);
+  });
+
+  it('fails closed for exact session-event ACKs with missing disposition or mismatched identity', async () => {
+    vi.resetModules();
+    supervisorStartCount = 0;
+    const messagePayloads: any[] = [];
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAck: async (event: string, payload: any) => {
+        if (event !== 'message') return { ok: true };
+        messagePayloads.push(payload);
+        if (messagePayloads.length === 1) {
+          return { ok: true, id: 'event-message-1', seq: 51, localId: payload.localId };
+        }
+        if (messagePayloads.length === 2) {
+          return { ok: true, id: 'event-message-1', seq: 51, localId: 'wrong-effect-id', didWrite: false };
+        }
+        return { ok: true, id: 'event-message-1', seq: 51, localId: payload.localId, didWrite: false };
+      },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const { ApiSessionClient } = await import('./sessionClient');
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    const exactClient = client;
+
+    await expect(Promise.resolve().then(() => exactClient.sendSessionEventCommitted(
+      { type: 'context-compaction', phase: 'completed' },
+      { localId: 'rollout-event-1' },
+    ))).rejects.toThrow('didWrite');
+
+    await expect(exactClient.sendSessionEventCommitted(
+      { type: 'context-compaction', phase: 'completed' },
+      { localId: 'rollout-event-1' },
+    )).rejects.toThrow('localId mismatch');
+
+    await expect(exactClient.sendSessionEventCommitted(
+      { type: 'context-compaction', phase: 'completed' },
+      { localId: 'rollout-event-1' },
+    )).resolves.toEqual({
+      localId: 'rollout-event-1',
+      messageId: 'event-message-1',
+      seq: 51,
+      didWrite: false,
+    });
+    expect(messagePayloads).toHaveLength(3);
+    expect(messagePayloads[2]).toEqual(expect.objectContaining({
+      localId: 'rollout-event-1',
+      messageRole: 'event',
+    }));
+    expect(messagePayloads[2].message).toEqual({
+      t: 'plain',
+      v: expect.objectContaining({
+        content: expect.objectContaining({ id: 'rollout-event-1', type: 'event' }),
+      }),
+    });
   });
 
   it('queues a retry and throws an explicit unsupported confirmation error when persisted ACK-timeout recovery hits an older server', async () => {
@@ -512,7 +625,7 @@ describe('ApiSessionClient message commit queue', () => {
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
     expectCommittedUserMessageSeqApi(client);
 
-    const waiter = client.waitForCommittedUserMessageSeq('steer-1', { timeoutMs: 1_000, pollMs: 5 });
+    const waiter = client.waitForCommittedUserMessageSeq('steer-1', { timeoutMs: 1_000 });
     userSocketStub.trigger('update', {
       id: 'u1',
       seq: 7,
@@ -613,40 +726,6 @@ describe('ApiSessionClient message commit queue', () => {
     }
   });
 
-  it('blocks pending queue materialization while continuation recovery is unresolved', async () => {
-    vi.resetModules();
-    sessionSocketStub = createApiSessionSocketStub({
-      connected: true,
-      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'ack-1' },
-    });
-    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-
-    const { ApiSessionClient } = await import('./sessionClient');
-    const client = new ApiSessionClient('tok', createPlainSessionFixture({
-      id: 's1',
-      pendingCount: 1,
-      pendingVersion: 5,
-      metadata: createTestMetadata({
-        sessionContinuationRecoveryV1: {
-          v: 1,
-          attemptsById: {
-            'generation-1:restart-1': {
-              v: 1,
-              attemptId: 'generation-1:restart-1',
-              status: 'pending_provider_context',
-              failureAtMs: 1_000,
-              updatedAtMs: 1_100,
-              resumePromptMode: 'standard',
-            },
-          },
-        },
-      }),
-    }));
-
-    expect(client.shouldAttemptPendingMaterialization()).toBe(false);
-    await client.close();
-  });
-
   it('returns null when a committed user message seq is not observed before timeout', async () => {
     vi.resetModules();
     vi.useFakeTimers();
@@ -662,7 +741,7 @@ describe('ApiSessionClient message commit queue', () => {
       const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
       expectCommittedUserMessageSeqApi(client);
 
-      const waiter = client.waitForCommittedUserMessageSeq('missing-1', { timeoutMs: 25, pollMs: 5 });
+      const waiter = client.waitForCommittedUserMessageSeq('missing-1', { timeoutMs: 25 });
       await vi.advanceTimersByTimeAsync(25);
 
       await expect(waiter).resolves.toBeNull();
@@ -779,5 +858,57 @@ describe('ApiSessionClient message commit queue', () => {
     await flushPromise;
     expect(didFlush).toBe(true);
     await client.close();
+  });
+
+  it('does not reset a message commit retry budget across reconnect flushes', async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    let emitted = 0;
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAck: async (event: string) => {
+        if (event === 'message') {
+          emitted += 1;
+          return null;
+        }
+        return { ok: true };
+      },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    try {
+      const { ApiSessionClient } = await import('./sessionClient');
+      const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+      const commitQueueAccess = client as unknown as {
+        commitSessionMessage(params: {
+          message: { t: 'plain'; v: unknown };
+          localId: string;
+          sidechainId: string | null;
+          messageRole: 'agent';
+          requireCommit: false;
+        }): Promise<unknown>;
+        flushQueuedSessionMessagesOnReconnect(): Promise<void>;
+      };
+
+      await commitQueueAccess.commitSessionMessage({
+        message: { t: 'plain', v: { revision: 1 } },
+        localId: 'bounded-reconnect-local-id',
+        sidechainId: null,
+        messageRole: 'agent',
+        requireCommit: false,
+      });
+
+      for (let reconnect = 0; reconnect < 6; reconnect += 1) {
+        sessionSocketStub.connected = false;
+        await vi.runOnlyPendingTimersAsync();
+        sessionSocketStub.connected = true;
+        await commitQueueAccess.flushQueuedSessionMessagesOnReconnect();
+      }
+
+      expect(emitted).toBe(4);
+      await client.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

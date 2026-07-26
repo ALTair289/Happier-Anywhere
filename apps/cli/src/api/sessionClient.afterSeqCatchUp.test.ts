@@ -181,6 +181,7 @@ describe('ApiSessionClient reconnect transcript catch-up (afterSeq)', () => {
 
         // Avoid snapshot side effects in this unit test.
         (client as any).syncSessionSnapshotFromServer = vi.fn(async () => {});
+        (client as any).refreshAccountSettingsFromChangesHint = vi.fn(async () => {});
 
         // Simulate a reconnect (the constructor wires the handler; we can bypass the first connect).
         (client as any).hasConnectedOnce = true;
@@ -190,9 +191,10 @@ describe('ApiSessionClient reconnect transcript catch-up (afterSeq)', () => {
         client.on('user-message', onUserMessage);
 
         mockSocket.trigger('connect');
+        await vi.waitFor(() => {
+            expect(onUserMessage).toHaveBeenCalledTimes(1);
+        });
         await (client as any).changesSyncInFlight;
-
-        expect(onUserMessage).toHaveBeenCalledTimes(1);
         expect(onUserMessage).toHaveBeenCalledWith(expect.objectContaining({ localId: 'local-1' }));
         expect(writeAccountChangesCursor).not.toHaveBeenCalled();
 

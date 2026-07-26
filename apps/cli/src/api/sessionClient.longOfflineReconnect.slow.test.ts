@@ -13,7 +13,10 @@ vi.mock('socket.io-client', () => ({
 }));
 
 vi.mock('@/persistence', () => ({
-    readCredentials: vi.fn(async () => null),
+    readCredentials: vi.fn(async () => ({
+        token: 'fake-token',
+        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(7) },
+    })),
     readAccountChangesCursor: vi.fn(async () => 0),
     writeAccountChangesCursor: vi.fn(async () => {}),
 }));
@@ -57,6 +60,13 @@ describe('ApiSessionClient long-offline reconnect fallback', () => {
                 };
             }
 
+            if (url.endsWith('/v2/account/settings')) {
+                return {
+                    status: 200,
+                    data: { content: { t: 'plain', v: {} }, version: 0 },
+                };
+            }
+
             if (url.includes(`/v1/sessions/${sessionId}/messages`)) {
                 expect(config?.params?.afterSeq).toBe(lastObservedMessageSeq);
                 return {
@@ -84,9 +94,9 @@ describe('ApiSessionClient long-offline reconnect fallback', () => {
         (client as any).lastObservedMessageSeq = lastObservedMessageSeq;
 
         mockSocket.trigger('connect');
-        await (client as any).changesSyncInFlight;
-
-        expect(snapshotSpy).toHaveBeenCalledWith({ reason: 'socket-reconnect-catchup' });
+        await vi.waitFor(() => {
+            expect(snapshotSpy).toHaveBeenCalledWith({ reason: 'socket-reconnect-catchup' });
+        }, { timeout: 15_000 });
         expect(writeAccountChangesCursor).not.toHaveBeenCalled();
 
         await client.close();
@@ -146,9 +156,9 @@ describe('ApiSessionClient long-offline reconnect fallback', () => {
         (client as any).lastObservedMessageSeq = lastObservedMessageSeq;
 
         mockSocket.trigger('connect');
-        await (client as any).changesSyncInFlight;
-
-        expect(snapshotSpy).toHaveBeenCalledWith({ reason: 'socket-reconnect-catchup' });
+        await vi.waitFor(() => {
+            expect(snapshotSpy).toHaveBeenCalledWith({ reason: 'socket-reconnect-catchup' });
+        }, { timeout: 15_000 });
         expect(writeAccountChangesCursor).not.toHaveBeenCalled();
 
         await client.close();

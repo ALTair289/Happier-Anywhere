@@ -1,12 +1,18 @@
 import { randomUUID } from 'node:crypto';
 
+import {
+    SessionRuntimeActivitySnapshotSchema,
+    SessionTranscriptObservationProvenanceV1Schema,
+} from '@happier-dev/protocol';
 import type {
+    SessionRuntimeActivitySnapshot,
     SessionRuntimeIssueV1,
     SessionMessageRole,
     SessionStoredMessageContent,
     SessionTurnMutationActionV1,
     SessionTurnTranscriptAnchorsV1,
     SessionTurnMutationV1,
+    SessionTranscriptObservationProvenanceV1,
 } from '@happier-dev/protocol';
 
 export type {
@@ -14,20 +20,11 @@ export type {
     SessionTurnMutationV1,
 } from '@happier-dev/protocol';
 
-export type SessionEndMutationV1 = Readonly<{
-    v: 1;
-    sessionId: string;
-    mutationId: string;
-    source: 'session_end';
-    observedAt: number;
-    exit?: unknown;
-}>;
-
 export type TranscriptMessageAppendMutationContentV1 =
     | string
     | SessionStoredMessageContent;
 
-export type TranscriptMessageAppendMutationV1 = Readonly<{
+type TranscriptMessageAppendMutationBaseV1 = Readonly<{
     v: 1;
     sessionId: string;
     mutationId: string;
@@ -40,6 +37,75 @@ export type TranscriptMessageAppendMutationV1 = Readonly<{
     updatedAt: number;
     sessionEventType?: 'ready';
 }>;
+
+/** Canonical V1 writer shape. Every deliverable observation has explicit causal provenance. */
+export type TranscriptMessageAppendMutationV1 = TranscriptMessageAppendMutationBaseV1 & Readonly<{
+    provenance: SessionTranscriptObservationProvenanceV1;
+}>;
+
+/**
+ * Recovery-only reader shape for public-dev V1 journals written before causal provenance existed.
+ * It remains in the same journal and is never delivered or silently reclassified.
+ */
+export type BlockedLegacyTranscriptMessageAppendMutationV1 = TranscriptMessageAppendMutationBaseV1 & Readonly<{
+    provenance?: unknown;
+}>;
+
+export type PersistedTranscriptMessageAppendMutationV1 =
+    | TranscriptMessageAppendMutationV1
+    | BlockedLegacyTranscriptMessageAppendMutationV1;
+
+export function validateTranscriptMessageAppendMutationProvenance(params: Readonly<{
+    sessionId: string;
+    provenance?: unknown;
+}>): SessionTranscriptObservationProvenanceV1 {
+    const provenance = SessionTranscriptObservationProvenanceV1Schema.safeParse(params.provenance);
+    if (!provenance.success) {
+        throw new Error('Transcript append mutation provenance is required');
+    }
+    return provenance.data;
+}
+
+export function hasSameTranscriptMessageAppendMutationProvenance(
+    left: Pick<PersistedTranscriptMessageAppendMutationV1, 'sessionId' | 'provenance'>,
+    right: Pick<PersistedTranscriptMessageAppendMutationV1, 'sessionId' | 'provenance'>,
+): boolean {
+    let leftProvenance: SessionTranscriptObservationProvenanceV1;
+    let rightProvenance: SessionTranscriptObservationProvenanceV1;
+    try {
+        leftProvenance = validateTranscriptMessageAppendMutationProvenance(left);
+        rightProvenance = validateTranscriptMessageAppendMutationProvenance(right);
+    } catch {
+        return false;
+    }
+    return leftProvenance.source === rightProvenance.source;
+}
+
+export type RuntimeActivitySnapshotMutationV1 = Readonly<{
+    v: 1;
+    source: 'runtime_activity_snapshot';
+    sessionId: string;
+    mutationId: string;
+    snapshot: SessionRuntimeActivitySnapshot;
+}>;
+
+export function resolveRuntimeActivitySnapshotMutationId(sessionId: string): string {
+    return `runtime-activity-snapshot:${normalizeRequiredString(sessionId, 'sessionId')}`;
+}
+
+export function createRuntimeActivitySnapshotMutation(params: Readonly<{
+    sessionId: string;
+    snapshot: SessionRuntimeActivitySnapshot;
+}>): RuntimeActivitySnapshotMutationV1 {
+    const sessionId = normalizeRequiredString(params.sessionId, 'sessionId');
+    return {
+        v: 1,
+        source: 'runtime_activity_snapshot',
+        sessionId,
+        mutationId: resolveRuntimeActivitySnapshotMutationId(sessionId),
+        snapshot: SessionRuntimeActivitySnapshotSchema.parse(params.snapshot),
+    };
+}
 
 export function resolveTranscriptMessageAppendMutationId(params: Readonly<{
     sessionId: string;
@@ -60,23 +126,25 @@ export type QueuedSessionMutation =
         nextAttemptAt: number;
     }>
     | Readonly<{
-        kind: 'session_end';
-        mutationId: string;
-        payload: SessionEndMutationV1;
-        createdAt: number;
-        attempts: number;
-        nextAttemptAt: number;
-    }>
-    | Readonly<{
         kind: 'transcript_message_append';
         mutationId: string;
-        payload: TranscriptMessageAppendMutationV1;
+        payload: PersistedTranscriptMessageAppendMutationV1;
         /** Client-local monotonic enqueue order; never sent in the server payload. */
         intentOrder?: number;
         createdAt: number;
         attempts: number;
         nextAttemptAt: number;
-}>;
+    }>
+    | Readonly<{
+        kind: 'runtime_activity_snapshot';
+        mutationId: string;
+        payload: RuntimeActivitySnapshotMutationV1;
+        /** Durable monotonic identity for the current coalesced runtime snapshot. */
+        admissionOrder: number;
+        createdAt: number;
+        attempts: number;
+        nextAttemptAt: number;
+    }>;
 
 export function createSessionTurnMutation(params: Readonly<{
     sessionId: string;
@@ -115,21 +183,6 @@ export function createSessionTurnMutation(params: Readonly<{
     } as SessionTurnMutationV1;
 }
 
-export function createSessionEndMutation(params: Readonly<{
-    sessionId: string;
-    observedAt?: number;
-    exit?: unknown;
-}>): SessionEndMutationV1 {
-    return {
-        v: 1,
-        sessionId: params.sessionId,
-        mutationId: randomUUID(),
-        source: 'session_end',
-        observedAt: normalizeObservedAt(params.observedAt ?? Date.now()),
-        ...(params.exit !== undefined ? { exit: params.exit } : {}),
-    };
-}
-
 export function createTranscriptMessageAppendMutation(params: Readonly<{
     sessionId: string;
     localId: string;
@@ -139,12 +192,17 @@ export function createTranscriptMessageAppendMutation(params: Readonly<{
     sessionEventType?: 'ready';
     createdAt?: number;
     updatedAt?: number;
+    provenance: SessionTranscriptObservationProvenanceV1;
 }>): TranscriptMessageAppendMutationV1 {
     const localId = normalizeRequiredString(params.localId, 'localId');
     const sessionId = normalizeRequiredString(params.sessionId, 'sessionId');
     const createdAt = normalizeObservedAt(params.createdAt ?? Date.now());
     const updatedAt = normalizeObservedAt(params.updatedAt ?? createdAt);
     const sidechainId = normalizeOptionalString(params.sidechainId);
+    const provenance = validateTranscriptMessageAppendMutationProvenance({
+        sessionId,
+        provenance: params.provenance,
+    });
     return {
         v: 1,
         sessionId,
@@ -156,6 +214,7 @@ export function createTranscriptMessageAppendMutation(params: Readonly<{
         content: params.content,
         createdAt,
         updatedAt: Math.max(createdAt, updatedAt),
+        provenance,
         ...(params.sessionEventType ? { sessionEventType: params.sessionEventType } : {}),
     };
 }

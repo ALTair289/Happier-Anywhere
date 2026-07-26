@@ -1,16 +1,13 @@
 export const DEFAULT_COMMITTED_USER_MESSAGE_SEQ_WAIT_TIMEOUT_MS = 5_000;
-export const DEFAULT_COMMITTED_USER_MESSAGE_SEQ_WAIT_POLL_MS = 50;
 export const DEFAULT_COMMITTED_USER_MESSAGE_SEQ_TRACKER_MAX_ENTRIES = 256;
 
 export type CommittedUserMessageSeqWaitOptions = Readonly<{
     timeoutMs?: number;
-    pollMs?: number;
 }>;
 
 type Waiter = {
     resolve: (seq: number | null) => void;
     timeout: ReturnType<typeof setTimeout>;
-    poll: ReturnType<typeof setInterval>;
 };
 
 function normalizePositiveInteger(value: unknown, fallback: number): number {
@@ -38,7 +35,8 @@ export class CommittedUserMessageSeqTracker {
     }
 
     record(localId: string | null | undefined, seq: unknown): number | null {
-        if (typeof localId !== 'string' || localId.length === 0) {
+        const pendingLocalId = readPendingLocalId(localId);
+        if (pendingLocalId === null) {
             return null;
         }
         const normalizedSeq = normalizeSeq(seq);
@@ -46,15 +44,15 @@ export class CommittedUserMessageSeqTracker {
             return null;
         }
 
-        const existingSeq = this.committedSeqByLocalId.get(localId) ?? null;
+        const existingSeq = this.committedSeqByLocalId.get(pendingLocalId) ?? null;
         if (existingSeq !== null) {
-            this.resolveWaiters(localId, existingSeq);
+            this.resolveWaiters(pendingLocalId, existingSeq);
             return existingSeq;
         }
 
-        this.committedSeqByLocalId.set(localId, normalizedSeq);
+        this.committedSeqByLocalId.set(pendingLocalId, normalizedSeq);
         this.trimCommittedSeqs();
-        this.resolveWaiters(localId, normalizedSeq);
+        this.resolveWaiters(pendingLocalId, normalizedSeq);
         return normalizedSeq;
     }
 
@@ -63,17 +61,15 @@ export class CommittedUserMessageSeqTracker {
         if (existing !== null) {
             return Promise.resolve(existing);
         }
-        if (localId.length === 0) {
+        if (readPendingLocalId(localId) === null) {
             return Promise.resolve(null);
         }
 
         const timeoutMs = normalizePositiveInteger(options.timeoutMs, DEFAULT_COMMITTED_USER_MESSAGE_SEQ_WAIT_TIMEOUT_MS);
-        const pollMs = normalizePositiveInteger(options.pollMs, DEFAULT_COMMITTED_USER_MESSAGE_SEQ_WAIT_POLL_MS);
 
         return new Promise((resolve) => {
             const cleanup = (waiter: Waiter) => {
                 clearTimeout(waiter.timeout);
-                clearInterval(waiter.poll);
                 const waiters = this.waitersByLocalId.get(localId);
                 waiters?.delete(waiter);
                 if (waiters && waiters.size === 0) {
@@ -87,15 +83,8 @@ export class CommittedUserMessageSeqTracker {
             const waiter: Waiter = {
                 resolve: (seq) => finish(waiter, seq),
                 timeout: setTimeout(() => finish(waiter, null), timeoutMs),
-                poll: setInterval(() => {
-                    const seq = this.get(localId);
-                    if (seq !== null) {
-                        finish(waiter, seq);
-                    }
-                }, pollMs),
             };
             waiter.timeout.unref?.();
-            waiter.poll.unref?.();
 
             const waiters = this.waitersByLocalId.get(localId) ?? new Set<Waiter>();
             waiters.add(waiter);
@@ -108,7 +97,6 @@ export class CommittedUserMessageSeqTracker {
         for (const waiters of this.waitersByLocalId.values()) {
             for (const waiter of waiters) {
                 clearTimeout(waiter.timeout);
-                clearInterval(waiter.poll);
                 waiter.resolve(null);
             }
         }
@@ -136,3 +124,4 @@ export class CommittedUserMessageSeqTracker {
         }
     }
 }
+import { readPendingLocalId } from '@happier-dev/protocol';

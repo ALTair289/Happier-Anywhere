@@ -283,17 +283,17 @@ describe('TranscriptRecoveryCoordinator', () => {
     });
   });
 
-  it('reports server 5xx lookup outcomes as retry_later supervisor probes', async () => {
+  it.each([
+    ['server 5xx', { type: 'unhealthy', reason: 'server_5xx', error: new Error('unavailable') }],
+    ['network', { type: 'unhealthy', reason: 'network', error: Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }) }],
+    ['timeout', { type: 'unhealthy', reason: 'timeout', error: Object.assign(new Error('request timed out'), { code: 'ETIMEDOUT' }) }],
+    ['protocol', { type: 'protocol_error', error: new Error('malformed response') }],
+  ] as const)('keeps %s lookup failures operation-local', async (_name, outcome) => {
     vi.useFakeTimers();
 
     const supervisor = createSupervisor();
-    const error = new Error('unavailable');
     const coordinator = TranscriptRecoveryCoordinator.forServer('http://server.test', { delayMs: 0 });
-    const runRequest = vi.fn(async (): Promise<TranscriptLookupOutcome> => ({
-      type: 'unhealthy',
-      reason: 'server_5xx',
-      error,
-    }));
+    const runRequest = vi.fn(async (): Promise<TranscriptLookupOutcome> => outcome);
 
     const result = coordinator.scheduleByLocalId({
       sessionId: 'sid',
@@ -303,19 +303,21 @@ describe('TranscriptRecoveryCoordinator', () => {
     });
     await vi.runAllTimersAsync();
 
-    await expect(result).resolves.toEqual({ type: 'error', reason: 'unhealthy', error });
-    expect(supervisor.reportProbeResult).toHaveBeenCalledWith({
-      status: 'retry_later',
-      errorMessage: 'unavailable',
-    });
+    await expect(result).resolves.toMatchObject({ type: 'error' });
+    expect(supervisor.reportProbeResult).not.toHaveBeenCalled();
   });
 
-  it('reports thrown server 5xx errors as retry_later supervisor probes', async () => {
+  it('keeps thrown server failures operation-local while retaining keyed backoff', async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(0);
 
     const supervisor = createSupervisor();
     const error = new HttpStatusError(503, 'service unavailable');
-    const coordinator = TranscriptRecoveryCoordinator.forServer('http://server.test', { delayMs: 0 });
+    const coordinator = TranscriptRecoveryCoordinator.forServer('http://server.test', {
+      delayMs: 0,
+      errorBackoffBaseMs: 100,
+      errorBackoffMaxMs: 100,
+    });
     const runRequest = vi.fn(async (): Promise<TranscriptLookupOutcome> => {
       throw error;
     });
@@ -329,9 +331,39 @@ describe('TranscriptRecoveryCoordinator', () => {
     await vi.runAllTimersAsync();
 
     await expect(result).resolves.toEqual({ type: 'error', reason: 'unhealthy', error });
+    expect(supervisor.reportProbeResult).not.toHaveBeenCalled();
+    await expect(
+      coordinator.scheduleByLocalId({
+        sessionId: 'sid',
+        localId: 'local-1',
+        supervisor,
+        runRequest,
+      }),
+    ).resolves.toEqual({ type: 'deferred', reason: 'backoff' });
+    expect(runRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports thrown 403 authentication failures to the shared supervisor', async () => {
+    vi.useFakeTimers();
+
+    const supervisor = createSupervisor();
+    const error = new HttpStatusError(403, 'forbidden');
+    const coordinator = TranscriptRecoveryCoordinator.forServer('http://server.test', { delayMs: 0 });
+    const result = coordinator.scheduleByLocalId({
+      sessionId: 'sid',
+      localId: 'local-1',
+      supervisor,
+      runRequest: async () => {
+        throw error;
+      },
+    });
+    await vi.runAllTimersAsync();
+
+    await expect(result).resolves.toEqual({ type: 'error', reason: 'auth_failed', error });
     expect(supervisor.reportProbeResult).toHaveBeenCalledWith({
-      status: 'retry_later',
-      errorMessage: 'service unavailable',
+      status: 'auth_failed',
+      statusCode: 403,
+      errorMessage: 'forbidden',
     });
   });
 

@@ -1,13 +1,19 @@
+import {
+    mergeSessionRuntimeActivityProjection,
+    parseSessionRuntimeActivityProjectionFields,
+    type SessionRuntimeActivityProjection,
+} from '@happier-dev/protocol';
+import type { PendingQueueRuntimeActivityProjection } from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
+import { tryParseJsonObject } from '@/utils/tryParseJsonRecord';
+
 import { decodeBase64, decrypt } from '../encryption';
 import type { AgentState, Metadata, Update } from '../types';
-import { tryParseJsonObject } from '@/utils/tryParseJsonRecord';
 import {
     applyKnownPendingQueueState,
     readKnownPendingQueueState,
     UNKNOWN_PENDING_QUEUE_STATE,
     type PendingQueueState,
 } from './pendingQueueState';
-import type { PendingQueueRuntimeActivityProjection } from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
 
 type PendingChangedDrainTriggerSnapshot = Readonly<{
     pendingCount: number | null;
@@ -42,11 +48,82 @@ function tryDecodeSessionStateValue<T>(params: {
     }
 }
 
-function hasRuntimeActivityProjectionFields(value: unknown): boolean {
-    if (!value || typeof value !== 'object') return false;
-    const record = value as Record<string, unknown>;
-    return 'runtimeActivityActiveCount' in record
-        || 'runtimeActivityExpiresAt' in record;
+export type SessionRuntimeActivityResyncTrigger = Readonly<{
+    reason: 'equal_revision_conflict';
+    current: SessionRuntimeActivityProjection;
+    incoming: SessionRuntimeActivityProjection;
+}>;
+
+function toPendingQueueRuntimeActivityProjection(
+    projection: SessionRuntimeActivityProjection,
+): PendingQueueRuntimeActivityProjection {
+    return {
+        runtimeActivityState: projection.state,
+        runtimeActivityActiveCount: projection.activeCount,
+        runtimeActivityObservedAt: projection.observedAt,
+        runtimeActivityRevision: projection.revision,
+    };
+}
+
+function applyRuntimeActivityProjectionUpdate(params: Readonly<{
+    current: PendingQueueRuntimeActivityProjection;
+    body: Record<string, unknown>;
+    onResyncRequired?: (trigger: SessionRuntimeActivityResyncTrigger) => void;
+}>): PendingQueueRuntimeActivityProjection {
+    const incoming = parseSessionRuntimeActivityProjectionFields(params.body);
+    if (incoming.kind !== 'valid') return params.current;
+
+    const current = parseSessionRuntimeActivityProjectionFields(params.current);
+    if (current.kind !== 'valid') {
+        return toPendingQueueRuntimeActivityProjection(incoming.projection);
+    }
+
+    const merged = mergeSessionRuntimeActivityProjection(current.projection, incoming.projection);
+    if (merged.decision === 'replace') {
+        return toPendingQueueRuntimeActivityProjection(merged.projection);
+    }
+    if (merged.decision === 'resync_conflict') {
+        params.onResyncRequired?.({
+            reason: 'equal_revision_conflict',
+            current: current.projection,
+            incoming: incoming.projection,
+        });
+    }
+    return params.current;
+}
+
+function isAcceptedRuntimeActivityIdleTransition(params: Readonly<{
+    previous: PendingQueueRuntimeActivityProjection;
+    next: PendingQueueRuntimeActivityProjection;
+}>): boolean {
+    if (params.previous === params.next) return false;
+    return params.previous.runtimeActivityState !== 'idle'
+        && params.next.runtimeActivityState === 'idle';
+}
+
+export function applyAcknowledgedRuntimeActivityProjection(params: Readonly<{
+    current: PendingQueueRuntimeActivityProjection;
+    projection: SessionRuntimeActivityProjection;
+}>): Readonly<{
+    projection: PendingQueueRuntimeActivityProjection;
+    didBecomeIdle: boolean;
+}> {
+    const next = applyRuntimeActivityProjectionUpdate({
+        current: params.current,
+        body: {
+            runtimeActivityState: params.projection.state,
+            runtimeActivityActiveCount: params.projection.activeCount,
+            runtimeActivityObservedAt: params.projection.observedAt,
+            runtimeActivityRevision: params.projection.revision,
+        },
+    });
+    return {
+        projection: next,
+        didBecomeIdle: isAcceptedRuntimeActivityIdleTransition({
+            previous: params.current,
+            next,
+        }),
+    };
 }
 
 export function handleSessionStateUpdate(params: {
@@ -65,6 +142,7 @@ export function handleSessionStateUpdate(params: {
     encryptionVariant: 'legacy' | 'dataKey';
     onMetadataUpdated: () => void;
     onPendingChangedDrainTrigger?: ((snapshot: PendingChangedDrainTriggerSnapshot) => void) | undefined;
+    onRuntimeActivityResyncRequired?: ((trigger: SessionRuntimeActivityResyncTrigger) => void) | undefined;
     onWarning: (message: string) => void;
 }): {
     handled: boolean;
@@ -183,22 +261,28 @@ export function handleSessionStateUpdate(params: {
             }
         }
 
+        const runtimeActivityProjection = applyRuntimeActivityProjectionUpdate({
+            current: unchangedRuntimeActivityProjection,
+            body,
+            onResyncRequired: params.onRuntimeActivityResyncRequired,
+        });
+        const didBecomeRuntimeActivityIdle = isAcceptedRuntimeActivityIdleTransition({
+            previous: unchangedRuntimeActivityProjection,
+            next: runtimeActivityProjection,
+        });
+        if (didBecomeRuntimeActivityIdle) {
+            params.onMetadataUpdated();
+        }
+
         return {
             handled: true,
             metadata,
             metadataVersion,
             agentState,
             agentStateVersion,
-            pendingWakeSeq: params.pendingWakeSeq,
+            pendingWakeSeq: params.pendingWakeSeq + (didBecomeRuntimeActivityIdle ? 1 : 0),
             pendingQueueState: unchangedPendingQueueState,
-            runtimeActivityProjection: hasRuntimeActivityProjectionFields(body)
-                ? {
-                    runtimeActivityActiveCount: body.runtimeActivityActiveCount,
-                    runtimeActivityObservedAt: body.runtimeActivityObservedAt,
-                    runtimeActivityExpiresAt: body.runtimeActivityExpiresAt,
-                    runtimeActivitySourceClass: body.runtimeActivitySourceClass,
-                }
-                : unchangedRuntimeActivityProjection,
+            runtimeActivityProjection,
         };
     }
 

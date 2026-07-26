@@ -6,10 +6,12 @@ import type { TurnAssistantTextSnapshot } from './turnAssistantTextSnapshot';
 import type { CommittedUserMessageSeqWaitOptions } from './committedUserMessageSeqTracker';
 import type { SessionTurnLifecycleController } from '@/agent/runtime/session/turn/types';
 import type { PendingQueueReadOptions, PendingQueueReconcileWhenEmpty } from './pendingQueueReadPolicy';
-import type { PendingMaterializationActiveTurnPolicy } from './pendingMaterializationActiveTurnPolicy';
+import type { PendingForegroundSteerability } from './pendingForegroundSteerability';
 import type { ProviderOwnedUserMessageEchoClassifier } from './providerOwnedUserMessageEcho';
 import type { SessionRuntimeControls } from '@/rpc/handlers/sessionControls';
-import type { SessionRuntimeActivityPublisher } from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
+import type {
+  SessionRuntimeActivitySnapshotPublisher,
+} from '@/session/runtimeActivity/types';
 import type {
   SessionEncryptionContext,
   SessionStoredContentEncryptionMode,
@@ -19,12 +21,15 @@ import type {
   PendingQueueDeliveryBlockedReason,
 } from './pendingQueueV2Transport';
 import type {
+  PendingProviderAction,
   SessionPendingQueueDeliveryTiming,
-  SessionRuntimeActivitySourceClassV1,
   SessionSystemRecord,
+  SessionSystemRecordKind,
   SessionSystemRecordNamespace,
   SessionSystemRecordUpsertRequest,
 } from '@happier-dev/protocol';
+import type { EphemeralSendResult } from './ephemeralSendOutcome';
+import type { RuntimeActivitySnapshotTail } from './mutations/createSessionMutationOutbox';
 
 export type MaterializeNextPendingResult =
   | {
@@ -37,36 +42,33 @@ export type MaterializeNextPendingResult =
     deliveryState?: PendingMaterializationDeliveryState;
   }
   | { type: 'no_pending' }
-  | { type: 'deferred'; reason: 'supervisor_offline' | 'supervisor_auth_failed' | 'runtime_activity_active' };
-
-export type UserMessageProviderAcceptanceQuery = Readonly<{
-  userMessageSeq?: number | null | undefined;
-  userMessageSeqs?: readonly number[] | null | undefined;
-  localIds?: readonly string[] | null | undefined;
-}>;
-
-export type ProviderAcceptancePendingMaterializationPolicy =
-  | 'claimUntilProviderAccept'
-  | 'commitAtMaterialize';
-
-export type ProviderAcceptanceDeliveryOptions = Readonly<{
-  pendingMaterialization?: ProviderAcceptancePendingMaterializationPolicy;
-}>;
+  | { type: 'retryable_transport' }
+  | { type: 'auth_failure'; statusCode: 401 | 403 }
+  | {
+    type: 'deferred';
+    reason: 'supervisor_offline' | 'supervisor_auth_failed' | 'waiting_for_runtime_activity' | 'runtime_activity_unknown' | 'pending_version_mismatch' | 'waiting_for_predecessor' | 'waiting_for_foreground_turn' | 'local_input_queued';
+    retryAfterMs?: number;
+  };
 
 export type SessionUserMessageDeliveryInfo = Readonly<{
   seq: number | null;
   providerAcceptancePending?: boolean | undefined;
+  pendingProviderAction?: PendingProviderAction | undefined;
 }>;
 
 export interface SessionClientPort {
   sessionId: string;
   rpcHandlerManager: RpcHandlerManagerLike;
 
+  /** Synchronously reject new provider input before runner termination cleanup begins. */
+  beginRuntimeTermination?(): void;
+
   sendSessionEvent(event: SessionEventMessage, id?: string): void;
   sendClaudeSessionMessage(message: RawJSONLines, meta?: Record<string, unknown>): void;
   recordClaudeJsonlMessageConsumed?(message: RawJSONLines, meta?: Record<string, unknown>): void;
   setSessionRuntimeControls?(controls: SessionRuntimeControls | null): void;
   registerSessionRuntimeControls?(controls: Partial<SessionRuntimeControls> | null): () => void;
+  wakePendingMaterialization?(): void;
   setProviderOwnedUserMessageEchoClassifier?(classifier: ProviderOwnedUserMessageEchoClassifier | null): void;
   hasActiveCanonicalTurn?(): boolean;
   fetchCommittedClaudeJsonlMessageBaseline?(opts?: { take?: number }): Promise<import('@/backends/claude/utils/claudeJsonlMessageKey').CommittedClaudeJsonlMessageBaseline>;
@@ -76,23 +78,35 @@ export interface SessionClientPort {
   sendAgentMessageEphemeral?(
     provider: ACPProvider,
     body: ACPMessageData,
-    opts: { localId: string; createdAt: number; updatedAt?: number; meta?: Record<string, unknown> },
-  ): void;
+    opts: { localId: string; createdAt: number; updatedAt?: number; meta?: Record<string, unknown>; tick?: number },
+  ): EphemeralSendResult;
+  sendAgentMessageEphemeralDelta?(
+    provider: ACPProvider,
+    body: ACPMessageData,
+    opts: { localId: string; tick: number; baseLength: number; createdAt: number; updatedAt?: number; meta?: Record<string, unknown> },
+  ): EphemeralSendResult;
+  getEphemeralStreamConnectionEpoch?(): number;
 
   updateMetadata(updater: (metadata: Metadata) => Metadata): void | Promise<void>;
   updateAgentState(updater: (state: AgentState) => AgentState): void | Promise<void>;
-  updateRuntimeActivityProjection?(projection: Readonly<{
-    runtimeActivityActiveCount: number;
-    runtimeActivityObservedAt: number | null;
-    runtimeActivityExpiresAt: number | null;
-    runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1 | null;
-  }>): Promise<void> | void;
-  runtimeActivityPublisher?: SessionRuntimeActivityPublisher;
+  /** Phase-5 transport seam; absent until a client owns a real journal-backed snapshot handle. */
+  getRuntimeActivitySnapshotPublisher?(): SessionRuntimeActivitySnapshotPublisher | null;
+  readRuntimeActivitySnapshotTail?(): RuntimeActivitySnapshotTail;
+  waitForRuntimeActivitySnapshotTailChange?(sequence: number, signal?: AbortSignal): Promise<boolean>;
   upsertSessionSystemRecord?(request: SessionSystemRecordUpsertRequest): Promise<void>;
   fetchSessionSystemRecord?(params: Readonly<{
     namespace: SessionSystemRecordNamespace;
     localId: string;
   }>): Promise<SessionSystemRecord | null>;
+  fetchSessionSystemRecordsPage?(params: Readonly<{
+    namespace: SessionSystemRecordNamespace;
+    kind: SessionSystemRecordKind;
+    cursor?: string;
+  }>): Promise<Readonly<{
+    records: SessionSystemRecord[];
+    nextCursor: string | null;
+    hasNext: boolean;
+  }>>;
   getStoredContentEncryptionContext?(): Readonly<{
     mode: SessionStoredContentEncryptionMode;
     ctx?: SessionEncryptionContext;
@@ -103,23 +117,10 @@ export interface SessionClientPort {
   keepAlive(thinking: boolean, mode: 'local' | 'remote'): void;
 
   getMetadataSnapshot(): Metadata | null;
-  /**
-   * A3-HIGH-1 owed-delivery watermark: launchers whose consumption path confirms provider
-   * acceptance opt in so the watermark stops persisting at queue handoff…
-   */
-  deferDeliveredUserMessageWatermarkToProviderAcceptance?(options?: ProviderAcceptanceDeliveryOptions): void;
-  /** …and persist it here once the provider actually accepted the batch (null seq = local-id join). */
-  confirmUserMessageDeliveredToProvider?(
-    seq: number | null | undefined,
-    opts?: { localIds?: readonly string[] | null },
-  ): void;
-  hasUserMessageProviderAcceptance?(query: UserMessageProviderAcceptanceQuery): boolean;
+  hasPendingProviderInputAcceptance?(localId: string): boolean;
   blockPendingMessageDelivery?(params: Readonly<{
     localIds: readonly string[] | null | undefined;
     reason: PendingQueueDeliveryBlockedReason;
-  }>): Promise<boolean>;
-  retryPendingMessageDelivery?(params: Readonly<{
-    localId: string | null | undefined;
   }>): Promise<boolean>;
   getLastObservedMessageSeq?(): number;
   getCommittedUserMessageSeq?(localId: string): number | null;
@@ -133,14 +134,23 @@ export interface SessionClientPort {
     startSeqExclusive?: number | null;
   }): TurnAssistantTextSnapshot | null;
   waitForMetadataUpdate(abortSignal?: AbortSignal): Promise<boolean>;
+  waitForPendingEligibilityUpdate(abortSignal?: AbortSignal): Promise<boolean>;
   shouldAttemptPendingMaterialization?(opts?: {
-    activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
+    activeTurnSteerability?: PendingForegroundSteerability;
     pendingQueueDeliveryTiming?: SessionPendingQueueDeliveryTiming;
   }): boolean;
+  /**
+   * True when the canonical pending queue holds rows but every one is blocked (undeliverable).
+   * Such work can never advance the session, so a completed turn must not defer its ready/push to
+   * it. Optional so lightweight port stubs may omit it (callers treat absence as "not all blocked").
+   */
+  hasOnlyBlockedPendingWork?(): boolean;
   reconcilePendingQueueState?(opts?: { force?: boolean }): Promise<boolean>;
   materializeNextPendingMessageSafely?(opts?: {
+    expectedPendingVersion?: number;
+    expectedRuntimeActivityRevision?: number;
     reconcileWhenEmpty?: PendingQueueReconcileWhenEmpty;
-    activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
+    activeTurnSteerability?: PendingForegroundSteerability;
     pendingQueueDeliveryTiming?: SessionPendingQueueDeliveryTiming;
   }): Promise<MaterializeNextPendingResult>;
   popPendingMessage(): Promise<boolean>;

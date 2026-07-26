@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { logger } from '@/ui/logger';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 import { normalizeEphemeralSendOutcome, type EphemeralSendOutcome } from '../ephemeralSendOutcome';
 import { serializeOutboundError } from '../outboundErrorSerialization';
 
@@ -41,6 +42,7 @@ import type {
   StreamedTranscriptWriter,
   StreamedTranscriptWriterSession,
 } from './types';
+import type { SessionTranscriptObservationProvenanceV1 } from '@happier-dev/protocol';
 
 type SegmentKind = StreamedTranscriptSegmentKind;
 type SegmentState = StreamedTranscriptSegmentState;
@@ -61,9 +63,11 @@ function buildFlushSummary(params: {
   const segments: StreamedTranscriptSegmentFlushSummary[] = params.flushedSegments.map((segment) => ({
     kind: segment.kind,
     sidechainId: segment.sidechainId,
+    localId: segment.segmentLocalId,
     sawText: segment.accumulatedText.length > 0,
     didDurablyFlush: didSegmentDurablyFlush(segment, params.expectedState),
     lastCommittedState: segment.lastCommittedState,
+    commitResult: segment.lastCommitResult,
   }));
 
   const buildAggregate = (kind: SegmentKind, sidechainId?: string | null) => {
@@ -101,6 +105,7 @@ export function createStreamedTranscriptWriter(params: {
   const session = params.session;
   const makeLocalId = typeof params.makeLocalId === 'function' ? params.makeLocalId : () => randomUUID();
   let durableCommitsEnabled = params.durableCommitsRequireExplicitEnable !== true;
+  let commitProvenance: SessionTranscriptObservationProvenanceV1 | undefined;
 
   const initialCheckpointDelayMs = resolveInitialCheckpointDelayMs(params.initialCheckpointDelayMs);
   const checkpointIntervalMs = resolveCheckpointIntervalMs(params.checkpointIntervalMs);
@@ -135,17 +140,31 @@ export function createStreamedTranscriptWriter(params: {
     });
   };
 
-  const getOrCreateSegment = (kind: SegmentKind, sidechainId: string | null): SegmentRuntime => {
+  const getOrCreateSegment = (
+    kind: SegmentKind,
+    sidechainId: string | null,
+    exactLocalId?: string,
+  ): SegmentRuntime => {
     const key = buildStreamedTranscriptSegmentKey(kind, sidechainId);
     const existing = segments.get(key);
-    if (existing) return existing;
+    if (existing) {
+      if (exactLocalId !== undefined) {
+        if (existing.commitMode !== 'exact' || existing.segmentLocalId !== exactLocalId) {
+          throw new Error(`Exact transcript segment identity mismatch for ${key}`);
+        }
+      } else if (existing.commitMode === 'exact') {
+        throw new Error(`Exact transcript segment ${key} requires the exact append API`);
+      }
+      return existing;
+    }
 
     const nowMs = Date.now();
     const created: SegmentRuntime = {
       key,
       kind,
       sidechainId,
-      segmentLocalId: makeLocalId(),
+      segmentLocalId: exactLocalId ?? makeLocalId(),
+      commitMode: exactLocalId === undefined ? 'compatibility' : 'exact',
       startedAtMs: nowMs,
       accumulatedText: '',
       textVersion: 0,
@@ -157,8 +176,11 @@ export function createStreamedTranscriptWriter(params: {
       lastCommittedTextVersion: 0,
       lastCommittedState: null,
       lastCommitFailedAtMs: 0,
+      lastCommitError: null,
+      lastCommitResult: null,
       liveDelivery: createLiveDeliveryState(),
       additionalMeta: {},
+      ...(commitProvenance ? { provenance: commitProvenance } : {}),
       durableCheckpointTimer: null,
       liveSnapshotTimer: null,
       isCommittingDurable: false,
@@ -480,10 +502,15 @@ export function createStreamedTranscriptWriter(params: {
     scheduleDurableCheckpoint(segment);
   };
 
-  const appendDelta = (kind: SegmentKind, deltaText: string, sidechainId: string | null) => {
+  const appendDelta = (
+    kind: SegmentKind,
+    deltaText: string,
+    sidechainId: string | null,
+    exactLocalId?: string,
+  ) => {
     if (!deltaText) return;
 
-    const segment = getOrCreateSegment(kind, sidechainId);
+    const segment = getOrCreateSegment(kind, sidechainId, exactLocalId);
     segment.accumulatedText += deltaText;
     segment.textVersion += 1;
     maybeEmitLiveStreamingSnapshot(segment);
@@ -525,15 +552,36 @@ export function createStreamedTranscriptWriter(params: {
       clearDurableCheckpointTimer(segment);
       clearLiveSnapshotTimer(segment);
       requestLivePublication(segment, { state, interruptedReason: opts.interruptedReason });
-      commitDurableSnapshot(segment, { state, interruptedReason: opts.interruptedReason, force: true });
-      drainPromises.push(Promise.all([
-        waitForSegmentDrain(segment),
-        waitForLiveDeliveryDrain(segment),
-      ]).then(() => undefined));
       segments.delete(segment.key);
+      drainPromises.push((async () => {
+        // The durable snapshot replaces the live projection for this localId.
+        // Settle every queued live publication first so a delayed ephemeral
+        // delivery cannot temporarily overwrite the terminal durable state.
+        await waitForLiveDeliveryDrain(segment);
+        commitDurableSnapshot(segment, { state, interruptedReason: opts.interruptedReason, force: true });
+        await waitForSegmentDrain(segment);
+      })());
     }
 
     await Promise.all(drainPromises);
+    for (const segment of flushedSegments) {
+      if (
+        segment.commitMode === 'compatibility'
+        && (segment.lastCommitError !== null || !didSegmentDurablyFlush(segment, state))
+      ) {
+        segments.set(segment.key, segment);
+      }
+    }
+    const failedExactSegment = flushedSegments.find((segment) =>
+      segment.commitMode === 'exact'
+      && (segment.lastCommitError !== null || !didSegmentDurablyFlush(segment, state)),
+    );
+    if (failedExactSegment) {
+      const reason = failedExactSegment.lastCommitError instanceof Error
+        ? failedExactSegment.lastCommitError.message
+        : 'durable acknowledgement was not received';
+      throw new Error(`Exact transcript segment commit failed for ${failedExactSegment.segmentLocalId}: ${reason}`);
+    }
     for (const segment of flushedSegments) logUnresolvedLiveFailureSummary(segment);
     return buildFlushSummary({ flushedSegments, expectedState: state });
   };
@@ -560,10 +608,20 @@ export function createStreamedTranscriptWriter(params: {
 
   return {
     appendAssistantDelta: (deltaText, opts) => appendDelta('assistant', deltaText, normalizeSidechainId(opts?.sidechainId)),
+    appendAssistantDeltaExact: (deltaText, opts) => {
+      const localId = readNonBlankOpaqueIdentifier(opts?.localId);
+      if (!localId) {
+        throw new Error('Exact assistant transcript append requires a caller-supplied non-blank localId');
+      }
+      appendDelta('assistant', deltaText, normalizeSidechainId(opts?.sidechainId), localId);
+    },
     appendThinkingDelta: (deltaText, opts) => appendDelta('thinking', deltaText, normalizeSidechainId(opts?.sidechainId)),
     overrideAssistantText: (text, opts) => overrideSegmentText('assistant', text, normalizeSidechainId(opts?.sidechainId)),
     overrideThinkingText: (text, opts) => overrideSegmentText('thinking', text, normalizeSidechainId(opts?.sidechainId)),
     mergeAssistantMeta: (meta, opts) => mergeSegmentMeta('assistant', meta, normalizeSidechainId(opts?.sidechainId)),
+    setCommitProvenance: (provenance) => {
+      commitProvenance = provenance ?? undefined;
+    },
     enableDurableCommits,
     discard,
     flushAll,
