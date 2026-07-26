@@ -29,7 +29,7 @@ describe('startup side effects: daemon session reporting retry', () => {
   it('retries transient daemon-unavailable errors and succeeds', async () => {
     const errors = [
       { error: 'No daemon running, no state file found' },
-      { error: 'No daemon running, no state file found' },
+      { error: 'Request failed: /session-started, HTTP 503 (session_startup_reconciliation_failed)' },
       {},
     ];
     let calls = 0;
@@ -157,6 +157,21 @@ describe('startup side effects: daemon session reporting retry', () => {
     // With retryInterval=30s and daemon-default retryTimeout=90s, we should observe:
     // attempt at t=0, 30s, 60s, 90s (then stop).
     expect(calls).toBe(4);
+  });
+
+  it('fails closed when a readiness report exhausts retries without daemon acknowledgement', async () => {
+    await expect(reportSessionToDaemonIfRunning(
+      {
+        sessionId: 'session-readiness',
+        metadata: { startedBy: 'daemon' } as Metadata,
+        requireDaemonAck: true,
+      },
+      {
+        notifyDaemonSessionStartedFn: async () => ({ error: 'No daemon running, no state file found' }),
+        nowFn: () => 1_000,
+        retryTimeoutMs: 0,
+      },
+    )).rejects.toThrow('Claude runtime readiness was not acknowledged by the daemon');
   });
 
   it('uses a longer default retry window when daemon autostart is enabled for terminal sessions', async () => {

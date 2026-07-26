@@ -43,6 +43,13 @@ describe('startupMetadataUpdate', () => {
     });
   });
 
+  it('preserves exact nonblank opaque model identifiers', () => {
+    expect(buildModelOverride({ modelId: ' model-a ', modelUpdatedAt: 123 })).toEqual({
+      modelId: ' model-a ',
+      updatedAt: 123,
+    });
+  });
+
   it('applies mergeSessionMetadataForStartup via session.updateMetadata', () => {
     const updates: Metadata[] = [];
     const fakeSession = {

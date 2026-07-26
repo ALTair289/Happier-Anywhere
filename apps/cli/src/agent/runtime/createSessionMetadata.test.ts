@@ -42,6 +42,21 @@ describe('createSessionMetadata', () => {
         expect((metadata as any).modelOverrideV1).toEqual({ v: 1, updatedAt: 123, modelId: 'gpt-5-codex-high' });
     });
 
+    it('preserves exact nonblank opaque mode and model identifiers', () => {
+        const { metadata } = createSessionMetadata({
+            flavor: 'cursor',
+            machineId: 'machine-1',
+            startedBy: 'daemon',
+            agentModeId: ' plan ',
+            agentModeUpdatedAt: 122,
+            modelId: ' model-a ',
+            modelUpdatedAt: 123,
+        } as any);
+
+        expect((metadata as any).sessionModeOverrideV1.modeId).toBe(' plan ');
+        expect((metadata as any).modelOverrideV1.modelId).toBe(' model-a ');
+    });
+
     it('seeds sessionConfigOptionOverridesV1 from the daemon-provided environment override', () => {
         const previous = process.env.HAPPIER_SESSION_CONFIG_OPTION_OVERRIDES_JSON;
         process.env.HAPPIER_SESSION_CONFIG_OPTION_OVERRIDES_JSON = JSON.stringify({

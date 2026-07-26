@@ -18,6 +18,31 @@ function createFakeProcess() {
 }
 
 describe('registerRunnerTerminationHandlers', () => {
+  it('closes runtime input admission synchronously before asynchronous termination cleanup starts', async () => {
+    const fakeProcess = createFakeProcess();
+    const events: string[] = [];
+    const handlers = registerRunnerTerminationHandlers({
+      process: fakeProcess,
+      exit: () => undefined,
+      onTerminationRequested: () => {
+        events.push('admission-closed');
+      },
+      onTerminate: async () => {
+        events.push('cleanup-started');
+      },
+    });
+
+    try {
+      handlers.requestTermination({ kind: 'killSession' });
+
+      expect(events).toEqual(['admission-closed']);
+      await handlers.whenTerminated;
+      expect(events).toEqual(['admission-closed', 'cleanup-started']);
+    } finally {
+      handlers.dispose();
+    }
+  });
+
   it('forces process exit even if onTerminate hangs (bounded by env timeout)', async () => {
     vi.useFakeTimers();
     const previousTimeout = process.env.HAPPIER_RUNNER_TERMINATION_TIMEOUT_MS;

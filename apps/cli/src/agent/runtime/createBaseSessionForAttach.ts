@@ -33,16 +33,11 @@ export async function createBaseSessionForAttach(opts: Readonly<{
       ? Math.trunc(attach.lastObservedMessageSeq)
       : undefined;
   const wakeDeliveryAfterSeq = initialTranscriptAfterSeq ?? legacyAttachAfterSeq;
-  const initialTranscriptCatchUpAuthorization =
-    attach.initialTranscriptCatchUpAuthorization
-    ?? (wakeDeliveryAfterSeq !== undefined ? 'explicit_cursor' : undefined);
-
   if (attach.encryptionMode === 'plain') {
     return {
       id: existingSessionId,
       seq,
       ...(wakeDeliveryAfterSeq !== undefined ? { initialTranscriptAfterSeq: wakeDeliveryAfterSeq } : {}),
-      ...(initialTranscriptCatchUpAuthorization ? { initialTranscriptCatchUpAuthorization } : {}),
       encryptionMode: 'plain',
       metadata: opts.metadata,
       metadataVersion: -1,
@@ -55,7 +50,6 @@ export async function createBaseSessionForAttach(opts: Readonly<{
     id: existingSessionId,
     seq,
     ...(wakeDeliveryAfterSeq !== undefined ? { initialTranscriptAfterSeq: wakeDeliveryAfterSeq } : {}),
-    ...(initialTranscriptCatchUpAuthorization ? { initialTranscriptCatchUpAuthorization } : {}),
     encryptionMode: 'e2ee',
     encryptionKey: attach.encryptionKey,
     encryptionVariant: attach.encryptionVariant,

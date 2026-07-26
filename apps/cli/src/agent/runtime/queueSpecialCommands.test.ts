@@ -6,6 +6,7 @@ describe('pushMessageToQueueWithSpecialCommands', () => {
   it('pushes clear commands via isolate+clear', () => {
     const queue = {
       push: vi.fn(),
+      unshift: vi.fn(),
       pushIsolateAndClear: vi.fn(),
     };
 
@@ -27,6 +28,7 @@ describe('pushMessageToQueueWithSpecialCommands', () => {
   it('pushes non-special text normally', () => {
     const queue = {
       push: vi.fn(),
+      unshift: vi.fn(),
       pushIsolateAndClear: vi.fn(),
     };
 
@@ -48,6 +50,7 @@ describe('pushMessageToQueueWithSpecialCommands', () => {
   it('preserves user message delivery attribution for normal and clear commands', () => {
     const queue = {
       push: vi.fn(),
+      unshift: vi.fn(),
       pushIsolateAndClear: vi.fn(),
     };
 

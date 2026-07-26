@@ -220,13 +220,13 @@ describe('SessionTurnLifecycle', () => {
     });
 
     it('emits turn lifecycle callbacks for start, boundary completion, failure, and cancellation', async () => {
-        const events: Array<readonly [string, string | undefined]> = [];
+        const events: Array<readonly [string, string | undefined, string | undefined]> = [];
         const lifecycle = createSessionTurnLifecycle({
             sessionId: 's1',
             createId: () => 'turn-callback',
             enqueueSessionTurn: async () => {},
-            onTurnLifecycleEvent: (event, terminalStatus) => {
-                events.push([event, terminalStatus]);
+            onTurnLifecycleEvent: (event, terminalStatus, turnId) => {
+                events.push([event, terminalStatus, turnId]);
             },
         });
 
@@ -238,19 +238,19 @@ describe('SessionTurnLifecycle', () => {
         await lifecycle.cancelTurn({ provider: 'codex' });
 
         expect(events).toEqual([
-            ['prompt_or_steer', undefined],
+            ['prompt_or_steer', undefined, 'session-turn:turn-callback'],
             // REV-1: completed vs failed turns share the boundary event but must be
             // distinguishable downstream (failed turns are not supersession/activity proof).
-            ['assistant_message_end', 'completed'],
-            ['prompt_or_steer', undefined],
-            ['assistant_message_end', 'failed'],
-            ['prompt_or_steer', undefined],
-            ['turn_cancelled', undefined],
+            ['assistant_message_end', 'completed', 'session-turn:turn-callback'],
+            ['prompt_or_steer', undefined, 'session-turn:turn-callback'],
+            ['assistant_message_end', 'failed', 'session-turn:turn-callback'],
+            ['prompt_or_steer', undefined, 'session-turn:turn-callback'],
+            ['turn_cancelled', undefined, 'session-turn:turn-callback'],
         ]);
     });
 
     it('emits the terminal boundary callback even when the terminal mutation write rejects', async () => {
-        const events: Array<readonly [string, string | undefined]> = [];
+        const events: Array<readonly [string, string | undefined, string | undefined]> = [];
         let rejectTerminalWrite = false;
         const lifecycle = createSessionTurnLifecycle({
             sessionId: 's1',
@@ -260,8 +260,8 @@ describe('SessionTurnLifecycle', () => {
                     throw new Error('terminal write failed');
                 }
             },
-            onTurnLifecycleEvent: (event, terminalStatus) => {
-                events.push([event, terminalStatus]);
+            onTurnLifecycleEvent: (event, terminalStatus, turnId) => {
+                events.push([event, terminalStatus, turnId]);
             },
         });
 
@@ -270,10 +270,58 @@ describe('SessionTurnLifecycle', () => {
         await expect(lifecycle.completeTurn({ provider: 'codex' })).rejects.toThrow('terminal write failed');
 
         expect(events).toEqual([
-            ['prompt_or_steer', undefined],
-            ['assistant_message_end', 'completed'],
+            ['prompt_or_steer', undefined, 'session-turn:turn-write-rejects'],
+            ['assistant_message_end', 'completed', undefined],
         ]);
         expect(lifecycle.hasActiveTurn()).toBe(false);
+    });
+
+    it('does not publish an exact turn start when the begin mutation write rejects', async () => {
+        const events: Array<readonly [string, string | undefined, string | undefined]> = [];
+        const lifecycle = createSessionTurnLifecycle({
+            sessionId: 's1',
+            createId: () => 'begin-write-rejects',
+            enqueueSessionTurn: async (mutation) => {
+                if (mutation.action === 'begin') {
+                    throw new Error('begin write failed');
+                }
+            },
+            onTurnLifecycleEvent: (event, terminalStatus, turnId) => {
+                events.push([event, terminalStatus, turnId]);
+            },
+        });
+
+        await expect(lifecycle.beginTurn({ provider: 'codex' })).rejects.toThrow('begin write failed');
+
+        expect(events).toEqual([
+            ['prompt_or_steer', undefined, undefined],
+        ]);
+    });
+
+    it('does not publish an exact ACP task start when the begin mutation write rejects', async () => {
+        const events: Array<readonly [string, string | undefined, string | undefined]> = [];
+        const lifecycle = createSessionTurnLifecycle({
+            sessionId: 's1',
+            createId: () => 'acp-begin-write-rejects',
+            enqueueSessionTurn: async (mutation) => {
+                if (mutation.action === 'begin') {
+                    throw new Error('ACP begin write failed');
+                }
+            },
+            onTurnLifecycleEvent: (event, terminalStatus, turnId) => {
+                events.push([event, terminalStatus, turnId]);
+            },
+        });
+
+        const started = lifecycle.observeAcpLifecycleMarker({
+            provider: 'pi',
+            body: { type: 'task_started', id: 'provider-turn-1' },
+        });
+        await expect(started.pendingWrite).rejects.toThrow('ACP begin write failed');
+
+        expect(events).toEqual([
+            ['task_started', undefined, undefined],
+        ]);
     });
 
     it('emits turn lifecycle callbacks for ACP task markers from resumed provider work', async () => {

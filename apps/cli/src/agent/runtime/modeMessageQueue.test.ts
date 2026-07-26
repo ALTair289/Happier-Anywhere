@@ -3,6 +3,48 @@ import { MessageQueue2 } from './modeMessageQueue';
 import { hashObject } from '@/utils/deterministicJson';
 
 describe('MessageQueue2', () => {
+    it('keeps server-selected provider actions isolated from ordinary batching', async () => {
+        const queue = new MessageQueue2<string>(mode => mode);
+        queue.push('exact', 'remote', { pendingProviderAction: 'steer' });
+        queue.push('ordinary', 'remote');
+
+        await expect(queue.waitForMessagesAndGetAsString()).resolves.toMatchObject({
+            message: 'exact',
+            pendingProviderAction: 'steer',
+        });
+        await expect(queue.waitForMessagesAndGetAsString()).resolves.toMatchObject({
+            message: 'ordinary',
+        });
+    });
+
+    it('never batches adjacent Pending rows carrying the same selected provider action', async () => {
+        const queue = new MessageQueue2<string>(mode => mode);
+        queue.push('exact-1', 'remote', { pendingProviderAction: 'steer' });
+        queue.push('exact-2', 'remote', { pendingProviderAction: 'steer' });
+        expect((await queue.waitForMessagesAndGetAsString())?.message).toBe('exact-1');
+        expect((await queue.waitForMessagesAndGetAsString())?.message).toBe('exact-2');
+    });
+
+    it('keeps adjacent ordinary Pending-origin rows as singleton provider invocations', async () => {
+        const queue = new MessageQueue2<string>(mode => mode);
+        queue.push('pending-1', 'remote', {
+            userMessageLocalId: 'pending-local-1',
+            providerAcceptancePending: true,
+        });
+        queue.push('pending-2', 'remote', {
+            userMessageLocalId: 'pending-local-2',
+            providerAcceptancePending: true,
+        });
+
+        await expect(queue.waitForMessagesAndGetAsString()).resolves.toMatchObject({
+            message: 'pending-1',
+            userMessageLocalIds: ['pending-local-1'],
+        });
+        await expect(queue.waitForMessagesAndGetAsString()).resolves.toMatchObject({
+            message: 'pending-2',
+            userMessageLocalIds: ['pending-local-2'],
+        });
+    });
     it('should create a queue', () => {
         const queue = new MessageQueue2<string>(mode => mode);
         expect(queue.size()).toBe(0);

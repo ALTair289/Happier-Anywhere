@@ -1,11 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  TERMINAL_INPUT_BASE_PROVIDER_ACCEPTANCE_TIMEOUT_MS,
-  TERMINAL_INPUT_MAX_PROVIDER_ACCEPTANCE_TIMEOUT_MS,
   TERMINAL_INPUT_MAX_WRITE_TIMEOUT_MS,
   resolveTerminalPromptWriteBudget,
-  resolveTerminalPromptProviderAcceptanceTimeoutMs,
   resolveTerminalPromptWriteTimeoutMs,
 } from './promptWriteTimeout';
 
@@ -39,29 +36,5 @@ describe('resolveTerminalPromptWriteTimeoutMs', () => {
   it('caps the timeout for pathological prompt sizes', () => {
     expect(TERMINAL_INPUT_MAX_WRITE_TIMEOUT_MS).toBe(300_000);
     expect(resolveTerminalPromptWriteTimeoutMs('x'.repeat(5_000_000))).toBe(300_000);
-  });
-});
-
-describe('resolveTerminalPromptProviderAcceptanceTimeoutMs', () => {
-  it('keeps the base timeout for ordinary prompts', () => {
-    expect(resolveTerminalPromptProviderAcceptanceTimeoutMs('hello')).toBe(TERMINAL_INPUT_BASE_PROVIDER_ACCEPTANCE_TIMEOUT_MS);
-  });
-
-  it('scales the provider acceptance timeout for large terminal prompts', () => {
-    expect(resolveTerminalPromptProviderAcceptanceTimeoutMs('x'.repeat(128_000))).toBeGreaterThan(
-      TERMINAL_INPUT_BASE_PROVIDER_ACCEPTANCE_TIMEOUT_MS,
-    );
-  });
-
-  it('uses the terminal-reported byte count when available', () => {
-    expect(resolveTerminalPromptProviderAcceptanceTimeoutMs('short', { bytesWritten: 128_000 })).toBeGreaterThan(
-      TERMINAL_INPUT_BASE_PROVIDER_ACCEPTANCE_TIMEOUT_MS,
-    );
-  });
-
-  it('caps the timeout for pathological prompt sizes', () => {
-    expect(resolveTerminalPromptProviderAcceptanceTimeoutMs('x'.repeat(5_000_000))).toBe(
-      TERMINAL_INPUT_MAX_PROVIDER_ACCEPTANCE_TIMEOUT_MS,
-    );
   });
 });

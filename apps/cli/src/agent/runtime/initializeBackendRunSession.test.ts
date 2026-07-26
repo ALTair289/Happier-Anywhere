@@ -1,8 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { initializeBackendRunSession } from '@/agent/runtime/initializeBackendRunSession'
+import {
+  createBackendRunRuntimeActivityLifecycle,
+  initializeBackendRunSession,
+} from '@/agent/runtime/initializeBackendRunSession'
 import type { ApiSessionClient } from '@/api/session/sessionClient'
 import type { AgentState, Metadata, Session } from '@/api/types'
+import { createSessionRuntimeActivity } from '@/session/runtimeActivity/createSessionRuntimeActivity'
+import type {
+  SessionRuntimeActivityContributionHandle,
+  SessionRuntimeActivitySnapshotPublisher,
+} from '@/session/runtimeActivity/types'
+import { createDeferred } from '@/testkit/async/deferred'
 
 function createSessionStub(overrides: Partial<ApiSessionClient> = {}): ApiSessionClient {
   return {
@@ -26,16 +35,162 @@ function createSessionResponse(id: string, metadata: Metadata, state: AgentState
 }
 
 describe('initializeBackendRunSession', () => {
+  it('configures an attached session before reporting it to the daemon', async () => {
+    const metadata = { terminal: { mode: 'tmux' } } as unknown as Metadata
+    const state = { controlledByUser: false } as AgentState
+    const session = createSessionStub({
+      sessionId: 'session-configure-before-report',
+      ensureMetadataSnapshot: async () => metadata,
+    })
+    const order: string[] = []
+
+    await initializeBackendRunSession(
+      {
+        api: {
+          getOrCreateSession: async () => null,
+          sessionSyncClient: () => session,
+        },
+        sessionTag: 'tag-configure-before-report',
+        metadata,
+        state,
+        existingSessionId: 'session-configure-before-report',
+        uiLogPrefix: '[Codex]',
+        startupMetadataOverrides: {
+          permissionModeOverride: { mode: 'default', updatedAt: 1 },
+        },
+        configureSessionClient: () => {
+          order.push('configure')
+        },
+      },
+      {
+        createBaseSessionForAttachFn: async () => createSessionResponse(
+          'session-configure-before-report',
+          metadata,
+          state,
+        ),
+        applyStartupMetadataUpdateToSessionFn: async () => {},
+        primeAgentStateForUiFn: () => {},
+        reportSessionToDaemonIfRunningFn: async () => {
+          order.push('report')
+        },
+        persistTerminalAttachmentInfoIfNeededFn: async () => {},
+        sendTerminalFallbackMessageIfNeededFn: () => {},
+      },
+    )
+
+    expect(order).toEqual(['configure', 'report'])
+  })
+
+  it('exposes the one provider-agnostic Activity lifecycle used by every backend construction path', async () => {
+    const configuredContributors: SessionRuntimeActivityContributionHandle[] = []
+    const publisher: SessionRuntimeActivitySnapshotPublisher = {
+      publish: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
+    }
+    const session = createSessionStub({
+      sessionId: 'session-shared-owner',
+      getRuntimeActivitySnapshotPublisher: () => publisher,
+    })
+    let creationCount = 0
+
+    const lifecycle = await createBackendRunRuntimeActivityLifecycle({
+      runtimeActivityApplicability: 'supported',
+      configureAgentRuntime: (contributionHandle) => {
+        configuredContributors.push(contributionHandle)
+      },
+      resolvePublisher: (candidate) => candidate.getRuntimeActivitySnapshotPublisher?.() ?? null,
+    }, (applicability) => {
+      creationCount += 1
+      return createSessionRuntimeActivity(applicability)
+    })
+
+    expect(creationCount).toBe(1)
+    expect(configuredContributors).toHaveLength(1)
+    expect(lifecycle.clientConfig().executionRunContributionHandle).toBeDefined()
+
+    await lifecycle.attachSession(session)
+    await lifecycle.attachSession(session)
+    expect(creationCount).toBe(1)
+
+    await lifecycle.dispose()
+    expect(publisher.close).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['fresh', 'existing'] as const)(
+    'starts a %s nonparticipating runtime idle without predecessor or attach truth',
+    async () => {
+      const publisher: SessionRuntimeActivitySnapshotPublisher = {
+        publish: vi.fn(async () => {}),
+        close: vi.fn(async () => {}),
+      }
+      const session = createSessionStub({
+        sessionId: 'session-with-real-id',
+        getRuntimeActivitySnapshotPublisher: () => publisher,
+      })
+      const lifecycle = await createBackendRunRuntimeActivityLifecycle({
+        runtimeActivityApplicability: 'not_applicable',
+        resolvePublisher: (candidate) => candidate.getRuntimeActivitySnapshotPublisher?.() ?? null,
+      })
+
+      await lifecycle.attachSession(session)
+
+      expect(publisher.publish).toHaveBeenCalledOnce()
+      expect(publisher.publish).toHaveBeenCalledWith({ state: 'idle', activeCount: 0 })
+      await lifecycle.dispose()
+    },
+  )
+
+  it('defaults omitted provider preparation to not-applicable for a fresh session', async () => {
+    const observedApplicability: string[] = []
+    const publisher: SessionRuntimeActivitySnapshotPublisher = {
+      publish: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
+    }
+    const session = createSessionStub({
+      sessionId: 'fresh-codex-session',
+      getRuntimeActivitySnapshotPublisher: () => publisher,
+    })
+    const lifecycle = await createBackendRunRuntimeActivityLifecycle(undefined, (applicability) => {
+      observedApplicability.push(applicability)
+      return createSessionRuntimeActivity(applicability)
+    })
+    await lifecycle.attachSession(session)
+
+    expect(observedApplicability).toEqual(['not_applicable'])
+    expect(publisher.publish).toHaveBeenCalledWith({ state: 'idle', activeCount: 0 })
+    await lifecycle.dispose()
+  })
+
+  it('fails closed when supported applicability has no producer configuration', async () => {
+    await expect(createBackendRunRuntimeActivityLifecycle({
+      runtimeActivityApplicability: 'supported',
+      resolvePublisher: () => null,
+    })).rejects.toThrow(/exactly one.*producer/i)
+  })
+
+  it.each(['unavailable', 'not_applicable'] as const)(
+    'rejects producer configuration when applicability is %s',
+    async (runtimeActivityApplicability) => {
+      await expect(createBackendRunRuntimeActivityLifecycle({
+        runtimeActivityApplicability,
+        configureAgentRuntime: () => {},
+        resolvePublisher: () => null,
+      })).rejects.toThrow(/cannot configure.*producer/i)
+    },
+  )
+
   it('attaches to an existing session, applies startup metadata update, and runs startup side effects', async () => {
     const metadata = { terminal: { mode: 'tmux' } } as unknown as Metadata
     const state = { controlledByUser: false } as AgentState
     const session = createSessionStub({
       ensureMetadataSnapshot: async () => ({ path: '/tmp/project' } as unknown as Metadata),
     })
-
     const api = {
       getOrCreateSession: async () => null,
-      sessionSyncClient: () => session,
+      sessionSyncClient: (_baseSession: Session, receivedRuntimeActivity?: unknown) => {
+        expect(receivedRuntimeActivity).toMatchObject({ executionRunContributionHandle: expect.any(Object) })
+        return session
+      },
     }
 
     const startupUpdates: Array<{ mode: 'attach' | 'start' | undefined }> = []
@@ -57,7 +212,7 @@ describe('initializeBackendRunSession', () => {
         },
       },
       {
-        createBaseSessionForAttachFn: async () => createSessionResponse('session-123', metadata, state),
+        createBaseSessionForAttachFn: async () => createSessionResponse(' session-123 ', metadata, state),
         applyStartupMetadataUpdateToSessionFn: async (opts) => {
           startupUpdates.push({ mode: opts.mode })
         },
@@ -77,11 +232,11 @@ describe('initializeBackendRunSession', () => {
     )
 
     expect(result.attachedToExistingSession).toBe(true)
-    expect(result.reportedSessionId).toBe('session-123')
+    expect(result.reportedSessionId).toBe(' session-123 ')
     expect(result.session).toBe(session)
     expect(startupUpdates).toEqual([{ mode: 'attach' }])
-    expect(daemonReports).toEqual(['session-123'])
-    expect(persisted).toEqual(['session-123'])
+    expect(daemonReports).toEqual([' session-123 '])
+    expect(persisted).toEqual([' session-123 '])
     expect(fallbackCount).toBe(1)
     expect(primedWithPrefix).toBe('[Qwen]')
   })
@@ -492,6 +647,103 @@ describe('initializeBackendRunSession', () => {
     expect(onSessionSwapCount).toBe(1)
   })
 
+  it('defers a fresh-session daemon report until the provider runtime is ready without blocking initialization', async () => {
+    const metadata = { terminal: { mode: 'tmux' } } as unknown as Metadata
+    const state = { controlledByUser: false } as AgentState
+    const session = createSessionStub()
+    const runtimeReady = createDeferred<void>()
+    const daemonReports: string[] = []
+
+    const result = await initializeBackendRunSession(
+      {
+        api: {
+          getOrCreateSession: async () => createSessionResponse('runtime-ready-session', metadata, state),
+          sessionSyncClient: () => session,
+        },
+        sessionTag: 'tag-runtime-ready',
+        metadata,
+        state,
+        uiLogPrefix: '[Codex]',
+        startupMetadataOverrides: {
+          permissionModeOverride: { mode: 'default', updatedAt: 100 },
+        },
+        waitForDaemonReportReadiness: async () => await runtimeReady.promise,
+      },
+      {
+        setupOfflineReconnectionFn: () => ({
+          session,
+          reconnectionHandle: null,
+          isOffline: false,
+        }),
+        primeAgentStateForUiFn: () => {},
+        reportSessionToDaemonIfRunningFn: async (opts) => {
+          daemonReports.push(opts.sessionId)
+        },
+        persistTerminalAttachmentInfoIfNeededFn: async () => {},
+        sendTerminalFallbackMessageIfNeededFn: () => {},
+      },
+    )
+
+    expect(result.session).toBe(session)
+    expect(daemonReports).toEqual([])
+
+    runtimeReady.resolve()
+    await vi.waitFor(() => {
+      expect(daemonReports).toEqual(['runtime-ready-session'])
+    })
+  })
+
+  it('commits daemon-carried first input after real session creation and before daemon report', async () => {
+    vi.stubEnv('HAPPIER_DAEMON_PENDING_FIRST_INPUT', JSON.stringify({
+      text: 'Commit me through Pending.',
+      localId: 'spawn-first:stable-nonce',
+    }))
+    const metadata = {} as Metadata
+    const state = { controlledByUser: false } as AgentState
+    const events: string[] = []
+    const enqueueSessionUserMessage = vi.fn(async () => {
+      events.push('pending-committed')
+    })
+    const session = createSessionStub({ enqueueSessionUserMessage })
+
+    try {
+      await initializeBackendRunSession(
+        {
+          api: {
+            getOrCreateSession: async () => createSessionResponse('new-session-with-first-input', metadata, state),
+            sessionSyncClient: () => session,
+          },
+          sessionTag: 'tag-first-input',
+          metadata,
+          state,
+          uiLogPrefix: '[Codex]',
+          startupMetadataOverrides: {
+            permissionModeOverride: { mode: 'default', updatedAt: 1 },
+          },
+        },
+        {
+          setupOfflineReconnectionFn: () => ({ session, reconnectionHandle: null, isOffline: false }),
+          primeAgentStateForUiFn: () => {},
+          reportSessionToDaemonIfRunningFn: async () => {
+            events.push('daemon-report')
+          },
+          persistTerminalAttachmentInfoIfNeededFn: async () => {},
+          sendTerminalFallbackMessageIfNeededFn: () => {},
+        },
+      )
+
+      expect(enqueueSessionUserMessage).toHaveBeenCalledExactlyOnceWith({
+        text: 'Commit me through Pending.',
+        localId: 'spawn-first:stable-nonce',
+        meta: { source: 'ui', sentFrom: 'cli' },
+      })
+      expect(events).toEqual(['pending-committed', 'daemon-report'])
+      expect(process.env.HAPPIER_DAEMON_PENDING_FIRST_INPUT).toBeUndefined()
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('notifies providers after a new session is reported to the daemon', async () => {
     const metadata = { terminal: { mode: 'tmux' } } as unknown as Metadata
     const state = { controlledByUser: false } as AgentState
@@ -807,5 +1059,199 @@ describe('initializeBackendRunSession', () => {
     )
 
     expect(notifications).toEqual(['hello'])
+  })
+
+  it('prepares and seals the target runtime Activity owner before attaching a session client', async () => {
+    const metadata = {} as Metadata
+    const state = { controlledByUser: false } as AgentState
+    const events: string[] = []
+    const published: unknown[] = []
+    const publisher: SessionRuntimeActivitySnapshotPublisher = {
+      publish: vi.fn(async (snapshot) => {
+        events.push('publish')
+        published.push(snapshot)
+      }),
+      close: vi.fn(async () => {}),
+    }
+    const session = createSessionStub({ sessionId: 'session-existing' })
+
+    const result = await initializeBackendRunSession({
+      api: {
+        getOrCreateSession: async () => null,
+        sessionSyncClient: () => {
+          events.push('session-client')
+          return session
+        },
+      },
+      sessionTag: 'tag-target-owner',
+      metadata,
+      state,
+      existingSessionId: 'session-existing',
+      uiLogPrefix: '[test]',
+      startupMetadataOverrides: { permissionModeOverride: { mode: 'default', updatedAt: 1 } },
+      runtimeActivityPreparation: {
+        runtimeActivityApplicability: 'supported',
+        configureAgentRuntime: async (contributor) => {
+          events.push('configure')
+          await contributor.report({
+            state: 'active',
+            activeCount: 2,
+          }, 'initial-provider-baseline')
+        },
+        resolvePublisher: () => publisher,
+      },
+    }, {
+      createSessionRuntimeActivityFn: createSessionRuntimeActivity,
+      createBaseSessionForAttachFn: async () => createSessionResponse('session-existing', metadata, state),
+      primeAgentStateForUiFn: () => {},
+      reportSessionToDaemonIfRunningFn: async () => {},
+      persistTerminalAttachmentInfoIfNeededFn: async () => {},
+      sendTerminalFallbackMessageIfNeededFn: () => {},
+    })
+
+    expect(events.slice(0, 3)).toEqual(['configure', 'session-client', 'publish'])
+    expect(published).toEqual([{
+      state: 'active',
+      activeCount: 2,
+    }])
+
+    await result.disposeRuntimeActivity?.()
+    expect(publisher.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('retains one current-runtime Activity owner across transport rebinds even when the server session id changes', async () => {
+    const metadata = {} as Metadata
+    const state = { controlledByUser: false } as AgentState
+    const offlineSession = createSessionStub({ sessionId: 'offline-tag' })
+    const firstSession = createSessionStub({ sessionId: 'session-one' })
+    const replacementSession = createSessionStub({ sessionId: 'session-one' })
+    const differentSession = createSessionStub({ sessionId: 'session-two' })
+    const events: string[] = []
+    const makePublisher = (label: string): SessionRuntimeActivitySnapshotPublisher => ({
+      publish: vi.fn(async (snapshot) => {
+        events.push(`${label}:publish:${snapshot.state}:${snapshot.activeCount}`)
+      }),
+      close: vi.fn(async () => {
+        events.push(`${label}:close`)
+      }),
+    })
+    const firstPublisher = makePublisher('first')
+    const replacementPublisher = makePublisher('replacement')
+    const differentPublisher = makePublisher('different')
+    const publishers = new Map<ApiSessionClient, SessionRuntimeActivitySnapshotPublisher>([
+      [firstSession, firstPublisher],
+      [replacementSession, replacementPublisher],
+      [differentSession, differentPublisher],
+    ])
+    let capturedSwap: ((session: ApiSessionClient) => void | Promise<void>) | undefined
+    let creationCount = 0
+    let configurationCount = 0
+
+    const result = await initializeBackendRunSession({
+      api: {
+        getOrCreateSession: async () => null,
+        sessionSyncClient: () => offlineSession,
+      },
+      sessionTag: 'tag-offline-target-owner',
+      metadata,
+      state,
+      uiLogPrefix: '[test]',
+      allowOfflineStub: true,
+      startupMetadataOverrides: { permissionModeOverride: { mode: 'default', updatedAt: 1 } },
+      runtimeActivityPreparation: {
+        runtimeActivityApplicability: 'supported',
+        configureAgentRuntime: async (contributor) => {
+          configurationCount += 1
+          await contributor.report({
+            state: 'active',
+            activeCount: configurationCount,
+          }, 'initial-workflow-baseline')
+        },
+        resolvePublisher: (session) => publishers.get(session) ?? null,
+      },
+      onSessionSwap: (session) => {
+        events.push(`hook:${session.sessionId}`)
+      },
+    }, {
+      createSessionRuntimeActivityFn: (applicability) => {
+        creationCount += 1
+        return createSessionRuntimeActivity(applicability)
+      },
+      setupOfflineReconnectionFn: (options) => {
+        capturedSwap = options.onSessionSwap
+        return {
+          session: offlineSession,
+          reconnectionHandle: { cancel: () => {}, getSession: () => null, isReconnected: () => false },
+          isOffline: true,
+        }
+      },
+      primeAgentStateForUiFn: () => {},
+      reportSessionToDaemonIfRunningFn: async () => {},
+      persistTerminalAttachmentInfoIfNeededFn: async () => {},
+      sendTerminalFallbackMessageIfNeededFn: () => {},
+    })
+
+    if (!capturedSwap) throw new Error('Expected an offline session-swap callback')
+    expect(creationCount).toBe(1)
+
+    await capturedSwap(firstSession)
+    expect(creationCount).toBe(1)
+    expect(events.slice(0, 2)).toEqual(['first:publish:active:1', 'hook:session-one'])
+
+    await capturedSwap(replacementSession)
+    expect(creationCount).toBe(1)
+    expect(events.slice(2, 5)).toEqual([
+      'first:close',
+      'replacement:publish:active:1',
+      'hook:session-one',
+    ])
+
+    await capturedSwap(differentSession)
+    expect(creationCount).toBe(1)
+    expect(configurationCount).toBe(1)
+    expect(events.slice(5, 8)).toEqual([
+      'replacement:close',
+      'different:publish:active:1',
+      'hook:session-two',
+    ])
+
+    await result.disposeRuntimeActivity?.()
+    expect(differentPublisher.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('disposes a prepared target Activity owner when initialization fails', async () => {
+    const metadata = {} as Metadata
+    const state = { controlledByUser: false } as AgentState
+    const contributors: SessionRuntimeActivityContributionHandle[] = []
+
+    await expect(initializeBackendRunSession({
+      api: {
+        getOrCreateSession: async () => {
+          throw new Error('session creation failed')
+        },
+        sessionSyncClient: () => createSessionStub(),
+      },
+      sessionTag: 'tag-target-owner-failure',
+      metadata,
+      state,
+      uiLogPrefix: '[test]',
+      startupMetadataOverrides: { permissionModeOverride: { mode: 'default', updatedAt: 1 } },
+      runtimeActivityPreparation: {
+        runtimeActivityApplicability: 'supported',
+        configureAgentRuntime: (contributionHandle) => {
+          contributors.push(contributionHandle)
+        },
+        resolvePublisher: () => null,
+      },
+    }, {
+      createSessionRuntimeActivityFn: createSessionRuntimeActivity,
+    })).rejects.toThrow('session creation failed')
+
+    const configuredContributor = contributors[0]
+    if (!configuredContributor) throw new Error('Expected a configured contributor')
+    expect(() => configuredContributor.report({
+      state: 'idle',
+      activeCount: 0,
+    }, 'after-failure')).toThrow('disposed')
   })
 })

@@ -5,12 +5,13 @@ import type {
   SessionProviderInputConsumerOptions,
   SessionProviderInputConsumerSession,
 } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
-import type { MessageBatch } from '@/agent/runtime/sessionInput/types';
+import type { MessageBatch, SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 
 export async function waitForNextPermissionModeMessage<Mode, Message>(opts: {
   messageQueue: MessageQueue2<Mode, Message>;
   abortSignal: AbortSignal;
   session: ApiSessionClient;
+  inputConsumer?: SessionProviderInputConsumer<Mode, Message>;
   onMetadataUpdate?: (() => void | Promise<void>) | null;
 }): Promise<MessageBatch<Mode, Message> | null> {
   const session: SessionProviderInputConsumerSession = {
@@ -20,7 +21,7 @@ export async function waitForNextPermissionModeMessage<Mode, Message>(opts: {
     reconcilePendingQueueState: async (reconcileOpts) => {
       await opts.session.reconcilePendingQueueState?.(reconcileOpts);
     },
-    waitForMetadataUpdate: (signal) => opts.session.waitForMetadataUpdate(signal),
+    waitForPendingEligibilityUpdate: (signal) => opts.session.waitForPendingEligibilityUpdate(signal),
   };
 
   const consumerOptions: SessionProviderInputConsumerOptions<Mode, Message> = {
@@ -32,7 +33,7 @@ export async function waitForNextPermissionModeMessage<Mode, Message>(opts: {
     consumerOptions.onMetadataUpdate = opts.onMetadataUpdate;
   }
 
-  const inputConsumer = createSessionProviderInputConsumer(consumerOptions);
+  const inputConsumer = opts.inputConsumer ?? createSessionProviderInputConsumer(consumerOptions);
 
   return await inputConsumer.waitForNextInput({ abortSignal: opts.abortSignal });
 }

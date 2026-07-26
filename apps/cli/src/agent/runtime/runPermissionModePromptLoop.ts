@@ -1,4 +1,4 @@
-import type { ApiSessionClient } from '@/api/session/sessionClient';
+import type { ApiSessionClient, SessionProviderInputOutcomeObserver } from '@/api/session/sessionClient';
 import type { PermissionMode } from '@/api/types';
 import { parseSpecialCommand } from '@/cli/parsers/specialCommands';
 import type { ProviderEnforcedPermissionHandler } from '@/agent/permissions/ProviderEnforcedPermissionHandler';
@@ -8,6 +8,7 @@ import {
   initializePermissionModeStateSync,
 } from '@/agent/runtime/permission/permissionModeStateSync';
 import { waitForNextPermissionModeMessage } from '@/agent/runtime/waitForNextPermissionModeMessage';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
 import type { PermissionModeQueuedPrompt } from '@/agent/runtime/permission/permissionModeQueuedPrompt';
 import {
@@ -16,19 +17,20 @@ import {
 import { normalizePendingDeliveryLocalIds } from '@/agent/runtime/session/pendingDelivery/undeliverableProviderPrompt';
 import { isAbortLikeError } from '@/agent/executionRuns/runtime/turnDelivery';
 import { configuration } from '@/configuration';
-import type { PendingQueueDeliveryBlockedReason } from '@/api/session/pendingQueueV2Transport';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
+import { readPendingLocalId } from '@happier-dev/protocol';
+import { readNewestSessionModelsMetadataStateV1 } from '@happier-dev/agents';
+import {
+  resolveProviderPromptFailureDeliveryReason,
+  type ProviderPromptWithMeta,
+} from '@/agent/runtime/providerPromptSubmission';
 
 type PromptRuntime = {
   beginTurn: () => void;
   startOrLoad: (opts: { resumeId?: string; importHistory?: boolean; deferPendingDrain?: boolean }) => Promise<unknown>;
   drainPendingAfterStartOrLoad?: () => Promise<void>;
   sendPrompt: (message: string) => Promise<void>;
-  sendPromptWithMeta?: (params: {
-    text: string;
-    localId?: string | null;
-    meta?: Record<string, unknown>;
-    onProviderPromptAccepted?: () => void;
-  }) => Promise<void>;
+  sendPromptWithMeta?: (params: ProviderPromptWithMeta) => Promise<void>;
   compactContext?: (command: string) => Promise<void>;
   failTurn?: (error: unknown) => void | boolean | Promise<void | boolean>;
   flushTurn: () => void | Promise<void>;
@@ -83,24 +85,26 @@ async function waitForCommittedUserPromptBoundary(
   session: ApiSessionClient,
   localId: string | null,
 ): Promise<number | null> {
-  const trimmedLocalId = typeof localId === 'string' ? localId.trim() : '';
-  if (!trimmedLocalId) return null;
+  const exactLocalId = readPendingLocalId(localId);
+  if (!exactLocalId) return null;
 
-  const syncSeq = normalizePositiveSeq(session.getCommittedUserMessageSeq?.(trimmedLocalId));
+  const syncSeq = normalizePositiveSeq(session.getCommittedUserMessageSeq?.(exactLocalId));
   if (syncSeq !== null) return syncSeq;
 
-  return normalizePositiveSeq(await session.waitForCommittedUserMessageSeq?.(trimmedLocalId, {
+  return normalizePositiveSeq(await session.waitForCommittedUserMessageSeq?.(exactLocalId, {
     timeoutMs: configuration.promptLoopUserMessageSeqWaitTimeoutMs,
-    pollMs: configuration.promptLoopUserMessageSeqWaitPollMs,
   }));
 }
 
 export async function runPermissionModePromptLoop(opts: {
   providerName: string;
+  providerId?: string;
   agentMessageType: Parameters<ApiSessionClient['sendAgentMessage']>[0];
   explicitPermissionMode: PermissionMode | undefined;
   session: ApiSessionClient;
+  providerInputOutcomeObserver?: SessionProviderInputOutcomeObserver | null;
   messageQueue: MessageQueue2<{ permissionMode: PermissionMode; appendSystemPrompt?: string | null }, PermissionModeQueuedPrompt>;
+  inputConsumer?: SessionProviderInputConsumer<{ permissionMode: PermissionMode; appendSystemPrompt?: string | null }, PermissionModeQueuedPrompt>;
   permissionHandler: ProviderEnforcedPermissionHandler;
   runtime: PromptRuntime;
   createOverrideSynchronizer: (isStarted: () => boolean) => OverrideSynchronizer;
@@ -133,7 +137,7 @@ export async function runPermissionModePromptLoop(opts: {
   let pendingFreshSessionSystemPrompt = false;
   let snapshotFreshForNextPromptBoundary = false;
 
-  const normalizedResumeId = typeof opts.initialResumeId === 'string' ? opts.initialResumeId.trim() : '';
+  const normalizedResumeId = readNonBlankOpaqueIdentifier(opts.initialResumeId) ?? '';
   if (normalizedResumeId) {
     storedSessionIdForResume = { value: normalizedResumeId, origin: 'initial' };
   }
@@ -185,25 +189,40 @@ export async function runPermissionModePromptLoop(opts: {
     }
   };
 
-  const confirmQueuedUserMessageDeliveredToProvider = (message: QueuedPermissionModeMessage): void => {
-    opts.session.confirmUserMessageDeliveredToProvider?.(message.maxUserMessageSeq, {
-      localIds: message.userMessageLocalIds,
+  const confirmQueuedUserMessageDeliveredToProvider = (
+    message: QueuedPermissionModeMessage,
+    appliedModelId?: string | null,
+  ): void => {
+    const localIds = normalizePendingDeliveryLocalIds(message.userMessageLocalIds);
+    if (localIds.length !== 1) return;
+    const normalizedAppliedModelId = readNonBlankOpaqueIdentifier(appliedModelId);
+    opts.providerInputOutcomeObserver?.({
+      kind: 'accepted',
+      localId: localIds[0],
+      ...(normalizedAppliedModelId ? { appliedModelId: normalizedAppliedModelId } : {}),
     });
   };
 
-  const blockQueuedUserMessageDeliveryBeforeProviderAcceptance = async (
+  const reportQueuedUserMessageFailureBeforeProviderAcceptance = (
     message: QueuedPermissionModeMessage,
-    reason: PendingQueueDeliveryBlockedReason,
-  ): Promise<boolean> => {
+    error: unknown,
+    didAttemptProviderSend: boolean,
+  ): void => {
     const localIds = normalizePendingDeliveryLocalIds(message.userMessageLocalIds);
-    if (localIds.length === 0 || typeof opts.session.blockPendingMessageDelivery !== 'function') {
-      return false;
+    if (localIds.length !== 1) return;
+    const reason = resolveProviderPromptFailureDeliveryReason(error, didAttemptProviderSend);
+    if (reason === 'ambiguous_terminal_delivery') {
+      opts.providerInputOutcomeObserver?.({
+        kind: 'effect_may_have_occurred',
+        localId: localIds[0],
+      });
+      return;
     }
-    try {
-      return await opts.session.blockPendingMessageDelivery({ localIds, reason });
-    } catch {
-      return false;
-    }
+    opts.providerInputOutcomeObserver?.({
+      kind: 'rejected_before_effect',
+      localId: localIds[0],
+      reason,
+    });
   };
 
   const ensureFreshSessionSnapshotBeforeTurnBestEffort = async (): Promise<void> => {
@@ -219,7 +238,7 @@ export async function runPermissionModePromptLoop(opts: {
     if (wasStarted) return { startedFreshSessionForTurn: false };
 
     const resume = storedSessionIdForResume;
-    const resumeId = typeof resume?.value === 'string' ? resume.value.trim() : '';
+    const resumeId = readNonBlankOpaqueIdentifier(resume?.value) ?? '';
     let strictAbort: StrictInitialResumeError | null = null;
     let startedFreshSessionForTurn = false;
 
@@ -298,9 +317,9 @@ export async function runPermissionModePromptLoop(opts: {
         messageQueue: opts.messageQueue,
         abortSignal: opts.getAbortSignal(),
         session: opts.session,
+        inputConsumer: opts.inputConsumer,
         onMetadataUpdate: async () => {
           await refreshSessionSnapshotBeforeTurnBestEffort();
-          if (opts.shouldExit()) return;
           syncPermissionModeFromMetadata();
           overrideSync.syncFromMetadata();
           if (!turnInFlight) {
@@ -308,7 +327,6 @@ export async function runPermissionModePromptLoop(opts: {
           }
         },
       });
-      if (opts.shouldExit()) break;
       if (!next) continue;
       message = {
         message: next.message,
@@ -352,11 +370,9 @@ export async function runPermissionModePromptLoop(opts: {
 
     currentModeHash = message.hash;
     await ensureFreshSessionSnapshotBeforeTurnBestEffort();
-    if (opts.shouldExit()) break;
     syncPermissionModeFromMetadata();
     overrideSync.syncFromMetadata();
     await overrideSync.flushPendingAfterStart();
-    if (opts.shouldExit()) break;
     opts.messageBuffer.addMessage(message.message.text, 'user');
 
     const special = parseSpecialCommand(message.message.text);
@@ -364,11 +380,9 @@ export async function runPermissionModePromptLoop(opts: {
       opts.messageBuffer.addMessage(`Resetting ${opts.providerName} session…`, 'status');
       await opts.runtime.reset();
       confirmQueuedUserMessageDeliveredToProvider(message);
-      if (opts.shouldExit()) break;
       wasStarted = false;
       pendingFreshSessionSystemPrompt = false;
       await opts.onAfterReset?.();
-      if (opts.shouldExit()) break;
       opts.permissionHandler.reset();
       opts.setThinking(false);
       opts.keepAlive();
@@ -383,10 +397,11 @@ export async function runPermissionModePromptLoop(opts: {
     let readyTurnContext: ReadyNotificationTurnContext | undefined;
     let didAttemptProviderSend = false;
     let didConfirmProviderAccepted = false;
+    let appliedModelIdForPrompt: string | null = null;
     const confirmProviderAccepted = (): void => {
       if (didConfirmProviderAccepted) return;
       didConfirmProviderAccepted = true;
-      confirmQueuedUserMessageDeliveredToProvider(message);
+      confirmQueuedUserMessageDeliveredToProvider(message, appliedModelIdForPrompt);
     };
     try {
       turnInFlight = true;
@@ -424,7 +439,21 @@ export async function runPermissionModePromptLoop(opts: {
 
       const special = parseSpecialCommand(message.message.text);
       if (special.type === 'compact' && typeof opts.runtime.compactContext === 'function') {
-        await opts.runtime.compactContext(special.originalMessage ?? message.message.text.trim());
+        const compact = async () => {
+          await opts.runtime.compactContext!(special.originalMessage ?? message.message.text.trim());
+        };
+        if (opts.inputConsumer) {
+          const outcome = await opts.inputConsumer.runProviderInputDispatch({
+            abortSignal: opts.getAbortSignal(),
+            dispatch: compact,
+          });
+          if (outcome.status === 'cancelled') {
+            shouldSendReady = false;
+            continue;
+          }
+        } else {
+          await compact();
+        }
         confirmQueuedUserMessageDeliveredToProvider(message);
         continue;
       }
@@ -464,26 +493,44 @@ export async function runPermissionModePromptLoop(opts: {
           ? `${effectiveAppendSystemPrompt.trim()}\n\n${seedResolution.providerPrompt}`
           : seedResolution.providerPrompt;
 
-      if (typeof opts.runtime.sendPromptWithMeta === 'function') {
-        didAttemptProviderSend = true;
-        await opts.runtime.sendPromptWithMeta({
-          text: providerPrompt,
-          localId,
-          ...(message.message.meta ? { meta: message.message.meta } : {}),
-          onProviderPromptAccepted: confirmProviderAccepted,
+      const dispatchProviderPrompt = async () => {
+        const modelState = readNewestSessionModelsMetadataStateV1(opts.session.getMetadataSnapshot());
+        appliedModelIdForPrompt = (
+          !opts.providerId
+          || modelState?.provider === opts.providerId
+        )
+          ? modelState?.currentModelId ?? null
+          : null;
+        if (typeof opts.runtime.sendPromptWithMeta === 'function') {
+          didAttemptProviderSend = true;
+          await opts.runtime.sendPromptWithMeta({
+            text: providerPrompt,
+            localId,
+            ...(message.message.meta ? { meta: message.message.meta } : {}),
+            onProviderPromptAccepted: confirmProviderAccepted,
+          });
+          confirmProviderAccepted();
+        } else {
+          didAttemptProviderSend = true;
+          await opts.runtime.sendPrompt(providerPrompt);
+          confirmProviderAccepted();
+        }
+      };
+      if (opts.inputConsumer) {
+        const outcome = await opts.inputConsumer.runProviderInputDispatch({
+          abortSignal: opts.getAbortSignal(),
+          dispatch: dispatchProviderPrompt,
         });
-        confirmProviderAccepted();
+        if (outcome.status === 'cancelled') {
+          shouldSendReady = false;
+          continue;
+        }
       } else {
-        didAttemptProviderSend = true;
-        await opts.runtime.sendPrompt(providerPrompt);
-        confirmProviderAccepted();
+        await dispatchProviderPrompt();
       }
     } catch (error) {
       if (!didConfirmProviderAccepted) {
-        const pendingDeliveryBlockedReason: PendingQueueDeliveryBlockedReason = didAttemptProviderSend
-          ? 'provider_rejected_before_acceptance'
-          : 'runtime_disposed_before_delivery';
-        await blockQueuedUserMessageDeliveryBeforeProviderAcceptance(message, pendingDeliveryBlockedReason);
+        reportQueuedUserMessageFailureBeforeProviderAcceptance(message, error, didAttemptProviderSend);
       }
 
       if (error instanceof StrictInitialResumeError || error instanceof ResumeFailClosedError) {

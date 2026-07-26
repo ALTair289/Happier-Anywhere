@@ -41,6 +41,8 @@ describe('registerPermissionModeMessageQueueBinding', () => {
       queue: {
         push: (message: PermissionModeQueuedPrompt, mode: { permissionMode: PermissionMode }) =>
           queueCalls.push({ type: 'push', message, mode }),
+        unshift: (message: PermissionModeQueuedPrompt, mode: { permissionMode: PermissionMode }) =>
+          queueCalls.push({ type: 'push', message, mode }),
         pushIsolateAndClear: (message: PermissionModeQueuedPrompt, mode: { permissionMode: PermissionMode }) =>
           queueCalls.push({ type: 'clear', message, mode }),
       },

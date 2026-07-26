@@ -92,6 +92,8 @@ export type SessionMediaSource =
       path: string;
       mimeType?: string;
       suggestedName?: string;
+      description?: string;
+      referenceImagePaths?: readonly string[];
       origin: SessionMediaSourceOrigin;
       dedupeKey?: string;
       provenance?: Record<string, unknown>;

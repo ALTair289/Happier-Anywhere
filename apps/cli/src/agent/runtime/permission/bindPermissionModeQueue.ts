@@ -9,6 +9,10 @@ import { resolvePermissionModeUpdatedAtFromMessage } from './permissionModeCanon
 import { resolvePermissionModeForQueueingUserMessage } from './permissionModeFromUserMessage';
 import { updateAgentStateBestEffort, updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
 import type { PermissionModeQueuedPrompt } from '@/agent/runtime/permission/permissionModeQueuedPrompt';
+import type { PendingProviderAction } from '@/agent/runtime/modeMessageQueue';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
+import type { SessionUserMessageDeliveryInfo } from '@/api/session/sessionClientPort';
+import type { PendingQueueDeliveryBlockedReason } from '@/api/session/pendingQueueV2Transport';
 
 /**
  * Config change carried by a steered message that the backend must own BEFORE the text joins the
@@ -52,6 +56,8 @@ export type InFlightSteerController = Readonly<{
     text: string,
     identity?: InFlightSteerDeliveryIdentity,
   ) => Promise<void>;
+  /** Cancel the active provider turn before executing an `interrupt_and_send` Pending action. */
+  cancelActiveTurn?: (() => Promise<void>) | undefined;
   /**
    * OPTIONAL capability (lane Q): apply a config delta to the RUNNING turn so a config-carrying
    * message can still steer. Backends that cannot own mid-turn config changes (e.g. Codex —
@@ -82,7 +88,11 @@ export function registerPermissionModeMessageQueueBinding(opts: {
   const isCurrentBinding = (session: PermissionModeQueueSessionBinding, generation: number): boolean =>
     currentSession === session && bindingGeneration === generation;
 
-  const handleMessage = (session: PermissionModeQueueSessionBinding, message: UserMessage) => {
+  const handleMessage = (
+    session: PermissionModeQueueSessionBinding,
+    message: UserMessage,
+    deliveryInfo?: SessionUserMessageDeliveryInfo,
+  ): void | Promise<void> => {
     const messageBindingGeneration = bindingGeneration;
     if (!isCurrentBinding(session, messageBindingGeneration)) {
       return;
@@ -108,7 +118,7 @@ export function registerPermissionModeMessageQueueBinding(opts: {
 
     const text = message.content.text;
     const didChangePermissionMode = previousPermissionMode !== resolvedMode.currentPermissionMode;
-    const deliveryIdentity = resolveInFlightSteerDeliveryIdentity(session, message);
+    const deliveryIdentity = resolveInFlightSteerDeliveryIdentity(session, message, deliveryInfo);
 
     // In-flight steer is only valid when:
     // - the runtime is currently processing a turn,
@@ -118,7 +128,7 @@ export function registerPermissionModeMessageQueueBinding(opts: {
     //   `applyConfigDeltaInFlight` capability (lane Q) so it can own the mode change mid-turn.
     //   Without the capability, mode changes keep the queue path (handled by the main loop).
     const steer = opts.inFlightSteer;
-    const pushToQueueBestEffort = () => {
+    const pushToQueueBestEffort = (pendingProviderAction?: PendingProviderAction) => {
       if (!isCurrentBinding(session, messageBindingGeneration)) return;
       try {
         pushMessageToQueueWithSpecialCommands({
@@ -130,17 +140,61 @@ export function registerPermissionModeMessageQueueBinding(opts: {
             ...resolveAppendSystemPromptModeOverride(message.meta),
           },
           ...deliveryIdentity.queueOptions,
+          ...(pendingProviderAction ? { pendingProviderAction } : {}),
         });
       } catch {
         // Best-effort fallback: queueing should not be able to crash the process if a steer fails.
       }
     };
+    const blockPendingDelivery = async (reason: PendingQueueDeliveryBlockedReason) => {
+      if (!isCurrentBinding(session, messageBindingGeneration)) return;
+      await session.blockPendingMessageDelivery?.({
+        localIds: deliveryIdentity.queueOptions.userMessageLocalIds,
+        reason,
+      });
+    };
+    const claimedProviderAction = deliveryInfo?.pendingProviderAction;
+
+    if (claimedProviderAction === 'send') {
+      pushToQueueBestEffort('send');
+      return;
+    }
+
+    if (claimedProviderAction === 'interrupt_and_send') {
+      steerSequence = steerSequence.then(async () => {
+        if (!isCurrentBinding(session, messageBindingGeneration)) return;
+        try {
+          if (!steer?.cancelActiveTurn) {
+            throw new Error('active-turn cancellation is unavailable');
+          }
+          await steer.cancelActiveTurn();
+          if (!isCurrentBinding(session, messageBindingGeneration)) return;
+          pushToQueueBestEffort('send');
+        } catch {
+          if (!isCurrentBinding(session, messageBindingGeneration)) return;
+          await blockPendingDelivery('provider_rejected_before_acceptance');
+        }
+      });
+      return steerSequence;
+    }
+
+    const isClaimedSteer = claimedProviderAction === 'steer';
+    const canSteerNow = Boolean(
+      steer
+      && steer.supportsInFlightSteer()
+      && steer.isTurnInFlight()
+      && !isNonSteerablePromptPayload(text)
+      && (!didChangePermissionMode || typeof steer.applyConfigDeltaInFlight === 'function'),
+    );
+
+    if (isClaimedSteer && !canSteerNow) {
+      steerSequence = steerSequence.then(async () => {
+        await blockPendingDelivery('steering_unavailable');
+      });
+      return steerSequence;
+    }
     if (
-      steer &&
-      steer.supportsInFlightSteer() &&
-      steer.isTurnInFlight() &&
-      !isNonSteerablePromptPayload(text) &&
-      (!didChangePermissionMode || typeof steer.applyConfigDeltaInFlight === 'function')
+      steer && canSteerNow
     ) {
       const applyConfigDelta = didChangePermissionMode ? steer.applyConfigDeltaInFlight : undefined;
       steerSequence = steerSequence.then(async () => {
@@ -155,6 +209,10 @@ export function registerPermissionModeMessageQueueBinding(opts: {
           }
           if (!isCurrentBinding(session, messageBindingGeneration)) return;
           if (configOutcome.status !== 'applied' && configOutcome.status !== 'scheduled_in_turn') {
+            if (isClaimedSteer) {
+              await blockPendingDelivery('steering_unavailable');
+              return;
+            }
             // The backend cannot own the config mid-turn: legacy queue path (the mode applies when
             // the queue drains). Not a bounce — the steer was never accepted — so no corrective
             // unsafe_window publish (the UI already routes known-refused payloads honestly).
@@ -214,6 +272,12 @@ export function registerPermissionModeMessageQueueBinding(opts: {
           return;
         } catch {
           if (!isCurrentBinding(session, messageBindingGeneration)) return;
+          if (isClaimedSteer) {
+            await blockPendingDelivery('steering_unavailable');
+            if (!isCurrentBinding(session, messageBindingGeneration)) return;
+            publishSteerBounceUnavailable(session);
+            return;
+          }
           pushToQueueBestEffort();
           if (!isCurrentBinding(session, messageBindingGeneration)) return;
           // Lane P (O-design Seam A corrective): a steer the runner accepted just BOUNCED to the
@@ -221,7 +285,7 @@ export function registerPermissionModeMessageQueueBinding(opts: {
           publishSteerBounceUnavailable(session);
         }
       });
-      return;
+      return steerSequence;
     }
 
     if (!isCurrentBinding(session, messageBindingGeneration)) return;
@@ -240,9 +304,7 @@ export function registerPermissionModeMessageQueueBinding(opts: {
   const bindSession = (session: PermissionModeQueueSessionBinding) => {
     bindingGeneration += 1;
     currentSession = session;
-    session.onUserMessage((message) => {
-      handleMessage(session, message);
-    });
+    session.onUserMessage((message, deliveryInfo) => handleMessage(session, message, deliveryInfo));
   };
 
   bindSession(opts.session);
@@ -270,17 +332,22 @@ function publishSteerBounceUnavailable(session: PermissionModeQueueSessionBindin
 }
 
 type PermissionModeQueueSessionBinding = {
-  onUserMessage: (handler: (message: UserMessage) => void) => void;
+  onUserMessage: (handler: (message: UserMessage, info?: SessionUserMessageDeliveryInfo) => void | Promise<void>) => void;
   updateMetadata: (updater: (current: Metadata) => Metadata) => Promise<void> | void;
   updateAgentState?: (updater: (current: AgentState) => AgentState) => Promise<void> | void;
   getCommittedUserMessageSeq?: (localId: string) => number | null;
   getMetadataSnapshot?: () => unknown;
   refreshSessionSnapshotFromServerBestEffort?: (opts?: { reason: 'connect' | 'waitForMetadataUpdate' }) => Promise<void>;
+  blockPendingMessageDelivery?: (params: Readonly<{
+    localIds: readonly string[] | null | undefined;
+    reason: PendingQueueDeliveryBlockedReason;
+  }>) => Promise<boolean>;
 };
 
 function resolveInFlightSteerDeliveryIdentity(
   session: PermissionModeQueueSessionBinding,
   message: UserMessage,
+  deliveryInfo?: SessionUserMessageDeliveryInfo,
 ): Readonly<{
   localId: string | null;
   userMessageSeq: number | null;
@@ -288,6 +355,8 @@ function resolveInFlightSteerDeliveryIdentity(
     userMessageSeq: number | null;
     userMessageLocalId: string | null;
     userMessageLocalIds: readonly string[] | null;
+    providerAcceptancePending?: boolean;
+    pendingProviderAction?: PendingProviderAction;
   };
   steerOptions: InFlightSteerDeliveryIdentity | undefined;
 }> {
@@ -306,6 +375,8 @@ function resolveInFlightSteerDeliveryIdentity(
       userMessageSeq,
       userMessageLocalId: localId,
       userMessageLocalIds: localIds.length === 0 ? null : localIds,
+      ...(deliveryInfo?.providerAcceptancePending === true ? { providerAcceptancePending: true } : {}),
+      ...(deliveryInfo?.pendingProviderAction ? { pendingProviderAction: deliveryInfo.pendingProviderAction } : {}),
     },
     steerOptions: hasSteerIdentity
       ? {
@@ -317,8 +388,7 @@ function resolveInFlightSteerDeliveryIdentity(
 }
 
 function normalizeDeliveryLocalId(value: unknown): string | null {
-  const localId = typeof value === 'string' ? value.trim() : '';
-  return localId.length === 0 ? null : localId;
+  return readNonBlankOpaqueIdentifier(value);
 }
 
 function normalizeDeliverySeq(value: unknown): number | null {

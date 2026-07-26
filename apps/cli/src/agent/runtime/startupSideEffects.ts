@@ -86,6 +86,7 @@ export function sendTerminalFallbackMessageIfNeeded(opts: {
 export async function reportSessionToDaemonIfRunning(opts: {
     sessionId: string;
     metadata: Metadata;
+    requireDaemonAck?: boolean;
 }, deps: DaemonReportDeps = {}): Promise<void> {
     const notifyFn = deps.notifyDaemonSessionStartedFn ?? notifyDaemonSessionStarted;
     const sleepFn = deps.sleepFn ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -125,7 +126,11 @@ export async function reportSessionToDaemonIfRunning(opts: {
         attempt += 1;
         try {
             logger.debug(`[START] Reporting session ${opts.sessionId} to daemon (attempt ${attempt})`);
-            const result = await notifyFn(opts.sessionId, opts.metadata, { timeoutMs: boundedAttemptTimeoutMs });
+            const result = await notifyFn(
+                opts.sessionId,
+                opts.metadata,
+                { timeoutMs: boundedAttemptTimeoutMs },
+            );
             if (!result?.error) {
                 logger.debug(`[START] Reported session ${opts.sessionId} to daemon`);
                 try {
@@ -140,6 +145,9 @@ export async function reportSessionToDaemonIfRunning(opts: {
             const timedOut = nowFn() - startedAt >= retryTimeoutMs;
             if (!isTransientDaemonReportError(message) || timedOut) {
                 logger.debug(`[START] Failed to report to daemon (may not be running):`, result.error);
+                if (opts.requireDaemonAck) {
+                    throw new Error('Claude runtime readiness was not acknowledged by the daemon');
+                }
                 return;
             }
             await sleepFn(retryIntervalMs);
@@ -148,6 +156,9 @@ export async function reportSessionToDaemonIfRunning(opts: {
             const timedOut = nowFn() - startedAt >= retryTimeoutMs;
             if (!isTransientDaemonReportError(message) || timedOut) {
                 logger.debug('[START] Failed to report to daemon (may not be running):', error);
+                if (opts.requireDaemonAck) {
+                    throw new Error('Claude runtime readiness was not acknowledged by the daemon');
+                }
                 return;
             }
             await sleepFn(retryIntervalMs);

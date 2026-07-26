@@ -5,17 +5,17 @@ import {
 } from '@happier-dev/agents';
 import { isDefinitiveSessionControlApplyError } from './sessionControlApplyError';
 import { logger } from '@/ui/logger';
+import {
+  readNonBlankSessionControlIdentifier,
+  readSessionControlValueId,
+} from '@/agent/runtime/sessionControlIdentifiers';
 
 type ConfigOptionValueId = string;
 
 function normalizeValueId(raw: unknown): ConfigOptionValueId | null {
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  }
-  if (typeof raw === 'boolean') return raw ? 'true' : 'false';
-  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw);
-  return null;
+  const value = readSessionControlValueId(raw);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return value;
 }
 
 export function resolveSessionConfigOptionOverridesFromMetadataSnapshot(opts: Readonly<{
@@ -28,7 +28,7 @@ export function resolveSessionConfigOptionOverridesFromMetadataSnapshot(opts: Re
   const out: Array<{ configId: string; valueId: ConfigOptionValueId; updatedAt: number }> = [];
 
   for (const [configIdRaw, entryRaw] of Object.entries(overridesRaw as Record<string, unknown>)) {
-    const configId = typeof configIdRaw === 'string' ? configIdRaw.trim() : '';
+    const configId = readNonBlankSessionControlIdentifier(configIdRaw) ?? '';
     if (!configId) continue;
     const entry = entryRaw && typeof entryRaw === 'object' && !Array.isArray(entryRaw) ? (entryRaw as Record<string, unknown>) : null;
     if (!entry) continue;

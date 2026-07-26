@@ -8,6 +8,19 @@ export type SpecialCommandQueue<Mode, Message> = {
       userMessageSeq?: number | null;
       userMessageLocalId?: string | null;
       userMessageLocalIds?: readonly string[] | null;
+      providerAcceptancePending?: boolean | null;
+      pendingProviderAction?: import('@/agent/runtime/modeMessageQueue').PendingProviderAction;
+    },
+  ) => void;
+  unshift: (
+    message: Message,
+    mode: Mode,
+    opts?: {
+      userMessageSeq?: number | null;
+      userMessageLocalId?: string | null;
+      userMessageLocalIds?: readonly string[] | null;
+      providerAcceptancePending?: boolean | null;
+      pendingProviderAction?: import('@/agent/runtime/modeMessageQueue').PendingProviderAction;
     },
   ) => void;
   pushIsolateAndClear: (
@@ -17,6 +30,8 @@ export type SpecialCommandQueue<Mode, Message> = {
       userMessageSeq?: number | null;
       userMessageLocalId?: string | null;
       userMessageLocalIds?: readonly string[] | null;
+      providerAcceptancePending?: boolean | null;
+      pendingProviderAction?: import('@/agent/runtime/modeMessageQueue').PendingProviderAction;
     },
   ) => void;
 };
@@ -32,16 +47,25 @@ export function pushMessageToQueueWithSpecialCommands<Mode, Message>(opts: {
   userMessageSeq?: number | null;
   userMessageLocalId?: string | null;
   userMessageLocalIds?: readonly string[] | null;
+  providerAcceptancePending?: boolean | null;
+  pendingProviderAction?: import('@/agent/runtime/modeMessageQueue').PendingProviderAction;
+  prioritize?: boolean;
 }): void {
   const special = parseSpecialCommand(opts.text);
   const queueOptions = {
     userMessageSeq: opts.userMessageSeq ?? null,
     userMessageLocalId: opts.userMessageLocalId ?? null,
     userMessageLocalIds: opts.userMessageLocalIds ?? null,
+    ...(opts.providerAcceptancePending === true ? { providerAcceptancePending: true } : {}),
+    ...(opts.pendingProviderAction ? { pendingProviderAction: opts.pendingProviderAction } : {}),
   };
   if (special.type === 'clear') {
     opts.queue.pushIsolateAndClear(opts.message, opts.mode, queueOptions);
     return;
   }
-  opts.queue.push(opts.message, opts.mode, queueOptions);
+  if (opts.prioritize) {
+    opts.queue.unshift(opts.message, opts.mode, queueOptions);
+  } else {
+    opts.queue.push(opts.message, opts.mode, queueOptions);
+  }
 }

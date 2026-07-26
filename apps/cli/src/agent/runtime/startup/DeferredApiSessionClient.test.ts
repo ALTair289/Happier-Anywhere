@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createDeferred } from '@/testkit/async/deferred';
-import { DeferredApiSessionClient } from './DeferredApiSessionClient';
+import type { SessionRuntimeActivitySnapshotPublisher } from '@/session/runtimeActivity/types';
+import { DeferredApiSessionClient, type DeferredApiSessionTarget } from './DeferredApiSessionClient';
 import type { Metadata } from '@/api/types';
+import { registerSessionHandlers } from '@/rpc/handlers/registerSessionHandlers';
+import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
+import { createClaudeUnifiedUserMessageHandler } from '@/backends/claude/startup/createClaudeUnifiedUserMessageHandler';
 
 function createMetadataStub(overrides?: Partial<Metadata>): Metadata {
   return {
@@ -17,6 +21,195 @@ function createMetadataStub(overrides?: Partial<Metadata>): Metadata {
 }
 
 describe('DeferredApiSessionClient', () => {
+  it('returns and exactly replays a typed non-success when a pre-attach Claude enqueue overflows', async () => {
+    const deferred = new DeferredApiSessionClient({
+      placeholderSessionId: 'PID-overflow-enqueue',
+      limits: { maxEntries: 1, maxBytes: 10_000 },
+    });
+    registerSessionHandlers(deferred.rpcHandlerManager, process.cwd(), {
+      sessionRuntimeControls: {
+        handleUserMessage: createClaudeUnifiedUserMessageHandler({
+          enqueueSessionUserMessage: (request) => deferred.enqueueSessionUserMessage(request),
+        }),
+      },
+    });
+    const request = { text: 'queued', localId: 'overflow-id', meta: {} };
+    const pending = deferred.rpcHandlerManager.invokeLocal(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND, request);
+    await vi.waitFor(() => {
+      expect(deferred.getBufferStats().entryCount).toBe(1);
+    });
+    deferred.sendSessionEvent({ type: 'force-overflow' });
+
+    const expected = {
+      ok: false,
+      status: 'unavailable',
+      errorCode: 'session_user_message_startup_buffer_overflow',
+      error: 'session_user_message_startup_buffer_overflow',
+    };
+    await expect(pending).resolves.toEqual(expected);
+    await expect(deferred.rpcHandlerManager.invokeLocal(
+      SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND,
+      request,
+    )).resolves.toEqual(expected);
+
+    const enqueueSessionUserMessage = vi.fn(async () => {});
+    await deferred.attach({
+      sessionId: 'session-overflow-enqueue',
+      rpcHandlerManager: { registerHandler: vi.fn(), invokeLocal: vi.fn(async () => ({})) },
+      enqueueSessionUserMessage,
+    } as unknown as DeferredApiSessionTarget);
+    expect(enqueueSessionUserMessage).not.toHaveBeenCalled();
+    expect(deferred.getBufferStats().entryCount).toBe(0);
+  });
+
+  it('returns and exactly replays a typed non-success when a pre-attach Claude enqueue is cancelled', async () => {
+    const deferred = new DeferredApiSessionClient({
+      placeholderSessionId: 'PID-cancel-enqueue',
+      limits: { maxEntries: 10, maxBytes: 10_000 },
+    });
+    registerSessionHandlers(deferred.rpcHandlerManager, process.cwd(), {
+      sessionRuntimeControls: {
+        handleUserMessage: createClaudeUnifiedUserMessageHandler({
+          enqueueSessionUserMessage: (request) => deferred.enqueueSessionUserMessage(request),
+        }),
+      },
+    });
+    const request = { text: 'queued', localId: 'cancel-id', meta: {} };
+    const pending = deferred.rpcHandlerManager.invokeLocal(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND, request);
+    await Promise.resolve();
+    deferred.cancel();
+    const expected = {
+      ok: false,
+      status: 'unavailable',
+      errorCode: 'session_user_message_startup_cancelled',
+      error: 'session_user_message_startup_cancelled',
+    };
+    await expect(pending).resolves.toEqual(expected);
+    await expect(deferred.rpcHandlerManager.invokeLocal(
+      SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND,
+      request,
+    )).resolves.toEqual(expected);
+    expect(deferred.getBufferStats().entryCount).toBe(0);
+  });
+
+  it('returns and exactly replays a typed non-success when the pre-attach Claude enqueue fails during flush', async () => {
+    const deferred = new DeferredApiSessionClient({
+      placeholderSessionId: 'PID-flush-error-enqueue',
+      limits: { maxEntries: 10, maxBytes: 10_000 },
+    });
+    registerSessionHandlers(deferred.rpcHandlerManager, process.cwd(), {
+      sessionRuntimeControls: {
+        handleUserMessage: createClaudeUnifiedUserMessageHandler({
+          enqueueSessionUserMessage: (request) => deferred.enqueueSessionUserMessage(request),
+        }),
+      },
+    });
+    const request = { text: 'queued', localId: 'flush-error-id', meta: {} };
+    const pending = deferred.rpcHandlerManager.invokeLocal(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND, request);
+    await Promise.resolve();
+    const enqueueSessionUserMessage = vi.fn(async () => {
+      throw new Error('target enqueue failed');
+    });
+    await deferred.attach({
+      sessionId: 'session-flush-error-enqueue',
+      rpcHandlerManager: { registerHandler: vi.fn(), invokeLocal: vi.fn(async () => ({})) },
+      enqueueSessionUserMessage,
+    } as unknown as DeferredApiSessionTarget);
+
+    const expected = {
+      ok: false,
+      status: 'unavailable',
+      errorCode: 'session_user_message_startup_flush_error',
+      error: 'session_user_message_startup_flush_error',
+    };
+    await expect(pending).resolves.toEqual(expected);
+    await expect(deferred.rpcHandlerManager.invokeLocal(
+      SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND,
+      request,
+    )).resolves.toEqual(expected);
+    expect(enqueueSessionUserMessage).toHaveBeenCalledExactlyOnceWith(request);
+    expect(deferred.getBufferStats().entryCount).toBe(0);
+  });
+
+  it('preserves and exactly replays a typed recovery block through deferred Claude registration', async () => {
+    const deferred = new DeferredApiSessionClient({
+      placeholderSessionId: 'PID-recovery-block',
+      limits: { maxEntries: 10, maxBytes: 10_000 },
+    });
+    const target = {
+      sessionId: 'session-recovery-block',
+      rpcHandlerManager: { registerHandler: vi.fn(), invokeLocal: vi.fn(async () => ({})) },
+      enqueueSessionUserMessage: vi.fn(async () => ({
+        recoveryBlocked: {
+          status: 'waiting' as const,
+          errorCode: 'session_user_message_recovery_pending',
+        },
+      })),
+    } as unknown as DeferredApiSessionTarget;
+    await deferred.attach(target);
+
+    registerSessionHandlers(deferred.rpcHandlerManager, process.cwd(), {
+      sessionRuntimeControls: {
+        handleUserMessage: createClaudeUnifiedUserMessageHandler({
+          enqueueSessionUserMessage: (request) => deferred.enqueueSessionUserMessage(request),
+        }),
+      },
+    });
+    const request = {
+      text: 'retry',
+      localId: 'exact-id',
+      meta: {},
+    };
+    const expected = {
+      ok: false,
+      status: 'waiting',
+      errorCode: 'session_user_message_recovery_pending',
+      error: 'session_user_message_recovery_pending',
+    };
+
+    await expect(deferred.rpcHandlerManager.invokeLocal(
+      SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND,
+      request,
+    )).resolves.toEqual(expected);
+    await expect(deferred.rpcHandlerManager.invokeLocal(
+      SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND,
+      request,
+    )).resolves.toEqual(expected);
+    expect(target.enqueueSessionUserMessage).toHaveBeenCalledExactlyOnceWith({
+      text: 'retry',
+      localId: 'exact-id',
+      meta: {},
+    });
+    await expect(deferred.enqueueSessionUserMessage(request)).resolves.toEqual({
+      recoveryBlocked: {
+        status: 'waiting',
+        errorCode: 'session_user_message_recovery_pending',
+      },
+    });
+  });
+  it('exposes only the attached target snapshot publisher without fabricating or buffering Activity', async () => {
+    const deferred = new DeferredApiSessionClient({
+      placeholderSessionId: 'PID-target-activity',
+      limits: { maxEntries: 10, maxBytes: 10_000 },
+    });
+    const publisher: SessionRuntimeActivitySnapshotPublisher = {
+      publish: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
+    };
+
+    expect(deferred.getRuntimeActivitySnapshotPublisher()).toBeNull();
+
+    await deferred.attach({
+      sessionId: 'session-target-activity',
+      rpcHandlerManager: { registerHandler: vi.fn(), invokeLocal: vi.fn(async () => ({})) },
+      getRuntimeActivitySnapshotPublisher: () => publisher,
+    } as unknown as DeferredApiSessionTarget);
+
+    expect(deferred.getRuntimeActivitySnapshotPublisher()).toBe(publisher);
+    expect(publisher.publish).not.toHaveBeenCalled();
+    expect(publisher.close).not.toHaveBeenCalled();
+  });
+
   it('invokes registered RPC handlers locally before attach', async () => {
     const deferred = new DeferredApiSessionClient({
       placeholderSessionId: 'PID-1',
@@ -49,7 +242,7 @@ describe('DeferredApiSessionClient', () => {
       fetchCommittedClaudeJsonlMessageBaseline: vi.fn(async () => ({ keys: new Set(['claude-jsonl:main:user:u1']), complete: true, oldestCoveredAtMs: null })),
       fetchRecentTranscriptTextItemsForAcpImport: vi.fn(async () => [{ role: 'user' as const, text: 'hello' }]),
       sendAgentMessage: vi.fn(),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
       sendUserTextMessage: vi.fn(),
       updateMetadata: vi.fn(),
@@ -57,13 +250,14 @@ describe('DeferredApiSessionClient', () => {
       keepAlive: vi.fn(),
       getMetadataSnapshot: vi.fn(() => createMetadataStub()),
       waitForMetadataUpdate: vi.fn(async () => true),
+      waitForPendingEligibilityUpdate: vi.fn(async () => true),
       popPendingMessage: vi.fn(async () => true),
       peekPendingMessageQueueV2Count: vi.fn(async () => 3),
       discardPendingMessageQueueV2All: vi.fn(async () => 1),
       discardCommittedMessageLocalIds: vi.fn(async () => 2),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     const classifier = vi.fn(() => true);
@@ -72,6 +266,7 @@ describe('DeferredApiSessionClient', () => {
     await deferred.attach(real);
 
     await expect(deferred.waitForMetadataUpdate()).resolves.toBe(true);
+    await expect(deferred.waitForPendingEligibilityUpdate()).resolves.toBe(true);
     await expect(deferred.popPendingMessage()).resolves.toBe(true);
     await expect(deferred.peekPendingMessageQueueV2Count({ reconcileWhenEmpty: 'skip' })).resolves.toBe(3);
     await expect(deferred.fetchCommittedClaudeJsonlMessageBaseline({ take: 1 })).resolves.toEqual(
@@ -89,6 +284,7 @@ describe('DeferredApiSessionClient', () => {
     await deferred.close();
 
     expect(real.waitForMetadataUpdate).toHaveBeenCalledTimes(1);
+    expect(real.waitForPendingEligibilityUpdate).toHaveBeenCalledTimes(1);
     expect(real.peekPendingMessageQueueV2Count).toHaveBeenCalledWith({ reconcileWhenEmpty: 'skip' });
     expect(real.fetchCommittedClaudeJsonlMessageBaseline).toHaveBeenCalledWith({ take: 1 });
     expect(real.fetchRecentTranscriptTextItemsForAcpImport).toHaveBeenCalledWith({ take: 1 });
@@ -117,7 +313,7 @@ describe('DeferredApiSessionClient', () => {
       sendSessionEvent: vi.fn(),
       sendClaudeSessionMessage: vi.fn(),
       sendAgentMessage: vi.fn(),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
       sendUserTextMessage: vi.fn(),
       updateMetadata: vi.fn(),
@@ -134,8 +330,8 @@ describe('DeferredApiSessionClient', () => {
       discardPendingMessageQueueV2All: vi.fn(async () => 1),
       discardCommittedMessageLocalIds: vi.fn(async () => 2),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     await deferred.attach(real);
@@ -145,6 +341,95 @@ describe('DeferredApiSessionClient', () => {
       reason: 'supervisor_offline',
     });
     expect(real.materializeNextPendingMessageSafely).toHaveBeenCalledWith({ reconcileWhenEmpty: 'skip' });
+  });
+
+  it('coalesces pre-attach pending wakes and delegates through the public wake port', async () => {
+    const deferred = new DeferredApiSessionClient({
+      placeholderSessionId: 'PID-wake',
+      limits: { maxEntries: 10, maxBytes: 10_000 },
+    });
+    const wakePendingMaterialization = vi.fn();
+
+    deferred.wakePendingMaterialization();
+    deferred.wakePendingMaterialization();
+
+    const real = {
+      sessionId: 'sess_wake',
+      rpcHandlerManager: { registerHandler: vi.fn(), invokeLocal: vi.fn(async () => ({})) },
+      sendSessionEvent: vi.fn(), sendClaudeSessionMessage: vi.fn(), sendAgentMessage: vi.fn(),
+      sendAgentMessageCommitted: vi.fn(async () => {}), sendCodexMessage: vi.fn(), sendUserTextMessage: vi.fn(),
+      updateMetadata: vi.fn(), updateAgentState: vi.fn(), keepAlive: vi.fn(),
+      getMetadataSnapshot: vi.fn(() => createMetadataStub()), waitForMetadataUpdate: vi.fn(async () => true),
+      wakePendingMaterialization,
+      popPendingMessage: vi.fn(async () => false), peekPendingMessageQueueV2Count: vi.fn(async () => 0),
+      discardPendingMessageQueueV2All: vi.fn(async () => 0), discardCommittedMessageLocalIds: vi.fn(async () => 0),
+      sendSessionDeath: vi.fn(), flush: vi.fn(async () => {}), close: vi.fn(async () => {}),
+    } as const;
+
+    await deferred.attach(real);
+    expect(wakePendingMaterialization).toHaveBeenCalledTimes(1);
+    deferred.wakePendingMaterialization();
+    expect(wakePendingMaterialization).toHaveBeenCalledTimes(2);
+  });
+
+
+  it('drops unforwarded pending wake debt when cancelled', async () => {
+    const deferred = new DeferredApiSessionClient({
+      placeholderSessionId: 'PID-cancel-wake',
+      limits: { maxEntries: 10, maxBytes: 10_000 },
+    });
+    const wakePendingMaterialization = vi.fn();
+    deferred.wakePendingMaterialization();
+    deferred.cancel();
+
+    await deferred.attach({
+      sessionId: 'sess_cancelled', rpcHandlerManager: { registerHandler: vi.fn(), invokeLocal: vi.fn(async () => ({})) },
+      sendSessionEvent: vi.fn(), sendClaudeSessionMessage: vi.fn(), sendAgentMessage: vi.fn(),
+      sendAgentMessageCommitted: vi.fn(async () => {}), sendCodexMessage: vi.fn(), sendUserTextMessage: vi.fn(),
+      updateMetadata: vi.fn(), updateAgentState: vi.fn(), keepAlive: vi.fn(), getMetadataSnapshot: vi.fn(() => null),
+      waitForMetadataUpdate: vi.fn(async () => true), wakePendingMaterialization,
+      popPendingMessage: vi.fn(async () => false), peekPendingMessageQueueV2Count: vi.fn(async () => 0),
+      discardPendingMessageQueueV2All: vi.fn(async () => 0), discardCommittedMessageLocalIds: vi.fn(async () => 0),
+      sendSessionDeath: vi.fn(), flush: vi.fn(async () => {}), close: vi.fn(async () => {}),
+    });
+    expect(wakePendingMaterialization).not.toHaveBeenCalled();
+  });
+
+  it('reports an attached target without pending materialization support as unavailable, not empty', async () => {
+    const deferred = new DeferredApiSessionClient({
+      placeholderSessionId: 'PID-1',
+      limits: { maxEntries: 10, maxBytes: 10_000 },
+    });
+    const real = {
+      sessionId: 'sess_legacy',
+      rpcHandlerManager: { registerHandler: vi.fn(), invokeLocal: vi.fn(async () => ({})) },
+      sendSessionEvent: vi.fn(),
+      sendClaudeSessionMessage: vi.fn(),
+      sendAgentMessage: vi.fn(),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
+      sendCodexMessage: vi.fn(),
+      sendUserTextMessage: vi.fn(),
+      updateMetadata: vi.fn(),
+      updateAgentState: vi.fn(),
+      keepAlive: vi.fn(),
+      getMetadataSnapshot: vi.fn(() => createMetadataStub()),
+      waitForMetadataUpdate: vi.fn(async () => true),
+      popPendingMessage: vi.fn(async () => false),
+      peekPendingMessageQueueV2Count: vi.fn(async () => 1),
+      discardPendingMessageQueueV2All: vi.fn(async () => 0),
+      discardCommittedMessageLocalIds: vi.fn(async () => 0),
+      sendSessionDeath: vi.fn(),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
+    } as const;
+
+    await deferred.attach(real);
+
+    await expect(deferred.materializeNextPendingMessageSafely()).resolves.toEqual({
+      type: 'retryable_transport',
+    });
+    expect(real.peekPendingMessageQueueV2Count).not.toHaveBeenCalled();
+    expect(real.popPendingMessage).not.toHaveBeenCalled();
   });
 
   it('buffers codex and user message writes until attach then flushes', async () => {
@@ -160,7 +445,7 @@ describe('DeferredApiSessionClient', () => {
       sendSessionEvent: vi.fn(),
       sendClaudeSessionMessage: vi.fn(),
       sendAgentMessage: vi.fn(),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(() => {
         calls.push('codex');
       }),
@@ -177,8 +462,8 @@ describe('DeferredApiSessionClient', () => {
       discardPendingMessageQueueV2All: vi.fn(async () => 0),
       discardCommittedMessageLocalIds: vi.fn(async () => 0),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     deferred.sendUserTextMessage('hi');
@@ -204,7 +489,7 @@ describe('DeferredApiSessionClient', () => {
       }),
       sendClaudeSessionMessage: vi.fn(),
       sendAgentMessage: vi.fn(),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
       sendUserTextMessage: vi.fn(),
       updateMetadata: vi.fn(async () => {
@@ -219,8 +504,8 @@ describe('DeferredApiSessionClient', () => {
       discardPendingMessageQueueV2All: vi.fn(async () => 0),
       discardCommittedMessageLocalIds: vi.fn(async () => 0),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     const updatePromise = deferred.updateMetadata((metadata) => metadata) as Promise<void>;
@@ -246,7 +531,7 @@ describe('DeferredApiSessionClient', () => {
       }),
       sendClaudeSessionMessage: vi.fn(),
       sendAgentMessage: vi.fn(),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
       sendUserTextMessage: vi.fn(),
       updateMetadata: vi.fn(),
@@ -261,8 +546,8 @@ describe('DeferredApiSessionClient', () => {
       discardPendingMessageQueueV2All: vi.fn(async () => 0),
       discardCommittedMessageLocalIds: vi.fn(async () => 0),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     const updatePromise = deferred.updateAgentState((agentState) => agentState) as Promise<void>;
@@ -290,7 +575,7 @@ describe('DeferredApiSessionClient', () => {
       }),
       sendClaudeSessionMessage: vi.fn(),
       sendAgentMessage: vi.fn(),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
       sendUserTextMessage: vi.fn(),
       updateMetadata: vi.fn(async () => {
@@ -307,8 +592,8 @@ describe('DeferredApiSessionClient', () => {
       discardPendingMessageQueueV2All: vi.fn(async () => 0),
       discardCommittedMessageLocalIds: vi.fn(async () => 0),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     const ignored = {
@@ -317,7 +602,7 @@ describe('DeferredApiSessionClient', () => {
       sendSessionEvent: vi.fn(),
       sendClaudeSessionMessage: vi.fn(),
       sendAgentMessage: vi.fn(),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
       sendUserTextMessage: vi.fn(),
       updateMetadata: vi.fn(),
@@ -330,8 +615,8 @@ describe('DeferredApiSessionClient', () => {
       discardPendingMessageQueueV2All: vi.fn(async () => 0),
       discardCommittedMessageLocalIds: vi.fn(async () => 0),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     deferred.sendSessionEvent({ id: 'before' });
@@ -391,7 +676,7 @@ describe('DeferredApiSessionClient', () => {
       sendAgentMessage: vi.fn(() => {
         calls.push('agent');
       }),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
       sendUserTextMessage: vi.fn(),
       updateMetadata: vi.fn(() => {
@@ -408,8 +693,8 @@ describe('DeferredApiSessionClient', () => {
       discardPendingMessageQueueV2All: vi.fn(async () => 0),
       discardCommittedMessageLocalIds: vi.fn(async () => 0),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     // Register handlers + send events before attach.
@@ -450,7 +735,7 @@ describe('DeferredApiSessionClient', () => {
       sendSessionEvent: vi.fn(),
       sendClaudeSessionMessage: vi.fn(),
       sendAgentMessage: vi.fn(),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
       sendUserTextMessage: vi.fn(),
       updateMetadata: vi.fn(),
@@ -463,8 +748,8 @@ describe('DeferredApiSessionClient', () => {
       discardPendingMessageQueueV2All: vi.fn(async () => 0),
       discardCommittedMessageLocalIds: vi.fn(async () => 0),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     await deferred.attach(real);
@@ -500,7 +785,7 @@ describe('DeferredApiSessionClient', () => {
       }),
       sendClaudeSessionMessage: vi.fn(),
       sendAgentMessage: vi.fn(),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
       sendUserTextMessage: vi.fn(),
       updateMetadata: vi.fn(),
@@ -513,8 +798,8 @@ describe('DeferredApiSessionClient', () => {
       discardPendingMessageQueueV2All: vi.fn(async () => 0),
       discardCommittedMessageLocalIds: vi.fn(async () => 0),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     await deferred.attach(real);
@@ -543,7 +828,7 @@ describe('DeferredApiSessionClient', () => {
       }),
       sendClaudeSessionMessage: vi.fn(),
       sendAgentMessage: vi.fn(),
-      sendAgentMessageCommitted: vi.fn(async () => {}),
+      sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
       sendUserTextMessage: vi.fn(),
       updateMetadata: vi.fn(),
@@ -556,8 +841,8 @@ describe('DeferredApiSessionClient', () => {
       discardPendingMessageQueueV2All: vi.fn(async () => 0),
       discardCommittedMessageLocalIds: vi.fn(async () => 0),
       sendSessionDeath: vi.fn(),
-      flush: vi.fn(async () => {}),
-      close: vi.fn(async () => {}),
+      flush: vi.fn(async (_input?: unknown) => {}),
+      close: vi.fn(async (_input?: unknown) => {}),
     } as const;
 
     await deferred.attach(real);
@@ -594,7 +879,7 @@ describe('DeferredApiSessionClient', () => {
         sendSessionEvent: vi.fn(),
         sendClaudeSessionMessage: vi.fn(),
         sendAgentMessage: vi.fn(),
-        sendAgentMessageCommitted: vi.fn(async () => {}),
+        sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
         sendCodexMessage: vi.fn(),
         sendUserTextMessage: vi.fn(),
         updateMetadata: vi.fn(),
@@ -607,8 +892,8 @@ describe('DeferredApiSessionClient', () => {
         discardPendingMessageQueueV2All: vi.fn(async () => 0),
         discardCommittedMessageLocalIds: vi.fn(async () => 0),
         sendSessionDeath: vi.fn(),
-        flush: vi.fn(async () => {}),
-        close: vi.fn(async () => {}),
+        flush: vi.fn(async (_input?: unknown) => {}),
+        close: vi.fn(async (_input?: unknown) => {}),
         ...overrides,
       };
     }

@@ -1,6 +1,7 @@
 import type { Metadata, PermissionMode } from '@/api/types';
 import { logger } from '@/ui/logger';
 import type { SessionAttachMetadataIdentityPolicy } from '@happier-dev/protocol';
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 
 import {
   mergeSessionMetadataForStartup,
@@ -19,8 +20,7 @@ export function buildAcpSessionModeOverride(opts: {
   agentModeId?: string;
   agentModeUpdatedAt?: number;
 }): AcpSessionModeOverride {
-  if (typeof opts.agentModeId !== 'string') return null;
-  const normalized = opts.agentModeId.trim();
+  const normalized = readNonBlankSessionControlIdentifier(opts.agentModeId) ?? '';
   if (!normalized) return null;
   return { modeId: normalized, updatedAt: opts.agentModeUpdatedAt };
 }
@@ -39,8 +39,7 @@ export function buildModelOverride(opts: {
   modelId?: string;
   modelUpdatedAt?: number;
 }): ModelOverride {
-  if (typeof opts.modelId !== 'string') return null;
-  const normalized = opts.modelId.trim();
+  const normalized = readNonBlankSessionControlIdentifier(opts.modelId) ?? '';
   if (!normalized) return null;
   return { modelId: normalized, updatedAt: opts.modelUpdatedAt };
 }

@@ -3,13 +3,14 @@ import {
   DEFAULT_SESSION_PENDING_QUEUE_DRAIN_MODE,
   SessionPendingQueueDeliveryTimingSchema,
   SessionPendingQueueDrainModeSchema,
-  isSessionRuntimeActivityProjectionIdleForPendingDrain,
+  decideRuntimeIdleAdmission,
   type AccountSettings,
-  type SessionRuntimeActivityProjectionForPendingDrain,
+  type SessionRuntimeActivityProjection,
   type SessionPendingQueueDeliveryTiming,
   type SessionPendingQueueDrainMode,
 } from '@happier-dev/protocol';
-import type { PendingMaterializationActiveTurnPolicy } from './types';
+import type { SessionRuntimeActivityProjectionBoundary } from '@/api/session/runtimeActivityProjection';
+import type { PendingForegroundSteerability } from './types';
 
 export const PENDING_QUEUE_ONE_AT_A_TIME_MAX_POP_PER_WAKE = 1;
 export const PENDING_QUEUE_DRAIN_ALL_MAX_POP_PER_WAKE = 25;
@@ -29,15 +30,43 @@ export function resolveSessionPendingQueueMaxPopPerWake(
     : PENDING_QUEUE_ONE_AT_A_TIME_MAX_POP_PER_WAKE;
 }
 
-export function resolveSessionPendingActiveTurnDeliveryPolicy(
+export function resolveSessionPendingForegroundSteerability(
   settings: Readonly<Record<string, unknown>> | null | undefined,
-): PendingMaterializationActiveTurnPolicy | undefined {
+): PendingForegroundSteerability {
   return settings?.sessionBusySteerSendPolicy === 'server_pending'
-    ? undefined
-    : 'allow_live_delivery';
+    ? 'unsteerable'
+    : 'steerable';
 }
 
-export type PendingQueueRuntimeActivityProjection = SessionRuntimeActivityProjectionForPendingDrain;
+export function resolveRuntimeAwarePendingForegroundSteerability(params: Readonly<{
+  configuredSteerability: PendingForegroundSteerability;
+  hasActiveProviderTurn: boolean;
+  canSteerPrompt: boolean;
+}>): PendingForegroundSteerability {
+  if (params.configuredSteerability !== 'steerable') return params.configuredSteerability;
+  return params.hasActiveProviderTurn && !params.canSteerPrompt
+    ? 'unsteerable'
+    : params.configuredSteerability;
+}
+
+export type PendingQueueRuntimeActivityProjection = SessionRuntimeActivityProjectionBoundary;
+
+function readProjection(activity: PendingQueueRuntimeActivityProjection | null | undefined): SessionRuntimeActivityProjection {
+  if (
+    activity?.runtimeActivityState === undefined
+    || activity.runtimeActivityActiveCount === undefined
+    || activity.runtimeActivityObservedAt === undefined
+    || activity.runtimeActivityRevision === undefined
+  ) {
+    return { state: 'unknown', activeCount: 0, observedAt: null, revision: 0 };
+  }
+  return {
+    state: activity.runtimeActivityState ?? 'unknown',
+    activeCount: activity.runtimeActivityActiveCount,
+    observedAt: activity.runtimeActivityObservedAt ?? null,
+    revision: activity.runtimeActivityRevision,
+  };
+}
 
 export function resolveSessionPendingQueueDeliveryTiming(
   settings: Pick<AccountSettings, 'sessionPendingQueueDeliveryTiming'> | null | undefined,
@@ -49,49 +78,28 @@ export function resolveSessionPendingQueueDeliveryTiming(
 export function runtimeIdleForPendingDrain(
   activity: PendingQueueRuntimeActivityProjection | null | undefined,
   nowMs: unknown,
-  opts: Readonly<{ ownerLive?: boolean }> = {},
 ): boolean {
-  return isSessionRuntimeActivityProjectionIdleForPendingDrain(activity, nowMs, opts);
+  void nowMs;
+  return decideRuntimeIdleAdmission(readProjection(activity)).decision === 'allow';
 }
 
-function readRuntimeActivityExpiry(activity: PendingQueueRuntimeActivityProjection | null | undefined): number | null {
-  const value = activity?.runtimeActivityExpiresAt;
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
-}
+export type PendingRuntimeActivityDeferredReason = "waiting_for_runtime_activity" | "runtime_activity_unknown";
 
-function readNowMs(value: unknown): number | null {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
-}
-
-export type PendingQueueRuntimeActivityDeferral = Readonly<{
-  defer: boolean;
-  runtimeActivityExpiresAt: number | null;
-}>;
-
-export function resolvePendingQueueRuntimeActivityDeferral(params: Readonly<{
-  settings: Pick<AccountSettings, 'sessionPendingQueueDeliveryTiming'> | null | undefined;
-  activity: PendingQueueRuntimeActivityProjection | null | undefined;
-  nowMs: unknown;
-  ownerLive?: boolean;
-}>): PendingQueueRuntimeActivityDeferral {
-  const runtimeActivityExpiresAt = readRuntimeActivityExpiry(params.activity);
-  const nowMs = readNowMs(params.nowMs);
-  const hasFutureExpiry = runtimeActivityExpiresAt !== null
-    && nowMs !== null
-    && runtimeActivityExpiresAt > nowMs;
-  const defer = resolveSessionPendingQueueDeliveryTiming(params.settings) === 'after_runtime_idle'
-    && !runtimeIdleForPendingDrain(params.activity, params.nowMs, { ownerLive: params.ownerLive });
-  return {
-    defer,
-    runtimeActivityExpiresAt: defer && hasFutureExpiry ? runtimeActivityExpiresAt : null,
-  };
+export function resolvePendingRuntimeActivityDeferredReason(
+  activity: PendingQueueRuntimeActivityProjection | null | undefined,
+  nowMs: unknown,
+): PendingRuntimeActivityDeferredReason | null {
+  void nowMs;
+  const decision = decideRuntimeIdleAdmission(readProjection(activity));
+  if (decision.decision === 'allow') return null;
+  return decision.reason === 'active' ? 'waiting_for_runtime_activity' : 'runtime_activity_unknown';
 }
 
 export function shouldDeferPendingQueueDrainForRuntimeActivity(params: Readonly<{
   settings: Pick<AccountSettings, 'sessionPendingQueueDeliveryTiming'> | null | undefined;
   activity: PendingQueueRuntimeActivityProjection | null | undefined;
   nowMs: unknown;
-  ownerLive?: boolean;
 }>): boolean {
-  return resolvePendingQueueRuntimeActivityDeferral(params).defer;
+  return resolveSessionPendingQueueDeliveryTiming(params.settings) === 'after_runtime_idle'
+    && resolvePendingRuntimeActivityDeferredReason(params.activity, params.nowMs) !== null;
 }

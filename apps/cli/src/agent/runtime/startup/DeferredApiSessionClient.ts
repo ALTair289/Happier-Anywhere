@@ -1,18 +1,24 @@
 import type {
   DeferredSessionBufferEntry,
+  DeferredSessionBufferDropReason,
   DeferredSessionBufferLimits,
   DeferredSessionBufferStats,
 } from './deferredSessionBuffer';
 import { RPC_ERROR_CODES, RPC_ERROR_MESSAGES } from '@happier-dev/protocol/rpc';
 import type { RpcHandler, RpcHandlerManagerLike } from '@/api/rpc/types';
 import type { AgentState, Metadata } from '@/api/types';
-import type { MaterializeNextPendingResult } from '@/api/session/sessionClientPort';
+import type {
+  MaterializeNextPendingResult,
+} from '@/api/session/sessionClientPort';
 import type { PendingQueueReadOptions, PendingQueueReconcileWhenEmpty } from '@/api/session/pendingQueueReadPolicy';
 import type { ProviderOwnedUserMessageEchoClassifier } from '@/api/session/providerOwnedUserMessageEcho';
+import type { SessionRuntimeActivitySnapshotPublisher } from '@/session/runtimeActivity/types';
+import type { SessionUserMessageEnqueueResult } from '@/rpc/handlers/sessionUserMessageSend';
 
 export type DeferredApiSessionTarget = Readonly<{
   sessionId: string;
   rpcHandlerManager: RpcHandlerManagerLike;
+  beginRuntimeTermination?: () => void;
   sendSessionEvent: (event: unknown, id?: string) => void;
   sendClaudeSessionMessage: (message: unknown, meta?: unknown) => void;
   recordClaudeJsonlMessageConsumed?: (message: unknown, meta?: unknown) => void;
@@ -28,17 +34,25 @@ export type DeferredApiSessionTarget = Readonly<{
   ) => Promise<void>;
   sendCodexMessage: (body: unknown) => void;
   sendUserTextMessage: (text: string, opts?: { localId?: string; meta?: Record<string, unknown> }) => void;
+  enqueueSessionUserMessage?: (params: Readonly<{
+    text: string;
+    localId?: string;
+    meta?: Record<string, unknown>;
+  }>) => Promise<SessionUserMessageEnqueueResult>;
   updateMetadata: (updater: (metadata: Metadata) => Metadata) => void | Promise<void>;
   updateAgentState: (updater: (state: AgentState) => AgentState) => void | Promise<void>;
+  getRuntimeActivitySnapshotPublisher?: () => SessionRuntimeActivitySnapshotPublisher | null;
   keepAlive: (thinking: boolean, mode: 'local' | 'remote') => void;
   getMetadataSnapshot: () => Metadata | null;
   refreshSessionSnapshotFromServerBestEffort?: (opts?: { reason?: 'connect' | 'waitForMetadataUpdate' }) => Promise<void>;
   waitForMetadataUpdate: (abortSignal?: AbortSignal) => Promise<boolean>;
+  waitForPendingEligibilityUpdate?: (abortSignal?: AbortSignal) => Promise<boolean>;
   shouldAttemptPendingMaterialization?: () => boolean;
   reconcilePendingQueueState?: (opts?: { force?: boolean }) => Promise<boolean>;
   materializeNextPendingMessageSafely?: (opts?: {
     reconcileWhenEmpty?: PendingQueueReconcileWhenEmpty;
   }) => Promise<MaterializeNextPendingResult>;
+  wakePendingMaterialization?: () => void;
   popPendingMessage: () => Promise<boolean>;
   peekPendingMessageQueueV2Count: (opts?: PendingQueueReadOptions) => Promise<number>;
   discardPendingMessageQueueV2All: (opts: { reason: 'switch_to_local' | 'manual' }) => Promise<number>;
@@ -69,6 +83,8 @@ export class DeferredApiSessionClient {
   private flushHadErrors = false;
   private flushErrorWarningSent = false;
   private cancelled = false;
+  private runtimeTerminationStarted = false;
+  private pendingWakeDebt = false;
   private providerOwnedUserMessageEchoClassifier: ProviderOwnedUserMessageEchoClassifier | null = null;
   private providerOwnedUserMessageEchoClassifierSet = false;
 
@@ -235,6 +251,50 @@ export class DeferredApiSessionClient {
     this.pushBufferedCall((t) => t.sendUserTextMessage(_text, _opts), { hint: 'sendUserTextMessage' });
   }
 
+  async enqueueSessionUserMessage(_params: Readonly<{
+    text: string;
+    localId?: string;
+    meta?: Record<string, unknown>;
+  }>): Promise<SessionUserMessageEnqueueResult> {
+    const target = this.target;
+    if (target && !this.flushInFlight) {
+      if (typeof target.enqueueSessionUserMessage === 'function') {
+        return await target.enqueueSessionUserMessage(_params);
+      }
+      target.sendUserTextMessage(_params.text, {
+        localId: _params.localId,
+        meta: _params.meta,
+      });
+      return;
+    }
+
+    const deferred = createDeferredPromise<SessionUserMessageEnqueueResult>();
+    if (this.cancelled) {
+      deferred.resolve(startupEnqueueUnavailable('cancelled'));
+      return deferred.promise;
+    }
+
+    this.pushBufferedCall(
+      async (t) => {
+        if (typeof t.enqueueSessionUserMessage === 'function') {
+          deferred.resolve(await t.enqueueSessionUserMessage(_params));
+          return;
+        }
+        t.sendUserTextMessage(_params.text, {
+          localId: _params.localId,
+          meta: _params.meta,
+        });
+        deferred.resolve();
+      },
+      { hint: 'enqueueSessionUserMessage' },
+      {
+        onDrop: (reason) => deferred.resolve(startupEnqueueUnavailable(reason)),
+        onError: () => deferred.resolve(startupEnqueueUnavailable('flush_error')),
+      },
+    );
+    return deferred.promise;
+  }
+
   updateMetadata(_updater: (metadata: Metadata) => Metadata): void | Promise<void> {
     const target = this.target;
     if (target && !this.flushInFlight) {
@@ -334,6 +394,14 @@ export class DeferredApiSessionClient {
     return await this.withAttachedTarget((t) => t.waitForMetadataUpdate(abortSignal), false);
   }
 
+  async waitForPendingEligibilityUpdate(abortSignal?: AbortSignal): Promise<boolean> {
+    if (abortSignal?.aborted) return false;
+    return await this.withAttachedTarget(
+      (t) => t.waitForPendingEligibilityUpdate?.(abortSignal) ?? Promise.resolve(false),
+      false,
+    );
+  }
+
   shouldAttemptPendingMaterialization(): boolean {
     const target = this.target;
     if (!target || this.flushInFlight) return false;
@@ -348,7 +416,7 @@ export class DeferredApiSessionClient {
     reconcileWhenEmpty?: PendingQueueReconcileWhenEmpty;
   }): Promise<MaterializeNextPendingResult> {
     return await this.withAttachedTarget(
-      (t) => t.materializeNextPendingMessageSafely?.(opts) ?? Promise.resolve({ type: 'no_pending' as const }),
+      (t) => t.materializeNextPendingMessageSafely?.(opts) ?? Promise.resolve({ type: 'retryable_transport' as const }),
       { type: 'deferred' as const, reason: 'supervisor_offline' as const },
     );
   }
@@ -390,6 +458,19 @@ export class DeferredApiSessionClient {
     await this.withAttachedTarget((t) => t.close(), undefined);
   }
 
+  getRuntimeActivitySnapshotPublisher(): SessionRuntimeActivitySnapshotPublisher | null {
+    return this.target?.getRuntimeActivitySnapshotPublisher?.() ?? null;
+  }
+
+  wakePendingMaterialization(): void {
+    if (this.cancelled) return;
+    if (this.target) {
+      this.target.wakePendingMaterialization?.();
+      return;
+    }
+    this.pendingWakeDebt = true;
+  }
+
   attach(_real: DeferredApiSessionTarget): Promise<void> {
     const existingPromise = this.attachPromise;
     if (existingPromise) return existingPromise;
@@ -399,6 +480,10 @@ export class DeferredApiSessionClient {
       return this.attachPromise;
     }
 
+    if (this.runtimeTerminationStarted) {
+      _real.beginRuntimeTermination?.();
+    }
+
     this.target = _real;
     this.sessionId = _real.sessionId;
 
@@ -406,20 +491,36 @@ export class DeferredApiSessionClient {
       _real.rpcHandlerManager.registerHandler(method, handler);
     }
 
+    if (this.pendingWakeDebt) {
+      this.pendingWakeDebt = false;
+      _real.wakePendingMaterialization?.();
+    }
+
     if (this.providerOwnedUserMessageEchoClassifierSet) {
       _real.setProviderOwnedUserMessageEchoClassifier?.(this.providerOwnedUserMessageEchoClassifier);
     }
 
     this.flushInFlight = this.drainBufferedCallsUntilEmpty();
-    this.attachPromise = this.flushInFlight.finally(() => {
-      this.flushInFlight = null;
-    });
+    this.attachPromise = (async () => {
+      try {
+        await this.flushInFlight;
+        // A call can arrive after the first drain observes an empty buffer but before its
+        // completion clears the attach fence. Drain that tail before making direct forwarding
+        // observable; otherwise an exact startup dispatch can remain buffered forever.
+        while (this.buffer.length > 0) {
+          await this.drainBufferedCallsUntilEmpty();
+        }
+      } finally {
+        this.flushInFlight = null;
+      }
+    })();
     return this.attachPromise;
   }
 
   cancel(): void {
     if (this.cancelled) return;
     this.cancelled = true;
+    this.pendingWakeDebt = false;
 
     const entries = this.buffer;
     this.buffer = [];
@@ -427,11 +528,18 @@ export class DeferredApiSessionClient {
 
     for (const entry of entries) {
       try {
-        entry.onDrop?.();
+        entry.onDrop?.('cancelled');
       } catch {
         // ignore
       }
     }
+  }
+
+  beginRuntimeTermination(): void {
+    if (this.runtimeTerminationStarted) return;
+    this.runtimeTerminationStarted = true;
+    this.target?.beginRuntimeTermination?.();
+    if (!this.target) this.cancel();
   }
 
   getBufferStats(): DeferredSessionBufferStats {
@@ -458,7 +566,7 @@ export class DeferredApiSessionClient {
         hadError = true;
         try {
           if (entry.onError) entry.onError(error);
-          else entry.onDrop?.();
+          else entry.onDrop?.('flush_error');
         } catch {
           // ignore
         }
@@ -531,7 +639,7 @@ export class DeferredApiSessionClient {
   private pushBufferedCall(
     flush: (target: DeferredApiSessionTarget) => void | Promise<void>,
     opts: { hint: string },
-    extra?: { onDrop?: () => void; onError?: (error: unknown) => void },
+    extra?: { onDrop?: (reason: DeferredSessionBufferDropReason) => void; onError?: (error: unknown) => void },
   ): void {
     const approxBytes = approxBytesForHint(opts.hint);
     this.buffer.push({ approxBytes, flush, onDrop: extra?.onDrop, onError: extra?.onError });
@@ -551,12 +659,28 @@ export class DeferredApiSessionClient {
         this.overflowed = true;
       }
       try {
-        dropped.onDrop?.();
+        dropped.onDrop?.('overflow');
       } catch {
         // ignore
       }
     }
   }
+}
+
+function startupEnqueueUnavailable(
+  reason: DeferredSessionBufferDropReason,
+): Exclude<SessionUserMessageEnqueueResult, void> {
+  const errorCode = reason === 'cancelled'
+    ? 'session_user_message_startup_cancelled'
+    : reason === 'overflow'
+      ? 'session_user_message_startup_buffer_overflow'
+      : 'session_user_message_startup_flush_error';
+  return {
+    recoveryBlocked: {
+      status: 'unavailable',
+      errorCode,
+    },
+  };
 }
 
 function createDeferredPromise<T>(): {

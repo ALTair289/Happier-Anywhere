@@ -1,4 +1,8 @@
 import { logger } from '@/ui/logger';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
+import type { PendingProviderAction } from '@happier-dev/protocol';
+
+export type { PendingProviderAction } from '@happier-dev/protocol';
 
 export type MessageQueueBatch<Mode, Message> = {
   message: Message;
@@ -13,6 +17,7 @@ export type MessageQueueBatch<Mode, Message> = {
   maxUserMessageSeq: number | null;
   userMessageLocalIds: string[];
   providerAcceptancePending?: boolean;
+  pendingProviderAction?: PendingProviderAction;
 };
 
 type QueueItem<Mode, Message> = {
@@ -23,6 +28,7 @@ type QueueItem<Mode, Message> = {
   userMessageSeq: number | null;
   userMessageLocalIds: string[];
   providerAcceptancePending: boolean;
+  pendingProviderAction?: PendingProviderAction;
 };
 
 type MessageBatcher<Message> = (messages: Message[]) => Message;
@@ -42,7 +48,7 @@ function normalizeUserMessageLocalIds(input?: {
   const seen = new Set<string>();
   const normalized: string[] = [];
   for (const value of values) {
-    const id = typeof value === 'string' ? value.trim() : '';
+    const id = readNonBlankOpaqueIdentifier(value) ?? '';
     if (!id || seen.has(id)) continue;
     seen.add(id);
     normalized.push(id);
@@ -96,6 +102,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageLocalId?: string | null;
       userMessageLocalIds?: readonly string[] | null;
       providerAcceptancePending?: boolean | null;
+      pendingProviderAction?: PendingProviderAction;
     },
   ): void {
     if (this.closed) {
@@ -112,6 +119,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageSeq: normalizeUserMessageSeq(opts?.userMessageSeq),
       userMessageLocalIds: normalizeUserMessageLocalIds(opts),
       providerAcceptancePending: opts?.providerAcceptancePending === true,
+      ...(opts?.pendingProviderAction ? { pendingProviderAction: opts.pendingProviderAction } : {}),
     });
 
     if (this.onMessageHandler) {
@@ -137,6 +145,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageLocalId?: string | null;
       userMessageLocalIds?: readonly string[] | null;
       providerAcceptancePending?: boolean | null;
+      pendingProviderAction?: PendingProviderAction;
     },
   ): void {
     if (this.closed) {
@@ -154,6 +163,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageSeq: normalizeUserMessageSeq(opts?.userMessageSeq),
       userMessageLocalIds: normalizeUserMessageLocalIds(opts),
       providerAcceptancePending: opts?.providerAcceptancePending === true,
+      ...(opts?.pendingProviderAction ? { pendingProviderAction: opts.pendingProviderAction } : {}),
     });
 
     if (this.onMessageHandler) {
@@ -175,6 +185,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageLocalId?: string | null;
       userMessageLocalIds?: readonly string[] | null;
       providerAcceptancePending?: boolean | null;
+      pendingProviderAction?: PendingProviderAction;
     },
   ): void {
     if (this.closed) {
@@ -191,6 +202,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageSeq: normalizeUserMessageSeq(opts?.userMessageSeq),
       userMessageLocalIds: normalizeUserMessageLocalIds(opts),
       providerAcceptancePending: opts?.providerAcceptancePending === true,
+      ...(opts?.pendingProviderAction ? { pendingProviderAction: opts.pendingProviderAction } : {}),
     });
 
     if (this.onMessageHandler) {
@@ -280,6 +292,7 @@ export class MessageQueue2<Mode, Message = string> {
     const userMessageLocalIdSet = new Set<string>();
     const userMessageLocalIds: string[] = [];
     let providerAcceptancePending = false;
+    const pendingProviderAction = firstItem.pendingProviderAction;
     const consume = (item: QueueItem<Mode, Message>): void => {
       sameModeMessages.push(item.message);
       if (item.userMessageSeq !== null) {
@@ -293,10 +306,16 @@ export class MessageQueue2<Mode, Message = string> {
       providerAcceptancePending = providerAcceptancePending || item.providerAcceptancePending;
     };
 
-    if (firstItem.isolate) {
+    if (firstItem.isolate || firstItem.pendingProviderAction || firstItem.providerAcceptancePending) {
       consume(this.queue.shift()!);
     } else {
-      while (this.queue.length > 0 && this.queue[0].modeHash === targetModeHash && !this.queue[0].isolate) {
+      while (
+        this.queue.length > 0
+        && this.queue[0].modeHash === targetModeHash
+        && !this.queue[0].isolate
+        && !this.queue[0].providerAcceptancePending
+        && this.queue[0].pendingProviderAction === pendingProviderAction
+      ) {
         consume(this.queue.shift()!);
       }
     }
@@ -311,6 +330,7 @@ export class MessageQueue2<Mode, Message = string> {
       maxUserMessageSeq,
       userMessageLocalIds,
       providerAcceptancePending,
+      ...(pendingProviderAction ? { pendingProviderAction } : {}),
     };
   }
 

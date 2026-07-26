@@ -1,7 +1,12 @@
 import type { ApiClient } from '@/api/api'
-import type { ApiSessionClient } from '@/api/session/sessionClient'
+import type {
+  ApiSessionClient,
+  SessionRuntimeActivityClientConfig,
+} from '@/api/session/sessionClient'
 import type { AgentState, Metadata, Session } from '@/api/types'
-import type { SessionAttachMetadataIdentityPolicy } from '@happier-dev/protocol'
+import {
+  type SessionAttachMetadataIdentityPolicy,
+} from '@happier-dev/protocol'
 import { setupOfflineReconnection } from '@/api/offline/setupOfflineReconnection'
 import { createBaseSessionForAttach } from '@/agent/runtime/createBaseSessionForAttach'
 import {
@@ -12,12 +17,24 @@ import {
 } from '@/agent/runtime/startupMetadataUpdate'
 import { mergeSessionMetadataForStartup } from '@/agent/runtime/mergeSessionMetadataForStartup'
 import { readSessionAttachMetadataIdentityPolicyFromEnv } from '@/agent/runtime/readSessionAttachMetadataIdentityPolicyFromEnv'
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers'
+import { createSessionRuntimeActivity } from '@/session/runtimeActivity/createSessionRuntimeActivity'
+import type {
+  RuntimeActivityApplicability,
+  SessionRuntimeActivity,
+  SessionRuntimeActivityContributionHandle,
+  SessionRuntimeActivitySnapshotPublisher,
+} from '@/session/runtimeActivity/types'
 import {
   persistTerminalAttachmentInfoIfNeeded,
   primeAgentStateForUi,
   reportSessionToDaemonIfRunning,
   sendTerminalFallbackMessageIfNeeded,
 } from '@/agent/runtime/startupSideEffects'
+import {
+  clearPendingFirstInputFromEnv,
+  readPendingFirstInputFromEnv,
+} from '@/daemon/spawn/pendingFirstInput'
 
 export interface InitializeBackendRunSessionOptions {
   api: Pick<ApiClient, 'getOrCreateSession' | 'sessionSyncClient'>
@@ -40,11 +57,27 @@ export interface InitializeBackendRunSessionOptions {
   offlineNotify?: (message: string) => void
   allowOfflineStub?: boolean
   onSessionSwap?: (newSession: ApiSessionClient) => void | Promise<void>
+  configureSessionClient?: (session: ApiSessionClient) => void
   onAttachMetadataSnapshotError?: (error: unknown) => void
   onAttachMetadataSnapshotMissing?: (error: unknown | null) => void
   onAttachMetadataSnapshotReady?: (snapshot: unknown, session: ApiSessionClient) => void | Promise<void>
   onDaemonSessionReported?: (opts: { sessionId: string }) => void | Promise<void>
   startupSideEffectsOrder?: 'report-first' | 'persist-first'
+  /**
+   * Providers whose runtime controls are constructed from the attached session can defer daemon
+   * registration until those controls exist. The initializer starts the report in the background
+   * so provider construction is never blocked on a daemon reconciliation that needs the provider.
+   */
+  waitForDaemonReportReadiness?: () => Promise<void>
+  /** Participating provider leaves declare their complete Runtime Activity contribution here. */
+  runtimeActivityPreparation?: BackendRunRuntimeActivityPreparation
+  /**
+   * Adopt an already configured backend-run Activity lifecycle. Fast-start callers use this to
+   * make sealed contributor handles available before concurrent session initialization begins.
+   * The common initializer still owns attachment, session-swap rebinding, failure cleanup, and
+   * the disposal callback returned to the caller.
+   */
+  runtimeActivityLifecycle?: BackendRunRuntimeActivityLifecycle
 }
 
 export interface InitializeBackendRunSessionResult {
@@ -52,6 +85,7 @@ export interface InitializeBackendRunSessionResult {
   reconnectionHandle: { cancel: () => void } | null
   reportedSessionId: string | null
   attachedToExistingSession: boolean
+  disposeRuntimeActivity?: () => Promise<void>
 }
 
 type DaemonReportMode = 'await' | 'background'
@@ -61,15 +95,106 @@ type InitializeBackendRunSessionDeps = {
   setupOfflineReconnectionFn?: typeof setupOfflineReconnection
   applyStartupMetadataUpdateToSessionFn?: typeof applyStartupMetadataUpdateToSession
   primeAgentStateForUiFn?: typeof primeAgentStateForUi
-  reportSessionToDaemonIfRunningFn?: typeof reportSessionToDaemonIfRunning
+  reportSessionToDaemonIfRunningFn?: (
+    ...args: Parameters<typeof reportSessionToDaemonIfRunning>
+  ) => Promise<unknown>
   persistTerminalAttachmentInfoIfNeededFn?: typeof persistTerminalAttachmentInfoIfNeeded
   sendTerminalFallbackMessageIfNeededFn?: typeof sendTerminalFallbackMessageIfNeeded
   nowFn?: () => number
+  createSessionRuntimeActivityFn?: typeof createSessionRuntimeActivity
+}
+
+export type BackendRunRuntimeActivityPreparation = Readonly<{
+  runtimeActivityApplicability: RuntimeActivityApplicability
+  configureAgentRuntime?(
+    contributionHandle: SessionRuntimeActivityContributionHandle,
+  ): void | Promise<void>
+  resolvePublisher(session: ApiSessionClient): SessionRuntimeActivitySnapshotPublisher | null
+}>
+
+export type BackendRunRuntimeActivityLifecycle = Readonly<{
+  clientConfig(): SessionRuntimeActivityClientConfig
+  attachSession(session: ApiSessionClient): Promise<void>
+  dispose(): Promise<void>
+}>
+
+export async function createBackendRunRuntimeActivityLifecycle(
+  preparation: BackendRunRuntimeActivityPreparation | undefined,
+  createActivity: typeof createSessionRuntimeActivity = createSessionRuntimeActivity,
+): Promise<BackendRunRuntimeActivityLifecycle> {
+  let currentActivity: SessionRuntimeActivity | null = null
+  let disposed = false
+  let transitionTail = Promise.resolve()
+  let executionRunContributionHandle: SessionRuntimeActivityClientConfig['executionRunContributionHandle'] | null = null
+  const runtimeActivityApplicability = preparation?.runtimeActivityApplicability ?? 'not_applicable'
+
+  const createConfiguredActivity = async (): Promise<SessionRuntimeActivity> => {
+    const activity = createActivity(runtimeActivityApplicability)
+    try {
+      executionRunContributionHandle = activity.executionRunsContributionHandle
+      await executionRunContributionHandle.report(
+        { state: 'idle', activeCount: 0 },
+        'execution-run-startup-empty',
+      )
+      const agentRuntimeContributionHandle = activity.agentRuntimeContributionHandle
+      if (runtimeActivityApplicability === 'supported') {
+        if (!agentRuntimeContributionHandle || !preparation?.configureAgentRuntime) {
+          throw new Error('Supported Runtime Activity requires exactly one configured agent-runtime producer')
+        }
+        await preparation.configureAgentRuntime(agentRuntimeContributionHandle)
+      } else if (preparation?.configureAgentRuntime) {
+        throw new Error(
+          `${runtimeActivityApplicability} Runtime Activity cannot configure an agent-runtime producer`,
+        )
+      }
+      return activity
+    } catch (error) {
+      await activity.dispose().catch(() => {})
+      throw error
+    }
+  }
+
+  currentActivity = await createConfiguredActivity()
+
+  const enqueueTransition = (operation: () => Promise<void>): Promise<void> => {
+    const result = transitionTail.then(operation)
+    transitionTail = result.catch(() => {})
+    return result
+  }
+
+  return {
+    clientConfig: () => {
+      if (!executionRunContributionHandle) {
+        throw new Error('Session runtime Activity execution-run contributor is unavailable')
+      }
+      return { executionRunContributionHandle }
+    },
+    attachSession: (session) => enqueueTransition(async () => {
+      if (disposed || currentActivity === null) {
+        throw new Error('Prepared session runtime activity lifecycle is disposed')
+      }
+
+      const publisher = preparation?.resolvePublisher(session)
+        ?? session.getRuntimeActivitySnapshotPublisher?.()
+        ?? null
+      if (publisher !== null) {
+        await currentActivity.bindPublisher(publisher)
+      }
+    }),
+    dispose: () => enqueueTransition(async () => {
+      if (disposed) return
+      disposed = true
+      const activity = currentActivity
+      currentActivity = null
+      if (activity !== null) {
+        await activity.dispose()
+      }
+    }),
+  }
 }
 
 function normalizeExistingSessionId(existingSessionId: string | undefined): string {
-  if (typeof existingSessionId !== 'string') return ''
-  return existingSessionId.trim()
+  return readNonBlankOpaqueIdentifier(existingSessionId) ?? ''
 }
 
 export async function initializeBackendRunSession(
@@ -84,7 +209,33 @@ export async function initializeBackendRunSession(
   const persistTerminalAttachmentInfoIfNeededFn = deps.persistTerminalAttachmentInfoIfNeededFn ?? persistTerminalAttachmentInfoIfNeeded
   const sendTerminalFallbackMessageIfNeededFn = deps.sendTerminalFallbackMessageIfNeededFn ?? sendTerminalFallbackMessageIfNeeded
   const nowFn = deps.nowFn ?? (() => Date.now())
+  if (opts.runtimeActivityLifecycle && opts.runtimeActivityPreparation) {
+    await opts.runtimeActivityLifecycle.dispose().catch(() => {})
+    throw new Error('Provide either a prepared runtime Activity lifecycle or contributor preparation, not both')
+  }
+  const preparedRuntimeActivity = opts.runtimeActivityLifecycle
+    ?? await createBackendRunRuntimeActivityLifecycle(
+      opts.runtimeActivityPreparation,
+      deps.createSessionRuntimeActivityFn ?? createSessionRuntimeActivity,
+    )
   const startupSideEffectsOrder = opts.startupSideEffectsOrder ?? 'report-first'
+  const pendingFirstInput = readPendingFirstInputFromEnv()
+  let pendingFirstInputCommitted = pendingFirstInput === null
+  const commitPendingFirstInput = async (session: ApiSessionClient): Promise<void> => {
+    if (pendingFirstInputCommitted || pendingFirstInput === null) return
+    const result = await session.enqueueSessionUserMessage({
+      text: pendingFirstInput.text,
+      localId: pendingFirstInput.localId,
+      meta: { source: 'ui', sentFrom: 'cli' },
+    })
+    if (result?.recoveryBlocked) {
+      throw new Error(`Pending first input was blocked: ${result.recoveryBlocked.status}`)
+    }
+    pendingFirstInputCommitted = true
+    clearPendingFirstInputFromEnv()
+  }
+
+  try {
 
   const existingSessionId = normalizeExistingSessionId(opts.existingSessionId)
   const attachMetadataIdentityPolicy =
@@ -92,22 +243,25 @@ export async function initializeBackendRunSession(
     ?? readSessionAttachMetadataIdentityPolicyFromEnv()
     ?? null
   const terminal = opts.metadata.terminal
-  const startDaemonReport = (sessionId: string, metadata: Metadata, mode: DaemonReportMode): Promise<void> => {
-    const reportPromise = reportSessionToDaemonIfRunningFn(
-      { sessionId, metadata },
-      opts.onDaemonSessionReported
-        ? {
-            onReported: async () => {
-              await opts.onDaemonSessionReported?.({ sessionId })
-            },
-          }
-        : undefined,
-    )
+  const startDaemonReport = async (sessionId: string, metadata: Metadata, mode: DaemonReportMode): Promise<void> => {
+    const reportPromise = (async () => {
+      await opts.waitForDaemonReportReadiness?.()
+      await reportSessionToDaemonIfRunningFn(
+        { sessionId, metadata },
+        opts.onDaemonSessionReported
+          ? {
+              onReported: async () => {
+                await opts.onDaemonSessionReported?.({ sessionId })
+              },
+            }
+          : undefined,
+      )
+    })()
     if (mode === 'background') {
       void reportPromise.catch(() => {})
-      return Promise.resolve()
+      return
     }
-    return reportPromise
+    await reportPromise
   }
   const runStartupSideEffects = async (
     sessionToUse: ApiSessionClient,
@@ -133,7 +287,12 @@ export async function initializeBackendRunSession(
       metadata: opts.metadata,
       state: opts.state,
     })
-    const session = opts.api.sessionSyncClient(baseSession)
+    const session = opts.api.sessionSyncClient(
+      baseSession,
+      preparedRuntimeActivity.clientConfig(),
+    )
+    await preparedRuntimeActivity.attachSession(session)
+    opts.configureSessionClient?.(session)
 
     let snapshot: Metadata | null = null
     let snapshotError: unknown = null
@@ -175,6 +334,7 @@ export async function initializeBackendRunSession(
     }
 
     primeAgentStateForUiFn(session, opts.uiLogPrefix)
+    await commitPendingFirstInput(session)
     await runStartupSideEffects(session, existingSessionId, daemonReportMetadata, 'background')
 
     return {
@@ -182,6 +342,7 @@ export async function initializeBackendRunSession(
       reconnectionHandle: null,
       reportedSessionId: existingSessionId,
       attachedToExistingSession: true,
+      disposeRuntimeActivity: preparedRuntimeActivity?.dispose,
     }
   }
 
@@ -200,7 +361,12 @@ export async function initializeBackendRunSession(
   const runStartupSideEffectsOnce = async (sessionToUse: ApiSessionClient, sessionId: string): Promise<void> => {
     if (ranStartupSideEffects) return
     ranStartupSideEffects = true
-    await runStartupSideEffects(sessionToUse, sessionId, opts.metadata, 'await')
+    await runStartupSideEffects(
+      sessionToUse,
+      sessionId,
+      opts.metadata,
+      opts.waitForDaemonReportReadiness ? 'background' : 'await',
+    )
   }
 
   const { session, reconnectionHandle } = setupOfflineReconnectionFn({
@@ -209,11 +375,14 @@ export async function initializeBackendRunSession(
     metadata: opts.metadata,
     state: opts.state,
     response: response as Session | null,
+    runtimeActivity: preparedRuntimeActivity.clientConfig(),
+    configureSessionClient: opts.configureSessionClient,
     onNotify: opts.offlineNotify,
-    onSessionSwap: (newSession) => {
+    onSessionSwap: async (newSession) => {
+      await preparedRuntimeActivity.attachSession(newSession)
       if (opts.onSessionSwap) {
         try {
-          void Promise.resolve(opts.onSessionSwap(newSession)).catch(() => {})
+          await Promise.resolve(opts.onSessionSwap(newSession)).catch(() => {})
         } catch {
           // Swallow hook failures; reconnection should continue.
         }
@@ -223,16 +392,21 @@ export async function initializeBackendRunSession(
       // real session arrives. Do not do this for normal online starts (reportedSessionId is set).
       if (reportedSessionId) return
       if (ranStartupSideEffects) return
-      const nextId = String((newSession as any)?.sessionId ?? '').trim()
+      const nextId = readNonBlankOpaqueIdentifier((newSession as any)?.sessionId) ?? ''
       if (!nextId || nextId.startsWith('offline-')) return
 
       primeAgentStateForUiFn(newSession, opts.uiLogPrefix)
-      void runStartupSideEffectsOnce(newSession, nextId).catch(() => {})
+      void commitPendingFirstInput(newSession)
+        .then(() => runStartupSideEffectsOnce(newSession, nextId))
+        .catch(() => {})
     },
   })
 
+  await preparedRuntimeActivity.attachSession(session)
+
   primeAgentStateForUiFn(session, opts.uiLogPrefix)
   if (reportedSessionId) {
+    await commitPendingFirstInput(session)
     await runStartupSideEffectsOnce(session, reportedSessionId)
   }
 
@@ -241,5 +415,10 @@ export async function initializeBackendRunSession(
     reconnectionHandle,
     reportedSessionId,
     attachedToExistingSession: false,
+    disposeRuntimeActivity: preparedRuntimeActivity?.dispose,
+  }
+  } catch (error) {
+    await preparedRuntimeActivity?.dispose().catch(() => {})
+    throw error
   }
 }

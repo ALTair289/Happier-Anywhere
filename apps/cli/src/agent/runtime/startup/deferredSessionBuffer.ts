@@ -3,10 +3,12 @@ export type DeferredSessionBufferLimits = Readonly<{
   maxBytes: number;
 }>;
 
+export type DeferredSessionBufferDropReason = 'cancelled' | 'overflow' | 'flush_error';
+
 export type DeferredSessionBufferEntry<TTarget> = Readonly<{
   approxBytes: number;
   flush: (target: TTarget) => void | Promise<void>;
-  onDrop?: () => void;
+  onDrop?: (reason: DeferredSessionBufferDropReason) => void;
   onError?: (error: unknown) => void;
 }>;
 

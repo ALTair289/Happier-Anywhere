@@ -63,6 +63,12 @@ function writeRunnerTerminationSessionExitReport(params: Readonly<{
 export function registerRunnerTerminationHandlers(params: Readonly<{
   process: ProcessLike;
   exit: (code: number) => void;
+  /**
+   * Synchronous lifecycle fence invoked before asynchronous provider cleanup starts.
+   * Use this to close new runtime-input admission while durable rows still belong to
+   * their canonical owner; it must not perform I/O.
+   */
+  onTerminationRequested?: (event: RunnerTerminationEvent) => void;
   onTerminate: (event: RunnerTerminationEvent, outcome: RunnerTerminationOutcome) => void | Promise<void>;
   sessionExitReport?: RunnerTerminationSessionExitReportOptions | null;
   /**
@@ -84,6 +90,12 @@ export function registerRunnerTerminationHandlers(params: Readonly<{
   const terminate = (event: RunnerTerminationEvent) => {
     if (terminated) return;
     terminated = true;
+
+    try {
+      params.onTerminationRequested?.(event);
+    } catch {
+      // A lifecycle fence is best-effort; cleanup and process exit must still proceed.
+    }
 
     const outcome = computeRunnerTerminationOutcome(event);
     writeRunnerTerminationSessionExitReport({ options: params.sessionExitReport, event, outcome });

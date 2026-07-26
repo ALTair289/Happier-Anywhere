@@ -10,6 +10,7 @@ import {
     readSessionMcpSelectionV1FromMetadata,
     type SessionAttachMetadataIdentityPolicy,
 } from '@happier-dev/protocol';
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 
 export type PermissionModeOverride = {
     mode: PermissionMode;
@@ -148,7 +149,7 @@ function resolveAcpSessionModeOverrideForStartup(opts: {
 
     const override = opts.override;
     if (override) {
-        const normalized = typeof override.modeId === 'string' ? override.modeId.trim() : '';
+        const normalized = readNonBlankSessionControlIdentifier(override.modeId) ?? '';
         if (normalized) {
             const baselineAt = updatedAt ?? 0;
             const overrideAt = typeof override.updatedAt === 'number' ? override.updatedAt : opts.nowMs;
@@ -221,7 +222,7 @@ function resolveModelOverrideForStartup(opts: {
 
     const override = opts.override;
     if (override) {
-        const normalized = typeof override.modelId === 'string' ? override.modelId.trim() : '';
+        const normalized = readNonBlankSessionControlIdentifier(override.modelId) ?? '';
         if (normalized) {
             const baselineAt = updatedAt ?? 0;
             const overrideAt = typeof override.updatedAt === 'number' ? override.updatedAt : opts.nowMs;

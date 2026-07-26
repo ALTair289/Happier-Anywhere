@@ -9,7 +9,7 @@ import { createDeferred } from '@/testkit/async/deferred';
 import { waitForNextPermissionModeMessage } from './waitForNextPermissionModeMessage';
 
 type QueueMode = { permissionMode: PermissionMode };
-type PermissionModeSessionFixture = Pick<ApiSessionClient, 'popPendingMessage' | 'waitForMetadataUpdate'> & {
+type PermissionModeSessionFixture = Pick<ApiSessionClient, 'popPendingMessage' | 'waitForPendingEligibilityUpdate'> & {
   materializeNextPendingMessageSafely: (opts?: {
     reconcileWhenEmpty?: 'force' | 'throttled' | 'skip';
   }) => Promise<MaterializeNextPendingResult>;
@@ -43,7 +43,7 @@ describe('waitForNextPermissionModeMessage', () => {
     const session: PermissionModeSessionFixture = {
       popPendingMessage,
       materializeNextPendingMessageSafely,
-      async waitForMetadataUpdate() {
+      async waitForPendingEligibilityUpdate() {
         return false;
       },
     };
@@ -71,7 +71,7 @@ describe('waitForNextPermissionModeMessage', () => {
     const session: PermissionModeSessionFixture = {
       popPendingMessage,
       materializeNextPendingMessageSafely,
-      async waitForMetadataUpdate(abortSignal?: AbortSignal) {
+      async waitForPendingEligibilityUpdate(abortSignal?: AbortSignal) {
         waitingForMetadata.resolve();
         return await new Promise<boolean>((resolve) => {
           abortSignal?.addEventListener('abort', () => resolve(false), { once: true });
@@ -105,7 +105,7 @@ describe('waitForNextPermissionModeMessage', () => {
     const session: PermissionModeSessionFixture = {
       popPendingMessage,
       materializeNextPendingMessageSafely,
-      async waitForMetadataUpdate() {
+      async waitForPendingEligibilityUpdate() {
         return false;
       },
     };
@@ -144,7 +144,7 @@ describe('waitForNextPermissionModeMessage', () => {
         popCount += 1;
         return false;
       },
-      async waitForMetadataUpdate() {
+      async waitForPendingEligibilityUpdate() {
         return await metadataUpdate.promise;
       },
     };
@@ -175,7 +175,7 @@ describe('waitForNextPermissionModeMessage', () => {
       async popPendingMessage() {
         return false;
       },
-      async waitForMetadataUpdate(abortSignal?: AbortSignal) {
+      async waitForPendingEligibilityUpdate(abortSignal?: AbortSignal) {
         waitingForMetadata.resolve();
         return await new Promise<boolean>((resolve) => {
           abortSignal?.addEventListener('abort', () => resolve(false), { once: true });
@@ -207,7 +207,7 @@ describe('waitForNextPermissionModeMessage', () => {
       async popPendingMessage() {
         return false;
       },
-      async waitForMetadataUpdate(abortSignal?: AbortSignal) {
+      async waitForPendingEligibilityUpdate(abortSignal?: AbortSignal) {
         waitingForMetadata.resolve();
         return await new Promise<boolean>((resolve) => {
           abortSignal?.addEventListener('abort', () => resolve(false), { once: true });
@@ -240,7 +240,7 @@ describe('waitForNextPermissionModeMessage', () => {
       async popPendingMessage() {
         return false;
       },
-      async waitForMetadataUpdate() {
+      async waitForPendingEligibilityUpdate() {
         return false;
       },
     };
@@ -271,7 +271,7 @@ describe('waitForNextPermissionModeMessage', () => {
         popCount += 1;
         return false;
       },
-      async waitForMetadataUpdate(abortSignal?: AbortSignal) {
+      async waitForPendingEligibilityUpdate(abortSignal?: AbortSignal) {
         waitCount += 1;
         waitingForMetadata.resolve();
         return await new Promise<boolean>((resolve) => {
@@ -311,7 +311,7 @@ describe('waitForNextPermissionModeMessage', () => {
       async popPendingMessage() {
         return false;
       },
-      async waitForMetadataUpdate(abortSignal?: AbortSignal) {
+      async waitForPendingEligibilityUpdate(abortSignal?: AbortSignal) {
         metadataWaitCalls += 1;
         if (metadataWaitCalls === 1) return true;
         return await new Promise<boolean>((resolve) => {

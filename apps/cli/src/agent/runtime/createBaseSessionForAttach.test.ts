@@ -46,7 +46,6 @@ describe('createBaseSessionForAttach', () => {
 
       expect(session.seq).toBe(123);
       expect(session.initialTranscriptAfterSeq).toBe(0);
-      expect(session.initialTranscriptCatchUpAuthorization).toBe('explicit_cursor');
     } finally {
       envScope.restore();
       await removeTempDir(dir);
@@ -153,7 +152,6 @@ describe('createBaseSessionForAttach', () => {
           encryptionMode: 'plain',
           lastObservedMessageSeq: 9,
           initialTranscriptAfterSeq: 4,
-          initialTranscriptCatchUpAuthorization: 'startup_recovery',
         }),
         { mode: 0o600 },
       );
@@ -167,7 +165,6 @@ describe('createBaseSessionForAttach', () => {
 
       expect(session.seq).toBe(9);
       expect(session.initialTranscriptAfterSeq).toBe(4);
-      expect(session.initialTranscriptCatchUpAuthorization).toBe('startup_recovery');
     } finally {
       envScope.restore();
       await removeTempDir(dir);

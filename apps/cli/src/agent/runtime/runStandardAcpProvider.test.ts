@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildBackendTargetKey } from '@happier-dev/protocol';
 
-import { reportSessionControlTerminalFailure, runStandardAcpProvider, type StandardAcpProviderConfig, type StandardAcpProviderRunOptions } from './runStandardAcpProvider';
+import { runStandardAcpProvider, type StandardAcpProviderConfig, type StandardAcpProviderRunOptions } from './runStandardAcpProvider';
 
 function createHarness() {
   let defaultReadyCalls = 0;
@@ -20,19 +20,28 @@ function createHarness() {
   const callOrder: string[] = [];
   const permissionAbortReasons: string[] = [];
 
-  const handlers = new Map<string, () => void | Promise<void>>();
+  const handlers = new Map<string, (request?: unknown) => unknown | Promise<unknown>>();
 
   const session: any = {
     sessionId: 'session-1',
     rpcHandlerManager: {
-      registerHandler: (name: string, handler: () => void | Promise<void>) => {
-        handlers.set(name, handler);
+      registerHandler: (name: string, handler: (request: unknown) => unknown | Promise<unknown>) => {
+        handlers.set(name, (request) => handler(request));
       },
     },
     sendAgentMessage: vi.fn(),
+    bindProviderInputOutcomeProducer: vi.fn(() => vi.fn()),
     sendSessionEvent: vi.fn(),
     keepAlive: vi.fn(),
-    getMetadataSnapshot: () => ({ path: '/tmp/workspace', permissionMode: 'default' }),
+    getMetadataSnapshot: () => ({
+      path: '/tmp/workspace',
+      permissionMode: 'default',
+      connectedServiceMaterializationIdentityV1: {
+        v: 1,
+        id: 'csm_standard_acp_test',
+        createdAtMs: 1,
+      },
+    }),
     getLastObservedMessageSeq: vi.fn(() => 0),
     beginTurnAssistantTextSnapshot: vi.fn(() => 'turn-1'),
     getTurnAssistantTextSnapshot: vi.fn(() => null),
@@ -228,39 +237,26 @@ function createHarness() {
 }
 
 describe('runStandardAcpProvider', () => {
-  it('persists terminal model/effort failures through the released-compatible provider message channel', () => {
-    const sendAgentMessage = vi.fn();
-    const addMessage = vi.fn();
-    const formatError = vi.fn(() => 'Error: sanitized');
+  it('does not let a generic ACP provider configure Runtime Activity participation or a producer', async () => {
+    const harness = createHarness();
+    let initializeOptions: Record<string, unknown> | null = null;
+    let runtimeOptions: Record<string, unknown> | null = null;
+    const initializeBackendRunSessionFn = harness.deps.initializeBackendRunSessionFn;
+    harness.deps.initializeBackendRunSessionFn = async (options: Record<string, unknown>) => {
+      initializeOptions = options;
+      return initializeBackendRunSessionFn(options);
+    };
+    harness.config.createRuntime = (options: Record<string, unknown>) => {
+      runtimeOptions = options;
+      return harness.runtime;
+    };
 
-    reportSessionControlTerminalFailure({
-      failure: { kind: 'model', requested: 'model-b', error: new Error('secret raw') },
-      provider: 'qwen',
-      session: { sendAgentMessage } as any,
-      messageBuffer: { addMessage } as any,
-      formatError,
-    });
-    reportSessionControlTerminalFailure({
-      failure: { kind: 'config', configId: 'reasoning_effort', requested: 'high', error: new Error('raw') },
-      provider: 'qwen',
-      session: { sendAgentMessage } as any,
-      messageBuffer: { addMessage } as any,
-      formatError,
-    });
-    reportSessionControlTerminalFailure({
-      failure: { kind: 'config', configId: 'provider_private', requested: 'x', error: new Error('raw') },
-      provider: 'qwen',
-      session: { sendAgentMessage } as any,
-      messageBuffer: { addMessage } as any,
-      formatError,
-    });
+    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
 
-    expect(sendAgentMessage).toHaveBeenCalledTimes(3);
-    expect(sendAgentMessage).toHaveBeenNthCalledWith(1, 'qwen', { type: 'message', message: 'Error: sanitized' });
-    expect(sendAgentMessage).toHaveBeenNthCalledWith(2, 'qwen', { type: 'message', message: 'Error: sanitized' });
-    expect(sendAgentMessage).toHaveBeenNthCalledWith(3, 'qwen', { type: 'message', message: 'Error: sanitized' });
-    expect(formatError).toHaveBeenCalledTimes(3);
+    expect(initializeOptions).not.toHaveProperty('runtimeActivityPreparation');
+    expect(runtimeOptions).not.toHaveProperty('runtimeActivityContributionHandle');
   });
+
   it('does not emit idle keepAlive heartbeats at the thinking cadence', async () => {
     vi.useFakeTimers();
     const harness = createHarness();
@@ -608,6 +604,72 @@ describe('runStandardAcpProvider', () => {
     expect(runtime.steerPrompt).toHaveBeenCalledWith('hello');
   });
 
+  it('in-flight action controller cancels the active runtime with the correct receiver', async () => {
+    const harness = createHarness();
+    const runtime = {
+      ...harness.runtime,
+      cancel: vi.fn(async function (this: unknown) {
+        if (this !== runtime) {
+          throw new Error('cancel called with wrong receiver');
+        }
+      }),
+    };
+    harness.config.createRuntime = () => runtime as any;
+
+    let inFlightSteer: any = null;
+    harness.deps.createPermissionModeQueueStateFn = (params: any) => {
+      inFlightSteer = params.inFlightSteer;
+      return {
+        messageQueue: { reset: () => undefined, size: () => 0 },
+        getCurrentPermissionMode: () => 'default',
+        setCurrentPermissionMode: () => undefined,
+        getCurrentPermissionModeUpdatedAt: () => 0,
+        setCurrentPermissionModeUpdatedAt: () => undefined,
+      };
+    };
+    harness.deps.runPermissionModePromptLoopFn = async (params: any) => {
+      await inFlightSteer.cancelActiveTurn();
+      params.sendReady();
+    };
+
+    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
+
+    expect(runtime.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves pending foreground steerability from the current runtime turn and steer capability', async () => {
+    const harness = createHarness();
+    let turnInFlight = true;
+    let steerSupported = false;
+    const runtime = {
+      ...harness.runtime,
+      isTurnInFlight: vi.fn(() => turnInFlight),
+      supportsInFlightSteer: vi.fn(() => steerSupported),
+      steerPrompt: vi.fn(async () => undefined),
+    };
+    harness.config.createRuntime = () => runtime as any;
+
+    let consumerOptions: any = null;
+    harness.deps.createSessionProviderInputConsumerFn = (options: any) => {
+      consumerOptions = options;
+      return {
+        drainPending: vi.fn(async () => ({ type: 'empty' })),
+        closeProviderInputAdmissionAndWaitForDispatches: vi.fn(async () => undefined),
+      };
+    };
+    harness.deps.runPermissionModePromptLoopFn = async (params: any) => {
+      expect(consumerOptions.resolveActiveTurnSteerability()).toBe('unsteerable');
+      steerSupported = true;
+      expect(consumerOptions.resolveActiveTurnSteerability()).toBe('steerable');
+      turnInFlight = false;
+      steerSupported = false;
+      expect(consumerOptions.resolveActiveTurnSteerability()).toBe('steerable');
+      params.sendReady();
+    };
+
+    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
+  });
+
   it('in-flight steer controller forwards delivery identity to runtime steerPrompt', async () => {
     const harness = createHarness();
 
@@ -675,17 +737,17 @@ describe('runStandardAcpProvider', () => {
     expect(harness.metrics.defaultReadyCalls).toBe(0);
   });
 
-  it('defers user-message delivery watermarks with request-response materialization when the standard provider config opts in', async () => {
+  it('binds one exact ACP provider-outcome producer without a selectable custody policy', async () => {
     const harness = createHarness();
-    harness.session.deferDeliveredUserMessageWatermarkToProviderAcceptance = vi.fn();
-    (harness.config as any).deferUserMessageDeliveryWatermarkToProviderAcceptance = true;
 
     await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
 
-    expect(harness.session.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledTimes(1);
-    expect(harness.session.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledWith({
-      pendingMaterialization: 'commitAtMaterialize',
-    });
+    expect(harness.session.bindProviderInputOutcomeProducer).toHaveBeenCalledTimes(1);
+    expect(harness.session.bindProviderInputOutcomeProducer).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: 'qwen',
+      mode: 'acp',
+      matchesCurrentSession: expect.any(Function),
+    }));
   });
 
   it('uses provider-controlled keep-alive mode when configured', async () => {
@@ -846,89 +908,6 @@ describe('runStandardAcpProvider', () => {
     expect(callOrder).toEqual(['before-notify', 'hook:start', 'hook:end', 'after-notify']);
   });
 
-  it('rebinds runtime override reads, writes, and capability publication to the swapped session', async () => {
-    const harness = createHarness();
-    let notifySessionSwap: ((session: any) => void | Promise<void>) | null = null;
-    const swappedUpdateAgentState = vi.fn((updater: (state: any) => any) => {
-      swappedSession.agentState = updater(swappedSession.agentState);
-    });
-    const swappedSession: any = {
-      ...harness.session,
-      sessionId: 'session-real',
-      agentState: { capabilities: { inFlightSteer: true } },
-      getMetadataSnapshot: () => ({
-        path: '/tmp/workspace',
-        permissionMode: 'default',
-        modelOverrideV1: { v: 1, updatedAt: 40, modelId: 'model-real' },
-      }),
-      updateAgentState: swappedUpdateAgentState,
-      updateMetadata: vi.fn(async (updater: (metadata: any) => any) => {
-        updater(swappedSession.getMetadataSnapshot());
-      }),
-    };
-    harness.deps.initializeBackendRunSessionFn = async ({ onSessionSwap }: any) => {
-      notifySessionSwap = onSessionSwap;
-      return {
-        session: harness.session,
-        reconnectionHandle: null,
-        reportedSessionId: 'session-1',
-        attachedToExistingSession: false,
-      };
-    };
-    harness.deps.runPermissionModePromptLoopFn = async (params: any) => {
-      const overrideSync = params.createOverrideSynchronizer(() => true);
-      expect(notifySessionSwap).toBeTypeOf('function');
-      await notifySessionSwap?.(swappedSession);
-      overrideSync.syncFromMetadata();
-      await overrideSync.flushPendingAfterStart();
-    };
-
-    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
-
-    expect(harness.runtime.setSessionModel).toHaveBeenCalledWith('model-real');
-    expect(swappedUpdateAgentState).toHaveBeenCalledTimes(1);
-    expect(swappedSession.agentState.capabilities).toEqual({
-      inFlightSteer: true,
-      modelScopedConfigTombstonesV1: true,
-    });
-  });
-
-  it('runs the provider session-swap hook when override capability publication fails', async () => {
-    const harness = createHarness();
-    let notifySessionSwap: ((session: any) => void | Promise<void>) | null = null;
-    const publicationError = new Error('capability publication failed');
-    const swappedUpdateAgentState = vi.fn(async () => {
-      throw publicationError;
-    });
-    const swappedSession: any = {
-      ...harness.session,
-      sessionId: 'session-real',
-      updateAgentState: swappedUpdateAgentState,
-    };
-    const onSessionSwap = vi.fn(async () => undefined);
-    harness.config.onSessionSwap = onSessionSwap;
-    harness.deps.initializeBackendRunSessionFn = async ({ onSessionSwap }: any) => {
-      notifySessionSwap = onSessionSwap;
-      return {
-        session: harness.session,
-        reconnectionHandle: null,
-        reportedSessionId: 'session-1',
-        attachedToExistingSession: false,
-      };
-    };
-    harness.deps.runPermissionModePromptLoopFn = async (params: any) => {
-      params.createOverrideSynchronizer(() => true);
-      expect(notifySessionSwap).toBeTypeOf('function');
-      await expect(notifySessionSwap?.(swappedSession)).rejects.toBe(publicationError);
-    };
-
-    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
-
-    expect(swappedUpdateAgentState).toHaveBeenCalledTimes(1);
-    expect(onSessionSwap).toHaveBeenCalledTimes(1);
-    expect(onSessionSwap).toHaveBeenCalledWith({ session: swappedSession });
-  });
-
   it('runs provider-specific dispose hooks during cleanup', async () => {
     const harness = createHarness();
     const onDispose = vi.fn(async () => undefined);
@@ -1024,6 +1003,136 @@ describe('runStandardAcpProvider', () => {
     expect(harness.metrics.cleanupCalls).toBe(1);
   });
 
+  it('awaits explicit Stop cancellation before API close and backend disposal', async () => {
+    const harness = createHarness();
+    harness.opts.startedBy = 'daemon';
+    const order = harness.metrics.callOrder;
+    let releaseCancelReceipt!: () => void;
+    const cancelReceipt = new Promise<void>((resolve) => {
+      releaseCancelReceipt = resolve;
+    });
+    let cancelStarted = false;
+    let backendDisposed = false;
+    harness.runtime.cancel = vi.fn(async () => {
+      cancelStarted = true;
+      order.push('cancel:start');
+      await cancelReceipt;
+      if (backendDisposed) {
+        throw new Error('Pi backend disposed');
+      }
+      order.push('cancel:receipt');
+    });
+    harness.runtime.reset = vi.fn(async () => {
+      backendDisposed = true;
+      order.push('backend:dispose');
+    });
+    harness.session.close = vi.fn(async () => {
+      order.push('api:close');
+    });
+    harness.deps.cleanupBackendRunResourcesFn = async ({ keepAliveInterval, resetRuntime, unmountUi }: any) => {
+      clearInterval(keepAliveInterval);
+      await resetRuntime();
+      await unmountUi?.();
+      order.push('backend-cleanup');
+    };
+
+    let killRequest: Promise<void> | null = null;
+    harness.deps.runPermissionModePromptLoopFn = async () => {
+      expect(harness.metrics.killHandler).toBeTypeOf('function');
+      killRequest = Promise.resolve(harness.metrics.killHandler?.());
+      await vi.waitFor(() => expect(cancelStarted).toBe(true));
+      // Model the in-flight provider loop unwinding as soon as explicit Stop is observed.
+      // Final cleanup must join the typed cancellation receipt instead of disposing underneath it.
+    };
+
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const run = runStandardAcpProvider(harness.opts, harness.config, harness.deps);
+    try {
+      await vi.waitFor(() => expect(cancelStarted).toBe(true));
+      const cleanupBeforeCancelReceipt = await Promise.race([
+        vi.waitFor(() => {
+          expect(
+            harness.session.close.mock.calls.length + harness.runtime.reset.mock.calls.length,
+          ).toBeGreaterThan(0);
+        }).then(() => 'cleanup-started'),
+        new Promise<'cancel-still-exclusive'>((resolve) => {
+          setTimeout(() => resolve('cancel-still-exclusive'), 100);
+        }),
+      ]);
+      expect(cleanupBeforeCancelReceipt).toBe('cancel-still-exclusive');
+
+      releaseCancelReceipt();
+      await run;
+      await killRequest;
+
+      expect(order.indexOf('cancel:receipt')).toBeGreaterThan(order.indexOf('cancel:start'));
+      expect(order.indexOf('api:close')).toBeGreaterThan(order.indexOf('cancel:receipt'));
+      expect(order.indexOf('backend:dispose')).toBeGreaterThan(order.indexOf('cancel:receipt'));
+      expect(harness.session.sendAgentMessage).not.toHaveBeenCalledWith(
+        harness.config.agentMessageType,
+        expect.objectContaining({ type: 'turn_failed' }),
+      );
+    } finally {
+      releaseCancelReceipt();
+      await run.catch(() => undefined);
+      await Promise.resolve(killRequest).catch(() => undefined);
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('awaits cleanup already started by the provider loop before terminating the runner', async () => {
+    const harness = createHarness();
+    harness.opts.startedBy = 'daemon';
+
+    let releaseSessionEndedCleanup!: () => void;
+    const sessionEndedCleanupGate = new Promise<void>((resolve) => {
+      releaseSessionEndedCleanup = resolve;
+    });
+    let sessionEndedCleanupStarted = false;
+    harness.deps.createProviderEnforcedPermissionHandlerFn = () => ({
+      setPermissionMode: () => undefined,
+      abortPendingRequestsAndFlush: async (reason: string) => {
+        if (reason !== 'Session ended') return;
+        sessionEndedCleanupStarted = true;
+        await sessionEndedCleanupGate;
+      },
+      reset: () => undefined,
+      updateSession: () => undefined,
+    });
+
+    let killRequest: Promise<void> | null = null;
+    harness.deps.runPermissionModePromptLoopFn = async () => {
+      expect(harness.metrics.killHandler).toBeTypeOf('function');
+      killRequest = Promise.resolve(harness.metrics.killHandler?.());
+      // Model the provider subprocess exiting at the same time as termination begins: the
+      // provider loop unwinds and starts final cleanup before the termination callback joins it.
+    };
+
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const run = runStandardAcpProvider(harness.opts, harness.config, harness.deps);
+    try {
+      await vi.waitFor(() => expect(sessionEndedCleanupStarted).toBe(true));
+      await Promise.resolve();
+
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(harness.session.close).not.toHaveBeenCalled();
+
+      releaseSessionEndedCleanup();
+      await run;
+      await killRequest;
+
+      expect(harness.session.close).toHaveBeenCalledTimes(1);
+      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(harness.session.close.mock.invocationCallOrder[0]).toBeLessThan(
+        exitSpy.mock.invocationCallOrder[0]!,
+      );
+    } finally {
+      releaseSessionEndedCleanup();
+      await run.catch(() => undefined);
+      exitSpy.mockRestore();
+    }
+  });
+
   it('passes a permission-mode queue key resolver when provided', async () => {
     const harness = createHarness();
     const resolvePermissionModeQueueKey = (mode: string) => `key:${mode}`;
@@ -1043,6 +1152,18 @@ describe('runStandardAcpProvider', () => {
 
     await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
     expect(observed).toBe(resolvePermissionModeQueueKey);
+  });
+
+  it('composes the standard-provider prompt loop around one input consumer', async () => {
+    const harness = createHarness();
+    harness.deps.runPermissionModePromptLoopFn = async (params: any) => {
+      expect(params.inputConsumer).toEqual(expect.objectContaining({
+        waitForNextInput: expect.any(Function),
+        drainPending: expect.any(Function),
+      }));
+    };
+
+    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
   });
 
   it('maps configured ACP flavors onto generic ACP permission semantics', async () => {

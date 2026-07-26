@@ -242,8 +242,6 @@ function createFastOpenCodeTransportHandler() {
 }
 
 describe('runPermissionModePromptLoop with ApiSessionClient idle snapshot refresh', () => {
-  const originalIdleWakePollIntervalMs = configuration.pendingQueueIdleWakePollIntervalMs;
-
   beforeEach(() => {
     sessionSocketStub = createApiSessionSocketStub({
       id: 'session-socket',
@@ -255,12 +253,10 @@ describe('runPermissionModePromptLoop with ApiSessionClient idle snapshot refres
       connected: false,
       emitWithAckResult: { ok: true },
     });
-    (configuration as any).pendingQueueIdleWakePollIntervalMs = 10;
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
-    (configuration as any).pendingQueueIdleWakePollIntervalMs = originalIdleWakePollIntervalMs;
     sessionSocketStub = null;
     userSocketStub = null;
   });
