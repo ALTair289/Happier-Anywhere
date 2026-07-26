@@ -112,13 +112,20 @@ describe('scenarioCatalog: Cursor ACP stub parity scenarios', () => {
       tier?: unknown;
       prompt?: unknown;
       requiredTraceSubstrings?: unknown;
+      resume?: unknown;
       verify?: unknown;
     };
 
     expect(scenario.id).toBe('cursor_acp_stub_captured_lifecycle_replay');
     expect(scenario.tier).toBe('extended');
     expect(typeof scenario.prompt).toBe('function');
-    expect(scenario.requiredTraceSubstrings).toEqual(['CURSOR_CAPTURED_REPLAY_DONE']);
+    expect(scenario.requiredTraceSubstrings).toEqual(['task_complete']);
+    expect(scenario.resume).toEqual({
+      metadataKey: 'cursorSessionId',
+      freshSession: true,
+      prompt: expect.any(Function),
+      requiredTraceSubstrings: ['task_complete'],
+    });
     expect(typeof scenario.verify).toBe('function');
   });
 });

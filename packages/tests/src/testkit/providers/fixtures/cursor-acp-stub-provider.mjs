@@ -3,7 +3,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { replayRepresentativeCursorLifecycle } from './cursor-acp-captured-replay-v1.mjs';
+import { cursorCapturedReplayV1, replayFullCapturedCursorLifecycle } from './cursor-acp-captured-replay-v1.mjs';
 
 const decoder = new TextDecoder();
 let buffer = '';
@@ -118,12 +118,15 @@ function sendSessionUpdate(sessionId, update) {
 }
 
 function runCapturedLifecycleReplay(id, sessionId) {
-  replayRepresentativeCursorLifecycle((update) => sendSessionUpdate(sessionId, update));
+  replayFullCapturedCursorLifecycle((update) => sendSessionUpdate(sessionId, update));
   sendSessionUpdate(sessionId, {
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: 'CURSOR_CAPTURED_REPLAY_DONE' },
   });
   ok(id, { stopReason: 'end_turn' });
+  setImmediate(() => {
+    sendSessionUpdate(sessionId, cursorCapturedReplayV1.extensionContracts.lateAfterTurnClose);
+  });
 }
 
 function updateConfigOption(session, configId, value) {
@@ -230,6 +233,11 @@ function handleRequest(req) {
 
   if (method === 'authenticate') {
     ok(id, {});
+    return;
+  }
+
+  if (method === 'cursor/list_available_models') {
+    ok(id, cursorCapturedReplayV1.extensionContracts.availableModels.success);
     return;
   }
 

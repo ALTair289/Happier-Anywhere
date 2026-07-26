@@ -4,7 +4,11 @@ import { join } from 'node:path';
 import { decryptLegacyBase64 } from '../../messageCrypto';
 import { fetchAllMessages, fetchSessionV2 } from '../../sessions';
 import { sleep } from '../../timing';
-import { assertSingleDurableToolCallPerLogicalId, decryptSessionMessageLegacy } from '../assertions';
+import {
+  assertDurableToolCardinality,
+  assertSingleDurableToolCallPerLogicalId,
+  decryptSessionMessageLegacy,
+} from '../assertions';
 import type { ProviderFixtures, ProviderScenario, ProviderUnderTest } from '../types';
 
 const cursorAliasModelId = 'gpt-5.1-codex-max-medium-fast';
@@ -283,13 +287,27 @@ export function makeCursorAcpStubCapturedLifecycleReplayScenario(provider: Provi
     tier: 'extended',
     yolo: true,
     prompt: () => 'CURSOR_STUB_CAPTURED_REPLAY=1',
-    requiredTraceSubstrings: ['CURSOR_CAPTURED_REPLAY_DONE'],
-    verify: async ({ baseUrl, token, sessionId, secret }) => {
-      const rows = await fetchAllMessages(baseUrl, token, sessionId);
-      const messages = rows
-        .map((row) => decryptSessionMessageLegacy(row, secret))
-        .filter((message): message is NonNullable<typeof message> => message !== null);
-      assertSingleDurableToolCallPerLogicalId(messages);
+    requiredTraceSubstrings: ['task_complete'],
+    resume: {
+      metadataKey: 'cursorSessionId',
+      freshSession: true,
+      prompt: () => 'CURSOR_STUB_CAPTURED_REPLAY=1',
+      requiredTraceSubstrings: ['task_complete'],
+    },
+    verify: async ({ baseUrl, token, sessionId, resumeSessionId, secret }) => {
+      const assertSession = async (targetSessionId: string) => {
+        const rows = await fetchAllMessages(baseUrl, token, targetSessionId);
+        const messages = rows
+          .map((row) => decryptSessionMessageLegacy(row, secret))
+          .filter((message): message is NonNullable<typeof message> => message !== null);
+        assertSingleDurableToolCallPerLogicalId(messages);
+        assertDurableToolCardinality(messages, { calls: 271, results: 270 });
+      };
+      await assertSession(sessionId);
+      if (!resumeSessionId) {
+        throw new Error(`${scenarioId}: fresh resume session was not created`);
+      }
+      await assertSession(resumeSessionId);
     },
   };
 }
