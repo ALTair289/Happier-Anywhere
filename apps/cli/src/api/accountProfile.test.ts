@@ -24,9 +24,13 @@ describe('fetchAccountProfile', () => {
     });
 
     const { fetchAccountProfile } = await import('./accountProfile');
+    const controller = new AbortController();
 
-    await fetchAccountProfile({ token: 't' });
+    await fetchAccountProfile({ token: 't', signal: controller.signal });
 
     expect((axios.get as any).mock.calls[0]?.[0]).toBe('http://127.0.0.1:52002/v1/account/profile');
+    expect((axios.get as any).mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      signal: controller.signal,
+    }));
   });
 });

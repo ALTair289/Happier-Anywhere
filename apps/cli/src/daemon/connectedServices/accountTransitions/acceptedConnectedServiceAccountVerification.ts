@@ -1,4 +1,4 @@
-import type { ConnectedServiceId } from '@happier-dev/protocol';
+import type { ConnectedServiceCredentialRevisionV1, ConnectedServiceId } from '@happier-dev/protocol';
 
 import type { ConnectedServiceAccountTransitionVerificationResult } from './connectedServiceAccountTransition';
 
@@ -7,6 +7,9 @@ export type AcceptedConnectedServiceAccountVerification = Readonly<{
   providerAccountId?: string | null;
   activeAccountId?: string | null;
   sharedAuthSurfaceId?: string | null;
+  credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
+  credentialFingerprint?: string | null;
+  generationApplication?: Extract<ConnectedServiceAccountTransitionVerificationResult, { status: 'verified' }>['generationApplication'];
   proofStrength?: 'exact' | 'weak' | 'diagnostic';
   source?: string;
   reason?: string;
@@ -22,6 +25,12 @@ type AcceptedVerificationResult = Extract<
 
 function readNonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Readonly<Record<string, unknown>>
+    : null;
 }
 
 function hasExactIdentityMaterial(
@@ -42,6 +51,8 @@ export function toAcceptedConnectedServiceAccountVerification(
   const providerAccountId = readNonEmptyString(result.providerAccountId);
   const activeAccountId = readNonEmptyString(result.activeAccountId);
   const sharedAuthSurfaceId = readNonEmptyString(result.sharedAuthSurfaceId);
+  const credentialRevision = result.credentialRevision ?? null;
+  const credentialFingerprint = readNonEmptyString(result.credentialFingerprint);
   const preserveExactProofDetails = result.status === 'verified'
     && result.proofStrength === 'exact'
     && hasExactIdentityMaterial(result);
@@ -52,6 +63,11 @@ export function toAcceptedConnectedServiceAccountVerification(
           ...(providerAccountId !== null ? { providerAccountId } : {}),
           ...(activeAccountId !== null ? { activeAccountId } : {}),
           ...(sharedAuthSurfaceId !== null ? { sharedAuthSurfaceId } : {}),
+          ...(credentialRevision !== null ? { credentialRevision } : {}),
+          ...(credentialFingerprint !== null ? { credentialFingerprint } : {}),
+          ...(result.generationApplication !== undefined
+            ? { generationApplication: result.generationApplication }
+            : {}),
         }
       : {}),
     ...(preserveExactProofDetails ? { proofStrength: result.proofStrength } : {}),
@@ -69,6 +85,33 @@ export function isExactAcceptedConnectedServiceAccountVerification(
   return verification?.status === 'verified'
     && verification.proofStrength === 'exact'
     && hasExactIdentityMaterial(verification);
+}
+
+export function hasExactAcceptedConnectedServiceTargetAdoptionProof(input: Readonly<{
+  verificationByServiceId: unknown;
+  target: Readonly<{
+    serviceId: ConnectedServiceId;
+    groupId: string;
+    profileId: string;
+    generation: number;
+    credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
+  }>;
+}>): boolean {
+  const verificationByServiceId = readRecord(input.verificationByServiceId);
+  const verificationRecord = readRecord(verificationByServiceId?.[input.target.serviceId]);
+  const verification = verificationRecord === null
+    ? undefined
+    : verificationRecord as AcceptedConnectedServiceAccountVerification;
+  if (!isExactAcceptedConnectedServiceAccountVerification(verification)) {
+    return false;
+  }
+  const generationApplication = readRecord(verification.generationApplication);
+  return generationApplication !== null
+    && generationApplication.serviceId === input.target.serviceId
+    && generationApplication.groupId === input.target.groupId
+    && generationApplication.profileId === input.target.profileId
+    && generationApplication.generation === input.target.generation
+    && generationApplication.credentialRevision === input.target.credentialRevision;
 }
 
 export function serializeAcceptedConnectedServiceAccountVerifications(

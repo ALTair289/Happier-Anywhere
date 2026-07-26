@@ -1,4 +1,10 @@
-import type { ConnectedServiceCredentialRecordV1, ConnectedServiceId } from '@happier-dev/protocol';
+import type {
+  ConnectedServiceCredentialRecordV1,
+  ConnectedServiceCredentialRevisionV1,
+  ConnectedServiceId,
+  SessionConnectedServiceAuthApplyGenerationRequestV1,
+  SessionConnectedServiceAuthCurrentGroupTruthV1,
+} from '@happier-dev/protocol';
 import type { AgentId as CatalogAgentId } from '@happier-dev/agents';
 
 import type { ConnectedServiceSameAccountFanoutStrategy } from '../quotas/identity/providerFanoutStrategy';
@@ -112,6 +118,26 @@ export type ConnectedServiceRuntimeAuthApplyCapability = Readonly<{
       }>;
 }>;
 
+export type ConnectedServiceGenerationApplicationProofInput = Readonly<{
+  serviceId: ConnectedServiceId;
+  groupId: string;
+  profileId: string;
+  generation: number;
+  credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
+  credentialFingerprint?: string | null;
+  environmentVariables: Readonly<Record<string, string>>;
+}>;
+
+export type ConnectedServiceGenerationApplicationProofResult =
+  | Readonly<{
+      status: 'verified';
+      source: string;
+      sharedAuthSurfaceId: string;
+      credentialRevision: ConnectedServiceCredentialRevisionV1;
+      credentialFingerprint: string;
+    }>
+  | Readonly<{ status: 'unavailable' }>;
+
 export const DEFAULT_CONNECTED_SERVICE_RUNTIME_AUTH_APPLY_CAPABILITY: ConnectedServiceRuntimeAuthApplyCapability = {
   directLiveHotAuth: 'unsupported',
 };
@@ -161,8 +187,8 @@ export type ConnectedServiceCredentialLifecycleDescriptor = Readonly<{
     noRestartRequiredServiceIds?: ReadonlyArray<ConnectedServiceId>;
     /**
      * Service ids whose refreshed OAuth credential is consumed through a daemon access-token callback
-     * only when the runtime target explicitly reports that callback as active. Unlike
-     * `noRestartRequiredServiceIds`, legacy targets without the callback still restart/rematerialize.
+     * only when the resolved provider/runtime capability reports that callback as active. Unlike
+     * `noRestartRequiredServiceIds`, targets without proof still restart/rematerialize.
      */
     noRestartRequiredWhenAccessTokenCallbackServiceIds?: ReadonlyArray<ConnectedServiceId>;
     /**
@@ -190,7 +216,41 @@ export type ConnectedServiceCredentialLifecycleDescriptor = Readonly<{
     liveSessionRequirement?: ConnectedServicePredictiveSoftSwitchLiveSessionRequirement;
   }>;
   sameAccountFanoutStrategy: ConnectedServiceSameAccountFanoutStrategy;
+  generationApplicationScope: 'per_session_runtime' | 'shared_group_auth_surface' | 'unsupported';
+  /**
+   * Exact services that share one live provider auth surface when the descriptor declares
+   * `shared_group_auth_surface`. Missing membership fails back to per-session application.
+   */
+  sharedGenerationApplicationServiceIds?: ReadonlyArray<ConnectedServiceId>;
   runtimeAuthApply: ConnectedServiceRuntimeAuthApplyCapability;
+  /**
+   * Provider-owned proof that a live target already consumes the current group generation through
+   * a stable shared auth surface. This is application proof, not a daemon spawn-intent assertion.
+   */
+  verifyGenerationApplication?: (
+    input: ConnectedServiceGenerationApplicationProofInput,
+  ) => Promise<ConnectedServiceGenerationApplicationProofResult>;
+  /**
+   * Applies one committed generation to a provider-owned shared auth surface without requiring a
+   * representative runner. Providers declaring `shared_group_auth_surface` own this operation.
+   */
+  applySharedGenerationApplication?: (input: Readonly<{
+    activeServerDir: string;
+    serviceId: ConnectedServiceId;
+    groupId: string;
+    profileId: string;
+    generation: number;
+    credentialRevision: ConnectedServiceCredentialRevisionV1;
+    record: ConnectedServiceCredentialRecordV1;
+  }>) => Promise<ConnectedServiceGenerationApplicationProofResult>;
+  /**
+   * Builds the retained session-RPC notification required by provider runtimes that cache group
+   * auth. Request-time brokers omit this hook because they resolve server truth per request.
+   */
+  buildLiveGenerationCurrentTruthRequest?: (input: Readonly<{
+    serviceId: ConnectedServiceId;
+    currentTruth: SessionConnectedServiceAuthCurrentGroupTruthV1;
+  }>) => SessionConnectedServiceAuthApplyGenerationRequestV1;
   credentialStorageCleanup?: ConnectedServiceCredentialStorageCleanup;
   materializedHomeMaintenance?: ConnectedServiceMaterializedHomeMaintenance;
 }>;
@@ -205,6 +265,7 @@ export function buildDefaultConnectedServiceCredentialLifecycleDescriptor(
     refreshedCredentialApplication: { mode: 'no_restart_required' },
     predictiveSoftSwitch: { mode: 'unsupported', liveSessionRequirement: { kind: 'none' } },
     sameAccountFanoutStrategy: 'none',
+    generationApplicationScope: 'unsupported',
     runtimeAuthApply: DEFAULT_CONNECTED_SERVICE_RUNTIME_AUTH_APPLY_CAPABILITY,
   };
 }

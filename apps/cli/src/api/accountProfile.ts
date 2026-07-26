@@ -8,7 +8,7 @@ import {
 } from '@/api/client/httpStatusError';
 import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 
-export async function fetchAccountProfile(opts: Readonly<{ token: string }>): Promise<AccountProfileResponse> {
+export async function fetchAccountProfile(opts: Readonly<{ token: string; signal?: AbortSignal }>): Promise<AccountProfileResponse> {
   const serverUrl = resolveServerHttpBaseUrl();
   const response = await axios.get(`${serverUrl}/v1/account/profile`, {
     headers: {
@@ -16,6 +16,7 @@ export async function fetchAccountProfile(opts: Readonly<{ token: string }>): Pr
       'Content-Type': 'application/json',
     },
     timeout: 15_000,
+    ...(opts.signal ? { signal: opts.signal } : {}),
     validateStatus: () => true,
   });
 
