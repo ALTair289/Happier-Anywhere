@@ -2,7 +2,6 @@ import type { SessionAttachFilePayload } from '@/agent/runtime/sessionAttachPayl
 import type { Credentials } from '@/persistence';
 import { isAuthenticationError } from '@/api/client/httpStatusError';
 import { encodeBase64 } from '@/api/encryption';
-import { readSessionCatchUpAuthorization } from '@/api/session/sessionChangesSyncOnConnect';
 import { configuration } from '@/configuration';
 import { resolveVendorResumeIdForExistingSession } from '@/daemon/spawn/resolveVendorResumeIdForExistingSession';
 import { createSpawnConcurrencyGate, type SpawnConcurrencyGate } from '@/daemon/spawn/createSpawnConcurrencyGate';
@@ -14,12 +13,6 @@ import {
 import { fetchSessionByIdCompat } from '@/session/transport/http/sessionsHttp';
 import type { SessionSnapshotRefreshReasonInput } from '@/api/session/sessionSnapshotRefreshReason';
 import { tryParseJsonRecord } from '@/utils/tryParseJsonRecord';
-import {
-  readDeliveredUserMessageSeqV1,
-  readProviderAcceptedUserMessageSeqV1,
-  readUserMessageDeliveryWatermarkModeV1,
-  resolveAttachCursorForUserMessageDeliveryWatermark,
-} from '@/api/session/deliveredUserMessageSeq';
 
 export type ExistingSessionAttachContext = Readonly<{
   ok: true;
@@ -27,8 +20,6 @@ export type ExistingSessionAttachContext = Readonly<{
   vendorResumeId: string | null;
   sessionPath: string | null;
   metadata: Record<string, unknown> | null;
-  /** Owed-delivery watermark from session metadata (A-F2/D15b); null for legacy sessions. */
-  deliveredUserMessageSeq: number | null;
 }>;
 
 export type ExistingSessionAttachContextFailureReason =
@@ -78,7 +69,12 @@ function resolveExistingSessionPath(metadata: Record<string, unknown> | null): s
 }
 
 function buildExistingSessionAttachContext(params: Readonly<{
-  rawSession: Readonly<{ metadata?: unknown; dataEncryptionKey?: unknown; encryptionMode?: unknown; seq?: unknown }>;
+  rawSession: Readonly<{
+    metadata?: unknown;
+    dataEncryptionKey?: unknown;
+    encryptionMode?: unknown;
+    seq?: unknown;
+  }>;
   agent: unknown;
   credentials: Credentials | null;
 }>): ExistingSessionAttachContext | ExistingSessionAttachContextFailure {
@@ -88,22 +84,7 @@ function buildExistingSessionAttachContext(params: Readonly<{
   });
   const sessionPath = resolveExistingSessionPath(metadata);
   const mode = resolveSessionStoredContentEncryptionMode(params.rawSession);
-  // Owed-delivery clamp (A-F2/D15b): never synthesize a catch-up cursor past the highest user row
-  // actually delivered to the runner, or rows committed while the runner was down are skipped forever.
-  const deliveredUserMessageSeq = readDeliveredUserMessageSeqV1(metadata);
-  const providerAcceptedUserMessageSeq = readProviderAcceptedUserMessageSeqV1(metadata);
-  const watermarkMode = readUserMessageDeliveryWatermarkModeV1(metadata) ?? 'queueHandoff';
-  const attachCursor = resolveAttachCursorForUserMessageDeliveryWatermark({
-    cursor: resolveLastObservedMessageSeq(params.rawSession),
-    mode: watermarkMode,
-    deliveredUserMessageSeq,
-    providerAcceptedUserMessageSeq,
-  });
-  const lastObservedMessageSeq = attachCursor.cursor;
-  const effectiveDeliveredUserMessageSeq = attachCursor.effectiveWatermarkSeq;
-  const initialTranscriptCatchUpAuthorization = readSessionCatchUpAuthorization(
-    (params.rawSession as { initialTranscriptCatchUpAuthorization?: unknown }).initialTranscriptCatchUpAuthorization,
-  );
+  const lastObservedMessageSeq = resolveLastObservedMessageSeq(params.rawSession);
   if (mode === 'plain') {
     return {
       ok: true,
@@ -111,7 +92,6 @@ function buildExistingSessionAttachContext(params: Readonly<{
         v: 2,
         encryptionMode: 'plain',
         ...(lastObservedMessageSeq !== undefined ? { lastObservedMessageSeq } : {}),
-        ...(initialTranscriptCatchUpAuthorization ? { initialTranscriptCatchUpAuthorization } : {}),
       },
       vendorResumeId: resolveVendorResumeIdForExistingSession({
         agent: params.agent,
@@ -120,7 +100,6 @@ function buildExistingSessionAttachContext(params: Readonly<{
       }),
       sessionPath,
       metadata,
-      deliveredUserMessageSeq: effectiveDeliveredUserMessageSeq,
     };
   }
 
@@ -137,7 +116,6 @@ function buildExistingSessionAttachContext(params: Readonly<{
       encryptionKeyBase64: encodeBase64(ctx.encryptionKey, 'base64'),
       encryptionVariant: ctx.encryptionVariant,
       ...(lastObservedMessageSeq !== undefined ? { lastObservedMessageSeq } : {}),
-      ...(initialTranscriptCatchUpAuthorization ? { initialTranscriptCatchUpAuthorization } : {}),
     },
     vendorResumeId: resolveVendorResumeIdForExistingSession({
       agent: params.agent,
@@ -146,7 +124,6 @@ function buildExistingSessionAttachContext(params: Readonly<{
     }),
     sessionPath,
     metadata,
-    deliveredUserMessageSeq: effectiveDeliveredUserMessageSeq,
   };
 }
 

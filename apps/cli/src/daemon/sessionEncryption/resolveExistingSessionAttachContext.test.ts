@@ -52,7 +52,6 @@ describe('resolveExistingSessionAttachContext', () => {
         id: 'sess_plain',
         seq: 42,
         encryptionMode: 'plain',
-        initialTranscriptCatchUpAuthorization: 'explicit_cursor',
         metadata: JSON.stringify({ flavor: 'codex', path: '/tmp', codexSessionId: 'vendor-plain-1' }),
         dataEncryptionKey: null,
       }),
@@ -65,7 +64,6 @@ describe('resolveExistingSessionAttachContext', () => {
         v: 2,
         encryptionMode: 'plain',
         lastObservedMessageSeq: 42,
-        initialTranscriptCatchUpAuthorization: 'explicit_cursor',
       },
       vendorResumeId: 'vendor-plain-1',
       sessionPath: '/tmp',
@@ -74,7 +72,7 @@ describe('resolveExistingSessionAttachContext', () => {
     expect(vi.mocked(fetchSessionByIdCompat)).toHaveBeenCalledTimes(1);
   });
 
-  it('clamps the attach cursor to the owed-delivery watermark so committed-while-dead user rows are redelivered (D15b)', async () => {
+  it('uses the server session sequence without consulting retired delivery watermark metadata', async () => {
     vi.mocked(fetchSessionByIdCompat).mockResolvedValueOnce(
       createSessionRecordFixture({
         id: 'sess_owed',
@@ -88,57 +86,7 @@ describe('resolveExistingSessionAttachContext', () => {
     const out = await resolveExistingSessionAttachContext({ token: 't', sessionId: 'sess_owed', agent: 'claude', credentials: null });
     expect(out).toMatchObject({
       ok: true,
-      attachPayload: { v: 2, encryptionMode: 'plain', lastObservedMessageSeq: 4 },
-      deliveredUserMessageSeq: 4,
-    });
-  });
-
-  it('uses the provider-accepted watermark instead of legacy delivered metadata for provider-acceptance sessions', async () => {
-    vi.mocked(fetchSessionByIdCompat).mockResolvedValueOnce(
-      createSessionRecordFixture({
-        id: 'sess_provider_acceptance',
-        seq: 42,
-        encryptionMode: 'plain',
-        metadata: JSON.stringify({
-          flavor: 'claude',
-          path: '/tmp',
-          userMessageDeliveryWatermarkModeV1: 'providerAcceptance',
-          deliveredUserMessageSeqV1: 5,
-          providerAcceptedUserMessageSeqV1: 3,
-        }),
-        dataEncryptionKey: null,
-      }),
-    );
-
-    const out = await resolveExistingSessionAttachContext({ token: 't', sessionId: 'sess_provider_acceptance', agent: 'claude', credentials: null });
-    expect(out).toMatchObject({
-      ok: true,
-      attachPayload: { v: 2, encryptionMode: 'plain', lastObservedMessageSeq: 3 },
-      deliveredUserMessageSeq: 3,
-    });
-  });
-
-  it('replays from the beginning for provider-acceptance sessions without explicit provider custody', async () => {
-    vi.mocked(fetchSessionByIdCompat).mockResolvedValueOnce(
-      createSessionRecordFixture({
-        id: 'sess_provider_acceptance_no_custody',
-        seq: 42,
-        encryptionMode: 'plain',
-        metadata: JSON.stringify({
-          flavor: 'claude',
-          path: '/tmp',
-          userMessageDeliveryWatermarkModeV1: 'providerAcceptance',
-          deliveredUserMessageSeqV1: 5,
-        }),
-        dataEncryptionKey: null,
-      }),
-    );
-
-    const out = await resolveExistingSessionAttachContext({ token: 't', sessionId: 'sess_provider_acceptance_no_custody', agent: 'claude', credentials: null });
-    expect(out).toMatchObject({
-      ok: true,
-      attachPayload: { v: 2, encryptionMode: 'plain', lastObservedMessageSeq: 0 },
-      deliveredUserMessageSeq: 0,
+      attachPayload: { v: 2, encryptionMode: 'plain', lastObservedMessageSeq: 42 },
     });
   });
 
@@ -157,7 +105,6 @@ describe('resolveExistingSessionAttachContext', () => {
     expect(out).toMatchObject({
       ok: true,
       attachPayload: { v: 2, encryptionMode: 'plain', lastObservedMessageSeq: 42 },
-      deliveredUserMessageSeq: null,
     });
   });
 
