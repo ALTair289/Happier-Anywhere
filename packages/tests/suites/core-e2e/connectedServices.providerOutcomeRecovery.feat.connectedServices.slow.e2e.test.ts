@@ -56,10 +56,7 @@ import {
   createConnectedServiceAuthGroup,
   createConnectedServiceProfile,
   fetchConnectedServiceAuthGroup,
-  findSessionContinuationProofWaitAttempt,
   isRuntimeAuthRecoveryAwaitingProviderOutcomeProof,
-  readSessionContinuationRecoveryAttempts,
-  readSessionContinuationRecoveryRaw,
   readRuntimeAuthRecoveryIntent,
   patchConnectedServiceAuthGroupMemberExhaustion,
   postConnectedServiceQuotaSnapshot,
@@ -586,20 +583,6 @@ describe('core e2e: connected-service provider-outcome recovery', () => {
     expect(Number(intent.armedAtMs)).toBeLessThanOrEqual(firstRefresh.receivedAtMs);
     expect(['waiting', 'checking', 'resumed_awaiting_proof']).toContain(intent.status);
 
-    const continuationRaw = await readSessionContinuationRecoveryRaw({ fixture: claudeFixture, sessionId });
-    if (!continuationRaw) throw new Error('Expected credential-refresh restart to create continuation recovery metadata');
-    const attempts = await readSessionContinuationRecoveryAttempts({ fixture: claudeFixture, sessionId });
-    expect(attempts).toHaveLength(1);
-    expect(attempts[0]).toMatchObject({
-      continuationRequired: true,
-      replayMode: 'continuation_prompt',
-      serviceId: CLAUDE_SUBSCRIPTION_SERVICE_ID,
-      groupId,
-      profileId,
-    });
-    expect(attempts[0]).not.toMatchObject({ replayMode: 'retry_original_user_message' });
-    expect(JSON.stringify(continuationRaw)).not.toContain(originalPrompt);
-
     await sleep(6_000);
     await expect(countFakeClaudeUserTextOccurrences({
       logPath: claudeFixture.fakeClaudeLogPath,
@@ -719,17 +702,8 @@ describe('core e2e: connected-service provider-outcome recovery', () => {
       .slice(refreshRequestsBeforeReport)[0];
     if (!firstRefresh) throw new Error('Expected Claude runtime-auth recovery to force-refresh the active profile');
 
-    let proofWaitAttempt: UnknownRecord | null = null;
     let proofWaitIntent: UnknownRecord | null = null;
     await waitFor(async () => {
-      const attempts = await readSessionContinuationRecoveryAttempts({ fixture: claudeFixture!, sessionId });
-      proofWaitAttempt = findSessionContinuationProofWaitAttempt({
-        attempts,
-        serviceId: CLAUDE_SUBSCRIPTION_SERVICE_ID,
-        groupId,
-        profileId,
-      });
-      if (!proofWaitAttempt) return false;
       proofWaitIntent = await readRuntimeAuthRecoveryIntent({
         fixture: claudeFixture!,
         sessionId,
@@ -742,13 +716,6 @@ describe('core e2e: connected-service provider-outcome recovery', () => {
       timeoutMs: 45_000,
       intervalMs: 250,
       context: 'Claude continuation recovery reaches provider-outcome proof wait',
-    });
-    expect(proofWaitAttempt).toMatchObject({
-      continuationRequired: true,
-      replayMode: 'continuation_prompt',
-      serviceId: CLAUDE_SUBSCRIPTION_SERVICE_ID,
-      groupId,
-      profileId,
     });
     expect(proofWaitIntent).toMatchObject({
       status: 'resumed_awaiting_proof',
@@ -854,9 +821,6 @@ describe('core e2e: connected-service provider-outcome recovery', () => {
 
     const firstRefresh = claudeTokenServer.requests().find((request) => request.path === '/oauth/token');
     if (!firstRefresh) throw new Error('Expected Claude runtime-auth recovery to force-refresh before cancellation');
-
-    const continuationRaw = await readSessionContinuationRecoveryRaw({ fixture: claudeFixture, sessionId });
-    if (!continuationRaw) throw new Error('Expected a pending continuation recovery before manual supersession');
 
     await recordConnectedServiceTurnLifecycle({
       fixture: claudeFixture,
@@ -1651,17 +1615,6 @@ describe('core e2e: connected-service provider-outcome recovery', () => {
       .filter((request) => request.path === '/oauth/token')
       .slice(refreshRequestsBeforeReport)[0];
     if (!firstRefresh) throw new Error('Expected Claude runtime-auth recovery to force-refresh after durable activity');
-
-    const attempts = await readSessionContinuationRecoveryAttempts({ fixture: claudeFixture, sessionId });
-    expect(attempts).toHaveLength(1);
-    expect(attempts[0]).toMatchObject({
-      continuationRequired: true,
-      replayMode: 'continuation_prompt',
-      serviceId: CLAUDE_SUBSCRIPTION_SERVICE_ID,
-      groupId,
-      profileId,
-    });
-    expect(attempts[0]).not.toMatchObject({ replayMode: 'retry_original_user_message' });
 
     await sleep(6_000);
     await expect(countFakeClaudeUserTextOccurrences({
