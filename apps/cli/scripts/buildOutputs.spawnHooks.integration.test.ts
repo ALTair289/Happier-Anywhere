@@ -68,6 +68,13 @@ function matchesDynamicSessionControlAdapterImport(text: string): boolean {
   return patterns.some((p) => p.test(text));
 }
 
+function matchesDynamicTerminalHostRegistryImport(text: string): boolean {
+  // Explicit Stop may run long after the daemon bundle was loaded. A lazy hashed-chunk
+  // import here can disappear when local development replaces dist, after the runner
+  // has exited but before its owned terminal host is destroyed.
+  return /import\(\s*['"]\.\/defaultRegistry-[^'"]+\.mjs['"]\s*\)/.test(text);
+}
+
 function containsStaticSessionControlAdapterWiring(text: string, agentId: 'claude' | 'codex' | 'gemini' | 'opencode'): boolean {
   const expectedUsageAdapterByAgentId = {
     claude: 'claudeUsageLimitRecoveryControlAdapter',
@@ -234,6 +241,18 @@ describe('CLI build output', () => {
       gemini: true,
       opencode: true,
     });
+    expect(offenders).toEqual([]);
+  }, 60_000);
+
+  it('does not lazy-load terminal-host cleanup through a hashed runtime chunk', async () => {
+    expect(distFiles.length).toBeGreaterThan(0);
+
+    const offenders: string[] = [];
+    for (const file of distFiles) {
+      const text = await fs.readFile(file, 'utf8');
+      if (matchesDynamicTerminalHostRegistryImport(text)) offenders.push(file);
+    }
+
     expect(offenders).toEqual([]);
   }, 60_000);
 });
