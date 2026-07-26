@@ -322,7 +322,8 @@ describe('resolveSessionRuntimeSnapshot', () => {
     const result = resolveSessionRuntimeSnapshot({
       incomingOptions: baseIncomingOptions({
         initialTranscriptAfterSeq: 33294,
-        initialPrompt: 'one-shot prompt',
+        executionAuthorization: { provenance: 'user_request', requestId: 'message-1' },
+        pendingFirstInput: { text: 'one-shot prompt', localId: 'spawn-first:nonce' },
         initialGoal: { goalText: 'one-shot goal' } as unknown as SpawnSessionOptions['initialGoal'],
         existingSessionAttachPayload: { v: 2, encryptionMode: 'plain' },
         permissionMode: 'yolo',
@@ -332,7 +333,8 @@ describe('resolveSessionRuntimeSnapshot', () => {
     });
 
     expect(result.spawnOptions.initialTranscriptAfterSeq).toBeUndefined();
-    expect(result.spawnOptions.initialPrompt).toBeUndefined();
+    expect(result.spawnOptions.executionAuthorization).toBeUndefined();
+    expect(result.spawnOptions.pendingFirstInput).toBeUndefined();
     expect(result.spawnOptions.initialGoal).toBeUndefined();
     expect(result.spawnOptions.existingSessionAttachPayload).toBeUndefined();
     // Durable runtime controls are preserved.

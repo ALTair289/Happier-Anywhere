@@ -274,7 +274,8 @@ function applySnapshotToSpawnOptions(
   // single-use.
   const {
     initialTranscriptAfterSeq: _initialTranscriptAfterSeq,
-    initialPrompt: _initialPrompt,
+    executionAuthorization: _executionAuthorization,
+    pendingFirstInput: _pendingFirstInput,
     initialGoal: _initialGoal,
     existingSessionAttachPayload: _existingSessionAttachPayload,
     ...durableOptions
