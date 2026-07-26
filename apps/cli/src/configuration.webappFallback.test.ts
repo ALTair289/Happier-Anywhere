@@ -13,6 +13,7 @@ describe('configuration env url fallback', () => {
     'HAPPIER_PUBLIC_SERVER_URL',
     'HAPPIER_WEBAPP_URL',
     'HAPPIER_ACTIVE_SERVER_ID',
+    'HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID',
     'HAPPIER_EXECUTION_RUNS_MAX_CONCURRENT_PER_SESSION',
     'HAPPIER_EPHEMERAL_TASKS_MAX_CONCURRENT_PER_SESSION',
     'HAPPIER_EXECUTION_RUNS_BOUNDED_TIMEOUT_MS',
@@ -319,6 +320,44 @@ describe('configuration env url fallback', () => {
     expect(configMod.configuration.activeServerDir).toBe(join(homeDir, 'servers', 'android-keyboard-qa'));
     expect(configMod.configuration.serverUrl).toBe('http://127.0.0.1:52753');
     expect(configMod.configuration.webappUrl).toBe('http://localhost:52753');
+  });
+
+  it('keeps daemon state and lock on an explicit lifecycle scope without changing the endpoint profile', async () => {
+    const homeDir = createTempDirSync('happier-cli-config-daemon-lifecycle-scope-');
+    tempDirs.push(homeDir);
+    const endpointProfileId = 'android-keyboard-qa';
+    const lifecycleScopeId = 'stack_repo-remote-dev-d72117acdb__id_default';
+    writeFileSync(
+      join(homeDir, 'settings.json'),
+      JSON.stringify({
+        schemaVersion: 6,
+        activeServerId: endpointProfileId,
+        servers: {
+          [endpointProfileId]: {
+            id: endpointProfileId,
+            serverUrl: 'http://10.0.2.2:52753',
+            localServerUrl: 'http://127.0.0.1:52753',
+            webappUrl: 'http://10.0.2.2:52753',
+          },
+        },
+      }),
+      'utf-8',
+    );
+
+    process.env.HAPPIER_HOME_DIR = homeDir;
+    process.env.HAPPIER_ACTIVE_SERVER_ID = endpointProfileId;
+    process.env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID = lifecycleScopeId;
+    process.env.HAPPIER_SERVER_URL = 'http://127.0.0.1:52753';
+    process.env.HAPPIER_WEBAPP_URL = 'http://localhost:52753';
+
+    const configMod = await import('./configuration');
+    configMod.reloadConfiguration();
+
+    expect(configMod.configuration.activeServerId).toBe(endpointProfileId);
+    expect(configMod.configuration.privateKeyFile).toBe(join(homeDir, 'servers', endpointProfileId, 'access.key'));
+    expect(configMod.configuration.serverUrl).toBe('http://127.0.0.1:52753');
+    expect(configMod.configuration.daemonStateFile).toBe(join(homeDir, 'servers', lifecycleScopeId, 'daemon.state.json'));
+    expect(configMod.configuration.daemonLockFile).toBe(join(homeDir, 'servers', lifecycleScopeId, 'daemon.state.json.lock'));
   });
 
   it('lets explicit persisted active server metadata override a contradictory inherited server URL', async () => {

@@ -12,7 +12,6 @@ import { deriveServerIdFromUrl, isServerIdFilesystemSafe, sanitizeServerIdForFil
 import { isLocalishServerUrl } from '@/server/serverUrlClassification'
 import { normalizeCliArgv } from '@/cli/parseArgs'
 import { expandHomeDirPath } from '@/utils/path/expandHomeDirPath'
-import { TERMINAL_INPUT_MAX_PROVIDER_ACCEPTANCE_TIMEOUT_MS } from '@/agent/runtime/terminal/injection/promptWriteTimeout'
 import {
   resolveManagedCliReleaseChannelSync,
 } from '@happier-dev/cli-common/firstPartyRuntime'
@@ -220,12 +219,8 @@ class Configuration {
   public readonly sessionKeepAliveIdleMs: number
   public readonly sessionKeepAliveThinkingMs: number
 
-  // Pending queue V2: optional idle wake polling fallback for suspected missed socket wakeups.
-  public readonly pendingQueueIdleWakePollIntervalMs: number
   public readonly pendingQueueStateReconcileThrottleMs: number
-  public readonly sessionSocketStaleSafetyIntervalMs: number
   public readonly promptLoopUserMessageSeqWaitTimeoutMs: number
-  public readonly promptLoopUserMessageSeqWaitPollMs: number
 
   // Codex app-server terminal notification settle time (allows slightly late item notifications to land before flushing).
   public readonly codexAppServerTurnCompletionSettleMs: number
@@ -272,7 +267,6 @@ class Configuration {
   public readonly claudeUnifiedTerminalAcceptedPromptEchoWindowMs: number
   public readonly claudeUnifiedTerminalInjectionRetryLimit: number
   public readonly claudeUnifiedTerminalInjectionRetryBaseDelayMs: number
-  public readonly claudeUnifiedTerminalProviderAcceptanceTimeoutMs: number
 
   // Claude JSONL transcript repair (missing tool_result injection for interrupted tool calls).
   public readonly claudeTranscriptRepairWaitForToolUseIdsTimeoutMs: number
@@ -364,6 +358,10 @@ class Configuration {
     const envActiveServerId = isServerIdFilesystemSafe(envActiveServerIdRaw)
       ? envActiveServerIdRaw
       : null;
+    const daemonLifecycleScopeIdRaw = (process.env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID ?? '').toString().trim();
+    const daemonLifecycleScopeId = isServerIdFilesystemSafe(daemonLifecycleScopeIdRaw)
+      ? daemonLifecycleScopeIdRaw
+      : null;
     const persisted = readActiveServerFromSettingsFile(this.settingsFile);
     const resolved = resolveServerSelection({
       envServerUrl: envServerUrl || null,
@@ -386,8 +384,11 @@ class Configuration {
     this.legacyPrivateKeyFile = join(this.happyHomeDir, 'access.key')
     this.privateKeyFile = join(this.activeServerDir, 'access.key')
     this.installationIdentityFile = join(this.happyHomeDir, 'installation-identity.json')
-    this.daemonStateFile = join(this.activeServerDir, CANONICAL_DAEMON_STATE_BASENAME)
-    this.daemonLockFile = join(this.activeServerDir, `${CANONICAL_DAEMON_STATE_BASENAME}.lock`)
+    const daemonLifecycleDir = daemonLifecycleScopeId
+      ? join(this.serversDir, daemonLifecycleScopeId)
+      : this.activeServerDir
+    this.daemonStateFile = join(daemonLifecycleDir, CANONICAL_DAEMON_STATE_BASENAME)
+    this.daemonLockFile = join(daemonLifecycleDir, `${CANONICAL_DAEMON_STATE_BASENAME}.lock`)
 
     const attachMaxAgeRaw = String(process.env.HAPPIER_SESSION_ATTACH_FILE_MAX_AGE_MS ?? '').trim();
     const attachMaxAgeMs = Number.parseInt(attachMaxAgeRaw, 10);
@@ -559,35 +560,13 @@ class Configuration {
       min: 500, default: 2_000,
     });
 
-    const pendingWakeRaw = String(process.env.HAPPIER_PENDING_QUEUE_IDLE_WAKE_POLL_INTERVAL_MS ?? '').trim();
-    const pendingWakeMs = Number.parseInt(pendingWakeRaw, 10);
-    // Default: disabled. Pending queue wakeups should arrive via server
-    // pending-changed updates and reconnect catch-up; periodic idle polling is an
-    // explicit opt-in diagnostic/self-healing fallback for environments where
-    // those nudges are suspected to be unreliable.
-    this.pendingQueueIdleWakePollIntervalMs =
-      pendingWakeRaw === '0'
-        ? 0
-        : (Number.isFinite(pendingWakeMs) && pendingWakeMs >= 50
-            ? Math.min(pendingWakeMs, 60_000)
-            : 0);
-
     this.pendingQueueStateReconcileThrottleMs = resolveIntEnvWithBounds(
       'HAPPIER_PENDING_QUEUE_STATE_RECONCILE_THROTTLE_MS',
       { min: 1_000, max: 60_000, default: 15_000 },
     );
-    this.sessionSocketStaleSafetyIntervalMs = resolveIntEnvWithBounds(
-      'HAPPIER_SESSION_SOCKET_STALE_SAFETY_INTERVAL_MS',
-      { min: 60_000, max: 600_000, default: 90_000 },
-    );
-
     this.promptLoopUserMessageSeqWaitTimeoutMs = resolveIntEnvWithBounds(
       'HAPPIER_PROMPT_LOOP_USER_MESSAGE_SEQ_WAIT_TIMEOUT_MS',
       { min: 0, max: 10_000, default: 1_000 },
-    );
-    this.promptLoopUserMessageSeqWaitPollMs = resolveIntEnvWithBounds(
-      'HAPPIER_PROMPT_LOOP_USER_MESSAGE_SEQ_WAIT_POLL_MS',
-      { min: 1, max: 1_000, default: 20 },
     );
 
     this.codexAppServerTurnCompletionSettleMs = resolveIntEnvWithBounds(
@@ -771,10 +750,6 @@ class Configuration {
     this.claudeUnifiedTerminalInjectionRetryBaseDelayMs = resolveIntEnvWithBounds(
       'HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_BASE_DELAY_MS',
       { min: 1, max: 60_000, default: 250 },
-    );
-    this.claudeUnifiedTerminalProviderAcceptanceTimeoutMs = resolveIntEnvWithBounds(
-      'HAPPIER_CLAUDE_UNIFIED_TERMINAL_PROVIDER_ACCEPTANCE_TIMEOUT_MS',
-      { min: 1, max: TERMINAL_INPUT_MAX_PROVIDER_ACCEPTANCE_TIMEOUT_MS, default: 5_000 },
     );
 
     // Default: 250ms. Best-effort grace window for the transcript to settle and for tool_use/tool_result

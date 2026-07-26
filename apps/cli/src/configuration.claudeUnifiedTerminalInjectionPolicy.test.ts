@@ -13,7 +13,7 @@ describe('configuration Claude unified terminal injection policy', () => {
     vi.resetModules();
   });
 
-  it('defaults injection retry and provider-acceptance timing to bounded values', async () => {
+  it('defaults injection retry to bounded values without a provider-acceptance timeout authority', async () => {
     delete process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_LIMIT;
     delete process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_BASE_DELAY_MS;
     delete process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_PROVIDER_ACCEPTANCE_TIMEOUT_MS;
@@ -23,10 +23,10 @@ describe('configuration Claude unified terminal injection policy', () => {
 
     expect(configuration.claudeUnifiedTerminalInjectionRetryLimit).toBe(3);
     expect(configuration.claudeUnifiedTerminalInjectionRetryBaseDelayMs).toBe(250);
-    expect(configuration.claudeUnifiedTerminalProviderAcceptanceTimeoutMs).toBe(5_000);
+    expect('claudeUnifiedTerminalProviderAcceptanceTimeoutMs' in configuration).toBe(false);
   });
 
-  it('reads injection retry and provider-acceptance timing from env with bounds', async () => {
+  it('reads injection retry from env with bounds and ignores the retired provider-acceptance timeout env', async () => {
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_LIMIT = '5';
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_BASE_DELAY_MS = '123';
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_PROVIDER_ACCEPTANCE_TIMEOUT_MS = '4567';
@@ -35,7 +35,7 @@ describe('configuration Claude unified terminal injection policy', () => {
 
     expect(configuration.claudeUnifiedTerminalInjectionRetryLimit).toBe(5);
     expect(configuration.claudeUnifiedTerminalInjectionRetryBaseDelayMs).toBe(123);
-    expect(configuration.claudeUnifiedTerminalProviderAcceptanceTimeoutMs).toBe(4_567);
+    expect('claudeUnifiedTerminalProviderAcceptanceTimeoutMs' in configuration).toBe(false);
 
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_LIMIT = '-1';
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_BASE_DELAY_MS = '0';
@@ -45,7 +45,7 @@ describe('configuration Claude unified terminal injection policy', () => {
 
     expect(invalidConfiguration.claudeUnifiedTerminalInjectionRetryLimit).toBe(3);
     expect(invalidConfiguration.claudeUnifiedTerminalInjectionRetryBaseDelayMs).toBe(250);
-    expect(invalidConfiguration.claudeUnifiedTerminalProviderAcceptanceTimeoutMs).toBe(5_000);
+    expect('claudeUnifiedTerminalProviderAcceptanceTimeoutMs' in invalidConfiguration).toBe(false);
 
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_LIMIT = '100';
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_BASE_DELAY_MS = '60001';
@@ -55,6 +55,6 @@ describe('configuration Claude unified terminal injection policy', () => {
 
     expect(clampedConfiguration.claudeUnifiedTerminalInjectionRetryLimit).toBe(10);
     expect(clampedConfiguration.claudeUnifiedTerminalInjectionRetryBaseDelayMs).toBe(60_000);
-    expect(clampedConfiguration.claudeUnifiedTerminalProviderAcceptanceTimeoutMs).toBe(180_000);
+    expect('claudeUnifiedTerminalProviderAcceptanceTimeoutMs' in clampedConfiguration).toBe(false);
   });
 });
