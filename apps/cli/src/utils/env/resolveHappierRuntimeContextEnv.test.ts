@@ -36,8 +36,9 @@ describe('resolveHappierRuntimeContextEnv', () => {
   it('expresses a split local/public stack: SERVER=local, LOCAL=local, PUBLIC=canonical', () => {
     const env = resolveHappierRuntimeContextEnv({
       homeDir: '/home/.happier',
+      daemonLifecycleScopeId: 'stack_repo-remote-dev-d72117acdb__id_default',
       server: {
-        activeServerId: 'stack-a',
+        activeServerId: 'android-keyboard-qa',
         canonicalServerUrl: 'http://127.0.0.1:13155',
         apiServerUrl: 'http://127.0.0.1:3005',
         webappUrl: 'http://127.0.0.1:13155',
@@ -46,7 +47,8 @@ describe('resolveHappierRuntimeContextEnv', () => {
 
     expect(env).toEqual({
       HAPPIER_HOME_DIR: '/home/.happier',
-      HAPPIER_ACTIVE_SERVER_ID: 'stack-a',
+      HAPPIER_ACTIVE_SERVER_ID: 'android-keyboard-qa',
+      HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-remote-dev-d72117acdb__id_default',
       HAPPIER_SERVER_URL: 'http://127.0.0.1:3005',
       HAPPIER_LOCAL_SERVER_URL: 'http://127.0.0.1:3005',
       HAPPIER_PUBLIC_SERVER_URL: 'http://127.0.0.1:13155',
