@@ -55,6 +55,7 @@ import { inferAndApplyTailscaleServePublicServerUrl } from '@/app/integrations/t
 import { startRetentionWorker } from '@/app/retention/runtime/startRetentionWorker';
 import { expandHomeDirPath } from '@/utils/path/expandHomeDirPath';
 import { initializeServerIdentityCache } from '@/app/serverIdentity/serverIdentity';
+import { isServerFeatureEnabledForRequest } from '@/app/features/catalog/serverFeatureGate';
 
 export type ServerFlavor = 'full' | 'light';
 export type ServerRole = 'all' | 'api' | 'worker';
@@ -279,7 +280,7 @@ export async function startServer(flavor: ServerFlavor): Promise<void> {
     if (shouldEnableRedisAdapter && role === 'api') {
         log(
             { module: 'presence' },
-            'Redis adapter is enabled: durable presence writes are consumed by a worker process. Ensure at least one replica runs with SERVER_ROLE=worker.',
+            'Redis adapter is enabled: durable machine-presence writes and legacy presence-stream cleanup are handled by a worker process. Ensure at least one replica runs with SERVER_ROLE=worker.',
         );
     }
 

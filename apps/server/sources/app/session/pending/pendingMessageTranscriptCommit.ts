@@ -1,6 +1,9 @@
 import { parseSessionMessageRole } from "@/app/session/messageRole/resolveSessionMessageRole";
 import type { Tx } from "@/storage/inTx";
-import type { SessionMessageRole } from "@happier-dev/protocol";
+import {
+    readPendingLocalId,
+    type SessionMessageRole,
+} from "@happier-dev/protocol";
 import { isDeepStrictEqual } from "node:util";
 
 export type PendingTranscriptMessage = {
@@ -9,6 +12,7 @@ export type PendingTranscriptMessage = {
     localId: string;
     messageRole: SessionMessageRole | null;
     content: PrismaJson.SessionMessageContent;
+    deliveryResolution?: Readonly<{ v: 1; kind: "manual_handled" }> | null;
     createdAt: Date;
     updatedAt: Date;
 };
@@ -58,13 +62,16 @@ export async function createSessionMessageFromPending(tx: Tx, params: {
 } | {
     ok: false;
     error: "transcript-conflict";
-    conflict: "content" | "message-role";
+    conflict: "local-id" | "content" | "message-role";
 }> {
     const { sessionId, localId, content, messageRole } = params;
+    if (readPendingLocalId(localId) === null) {
+        return { ok: false, error: "transcript-conflict", conflict: "local-id" };
+    }
 
     const existing = await tx.sessionMessage.findFirst({
         where: { sessionId, localId },
-        select: { id: true, seq: true, localId: true, messageRole: true, content: true, createdAt: true, updatedAt: true },
+        select: { id: true, seq: true, localId: true, messageRole: true, content: true, deliveryResolution: true, createdAt: true, updatedAt: true },
     });
     if (existing && existing.localId) {
         const compatibility = resolvePendingTranscriptCompatibility({
@@ -72,15 +79,14 @@ export async function createSessionMessageFromPending(tx: Tx, params: {
             pending: { content, messageRole },
         });
         if (!compatibility.ok) return { ok: false, error: "transcript-conflict", conflict: compatibility.conflict };
-
         const needsRoleUpdate = existing.messageRole === null && messageRole !== null;
         const row = needsRoleUpdate
             ? await tx.sessionMessage.update({
                 where: { id: existing.id },
                 data: {
-                    messageRole,
+                    ...(needsRoleUpdate ? { messageRole } : {}),
                 },
-                select: { id: true, seq: true, localId: true, messageRole: true, content: true, createdAt: true, updatedAt: true },
+                select: { id: true, seq: true, localId: true, messageRole: true, content: true, deliveryResolution: true, createdAt: true, updatedAt: true },
             })
             : existing;
         return {
@@ -93,6 +99,7 @@ export async function createSessionMessageFromPending(tx: Tx, params: {
                 localId: row.localId ?? localId,
                 messageRole: parseSessionMessageRole(row.messageRole),
                 content: row.content as PrismaJson.SessionMessageContent,
+                deliveryResolution: row.deliveryResolution as PendingTranscriptMessage["deliveryResolution"],
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
             },
@@ -117,7 +124,7 @@ export async function createSessionMessageFromPending(tx: Tx, params: {
             messageRole,
             createdAt: messageCreatedAt,
         },
-        select: { id: true, seq: true, localId: true, messageRole: true, content: true, createdAt: true, updatedAt: true },
+        select: { id: true, seq: true, localId: true, messageRole: true, content: true, deliveryResolution: true, createdAt: true, updatedAt: true },
     });
 
     return {
@@ -130,6 +137,7 @@ export async function createSessionMessageFromPending(tx: Tx, params: {
             localId: created.localId!,
             messageRole: parseSessionMessageRole(created.messageRole),
             content: created.content as PrismaJson.SessionMessageContent,
+            deliveryResolution: created.deliveryResolution as PendingTranscriptMessage["deliveryResolution"],
             createdAt: created.createdAt,
             updatedAt: created.updatedAt,
         },

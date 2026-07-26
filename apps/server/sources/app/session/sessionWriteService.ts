@@ -20,6 +20,8 @@ import {
     type SessionMessageRole,
     type SessionStoredContentKind,
     type SessionMessageAttentionImpact,
+    type SessionTranscriptObservationProvenanceV1,
+    SessionTranscriptObservationProvenanceV1Schema,
 } from "@happier-dev/protocol";
 import { resolveEncryptionWriteRejectionCode, type EncryptionPolicyRejectionCode } from "@/app/session/encryptionRejectionCodes";
 import { isDeepStrictEqual } from "node:util";
@@ -43,15 +45,11 @@ import {
     parseStoredSessionTurns,
     type SessionTurnStoredRow,
 } from "./turns/parseSessionTurnState";
-import {
-    hasNonIdleSessionRuntimeActivityProjection,
-    IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION,
-    normalizeSessionRuntimeActivityProjection,
-    normalizeStoredSessionRuntimeActivityProjection,
-    type SessionRuntimeActivityProjectionUpdate,
-} from "./runtimeActivityProjection";
+import { hasCurrentSessionScopedMachineAccessInTx } from "@/app/api/socket/sessionScopedBinding";
 
 type ParticipantCursor = SessionParticipantCursor;
+
+const JSON_PARSE_FAILED = Symbol("json-parse-failed");
 
 type SessionMessageWriteRow = {
     id: string;
@@ -62,6 +60,9 @@ type SessionMessageWriteRow = {
     content: PrismaJson.SessionMessageContent;
     createdAt: Date;
     updatedAt: Date;
+    sourceCreatedAt?: Date | null;
+    sourceUpdatedAt?: Date | null;
+    transcriptObservationProvenance?: SessionTranscriptObservationProvenanceV1 | null;
 };
 
 const SESSION_MESSAGE_WRITE_SELECT = {
@@ -73,13 +74,51 @@ const SESSION_MESSAGE_WRITE_SELECT = {
     content: true,
     createdAt: true,
     updatedAt: true,
+    sourceCreatedAt: true,
+    sourceUpdatedAt: true,
+    transcriptObservationProvenance: true,
 } as const;
 
-function toSessionMessageWriteRow(row: Omit<SessionMessageWriteRow, "messageRole"> & { messageRole: unknown }): SessionMessageWriteRow {
+function toSessionMessageWriteRow(
+    row: Omit<SessionMessageWriteRow, "messageRole" | "transcriptObservationProvenance"> & {
+        messageRole: unknown;
+        transcriptObservationProvenance: unknown;
+    },
+): SessionMessageWriteRow {
+    const { transcriptObservationProvenance: rawProvenance, ...rest } = row;
+    const provenance = SessionTranscriptObservationProvenanceV1Schema.safeParse(rawProvenance);
     return {
-        ...row,
+        ...rest,
         messageRole: parseSessionMessageRole(row.messageRole),
+        ...(provenance.success ? { transcriptObservationProvenance: provenance.data } : {}),
     };
+}
+
+function parseJsonForComparison(value: string): unknown | typeof JSON_PARSE_FAILED {
+    try {
+        return JSON.parse(value);
+    } catch {
+        return JSON_PARSE_FAILED;
+    }
+}
+
+function isSessionMetadataNoOp(params: Readonly<{
+    currentMetadata: string;
+    nextMetadata: string;
+    encryptionMode?: unknown;
+}>): boolean {
+    if (params.currentMetadata === params.nextMetadata) {
+        return true;
+    }
+    if (params.encryptionMode !== "plain") {
+        return false;
+    }
+    const current = parseJsonForComparison(params.currentMetadata);
+    const next = parseJsonForComparison(params.nextMetadata);
+    if (current === JSON_PARSE_FAILED || next === JSON_PARSE_FAILED) {
+        return false;
+    }
+    return isDeepStrictEqual(current, next);
 }
 
 export async function updateSessionMessageActivityProjection(
@@ -791,6 +830,16 @@ type CreateSessionMessageParamsBase = Readonly<{
     messageRole?: unknown;
     trustedSessionEventType?: "ready";
     trustedAttentionImpact?: SessionMessageAttentionImpact;
+    /** Exact publisher-presence fence, revalidated in the same serializable transaction as the write. */
+    trustedPublisherFence?: Readonly<{
+        accountId: string;
+        machineId: string;
+        sessionId: string;
+        committedFence: Date;
+    }>;
+    /** Source chronology accepted only from an authenticated, fenced transcript-observation producer. */
+    trustedSourceTimestamps?: Readonly<{ createdAt: number; updatedAt: number }>;
+    trustedTranscriptObservationProvenance?: SessionTranscriptObservationProvenanceV1;
 }>;
 
 export async function createSessionMessage(
@@ -809,6 +858,23 @@ export async function createSessionMessage(
         return { ok: false, error: "invalid-params" };
     }
     const sidechainId = parsedSidechainId.sidechainId;
+    const sourceCreatedAt = params.trustedSourceTimestamps
+        ? new Date(params.trustedSourceTimestamps.createdAt)
+        : null;
+    const sourceUpdatedAt = params.trustedSourceTimestamps
+        ? new Date(params.trustedSourceTimestamps.updatedAt)
+        : null;
+    if (
+        params.trustedSourceTimestamps
+        && (!Number.isFinite(sourceCreatedAt?.getTime())
+            || !Number.isFinite(sourceUpdatedAt?.getTime())
+            || sourceUpdatedAt!.getTime() < sourceCreatedAt!.getTime())
+    ) {
+        return { ok: false, error: "invalid-params" };
+    }
+    if (Boolean(params.trustedSourceTimestamps) !== Boolean(params.trustedTranscriptObservationProvenance)) {
+        return { ok: false, error: "invalid-params" };
+    }
 
     const content = "content" in params ? params.content : ciphertext ? ({ t: "encrypted", c: ciphertext } satisfies PrismaJson.SessionMessageContent) : null;
 
@@ -834,8 +900,111 @@ export async function createSessionMessage(
             },
         }).messageRole;
 
+    const reconcileExistingLocalId = async (args: Readonly<{
+        tx: Tx;
+        existing: Parameters<typeof toSessionMessageWriteRow>[0];
+        resolvedRole: SessionMessageRole | null;
+        attentionImpact: SessionMessageAttentionImpact;
+    }>): Promise<CreateSessionMessageResult> => {
+        const { tx, existing, resolvedRole, attentionImpact } = args;
+        if ((existing.sidechainId ?? null) !== sidechainId) {
+            return { ok: false, error: "invalid-params" };
+        }
+        const existingHasObservationProvenance = existing.transcriptObservationProvenance != null;
+        const incomingHasObservationProvenance = params.trustedTranscriptObservationProvenance !== undefined;
+        if (existingHasObservationProvenance !== incomingHasObservationProvenance) {
+            return { ok: false, error: "invalid-params" };
+        }
+        if (
+            incomingHasObservationProvenance
+            && (
+                !isDeepStrictEqual(existing.transcriptObservationProvenance, params.trustedTranscriptObservationProvenance)
+                || existing.sourceCreatedAt?.getTime() !== sourceCreatedAt?.getTime()
+                || existing.sourceUpdatedAt == null
+                || sourceUpdatedAt === null
+                || sourceUpdatedAt.getTime() < existing.sourceUpdatedAt.getTime()
+            )
+        ) {
+            return { ok: false, error: "invalid-params" };
+        }
+
+        if (isDeepStrictEqual(existing.content, content)) {
+            const shouldBackfillRole = existing.messageRole === null && resolvedRole !== null;
+            const shouldAdvanceSourceUpdatedAt = (
+                incomingHasObservationProvenance
+                && sourceUpdatedAt !== null
+                && existing.sourceUpdatedAt != null
+                && sourceUpdatedAt.getTime() > existing.sourceUpdatedAt.getTime()
+            );
+            if (shouldBackfillRole || shouldAdvanceSourceUpdatedAt) {
+                const updatedMetadata = await tx.sessionMessage.update({
+                    where: { id: existing.id },
+                    data: {
+                        ...(shouldBackfillRole ? { messageRole: resolvedRole } : {}),
+                        ...(shouldAdvanceSourceUpdatedAt ? { sourceUpdatedAt } : {}),
+                    },
+                    select: SESSION_MESSAGE_WRITE_SELECT,
+                });
+                return { ok: true, didWrite: false, didUpdate: false, badgeAttentionChanged: false, message: toSessionMessageWriteRow(updatedMetadata), participantCursors: [] };
+            }
+            return { ok: true, didWrite: false, didUpdate: false, badgeAttentionChanged: false, message: toSessionMessageWriteRow(existing), participantCursors: [] };
+        }
+
+        const updated = await tx.sessionMessage.update({
+            where: { id: existing.id },
+            data: {
+                content,
+                sidechainId,
+                messageRole: resolvedRole,
+                ...(sourceUpdatedAt ? { sourceUpdatedAt } : {}),
+            },
+            select: SESSION_MESSAGE_WRITE_SELECT,
+        });
+        const participantCursors = await markSessionParticipantsChanged({
+            tx,
+            sessionId,
+            hint: { updatedMessageSeq: updated.seq, updatedMessageId: updated.id },
+        });
+        return {
+            ok: true,
+            didWrite: false,
+            didUpdate: true,
+            badgeAttentionChanged: false,
+            attentionImpact,
+            message: toSessionMessageWriteRow(updated),
+            participantCursors,
+        };
+    };
+
     try {
         return await inTx(async (tx) => {
+            if (params.trustedPublisherFence) {
+                const fence = params.trustedPublisherFence;
+                if (
+                    fence.accountId !== actorUserId
+                    || fence.sessionId !== sessionId
+                    || !await hasCurrentSessionScopedMachineAccessInTx({
+                        tx,
+                        accountId: fence.accountId,
+                        machineId: fence.machineId,
+                        sessionId: fence.sessionId,
+                    })
+                ) {
+                    return { ok: false, error: "forbidden" };
+                }
+                const currentPublisherSession = await tx.session.findUnique({
+                    where: { id: sessionId },
+                    select: { active: true, archivedAt: true, lastActiveAt: true },
+                });
+                if (
+                    !currentPublisherSession
+                    || currentPublisherSession.archivedAt !== null
+                    || !currentPublisherSession.active
+                    || currentPublisherSession.lastActiveAt.getTime() !== fence.committedFence.getTime()
+                ) {
+                    return { ok: false, error: "forbidden" };
+                }
+            }
             const access = await ensureSessionEditAccess(tx, { actorUserId, sessionId });
             if (!access.ok) {
                 return { ok: false, error: access.error };
@@ -871,47 +1040,12 @@ export async function createSessionMessage(
                     select: SESSION_MESSAGE_WRITE_SELECT,
                 });
                 if (existing) {
-                    if ((existing.sidechainId ?? null) !== sidechainId) {
-                        return { ok: false, error: "invalid-params" };
-                    }
-
-                    if (isDeepStrictEqual(existing.content, content)) {
-                        if (existing.messageRole === null && resolvedRole !== null) {
-                            const updatedRole = await tx.sessionMessage.update({
-                                where: { id: existing.id },
-                                data: { messageRole: resolvedRole },
-                                select: SESSION_MESSAGE_WRITE_SELECT,
-                            });
-                            return { ok: true, didWrite: false, didUpdate: false, badgeAttentionChanged: false, message: toSessionMessageWriteRow(updatedRole), participantCursors: [] };
-                        }
-                        return { ok: true, didWrite: false, didUpdate: false, badgeAttentionChanged: false, message: toSessionMessageWriteRow(existing), participantCursors: [] };
-                    }
-
-                    const updated = await tx.sessionMessage.update({
-                        where: { id: existing.id },
-                        data: {
-                            content,
-                            sidechainId,
-                            messageRole: resolvedRole,
-                        },
-                        select: SESSION_MESSAGE_WRITE_SELECT,
-                    });
-
-                    const participantCursors = await markSessionParticipantsChanged({
+                    return await reconcileExistingLocalId({
                         tx,
-                        sessionId,
-                        hint: { updatedMessageSeq: updated.seq, updatedMessageId: updated.id },
-                    });
-
-                    return {
-                        ok: true,
-                        didWrite: false,
-                        didUpdate: true,
-                        badgeAttentionChanged: false,
+                        existing,
+                        resolvedRole,
                         attentionImpact,
-                        message: toSessionMessageWriteRow(updated),
-                        participantCursors,
-                    };
+                    });
                 }
             }
 
@@ -930,7 +1064,6 @@ export async function createSessionMessage(
             });
 
             const messageCreatedAt = new Date();
-
             const created = await tx.sessionMessage.create({
                 data: {
                     sessionId,
@@ -940,6 +1073,11 @@ export async function createSessionMessage(
                     sidechainId,
                     messageRole: resolvedRole,
                     createdAt: messageCreatedAt,
+                    ...(sourceCreatedAt ? { sourceCreatedAt } : {}),
+                    ...(sourceUpdatedAt ? { sourceUpdatedAt } : {}),
+                    ...(params.trustedTranscriptObservationProvenance
+                        ? { transcriptObservationProvenance: params.trustedTranscriptObservationProvenance }
+                        : {}),
                 },
                 select: SESSION_MESSAGE_WRITE_SELECT,
             });
@@ -1017,74 +1155,65 @@ export async function createSessionMessage(
                 log({ module: "session-write", level: "error", sessionId, target }, "Unexpected P2002 while creating session message");
                 return { ok: false, error: "internal" };
             }
-            const access = await ensureSessionEditAccessNoTx({ actorUserId, sessionId });
-            if (!access.ok) {
-                return { ok: false, error: access.error };
-            }
-            const resolvedRole = resolveRoleForStorageMode(access.sessionEncryptionMode);
-            const trustedLocalIdAttentionImpact = access.sessionOwnerId === actorUserId && resolvedRole === "event"
-                ? agentEventLocalIdAttentionImpact(localId)
-                : null;
-            const attentionImpact = resolveMessageAttentionImpact({
-                content,
-                explicitAttentionImpact: params.trustedAttentionImpact ?? trustedLocalIdAttentionImpact ?? undefined,
-            });
-            const existing = await db.sessionMessage.findUnique({
-                where: { sessionId_localId: { sessionId, localId } },
-                select: SESSION_MESSAGE_WRITE_SELECT,
-            });
-            if (existing) {
-                if ((existing.sidechainId ?? null) !== sidechainId) {
-                    return { ok: false, error: "invalid-params" };
-                }
-
-                if (isDeepStrictEqual(existing.content, content)) {
-                    if (existing.messageRole === null && resolvedRole !== null) {
-                        try {
-                            return await inTx(async (tx) => {
-                                const updatedRole = await tx.sessionMessage.update({
-                                    where: { id: existing.id },
-                                    data: { messageRole: resolvedRole },
-                                    select: SESSION_MESSAGE_WRITE_SELECT,
-                                });
-                                return { ok: true, didWrite: false, didUpdate: false, badgeAttentionChanged: false, message: toSessionMessageWriteRow(updatedRole), participantCursors: [] };
-                            });
-                        } catch {
-                            return { ok: false, error: "internal" };
+            try {
+                return await inTx(async (tx) => {
+                    if (params.trustedPublisherFence) {
+                        const fence = params.trustedPublisherFence;
+                        if (
+                            fence.accountId !== actorUserId
+                            || fence.sessionId !== sessionId
+                            || !await hasCurrentSessionScopedMachineAccessInTx({
+                                tx,
+                                accountId: fence.accountId,
+                                machineId: fence.machineId,
+                                sessionId: fence.sessionId,
+                            })
+                        ) {
+                            return { ok: false, error: "forbidden" } as const;
+                        }
+                        const currentPublisherSession = await tx.session.findUnique({
+                            where: { id: sessionId },
+                            select: { active: true, archivedAt: true, lastActiveAt: true },
+                        });
+                        if (
+                            !currentPublisherSession
+                            || currentPublisherSession.archivedAt !== null
+                            || !currentPublisherSession.active
+                            || currentPublisherSession.lastActiveAt.getTime() !== fence.committedFence.getTime()
+                        ) {
+                            return { ok: false, error: "forbidden" } as const;
                         }
                     }
-                    return { ok: true, didWrite: false, didUpdate: false, badgeAttentionChanged: false, message: toSessionMessageWriteRow(existing), participantCursors: [] };
-                }
-
-                try {
-                    return await inTx(async (tx) => {
-                        const updated = await tx.sessionMessage.update({
-                            where: { id: existing.id },
-                            data: { content, sidechainId, messageRole: resolvedRole },
-                            select: SESSION_MESSAGE_WRITE_SELECT,
-                        });
-
-                        const participantCursors = await markSessionParticipantsChanged({
-                            tx,
-                            sessionId,
-                            hint: { updatedMessageSeq: updated.seq, updatedMessageId: updated.id },
-                        });
-
-                        return {
-                            ok: true,
-                            didWrite: false,
-                            didUpdate: true,
-                            badgeAttentionChanged: false,
-                            attentionImpact,
-                            message: toSessionMessageWriteRow(updated),
-                            participantCursors,
-                        };
+                    const access = await ensureSessionEditAccess(tx, { actorUserId, sessionId });
+                    if (!access.ok) return { ok: false, error: access.error };
+                    const resolvedRole = resolveRoleForStorageMode(access.sessionEncryptionMode);
+                    const trustedLocalIdAttentionImpact = access.sessionOwnerId === actorUserId && resolvedRole === "event"
+                        ? agentEventLocalIdAttentionImpact(localId)
+                        : null;
+                    const attentionImpact = resolveMessageAttentionImpact({
+                        content,
+                        explicitAttentionImpact: params.trustedAttentionImpact ?? trustedLocalIdAttentionImpact ?? undefined,
                     });
-                } catch {
-                    return { ok: false, error: "internal" };
-                }
+                    const existing = await tx.sessionMessage.findUnique({
+                        where: { sessionId_localId: { sessionId, localId } },
+                        select: SESSION_MESSAGE_WRITE_SELECT,
+                    });
+                    if (!existing) return { ok: false, error: "internal" } as const;
+                    return await reconcileExistingLocalId({
+                        tx,
+                        existing,
+                        resolvedRole,
+                        attentionImpact,
+                    });
+                });
+            } catch {
+                return { ok: false, error: "internal" };
             }
         }
+        log(
+            { module: "session-write", level: "error", sessionId, error: e },
+            "Unexpected error while creating a session message",
+        );
         return { ok: false, error: "internal" };
     }
 }
@@ -1125,6 +1254,7 @@ export async function updateSessionMetadata(params: {
                 select: {
                     metadataVersion: true,
                     metadata: true,
+                    encryptionMode: true,
                     ...selectSessionActivityBadgeInputs(),
                 },
             });
@@ -1144,6 +1274,58 @@ export async function updateSessionMetadata(params: {
                 if (typeof current === "number" && clamped <= current) return undefined;
                 return clamped;
             })();
+
+            if (isSessionMetadataNoOp({
+                currentMetadata: session.metadata,
+                nextMetadata: metadataCiphertext,
+                encryptionMode: session.encryptionMode,
+            })) {
+                if (typeof nextLastViewedSessionSeq !== "number") {
+                    return {
+                        ok: true,
+                        version: expectedVersion,
+                        metadata: session.metadata,
+                        participantCursors: [],
+                        badgeAttentionChanged: false,
+                    };
+                }
+
+                const { count } = await tx.session.updateMany({
+                    where: { id: sessionId, metadataVersion: expectedVersion },
+                    data: { lastViewedSessionSeq: nextLastViewedSessionSeq },
+                });
+
+                if (count === 0) {
+                    const fresh = await tx.session.findUnique({
+                        where: { id: sessionId },
+                        select: { metadataVersion: true, metadata: true },
+                    });
+                    if (!fresh) {
+                        return { ok: false, error: "session-not-found" };
+                    }
+                    return {
+                        ok: false,
+                        error: "version-mismatch",
+                        current: { version: fresh.metadataVersion, metadata: fresh.metadata },
+                    };
+                }
+
+                const participantCursors = await markSessionParticipantsChanged({ tx, sessionId });
+                return {
+                    ok: true,
+                    version: expectedVersion,
+                    metadata: session.metadata,
+                    participantCursors,
+                    badgeAttentionChanged: didSessionActivityBadgeContributionChange(
+                        toSessionActivityBadgeInputs(session),
+                        {
+                            ...toSessionActivityBadgeInputs(session),
+                            lastViewedSessionSeq: nextLastViewedSessionSeq,
+                        },
+                    ),
+                    lastViewedSessionSeq: nextLastViewedSessionSeq,
+                };
+            }
 
             const { count } = await tx.session.updateMany({
                 where: { id: sessionId, metadataVersion: expectedVersion },
@@ -1207,182 +1389,6 @@ export type UpdateSessionAgentStateResult =
         pendingRequestObservedAt?: number | null;
       }
     | { ok: false; error: "invalid-params" | "forbidden" | "session-not-found" | "version-mismatch" | "internal"; current?: { version: number; agentState: string | null } };
-
-export type UpdateSessionRuntimeActivityProjectionResult =
-    | {
-        ok: true;
-        didWrite: boolean;
-        projection: SessionRuntimeActivityProjectionUpdate;
-        participantCursors: ParticipantCursor[];
-        badgeAttentionChanged: false;
-      }
-    | { ok: false; error: "invalid-params" | "forbidden" | "session-not-found" | "internal" };
-
-function runtimeActivityProjectionEquals(
-    a: SessionRuntimeActivityProjectionUpdate,
-    b: SessionRuntimeActivityProjectionUpdate,
-): boolean {
-    return a.runtimeActivityActiveCount === b.runtimeActivityActiveCount
-        && a.runtimeActivityObservedAt === b.runtimeActivityObservedAt
-        && a.runtimeActivityExpiresAt === b.runtimeActivityExpiresAt
-        && a.runtimeActivitySourceClass === b.runtimeActivitySourceClass;
-}
-
-function isRuntimeActivityProjectionActive(
-    projection: SessionRuntimeActivityProjectionUpdate,
-    now: number,
-): boolean {
-    return projection.runtimeActivityActiveCount > 0
-        && projection.runtimeActivityExpiresAt !== null
-        && projection.runtimeActivityExpiresAt > now;
-}
-
-function runtimeActivityPresentedProjectionChanged(params: {
-    previous: SessionRuntimeActivityProjectionUpdate;
-    next: SessionRuntimeActivityProjectionUpdate;
-    now: number;
-}): boolean {
-    return params.previous.runtimeActivityActiveCount !== params.next.runtimeActivityActiveCount
-        || params.previous.runtimeActivitySourceClass !== params.next.runtimeActivitySourceClass
-        || isRuntimeActivityProjectionActive(params.previous, params.now) !== isRuntimeActivityProjectionActive(params.next, params.now);
-}
-
-function toSessionRuntimeActivityProjectionColumnData(
-    projection: SessionRuntimeActivityProjectionUpdate,
-): Prisma.SessionUpdateInput {
-    return {
-        runtimeActivityActiveCount: projection.runtimeActivityActiveCount,
-        runtimeActivityObservedAt: projection.runtimeActivityObservedAt === null
-            ? null
-            : BigInt(projection.runtimeActivityObservedAt),
-        runtimeActivityExpiresAt: projection.runtimeActivityExpiresAt === null
-            ? null
-            : BigInt(projection.runtimeActivityExpiresAt),
-        runtimeActivitySourceClass: projection.runtimeActivitySourceClass,
-    };
-}
-
-export async function clearSessionRuntimeActivityProjectionInTx(params: {
-    tx: Tx;
-    sessionId: string;
-    current: Readonly<{
-        runtimeActivityActiveCount?: unknown;
-        runtimeActivityObservedAt?: unknown;
-        runtimeActivityExpiresAt?: unknown;
-        runtimeActivitySourceClass?: unknown;
-    }>;
-    additionalData?: Prisma.SessionUpdateInput;
-    select?: Prisma.SessionSelect;
-}): Promise<{
-    didWrite: boolean;
-    didChangePresentedProjection: boolean;
-    projection: SessionRuntimeActivityProjectionUpdate;
-    row: unknown;
-}> {
-    const projection = IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION;
-    const previousProjection = normalizeStoredSessionRuntimeActivityProjection(params.current);
-    const didWrite = hasNonIdleSessionRuntimeActivityProjection(params.current);
-    const didChangePresentedProjection = runtimeActivityPresentedProjectionChanged({
-        previous: previousProjection,
-        next: projection,
-        now: Date.now(),
-    });
-    if (!didWrite && params.additionalData === undefined) {
-        return {
-            didWrite,
-            didChangePresentedProjection,
-            projection,
-            row: null,
-        };
-    }
-    const data: Prisma.SessionUpdateInput = {
-        ...(params.additionalData ?? {}),
-        ...(didWrite ? toSessionRuntimeActivityProjectionColumnData(projection) : {}),
-    };
-    const row = await params.tx.session.update({
-        where: { id: params.sessionId },
-        data,
-        ...(params.select ? { select: params.select } : {}),
-    });
-    return {
-        didWrite,
-        didChangePresentedProjection,
-        projection,
-        row,
-    };
-}
-
-export async function updateSessionRuntimeActivityProjection(params: {
-    actorUserId: string;
-    sessionId: string;
-    activeCount: unknown;
-    observedAt: unknown;
-    expiresAt: unknown;
-    sourceClass: unknown;
-}): Promise<UpdateSessionRuntimeActivityProjectionResult> {
-    const actorUserId = typeof params.actorUserId === "string" ? params.actorUserId : "";
-    const sessionId = typeof params.sessionId === "string" ? params.sessionId : "";
-    if (!actorUserId || !sessionId) {
-        return { ok: false, error: "invalid-params" };
-    }
-
-    try {
-        return await inTx(async (tx) => {
-            const access = await ensureSessionOwnerAccess(tx, { actorUserId, sessionId });
-            if (!access.ok) {
-                return { ok: false, error: access.error };
-            }
-
-            const current = await tx.session.findUnique({
-                where: { id: sessionId },
-                select: {
-                    runtimeActivityActiveCount: true,
-                    runtimeActivityObservedAt: true,
-                    runtimeActivityExpiresAt: true,
-                    runtimeActivitySourceClass: true,
-                },
-            });
-            if (!current) {
-                return { ok: false, error: "session-not-found" };
-            }
-
-            const projection = normalizeSessionRuntimeActivityProjection(params);
-            const previousProjection = normalizeStoredSessionRuntimeActivityProjection(current);
-            if (runtimeActivityProjectionEquals(previousProjection, projection)) {
-                return {
-                    ok: true,
-                    didWrite: false,
-                    didChangePresentedProjection: false,
-                    projection,
-                    participantCursors: [],
-                    badgeAttentionChanged: false,
-                };
-            }
-
-            const didChangePresentedProjection = runtimeActivityPresentedProjectionChanged({
-                previous: previousProjection,
-                next: projection,
-                now: Date.now(),
-            });
-
-            await tx.session.updateMany({
-                where: { id: sessionId },
-                data: toSessionRuntimeActivityProjectionColumnData(projection),
-            });
-            const participantCursors = await markSessionParticipantsChanged({ tx, sessionId });
-            return {
-                ok: true,
-                didWrite: true,
-                didChangePresentedProjection,
-                projection,
-                participantCursors,
-                badgeAttentionChanged: false,
-            };
-        });
-    } catch {
-        return { ok: false, error: "internal" };
-    }
-}
 
 export async function updateSessionAgentState(params: {
     actorUserId: string;
@@ -1726,13 +1732,16 @@ export async function applySessionReadCursorOperation(params: {
                 if (!fresh) {
                     return { ok: false, error: "session-not-found" };
                 }
+                const readStateSeq = operation.kind === "mark-unread" && typeof readableSessionSeq === "number"
+                    ? readableSessionSeq
+                    : fresh.seq;
                 return {
                     ok: true,
                     lastViewedSessionSeq: fresh.lastViewedSessionSeq ?? null,
                     participantCursors: [],
                     badgeAttentionChanged: false,
                     didChange: false,
-                    readState: resolveSessionReadState(fresh.seq, fresh.lastViewedSessionSeq),
+                    readState: resolveSessionReadState(readStateSeq, fresh.lastViewedSessionSeq),
                 };
             }
 
@@ -1809,6 +1818,7 @@ export async function patchSession(params: {
                 select: {
                     metadataVersion: true,
                     metadata: true,
+                    encryptionMode: true,
                     agentStateVersion: true,
                     agentState: true,
                 },
@@ -1831,12 +1841,28 @@ export async function patchSession(params: {
                 };
             }
 
+            const metadataChanged = !!metadata && !isSessionMetadataNoOp({
+                currentMetadata: current.metadata,
+                nextMetadata: metadata.ciphertext,
+                encryptionMode: current.encryptionMode,
+            });
+            const agentStateChanged = !!agentState && current.agentState !== agentState.ciphertext;
+
+            if (!metadataChanged && !agentStateChanged) {
+                return {
+                    ok: true,
+                    participantCursors: [],
+                    ...(metadata ? { metadata: { version: current.metadataVersion, value: current.metadata } } : {}),
+                    ...(agentState ? { agentState: { version: current.agentStateVersion, value: current.agentState } } : {}),
+                };
+            }
+
             const updateData: any = {};
-            if (metadata) {
+            if (metadataChanged && metadata) {
                 updateData.metadata = metadata.ciphertext;
                 updateData.metadataVersion = metadata.expectedVersion + 1;
             }
-            if (agentState) {
+            if (agentStateChanged && agentState) {
                 updateData.agentState = agentState.ciphertext;
                 updateData.agentStateVersion = agentState.expectedVersion + 1;
             }
@@ -1878,8 +1904,18 @@ export async function patchSession(params: {
             return {
                 ok: true,
                 participantCursors,
-                ...(metadata ? { metadata: { version: metadata.expectedVersion + 1, value: metadata.ciphertext } } : {}),
-                ...(agentState ? { agentState: { version: agentState.expectedVersion + 1, value: agentState.ciphertext } } : {}),
+                ...(metadata ? {
+                    metadata: {
+                        version: metadataChanged ? metadata.expectedVersion + 1 : current.metadataVersion,
+                        value: metadataChanged ? metadata.ciphertext : current.metadata,
+                    },
+                } : {}),
+                ...(agentState ? {
+                    agentState: {
+                        version: agentStateChanged ? agentState.expectedVersion + 1 : current.agentStateVersion,
+                        value: agentStateChanged ? agentState.ciphertext : current.agentState,
+                    },
+                } : {}),
             };
         });
     } catch {

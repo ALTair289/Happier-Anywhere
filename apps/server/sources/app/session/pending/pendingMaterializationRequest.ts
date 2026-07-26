@@ -6,12 +6,24 @@ export function resolvePendingMaterializeDeliveryStateOptIn(value: unknown): "pr
     return deliveryState === "provider" ? "provider" : undefined;
 }
 
-export function resolvePendingMaterializeDeliveryTimingOptIn(
+export type PendingMaterializeDeliveryTimingParseResult =
+    | { status: "absent" }
+    | { status: "valid"; value: SessionPendingQueueDeliveryTiming }
+    | { status: "invalid" };
+
+export function parsePendingMaterializeDeliveryTiming(
     value: unknown,
-): SessionPendingQueueDeliveryTiming | undefined {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+): PendingMaterializeDeliveryTimingParseResult {
+    if (
+        !value
+        || typeof value !== "object"
+        || Array.isArray(value)
+        || !Object.prototype.hasOwnProperty.call(value, "deliveryTiming")
+    ) {
+        return { status: "absent" };
+    }
     const deliveryTiming = (value as { deliveryTiming?: unknown }).deliveryTiming;
     return deliveryTiming === "after_foreground_ready" || deliveryTiming === "after_runtime_idle"
-        ? deliveryTiming
-        : undefined;
+        ? { status: "valid", value: deliveryTiming }
+        : { status: "invalid" };
 }

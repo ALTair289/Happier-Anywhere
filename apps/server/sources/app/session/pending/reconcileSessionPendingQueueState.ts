@@ -18,7 +18,7 @@ export async function reconcileSessionPendingQueueState(
     params: PendingStateInput,
 ): Promise<ReconciledSessionPendingQueueState> {
     return await inTx(async (tx) => {
-        const queuedCount = await tx.sessionPendingMessage.count({
+        const pendingCount = await tx.sessionPendingMessage.count({
             where: { sessionId: params.sessionId, status: "queued" },
         });
         const blockedCount = await tx.sessionPendingMessage.count({
@@ -30,7 +30,7 @@ export async function reconcileSessionPendingQueueState(
             select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
         });
 
-        if (queuedCount === current.pendingCount && blockedCount === current.pendingBlockedCount) {
+        if (pendingCount === current.pendingCount && blockedCount === current.pendingBlockedCount) {
             return {
                 pendingCount: current.pendingCount,
                 pendingBlockedCount: current.pendingBlockedCount,
@@ -46,7 +46,7 @@ export async function reconcileSessionPendingQueueState(
                 pendingBlockedCount: current.pendingBlockedCount,
                 pendingVersion: current.pendingVersion,
             },
-            data: { pendingCount: queuedCount, pendingBlockedCount: blockedCount, pendingVersion: { increment: 1 } },
+            data: { pendingCount, pendingBlockedCount: blockedCount, pendingVersion: { increment: 1 } },
         });
 
         if (repair.count <= 0) {

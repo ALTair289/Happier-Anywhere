@@ -16,16 +16,14 @@ describe("sessionPendingRoutes rate limits", () => {
             ["POST", "/v2/sessions/:sessionId/pending/:localId/restore"],
             ["POST", "/v2/sessions/:sessionId/pending/reorder"],
             ["POST", "/v2/sessions/:sessionId/pending/materialize-next"],
-            ["POST", "/v2/sessions/:sessionId/pending/:localId/delivery/accepted"],
-            ["POST", "/v2/sessions/:sessionId/pending/delivery/accepted-through-seq"],
-            ["POST", "/v2/sessions/:sessionId/pending/delivery/provider-attach"],
             ["POST", "/v2/sessions/:sessionId/pending/:localId/delivery/block"],
-            ["POST", "/v2/sessions/:sessionId/pending/:localId/delivery/retry"],
             ["POST", "/v2/sessions/:sessionId/pending/:localId/delivery/handled"],
         ] as const) {
             expect(getRouteEntry(app, method, path).opts.config?.rateLimit).toEqual(
                 expect.objectContaining({ max: expect.any(Number), timeWindow: expect.any(String) }),
             );
         }
+        expect(app.routes.has("POST /v2/sessions/:sessionId/pending/:localId/delivery/accepted")).toBe(false);
+        expect(app.routes.has("POST /v2/sessions/:sessionId/pending/:localId/delivery/retry")).toBe(false);
     });
 });

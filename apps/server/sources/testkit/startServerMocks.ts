@@ -20,6 +20,7 @@ export const START_SERVER_ENV_KEYS = [
   'HAPPY_SERVER_LIGHT_DATA_DIR',
   'HAPPIER_SERVER_LIGHT_DATA_DIR',
   'HAPPIER_SERVER_RETENTION__ENABLED',
+  'METRICS_ENABLED',
 ] as const
 
 export function snapshotStartServerEnv(): EnvValues {
@@ -28,7 +29,7 @@ export function snapshotStartServerEnv(): EnvValues {
 
 export function installStartServerCommonWiringMocks(): void {
   vi.mock('@/app/api/api', () => ({ startApi: vi.fn(async () => {}) }))
-  vi.mock('@/app/monitoring/metrics', () => ({ startMetricsServer: vi.fn(async () => {}) }))
+  vi.mock('@/app/monitoring/metrics', () => ({ startMetricsServer: vi.fn(async () => true) }))
   vi.mock('@/app/monitoring/metrics2', () => ({ startDatabaseMetricsUpdater: vi.fn(() => {}) }))
   vi.mock('@/app/auth/auth', () => ({ auth: { init: vi.fn(async () => {}), verifyToken: vi.fn() } }))
   vi.mock('@/app/presence/sessionCache', () => ({
@@ -53,6 +54,9 @@ export function installStartServerCommonWiringMocks(): void {
   vi.mock('@/utils/logging/log', () => ({ log: vi.fn() }))
   vi.mock('@/app/retention/runtime/startRetentionWorker', () => ({
     startRetentionWorker: vi.fn(() => null),
+  }))
+  vi.mock('@/app/features/catalog/serverFeatureGate', () => ({
+    isServerFeatureEnabledForRequest: vi.fn(() => false),
   }))
   vi.mock('@/app/presence/presenceMode', () => ({
     shouldConsumePresenceFromRedis: vi.fn(() => false),

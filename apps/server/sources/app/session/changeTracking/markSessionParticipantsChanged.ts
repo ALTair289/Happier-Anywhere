@@ -8,6 +8,7 @@ export async function markSessionParticipantsChanged(params: {
     tx: Tx;
     sessionId: string;
     hint?: unknown;
+    hintForParticipant?: (accountId: string) => unknown;
 }): Promise<SessionParticipantCursor[]> {
     const participantUserIds = await getSessionParticipantUserIds({
         sessionId: params.sessionId,
@@ -20,7 +21,9 @@ export async function markSessionParticipantsChanged(params: {
             accountId: participantUserId,
             kind: "session",
             entityId: params.sessionId,
-            hint: params.hint,
+            hint: params.hintForParticipant
+                ? params.hintForParticipant(participantUserId)
+                : params.hint,
         });
         participantCursors.push({ accountId: participantUserId, cursor });
     }

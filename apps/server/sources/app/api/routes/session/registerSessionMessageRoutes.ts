@@ -4,8 +4,10 @@ import { z } from "zod";
 import { buildMessageUpdatedUpdate, buildNewMessageUpdate, eventRouter } from "@/app/events/eventRouter";
 import { catchupFollowupFetchesCounter, catchupFollowupReturnedCounter } from "@/app/monitoring/metrics2";
 import {
+    SessionMessageDeliveryResolutionV1Schema,
     SessionMessageRoleSchema,
     SessionStoredMessageContentSchema,
+    SessionTranscriptObservationProvenanceV1Schema,
     type SessionMessageRole,
 } from "@happier-dev/protocol";
 import { parseSessionMessageRole } from "@/app/session/messageRole/resolveSessionMessageRole";
@@ -91,6 +93,10 @@ export function registerSessionMessageRoutes(app: Fastify) {
                         content: SessionStoredMessageContentSchema,
                         createdAt: z.number().int().min(0),
                         updatedAt: z.number().int().min(0),
+                        sourceCreatedAt: z.number().int().min(0).optional(),
+                        sourceUpdatedAt: z.number().int().min(0).optional(),
+                        transcriptObservationProvenance: SessionTranscriptObservationProvenanceV1Schema.optional(),
+                        deliveryResolution: SessionMessageDeliveryResolutionV1Schema.optional(),
                     }).passthrough(),
                 }).passthrough(),
                 404: z.object({ error: z.string() }).passthrough(),
@@ -120,6 +126,10 @@ export function registerSessionMessageRoutes(app: Fastify) {
                 messageRole: true,
                 createdAt: true,
                 updatedAt: true,
+                sourceCreatedAt: true,
+                sourceUpdatedAt: true,
+                transcriptObservationProvenance: true,
+                deliveryResolution: true,
             },
         });
         if (!row) {
@@ -127,6 +137,10 @@ export function registerSessionMessageRoutes(app: Fastify) {
         }
 
         const messageRole = parseSessionMessageRole(row.messageRole);
+        const transcriptObservationProvenance = SessionTranscriptObservationProvenanceV1Schema.safeParse(
+            row.transcriptObservationProvenance,
+        );
+        const deliveryResolution = SessionMessageDeliveryResolutionV1Schema.safeParse(row.deliveryResolution);
         return reply.send({
             message: {
                 id: row.id,
@@ -137,6 +151,12 @@ export function registerSessionMessageRoutes(app: Fastify) {
                 content: row.content,
                 createdAt: row.createdAt.getTime(),
                 updatedAt: row.updatedAt.getTime(),
+                ...(row.sourceCreatedAt ? { sourceCreatedAt: row.sourceCreatedAt.getTime() } : {}),
+                ...(row.sourceUpdatedAt ? { sourceUpdatedAt: row.sourceUpdatedAt.getTime() } : {}),
+                ...(transcriptObservationProvenance.success
+                    ? { transcriptObservationProvenance: transcriptObservationProvenance.data }
+                    : {}),
+                ...(deliveryResolution.success ? { deliveryResolution: deliveryResolution.data } : {}),
             },
         });
     });
@@ -240,7 +260,11 @@ export function registerSessionMessageRoutes(app: Fastify) {
                 messageRole: true,
                 content: true,
                 createdAt: true,
-                updatedAt: true
+                updatedAt: true,
+                sourceCreatedAt: true,
+                sourceUpdatedAt: true,
+                transcriptObservationProvenance: true,
+                deliveryResolution: true,
             }
         });
 
@@ -275,7 +299,19 @@ export function registerSessionMessageRoutes(app: Fastify) {
                     return messageRole ? { messageRole } : {};
                 })(),
                 createdAt: v.createdAt.getTime(),
-                updatedAt: v.updatedAt.getTime()
+                updatedAt: v.updatedAt.getTime(),
+                ...(v.sourceCreatedAt ? { sourceCreatedAt: v.sourceCreatedAt.getTime() } : {}),
+                ...(v.sourceUpdatedAt ? { sourceUpdatedAt: v.sourceUpdatedAt.getTime() } : {}),
+                ...(() => {
+                    const provenance = SessionTranscriptObservationProvenanceV1Schema.safeParse(
+                        v.transcriptObservationProvenance,
+                    );
+                    return provenance.success ? { transcriptObservationProvenance: provenance.data } : {};
+                })(),
+                ...(() => {
+                    const resolution = SessionMessageDeliveryResolutionV1Schema.safeParse(v.deliveryResolution);
+                    return resolution.success ? { deliveryResolution: resolution.data } : {};
+                })(),
             })),
             hasMore,
             nextBeforeSeq,

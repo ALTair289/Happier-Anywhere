@@ -3,9 +3,10 @@ import type { Socket } from "socket.io";
 import type { ClientConnection } from "@/app/events/eventPayloadTypes";
 import { checkSessionAccess, requireAccessLevel } from "@/app/share/accessControl";
 import { getSessionParticipantUserIds } from "@/app/share/sessionParticipants";
-import { db } from "@/storage/db";
-
-import { resolveSessionScopedMachinePublishBinding } from "./sessionScopedBinding";
+import {
+    hasCurrentSessionScopedMachineAccess,
+    resolveSessionScopedMachinePublishBinding,
+} from "./sessionScopedBinding";
 
 /**
  * TTL cache for session relay publish authorization.
@@ -79,17 +80,11 @@ export async function authorizeSessionRelayPublish(params: Readonly<{
     }
     pruneExpiredRelayAuthEntries(nowMs);
 
-    const accessKey = await db.accessKey.findUnique({
-        where: {
-            accountId_machineId_sessionId: {
-                accountId: params.userId,
-                machineId: binding.machineId,
-                sessionId: binding.sessionId,
-            },
-        },
-        select: { machineId: true },
-    });
-    if (!accessKey) {
+    if (!await hasCurrentSessionScopedMachineAccess({
+        accountId: params.userId,
+        machineId: binding.machineId,
+        sessionId: binding.sessionId,
+    })) {
         return null;
     }
 

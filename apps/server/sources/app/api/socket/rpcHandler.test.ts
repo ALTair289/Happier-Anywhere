@@ -70,7 +70,7 @@ function createSocket(params: { id: string; emitWithAck?: ReturnType<typeof vi.f
     const emitWithAck = params.emitWithAck ?? vi.fn().mockResolvedValue(undefined);
     return createFakeSocket({
         id: params.id,
-        data: params.data,
+        ...(params.data !== undefined ? { data: params.data } : {}),
         emit: vi.fn(),
         timeout: vi.fn(() => ({
             emitWithAck,
@@ -558,6 +558,7 @@ describe("rpcHandler", () => {
         const targetSocket = createSocket({
             id: "target-socket",
             emitWithAck: vi.fn().mockResolvedValue(publicFailure),
+            data: { clientType: "user-scoped" },
         });
         const redisCoordinator = createRedisCoordinator({
             enabled: redisEnabled,

@@ -195,8 +195,12 @@ describe("sessionUpdateHandler (AccountChange integration)", () => {
             }),
         );
 
-        expect(buildNewMessageUpdate).toHaveBeenNthCalledWith(1, expect.anything(), "s1", 101, "upd-1");
-        expect(buildNewMessageUpdate).toHaveBeenNthCalledWith(2, expect.anything(), "s1", 102, "upd-2");
+        expect(buildNewMessageUpdate).toHaveBeenNthCalledWith(1, expect.anything(), "s1", 101, "upd-1", {
+            attentionImpact: { affectsMeaningfulActivity: true, affectsUnread: true },
+        });
+        expect(buildNewMessageUpdate).toHaveBeenNthCalledWith(2, expect.anything(), "s1", 102, "upd-2", {
+            attentionImpact: { affectsMeaningfulActivity: true, affectsUnread: true },
+        });
 
         expect(emitUpdate).toHaveBeenCalledTimes(2);
         expect(socketMessageAckInc).toHaveBeenCalledWith({ result: "ok", error: "none" });
@@ -238,8 +242,12 @@ describe("sessionUpdateHandler (AccountChange integration)", () => {
         await handler({ sid: "s1", message: "next", localId: "l1" }, callback);
 
         expect(buildNewMessageUpdate).not.toHaveBeenCalled();
-        expect(buildMessageUpdatedUpdate).toHaveBeenNthCalledWith(1, expect.anything(), "s1", 101, "upd-1");
-        expect(buildMessageUpdatedUpdate).toHaveBeenNthCalledWith(2, expect.anything(), "s1", 102, "upd-2");
+        expect(buildMessageUpdatedUpdate).toHaveBeenNthCalledWith(1, expect.anything(), "s1", 101, "upd-1", {
+            attentionImpact: { affectsMeaningfulActivity: true, affectsUnread: true },
+        });
+        expect(buildMessageUpdatedUpdate).toHaveBeenNthCalledWith(2, expect.anything(), "s1", 102, "upd-2", {
+            attentionImpact: { affectsMeaningfulActivity: true, affectsUnread: true },
+        });
         expect(emitUpdate).toHaveBeenCalledTimes(2);
         expect(callback).toHaveBeenCalledWith({ ok: true, id: "m1", seq: 55, localId: "l1", didWrite: false, didUpdate: true });
     });

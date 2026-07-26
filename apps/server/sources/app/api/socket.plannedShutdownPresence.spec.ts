@@ -91,10 +91,6 @@ vi.mock("@/app/api/socket/machineSocketOwnershipRegistry", () => ({
     })),
 }));
 
-vi.mock("@/app/api/socket/serverRpcForwarder", () => ({
-    createServerRpcForwarder: vi.fn(() => vi.fn()),
-}));
-
 vi.mock("@/app/api/socket/usageHandler", () => ({ usageHandler: vi.fn() }));
 vi.mock("@/app/api/socket/rpcHandler", () => ({ rpcHandler: vi.fn() }));
 vi.mock("@/app/api/socket/pingHandler", () => ({ pingHandler: vi.fn() }));

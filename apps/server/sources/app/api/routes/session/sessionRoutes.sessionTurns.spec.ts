@@ -117,6 +117,50 @@ describe("sessionRoutes session turns", () => {
         expect(emitUpdate).not.toHaveBeenCalled();
     });
 
+    it("returns the canonical non-positive exact receipt without converting it to success", async () => {
+        applySessionTurnMutation.mockResolvedValue({
+            ok: true,
+            didApply: false,
+            reason: "missing-turn",
+            receipt: {
+                v: 1,
+                sessionId: "s1",
+                mutationId: "exact-end-missing",
+                turnId: "turn-1",
+                action: "end_session",
+                decision: "missing-turn",
+                observedAt: 123,
+                appliedAt: 124,
+            },
+            latestTurnId: null,
+            latestTurnStatus: null,
+            latestTurnStatusObservedAt: null,
+            lastRuntimeIssue: null,
+            participantCursors: [],
+            badgeAttentionChanged: false,
+        });
+
+        const route = await createSessionRouteTestBuilder("POST", "/v1/sessions/:sessionId/turns/mutations");
+        const { response } = await route.invoke({
+            params: { sessionId: "s1" },
+            body: {
+                v: 1,
+                sessionId: "s1",
+                mutationId: "exact-end-missing",
+                action: "end_session",
+                turnId: "turn-1",
+                observedAt: 123,
+            },
+        });
+
+        expect(response).toEqual({
+            success: true,
+            applied: false,
+            reason: "missing-turn",
+            receipt: expect.objectContaining({ decision: "missing-turn", turnId: "turn-1" }),
+        });
+    });
+
     it("returns a session turns projection from server-readable rows", async () => {
         const route = await createSessionRouteTestBuilder("GET", "/v1/sessions/:sessionId/turns");
         expect(route.routeExists).toBe(true);

@@ -2,11 +2,14 @@ import { log } from "@/utils/logging/log";
 import { Server, Socket } from "socket.io";
 import {
     parseSocketRpcAuthorizationContext,
+    RPC_METHODS,
+    resolveSocketRpcProviderStartingMethod,
     resolveSocketRpcSessionWriteAuthorizationMethod,
     RPC_ERROR_CODES,
     RPC_ERROR_MESSAGES,
     type SocketRpcAuthorizationContext,
 } from "@happier-dev/protocol/rpc";
+import { StopSessionResultSchema } from "@happier-dev/protocol";
 import { SOCKET_RPC_EVENTS } from "@happier-dev/protocol/socketRpc";
 import { checkSessionAccess, requireAccessLevel } from "@/app/share/accessControl";
 import { resolveRpcForwardTimeoutMs } from "./rpcForwardTimeout";
@@ -19,6 +22,15 @@ import {
     formatCurrentMachineSocketError,
     validateCurrentMachineSocket,
 } from "@/app/machines/validateCurrentMachineSocket";
+import {
+    revalidateSessionSyncSocketCompatibility,
+} from "@/app/clientCompatibility/socketEnforcement";
+import { readHappierSocketData } from "./socketData";
+import type {
+    CaptureExplicitMachineStopResult,
+    createSessionPublisherPresence,
+} from "@/app/presence/sessionPublisherPresence";
+import { publishSessionPublisherLifecycleUpdate } from "@/app/session/runtimeActivity/publishPublisherLifecycleUpdate";
 
 const MAX_RPC_METHOD_NAME_LENGTH = 512;
 
@@ -90,12 +102,9 @@ function pruneUserRpcListenerMapIfEmpty(
 }
 
 function readMachineScopedSocketMachineId(socket: Socket): string | null {
-    const clientType = typeof (socket.data as any)?.clientType === 'string'
-        ? (socket.data as any).clientType
-        : '';
-    const machineId = typeof (socket.data as any)?.machineId === 'string'
-        ? (socket.data as any).machineId
-        : '';
+    const socketData = readHappierSocketData(socket);
+    const clientType = socketData.clientType ?? '';
+    const machineId = socketData.machineId ?? '';
     return clientType === 'machine-scoped' && machineId ? machineId : null;
 }
 
@@ -103,6 +112,44 @@ function readMachineIdPrefix(method: string): string | null {
     const separatorIndex = method.indexOf(':');
     if (separatorIndex <= 0) return null;
     return method.slice(0, separatorIndex);
+}
+
+function readExplicitMachineStopRequest(method: string, value: unknown): Readonly<{
+    machineId: string;
+    sessionId: string;
+}> | null {
+    const machineId = readMachineIdPrefix(method);
+    if (!machineId || method.slice(machineId.length + 1) !== RPC_METHODS.STOP_SESSION) return null;
+    // Machine params stay end-to-end encrypted; the authorized session context is
+    // the server-readable identity used to fence and finalize the exact publisher.
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const sessionId = (value as Record<string, unknown>).sessionId;
+    if (typeof sessionId !== "string") return null;
+    const trimmedSessionId = sessionId.trim();
+    if (!trimmedSessionId || trimmedSessionId.length > MAX_RPC_METHOD_NAME_LENGTH) return null;
+    return { machineId, sessionId: trimmedSessionId };
+}
+
+function revalidatePrivilegedRpcTargetCompatibility(socket: Socket, method: string) {
+    if (!resolveSocketRpcProviderStartingMethod(method)) return null;
+    const socketData = readHappierSocketData(socket);
+    return revalidateSessionSyncSocketCompatibility(
+        socketData.clientType === 'machine-scoped' && socketData.sessionSyncCompatibility
+            ? socketData.sessionSyncCompatibility.parseResult
+            : { status: 'missing' },
+        process.env,
+        'machine-scoped',
+    );
+}
+
+function buildPrivilegedRpcUpgradeRequiredResponse(socket: Socket, method: string) {
+    const compatibility = revalidatePrivilegedRpcTargetCompatibility(socket, method);
+    if (compatibility === null || compatibility.accepted) return null;
+    return {
+        ok: false as const,
+        error: 'client-upgrade-required',
+        ...(compatibility.upgradeRequired ?? {}),
+    };
 }
 
 function buildForbiddenRpcResponse() {
@@ -118,7 +165,14 @@ export function rpcHandler(
     socket: Socket,
     userRpcListeners: Map<string, Socket>,
     allRpcListeners: Map<string, Map<string, Socket>>,
-    ctx: { io: Server; redisRegistry: RpcRedisRegistryConfig },
+    ctx: {
+        io: Server;
+        redisRegistry: RpcRedisRegistryConfig;
+        sessionPublisherPresence?: Pick<
+            ReturnType<typeof createSessionPublisherPresence>,
+            "captureExplicitMachineStop" | "finalizeExplicitMachineStop"
+        >;
+    },
 ) {
     const ownedMethods = new Set<string>();
     const redisRegistry = createRpcRedisRegistryCoordinator({
@@ -154,6 +208,22 @@ export function rpcHandler(
 
             const machineId = readMachineScopedSocketMachineId(socket);
             if (machineId) {
+                if (resolveSocketRpcProviderStartingMethod(method)) {
+                    const compatibility = readHappierSocketData(socket).sessionSyncCompatibility;
+                    const currentCompatibility = revalidateSessionSyncSocketCompatibility(
+                        compatibility?.parseResult ?? { status: 'missing' },
+                        process.env,
+                        'machine-scoped',
+                    );
+                    if (!currentCompatibility.accepted) {
+                        socket.emit(SOCKET_RPC_EVENTS.ERROR, {
+                            type: 'register',
+                            error: 'client-upgrade-required',
+                            ...(currentCompatibility.upgradeRequired ?? {}),
+                        });
+                        return;
+                    }
+                }
                 const currentMachine = await validateCurrentMachineSocket({ accountId: userId, machineId });
                 if (!currentMachine.ok) {
                     socket.emit(SOCKET_RPC_EVENTS.ERROR, {
@@ -257,8 +327,17 @@ export function rpcHandler(
             }
 
             let { targetUserId, targetSocket } = targetResolution;
+            const explicitMachineStopRequest = readExplicitMachineStopRequest(method, rpcAuthorization);
+            if (method.endsWith(`:${RPC_METHODS.STOP_SESSION}`) && !explicitMachineStopRequest) {
+                callback?.({
+                    ok: false,
+                    error: "Invalid parameters: sessionId is required",
+                });
+                return;
+            }
             const forwardTimeoutMs = resolveRpcForwardTimeoutMs(method, requestedTimeoutMs);
             let attemptedTargetSocketId: string | null = null;
+            let explicitMachineStopCapture: CaptureExplicitMachineStopResult | null = null;
             const buildForwardedRequest = () => ({
                 method,
                 params: callParams,
@@ -269,6 +348,42 @@ export function rpcHandler(
                     return userRpcListeners.get(method) ?? null;
                 }
                 return allRpcListeners.get(targetUserId)?.get(method) ?? null;
+            };
+            const forwardTargetResponse = async (targetResponse: unknown) => {
+                const forwarded = forwardedRpcTargetResponse({ method, targetResponse });
+                if (!explicitMachineStopRequest || explicitMachineStopCapture?.status !== "captured") {
+                    return forwarded;
+                }
+                const stopResult = StopSessionResultSchema.safeParse(targetResponse);
+                if (!stopResult.success || stopResult.data.status !== "stopped") return forwarded;
+                const presence = ctx.sessionPublisherPresence;
+                if (!presence) {
+                    return {
+                        ok: false as const,
+                        error: "Server explicit stop lifecycle owner unavailable",
+                    };
+                }
+                const closed = await presence.finalizeExplicitMachineStop({
+                    target: explicitMachineStopCapture.target,
+                });
+                if (closed.status === "closed") {
+                    await publishSessionPublisherLifecycleUpdate({
+                        sessionId: explicitMachineStopRequest.sessionId,
+                        participantCursors: closed.participantCursors,
+                        active: false,
+                        activeAt: closed.activeAt.getTime(),
+                        ...(closed.projection ? { projection: closed.projection } : {}),
+                        ...(closed.turnProjection ?? {}),
+                    });
+                    return forwarded;
+                }
+                if (closed.status === "already_inactive") return forwarded;
+                return {
+                    ok: false as const,
+                    error: closed.status === "superseded"
+                        ? "Session resumed while stop was in progress"
+                        : "Session stop could not be finalized safely",
+                };
             };
 
             try {
@@ -286,6 +401,32 @@ export function rpcHandler(
                                 errorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
                             });
                         }
+                        return;
+                    }
+                }
+                if (explicitMachineStopRequest) {
+                    const presence = ctx.sessionPublisherPresence;
+                    if (!presence) {
+                        callback?.({
+                            ok: false,
+                            error: "Server explicit stop lifecycle owner unavailable",
+                        });
+                        return;
+                    }
+                    explicitMachineStopCapture = await presence.captureExplicitMachineStop({
+                        binding: {
+                            accountId: targetUserId,
+                            machineId: explicitMachineStopRequest.machineId,
+                            sessionId: explicitMachineStopRequest.sessionId,
+                        },
+                    });
+                    if (explicitMachineStopCapture.status === "rejected") {
+                        callback?.(explicitMachineStopCapture.reason === "unauthorized"
+                            ? buildForbiddenRpcResponse()
+                            : {
+                                ok: false,
+                                error: "Session stop target unavailable",
+                            });
                         return;
                     }
                 }
@@ -336,12 +477,18 @@ export function rpcHandler(
                             }
                         }
 
+                        const upgradeRequired = buildPrivilegedRpcUpgradeRequiredResponse(fallbackSocket, method);
+                        if (upgradeRequired) {
+                            callback?.(upgradeRequired);
+                            return;
+                        }
+
                         const response = await fallbackSocket.timeout(forwardTimeoutMs).emitWithAck(
                             SOCKET_RPC_EVENTS.REQUEST,
                             buildForwardedRequest(),
                         );
                         if (callback) {
-                            callback(forwardedRpcTargetResponse({ method, targetResponse: response }));
+                            callback(await forwardTargetResponse(response));
                         }
                         return;
                     }
@@ -369,6 +516,52 @@ export function rpcHandler(
                     }
 
                     attemptedTargetSocketId = targetSocketId;
+                    if (resolveSocketRpcProviderStartingMethod(method)) {
+                        const currentTargets = await ctx.io.in(targetSocketId).fetchSockets();
+                        const currentTarget = currentTargets.find((candidate) => candidate.id === targetSocketId);
+                        if (!currentTarget) {
+                            await redisRegistry.removeSocketRegistration(targetUserId, method, targetSocketId);
+                            callback?.({
+                                ok: false,
+                                error: RPC_ERROR_MESSAGES.METHOD_NOT_AVAILABLE,
+                                errorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
+                            });
+                            return;
+                        }
+                        const currentMachineId = readMachineScopedSocketMachineId(currentTarget as unknown as Socket);
+                        if (!currentMachineId) {
+                            const upgradeRequired = buildPrivilegedRpcUpgradeRequiredResponse(
+                                currentTarget as unknown as Socket,
+                                method,
+                            );
+                            callback?.(upgradeRequired ?? {
+                                ok: false,
+                                error: RPC_ERROR_MESSAGES.METHOD_NOT_AVAILABLE,
+                                errorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
+                            });
+                            return;
+                        }
+                        const currentMachine = await validateCurrentMachineSocket({
+                            accountId: targetUserId,
+                            machineId: currentMachineId,
+                        });
+                        if (!currentMachine.ok) {
+                            callback?.({
+                                ok: false,
+                                error: formatCurrentMachineSocketError(currentMachine.reason),
+                                errorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
+                            });
+                            return;
+                        }
+                        const upgradeRequired = buildPrivilegedRpcUpgradeRequiredResponse(
+                            currentTarget as unknown as Socket,
+                            method,
+                        );
+                        if (upgradeRequired) {
+                            callback?.(upgradeRequired);
+                            return;
+                        }
+                    }
                     const responses = await ctx.io.timeout(forwardTimeoutMs).to(targetSocketId).emitWithAck(
                         SOCKET_RPC_EVENTS.REQUEST,
                         buildForwardedRequest(),
@@ -393,7 +586,7 @@ export function rpcHandler(
                     const response = Array.isArray(responses) ? responses[0] : responses;
 
                     if (callback) {
-                        callback(forwardedRpcTargetResponse({ method, targetResponse: response }));
+                        callback(await forwardTargetResponse(response));
                     }
                     return;
                 }
@@ -447,6 +640,12 @@ export function rpcHandler(
                     }
                 }
 
+                const upgradeRequired = buildPrivilegedRpcUpgradeRequiredResponse(targetSocket, method);
+                if (upgradeRequired) {
+                    callback?.(upgradeRequired);
+                    return;
+                }
+
                 // Forward the RPC request to the target socket using emitWithAck (single-process path).
                 const response = await targetSocket.timeout(forwardTimeoutMs).emitWithAck(
                     SOCKET_RPC_EVENTS.REQUEST,
@@ -454,7 +653,7 @@ export function rpcHandler(
                 );
 
                 if (callback) {
-                    callback(forwardedRpcTargetResponse({ method, targetResponse: response }));
+                    callback(await forwardTargetResponse(response));
                 }
 
             } catch (error) {

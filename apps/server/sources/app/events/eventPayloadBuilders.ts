@@ -2,13 +2,14 @@ import { AccountProfile } from "@/types";
 import { getPublicUrl } from "@/storage/blob/files";
 import { resolveMessageAttentionImpact } from "@/app/session/messageAttentionImpact";
 import { type UpdatePayload, type EphemeralPayload } from "./eventPayloadTypes";
-import { SessionRuntimeActivityProjectionSchema } from "@happier-dev/protocol";
+import { SessionMessageDeliveryResolutionV1Schema, SessionRuntimeActivityProjectionSchema } from "@happier-dev/protocol";
 import type {
     PrimaryTurnStatusV1,
     SessionRuntimeActivityState,
     SessionMessageAttentionImpact,
     SessionMessageRole,
     SessionRuntimeIssueV1,
+    SessionTranscriptObservationProvenanceV1,
 } from "@happier-dev/protocol";
 
 type UpdateMessagePayloadInput = Readonly<{
@@ -20,6 +21,10 @@ type UpdateMessagePayloadInput = Readonly<{
     messageRole?: SessionMessageRole | null;
     createdAt: Date;
     updatedAt: Date;
+    sourceCreatedAt?: Date | null;
+    sourceUpdatedAt?: Date | null;
+    transcriptObservationProvenance?: SessionTranscriptObservationProvenanceV1 | null;
+    deliveryResolution?: unknown;
 }>;
 
 type UpdateMessagePayloadOptions = Readonly<{
@@ -77,6 +82,15 @@ function serializeUpdateMessage(message: UpdateMessagePayloadInput, options?: Up
         attentionImpact,
         createdAt: message.createdAt.getTime(),
         updatedAt: message.updatedAt.getTime(),
+        ...(message.sourceCreatedAt ? { sourceCreatedAt: message.sourceCreatedAt.getTime() } : {}),
+        ...(message.sourceUpdatedAt ? { sourceUpdatedAt: message.sourceUpdatedAt.getTime() } : {}),
+        ...(message.transcriptObservationProvenance
+            ? { transcriptObservationProvenance: message.transcriptObservationProvenance }
+            : {}),
+        ...(() => {
+            const resolution = SessionMessageDeliveryResolutionV1Schema.safeParse(message.deliveryResolution);
+            return resolution.success ? { deliveryResolution: resolution.data } : {};
+        })(),
     };
 }
 
@@ -251,7 +265,15 @@ export function buildUpdateSessionUpdate(
 }
 
 export function buildPendingChangedUpdate(
-    data: { sessionId: string; pendingVersion: number; pendingCount: number; pendingBlockedCount?: number; meaningfulActivityAt?: Date | null; changedByAccountId?: string },
+    data: {
+        sessionId: string;
+        pendingVersion: number;
+        pendingCount: number;
+        pendingBlockedCount?: number;
+        meaningfulActivityAt?: Date | null;
+        changedByAccountId?: string;
+        pendingActivationRequestId?: string;
+    },
     updateSeq: number,
     updateId: string,
 ): UpdatePayload {
@@ -272,6 +294,9 @@ export function buildPendingChangedUpdate(
             ...(typeof data.pendingBlockedCount === "number" ? { pendingBlockedCount: data.pendingBlockedCount } : {}),
             ...(typeof meaningfulActivityAt === "number" ? { meaningfulActivityAt } : {}),
             ...(typeof data.changedByAccountId === "string" ? { changedByAccountId: data.changedByAccountId } : {}),
+            ...(typeof data.pendingActivationRequestId === "string"
+                ? { pendingActivationRequestId: data.pendingActivationRequestId }
+                : {}),
         },
         createdAt: Date.now(),
     };

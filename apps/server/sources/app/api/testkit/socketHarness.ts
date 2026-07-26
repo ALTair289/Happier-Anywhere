@@ -22,6 +22,7 @@ export function createFakeSocket(overrides: FakeSocketOverrides = {}): FakeSocke
     const handlers = new Map<string, SocketHandler>();
     const socket: FakeSocket = {
         connected: true,
+        data: {},
         id: "fake-socket",
         handlers,
         emit: vi.fn(),

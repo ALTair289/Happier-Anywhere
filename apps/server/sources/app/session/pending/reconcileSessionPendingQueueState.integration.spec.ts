@@ -59,6 +59,7 @@ describe("reconcileSessionPendingQueueState", () => {
                 content: { t: "encrypted", c: "ciphertext" },
                 status: "queued",
                 position: params.position,
+                requestedAction: { v: 1, kind: "enqueue" },
             },
         });
     };
@@ -170,4 +171,5 @@ describe("reconcileSessionPendingQueueState", () => {
         });
         expect(after).toEqual(current);
     });
+
 });

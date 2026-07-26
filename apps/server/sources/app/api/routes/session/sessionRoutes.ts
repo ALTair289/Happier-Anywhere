@@ -9,7 +9,6 @@ import { registerSessionMessageRoutes } from "./registerSessionMessageRoutes";
 import { registerSessionPatchRoute } from "./registerSessionPatchRoute";
 import { registerSessionReadStateRoutes } from "./registerSessionReadStateRoutes";
 import { registerSessionTurnRoutes } from "./registerSessionTurnRoutes";
-import { registerSessionEndRoute } from "./registerSessionEndRoute";
 import { registerSessionSystemRecordRoutes } from "./registerSessionSystemRecordRoutes";
 
 export function sessionRoutes(app: Fastify) {
@@ -22,7 +21,6 @@ export function sessionRoutes(app: Fastify) {
     registerSessionSystemRecordRoutes(app);
     registerSessionPatchRoute(app);
     registerSessionTurnRoutes(app);
-    registerSessionEndRoute(app);
     registerSessionReadStateRoutes(app);
     registerSessionDeleteRoute(app);
 }

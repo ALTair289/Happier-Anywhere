@@ -1,6 +1,5 @@
 import {
     buildNewSessionUpdate,
-    buildSessionActivityEphemeral,
     buildUpdateSessionUpdate,
     eventRouter,
 } from "@/app/events/eventRouter";
@@ -23,9 +22,10 @@ import { mapStoredSessionRuntimeActivityProjection } from "./v2SessionListRows";
 
 import { type Fastify } from "../../types";
 
-type ExistingSessionReactivation = Readonly<{
+type ExistingSessionLoadUpdate = Readonly<{
     sessionId: string;
-    activeAt: number;
+    meaningfulActivityAt: number;
+    unarchived: boolean;
     participantCursors: ReadonlyArray<SessionParticipantCursor>;
 }>;
 
@@ -70,38 +70,60 @@ export function registerSessionCreateOrLoadRoute(app: Fastify) {
                     { module: "session-create", sessionId: existing.id, userId, tag },
                     `Found existing session: ${existing.id} for tag ${tag}`,
                 );
-                if (existing.active) {
-                    return { session: existing, reactivation: null };
+                if (existing.active && existing.archivedAt === null) {
+                    return { session: existing, loadUpdate: null, resolution: "existing" as const };
                 }
 
-                const activeAt = Date.now();
-                const activeAtDate = new Date(activeAt);
-                const session = await tx.session.update({
-                    where: { id: existing.id },
-                    data: {
-                        active: true,
-                        lastActiveAt: activeAtDate,
-                        meaningfulActivityAt: activeAtDate,
-                    },
-                });
+                const meaningfulActivityAt = Date.now();
+                const meaningfulActivityAtDate = new Date(meaningfulActivityAt);
+                const unarchived = existing.archivedAt !== null;
+                const loadData = {
+                    meaningfulActivityAt: meaningfulActivityAtDate,
+                    ...(unarchived ? { archivedAt: null } : {}),
+                } as const;
+                let session;
+                if (unarchived) {
+                    const transitioned = await tx.session.updateMany({
+                        where: { id: existing.id, archivedAt: existing.archivedAt },
+                        data: loadData,
+                    });
+                    if (transitioned.count === 1) {
+                        session = await tx.session.findUniqueOrThrow({ where: { id: existing.id } });
+                    } else {
+                        const concurrent = await tx.session.findUniqueOrThrow({ where: { id: existing.id } });
+                        if (concurrent.archivedAt !== null) {
+                            throw new Error("Concurrent session unarchive did not converge");
+                        }
+                        session = await tx.session.update({
+                            where: { id: existing.id },
+                            data: { meaningfulActivityAt: meaningfulActivityAtDate },
+                        });
+                    }
+                } else {
+                    session = await tx.session.update({
+                        where: { id: existing.id },
+                        data: loadData,
+                    });
+                }
                 const participantCursors = await markSessionParticipantsChanged({
                     tx,
                     sessionId: existing.id,
                     hint: {
                         sessionStart: true,
-                        active: true,
-                        activeAt,
-                        meaningfulActivityAt: activeAt,
+                        meaningfulActivityAt,
+                        ...(unarchived ? { archivedAt: null } : {}),
                     },
                 });
 
                 return {
                     session,
-                    reactivation: {
+                    resolution: "existing" as const,
+                    loadUpdate: {
                         sessionId: existing.id,
-                        activeAt,
+                        meaningfulActivityAt,
+                        unarchived,
                         participantCursors,
-                    } satisfies ExistingSessionReactivation,
+                    } satisfies ExistingSessionLoadUpdate,
                 };
             }
 
@@ -186,19 +208,18 @@ export function registerSessionCreateOrLoadRoute(app: Fastify) {
                 });
             });
 
-            return { session: created, reactivation: null };
+            return { session: created, loadUpdate: null, resolution: "created" as const };
         });
 
-        const reactivation = resolved.reactivation;
-        if (reactivation) {
+        const loadUpdate = resolved.loadUpdate;
+        if (loadUpdate) {
             const projection = {
-                active: true,
-                activeAt: reactivation.activeAt,
-                meaningfulActivityAt: reactivation.activeAt,
+                meaningfulActivityAt: loadUpdate.meaningfulActivityAt,
+                ...(loadUpdate.unarchived ? { archivedAt: null } : {}),
             };
-            await Promise.all(reactivation.participantCursors.map(async ({ accountId, cursor }) => {
+            await Promise.all(loadUpdate.participantCursors.map(async ({ accountId, cursor }) => {
                 const payload = buildUpdateSessionUpdate(
-                    reactivation.sessionId,
+                    loadUpdate.sessionId,
                     cursor,
                     randomKeyNaked(12),
                     undefined,
@@ -210,20 +231,16 @@ export function registerSessionCreateOrLoadRoute(app: Fastify) {
                     payload,
                     recipientFilter: {
                         type: "all-interested-in-session",
-                        sessionId: reactivation.sessionId,
+                        sessionId: loadUpdate.sessionId,
                     },
                 });
             }));
-            eventRouter.emitEphemeral({
-                userId,
-                payload: buildSessionActivityEphemeral(reactivation.sessionId, true, reactivation.activeAt, false),
-                recipientFilter: { type: "user-scoped-only" },
-            });
         }
 
         const resolvedSession = resolved.session;
         log({ module: "session-create", sessionId: resolvedSession.id, userId }, `Session resolved: ${resolvedSession.id}`);
         return reply.send({
+            resolution: resolved.resolution,
             session: {
                 id: resolvedSession.id,
                 seq: resolvedSession.seq,
@@ -238,7 +255,6 @@ export function registerSessionCreateOrLoadRoute(app: Fastify) {
                 pendingCount: resolvedSession.pendingCount,
                 pendingBlockedCount: resolvedSession.pendingBlockedCount,
                 pendingVersion: resolvedSession.pendingVersion,
-                initialTranscriptCatchUpAuthorization: "explicit_cursor",
                 ...mapStoredSessionRuntimeActivityProjection(resolvedSession),
                 active: resolvedSession.active,
                 activeAt: resolvedSession.lastActiveAt.getTime(),

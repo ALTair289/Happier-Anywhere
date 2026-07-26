@@ -35,10 +35,6 @@ vi.mock("@/app/session/messageContent/normalizeIncomingSessionMessageContent", (
     normalizeIncomingSessionMessageContent: vi.fn(() => null),
 }));
 
-vi.mock("@/app/presence/presenceRecorder", () => ({
-    recordSessionAlive: vi.fn(async () => {}),
-}));
-
 vi.mock("@/app/activity/refreshAccountActivityBadgePushes", () => ({
     refreshSessionParticipantBadgePushes: vi.fn(async () => {}),
 }));

@@ -201,7 +201,6 @@ export function mapV2SessionListRow(params: Readonly<{ row: V2SessionListRowComp
         latestTurnStatus,
         latestTurnStatusObservedAt,
         lastRuntimeIssue: parseStoredSessionRuntimeIssue(row.lastRuntimeIssue),
-        initialTranscriptCatchUpAuthorization: "explicit_cursor",
         ...runtimeActivityProjection,
         pendingCount: row.pendingCount,
         pendingBlockedCount: row.pendingBlockedCount,

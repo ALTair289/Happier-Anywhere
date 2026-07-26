@@ -7,28 +7,36 @@ vi.mock("@/app/session/pending/resolveSessionPendingAccess", () => ({
     resolveSessionPendingOwnerAccess,
 }));
 
+const hasCurrentSessionScopedMachineAccessInTx = vi.fn(async () => true);
+vi.mock("@/app/api/socket/sessionScopedBinding", () => ({
+    hasCurrentSessionScopedMachineAccessInTx,
+}));
+
 const dbMocks = createDbMocks({
-    account: ["findUnique"],
     session: ["findUnique"],
     sessionPendingMessage: ["findFirst", "count"],
 } as const);
 installDbModuleMock({ db: dbMocks.db });
 
+const txSessionFindUnique = vi.fn();
 const txSessionFindUniqueOrThrow = vi.fn();
 const txSessionUpdate = vi.fn();
 const txSessionUpdateMany = vi.fn();
 const txSessionPendingMessageFindFirst = vi.fn();
+const txSessionPendingMessageFindMany = vi.fn();
 const txSessionPendingMessageCount = vi.fn();
 const txSessionPendingMessageUpdateMany = vi.fn();
 const txSessionMessageFindFirst = vi.fn();
 const tx = {
     session: {
+        findUnique: txSessionFindUnique,
         findUniqueOrThrow: txSessionFindUniqueOrThrow,
         update: txSessionUpdate,
         updateMany: txSessionUpdateMany,
     },
     sessionPendingMessage: {
         findFirst: txSessionPendingMessageFindFirst,
+        findMany: txSessionPendingMessageFindMany,
         count: txSessionPendingMessageCount,
         updateMany: txSessionPendingMessageUpdateMany,
     },
@@ -37,16 +45,53 @@ const tx = {
     },
 };
 
-const inTx = vi.fn(async (run: (txArg: typeof tx) => Promise<unknown>) => {
-    return await run(tx);
-});
+const inTx = vi.fn(async (run: (txArg: typeof tx) => Promise<unknown>) => await run(tx));
 vi.mock("@/storage/inTx", () => ({
     inTx,
 }));
 
 let materializeNextPendingMessage: typeof import("./materializeNextPendingMessage").materializeNextPendingMessage;
 
-describe("materializeNextPendingMessage (pendingCount fast path)", () => {
+const trustedPublisherFence = {
+    accountId: "u1",
+    machineId: "machine-1",
+    sessionId: "s1",
+    committedFence: new Date("2026-07-13T12:00:00.000Z"),
+} as const;
+
+const sessionRow = (overrides: Record<string, unknown> = {}) => ({
+    encryptionMode: "e2ee",
+    pendingCount: 1,
+    pendingBlockedCount: 0,
+    pendingVersion: 9,
+    active: true,
+    archivedAt: null,
+    lastActiveAt: trustedPublisherFence.committedFence,
+    runtimeActivityState: "idle",
+    runtimeActivityActiveCount: 0,
+    runtimeActivityObservedAt: 1_000n,
+    runtimeActivityRevision: 12n,
+    updatedAt: new Date("2026-07-02T08:00:00.000Z"),
+    ...overrides,
+});
+
+const pendingRow = (
+    kind: "enqueue" | "send_now",
+    overrides: Record<string, unknown> = {},
+) => ({
+    localId: `pending-${kind}`,
+    messageRole: "user",
+    content: { t: "encrypted", c: "encrypted-user-message" },
+    requestedAction: { v: 1, kind },
+    providerAction: null,
+    status: "queued",
+    deliveryState: null,
+    createdAt: new Date("2026-07-02T08:00:00.000Z"),
+    updatedAt: new Date("2026-07-02T08:00:00.000Z"),
+    ...overrides,
+});
+
+describe("materializeNextPendingMessage current Pending owner", () => {
     beforeAll(async () => {
         ({ materializeNextPendingMessage } = await import("./materializeNextPendingMessage"));
     });
@@ -54,261 +99,233 @@ describe("materializeNextPendingMessage (pendingCount fast path)", () => {
     beforeEach(() => {
         vi.clearAllMocks();
         dbMocks.reset();
+        txSessionFindUnique.mockReset();
         txSessionFindUniqueOrThrow.mockReset();
         txSessionUpdate.mockReset();
         txSessionUpdateMany.mockReset();
         txSessionPendingMessageFindFirst.mockReset();
+        txSessionPendingMessageFindMany.mockReset();
         txSessionPendingMessageCount.mockReset();
         txSessionPendingMessageUpdateMany.mockReset();
         txSessionMessageFindFirst.mockReset();
-        dbMocks.db.account.findUnique.mockResolvedValue({ settings: null });
-        dbMocks.db.session.findUnique.mockResolvedValue({ encryptionMode: "e2ee", pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 5 });
+        dbMocks.db.session.findUnique.mockResolvedValue(sessionRow({ pendingCount: 0, pendingVersion: 8 }));
         dbMocks.db.sessionPendingMessage.findFirst.mockResolvedValue(null);
         dbMocks.db.sessionPendingMessage.count.mockResolvedValue(0);
+        txSessionPendingMessageFindFirst.mockResolvedValue(null);
+        txSessionPendingMessageFindMany.mockResolvedValue([]);
         txSessionPendingMessageCount.mockResolvedValue(0);
         txSessionPendingMessageUpdateMany.mockResolvedValue({ count: 0 });
         txSessionMessageFindFirst.mockResolvedValue(null);
+        txSessionFindUnique.mockResolvedValue({
+            accountId: trustedPublisherFence.accountId,
+            active: true,
+            archivedAt: null,
+            lastActiveAt: trustedPublisherFence.committedFence,
+        });
     });
 
-    it("returns didMaterialize=false without starting a transaction when pendingCount is 0", async () => {
-        const result = await materializeNextPendingMessage({ actorUserId: "u1", sessionId: "s1" });
+    it("rejoins current-publisher claims before using pendingCount as a no-work hint", async () => {
+        const result = await materializeNextPendingMessage({
+            actorUserId: "u1",
+            sessionId: "s1",
+            trustedPublisherFence,
+        });
 
         expect(resolveSessionPendingOwnerAccess).toHaveBeenCalledTimes(1);
-        expect(dbMocks.db.session.findUnique).toHaveBeenCalledTimes(1);
         expect(dbMocks.db.sessionPendingMessage.findFirst).toHaveBeenCalledTimes(1);
-        expect(inTx).not.toHaveBeenCalled();
-        expect(result).toEqual({ ok: true, didMaterialize: false, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 5 });
-    });
-
-    it("defers materialization for after-runtime-idle timing while runtime activity has a valid future expiry", async () => {
-        dbMocks.db.session.findUnique.mockResolvedValue({
-            encryptionMode: "e2ee",
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 7,
-            runtimeActivityActiveCount: 1,
-            runtimeActivityObservedAt: BigInt(Date.now()),
-            runtimeActivityExpiresAt: BigInt(Date.now() + 60_000),
-            runtimeActivitySourceClass: "provider_detached_task",
-        });
-        dbMocks.db.sessionPendingMessage.findFirst.mockResolvedValue({ localId: "queued-runtime" });
-        txSessionFindUniqueOrThrow.mockResolvedValue({
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 7,
-        });
-        txSessionPendingMessageFindFirst.mockResolvedValue(null);
-
-        const result = await materializeNextPendingMessage({
-            actorUserId: "u1",
-            sessionId: "s1",
-            deliveryTiming: "after_runtime_idle",
-        });
-
-        expect(inTx).not.toHaveBeenCalled();
-        expect(result).toEqual({
-            ok: true,
-            didMaterialize: false,
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 7,
-            deferredReason: "runtime_activity_active",
-        });
-    });
-
-    it("does not defer materialization for after-runtime-idle timing when runtime activity projection is stale even if the session is active", async () => {
-        dbMocks.db.session.findUnique.mockResolvedValue({
-            encryptionMode: "e2ee",
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 7,
-            active: true,
-            runtimeActivityActiveCount: 1,
-            runtimeActivityObservedAt: BigInt(Date.now() - 120_000),
-            runtimeActivityExpiresAt: BigInt(Date.now() - 1),
-            runtimeActivitySourceClass: "provider_detached_task",
-        });
-        dbMocks.db.sessionPendingMessage.findFirst.mockResolvedValue({ localId: "queued-runtime" });
-        txSessionFindUniqueOrThrow.mockResolvedValue({
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 7,
-            active: true,
-            runtimeActivityActiveCount: 1,
-            runtimeActivityObservedAt: BigInt(Date.now() - 120_000),
-            runtimeActivityExpiresAt: BigInt(Date.now() - 1),
-            runtimeActivitySourceClass: "provider_detached_task",
-        });
-        txSessionPendingMessageFindFirst.mockResolvedValue(null);
-
-        const result = await materializeNextPendingMessage({
-            actorUserId: "u1",
-            sessionId: "s1",
-            deliveryTiming: "after_runtime_idle",
-        });
-
         expect(inTx).toHaveBeenCalledTimes(1);
         expect(result).toEqual({
             ok: true,
             didMaterialize: false,
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 7,
-        });
-    });
-
-    it("defers materialization from the account after-runtime-idle setting without a request opt-in", async () => {
-        dbMocks.db.account.findUnique.mockResolvedValue({
-            settings: JSON.stringify({
-                t: "plain",
-                v: { sessionPendingQueueDeliveryTiming: "after_runtime_idle" },
-            }),
-        });
-        dbMocks.db.session.findUnique.mockResolvedValue({
-            encryptionMode: "e2ee",
-            pendingCount: 1,
+            pendingCount: 0,
             pendingBlockedCount: 0,
             pendingVersion: 8,
-            runtimeActivityActiveCount: 1,
-            runtimeActivityObservedAt: BigInt(Date.now()),
-            runtimeActivityExpiresAt: BigInt(Date.now() + 60_000),
-            runtimeActivitySourceClass: "provider_detached_task",
-        });
-        dbMocks.db.sessionPendingMessage.findFirst.mockResolvedValue({ localId: "queued-runtime" });
-
-        const result = await materializeNextPendingMessage({
-            actorUserId: "u1",
-            sessionId: "s1",
-        });
-
-        expect(dbMocks.db.account.findUnique).toHaveBeenCalledWith({
-            where: { id: "u1" },
-            select: { settings: true },
-        });
-        expect(inTx).not.toHaveBeenCalled();
-        expect(result).toEqual({
-            ok: true,
-            didMaterialize: false,
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 8,
-            deferredReason: "runtime_activity_active",
-        });
-    });
-
-    it("rechecks after-runtime-idle inside the transaction before claiming queued work", async () => {
-        dbMocks.db.session.findUnique.mockResolvedValue({
-            encryptionMode: "e2ee",
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 9,
-            runtimeActivityActiveCount: 0,
-            runtimeActivityObservedAt: null,
-            runtimeActivityExpiresAt: null,
-            runtimeActivitySourceClass: null,
-        });
-        txSessionFindUniqueOrThrow.mockResolvedValue({
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 9,
-            runtimeActivityActiveCount: 1,
-            runtimeActivityObservedAt: BigInt(Date.now()),
-            runtimeActivityExpiresAt: BigInt(Date.now() + 60_000),
-            runtimeActivitySourceClass: "provider_detached_task",
-        });
-        txSessionPendingMessageFindFirst.mockResolvedValue({
-            localId: "queued-runtime",
-            messageRole: "user",
-            content: { t: "encrypted", c: "encrypted-user-message" },
-            status: "queued",
-            createdAt: new Date("2026-07-02T08:00:00.000Z"),
-            updatedAt: new Date("2026-07-02T08:00:00.000Z"),
-        });
-
-        const result = await materializeNextPendingMessage({
-            actorUserId: "u1",
-            sessionId: "s1",
-            deliveryState: "provider",
-            deliveryTiming: "after_runtime_idle",
-        });
-
-        expect(inTx).toHaveBeenCalledTimes(1);
-        expect(txSessionMessageFindFirst).not.toHaveBeenCalled();
-        expect(txSessionPendingMessageUpdateMany).toHaveBeenCalledTimes(1);
-        expect(result).toEqual({
-            ok: true,
-            didMaterialize: false,
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 9,
-            deferredReason: "runtime_activity_active",
             deliveryState: { mode: "provider", unresolved: false },
         });
     });
 
-    it("repairs stale positive pendingCount when no queued pending message exists", async () => {
-        dbMocks.db.session.findUnique.mockResolvedValue({
-            encryptionMode: "e2ee",
-            pendingCount: 2,
-            pendingBlockedCount: 0,
-            pendingVersion: 9,
+    it("selects an urgent FIFO action without reading or validating Activity", async () => {
+        const malformedActivity = sessionRow({
+            runtimeActivityState: "malformed",
+            runtimeActivityActiveCount: -1,
+            runtimeActivityObservedAt: -1n,
+            runtimeActivityRevision: -1n,
         });
+        dbMocks.db.session.findUnique.mockResolvedValue(malformedActivity);
         txSessionFindUniqueOrThrow
-            .mockResolvedValueOnce({
-                pendingCount: 2,
-                pendingBlockedCount: 0,
-                pendingVersion: 9,
-            })
-            .mockResolvedValueOnce({ pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 10 });
-        txSessionPendingMessageFindFirst.mockResolvedValue(null);
-        txSessionUpdateMany.mockResolvedValue({ count: 1 });
+            .mockResolvedValueOnce(malformedActivity)
+            .mockResolvedValueOnce({ pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 9 });
+        txSessionPendingMessageFindMany.mockResolvedValue([pendingRow("send_now")]);
 
-        const result = await materializeNextPendingMessage({ actorUserId: "u1", sessionId: "s1" });
-
-        expect(inTx).toHaveBeenCalledTimes(1);
-        expect(txSessionUpdateMany).toHaveBeenCalledWith({
-            where: { id: "s1", pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 9 },
-            data: { pendingCount: 0, pendingBlockedCount: 0, pendingVersion: { increment: 1 } },
+        const result = await materializeNextPendingMessage({
+            actorUserId: "u1",
+            sessionId: "s1",
+            trustedPublisherFence,
+            deliveryTiming: "after_runtime_idle",
+            foregroundState: "active_unsteerable",
         });
-        expect(txSessionUpdate).not.toHaveBeenCalled();
-        expect(result).toEqual({ ok: true, didMaterialize: false, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 10 });
+
+        expect(txSessionPendingMessageUpdateMany).toHaveBeenCalledWith(
+            expect.objectContaining({
+                where: expect.objectContaining({ localId: "pending-send_now" }),
+                data: expect.objectContaining({ providerAction: "interrupt_and_send" }),
+            }),
+        );
+        expect(result).toMatchObject({ ok: true, didMaterialize: false });
     });
 
-    it("does not hide a concurrent pending enqueue when stale positive repair loses the version race", async () => {
-        dbMocks.db.session.findUnique.mockResolvedValue({
-            encryptionMode: "e2ee",
-            pendingCount: 2,
-            pendingBlockedCount: 0,
-            pendingVersion: 9,
+    it.each([
+        {
+            label: "active",
+            projection: {
+                runtimeActivityState: "active",
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: 1n,
+                runtimeActivityRevision: 12n,
+            },
+            deferredReason: "waiting_for_runtime_activity",
+        },
+        {
+            label: "malformed",
+            projection: {
+                runtimeActivityState: "idle",
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: null,
+                runtimeActivityRevision: 12n,
+            },
+            deferredReason: "runtime_activity_unknown",
+        },
+    ])("validates ordinary after-runtime-idle Activity inside the transaction for $label state", async ({
+        projection,
+        deferredReason,
+    }) => {
+        const before = sessionRow(projection);
+        dbMocks.db.session.findUnique.mockResolvedValue(before);
+        txSessionFindUniqueOrThrow.mockResolvedValue(before);
+        txSessionPendingMessageFindMany.mockResolvedValue([pendingRow("enqueue")]);
+
+        const result = await materializeNextPendingMessage({
+            actorUserId: "u1",
+            sessionId: "s1",
+            trustedPublisherFence,
+            deliveryTiming: "after_runtime_idle",
         });
-        txSessionFindUniqueOrThrow
-            .mockResolvedValueOnce({
-                pendingCount: 2,
-                pendingBlockedCount: 0,
-                pendingVersion: 9,
-            })
-            .mockResolvedValueOnce({ pendingCount: 3, pendingBlockedCount: 0, pendingVersion: 10 });
+
+        expect(txSessionPendingMessageUpdateMany).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ ok: true, didMaterialize: false, deferredReason });
+    });
+
+    it("requires the exact idle revision for a current publisher before claiming ordinary work", async () => {
+        const committedFence = new Date("2026-07-13T12:00:00.000Z");
+        const idle = sessionRow({ lastActiveAt: committedFence });
+        const authority = {
+            accountId: "u1",
+            machineId: "machine-1",
+            sessionId: "s1",
+            committedFence,
+        };
+        dbMocks.db.session.findUnique.mockResolvedValue(idle);
+        txSessionFindUnique.mockResolvedValue({
+            accountId: "u1",
+            active: true,
+            archivedAt: null,
+            lastActiveAt: committedFence,
+        });
         txSessionPendingMessageFindFirst.mockResolvedValue(null);
+        txSessionPendingMessageFindMany.mockResolvedValue([pendingRow("enqueue")]);
+        txSessionFindUniqueOrThrow
+            .mockResolvedValueOnce(idle)
+            .mockResolvedValueOnce(idle)
+            .mockResolvedValueOnce({ pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 9 });
+
+        const stale = await materializeNextPendingMessage({
+            actorUserId: "u1",
+            sessionId: "s1",
+            deliveryTiming: "after_runtime_idle",
+            expectedRuntimeActivityRevision: 11,
+            trustedPublisherFence: authority,
+        });
+        expect(stale).toMatchObject({
+            ok: true,
+            didMaterialize: false,
+            deferredReason: "runtime_activity_unknown",
+        });
+        expect(txSessionPendingMessageUpdateMany).not.toHaveBeenCalled();
+
+        vi.clearAllMocks();
+        txSessionFindUnique.mockReset();
+        txSessionFindUniqueOrThrow.mockReset();
+        txSessionPendingMessageFindFirst.mockReset();
+        txSessionPendingMessageFindMany.mockReset();
+        txSessionPendingMessageUpdateMany.mockReset();
+        resolveSessionPendingOwnerAccess.mockResolvedValue({ ok: true });
+        hasCurrentSessionScopedMachineAccessInTx.mockResolvedValue(true);
+        dbMocks.db.session.findUnique.mockResolvedValue(idle);
+        txSessionFindUnique.mockResolvedValue({
+            accountId: "u1",
+            active: true,
+            archivedAt: null,
+            lastActiveAt: committedFence,
+        });
+        txSessionPendingMessageFindFirst.mockResolvedValue(null);
+        txSessionPendingMessageFindMany.mockResolvedValue([pendingRow("enqueue")]);
+        txSessionFindUniqueOrThrow
+            .mockResolvedValueOnce(idle)
+            .mockResolvedValueOnce(idle)
+            .mockResolvedValueOnce({ pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 9 });
+        txSessionPendingMessageUpdateMany.mockResolvedValue({ count: 0 });
+
+        const exact = await materializeNextPendingMessage({
+            actorUserId: "u1",
+            sessionId: "s1",
+            deliveryTiming: "after_runtime_idle",
+            expectedRuntimeActivityRevision: 12,
+            trustedPublisherFence: authority,
+        });
+
+        expect(exact).toMatchObject({ ok: true, didMaterialize: false });
+        expect(exact).not.toHaveProperty("deferredReason");
+        expect(txSessionPendingMessageUpdateMany).toHaveBeenCalledWith(
+            expect.objectContaining({ where: expect.objectContaining({ localId: "pending-enqueue" }) }),
+        );
+        const preflightSelect = dbMocks.db.session.findUnique.mock.calls[0]?.[0]?.select as Record<string, unknown>;
+        const transactionSelect = txSessionFindUniqueOrThrow.mock.calls[1]?.[0]?.select as Record<string, unknown>;
+        expect(preflightSelect).not.toHaveProperty("runtimeActivitySourceClass");
+        expect(transactionSelect).not.toHaveProperty("runtimeActivitySourceClass");
+    });
+
+    it("repairs stale positive pending counters without clobbering a newer version", async () => {
+        dbMocks.db.session.findUnique.mockResolvedValue(sessionRow({ pendingCount: 2 }));
+        txSessionFindUniqueOrThrow
+            .mockResolvedValueOnce({ pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 9 })
+            .mockResolvedValueOnce({ pendingCount: 3, pendingBlockedCount: 0, pendingVersion: 10 });
+        txSessionPendingMessageFindMany.mockResolvedValue([]);
         txSessionUpdateMany.mockResolvedValue({ count: 0 });
 
-        const result = await materializeNextPendingMessage({ actorUserId: "u1", sessionId: "s1" });
+        const result = await materializeNextPendingMessage({
+            actorUserId: "u1",
+            sessionId: "s1",
+            trustedPublisherFence,
+        });
 
         expect(txSessionUpdateMany).toHaveBeenCalledWith({
             where: { id: "s1", pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 9 },
             data: { pendingCount: 0, pendingBlockedCount: 0, pendingVersion: { increment: 1 } },
         });
-        expect(txSessionUpdate).not.toHaveBeenCalled();
-        expect(result).toEqual({ ok: true, didMaterialize: false, pendingCount: 3, pendingBlockedCount: 0, pendingVersion: 10 });
+        expect(result).toEqual({
+            ok: true,
+            didMaterialize: false,
+            pendingCount: 3,
+            pendingBlockedCount: 0,
+            pendingVersion: 10,
+            deliveryState: { mode: "provider", unresolved: false },
+        });
     });
 
     it("retries a benign unique-message materialization race as an idempotent no-op", async () => {
-        dbMocks.db.session.findUnique.mockResolvedValue({
-            encryptionMode: "e2ee",
-            pendingCount: 1,
-            pendingBlockedCount: 0,
-            pendingVersion: 9,
-        });
+        dbMocks.db.session.findUnique.mockResolvedValue(sessionRow());
         inTx
+            .mockImplementationOnce(async (run: (txArg: typeof tx) => Promise<unknown>) => await run(tx))
             .mockRejectedValueOnce({ code: "P2002" })
             .mockImplementationOnce(async (run: (txArg: typeof tx) => Promise<unknown>) => await run(tx));
         txSessionFindUniqueOrThrow.mockResolvedValue({
@@ -316,11 +333,22 @@ describe("materializeNextPendingMessage (pendingCount fast path)", () => {
             pendingBlockedCount: 0,
             pendingVersion: 10,
         });
-        txSessionPendingMessageFindFirst.mockResolvedValue(null);
+        txSessionPendingMessageFindMany.mockResolvedValue([]);
 
-        const result = await materializeNextPendingMessage({ actorUserId: "u1", sessionId: "s1" });
+        const result = await materializeNextPendingMessage({
+            actorUserId: "u1",
+            sessionId: "s1",
+            trustedPublisherFence,
+        });
 
-        expect(inTx).toHaveBeenCalledTimes(2);
-        expect(result).toEqual({ ok: true, didMaterialize: false, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 10 });
+        expect(inTx).toHaveBeenCalledTimes(4);
+        expect(result).toEqual({
+            ok: true,
+            didMaterialize: false,
+            pendingCount: 0,
+            pendingBlockedCount: 0,
+            pendingVersion: 10,
+            deliveryState: { mode: "provider", unresolved: false },
+        });
     });
 });

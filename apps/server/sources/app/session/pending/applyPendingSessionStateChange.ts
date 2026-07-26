@@ -9,6 +9,7 @@ export async function applyPendingSessionStateChange(params: {
     pendingCountDelta?: number;
     pendingBlockedCountDelta?: number;
     meaningfulActivityAt?: Date;
+    activationTarget?: Readonly<{ accountId: string; requestId: string }>;
 }): Promise<{ pendingCount: number; pendingBlockedCount: number; pendingVersion: number; participantCursors: SessionParticipantCursor[]; badgeAttentionChanged: boolean }> {
     const { tx, sessionId } = params;
     const pendingCountDelta = typeof params.pendingCountDelta === "number" && Number.isInteger(params.pendingCountDelta)
@@ -61,6 +62,7 @@ export async function applyPendingSessionStateChange(params: {
         pendingCount: session.pendingCount,
         pendingBlockedCount: session.pendingBlockedCount,
         meaningfulActivityAt: params.meaningfulActivityAt,
+        activationTarget: params.activationTarget,
     });
 
     return {

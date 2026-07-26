@@ -91,6 +91,28 @@ describe("ActivityCache machine presence", () => {
         expect(queuedAgain).toBe(false);
     });
 
+    it("guards an older cache flush from overwriting newer machine activity", async () => {
+        ({ activityCache } = await import("./sessionCache"));
+        activityCache.enableDbFlush();
+
+        await activityCache.isMachineValid("m1", "u1");
+        const staleTimestamp = Date.now() + 60_000;
+        expect(activityCache.queueMachineUpdate("m1", staleTimestamp)).toBe(true);
+
+        await (activityCache as any).flushPendingUpdates();
+
+        expect(dbMocks.db.machine.updateMany).toHaveBeenCalledWith({
+            where: {
+                accountId: "u1",
+                id: "m1",
+                revokedAt: null,
+                replacedByMachineId: null,
+                lastActiveAt: { lte: new Date(staleTimestamp) },
+            },
+            data: { lastActiveAt: new Date(staleTimestamp), active: true },
+        });
+    });
+
     it("treats revoked machines as invalid", async () => {
         machineRevokedAt = new Date("2026-01-01T00:00:00.000Z");
 

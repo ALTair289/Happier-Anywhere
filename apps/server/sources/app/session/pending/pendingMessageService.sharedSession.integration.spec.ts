@@ -1,30 +1,55 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 
 import { db } from "@/storage/db";
 import { auth } from "@/app/auth/auth";
 import {
-    blockPendingDeliveriesOnProviderAttach,
     blockPendingDelivery,
     deletePendingMessage,
     discardPendingMessage,
-    enqueuePendingMessage,
+    dismissPendingDelivery,
+    enqueuePendingMessage as enqueuePendingMessageOwner,
     listPendingMessages,
-    materializeNextPendingMessage,
+    materializeNextPendingMessage as materializeNextPendingMessageOwner,
+    materializeNextPendingMessageForCurrentPublisher,
     markPendingDeliveryHandled,
     reorderPendingMessages,
-    reconcileAcceptedPendingDeliveriesThroughSeq,
-    resolveAcceptedPendingDelivery,
-    retryPendingDelivery,
+    resolveAcceptedPendingDelivery as resolveAcceptedPendingDeliveryOwner,
+    sendPendingDeliveryAsNew,
     restorePendingMessage,
-    sweepStaleProviderDeliveryClaims,
     updatePendingMessage,
+    updatePendingRequestedAction,
 } from "./pendingMessageService";
+import type { PendingRequestedActionV1 } from "@happier-dev/protocol";
 import { createLightSqliteHarness, type LightSqliteHarness } from "@/testkit/lightSqliteHarness";
+import { reconcileSessionPendingQueueState } from "./reconcileSessionPendingQueueState";
+import { createSessionPublisherPresence } from "@/app/presence/sessionPublisherPresence";
+
+type EnqueuePendingTestParams = Parameters<typeof enqueuePendingMessageOwner>[0] extends infer T
+    ? T extends unknown
+        ? Omit<T, "requestedAction"> & { requestedAction?: PendingRequestedActionV1 }
+        : never
+    : never;
+const enqueuePendingMessage = (params: EnqueuePendingTestParams) => enqueuePendingMessageOwner({
+    ...params,
+    requestedAction: params.requestedAction ?? { v: 1, kind: "enqueue" },
+} as Parameters<typeof enqueuePendingMessageOwner>[0]);
 
 describe("pendingMessageService (shared sessions)", () => {
     let harness: LightSqliteHarness;
+    type CurrentPublisherMaterializeParams = Omit<
+        Parameters<typeof materializeNextPendingMessageForCurrentPublisher>[0],
+        "trustedPublisherFence"
+    >;
+    type TrustedPublisherFence = Parameters<
+        typeof materializeNextPendingMessageForCurrentPublisher
+    >[0]["trustedPublisherFence"];
+    type TestMaterializeParams = CurrentPublisherMaterializeParams & {
+        deliveryState?: "provider";
+        trustedPublisherFence?: TrustedPublisherFence;
+    };
+    const currentMaterializationFenceBySession = new Map<string, Promise<TrustedPublisherFence>>();
 
     beforeAll(async () => {
         harness = await createLightSqliteHarness({
@@ -39,6 +64,7 @@ describe("pendingMessageService (shared sessions)", () => {
 
     beforeEach(() => {
         harness.resetEnv();
+        currentMaterializationFenceBySession.clear();
     });
 
     const createAccount = async (kind: string) => {
@@ -68,10 +94,15 @@ describe("pendingMessageService (shared sessions)", () => {
     const markPendingProviderDeliveryClaimed = async (params: {
         sessionId: string;
         localId: string;
+        providerAction?: "send";
     }) => {
         await db.sessionPendingMessage.update({
             where: { sessionId_localId: { sessionId: params.sessionId, localId: params.localId } },
-            data: { deliveryState: "delivering", deliveryBlockedReason: null },
+            data: {
+                deliveryState: "delivering",
+                deliveryBlockedReason: null,
+                ...(params.providerAction ? { providerAction: params.providerAction } : {}),
+            },
         });
     };
 
@@ -81,15 +112,17 @@ describe("pendingMessageService (shared sessions)", () => {
         seq: number;
         messageRole: "user" | "agent" | null;
         ciphertext: string;
+        deliveryResolution?: { v: 1; kind: "manual_handled" };
     }) => {
         await db.session.update({ where: { id: params.sessionId }, data: { seq: params.seq } });
-        await db.sessionMessage.create({
+        return db.sessionMessage.create({
             data: {
                 sessionId: params.sessionId,
                 seq: params.seq,
                 localId: params.localId,
                 messageRole: params.messageRole,
                 content: { t: "encrypted", c: params.ciphertext },
+                ...(params.deliveryResolution ? { deliveryResolution: params.deliveryResolution } : {}),
             },
         });
     };
@@ -112,6 +145,683 @@ describe("pendingMessageService (shared sessions)", () => {
             select: { id: true },
         });
     };
+
+    const createCurrentPendingEvidencePublisher = async (params: { accountId: string; sessionId: string }) => {
+        const machineId = `machine-${randomUUID()}`;
+        await db.machine.create({ data: { id: machineId, accountId: params.accountId, metadata: "{}" } });
+        await db.accessKey.create({
+            data: { accountId: params.accountId, machineId, sessionId: params.sessionId, data: "encrypted" },
+        });
+        const presence = createSessionPublisherPresence();
+        const socket = {};
+        const binding = { accountId: params.accountId, machineId, sessionId: params.sessionId };
+        const registered = await presence.registerPublisher({
+            socket,
+            binding,
+            completeActivitySnapshot: { state: "idle", activeCount: 0 },
+        });
+        if (registered.status !== "registered") throw new Error(`publisher registration failed: ${registered.status}`);
+        currentMaterializationFenceBySession.set(
+            `${params.accountId}:${params.sessionId}`,
+            Promise.resolve({ ...binding, committedFence: registered.committedFence }),
+        );
+        return { machineId, presence, socket, binding, committedFence: registered.committedFence };
+    };
+
+    const materializeNextPendingMessage = async (
+        params: TestMaterializeParams,
+    ): Promise<Awaited<ReturnType<typeof materializeNextPendingMessageOwner>>> => {
+        const { deliveryState, trustedPublisherFence, ...commonParams } = params;
+        const key = `${params.actorUserId}:${params.sessionId}`;
+        let fence = trustedPublisherFence;
+        if (!fence) {
+            let pendingFence = currentMaterializationFenceBySession.get(key);
+            if (!pendingFence) {
+                pendingFence = createCurrentPendingEvidencePublisher({
+                    accountId: params.actorUserId,
+                    sessionId: params.sessionId,
+                }).then((publisher) => ({
+                    ...publisher.binding,
+                    committedFence: publisher.committedFence,
+                }));
+                currentMaterializationFenceBySession.set(key, pendingFence);
+            }
+            fence = await pendingFence;
+        }
+        return await materializeNextPendingMessageForCurrentPublisher({
+            ...commonParams,
+            trustedPublisherFence: fence,
+        });
+    };
+
+    it("commits the exact inactive send-now activation into the existing account-change cursor", async () => {
+        const owner = await createAccount("inactive-ui-death-owner");
+        const collaborator = await createAccount("inactive-ui-death-collaborator");
+        const session = await createSession(owner.id);
+        await shareSession({
+            sessionId: session.id,
+            ownerId: owner.id,
+            participantId: collaborator.id,
+            accessLevel: "edit",
+        });
+        const localId = `inactive-ui-death-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-inactive-ui-death",
+            messageRole: "user",
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toMatchObject({
+            ok: true,
+            didWrite: true,
+            activationTarget: {
+                accountId: owner.id,
+                requestId: localId,
+            },
+        });
+
+        await expect(db.accountChange.findUniqueOrThrow({
+            where: {
+                accountId_kind_entityId: {
+                    accountId: owner.id,
+                    kind: "session",
+                    entityId: session.id,
+                },
+            },
+            select: { hint: true },
+        })).resolves.toEqual({
+            hint: expect.objectContaining({
+                pendingCount: 1,
+                pendingVersion: 1,
+                pendingActivationRequestId: localId,
+            }),
+        });
+        await expect(db.accountChange.findUniqueOrThrow({
+            where: {
+                accountId_kind_entityId: {
+                    accountId: collaborator.id,
+                    kind: "session",
+                    entityId: session.id,
+                },
+            },
+            select: { hint: true },
+        })).resolves.toEqual({
+            hint: expect.not.objectContaining({
+                pendingActivationRequestId: expect.anything(),
+            }),
+        });
+    });
+
+    type ResolveAcceptedPendingDeliveryParams = Parameters<typeof resolveAcceptedPendingDeliveryOwner>[0];
+    const resolveAcceptedPendingDelivery = async (
+        params: Omit<ResolveAcceptedPendingDeliveryParams, "trustedPublisherFence"> & {
+            trustedPublisherFence?: ResolveAcceptedPendingDeliveryParams["trustedPublisherFence"];
+        },
+    ) => {
+        let trustedPublisherFence = params.trustedPublisherFence;
+        if (!trustedPublisherFence) {
+            const key = `${params.actorUserId}:${params.sessionId}`;
+            let pendingFence = currentMaterializationFenceBySession.get(key);
+            if (!pendingFence) {
+                pendingFence = createCurrentPendingEvidencePublisher({
+                    accountId: params.actorUserId,
+                    sessionId: params.sessionId,
+                }).then((publisher) => ({
+                    ...publisher.binding,
+                    committedFence: publisher.committedFence,
+                }));
+                currentMaterializationFenceBySession.set(key, pendingFence);
+            }
+            trustedPublisherFence = await pendingFence;
+        }
+        return await resolveAcceptedPendingDeliveryOwner({ ...params, trustedPublisherFence });
+    };
+
+    it("does not let unrelated Session writes create malformed-Activity release authority", async () => {
+        const owner = await createAccount("malformed-episode-session-churn-owner");
+        const session = await createSession(owner.id);
+        const localId = `malformed-episode-session-churn-${randomUUID()}`;
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-malformed-episode-session-churn",
+        })).resolves.toMatchObject({ ok: true });
+        await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        await db.session.update({
+            where: { id: session.id },
+            data: {
+                runtimeActivityState: "malformed",
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityRevision: 0n,
+            },
+        });
+
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryTiming: "after_runtime_idle",
+        })).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: false,
+            deferredReason: "runtime_activity_unknown",
+        });
+        const beforeUnrelatedWrite = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { updatedAt: true },
+        });
+        await db.session.update({
+            where: { id: session.id },
+            data: {
+                updatedAt: new Date(beforeUnrelatedWrite.updatedAt.getTime() + 1),
+            },
+        });
+
+        const continuedDeferral = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryTiming: "after_runtime_idle",
+        });
+        expect(continuedDeferral).toMatchObject({
+            ok: true,
+            didMaterialize: false,
+            deferredReason: "runtime_activity_unknown",
+        });
+        expect(continuedDeferral).not.toHaveProperty("retryAfterMs");
+        const beforeSecondUnrelatedWrite = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { updatedAt: true },
+        });
+        await db.session.update({
+            where: { id: session.id },
+            data: {
+                updatedAt: new Date(beforeSecondUnrelatedWrite.updatedAt.getTime() + 1),
+            },
+        });
+
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryTiming: "after_runtime_idle",
+        })).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: false,
+            deferredReason: "runtime_activity_unknown",
+        });
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
+    it("keeps canonical stored unknown Activity deferred after the retired deadline", async () => {
+        const owner = await createAccount("valid-unknown-owner");
+        const session = await createSession(owner.id);
+        const localId = `valid-unknown-${randomUUID()}`;
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-valid-unknown",
+        })).resolves.toMatchObject({ ok: true });
+        await db.session.update({
+            where: { id: session.id },
+            data: {
+                runtimeActivityState: "unknown",
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityRevision: 12n,
+            },
+        });
+        const initialNowMs = Date.now();
+        const nowSpy = vi.spyOn(Date, "now").mockReturnValue(initialNowMs);
+        try {
+            const result = await materializeNextPendingMessage({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                deliveryTiming: "after_runtime_idle",
+            });
+            expect(result).toMatchObject({
+                ok: true,
+                didMaterialize: false,
+                deferredReason: "runtime_activity_unknown",
+            });
+            expect(result).not.toHaveProperty("retryAfterMs");
+
+            nowSpy.mockReturnValue(initialNowMs + 31_000);
+            await expect(materializeNextPendingMessage({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                deliveryTiming: "after_runtime_idle",
+            })).resolves.toMatchObject({
+                ok: true,
+                didMaterialize: false,
+                deferredReason: "runtime_activity_unknown",
+            });
+        } finally {
+            nowSpy.mockRestore();
+        }
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
+    it("atomically fences external handoff rows from the ordinary materializer and retains them", async () => {
+        const owner = await createAccount("external-handoff-owner");
+        const session = await createSession(owner.id);
+        const localId = `external-handoff-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-external-handoff",
+            deliveryMode: "external_handoff",
+        })).resolves.toMatchObject({
+            ok: true,
+            didWrite: true,
+            pending: { localId, deliveryStatus: { status: "external_handoff" } },
+        });
+
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        })).resolves.toMatchObject({ ok: true });
+        await expect(db.sessionMessage.count({
+            where: { sessionId: session.id, localId },
+        })).resolves.toBe(0);
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { status: true, deliveryState: true },
+        })).resolves.toEqual({ status: "queued", deliveryState: "external_handoff" });
+
+        await expect(deletePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId }))
+            .resolves.toEqual({ ok: false, error: "delivery-settlement-conflict" });
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+        await expect(updatePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "mutated-external-handoff",
+        })).resolves.toEqual({ ok: false, error: "delivery-settlement-conflict" });
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-external-handoff",
+            deliveryMode: "external_handoff",
+        })).resolves.toMatchObject({
+            ok: true,
+            didWrite: false,
+            pending: { deliveryStatus: { status: "external_handoff" } },
+        });
+
+        await expect(markPendingDeliveryHandled({ actorUserId: owner.id, sessionId: session.id, localId }))
+            .resolves.toMatchObject({ ok: true, didResolve: true, pendingCount: 0 });
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+    });
+
+    it("blocks only the exact external handoff row when the provider is unavailable before acceptance", async () => {
+        const owner = await createAccount("external-handoff-provider-unavailable-owner");
+        const session = await createSession(owner.id);
+        const blockedLocalId = `external-handoff-blocked-${randomUUID()}`;
+        const retainedLocalId = `external-handoff-retained-${randomUUID()}`;
+
+        for (const localId of [blockedLocalId, retainedLocalId]) {
+            await expect(enqueuePendingMessage({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                localId,
+                ciphertext: `cipher-${localId}`,
+                deliveryMode: "external_handoff",
+            })).resolves.toMatchObject({
+                ok: true,
+                pending: { localId, deliveryStatus: { status: "external_handoff" } },
+            });
+        }
+
+        await expect(blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: blockedLocalId,
+            reason: "provider_unavailable_before_acceptance",
+        })).resolves.toMatchObject({
+            ok: true,
+            didUpdate: true,
+            pendingCount: 2,
+            pendingBlockedCount: 1,
+        });
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id },
+            orderBy: { localId: "asc" },
+            select: { localId: true, deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual([
+            {
+                localId: blockedLocalId,
+                deliveryState: "blocked",
+                deliveryBlockedReason: "provider_unavailable_before_acceptance",
+            },
+            {
+                localId: retainedLocalId,
+                deliveryState: "external_handoff",
+                deliveryBlockedReason: null,
+            },
+        ]);
+    });
+
+    it("atomically suppresses an automatic continuation when queued user input already exists", async () => {
+        const owner = await createAccount("conditional-continuation-owner");
+        const session = await createSession(owner.id);
+        const explicitLocalId = `explicit-input-${randomUUID()}`;
+        const continuationLocalId = `connected-service-continuation:${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: explicitLocalId,
+            ciphertext: "cipher-explicit-input",
+            messageRole: "user",
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toMatchObject({ ok: true, didWrite: true });
+
+        const enqueueConditionalContinuation = enqueuePendingMessage as unknown as (
+            params: EnqueuePendingTestParams & Readonly<{
+                admissionMode: "continuation_if_no_queued_user_input";
+            }>,
+        ) => ReturnType<typeof enqueuePendingMessage>;
+        await expect(enqueueConditionalContinuation({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: continuationLocalId,
+            ciphertext: "cipher-continuation",
+            messageRole: "user",
+            requestedAction: { v: 1, kind: "send_now" },
+            admissionMode: "continuation_if_no_queued_user_input",
+        })).resolves.toMatchObject({
+            ok: true,
+            didWrite: false,
+            suppressed: true,
+        });
+
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id, status: "queued" },
+            orderBy: { position: "asc" },
+            select: { localId: true, requestedAction: true },
+        })).resolves.toEqual([
+            { localId: explicitLocalId, requestedAction: { v: 1, kind: "send_now" } },
+        ]);
+    });
+
+    it("rejoins an already-committed continuation even after newer explicit input arrives", async () => {
+        const owner = await createAccount("committed-continuation-rejoin-owner");
+        const session = await createSession(owner.id);
+        const continuationLocalId = `connected-service-continuation:${randomUUID()}`;
+        const explicitLocalId = `explicit-input-${randomUUID()}`;
+        const enqueueConditionalContinuation = enqueuePendingMessage as unknown as (
+            params: EnqueuePendingTestParams & Readonly<{
+                admissionMode: "continuation_if_no_queued_user_input";
+            }>,
+        ) => ReturnType<typeof enqueuePendingMessage>;
+        const continuation = {
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: continuationLocalId,
+            ciphertext: "cipher-continuation",
+            messageRole: "user" as const,
+            requestedAction: { v: 1 as const, kind: "send_now" as const },
+            admissionMode: "continuation_if_no_queued_user_input" as const,
+        };
+
+        await expect(enqueueConditionalContinuation(continuation)).resolves.toMatchObject({
+            ok: true,
+            didWrite: true,
+        });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: explicitLocalId,
+            ciphertext: "cipher-explicit-input",
+            messageRole: "user",
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toMatchObject({ ok: true, didWrite: true });
+        await expect(enqueueConditionalContinuation(continuation)).resolves.toMatchObject({
+            ok: true,
+            didWrite: false,
+            pending: { localId: continuationLocalId },
+        });
+
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id, status: "queued" },
+            orderBy: { position: "asc" },
+            select: { localId: true },
+        })).resolves.toEqual([
+            { localId: continuationLocalId },
+            { localId: explicitLocalId },
+        ]);
+    });
+
+    it("does not let inert continuation-recovery metadata veto a fresh Pending row", async () => {
+        const owner = await createAccount("inert-continuation-metadata-owner");
+        const session = await createSession(owner.id);
+        const localId = `connected-service-continuation:${randomUUID()}`;
+        await db.session.update({
+            where: { id: session.id },
+            data: {
+                metadata: JSON.stringify({
+                    sessionContinuationRecoveryV1: {
+                        v: 1,
+                        attemptsById: {
+                            legacy: {
+                                v: 1,
+                                attemptId: "legacy",
+                                status: "awaiting_provider_activity",
+                                failureAtMs: 1,
+                                updatedAtMs: 1,
+                                resumePromptMode: "standard",
+                            },
+                        },
+                    },
+                }),
+            },
+        });
+        const enqueueConditionalContinuation = enqueuePendingMessage as unknown as (
+            params: EnqueuePendingTestParams & Readonly<{
+                admissionMode: "continuation_if_no_queued_user_input";
+            }>,
+        ) => ReturnType<typeof enqueuePendingMessage>;
+
+        await expect(enqueueConditionalContinuation({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-continuation",
+            messageRole: "user",
+            requestedAction: { v: 1, kind: "send_now" },
+            admissionMode: "continuation_if_no_queued_user_input",
+        })).resolves.toMatchObject({
+            ok: true,
+            didWrite: true,
+            pending: { localId, requestedAction: { v: 1, kind: "send_now" } },
+        });
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        })).resolves.toMatchObject({ ok: true, didMaterialize: true, message: { localId } });
+    });
+
+    it("rejects reordering across an active external-handoff reservation", async () => {
+        const owner = await createAccount("external-handoff-reorder-owner");
+        const session = await createSession(owner.id);
+        const reservedLocalId = `external-handoff-reorder-${randomUUID()}`;
+        const queuedLocalId = `queued-after-external-handoff-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: reservedLocalId,
+            ciphertext: "cipher-external-handoff-reorder",
+            deliveryMode: "external_handoff",
+        })).resolves.toMatchObject({
+            ok: true,
+            pending: { deliveryStatus: { status: "external_handoff" } },
+        });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: queuedLocalId,
+            ciphertext: "cipher-queued-after-external-handoff",
+        })).resolves.toMatchObject({ ok: true });
+
+        await expect(reorderPendingMessages({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            orderedLocalIds: [queuedLocalId, reservedLocalId],
+        })).resolves.toEqual({ ok: false, error: "delivery-settlement-conflict" });
+
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id, status: "queued" },
+            orderBy: [{ position: "asc" }, { localId: "asc" }],
+            select: { localId: true, deliveryState: true },
+        })).resolves.toEqual([
+            { localId: reservedLocalId, deliveryState: "external_handoff" },
+            { localId: queuedLocalId, deliveryState: null },
+        ]);
+    });
+
+    it("rejects ordinary discard of an external-handoff reservation", async () => {
+        const owner = await createAccount("external-handoff-discard-restore-owner");
+        const session = await createSession(owner.id);
+        const localId = `external-handoff-discard-restore-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-external-handoff-discard-restore",
+            deliveryMode: "external_handoff",
+        })).resolves.toMatchObject({
+            ok: true,
+            pending: { deliveryStatus: { status: "external_handoff" } },
+        });
+
+        await expect(discardPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            reason: "user_discarded",
+        })).resolves.toEqual({ ok: false, error: "delivery-settlement-conflict" });
+        await expect(restorePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+        })).resolves.toEqual({ ok: false, error: "delivery-settlement-conflict" });
+        await expect(deletePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+        })).resolves.toEqual({ ok: false, error: "delivery-settlement-conflict" });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { status: true, deliveryState: true, discardedReason: true },
+        })).resolves.toEqual({
+            status: "queued",
+            deliveryState: "external_handoff",
+            discardedReason: null,
+        });
+    });
+
+    it("treats a compatible terminal transcript localId as idempotent and rejects conflicting replay", async () => {
+        const owner = await createAccount("terminal-enqueue-owner");
+        const session = await createSession(owner.id);
+        const localId = ` terminal-enqueue-${randomUUID()} `;
+        const committed = await createCommittedTranscriptMessage({
+            sessionId: session.id,
+            localId,
+            seq: 1,
+            messageRole: "user",
+            ciphertext: "cipher-terminal",
+            deliveryResolution: { v: 1, kind: "manual_handled" },
+        });
+
+        const compatibleReplays = await Promise.all([
+            enqueuePendingMessage({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                localId,
+                ciphertext: "cipher-terminal",
+                messageRole: "user",
+            }),
+            enqueuePendingMessage({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                localId,
+                ciphertext: "cipher-terminal",
+                messageRole: "user",
+            }),
+        ]);
+        expect(compatibleReplays).toEqual([
+            expect.objectContaining({
+                ok: true,
+                didWrite: false,
+                terminal: true,
+                message: expect.objectContaining({
+                    id: committed.id,
+                    seq: committed.seq,
+                    localId,
+                    deliveryResolution: { v: 1, kind: "manual_handled" },
+                }),
+            }),
+            expect.objectContaining({
+                ok: true,
+                didWrite: false,
+                terminal: true,
+                message: expect.objectContaining({
+                    id: committed.id,
+                    seq: committed.seq,
+                    localId,
+                    deliveryResolution: { v: 1, kind: "manual_handled" },
+                }),
+            }),
+        ]);
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        })).resolves.toMatchObject({ ok: true, didMaterialize: false });
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-conflict",
+            messageRole: "user",
+        })).resolves.toEqual({ ok: false, error: "invalid-params" });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-terminal",
+            messageRole: "agent",
+        })).resolves.toEqual({ ok: false, error: "invalid-params" });
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
+    it("rejects whitespace-only Pending identity before persistence", async () => {
+        const owner = await createAccount("blank-pending-id-owner");
+        const session = await createSession(owner.id);
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: " \t\r\n ",
+            ciphertext: "cipher-blank-id",
+            requestedAction: { v: 1, kind: "enqueue" },
+        })).resolves.toEqual({ ok: false, error: "invalid-params" });
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id } })).resolves.toBe(0);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id } })).resolves.toBe(0);
+    });
 
     it("allows shared edit participants to edit/reorder/discard/restore pending (queue is session-global)", async () => {
         const owner = await createAccount("owner");
@@ -199,25 +909,9 @@ describe("pendingMessageService (shared sessions)", () => {
         if (!listQueued.ok) throw new Error("unexpected list failure");
         expect(listQueued.pending.map((p) => p.localId)).toEqual([localIdB, localIdC, localIdA]);
 
-        // Owner materializes into transcript; edits + order must be preserved.
-        const materializedLocalIds: string[] = [];
-        for (;;) {
-            const res = await materializeNextPendingMessage({ actorUserId: owner.id, sessionId: session.id });
-            expect(res.ok).toBe(true);
-            if (!res.ok) throw new Error("unexpected materialize failure");
-            if (!res.didMaterialize) break;
-            materializedLocalIds.push(res.message.localId ?? "");
-        }
-        expect(materializedLocalIds).toEqual([localIdB, localIdC, localIdA]);
-
-        const messages = await db.sessionMessage.findMany({
-            where: { sessionId: session.id },
-            orderBy: { seq: "asc" },
-            select: { localId: true, content: true },
-        });
-        expect(messages.map((m) => m.localId)).toEqual([localIdB, localIdC, localIdA]);
-        const aMsg = messages.find((m) => m.localId === localIdA);
-        expect((aMsg?.content as any)?.c).toBe("cipher-a-2");
+        const editedA = listQueued.pending.find((pending) => pending.localId === localIdA);
+        expect(editedA?.content).toEqual({ t: "encrypted", c: "cipher-a-2" });
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id } })).resolves.toBe(0);
     });
 
     it("keeps newly queued messages after pre-existing queued rows when the queue counter lags behind", async () => {
@@ -236,6 +930,7 @@ describe("pendingMessageService (shared sessions)", () => {
                 status: "queued",
                 position: 5,
                 authorAccountId: owner.id,
+                requestedAction: { v: 1, kind: "enqueue" },
             },
         });
         await db.sessionPendingMessage.create({
@@ -246,6 +941,7 @@ describe("pendingMessageService (shared sessions)", () => {
                 status: "queued",
                 position: 6,
                 authorAccountId: owner.id,
+                requestedAction: { v: 1, kind: "enqueue" },
             },
         });
         await db.session.update({
@@ -260,7 +956,9 @@ describe("pendingMessageService (shared sessions)", () => {
             ciphertext: "cipher-new-c",
         });
         expect(enqueue.ok).toBe(true);
-        if (!enqueue.ok) throw new Error("expected enqueue to succeed");
+        if (!enqueue.ok || enqueue.terminal === true || enqueue.suppressed === true) {
+            throw new Error("expected enqueue to create pending work");
+        }
         expect(enqueue.pending.position).toBe(7);
 
         const listQueued = await listPendingMessages({
@@ -274,7 +972,7 @@ describe("pendingMessageService (shared sessions)", () => {
         expect(listQueued.pending.map((p) => p.position)).toEqual([5, 6, 7]);
     });
 
-    it("persists and returns a ready projection when a queued owner-authored ready event is materialized", async () => {
+    it("does not advance ready projection when a queued ready event is only claimed for provider delivery", async () => {
         harness.resetEnv({ HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional" });
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
@@ -311,14 +1009,11 @@ describe("pendingMessageService (shared sessions)", () => {
         if (!materialize.ok) throw new Error("unexpected materialize failure");
         expect(materialize).toMatchObject({
             didMaterialize: true,
-            didWriteMessage: true,
-            readyProjection: {
-                latestReadyEventSeq: expect.any(Number),
-                latestReadyEventAt: expect.any(Number),
-            },
+            didWriteMessage: false,
+            message: { localId, id: null, seq: null },
         });
         if (!materialize.didMaterialize) throw new Error("expected materialization");
-        if (!materialize.readyProjection) throw new Error("expected ready projection");
+        expect(materialize).not.toHaveProperty("readyProjection");
 
         const persistedSession = await db.session.findUniqueOrThrow({
             where: { id: session.id },
@@ -328,8 +1023,15 @@ describe("pendingMessageService (shared sessions)", () => {
             },
         });
 
-        expect(persistedSession.latestReadyEventSeq).toBe(materialize.message.seq);
-        expect(persistedSession.latestReadyEventAt?.getTime()).toBe(materialize.readyProjection.latestReadyEventAt);
+        expect(persistedSession).toEqual({
+            latestReadyEventSeq: null,
+            latestReadyEventAt: null,
+        });
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryState: true, providerAction: true },
+        })).resolves.toEqual({ deliveryState: "delivering", providerAction: "send" });
     });
 
     it("forbids non-owner participants from materializing pending", async () => {
@@ -353,7 +1055,20 @@ describe("pendingMessageService (shared sessions)", () => {
         });
         expect(enqueue.ok).toBe(true);
 
-        const materialize = await materializeNextPendingMessage({ actorUserId: collaborator.id, sessionId: session.id });
+        const sessionState = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { lastActiveAt: true },
+        });
+        const materialize = await materializeNextPendingMessageOwner({
+            actorUserId: collaborator.id,
+            sessionId: session.id,
+            trustedPublisherFence: {
+                accountId: collaborator.id,
+                machineId: "missing-machine",
+                sessionId: session.id,
+                committedFence: sessionState.lastActiveAt,
+            },
+        });
         expect(materialize.ok).toBe(false);
         if (materialize.ok) throw new Error("expected forbidden");
         expect(materialize.error).toBe("forbidden");
@@ -388,13 +1103,15 @@ describe("pendingMessageService (shared sessions)", () => {
             where: { id: session.id },
             select: { pendingCount: true, pendingVersion: true },
         });
-        expect(after.pendingCount).toBe(0);
+        expect(after.pendingCount).toBe(1);
         expect(after.pendingVersion).toBe(before.pendingVersion + 1);
     });
 
-    it("claims provider-delivery prompt rows without writing transcript before provider acceptance", async () => {
+    it("lets the exact current publisher settle a claimed row without writing transcript before acceptance", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
+        const publisher = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const trustedPublisherFence = { ...publisher.binding, committedFence: publisher.committedFence };
         const localId = `provider-delivery-${randomUUID()}`;
 
         const enqueue = await enqueuePendingMessage({
@@ -441,13 +1158,75 @@ describe("pendingMessageService (shared sessions)", () => {
             select: { pendingCount: true },
         })).resolves.toEqual({ pendingCount: 1 });
 
-        const accepted = await resolveAcceptedPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId });
+        const accepted = await resolveAcceptedPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            trustedPublisherFence,
+        });
         expect(accepted.ok).toBe(true);
         if (!accepted.ok || !accepted.didResolve || !accepted.message) throw new Error("expected accepted resolution");
         expect(accepted.message).toEqual(expect.objectContaining({ seq: 1, localId, messageRole: "user" }));
         expect(accepted.pendingCount).toBe(0);
         await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+        await expect(materializeNextPendingMessage(materializeParams)).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: false,
+        });
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+    });
+
+    it.each([
+        {
+            mode: "e2ee" as const,
+            content: { t: "encrypted" as const, c: "opaque-pending-ciphertext" },
+        },
+        {
+            mode: "plain" as const,
+            content: {
+                t: "plain" as const,
+                v: { role: "user", content: { type: "text", text: "plain pending payload" } },
+            },
+        },
+    ])("preserves the $mode envelope through provider custody and exact settlement", async ({ mode, content }) => {
+        harness.resetEnv({ HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional" });
+        const owner = await createAccount(`provider-envelope-${mode}`);
+        const session = await createSession(owner.id);
+        if (mode === "plain") {
+            await db.session.update({ where: { id: session.id }, data: { encryptionMode: "plain" } });
+        }
+        const localId = `provider-envelope-${mode}-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            content,
+            messageRole: "user",
+        })).resolves.toMatchObject({ ok: true, pending: { localId, content } });
+
+        const materialized = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(materialized).toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            didWriteMessage: false,
+            message: { localId, content },
+        });
+
+        await expect(resolveAcceptedPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+        })).resolves.toMatchObject({ ok: true, didResolve: true, message: { localId, content } });
+        await expect(db.sessionMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { content: true },
+        })).resolves.toEqual({ content });
     });
 
     it("blocks accepted provider delivery that collides with divergent transcript content", async () => {
@@ -475,6 +1254,7 @@ describe("pendingMessageService (shared sessions)", () => {
         expect(accepted.ok).toBe(false);
         if (accepted.ok) throw new Error("expected accept conflict");
         expect(accepted.error).toBe("transcript-conflict");
+        if (accepted.error !== "transcript-conflict") throw new Error("expected transcript conflict");
         expect(accepted.pendingStateChanged).toBe(true);
         expect(accepted.pendingCount).toBe(1);
         expect(accepted.pendingBlockedCount).toBe(1);
@@ -688,7 +1468,7 @@ describe("pendingMessageService (shared sessions)", () => {
             sessionId: session.id,
             localId,
             ciphertext: "cipher-provider-delivery-edited",
-        })).resolves.toMatchObject({ ok: false, error: "not-found" });
+        })).resolves.toEqual({ ok: false, error: "delivery-settlement-conflict" });
 
         await expect(db.sessionPendingMessage.findUniqueOrThrow({
             where: { sessionId_localId: { sessionId: session.id, localId } },
@@ -702,7 +1482,7 @@ describe("pendingMessageService (shared sessions)", () => {
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
     });
 
-    it("does not materialize a later provider-delivery row while the queue head is unresolved", async () => {
+    it("rejoins the unresolved provider claim without materializing a later row", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const firstLocalId = `provider-delivery-first-${randomUUID()}`;
@@ -735,6 +1515,10 @@ describe("pendingMessageService (shared sessions)", () => {
             localId: secondLocalId,
             ciphertext: "cipher-provider-delivery-second",
         })).resolves.toMatchObject({ ok: true });
+        const sessionBeforeRejoin = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingVersion: true },
+        });
 
         const secondMaterialize = await materializeNextPendingMessage({
             actorUserId: owner.id,
@@ -742,11 +1526,12 @@ describe("pendingMessageService (shared sessions)", () => {
             deliveryState: "provider",
         });
         expect(secondMaterialize.ok).toBe(true);
-        if (!secondMaterialize.ok || secondMaterialize.didMaterialize) {
-            throw new Error("expected deferred ordered materialization result");
+        if (!secondMaterialize.ok || !secondMaterialize.didMaterialize) {
+            throw new Error("expected current-publisher claim rejoin");
         }
-        expect(secondMaterialize.didMaterialize).toBe(false);
-        expect(secondMaterialize.deliveryState).toEqual({ mode: "provider", unresolved: false });
+        expect(secondMaterialize.message.localId).toBe(firstLocalId);
+        expect(secondMaterialize.pendingVersion).toBe(sessionBeforeRejoin.pendingVersion);
+        expect(secondMaterialize.deliveryState).toEqual({ mode: "provider", unresolved: true });
 
         await expect(db.sessionPendingMessage.findMany({
             where: { sessionId: session.id, status: "queued" },
@@ -758,206 +1543,702 @@ describe("pendingMessageService (shared sessions)", () => {
         ]);
     });
 
-    it("lets legacy materialization recover only stale inherited provider claims without skipping the head", async () => {
+    it("persists the canonical requested action and rejects same-localId content or action drift", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
-        const firstLocalId = `provider-delivery-legacy-recovery-first-${randomUUID()}`;
-        const secondLocalId = `provider-delivery-legacy-recovery-second-${randomUUID()}`;
+        const localId = `requested-action-${randomUUID()}`;
+        const requestedAction = { v: 1 as const, kind: "steer_now" as const };
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-requested-action",
+            requestedAction,
+        })).resolves.toMatchObject({
+            ok: true,
+            didWrite: true,
+            pending: { localId, requestedAction },
+        });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-requested-action",
+            requestedAction,
+        })).resolves.toMatchObject({ ok: true, didWrite: false });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-requested-action",
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toEqual({ ok: false, error: "requested-action-conflict" });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "different-ciphertext",
+            requestedAction,
+        })).resolves.toEqual({ ok: false, error: "requested-action-conflict" });
+    });
+
+    it("self-heals a legacy null role while preserving action and role conflict identity", async () => {
+        const owner = await createAccount("legacy-action-role-owner");
+        const session = await createSession(owner.id);
+        const localId = `legacy-action-role-${randomUUID()}`;
+
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-legacy-action-role",
+        });
+        await db.$executeRaw`
+            UPDATE "SessionPendingMessage"
+            SET "messageRole" = NULL
+            WHERE "sessionId" = ${session.id} AND "localId" = ${localId}
+        `;
+        const legacyRevision = await db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { updatedAt: true },
+        });
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-legacy-action-role",
+            messageRole: "user",
+        })).resolves.toMatchObject({
+            ok: true,
+            didWrite: false,
+            pending: { messageRole: "user", requestedAction: { v: 1, kind: "enqueue" } },
+        });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { messageRole: true, requestedAction: true, updatedAt: true },
+        })).resolves.toEqual({
+            messageRole: "user",
+            requestedAction: { v: 1, kind: "enqueue" },
+            updatedAt: expect.any(Date),
+        });
+        const repairedRevision = await db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { updatedAt: true },
+        });
+        expect(repairedRevision.updatedAt.getTime()).toBeGreaterThan(legacyRevision.updatedAt.getTime());
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-legacy-action-role",
+            messageRole: "user",
+        })).resolves.toMatchObject({ ok: true, didWrite: false });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-legacy-action-role",
+            messageRole: "agent",
+        })).resolves.toEqual({ ok: false, error: "requested-action-conflict" });
+    });
+
+    it("does not mutate an ordinary queued row when an external-handoff retry conflicts", async () => {
+        const owner = await createAccount("external-handoff-retry-conflict-owner");
+        const session = await createSession(owner.id);
+        const localId = `external-handoff-retry-conflict-${randomUUID()}`;
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-external-handoff-retry-conflict",
+        });
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-external-handoff-retry-conflict",
+            messageRole: "user",
+            deliveryMode: "external_handoff",
+        })).resolves.toEqual({ ok: false, error: "invalid-params" });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { messageRole: true, requestedAction: true, deliveryState: true },
+        })).resolves.toEqual({
+            messageRole: null,
+            requestedAction: { v: 1, kind: "enqueue" },
+            deliveryState: null,
+        });
+    });
+
+    it("does not self-heal legacy identity metadata through a discarded terminal disposition", async () => {
+        const owner = await createAccount("discarded-legacy-retry-owner");
+        const session = await createSession(owner.id);
+        const localId = `discarded-legacy-retry-${randomUUID()}`;
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-discarded-legacy-retry",
+        });
+        await discardPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            reason: "user_discarded",
+        });
+        await db.$executeRaw`
+            UPDATE "SessionPendingMessage"
+            SET "messageRole" = NULL
+            WHERE "sessionId" = ${session.id} AND "localId" = ${localId}
+        `;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-discarded-legacy-retry",
+            messageRole: "user",
+        })).resolves.toEqual({ ok: false, error: "requested-action-conflict" });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { status: true, messageRole: true, requestedAction: true, discardedReason: true },
+        })).resolves.toEqual({
+            status: "discarded",
+            messageRole: null,
+            requestedAction: { v: 1, kind: "enqueue" },
+            discardedReason: "user_discarded",
+        });
+    });
+
+    it("serializes concurrent legacy role recovery so compatible retries rejoin and conflicting roles fail closed", async () => {
+        const owner = await createAccount("concurrent-legacy-role-owner");
+        const session = await createSession(owner.id);
+        const seedLegacyRow = async (localId: string, ciphertext: string) => {
+            await enqueuePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId, ciphertext });
+            await db.$executeRaw`
+                UPDATE "SessionPendingMessage"
+                SET "messageRole" = NULL
+                WHERE "sessionId" = ${session.id} AND "localId" = ${localId}
+            `;
+        };
+
+        const compatibleLocalId = `concurrent-compatible-role-${randomUUID()}`;
+        await seedLegacyRow(compatibleLocalId, "cipher-concurrent-compatible-role");
+        const compatible = await Promise.all([
+            enqueuePendingMessage({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                localId: compatibleLocalId,
+                ciphertext: "cipher-concurrent-compatible-role",
+                messageRole: "user",
+            }),
+            enqueuePendingMessage({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                localId: compatibleLocalId,
+                ciphertext: "cipher-concurrent-compatible-role",
+                messageRole: "user",
+            }),
+        ]);
+        expect(compatible).toEqual([
+            expect.objectContaining({ ok: true, didWrite: false }),
+            expect.objectContaining({ ok: true, didWrite: false }),
+        ]);
+
+        const conflictingLocalId = `concurrent-conflicting-role-${randomUUID()}`;
+        await seedLegacyRow(conflictingLocalId, "cipher-concurrent-conflicting-role");
+        const roles = ["user", "agent"] as const;
+        const conflicting = await Promise.all(roles.map((messageRole) => enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: conflictingLocalId,
+            ciphertext: "cipher-concurrent-conflicting-role",
+            messageRole,
+        })));
+        const successfulIndexes = conflicting
+            .map((result, index) => result.ok ? index : -1)
+            .filter((index) => index >= 0);
+        expect(successfulIndexes).toHaveLength(1);
+        expect(conflicting.filter((result) => !result.ok)).toEqual([
+            { ok: false, error: "requested-action-conflict" },
+        ]);
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId: conflictingLocalId } },
+            select: { messageRole: true, requestedAction: true },
+        })).resolves.toEqual({
+            messageRole: roles[successfulIndexes[0]!],
+            requestedAction: { v: 1, kind: "enqueue" },
+        });
+    });
+
+    it("retains a malformed persisted action as visible unsupported work without changing queue counts", async () => {
+        const owner = await createAccount("malformed-requested-action-owner");
+        const session = await createSession(owner.id);
+        const localId = `malformed-requested-action-${randomUUID()}`;
+
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-malformed-requested-action",
+        });
+        await db.sessionPendingMessage.update({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            data: { requestedAction: { v: 1, kind: "future_action" } },
+        });
+
+        const listed = await listPendingMessages({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        });
+        expect(listed).toMatchObject({
+            ok: true,
+            pending: [{
+                localId,
+                requestedActionMalformed: true,
+                deliveryStatus: { status: "blocked", reason: "unsupported_action" },
+            }],
+        });
+        expect(listed.ok && listed.pending[0]).not.toHaveProperty("requestedAction");
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true },
+        })).resolves.toEqual({ pendingCount: 1 });
+    });
+
+    it.each([
+        ["send_now", "active_unsteerable", "interrupt_and_send"],
+        ["steer_now", "active_steerable", "steer"],
+        ["steer_if_active", "active_steerable", "steer"],
+    ] as const)("claims the exact later %s row while leaving its ordinary FIFO neighbor queued", async (
+        urgentKind,
+        foregroundState,
+        providerAction,
+    ) => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const firstLocalId = `requested-action-first-${randomUUID()}`;
+        const urgentLocalId = `requested-action-urgent-${randomUUID()}`;
 
         await expect(enqueuePendingMessage({
             actorUserId: owner.id,
             sessionId: session.id,
             localId: firstLocalId,
-            ciphertext: "cipher-provider-delivery-legacy-recovery-first",
+            ciphertext: "cipher-requested-action-first",
+            requestedAction: { v: 1, kind: "enqueue" },
         })).resolves.toMatchObject({ ok: true });
         await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: urgentLocalId,
+            ciphertext: "cipher-requested-action-urgent",
+            requestedAction: { v: 1, kind: urgentKind },
+        })).resolves.toMatchObject({ ok: true });
+
+        const result = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+            foregroundState,
+        });
+        expect(result).toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            message: {
+                localId: urgentLocalId,
+                requestedAction: { v: 1, kind: urgentKind },
+                providerAction,
+            },
+        });
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id },
+            orderBy: [{ position: "asc" }, { localId: "asc" }],
+            select: { localId: true, deliveryState: true },
+        })).resolves.toEqual([
+            { localId: firstLocalId, deliveryState: null },
+            { localId: urgentLocalId, deliveryState: "delivering" },
+        ]);
+    });
+
+    it("claims a valid exact later action without executing a malformed predecessor", async () => {
+        const owner = await createAccount("requested-action-malformed-predecessor-owner");
+        const session = await createSession(owner.id);
+        const malformedLocalId = `requested-action-malformed-predecessor-${randomUUID()}`;
+        const urgentLocalId = `requested-action-valid-urgent-${randomUUID()}`;
+
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: malformedLocalId,
+            ciphertext: "cipher-requested-action-malformed-predecessor",
+        });
+        await db.sessionPendingMessage.update({
+            where: { sessionId_localId: { sessionId: session.id, localId: malformedLocalId } },
+            data: { requestedAction: { v: 1, kind: "future_action" } },
+        });
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: urgentLocalId,
+            ciphertext: "cipher-requested-action-valid-urgent",
+            requestedAction: { v: 1, kind: "send_now" },
+        });
+
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+            foregroundState: "active_unsteerable",
+        })).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            message: {
+                localId: urgentLocalId,
+                providerAction: "interrupt_and_send",
+            },
+        });
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id },
+            orderBy: [{ position: "asc" }, { localId: "asc" }],
+            select: { localId: true, deliveryState: true },
+        })).resolves.toEqual([
+            { localId: malformedLocalId, deliveryState: null },
+            { localId: urgentLocalId, deliveryState: "delivering" },
+        ]);
+    });
+
+    it("does not let a malformed later action preempt a valid FIFO predecessor", async () => {
+        const owner = await createAccount("requested-action-later-malformed-owner");
+        const session = await createSession(owner.id);
+        const firstLocalId = `requested-action-valid-head-${randomUUID()}`;
+        const laterLocalId = `requested-action-malformed-later-${randomUUID()}`;
+
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: firstLocalId,
+            ciphertext: "cipher-requested-action-valid-head",
+        });
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: laterLocalId,
+            ciphertext: "cipher-requested-action-malformed-later",
+        });
+        await db.sessionPendingMessage.update({
+            where: { sessionId_localId: { sessionId: session.id, localId: laterLocalId } },
+            data: { requestedAction: { v: 1, kind: "future_action" } },
+        });
+
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+            foregroundState: "ready",
+        })).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            message: { localId: firstLocalId, requestedAction: { v: 1, kind: "enqueue" } },
+        });
+    });
+
+    it("freezes steer_if_active into one claim-time provider action", async () => {
+        const owner = await createAccount("requested-action-provider-operation-owner");
+        const activeSession = await createSession(owner.id);
+        const readySession = await createSession(owner.id);
+
+        for (const session of [activeSession, readySession]) {
+            await enqueuePendingMessage({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                localId: `steer-if-active-${session.id}`,
+                ciphertext: `cipher-steer-if-active-${session.id}`,
+                requestedAction: { v: 1, kind: "steer_if_active" },
+            });
+        }
+
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: activeSession.id,
+            deliveryState: "provider",
+            foregroundState: "active_steerable",
+        })).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            message: {
+                requestedAction: { v: 1, kind: "steer_if_active" },
+                providerAction: "steer",
+            },
+        });
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: readySession.id,
+            deliveryState: "provider",
+            foregroundState: "ready",
+        })).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            message: {
+                requestedAction: { v: 1, kind: "steer_if_active" },
+                providerAction: "send",
+            },
+        });
+    });
+
+    it("updates only an unclaimed Pending row action and fences the action after provider claim", async () => {
+        const owner = await createAccount("requested-action-update-owner");
+        const session = await createSession(owner.id);
+        const firstLocalId = `requested-action-update-first-${randomUUID()}`;
+        const secondLocalId = `requested-action-update-second-${randomUUID()}`;
+
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: firstLocalId,
+            ciphertext: "cipher-requested-action-update-first",
+        });
+        await enqueuePendingMessage({
             actorUserId: owner.id,
             sessionId: session.id,
             localId: secondLocalId,
-            ciphertext: "cipher-provider-delivery-legacy-recovery-second",
-        })).resolves.toMatchObject({ ok: true });
+            ciphertext: "cipher-requested-action-update-second",
+        });
 
-        const providerClaim = await materializeNextPendingMessage({
+        await expect(updatePendingRequestedAction({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: secondLocalId,
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toMatchObject({ ok: true, didUpdate: true });
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id },
+            orderBy: [{ position: "asc" }, { localId: "asc" }],
+            select: { localId: true, requestedAction: true },
+        })).resolves.toEqual([
+            { localId: firstLocalId, requestedAction: { v: 1, kind: "enqueue" } },
+            { localId: secondLocalId, requestedAction: { v: 1, kind: "send_now" } },
+        ]);
+
+        await materializeNextPendingMessage({
             actorUserId: owner.id,
             sessionId: session.id,
             deliveryState: "provider",
         });
-        expect(providerClaim.ok).toBe(true);
-        if (!providerClaim.ok || !providerClaim.didMaterialize) throw new Error("expected provider claim");
-        expect(providerClaim.message.localId).toBe(firstLocalId);
-
-        const freshLegacyAttempt = await materializeNextPendingMessage({
+        await expect(updatePendingRequestedAction({
             actorUserId: owner.id,
             sessionId: session.id,
-        });
-        expect(freshLegacyAttempt).toMatchObject({
-            ok: true,
-            didMaterialize: false,
-        });
-        await expect(db.sessionPendingMessage.findMany({
-            where: { sessionId: session.id, status: "queued" },
-            orderBy: [{ position: "asc" }, { localId: "asc" }],
-            select: { localId: true, deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual([
-            { localId: firstLocalId, deliveryState: "delivering", deliveryBlockedReason: null },
-            { localId: secondLocalId, deliveryState: null, deliveryBlockedReason: null },
-        ]);
-
-        await db.sessionPendingMessage.update({
-            where: { sessionId_localId: { sessionId: session.id, localId: firstLocalId } },
-            data: { updatedAt: new Date(Date.now() - 10 * 60_000) },
-        });
-
-        const staleLegacyAttempt = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-        });
-        expect(staleLegacyAttempt).toMatchObject({
-            ok: true,
-            didMaterialize: false,
-            pendingCount: 2,
-            pendingBlockedCount: 0,
-        });
-        await expect(db.sessionPendingMessage.findMany({
-            where: { sessionId: session.id, status: "queued" },
-            orderBy: [{ position: "asc" }, { localId: "asc" }],
-            select: { localId: true, deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual([
-            { localId: firstLocalId, deliveryState: "delivering", deliveryBlockedReason: null },
-            { localId: secondLocalId, deliveryState: null, deliveryBlockedReason: null },
-        ]);
-        await expect(db.sessionMessage.count({ where: { sessionId: session.id } })).resolves.toBe(0);
+            localId: secondLocalId,
+            requestedAction: { v: 1, kind: "steer_now" },
+        })).resolves.toEqual({ ok: false, error: "action-conflict" });
     });
 
-    it("blocks and retries provider delivery claims without changing pendingCount or writing a transcript row", async () => {
-        const owner = await createAccount("owner");
+    it("allows only one stale writer to replace a pending action", async () => {
+        const owner = await createAccount("requested-action-race-owner");
         const session = await createSession(owner.id);
-        const localId = `provider-delivery-blocked-${randomUUID()}`;
+        const localId = `requested-action-race-${randomUUID()}`;
 
-        await expect(enqueuePendingMessage({
+        await enqueuePendingMessage({
             actorUserId: owner.id,
             sessionId: session.id,
             localId,
-            ciphertext: "cipher-provider-delivery-blocked",
-        })).resolves.toMatchObject({ ok: true });
-
-        const firstMaterialize = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
+            ciphertext: "cipher-requested-action-race",
         });
-        expect(firstMaterialize.ok).toBe(true);
-        if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected first materialization");
-        expect(firstMaterialize.didWriteMessage).toBe(false);
-        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
 
-        const blocked = await blockPendingDelivery({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            localId,
-            reason: "terminal_composer_draft",
-        });
-        expect(blocked.ok).toBe(true);
-        if (!blocked.ok) throw new Error("expected block to succeed");
-        expect(blocked.pendingCount).toBe(1);
-        await expect(db.session.findUniqueOrThrow({
-            where: { id: session.id },
-            select: { pendingCount: true, pendingBlockedCount: true },
-        })).resolves.toEqual({ pendingCount: 1, pendingBlockedCount: 1 });
-
-        await expect(db.sessionPendingMessage.findUniqueOrThrow({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "terminal_composer_draft" });
-        const listedBlocked = await listPendingMessages({ actorUserId: owner.id, sessionId: session.id });
-        expect(listedBlocked.ok).toBe(true);
-        if (!listedBlocked.ok) throw new Error("expected pending list");
-        expect(listedBlocked.pending).toEqual([
-            expect.objectContaining({
+        const results = await Promise.all([
+            updatePendingRequestedAction({
+                actorUserId: owner.id,
+                sessionId: session.id,
                 localId,
-                deliveryState: "blocked",
-                deliveryBlockedReason: "terminal_composer_draft",
-                deliveryStatus: { status: "blocked", reason: "terminal_composer_draft" },
+                requestedAction: { v: 1, kind: "send_now" },
+            }),
+            updatePendingRequestedAction({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                localId,
+                requestedAction: { v: 1, kind: "steer_now" },
             }),
         ]);
 
-        const blockedMaterialize = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
-        });
-        expect(blockedMaterialize.ok).toBe(true);
-        if (!blockedMaterialize.ok) throw new Error("expected blocked materialize result");
-        expect(blockedMaterialize.didMaterialize).toBe(false);
-        expect(blockedMaterialize.pendingCount).toBe(1);
-
-        const retry = await retryPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId });
-        expect(retry.ok).toBe(true);
-        if (!retry.ok) throw new Error("expected retry to succeed");
-        expect(retry.pendingCount).toBe(1);
-        await expect(db.session.findUniqueOrThrow({
-            where: { id: session.id },
-            select: { pendingCount: true, pendingBlockedCount: true },
-        })).resolves.toEqual({ pendingCount: 1, pendingBlockedCount: 0 });
-        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+        expect(results.filter((result) => result.ok && result.didUpdate)).toHaveLength(1);
+        expect(results.filter((result) => !result.ok && result.error === "action-conflict")).toHaveLength(1);
+        const stored = await db.sessionPendingMessage.findUniqueOrThrow({
             where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: null, deliveryBlockedReason: null });
-
-        const retryMaterialize = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
+            select: { requestedAction: true },
         });
-        expect(retryMaterialize.ok).toBe(true);
-        if (!retryMaterialize.ok || !retryMaterialize.didMaterialize) throw new Error("expected retry materialization");
-        expect(retryMaterialize.didWriteMessage).toBe(false);
-        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
-        await expect(db.sessionPendingMessage.findUniqueOrThrow({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "delivering", deliveryBlockedReason: null });
+        expect(stored.requestedAction).toEqual(
+            expect.objectContaining({ kind: expect.stringMatching(/^(send_now|steer_now)$/) }),
+        );
     });
 
-    it("does not retry an in-flight delivering row into duplicate materialization eligibility", async () => {
-        const owner = await createAccount("owner");
+    it("serializes a different-action writer against provider claim custody", async () => {
+        const owner = await createAccount("requested-action-claim-race-owner");
         const session = await createSession(owner.id);
-        const localId = `provider-delivery-delivering-retry-${randomUUID()}`;
+        const localId = `requested-action-claim-race-${randomUUID()}`;
 
-        await expect(enqueuePendingMessage({
+        await enqueuePendingMessage({
             actorUserId: owner.id,
             sessionId: session.id,
             localId,
-            ciphertext: "cipher-provider-delivery-delivering-retry",
-        })).resolves.toMatchObject({ ok: true });
-
-        const materialize = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
+            ciphertext: "cipher-requested-action-claim-race",
         });
-        expect(materialize.ok).toBe(true);
-        if (!materialize.ok || !materialize.didMaterialize) throw new Error("expected materialization");
 
-        const retry = await retryPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId });
-        expect(retry.ok).toBe(true);
-        if (!retry.ok) throw new Error("expected retry no-op");
-        expect(retry.didUpdate).toBe(false);
+        const [actionResult, claimResult] = await Promise.all([
+            updatePendingRequestedAction({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                localId,
+                requestedAction: { v: 1, kind: "send_now" },
+            }),
+            materializeNextPendingMessage({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                deliveryState: "provider",
+                foregroundState: "ready",
+            }),
+        ]);
 
+        expect(claimResult).toMatchObject({ ok: true, didMaterialize: true });
+        if (!claimResult.ok || !claimResult.didMaterialize) throw new Error("expected one provider claim");
+        if (actionResult.ok) {
+            expect(actionResult.didUpdate).toBe(true);
+            expect(claimResult.message.requestedAction).toEqual({ v: 1, kind: "send_now" });
+        } else {
+            expect(actionResult).toEqual({ ok: false, error: "action-conflict" });
+            expect(claimResult.message.requestedAction).toEqual({ v: 1, kind: "enqueue" });
+        }
         await expect(db.sessionPendingMessage.findUniqueOrThrow({
             where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "delivering", deliveryBlockedReason: null });
+            select: { deliveryState: true, requestedAction: true },
+        })).resolves.toEqual({
+            deliveryState: "delivering",
+            requestedAction: claimResult.message.requestedAction,
+        });
+    });
 
-        const nextMaterialize = await materializeNextPendingMessage({
+    it("releases only an exact pre-effect steering-unavailable block when replacing its action with send_now", async () => {
+        const owner = await createAccount("requested-action-steering-unavailable-owner");
+        const session = await createSession(owner.id);
+        const releasableLocalId = `requested-action-releasable-${randomUUID()}`;
+        const releasableConditionalLocalId = `requested-action-releasable-conditional-${randomUUID()}`;
+        const otherBlockedLocalId = `requested-action-other-blocked-${randomUUID()}`;
+
+        await enqueuePendingMessage({
             actorUserId: owner.id,
             sessionId: session.id,
-            deliveryState: "provider",
+            localId: releasableConditionalLocalId,
+            ciphertext: "cipher-requested-action-releasable-conditional",
+            requestedAction: { v: 1, kind: "steer_if_active" },
         });
-        expect(nextMaterialize.ok).toBe(true);
-        if (!nextMaterialize.ok) throw new Error("expected materialize result");
-        expect(nextMaterialize.didMaterialize).toBe(false);
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: releasableLocalId,
+            ciphertext: "cipher-requested-action-releasable",
+            requestedAction: { v: 1, kind: "steer_now" },
+        });
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: otherBlockedLocalId,
+            ciphertext: "cipher-requested-action-other-blocked",
+            requestedAction: { v: 1, kind: "send_now" },
+        });
+        await blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: releasableConditionalLocalId,
+            reason: "steering_unavailable",
+        });
+        await blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: releasableLocalId,
+            reason: "steering_unavailable",
+        });
+        await blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: otherBlockedLocalId,
+            reason: "unknown",
+        });
+
+        await expect(updatePendingRequestedAction({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: releasableLocalId,
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toMatchObject({
+            ok: true,
+            didUpdate: true,
+            pendingBlockedCount: 2,
+        });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId: releasableLocalId } },
+            select: { requestedAction: true, deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual({
+            requestedAction: { v: 1, kind: "send_now" },
+            deliveryState: null,
+            deliveryBlockedReason: null,
+        });
+
+        await expect(updatePendingRequestedAction({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: releasableConditionalLocalId,
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toMatchObject({
+            ok: true,
+            didUpdate: true,
+            pendingBlockedCount: 1,
+        });
+
+        await expect(updatePendingRequestedAction({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: otherBlockedLocalId,
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toEqual({ ok: false, error: "action-conflict" });
     });
+
+    it("does not reopen a runtime-disposed-before-delivery row through an action update", async () => {
+        const owner = await createAccount("requested-action-runtime-disposed-owner");
+        const session = await createSession(owner.id);
+        const localId = `requested-action-runtime-disposed-${randomUUID()}`;
+
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-requested-action-runtime-disposed",
+            requestedAction: { v: 1, kind: "enqueue" },
+        });
+        await blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            reason: "runtime_disposed_before_delivery",
+        });
+
+        await expect(updatePendingRequestedAction({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toEqual({ ok: false, error: "action-conflict" });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { requestedAction: true, deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual({
+            requestedAction: { v: 1, kind: "enqueue" },
+            deliveryState: "blocked",
+            deliveryBlockedReason: "runtime_disposed_before_delivery",
+        });
+    });
+
 
     it("does not refresh an in-flight delivering row during queue reorder", async () => {
         const owner = await createAccount("owner");
@@ -980,9 +2261,10 @@ describe("pendingMessageService (shared sessions)", () => {
         if (!claim.ok || !claim.didMaterialize) throw new Error("expected provider claim");
         expect(claim.didWriteMessage).toBe(false);
 
+        const staleUpdatedAt = new Date(Date.now() - 10 * 60_000);
         await db.sessionPendingMessage.update({
             where: { sessionId_localId: { sessionId: session.id, localId } },
-            data: { updatedAt: new Date(Date.now() - 10 * 60_000) },
+            data: { updatedAt: staleUpdatedAt },
         });
 
         const reorder = await reorderPendingMessages({
@@ -992,170 +2274,17 @@ describe("pendingMessageService (shared sessions)", () => {
         });
         expect(reorder.ok).toBe(true);
 
-        const blocked = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
-        });
-        expect(blocked.ok).toBe(true);
-        if (!blocked.ok) throw new Error("expected stale claim materialization result");
-        expect(blocked.didMaterialize).toBe(false);
-        expect(blocked).toMatchObject({
-            pendingStateChanged: true,
-            pendingCount: 1,
-            pendingBlockedCount: 1,
-            deliveryState: { mode: "provider", unresolved: false },
-        });
         await expect(db.sessionPendingMessage.findUniqueOrThrow({
             where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "provider_acceptance_timeout" });
+            select: { deliveryState: true, deliveryBlockedReason: true, updatedAt: true },
+        })).resolves.toEqual({
+            deliveryState: "delivering",
+            deliveryBlockedReason: null,
+            updatedAt: staleUpdatedAt,
+        });
     });
 
-    it("blocks a stale provider-delivery claim instead of reclaiming it for restart delivery", async () => {
-        const owner = await createAccount("owner");
-        const session = await createSession(owner.id);
-        const localId = `provider-delivery-stale-block-${randomUUID()}`;
-
-        await expect(enqueuePendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            localId,
-            ciphertext: "cipher-provider-delivery-stale-block",
-        })).resolves.toMatchObject({ ok: true });
-
-        const firstMaterialize = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
-        });
-        expect(firstMaterialize.ok).toBe(true);
-        if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected first materialization");
-        expect(firstMaterialize.didWriteMessage).toBe(false);
-
-        await db.sessionPendingMessage.update({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            data: { updatedAt: new Date(Date.now() - 10 * 60_000) },
-        });
-
-        const blocked = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
-        });
-        expect(blocked.ok).toBe(true);
-        if (!blocked.ok) throw new Error("expected stale claim materialization result");
-        expect(blocked.didMaterialize).toBe(false);
-        if (blocked.didMaterialize) throw new Error("expected stale claim to block without materialization");
-        expect(blocked.pendingStateChanged).toBe(true);
-        expect(blocked.pendingCount).toBe(1);
-        expect(blocked.pendingBlockedCount).toBe(1);
-
-        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
-        await expect(db.sessionPendingMessage.findUniqueOrThrow({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "provider_acceptance_timeout" });
-    });
-
-    it("sweeps stale provider-delivery claims through the typed delivery status contract", async () => {
-        const owner = await createAccount("owner");
-        const session = await createSession(owner.id);
-        const localId = `provider-delivery-stale-sweep-${randomUUID()}`;
-
-        await expect(enqueuePendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            localId,
-            ciphertext: "cipher-provider-delivery-stale-sweep",
-        })).resolves.toMatchObject({ ok: true });
-
-        const firstMaterialize = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
-        });
-        expect(firstMaterialize.ok).toBe(true);
-        if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected provider claim");
-        expect(firstMaterialize.didWriteMessage).toBe(false);
-
-        await db.sessionPendingMessage.update({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            data: { updatedAt: new Date(Date.now() - 10 * 60_000) },
-        });
-
-        const swept = await sweepStaleProviderDeliveryClaims({
-            actorUserId: owner.id,
-            sessionId: session.id,
-        });
-        expect(swept.ok).toBe(true);
-        if (!swept.ok) throw new Error("expected stale sweep");
-        expect(swept.didUpdate).toBe(true);
-        expect(swept.blockedCount).toBe(1);
-        expect(swept.pendingCount).toBe(1);
-        expect(swept.pendingBlockedCount).toBe(1);
-
-        const listed = await listPendingMessages({ actorUserId: owner.id, sessionId: session.id });
-        expect(listed.ok).toBe(true);
-        if (!listed.ok) throw new Error("expected pending list");
-        expect(listed.pending).toEqual([
-            expect.objectContaining({
-                localId,
-                deliveryState: "blocked",
-                deliveryBlockedReason: "provider_acceptance_timeout",
-                deliveryStatus: { status: "blocked", reason: "provider_acceptance_timeout" },
-            }),
-        ]);
-        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
-    });
-
-    it("reconciles an inherited provider-delivery claim that has already been accepted into the transcript", async () => {
-        const owner = await createAccount("owner");
-        const session = await createSession(owner.id);
-        const localId = `provider-delivery-stale-accepted-${randomUUID()}`;
-
-        await expect(enqueuePendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            localId,
-            ciphertext: "cipher-provider-delivery-stale-accepted",
-        })).resolves.toMatchObject({ ok: true });
-
-        const firstMaterialize = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
-        });
-        expect(firstMaterialize.ok).toBe(true);
-        if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected provider claim");
-        expect(firstMaterialize.didWriteMessage).toBe(false);
-
-        await createCommittedTranscriptMessage({
-            sessionId: session.id,
-            localId,
-            seq: 1,
-            messageRole: "user",
-            ciphertext: "cipher-provider-delivery-stale-accepted",
-        });
-        await db.sessionPendingMessage.update({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            data: { updatedAt: new Date(Date.now() - 10 * 60_000) },
-        });
-
-        const swept = await blockPendingDeliveriesOnProviderAttach({
-            actorUserId: owner.id,
-            sessionId: session.id,
-        });
-        expect(swept.ok).toBe(true);
-        if (!swept.ok) throw new Error("expected attach recovery");
-        expect(swept.didUpdate).toBe(true);
-        expect(swept.blockedCount).toBe(0);
-        expect(swept.pendingCount).toBe(0);
-        expect(swept.pendingBlockedCount).toBe(0);
-        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
-    });
-
-    it("reconciles a blocked inherited provider-delivery claim that has already been accepted into the transcript", async () => {
+    it("settles a blocked predecessor through its exact accepted localId", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const localId = `provider-delivery-blocked-accepted-${randomUUID()}`;
@@ -1180,7 +2309,7 @@ describe("pendingMessageService (shared sessions)", () => {
             actorUserId: owner.id,
             sessionId: session.id,
             localId,
-            reason: "provider_acceptance_timeout",
+            reason: "delivery_outcome_uncertain",
         })).resolves.toMatchObject({ ok: true, pendingBlockedCount: 1 });
         await createCommittedTranscriptMessage({
             sessionId: session.id,
@@ -1190,71 +2319,26 @@ describe("pendingMessageService (shared sessions)", () => {
             ciphertext: "cipher-provider-delivery-blocked-accepted",
         });
 
-        const recovered = await blockPendingDeliveriesOnProviderAttach({
-            actorUserId: owner.id,
-            sessionId: session.id,
-        });
-        expect(recovered.ok).toBe(true);
-        if (!recovered.ok) throw new Error("expected attach recovery");
-        expect(recovered.didUpdate).toBe(true);
-        expect(recovered.blockedCount).toBe(0);
-        expect(recovered.pendingCount).toBe(0);
-        expect(recovered.pendingBlockedCount).toBe(0);
-        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
-    });
-
-    it("blocks a fresh inherited provider-delivery claim on provider attach (orphaned claim after runner restart)", async () => {
-        // Incident cmr38nnxa0ax9tmqp86owwlxo: a user-initiated runner restart leaves the head
-        // pending row `delivering` from the dead runner generation. The freshly attached runner
-        // holds no claim of its own and is the session's sole deliverer, so every inherited
-        // `delivering` claim is provably orphaned and MUST be recovered immediately — not left
-        // stuck for 5+ minutes until the periodic stale-sweep crosses its time cutoff.
-        const owner = await createAccount("owner");
-        const session = await createSession(owner.id);
-        const localId = `provider-delivery-attach-recovery-${randomUUID()}`;
-
-        await expect(enqueuePendingMessage({
+        const accepted = await resolveAcceptedPendingDelivery({
             actorUserId: owner.id,
             sessionId: session.id,
             localId,
-            ciphertext: "cipher-provider-delivery-attach-recovery",
-        })).resolves.toMatchObject({ ok: true });
-
-        const firstMaterialize = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
         });
-        expect(firstMaterialize.ok).toBe(true);
-        if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected first materialization");
-        expect(firstMaterialize.didWriteMessage).toBe(false);
+        expect(accepted.ok).toBe(true);
+        if (!accepted.ok) throw new Error("expected exact accepted-localId recovery");
+        expect(accepted.didResolve).toBe(true);
+        expect(accepted.pendingCount).toBe(0);
+        expect(accepted.pendingBlockedCount).toBe(0);
 
-        // The claim is fresh (just materialized, well within the 5-minute stale cutoff).
-        const recovered = await blockPendingDeliveriesOnProviderAttach({
-            actorUserId: owner.id,
-            sessionId: session.id,
-        });
-        expect(recovered.ok).toBe(true);
-        if (!recovered.ok) throw new Error("expected attach recovery");
-        expect(recovered.didUpdate).toBe(true);
-        expect(recovered.blockedCount).toBe(1);
-        expect(recovered.pendingCount).toBe(1);
-        expect(recovered.pendingBlockedCount).toBe(1);
-
-        // Never fabricate a transcript row; surface a user-visible, retryable blocked state.
-        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
-        await expect(db.sessionPendingMessage.findUniqueOrThrow({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "provider_acceptance_timeout" });
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
     });
 
-    it("does not block a fresh provider-delivery claim during the periodic stale sweep (protects a live in-flight delivery)", async () => {
-        // The periodic safety tick runs on a LIVE runner that may hold a legitimately in-flight
-        // fresh claim of its own. It must keep the 5-minute time heuristic and never block a
-        // claim younger than the cutoff, or it would cancel the runner's own active delivery.
+
+    it("does not recover a provider-delivery claim merely because time advances", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
+        const publisher = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const trustedPublisherFence = { ...publisher.binding, committedFence: publisher.committedFence };
         const localId = `provider-delivery-live-fresh-${randomUUID()}`;
 
         await expect(enqueuePendingMessage({
@@ -1268,45 +2352,7 @@ describe("pendingMessageService (shared sessions)", () => {
             actorUserId: owner.id,
             sessionId: session.id,
             deliveryState: "provider",
-        });
-        expect(firstMaterialize.ok).toBe(true);
-        if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected first materialization");
-        expect(firstMaterialize.didWriteMessage).toBe(false);
-
-        const swept = await sweepStaleProviderDeliveryClaims({
-            actorUserId: owner.id,
-            sessionId: session.id,
-        });
-        expect(swept.ok).toBe(true);
-        if (!swept.ok) throw new Error("expected stale sweep");
-        expect(swept.didUpdate).toBe(false);
-        expect(swept.blockedCount).toBe(0);
-        expect(swept.pendingCount).toBe(1);
-        expect(swept.pendingBlockedCount).toBe(0);
-
-        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
-        await expect(db.sessionPendingMessage.findUniqueOrThrow({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "delivering", deliveryBlockedReason: null });
-    });
-
-    it("blocks stale inherited provider-delivery claims on provider attach without writing a transcript row", async () => {
-        const owner = await createAccount("owner");
-        const session = await createSession(owner.id);
-        const localId = `provider-delivery-stale-attach-recovery-${randomUUID()}`;
-
-        await expect(enqueuePendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            localId,
-            ciphertext: "cipher-provider-delivery-stale-attach-recovery",
-        })).resolves.toMatchObject({ ok: true });
-
-        const firstMaterialize = await materializeNextPendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            deliveryState: "provider",
+            trustedPublisherFence,
         });
         expect(firstMaterialize.ok).toBe(true);
         if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected first materialization");
@@ -1317,23 +2363,13 @@ describe("pendingMessageService (shared sessions)", () => {
             data: { updatedAt: new Date(Date.now() - 10 * 60_000) },
         });
 
-        const recovered = await blockPendingDeliveriesOnProviderAttach({
-            actorUserId: owner.id,
-            sessionId: session.id,
-        });
-        expect(recovered.ok).toBe(true);
-        if (!recovered.ok) throw new Error("expected attach recovery");
-        expect(recovered.didUpdate).toBe(true);
-        expect(recovered.blockedCount).toBe(1);
-        expect(recovered.pendingCount).toBe(1);
-        expect(recovered.pendingBlockedCount).toBe(1);
-
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
         await expect(db.sessionPendingMessage.findUniqueOrThrow({
             where: { sessionId_localId: { sessionId: session.id, localId } },
             select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "provider_acceptance_timeout" });
+        })).resolves.toEqual({ deliveryState: "delivering", deliveryBlockedReason: null });
     });
+
 
     it("marks a blocked provider delivery as handled by committing the pending row", async () => {
         const owner = await createAccount("owner");
@@ -1380,6 +2416,159 @@ describe("pendingMessageService (shared sessions)", () => {
             .resolves.toMatchObject({ ok: true, didResolve: false, pendingCount: 0 });
     });
 
+    it("dismisses uncertain delivery into a non-restorable tombstone without a transcript row", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const publisher = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const localId = `provider-delivery-dismissed-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delivery-dismissed",
+        })).resolves.toMatchObject({ ok: true });
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        })).resolves.toMatchObject({ ok: true, didMaterialize: true });
+        await expect(blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            reason: "delivery_outcome_uncertain",
+        })).resolves.toMatchObject({ ok: true });
+
+        await expect(dismissPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId }))
+            .resolves.toMatchObject({ ok: true, didDismiss: true, pendingCount: 0, pendingBlockedCount: 0 });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { status: true, discardedReason: true },
+        })).resolves.toEqual({ status: "discarded", discardedReason: "dismissed_uncertain" });
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(restorePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId }))
+            .resolves.toEqual({ ok: false, error: "delivery-settlement-conflict" });
+        await expect(resolveAcceptedPendingDeliveryOwner({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            trustedPublisherFence: { ...publisher.binding, committedFence: publisher.committedFence },
+        })).resolves.toMatchObject({ ok: true, didResolve: true, pendingCount: 0 });
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+    });
+
+    it("atomically tombstones uncertain delivery and creates one deterministic replacement", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const publisher = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const localId = `provider-delivery-resent-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delivery-resent",
+            requestedAction: { v: 1, kind: "steer_now" },
+        })).resolves.toMatchObject({ ok: true });
+        await expect(materializeNextPendingMessage({ actorUserId: owner.id, sessionId: session.id, deliveryState: "provider" }))
+            .resolves.toMatchObject({ ok: true, didMaterialize: true });
+        await expect(blockPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId, reason: "delivery_outcome_uncertain" }))
+            .resolves.toMatchObject({ ok: true });
+
+        await expect(sendPendingDeliveryAsNew({ actorUserId: owner.id, sessionId: session.id, localId }))
+            .resolves.toMatchObject({ ok: true, didWrite: true, pendingCount: 1, pendingBlockedCount: 0 });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { status: true, discardedReason: true },
+        })).resolves.toEqual({ status: "discarded", discardedReason: "resent_as_new" });
+        const replacement = await db.sessionPendingMessage.findFirstOrThrow({
+            where: { sessionId: session.id, status: "queued" },
+            select: { localId: true, status: true, deliveryState: true, content: true, requestedAction: true },
+        });
+        expect(replacement).toEqual({
+            localId: expect.any(String),
+            status: "queued",
+            deliveryState: null,
+            content: { t: "encrypted", c: "cipher-provider-delivery-resent" },
+            requestedAction: { v: 1, kind: "enqueue" },
+        });
+        await expect(sendPendingDeliveryAsNew({ actorUserId: owner.id, sessionId: session.id, localId }))
+            .resolves.toMatchObject({ ok: true, didWrite: false, pendingCount: 1 });
+        await db.sessionPendingMessage.update({
+            where: { sessionId_localId: { sessionId: session.id, localId: replacement.localId } },
+            data: { content: { t: "encrypted", c: "different-ciphertext" } },
+        });
+        await expect(sendPendingDeliveryAsNew({ actorUserId: owner.id, sessionId: session.id, localId }))
+            .resolves.toEqual({ ok: false, error: "identity-conflict" });
+        await expect(restorePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId }))
+            .resolves.toEqual({ ok: false, error: "delivery-settlement-conflict" });
+
+        await expect(resolveAcceptedPendingDeliveryOwner({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            trustedPublisherFence: { ...publisher.binding, committedFence: publisher.committedFence },
+        })).resolves.toMatchObject({ ok: true, didResolve: true, pendingCount: 1, pendingBlockedCount: 0 });
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId: replacement.localId } },
+            select: { status: true, deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual({ status: "queued", deliveryState: null, deliveryBlockedReason: null });
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
+    it("atomically anchors the minimal manual resolution on the surviving transcript row", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const localId = `provider-delivery-manual-lineage-${randomUUID()}`;
+        const requestedAction = { v: 1 as const, kind: "steer_now" as const };
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delivery-manual-lineage",
+            requestedAction,
+        })).resolves.toMatchObject({ ok: true });
+
+        const materialize = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            foregroundState: "active_steerable",
+            deliveryState: "provider",
+        });
+        expect(materialize).toMatchObject({ ok: true, didMaterialize: true });
+
+        await expect(markPendingDeliveryHandled({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+        })).resolves.toMatchObject({ ok: true, didResolve: true });
+
+        await expect(db.sessionMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryResolution: true },
+        })).resolves.toEqual({
+            deliveryResolution: {
+                v: 1,
+                kind: "manual_handled",
+            },
+        });
+        await expect(resolveAcceptedPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+        })).resolves.toMatchObject({
+            ok: true,
+            didResolve: false,
+            message: {
+                localId,
+                deliveryResolution: { v: 1, kind: "manual_handled" },
+            },
+        });
+    });
+
     it("marks an already-transcripted blocked provider delivery handled idempotently", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
@@ -1405,7 +2594,7 @@ describe("pendingMessageService (shared sessions)", () => {
             actorUserId: owner.id,
             sessionId: session.id,
             localId,
-            reason: "provider_acceptance_timeout",
+            reason: "delivery_outcome_uncertain",
         })).resolves.toMatchObject({ ok: true, pendingBlockedCount: 1 });
         await createCommittedTranscriptMessage({
             sessionId: session.id,
@@ -1551,6 +2740,39 @@ describe("pendingMessageService (shared sessions)", () => {
         })).resolves.toEqual({ pendingCount: 0, pendingBlockedCount: 0 });
     });
 
+    it("serializes exact acceptance against manual disposition to one terminal transcript row", async () => {
+        const owner = await createAccount("provider-delivery-terminal-race");
+        const session = await createSession(owner.id);
+        const localId = `provider-delivery-terminal-race-${randomUUID()}`;
+
+        await enqueuePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId, ciphertext: "cipher" });
+        await markPendingProviderDeliveryClaimed({ sessionId: session.id, localId });
+
+        const [accepted, handled] = await Promise.all([
+            resolveAcceptedPendingDelivery({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                localId,
+            }),
+            markPendingDeliveryHandled({
+                actorUserId: owner.id,
+                sessionId: session.id,
+                localId,
+            }),
+        ]);
+
+        expect(accepted.ok).toBe(true);
+        expect(handled.ok).toBe(true);
+        expect([
+            accepted.ok && accepted.didResolve,
+            handled.ok && handled.didResolve,
+        ].filter(Boolean)).toHaveLength(1);
+        await expect(db.sessionMessage.count({
+            where: { sessionId: session.id, localId },
+        })).resolves.toBe(1);
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
     it("does not mark an unmaterialized queued row handled", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
@@ -1573,7 +2795,7 @@ describe("pendingMessageService (shared sessions)", () => {
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
     });
 
-    it("reconciles materialized provider-delivery rows covered by a durable accepted seq", async () => {
+    it("settles a materialized provider-delivery row by its exact accepted localId", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const firstLocalId = `provider-delivery-reconcile-first-${randomUUID()}`;
@@ -1607,8 +2829,11 @@ describe("pendingMessageService (shared sessions)", () => {
             deliveryState: "provider",
         });
         expect(secondMaterialize.ok).toBe(true);
-        if (!secondMaterialize.ok) throw new Error("expected ordered materialization result");
-        expect(secondMaterialize.didMaterialize).toBe(false);
+        if (!secondMaterialize.ok || !secondMaterialize.didMaterialize) {
+            throw new Error("expected current-publisher claim rejoin");
+        }
+        expect(secondMaterialize.message.localId).toBe(firstLocalId);
+        expect(secondMaterialize.pendingVersion).toBe(firstMaterialize.pendingVersion);
 
         await createCommittedTranscriptMessage({
             sessionId: session.id,
@@ -1618,17 +2843,15 @@ describe("pendingMessageService (shared sessions)", () => {
             ciphertext: "cipher-provider-delivery-reconcile-first",
         });
 
-        const reconciled = await reconcileAcceptedPendingDeliveriesThroughSeq({
+        const accepted = await resolveAcceptedPendingDelivery({
             actorUserId: owner.id,
             sessionId: session.id,
-            maxAcceptedSeq: 1,
+            localId: firstLocalId,
         });
-        expect(reconciled.ok).toBe(true);
-        if (!reconciled.ok) throw new Error("expected reconciliation");
-        expect(reconciled.didResolve).toBe(true);
-        expect(reconciled.resolvedCount).toBe(1);
-        expect(reconciled).toMatchObject({ resolvedLocalIds: [firstLocalId] });
-        expect(reconciled.pendingCount).toBe(1);
+        expect(accepted.ok).toBe(true);
+        if (!accepted.ok || !accepted.didResolve) throw new Error("expected accepted resolution");
+        expect(accepted.message).toEqual(expect.objectContaining({ localId: firstLocalId, seq: 1 }));
+        expect(accepted.pendingCount).toBe(1);
         await expect(db.session.findUniqueOrThrow({
             where: { id: session.id },
             select: { pendingCount: true, pendingBlockedCount: true },
@@ -1654,7 +2877,7 @@ describe("pendingMessageService (shared sessions)", () => {
         ]);
     });
 
-    it("reconciles blocked claimed rows but not unclaimed queued rows covered by a durable accepted seq", async () => {
+    it("does not reconcile blocked claimed rows or later queued rows from transcript sequence alone", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const blockedLocalId = `provider-delivery-reconcile-blocked-${randomUUID()}`;
@@ -1706,29 +2929,17 @@ describe("pendingMessageService (shared sessions)", () => {
             ciphertext: "cipher-provider-delivery-reconcile-queued",
         });
 
-        const reconciled = await reconcileAcceptedPendingDeliveriesThroughSeq({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            maxAcceptedSeq: 61,
-        });
-        expect(reconciled.ok).toBe(true);
-        if (!reconciled.ok) throw new Error("expected reconciliation");
-        expect(reconciled.didResolve).toBe(true);
-        expect(reconciled.resolvedCount).toBe(1);
-        expect(reconciled.resolvedLocalIds).toEqual([blockedLocalId]);
-        expect(reconciled.pendingCount).toBe(1);
-        expect(reconciled.pendingBlockedCount).toBe(0);
-
         await expect(db.sessionPendingMessage.findMany({
             where: { sessionId: session.id },
             orderBy: [{ position: "asc" }, { localId: "asc" }],
             select: { localId: true, deliveryState: true, deliveryBlockedReason: true },
         })).resolves.toEqual([
+            { localId: blockedLocalId, deliveryState: "blocked", deliveryBlockedReason: "terminal_composer_draft" },
             { localId: queuedLocalId, deliveryState: null, deliveryBlockedReason: null },
         ]);
     });
 
-    it("does not resolve direct accepted provider delivery from a blocked row without a trusted accepted seq", async () => {
+    it("resolves late exact provider acceptance from a blocked row", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const localId = `provider-delivery-direct-blocked-${randomUUID()}`;
@@ -1767,94 +2978,12 @@ describe("pendingMessageService (shared sessions)", () => {
 
         const accepted = await resolveAcceptedPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId });
         expect(accepted.ok).toBe(true);
-        if (!accepted.ok) throw new Error("expected direct acceptance no-op");
-        expect(accepted.didResolve).toBe(false);
-        expect(accepted.pendingCount).toBe(1);
-        expect(accepted.pendingBlockedCount).toBe(1);
+        if (!accepted.ok) throw new Error("expected late exact acceptance");
+        expect(accepted.didResolve).toBe(true);
+        expect(accepted.pendingCount).toBe(0);
+        expect(accepted.pendingBlockedCount).toBe(0);
 
-        await expect(db.sessionPendingMessage.findUniqueOrThrow({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "terminal_composer_draft" });
-    });
-
-    it("blocks accepted-through-seq provider delivery that collides with divergent transcript content", async () => {
-        const owner = await createAccount("owner");
-        const session = await createSession(owner.id);
-        const localId = `provider-delivery-reconcile-conflict-${randomUUID()}`;
-
-        await expect(enqueuePendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            localId,
-            ciphertext: "cipher-provider-delivery-reconcile-conflict-pending",
-        })).resolves.toMatchObject({ ok: true });
-
-        await markPendingProviderDeliveryClaimed({ sessionId: session.id, localId });
-        await createCommittedTranscriptMessage({
-            sessionId: session.id,
-            localId,
-            seq: 50,
-            messageRole: "user",
-            ciphertext: "cipher-provider-delivery-reconcile-conflict-transcript",
-        });
-
-        const reconciled = await reconcileAcceptedPendingDeliveriesThroughSeq({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            maxAcceptedSeq: 50,
-        });
-        expect(reconciled.ok).toBe(true);
-        if (!reconciled.ok) throw new Error("expected reconciliation result");
-        expect(reconciled.didResolve).toBe(false);
-        expect(reconciled.resolvedCount).toBe(0);
-        expect(reconciled.pendingCount).toBe(1);
-        expect(reconciled.pendingBlockedCount).toBe(1);
-
-        await expect(db.sessionPendingMessage.findUniqueOrThrow({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "unknown" });
-    });
-
-    it("blocks accepted-through-seq provider delivery that collides with an incompatible transcript role", async () => {
-        const owner = await createAccount("owner");
-        const session = await createSession(owner.id);
-        const localId = `provider-delivery-reconcile-role-conflict-${randomUUID()}`;
-
-        await expect(enqueuePendingMessage({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            localId,
-            ciphertext: "cipher-provider-delivery-reconcile-role-conflict",
-            messageRole: "user",
-        })).resolves.toMatchObject({ ok: true });
-
-        await markPendingProviderDeliveryClaimed({ sessionId: session.id, localId });
-        await createCommittedTranscriptMessage({
-            sessionId: session.id,
-            localId,
-            seq: 51,
-            messageRole: "agent",
-            ciphertext: "cipher-provider-delivery-reconcile-role-conflict",
-        });
-
-        const reconciled = await reconcileAcceptedPendingDeliveriesThroughSeq({
-            actorUserId: owner.id,
-            sessionId: session.id,
-            maxAcceptedSeq: 51,
-        });
-        expect(reconciled.ok).toBe(true);
-        if (!reconciled.ok) throw new Error("expected reconciliation result");
-        expect(reconciled.didResolve).toBe(false);
-        expect(reconciled.resolvedCount).toBe(0);
-        expect(reconciled.pendingCount).toBe(1);
-        expect(reconciled.pendingBlockedCount).toBe(1);
-
-        await expect(db.sessionPendingMessage.findUniqueOrThrow({
-            where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { deliveryState: true, deliveryBlockedReason: true },
-        })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "unknown" });
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
     });
 
     it("does not resolve accepted provider delivery from a queued row before it is claimed", async () => {
@@ -1920,6 +3049,149 @@ describe("pendingMessageService (shared sessions)", () => {
             where: { id: session.id },
             select: { pendingCount: true, pendingBlockedCount: true },
         })).resolves.toEqual({ pendingCount: 0, pendingBlockedCount: 0 });
+    });
+
+    it("preserves exact settlement response-loss idempotency while terminal lineage is disabled", async () => {
+        const owner = await createAccount("provider-delivery-lineage-disabled");
+        const session = await createSession(owner.id);
+        const localId = `provider-delivery-lineage-disabled-${randomUUID()}`;
+        const requestedAction = { v: 1 as const, kind: "send_now" as const };
+
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delivery-lineage-disabled",
+            requestedAction,
+        });
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            foregroundState: "active_unsteerable",
+            deliveryState: "provider",
+        })).resolves.toMatchObject({ ok: true, didMaterialize: true });
+        await expect(resolveAcceptedPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+        })).resolves.toMatchObject({ ok: true, didResolve: true });
+
+        await expect(resolveAcceptedPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+        })).resolves.toMatchObject({ ok: true, didResolve: false });
+    });
+
+    it("settles an accepted exact send-now row while leaving its earlier queued neighbor untouched", async () => {
+        const owner = await createAccount("provider-delivery-exact-send-now");
+        const session = await createSession(owner.id);
+        const earlierLocalId = `provider-delivery-exact-earlier-${randomUUID()}`;
+        const selectedLocalId = `provider-delivery-exact-selected-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: earlierLocalId,
+            ciphertext: "cipher-provider-delivery-exact-earlier",
+        })).resolves.toMatchObject({ ok: true });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: selectedLocalId,
+            ciphertext: "cipher-provider-delivery-exact-selected",
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toMatchObject({ ok: true });
+
+        await expect(materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            foregroundState: "active_unsteerable",
+            deliveryState: "provider",
+        })).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            message: {
+                localId: selectedLocalId,
+                requestedAction: { v: 1, kind: "send_now" },
+                providerAction: "interrupt_and_send",
+            },
+        });
+
+        await expect(resolveAcceptedPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: selectedLocalId,
+        })).resolves.toMatchObject({ ok: true, didResolve: true });
+
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id },
+            orderBy: { position: "asc" },
+            select: { localId: true, status: true, deliveryState: true },
+        })).resolves.toEqual([{
+            localId: earlierLocalId,
+            status: "queued",
+            deliveryState: null,
+        }]);
+        await expect(db.sessionMessage.findMany({
+            where: { sessionId: session.id },
+            select: { localId: true },
+        })).resolves.toEqual([{ localId: selectedLocalId }]);
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true },
+        })).resolves.toEqual({ pendingCount: 1, pendingBlockedCount: 0 });
+    });
+
+    it("blocks accepted ordinary enqueue settlement behind its earlier executable neighbor", async () => {
+        const owner = await createAccount("provider-delivery-fifo-settlement");
+        const session = await createSession(owner.id);
+        const earlierLocalId = `provider-delivery-fifo-earlier-${randomUUID()}`;
+        const selectedLocalId = `provider-delivery-fifo-selected-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: earlierLocalId,
+            ciphertext: "cipher-provider-delivery-fifo-earlier",
+        })).resolves.toMatchObject({ ok: true });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: selectedLocalId,
+            ciphertext: "cipher-provider-delivery-fifo-selected",
+        })).resolves.toMatchObject({ ok: true });
+        await createCurrentPendingEvidencePublisher({
+            accountId: owner.id,
+            sessionId: session.id,
+        });
+        await markPendingProviderDeliveryClaimed({
+            sessionId: session.id,
+            localId: selectedLocalId,
+            providerAction: "send",
+        });
+
+        await expect(resolveAcceptedPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: selectedLocalId,
+        })).resolves.toEqual({ ok: false, error: "blocked-by-earlier-pending" });
+
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id },
+            orderBy: { position: "asc" },
+            select: { localId: true, status: true, deliveryState: true },
+        })).resolves.toEqual([
+            { localId: earlierLocalId, status: "queued", deliveryState: null },
+            { localId: selectedLocalId, status: "queued", deliveryState: "delivering" },
+        ]);
+        await expect(db.sessionMessage.count({
+            where: { sessionId: session.id, localId: { in: [earlierLocalId, selectedLocalId] } },
+        })).resolves.toBe(0);
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true },
+        })).resolves.toEqual({ pendingCount: 2, pendingBlockedCount: 0 });
     });
 
     it("rejects accepted provider delivery when neither a pending row nor a committed legacy message exists", async () => {
@@ -1989,8 +3261,11 @@ describe("pendingMessageService (shared sessions)", () => {
             deliveryState: "provider",
         });
         expect(secondClaim.ok).toBe(true);
-        if (!secondClaim.ok) throw new Error("expected ordered claim result");
-        expect(secondClaim.didMaterialize).toBe(false);
+        if (!secondClaim.ok || !secondClaim.didMaterialize) {
+            throw new Error("expected current-publisher claim rejoin");
+        }
+        expect(secondClaim.message.localId).toBe(firstLocalId);
+        expect(secondClaim.pendingVersion).toBe(firstClaim.pendingVersion);
 
         const secondAcceptedFirst = await resolveAcceptedPendingDelivery({
             actorUserId: owner.id,
@@ -2039,7 +3314,418 @@ describe("pendingMessageService (shared sessions)", () => {
         ]);
     });
 
-    it("materializes a concurrently claimed queued row idempotently", async () => {
+    it("rejoins the same heartbeat-advanced publisher's frozen claim before version, timing, foreground, or Activity evaluation", async () => {
+        const owner = await createAccount("provider-rejoin");
+        const session = await createSession(owner.id);
+        const publisher = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const localId = `provider-rejoin-${randomUUID()}`;
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-rejoin",
+            requestedAction: { v: 1, kind: "send_now" },
+        });
+        const trustedPublisherFence = { ...publisher.binding, committedFence: publisher.committedFence };
+
+        const first = await materializeNextPendingMessageForCurrentPublisher({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            trustedPublisherFence,
+            foregroundState: "active_unsteerable",
+            deliveryTiming: "after_foreground_ready",
+        });
+        expect(first).toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            message: { localId, requestedAction: { kind: "send_now" }, providerAction: "interrupt_and_send" },
+        });
+        if (!first.ok || !first.didMaterialize) throw new Error("expected fresh provider claim");
+        const claimed = await db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { providerAction: true, updatedAt: true },
+        });
+        const touched = await publisher.presence.touchPublisher({ socket: publisher.socket });
+        if (touched.status !== "touched") throw new Error("expected publisher heartbeat advance");
+        const rejoinPublisherFence = { ...publisher.binding, committedFence: touched.committedFence };
+        const frozenSessionUpdatedAt = new Date("2020-01-02T03:04:05.000Z");
+        await db.session.update({
+            where: { id: session.id },
+            data: { updatedAt: frozenSessionUpdatedAt },
+        });
+        const sessionBeforeRejoin = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { updatedAt: true, pendingVersion: true, active: true, lastActiveAt: true },
+        });
+
+        const rejoined = await materializeNextPendingMessageForCurrentPublisher({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            trustedPublisherFence: rejoinPublisherFence,
+            expectedPendingVersion: first.pendingVersion + 99,
+            foregroundState: "ready",
+            deliveryTiming: "after_runtime_idle",
+        });
+
+        expect(rejoined).toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            didWriteMessage: false,
+            pendingVersion: first.pendingVersion,
+            message: { localId, requestedAction: { kind: "send_now" }, providerAction: "interrupt_and_send" },
+        });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { providerAction: true, updatedAt: true },
+        })).resolves.toEqual(claimed);
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { updatedAt: true, pendingVersion: true, active: true, lastActiveAt: true },
+        })).resolves.toEqual(sessionBeforeRejoin);
+    });
+
+    it("rejects provider delivery without a trusted current-publisher fence before mutating Queue state", async () => {
+        const owner = await createAccount("provider-missing-fence");
+        const session = await createSession(owner.id);
+        await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const localId = `provider-missing-fence-${randomUUID()}`;
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-missing-fence",
+        })).resolves.toMatchObject({ ok: true });
+
+        const pendingBefore = await db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: {
+                status: true,
+                deliveryState: true,
+                deliveryBlockedReason: true,
+                providerAction: true,
+                requestedAction: true,
+                updatedAt: true,
+            },
+        });
+        const sessionBefore = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+        });
+
+        // @ts-expect-error Materialization is type-invalid without the trusted publisher fence; exercise the runtime boundary too.
+        await expect(materializeNextPendingMessageOwner({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        })).resolves.toEqual({ ok: false, error: "forbidden" });
+
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: {
+                status: true,
+                deliveryState: true,
+                deliveryBlockedReason: true,
+                providerAction: true,
+                requestedAction: true,
+                updatedAt: true,
+            },
+        })).resolves.toEqual(pendingBefore);
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+        })).resolves.toEqual(sessionBefore);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
+    it("converts an actionless delivering row to uncertainty once instead of inferring a rejoin action", async () => {
+        const owner = await createAccount("provider-actionless-rejoin");
+        const session = await createSession(owner.id);
+        const publisher = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const trustedPublisherFence = { ...publisher.binding, committedFence: publisher.committedFence };
+        const localId = `provider-actionless-rejoin-${randomUUID()}`;
+        await db.sessionPendingMessage.create({
+            data: {
+                sessionId: session.id,
+                authorAccountId: owner.id,
+                localId,
+                content: { t: "encrypted", c: "cipher-actionless-rejoin" },
+                requestedAction: { v: 1, kind: "enqueue" },
+                providerAction: null,
+                status: "queued",
+                deliveryState: "delivering",
+                position: 1,
+            },
+        });
+        await db.session.update({
+            where: { id: session.id },
+            data: { pendingCount: 1 },
+        });
+
+        const first = await materializeNextPendingMessageForCurrentPublisher({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            trustedPublisherFence,
+            expectedPendingVersion: 999,
+            deliveryTiming: "after_runtime_idle",
+        });
+        expect(first).toMatchObject({
+            ok: true,
+            didMaterialize: false,
+            pendingCount: 1,
+            pendingBlockedCount: 1,
+            pendingVersion: 1,
+            deliveryState: { mode: "provider", unresolved: false },
+        });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryState: true, deliveryBlockedReason: true, providerAction: true },
+        })).resolves.toEqual({
+            deliveryState: "blocked",
+            deliveryBlockedReason: "delivery_outcome_uncertain",
+            providerAction: null,
+        });
+
+        await expect(materializeNextPendingMessageForCurrentPublisher({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            trustedPublisherFence,
+        })).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: false,
+            pendingCount: 1,
+            pendingBlockedCount: 1,
+            pendingVersion: 1,
+        });
+    });
+
+    it("claims ordinary after-runtime-idle work from the exact current-publisher idle revision", async () => {
+        const owner = await createAccount("provider-idle-current-revision");
+        const session = await createSession(owner.id);
+        const publisher = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const trustedPublisherFence = { ...publisher.binding, committedFence: publisher.committedFence };
+        const localId = `provider-idle-current-revision-${randomUUID()}`;
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-idle-current-revision",
+        });
+        await db.session.update({
+            where: { id: session.id },
+            data: {
+                runtimeActivityState: "idle",
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: BigInt(Date.now()),
+                runtimeActivityRevision: BigInt(42),
+            },
+        });
+
+        await expect(materializeNextPendingMessageForCurrentPublisher({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            trustedPublisherFence,
+            foregroundState: "ready",
+            deliveryTiming: "after_runtime_idle",
+            expectedRuntimeActivityRevision: 42,
+        })).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            didWriteMessage: false,
+            message: {
+                localId,
+                requestedAction: { kind: "enqueue" },
+                providerAction: "send",
+            },
+            deliveryState: { mode: "provider", unresolved: true },
+        });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryState: true, deliveryBlockedReason: true, providerAction: true },
+        })).resolves.toEqual({
+            deliveryState: "delivering",
+            deliveryBlockedReason: null,
+            providerAction: "send",
+        });
+    });
+
+    it("lets urgent current-publisher delivery bypass after-runtime-idle Activity evaluation and revision fencing", async () => {
+        const owner = await createAccount("provider-urgent-zero-activity");
+        const session = await createSession(owner.id);
+        const publisher = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const trustedPublisherFence = { ...publisher.binding, committedFence: publisher.committedFence };
+        const localId = `provider-urgent-zero-activity-${randomUUID()}`;
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-urgent-zero-activity",
+            requestedAction: { v: 1, kind: "send_now" },
+        });
+        await db.session.update({
+            where: { id: session.id },
+            data: {
+                runtimeActivityState: "active",
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: BigInt(Date.now()),
+                runtimeActivityRevision: BigInt(41),
+            },
+        });
+        const activityBefore = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: {
+                runtimeActivityState: true,
+                runtimeActivityActiveCount: true,
+                runtimeActivityObservedAt: true,
+                runtimeActivityRevision: true,
+            },
+        });
+
+        await expect(materializeNextPendingMessageForCurrentPublisher({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            trustedPublisherFence,
+            foregroundState: "active_unsteerable",
+            deliveryTiming: "after_runtime_idle",
+        })).resolves.toMatchObject({
+            ok: true,
+            didMaterialize: true,
+            didWriteMessage: false,
+            message: {
+                localId,
+                requestedAction: { kind: "send_now" },
+                providerAction: "interrupt_and_send",
+            },
+        });
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: {
+                runtimeActivityState: true,
+                runtimeActivityActiveCount: true,
+                runtimeActivityObservedAt: true,
+                runtimeActivityRevision: true,
+            },
+        })).resolves.toEqual(activityBefore);
+    });
+
+    it("gives a replaced publisher zero fresh-claim or rejoin authority without mutating Queue state", async () => {
+        const owner = await createAccount("provider-replaced");
+        const session = await createSession(owner.id);
+        const predecessor = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const successor = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const predecessorFence = { ...predecessor.binding, committedFence: predecessor.committedFence };
+        const successorFence = { ...successor.binding, committedFence: successor.committedFence };
+        const localId = `provider-replaced-${randomUUID()}`;
+        await enqueuePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId, ciphertext: "cipher-replaced" });
+
+        const beforeStaleClaim = await db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryState: true, providerAction: true, requestedAction: true, updatedAt: true },
+        });
+        const versionBeforeStaleClaim = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingVersion: true },
+        });
+        await expect(materializeNextPendingMessageForCurrentPublisher({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            trustedPublisherFence: predecessorFence,
+        })).resolves.toEqual({ ok: false, error: "forbidden" });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryState: true, providerAction: true, requestedAction: true, updatedAt: true },
+        })).resolves.toEqual(beforeStaleClaim);
+        await expect(db.session.findUniqueOrThrow({ where: { id: session.id }, select: { pendingVersion: true } }))
+            .resolves.toEqual(versionBeforeStaleClaim);
+
+        const claimed = await materializeNextPendingMessageForCurrentPublisher({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            trustedPublisherFence: successorFence,
+        });
+        expect(claimed).toMatchObject({ ok: true, didMaterialize: true, message: { localId } });
+        const claimedRow = await db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryState: true, providerAction: true, requestedAction: true, updatedAt: true },
+        });
+        const claimedVersion = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingVersion: true },
+        });
+        await expect(materializeNextPendingMessageForCurrentPublisher({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            trustedPublisherFence: predecessorFence,
+        })).resolves.toEqual({ ok: false, error: "forbidden" });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryState: true, providerAction: true, requestedAction: true, updatedAt: true },
+        })).resolves.toEqual(claimedRow);
+        await expect(db.session.findUniqueOrThrow({ where: { id: session.id }, select: { pendingVersion: true } }))
+            .resolves.toEqual(claimedVersion);
+    });
+
+    it("gives a replaced publisher zero accepted-settlement authority without creating transcript state", async () => {
+        const owner = await createAccount("provider-replaced-settlement");
+        const session = await createSession(owner.id);
+        const predecessor = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const predecessorFence = { ...predecessor.binding, committedFence: predecessor.committedFence };
+        const localId = `provider-replaced-settlement-${randomUUID()}`;
+        await enqueuePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId, ciphertext: "cipher-replaced-settlement" });
+
+        await expect(materializeNextPendingMessageForCurrentPublisher({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            trustedPublisherFence: predecessorFence,
+        })).resolves.toMatchObject({ ok: true, didMaterialize: true, message: { localId } });
+
+        const beforeWrongMachine = await db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { status: true, deliveryState: true, providerAction: true, requestedAction: true, updatedAt: true },
+        });
+        await expect(resolveAcceptedPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            trustedPublisherFence: { ...predecessorFence, machineId: `wrong-${randomUUID()}` },
+        })).resolves.toEqual({ ok: false, error: "forbidden" });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { status: true, deliveryState: true, providerAction: true, requestedAction: true, updatedAt: true },
+        })).resolves.toEqual(beforeWrongMachine);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+
+        await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const before = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+        });
+        const pendingBefore = await db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { status: true, deliveryState: true, providerAction: true, requestedAction: true, updatedAt: true },
+        });
+
+        const staleSettlementRequest = {
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            trustedPublisherFence: predecessorFence,
+        };
+        await expect(resolveAcceptedPendingDelivery(staleSettlementRequest)).resolves.toEqual({
+            ok: false,
+            error: "forbidden",
+        });
+
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { status: true, deliveryState: true, providerAction: true, requestedAction: true, updatedAt: true },
+        })).resolves.toEqual(pendingBefore);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+        })).resolves.toEqual(before);
+    });
+
+    it("claims a concurrently requested queued row once without committing transcript state", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const localId = `race-${randomUUID()}`;
@@ -2060,59 +3746,87 @@ describe("pendingMessageService (shared sessions)", () => {
         expect(results.every((result) => result.ok)).toBe(true);
         expect(results.filter((result) => result.ok && result.didMaterialize).length).toBe(1);
         expect(results.filter((result) => result.ok && !result.didMaterialize).length).toBe(1);
-        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
-        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryState: true, providerAction: true },
+        })).resolves.toEqual({ deliveryState: "delivering", providerAction: "send" });
 
         const after = await db.session.findUniqueOrThrow({
             where: { id: session.id },
             select: { pendingCount: true },
         });
-        expect(after.pendingCount).toBe(0);
+        expect(after.pendingCount).toBe(1);
     });
 
-    it("claims a provider-delivery row at most once under concurrent materialization", async () => {
+    it("keeps concurrent same-publisher materialization on one frozen provider-delivery claim", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
+        const publisher = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+        const trustedPublisherFence = { ...publisher.binding, committedFence: publisher.committedFence };
         const localId = `provider-race-${randomUUID()}`;
 
-        await expect(enqueuePendingMessage({
+        const enqueue = await enqueuePendingMessage({
             actorUserId: owner.id,
             sessionId: session.id,
             localId,
             ciphertext: "cipher-provider-race",
-        })).resolves.toMatchObject({ ok: true });
+        });
+        expect(enqueue).toMatchObject({ ok: true });
+        if (!enqueue.ok) throw new Error("expected enqueue success");
 
         const results = await Promise.all([
-            materializeNextPendingMessage({ actorUserId: owner.id, sessionId: session.id, deliveryState: "provider" }),
-            materializeNextPendingMessage({ actorUserId: owner.id, sessionId: session.id, deliveryState: "provider" }),
+            materializeNextPendingMessage({ actorUserId: owner.id, sessionId: session.id, deliveryState: "provider", trustedPublisherFence }),
+            materializeNextPendingMessage({ actorUserId: owner.id, sessionId: session.id, deliveryState: "provider", trustedPublisherFence }),
         ]);
 
         expect(results.every((result) => result.ok)).toBe(true);
-        expect(results.filter((result) => result.ok && result.didMaterialize).length).toBe(1);
-        expect(results.filter((result) => result.ok && !result.didMaterialize).length).toBe(1);
-        const materialized = results.find((result) => result.ok && result.didMaterialize);
-        if (!materialized?.ok || !materialized.didMaterialize) throw new Error("expected provider delivery claim");
-        expect(materialized.didWriteMessage).toBe(false);
-        expect(materialized.message).toEqual(expect.objectContaining({
-            id: null,
-            seq: null,
-            localId,
-            content: { t: "encrypted", c: "cipher-provider-race" },
-        }));
+        // A caller that enters after the first commit is intentionally indistinguishable from a
+        // response-loss retry and rejoins the frozen claim. The durable invariant is one claim
+        // transition; the exact socket/CLI owners serialize and suppress duplicate local handoff.
+        const materialized = results.filter((result) => result.ok && result.didMaterialize);
+        expect(materialized.length).toBeGreaterThanOrEqual(1);
+        for (const result of materialized) {
+            expect(result).toMatchObject({
+                didWriteMessage: false,
+                pendingVersion: enqueue.pendingVersion + 1,
+                message: {
+                    id: null,
+                    seq: null,
+                    localId,
+                    content: { t: "encrypted", c: "cipher-provider-race" },
+                    requestedAction: { v: 1, kind: "enqueue" },
+                    providerAction: "send",
+                },
+            });
+        }
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
         await expect(db.sessionPendingMessage.findUniqueOrThrow({
             where: { sessionId_localId: { sessionId: session.id, localId } },
-            select: { status: true, deliveryState: true, deliveryBlockedReason: true },
+            select: {
+                status: true,
+                deliveryState: true,
+                deliveryBlockedReason: true,
+                requestedAction: true,
+                providerAction: true,
+            },
         })).resolves.toEqual({
             status: "queued",
             deliveryState: "delivering",
             deliveryBlockedReason: null,
+            requestedAction: { v: 1, kind: "enqueue" },
+            providerAction: "send",
         });
         await expect(db.session.findUniqueOrThrow({
             where: { id: session.id },
-            select: { pendingCount: true, pendingBlockedCount: true },
-        })).resolves.toEqual({ pendingCount: 1, pendingBlockedCount: 0 });
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+        })).resolves.toEqual({
+            pendingCount: 1,
+            pendingBlockedCount: 0,
+            pendingVersion: enqueue.pendingVersion + 1,
+        });
     });
+
 
     it("clamps pendingCount when discarding a queued message after the counter is already 0", async () => {
         const owner = await createAccount("owner");
@@ -2148,7 +3862,7 @@ describe("pendingMessageService (shared sessions)", () => {
         expect(after.pendingVersion).toBe(before.pendingVersion + 1);
     });
 
-    it("discards a delivering provider-owned pending row", async () => {
+    it("rejects ordinary discard of a delivering provider-owned pending row", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const localId = `provider-discard-delivering-${randomUUID()}`;
@@ -2178,21 +3892,21 @@ describe("pendingMessageService (shared sessions)", () => {
         })).resolves.toEqual({ status: "queued", deliveryState: "delivering" });
 
         const discard = await discardPendingMessage({ actorUserId: owner.id, sessionId: session.id, localId, reason: "test" });
-        expect(discard.ok).toBe(true);
-        if (!discard.ok) throw new Error("expected discard to succeed");
-        expect(discard.pendingCount).toBe(beforeDiscard.pendingCount - 1);
-        expect(discard.pendingBlockedCount).toBe(beforeDiscard.pendingBlockedCount);
-        expect(discard.pendingVersion).toBe(beforeDiscard.pendingVersion + 1);
+        expect(discard).toEqual({ ok: false, error: "delivery-settlement-conflict" });
 
         await expect(db.sessionPendingMessage.findUnique({
             where: { sessionId_localId: { sessionId: session.id, localId } },
             select: { status: true, deliveryState: true, discardedReason: true },
         })).resolves.toEqual({
-            status: "discarded",
-            deliveryState: null,
-            discardedReason: "test",
+            status: "queued",
+            deliveryState: "delivering",
+            discardedReason: null,
         });
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+        })).resolves.toEqual(beforeDiscard);
     });
 
     it("deletes queued, blocked, and discarded pending rows", async () => {
@@ -2262,7 +3976,7 @@ describe("pendingMessageService (shared sessions)", () => {
         })).resolves.toEqual([]);
     });
 
-    it("deletes a delivering provider-owned pending row", async () => {
+    it("rejects generic deletion of a delivering row so exact acceptance remains the retirement owner", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const localId = `provider-delete-delivering-${randomUUID()}`;
@@ -2289,25 +4003,64 @@ describe("pendingMessageService (shared sessions)", () => {
         });
 
         const deleted = await deletePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId });
-        expect(deleted.ok).toBe(true);
-        if (!deleted.ok) throw new Error("expected delete to succeed");
-        expect(deleted.pendingCount).toBe(beforeDelete.pendingCount - 1);
-        expect(deleted.pendingBlockedCount).toBe(beforeDelete.pendingBlockedCount);
-        expect(deleted.pendingVersion).toBe(beforeDelete.pendingVersion + 1);
+        expect(deleted).toEqual({ ok: false, error: "delivery-settlement-conflict" });
 
-        await expect(db.sessionPendingMessage.findUnique({
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
             where: { sessionId_localId: { sessionId: session.id, localId } },
-        })).resolves.toBeNull();
+            select: { status: true, deliveryState: true },
+        })).resolves.toEqual({ status: "queued", deliveryState: "delivering" });
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+        })).resolves.toEqual(beforeDelete);
 
-        const afterDeleteMaterialize = await materializeNextPendingMessage({
+        const accepted = await resolveAcceptedPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId });
+        expect(accepted).toMatchObject({ ok: true, didResolve: true, pendingCount: 0, pendingBlockedCount: 0 });
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+    });
+
+    it("serializes concurrent delivering-row deletion and exact acceptance without corrupting counts or version", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const localId = `provider-delete-accept-race-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delete-accept-race",
+        })).resolves.toMatchObject({ ok: true });
+        await expect(materializeNextPendingMessage({
             actorUserId: owner.id,
             sessionId: session.id,
             deliveryState: "provider",
+        })).resolves.toMatchObject({ ok: true, didMaterialize: true, didWriteMessage: false });
+
+        const before = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
         });
-        expect(afterDeleteMaterialize.ok).toBe(true);
-        if (!afterDeleteMaterialize.ok) throw new Error("expected post-delete materialization result");
-        expect(afterDeleteMaterialize.didMaterialize).toBe(false);
+        const [deleted, accepted] = await Promise.all([
+            deletePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId }),
+            resolveAcceptedPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId }),
+        ]);
+
+        expect(accepted).toMatchObject({ ok: true, pendingCount: 0, pendingBlockedCount: 0 });
+        expect(
+            deleted.ok === true || (deleted.ok === false && deleted.error === "delivery-settlement-conflict"),
+        ).toBe(true);
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+        })).resolves.toEqual({
+            pendingCount: 0,
+            pendingBlockedCount: 0,
+            pendingVersion: before.pendingVersion + 1,
+        });
     });
 
     it("forbids view-only participants from mutating pending (but allows listing)", async () => {
@@ -2373,11 +4126,6 @@ describe("pendingMessageService (shared sessions)", () => {
         expect(block.ok).toBe(false);
         if (block.ok) throw new Error("expected forbidden");
         expect(block.error).toBe("forbidden");
-
-        const retry = await retryPendingDelivery({ actorUserId: viewer.id, sessionId: session.id, localId });
-        expect(retry.ok).toBe(false);
-        if (retry.ok) throw new Error("expected forbidden");
-        expect(retry.error).toBe("forbidden");
 
         const handled = await markPendingDeliveryHandled({ actorUserId: viewer.id, sessionId: session.id, localId });
         expect(handled.ok).toBe(false);
@@ -2499,6 +4247,7 @@ describe("pendingMessageService (shared sessions)", () => {
             pendingBlockedCount: 0,
             pendingVersion: enqueueB.pendingVersion,
             deferredReason: "pending_version_mismatch",
+            deliveryState: { mode: "provider", unresolved: false },
         });
         await expect(db.sessionMessage.count({ where: { sessionId: session.id } })).resolves.toBe(0);
         await expect(db.sessionPendingMessage.findMany({

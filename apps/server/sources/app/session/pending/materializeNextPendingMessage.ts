@@ -1,4 +1,4 @@
-import { markSessionParticipantsChanged, type SessionParticipantCursor } from "@/app/session/changeTracking/markSessionParticipantsChanged";
+import { type SessionParticipantCursor } from "@/app/session/changeTracking/markSessionParticipantsChanged";
 import { markPendingStateChangedParticipants } from "@/app/session/pending/markPendingStateChangedParticipants";
 import { resolveSessionPendingOwnerAccess } from "@/app/session/pending/resolveSessionPendingAccess";
 import { inTx } from "@/storage/inTx";
@@ -6,27 +6,29 @@ import { db } from "@/storage/db";
 import { isPrismaErrorCode } from "@/storage/prisma";
 import { readEncryptionFeatureEnv } from "@/app/features/catalog/readFeatureEnv";
 import {
-    accountSettingsParse,
-    isSessionRuntimeActivityProjectionIdleForPendingDrain,
+    decideRuntimeIdleAdmission,
     isStoredContentKindAllowedForSessionByStoragePolicy,
     pendingDeliveryStatusV1ToPersistedFields,
+    PendingRequestedActionV1Schema,
+    readPendingLocalId,
+    type PendingProviderAction,
+    type PendingRequestedActionV1,
     type SessionMessageRole,
     type SessionPendingQueueDeliveryTiming,
     type SessionStoredContentKind,
 } from "@happier-dev/protocol";
 import { didSessionActivityBadgeContributionChange } from "@/app/activity/accountActivityBadge";
 import { resolveSessionMessageRole } from "@/app/session/messageRole/resolveSessionMessageRole";
-import { createSessionMessageFromPending, resolvePendingTranscriptCompatibility } from "@/app/session/pending/pendingMessageTranscriptCommit";
-import { blockStaleProviderDeliveryClaims } from "@/app/session/pending/providerDeliveryClaimStaleness";
-import {
-    resolveReadyProjectionEventType,
-    updateSessionMessageActivityProjection,
-    type SessionReadyProjectionUpdate,
-} from "@/app/session/sessionWriteService";
+import { resolvePendingTranscriptCompatibility } from "@/app/session/pending/pendingMessageTranscriptCommit";
 import { logger } from "@/utils/logging/log";
-import { openPlainAccountSettingsDbValue } from "@/app/encryption/accountSettingsStorage";
+import { readStoredSessionRuntimeActivityProjectionResult } from "@/app/session/runtimeActivity/projection";
+import {
+    isTrustedPendingPublisherFenceCurrent,
+    type TrustedPendingPublisherFence,
+} from "@/app/session/pending/pendingPublisherAuthority";
 
 type ParticipantCursor = SessionParticipantCursor;
+class PublisherAuthorityLostError extends Error {}
 
 export type PendingMaterializationDeliveryState = Readonly<{
     mode: "provider";
@@ -40,6 +42,13 @@ const pendingMessageEligibleForMaterializationWhere = {
     deliveryState: null,
 };
 
+type RuntimeActivityPendingDeferredReason =
+    | "waiting_for_runtime_activity"
+    | "runtime_activity_unknown";
+
+export type PendingForegroundState = "ready" | "active_steerable" | "active_unsteerable";
+export type { TrustedPendingPublisherFence } from "@/app/session/pending/pendingPublisherAuthority";
+
 export type MaterializeNextPendingMessageResult =
     | {
         ok: true;
@@ -51,81 +60,239 @@ export type MaterializeNextPendingMessageResult =
         participantCursorsPending?: ParticipantCursor[];
         badgeAttentionChanged?: boolean;
         deliveryState?: PendingMaterializationDeliveryState;
-        deferredReason?: "runtime_activity_active" | "pending_version_mismatch" | "blocked_by_earlier";
+        deferredReason?: RuntimeActivityPendingDeferredReason | "waiting_for_foreground_turn" | "pending_version_mismatch" | "waiting_for_predecessor";
+        retryAfterMs?: number;
       }
     | {
         ok: true;
         didMaterialize: true;
-        didWriteMessage: boolean;
-        message: { id: string | null; seq: number | null; localId: string; messageRole: SessionMessageRole | null; content: PrismaJson.SessionMessageContent; createdAt: Date; updatedAt: Date };
-        participantCursorsMessage: ParticipantCursor[];
+        didWriteMessage: false;
+        message: { id: string | null; seq: number | null; localId: string; messageRole: SessionMessageRole | null; content: PrismaJson.SessionMessageContent; requestedAction: PendingRequestedActionV1; providerAction: PendingProviderAction; createdAt: Date; updatedAt: Date };
         participantCursorsPending: ParticipantCursor[];
         pendingCount: number;
         pendingBlockedCount: number;
         pendingVersion: number;
-        meaningfulActivityAt?: Date;
         badgeAttentionChanged: boolean;
-        readyProjection?: SessionReadyProjectionUpdate;
         deliveryState?: PendingMaterializationDeliveryState;
       }
-    | { ok: false; error: "session-not-found" | "forbidden" | "invalid-params" | "transcript-conflict" | "internal" };
+    | { ok: false; error: "session-not-found" | "forbidden" | "invalid-params" | "requested-action-conflict" | "transcript-conflict" | "internal" };
 
 function toSessionMessageContentFromPending(content: PrismaJson.SessionPendingMessageContent): PrismaJson.SessionMessageContent {
     return content;
 }
 
-async function resolveEffectiveDeliveryTiming(params: {
+async function tryRejoinProviderClaim(params: Readonly<{
     actorUserId: string;
-    requestedDeliveryTiming?: SessionPendingQueueDeliveryTiming;
-}): Promise<SessionPendingQueueDeliveryTiming> {
-    if (params.requestedDeliveryTiming === "after_runtime_idle") {
-        return "after_runtime_idle";
+    sessionId: string;
+    trustedPublisherFence: TrustedPendingPublisherFence;
+}>): Promise<MaterializeNextPendingMessageResult | null> {
+    try {
+        return await inTx(async (tx): Promise<MaterializeNextPendingMessageResult | null> => {
+            if (!await isTrustedPendingPublisherFenceCurrent({
+                tx,
+                actorUserId: params.actorUserId,
+                sessionId: params.sessionId,
+                fence: params.trustedPublisherFence,
+            })) return { ok: false, error: "forbidden" };
+            const claimed = await tx.sessionPendingMessage.findFirst({
+                where: {
+                    sessionId: params.sessionId,
+                    status: "queued",
+                    deliveryState: "delivering",
+                },
+                orderBy: [{ position: "asc" }, { createdAt: "asc" }, { localId: "asc" }],
+                select: {
+                    localId: true,
+                    messageRole: true,
+                    content: true,
+                    requestedAction: true,
+                    providerAction: true,
+                    createdAt: true,
+                    updatedAt: true,
+                },
+            });
+            if (!claimed) return null;
+            if (readPendingLocalId(claimed.localId) === null) {
+                return { ok: false, error: "invalid-params" };
+            }
+            if (claimed.providerAction === null) {
+                const blocked = pendingDeliveryStatusV1ToPersistedFields({
+                    status: "blocked",
+                    reason: "delivery_outcome_uncertain",
+                });
+                await tx.sessionPendingMessage.update({
+                    where: {
+                        sessionId_localId: {
+                            sessionId: params.sessionId,
+                            localId: claimed.localId,
+                        },
+                    },
+                    data: {
+                        deliveryState: blocked.deliveryState,
+                        deliveryBlockedReason: blocked.deliveryBlockedReason,
+                    },
+                });
+                const pendingBlockedCount = await tx.sessionPendingMessage.count({
+                    where: {
+                        sessionId: params.sessionId,
+                        status: "queued",
+                        deliveryState: "blocked",
+                    },
+                });
+                const publisherFence = await tx.session.updateMany({
+                    where: {
+                        id: params.sessionId,
+                        active: true,
+                        archivedAt: null,
+                        lastActiveAt: params.trustedPublisherFence.committedFence,
+                    },
+                    data: { pendingBlockedCount, pendingVersion: { increment: 1 } },
+                });
+                if (publisherFence.count !== 1) throw new PublisherAuthorityLostError();
+                const updated = await tx.session.findUniqueOrThrow({
+                    where: { id: params.sessionId },
+                    select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+                });
+                const participantCursorsPending = await markPendingStateChangedParticipants({
+                    tx,
+                    sessionId: params.sessionId,
+                    pendingCount: updated.pendingCount,
+                    pendingBlockedCount: updated.pendingBlockedCount,
+                    pendingVersion: updated.pendingVersion,
+                });
+                return {
+                    ok: true,
+                    didMaterialize: false,
+                    ...updated,
+                    pendingStateChanged: true,
+                    participantCursorsPending: [...participantCursorsPending],
+                    badgeAttentionChanged: false,
+                    deliveryState: { mode: "provider", unresolved: false },
+                };
+            }
+            const requestedAction = PendingRequestedActionV1Schema.safeParse(claimed.requestedAction);
+            const providerAction = claimed.providerAction;
+            if (
+                !requestedAction.success
+                || (providerAction !== "send" && providerAction !== "steer" && providerAction !== "interrupt_and_send")
+            ) return { ok: false, error: "invalid-params" };
+            if (!await isTrustedPendingPublisherFenceCurrent({
+                tx,
+                actorUserId: params.actorUserId,
+                sessionId: params.sessionId,
+                fence: params.trustedPublisherFence,
+            })) return { ok: false, error: "forbidden" };
+            const session = await tx.session.findUniqueOrThrow({
+                where: { id: params.sessionId },
+                select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+            });
+            const content = toSessionMessageContentFromPending(
+                claimed.content as PrismaJson.SessionPendingMessageContent,
+            );
+            const messageRole = resolveSessionMessageRole({
+                content,
+                suppliedRole: claimed.messageRole,
+                telemetry: {
+                    sessionId: params.sessionId,
+                    storageMode: content.t === "plain" ? "plain" : "e2ee",
+                    source: "pending-materialization",
+                },
+            }).messageRole;
+            return {
+                ok: true,
+                didMaterialize: true,
+                didWriteMessage: false,
+                message: {
+                    id: null,
+                    seq: null,
+                    localId: claimed.localId,
+                    messageRole,
+                    content,
+                    requestedAction: requestedAction.data,
+                    providerAction,
+                    createdAt: claimed.createdAt,
+                    updatedAt: claimed.updatedAt,
+                },
+                participantCursorsPending: [],
+                pendingCount: session.pendingCount,
+                pendingBlockedCount: session.pendingBlockedCount,
+                pendingVersion: session.pendingVersion,
+                deliveryState: { mode: "provider", unresolved: true },
+                badgeAttentionChanged: false,
+            };
+        });
+    } catch (error) {
+        if (error instanceof PublisherAuthorityLostError) return { ok: false, error: "forbidden" };
+        return { ok: false, error: "internal" };
     }
-
-    const account = await db.account.findUnique({
-        where: { id: params.actorUserId },
-        select: { settings: true },
-    });
-    const settings = openPlainAccountSettingsDbValue({
-        accountId: params.actorUserId,
-        dbValue: account?.settings ?? null,
-    });
-    const accountDeliveryTiming = accountSettingsParse(
-        settings?.t === "plain" ? settings.v : {},
-    ).sessionPendingQueueDeliveryTiming;
-    if (accountDeliveryTiming === "after_runtime_idle") {
-        return "after_runtime_idle";
-    }
-    return params.requestedDeliveryTiming ?? accountDeliveryTiming;
 }
 
-export async function materializeNextPendingMessage(params: {
+export async function materializeNextPendingMessageForCurrentPublisher(params: Readonly<{
+    actorUserId: string;
+    sessionId: string;
+    trustedPublisherFence: TrustedPendingPublisherFence;
+    expectedPendingVersion?: number;
+    deliveryTiming?: SessionPendingQueueDeliveryTiming;
+    foregroundState?: PendingForegroundState;
+    expectedRuntimeActivityRevision?: number;
+}>): Promise<MaterializeNextPendingMessageResult> {
+    return await materializeNextPendingMessage({
+        ...params,
+    });
+}
+
+type MaterializeNextPendingMessageCommonParams = Readonly<{
     actorUserId: string;
     sessionId: string;
     expectedPendingVersion?: number;
-    deliveryState?: PendingMaterializationDeliveryStateMode;
     deliveryTiming?: SessionPendingQueueDeliveryTiming;
-}): Promise<MaterializeNextPendingMessageResult> {
+    foregroundState?: PendingForegroundState;
+    expectedRuntimeActivityRevision?: number;
+}>;
+
+type MaterializeNextPendingMessageParams =
+    MaterializeNextPendingMessageCommonParams
+    & Readonly<{ trustedPublisherFence: TrustedPendingPublisherFence }>;
+
+export async function materializeNextPendingMessage(
+    params: MaterializeNextPendingMessageParams,
+): Promise<MaterializeNextPendingMessageResult> {
     return await materializeNextPendingMessageWithRaceRetry(params, true);
 }
 
-async function materializeNextPendingMessageWithRaceRetry(params: {
-    actorUserId: string;
-    sessionId: string;
-    expectedPendingVersion?: number;
-    deliveryState?: PendingMaterializationDeliveryStateMode;
-    deliveryTiming?: SessionPendingQueueDeliveryTiming;
-}, retryRace: boolean): Promise<MaterializeNextPendingMessageResult> {
+async function materializeNextPendingMessageWithRaceRetry(
+    params: MaterializeNextPendingMessageParams,
+    retryRace: boolean,
+): Promise<MaterializeNextPendingMessageResult> {
     const actorUserId = typeof params.actorUserId === "string" ? params.actorUserId : "";
     const sessionId = typeof params.sessionId === "string" ? params.sessionId : "";
-    const useProviderDeliveryState = params.deliveryState === "provider";
-    const materializedDeliveryState = useProviderDeliveryState
-        ? ({ mode: "provider", unresolved: true } satisfies PendingMaterializationDeliveryState)
-        : undefined;
-    const noopDeliveryState = useProviderDeliveryState
-        ? ({ mode: "provider", unresolved: false } satisfies PendingMaterializationDeliveryState)
-        : undefined;
+    const materializedDeliveryState = {
+        mode: "provider",
+        unresolved: true,
+    } satisfies PendingMaterializationDeliveryState;
+    const noopDeliveryState = {
+        mode: "provider",
+        unresolved: false,
+    } satisfies PendingMaterializationDeliveryState;
     const pendingMessageMaterializationWhere = pendingMessageEligibleForMaterializationWhere;
+    const foregroundState = params.foregroundState ?? "ready";
+
+    if (!params.trustedPublisherFence) {
+        return { ok: false, error: "forbidden" };
+    }
+    const rejoined = await tryRejoinProviderClaim({
+        actorUserId,
+        sessionId,
+        trustedPublisherFence: params.trustedPublisherFence,
+    });
+    if (rejoined !== null) return rejoined;
+    if (
+        foregroundState !== "ready"
+        && foregroundState !== "active_steerable"
+        && foregroundState !== "active_unsteerable"
+    ) {
+        return { ok: false, error: "invalid-params" };
+    }
 
     if (
         !actorUserId
@@ -138,6 +305,10 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
 
     const access = await resolveSessionPendingOwnerAccess(actorUserId, sessionId);
     if (!access.ok) return { ok: false, error: access.error };
+
+    // Released claim writers omitted this field and historically meant foreground-ready.
+    // Current writers resolve the canonical account preference and send it explicitly.
+    const deliveryTiming = params.deliveryTiming ?? "after_foreground_ready";
 
     const sessionRow = await db.session.findUnique({
         where: { id: sessionId },
@@ -152,10 +323,10 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
             pendingUserActionRequestCount: true,
             active: true,
             archivedAt: true,
+            runtimeActivityState: true,
             runtimeActivityActiveCount: true,
             runtimeActivityObservedAt: true,
-            runtimeActivityExpiresAt: true,
-            runtimeActivitySourceClass: true,
+            runtimeActivityRevision: true,
         },
     });
     if (!sessionRow) return { ok: false, error: "session-not-found" };
@@ -168,12 +339,12 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
             select: { localId: true },
         });
         if (!hasEligibleQueued) {
-            const queuedCount = await db.sessionPendingMessage.count({
+            const pendingCount = await db.sessionPendingMessage.count({
                 where: { sessionId, status: "queued" },
             });
-            if (queuedCount > 0) {
-                // There are unresolved provider-owned rows but no row currently eligible for a
-                // materialization handoff. Let the transactional path reconcile pendingCount.
+            if (pendingCount > 0) {
+                // Retained rows exist but none is eligible for the released materializer.
+                // Let the transactional path reconcile the aggregate pending counter.
             } else {
                 return {
                     ok: true,
@@ -184,29 +355,6 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                     ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
                 };
             }
-        }
-    }
-
-    const deliveryTiming = await resolveEffectiveDeliveryTiming({
-        actorUserId,
-        requestedDeliveryTiming: params.deliveryTiming,
-    });
-    if (deliveryTiming === "after_runtime_idle" && !isSessionRuntimeActivityProjectionIdleForPendingDrain(sessionRow, Date.now())) {
-        const earliestQueued = await db.sessionPendingMessage.findFirst({
-            where: { sessionId, status: "queued" },
-            orderBy: [{ position: "asc" }, { createdAt: "asc" }, { localId: "asc" }],
-            select: { localId: true, deliveryState: true },
-        });
-        if (earliestQueued?.deliveryState === null) {
-            return {
-                ok: true,
-                didMaterialize: false,
-                pendingCount: sessionRow.pendingCount ?? 0,
-                pendingBlockedCount: sessionRow.pendingBlockedCount ?? 0,
-                pendingVersion: sessionRow.pendingVersion ?? 0,
-                deferredReason: "runtime_activity_active",
-                ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
-            };
         }
     }
 
@@ -227,12 +375,24 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                     pendingUserActionRequestCount: true,
                     active: true,
                     archivedAt: true,
+                    runtimeActivityState: true,
                     runtimeActivityActiveCount: true,
                     runtimeActivityObservedAt: true,
-                    runtimeActivityExpiresAt: true,
-                    runtimeActivitySourceClass: true,
+                    runtimeActivityRevision: true,
+                    updatedAt: true,
                 },
             });
+
+            if (
+                !await isTrustedPendingPublisherFenceCurrent({
+                    tx,
+                    actorUserId,
+                    sessionId,
+                    fence: params.trustedPublisherFence,
+                })
+            ) {
+                return { ok: false, error: "forbidden" } as const;
+            }
 
             if (
                 params.expectedPendingVersion !== undefined
@@ -249,32 +409,15 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                 } as const;
             }
 
-            // Recovery follows the durable row state, not the current caller's delivery mode.
-            // The stale-sweep cutoff protects fresh claims held by a live provider-mode runner,
-            // while still making an inherited claim recoverable after a provider→legacy fallback.
-            const staleDeliveryBlock = await blockStaleProviderDeliveryClaims({ tx, sessionId });
-            if (staleDeliveryBlock) {
-                return {
-                    ok: true,
-                    didMaterialize: false,
-                    pendingCount: staleDeliveryBlock.pendingCount,
-                    pendingBlockedCount: staleDeliveryBlock.pendingBlockedCount,
-                    pendingVersion: staleDeliveryBlock.pendingVersion,
-                    pendingStateChanged: true,
-                    participantCursorsPending: staleDeliveryBlock.participantCursors,
-                    badgeAttentionChanged: staleDeliveryBlock.badgeAttentionChanged,
-                    deferredReason: "blocked_by_earlier",
-                    ...(materializedDeliveryState ? { deliveryState: materializedDeliveryState } : {}),
-                } as const;
-            }
-
-            const nextPending = await tx.sessionPendingMessage.findFirst({
+            const queuedPending = await tx.sessionPendingMessage.findMany({
                 where: { sessionId, status: "queued" },
                 orderBy: [{ position: "asc" }, { createdAt: "asc" }, { localId: "asc" }],
                 select: {
                     localId: true,
                     messageRole: true,
                     content: true,
+                    requestedAction: true,
+                    providerAction: true,
                     status: true,
                     deliveryState: true,
                     createdAt: true,
@@ -282,14 +425,27 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                 },
             });
 
-            if (!nextPending) {
-                const queuedCount = await tx.sessionPendingMessage.count({
+            const queueHead = queuedPending[0];
+            const exactActionCandidate = queuedPending.find((row) => {
+                if (row.deliveryState !== null) return false;
+                const action = PendingRequestedActionV1Schema.safeParse(row.requestedAction);
+                if (!action.success) return false;
+                return action.data.kind === "send_now"
+                    || action.data.kind === "steer_now"
+                    || (
+                        action.data.kind === "steer_if_active"
+                        && foregroundState === "active_steerable"
+                    );
+            });
+
+            if (!queueHead) {
+                const pendingCount = await tx.sessionPendingMessage.count({
                     where: { sessionId, status: "queued" },
                 });
                 const blockedCount = await tx.sessionPendingMessage.count({
                     where: { sessionId, status: "queued", deliveryState: "blocked" },
                 });
-                if ((sessionBefore.pendingCount ?? 0) !== queuedCount || (sessionBefore.pendingBlockedCount ?? 0) !== blockedCount) {
+                if ((sessionBefore.pendingCount ?? 0) !== pendingCount || (sessionBefore.pendingBlockedCount ?? 0) !== blockedCount) {
                     await tx.session.updateMany({
                         where: {
                             id: sessionId,
@@ -297,7 +453,7 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                             pendingBlockedCount: sessionBefore.pendingBlockedCount,
                             pendingVersion: sessionBefore.pendingVersion,
                         },
-                        data: { pendingCount: queuedCount, pendingBlockedCount: blockedCount, pendingVersion: { increment: 1 } },
+                        data: { pendingCount, pendingBlockedCount: blockedCount, pendingVersion: { increment: 1 } },
                     });
                     const latestSession = await tx.session.findUniqueOrThrow({
                         where: { id: sessionId },
@@ -322,29 +478,99 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                     ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
                 } as const;
             }
+            if (readPendingLocalId(queueHead.localId) === null) {
+                return { ok: false, error: "invalid-params" } as const;
+            }
 
-            if (nextPending.deliveryState !== null) {
+            if (!exactActionCandidate && queueHead.deliveryState !== null) {
                 return {
                     ok: true,
                     didMaterialize: false,
                     pendingCount: sessionBefore.pendingCount ?? 0,
                     pendingBlockedCount: sessionBefore.pendingBlockedCount ?? 0,
                     pendingVersion: sessionBefore.pendingVersion ?? 0,
-                    deferredReason: "blocked_by_earlier",
+                    deferredReason: "waiting_for_predecessor",
                     ...(materializedDeliveryState ? { deliveryState: materializedDeliveryState } : {}),
                 } as const;
             }
 
-            if (deliveryTiming === "after_runtime_idle" && !isSessionRuntimeActivityProjectionIdleForPendingDrain(sessionBefore, Date.now())) {
+            const selectedAction = exactActionCandidate
+                ? PendingRequestedActionV1Schema.safeParse(exactActionCandidate.requestedAction)
+                : null;
+            if (selectedAction && !selectedAction.success) {
+                return { ok: false, error: "invalid-params" } as const;
+            }
+            // Automatic delivery remains FIFO. An explicit action is different: the selected
+            // localId is authoritative and may bypass ordinary or blocked predecessors while they
+            // remain queued. An unresolved delivering claim is rejoined before this transaction.
+            let selected: { row: NonNullable<typeof queueHead>; action: PendingRequestedActionV1 } | undefined;
+            if (exactActionCandidate && selectedAction?.success) {
+                selected = { row: exactActionCandidate, action: selectedAction.data };
+            } else {
+                const headAction = PendingRequestedActionV1Schema.safeParse(queueHead.requestedAction);
+                if (!headAction.success) {
+                    return { ok: false, error: "invalid-params" } as const;
+                }
+                if (foregroundState === "ready") {
+                    selected = { row: queueHead, action: headAction.data };
+                }
+            }
+            if (!selected) {
                 return {
                     ok: true,
                     didMaterialize: false,
                     pendingCount: sessionBefore.pendingCount ?? 0,
                     pendingBlockedCount: sessionBefore.pendingBlockedCount ?? 0,
                     pendingVersion: sessionBefore.pendingVersion ?? 0,
-                    deferredReason: "runtime_activity_active",
+                    deferredReason: "waiting_for_foreground_turn",
                     ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
                 } as const;
+            }
+
+            const nextPending = selected.row;
+            const requestedAction = selected.action;
+            const providerAction: PendingProviderAction = requestedAction.kind === "steer_now"
+                || (requestedAction.kind === "steer_if_active" && foregroundState === "active_steerable")
+                ? "steer"
+                : requestedAction.kind === "send_now" && foregroundState !== "ready"
+                    ? "interrupt_and_send"
+                    : "send";
+            const consumesRuntimeActivity = deliveryTiming === "after_runtime_idle" && (
+                requestedAction.kind === "enqueue"
+                || (requestedAction.kind === "steer_if_active" && foregroundState !== "active_steerable")
+            );
+            if (consumesRuntimeActivity) {
+                const activityRead = readStoredSessionRuntimeActivityProjectionResult(sessionBefore);
+                const activityDecision = activityRead.status === "valid"
+                    ? decideRuntimeIdleAdmission(activityRead.projection)
+                    : { decision: "defer" as const, reason: "unknown" as const };
+                if (activityDecision.decision === "defer") {
+                    return {
+                        ok: true,
+                        didMaterialize: false,
+                        pendingCount: sessionBefore.pendingCount ?? 0,
+                        pendingBlockedCount: sessionBefore.pendingBlockedCount ?? 0,
+                        pendingVersion: sessionBefore.pendingVersion ?? 0,
+                        deferredReason: activityDecision.reason === "active"
+                            ? "waiting_for_runtime_activity"
+                            : "runtime_activity_unknown",
+                        ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
+                    } as const;
+                }
+                if (
+                    !Number.isSafeInteger(params.expectedRuntimeActivityRevision)
+                    || params.expectedRuntimeActivityRevision !== activityDecision.revision
+                ) {
+                    return {
+                        ok: true,
+                        didMaterialize: false,
+                        pendingCount: sessionBefore.pendingCount ?? 0,
+                        pendingBlockedCount: sessionBefore.pendingBlockedCount ?? 0,
+                        pendingVersion: sessionBefore.pendingVersion ?? 0,
+                        deferredReason: "runtime_activity_unknown",
+                        ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
+                    } as const;
+                }
             }
 
             const localId = nextPending.localId;
@@ -364,7 +590,7 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                 return { ok: false, error: "invalid-params" } as const;
             }
 
-            if (useProviderDeliveryState) {
+            {
                 const existingTranscriptMessage = await tx.sessionMessage.findFirst({
                     where: { sessionId, localId },
                     select: { content: true, messageRole: true },
@@ -381,8 +607,17 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
 
                 const delivering = pendingDeliveryStatusV1ToPersistedFields({ status: "delivering" });
                 const claimed = await tx.sessionPendingMessage.updateMany({
-                    where: { sessionId, localId, ...pendingMessageMaterializationWhere },
-                    data: { deliveryState: delivering.deliveryState, deliveryBlockedReason: delivering.deliveryBlockedReason },
+                    where: {
+                        sessionId,
+                        localId,
+                        ...pendingMessageMaterializationWhere,
+                        providerAction: null,
+                    },
+                    data: {
+                        deliveryState: delivering.deliveryState,
+                        deliveryBlockedReason: delivering.deliveryBlockedReason,
+                        providerAction,
+                    },
                 });
                 if (claimed.count === 0) {
                     const latestSession = await tx.session.findUniqueOrThrow({
@@ -405,20 +640,33 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                 const pendingBlockedCount = await tx.sessionPendingMessage.count({
                     where: { sessionId, status: "queued", deliveryState: "blocked" },
                 });
-                const session = await tx.session.update({
-                    where: { id: sessionId },
-                    data: { pendingCount, pendingBlockedCount, pendingVersion: { increment: 1 } },
-                    select: {
-                        seq: true,
-                        pendingCount: true,
-                        pendingBlockedCount: true,
-                        pendingVersion: true,
-                        lastViewedSessionSeq: true,
-                        pendingPermissionRequestCount: true,
-                        pendingUserActionRequestCount: true,
+                const sessionSelect = {
+                    seq: true,
+                    pendingCount: true,
+                    pendingBlockedCount: true,
+                    pendingVersion: true,
+                    lastViewedSessionSeq: true,
+                    pendingPermissionRequestCount: true,
+                    pendingUserActionRequestCount: true,
+                    active: true,
+                    archivedAt: true,
+                } as const;
+                const sessionFence = await tx.session.updateMany({
+                    where: {
+                        id: sessionId,
                         active: true,
-                        archivedAt: true,
+                        archivedAt: null,
+                        lastActiveAt: params.trustedPublisherFence.committedFence,
+                        ...(consumesRuntimeActivity
+                            ? { runtimeActivityRevision: BigInt(params.expectedRuntimeActivityRevision!) }
+                            : {}),
                     },
+                    data: { pendingCount, pendingBlockedCount, pendingVersion: { increment: 1 } },
+                });
+                if (sessionFence.count !== 1) throw new PublisherAuthorityLostError();
+                const session = await tx.session.findUniqueOrThrow({
+                    where: { id: sessionId },
+                    select: sessionSelect,
                 });
 
                 const participantCursorsPending = await markPendingStateChangedParticipants({
@@ -439,10 +687,11 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                         localId,
                         messageRole,
                         content,
+                        requestedAction,
+                        providerAction,
                         createdAt: nextPending.createdAt,
                         updatedAt: nextPending.updatedAt,
                     },
-                    participantCursorsMessage: [] as ParticipantCursor[],
                     participantCursorsPending,
                     pendingCount: session.pendingCount,
                     pendingBlockedCount: session.pendingBlockedCount,
@@ -464,96 +713,6 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                 } as const;
             }
 
-            const created = await createSessionMessageFromPending(tx, { sessionId, localId, content, messageRole });
-            if (!created.ok) {
-                return { ok: false, error: created.error } as const;
-            }
-            const readyProjection = created.didWrite
-                ? await updateSessionMessageActivityProjection(tx, {
-                    sessionId,
-                    created: created.message,
-                    trustedSessionEventType: resolveReadyProjectionEventType({
-                        actorUserId,
-                        sessionOwnerId: actorUserId,
-                        content,
-                    }),
-                })
-                : undefined;
-
-            await tx.sessionPendingMessage.delete({
-                where: { sessionId_localId: { sessionId, localId } },
-            });
-
-            const didDecrementPendingCount =
-                (
-                    await tx.session.updateMany({
-                        where: { id: sessionId, pendingCount: { gt: 0 } },
-                        data: { pendingCount: { decrement: 1 }, pendingVersion: { increment: 1 } },
-                    })
-                ).count > 0;
-
-            if (!didDecrementPendingCount) {
-                await tx.session.updateMany({
-                    where: { id: sessionId, pendingCount: { lte: 0 } },
-                    data: { pendingCount: 0, pendingVersion: { increment: 1 } },
-                });
-            }
-
-            const session = await tx.session.findUniqueOrThrow({
-                where: { id: sessionId },
-                select: {
-                    seq: true,
-                    pendingCount: true,
-                    pendingBlockedCount: true,
-                    pendingVersion: true,
-                    lastViewedSessionSeq: true,
-                    pendingPermissionRequestCount: true,
-                    pendingUserActionRequestCount: true,
-                    active: true,
-                    archivedAt: true,
-                },
-            });
-
-            const participantCursorsMessage = await markSessionParticipantsChanged({
-                tx,
-                sessionId,
-                hint: { lastMessageSeq: created.message.seq, lastMessageId: created.message.id },
-            });
-            const participantCursorsPending = await markPendingStateChangedParticipants({
-                tx,
-                sessionId,
-                pendingVersion: session.pendingVersion,
-                pendingCount: session.pendingCount,
-                pendingBlockedCount: session.pendingBlockedCount,
-                meaningfulActivityAt: created.didWrite ? created.message.createdAt : undefined,
-            });
-
-            return {
-                ok: true,
-                didMaterialize: true,
-                didWriteMessage: created.didWrite,
-                message: created.message,
-                participantCursorsMessage,
-                participantCursorsPending,
-                pendingCount: session.pendingCount,
-                pendingBlockedCount: session.pendingBlockedCount,
-                pendingVersion: session.pendingVersion,
-                ...(created.didWrite ? { meaningfulActivityAt: created.message.createdAt } : {}),
-                ...(readyProjection ? { readyProjection } : {}),
-                badgeAttentionChanged: didSessionActivityBadgeContributionChange(
-                    sessionBefore,
-                    {
-                        seq: session.seq,
-                        pendingCount: session.pendingCount,
-                        pendingBlockedCount: session.pendingBlockedCount,
-                        lastViewedSessionSeq: session.lastViewedSessionSeq,
-                        pendingPermissionRequestCount: session.pendingPermissionRequestCount,
-                        pendingUserActionRequestCount: session.pendingUserActionRequestCount,
-                        active: session.active,
-                        archivedAt: session.archivedAt,
-                    },
-                ),
-            } as const;
         });
         if (result.ok && result.didMaterialize) {
             logger.debug({
@@ -570,6 +729,7 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
         }
         return result;
     } catch (error) {
+        if (error instanceof PublisherAuthorityLostError) return { ok: false, error: "forbidden" };
         if (retryRace && (isPrismaErrorCode(error, "P2002") || isPrismaErrorCode(error, "P2025"))) {
             return await materializeNextPendingMessageWithRaceRetry(params, false);
         }

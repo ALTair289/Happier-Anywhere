@@ -1,5 +1,5 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
-import { RPC_ERROR_CODES } from "@happier-dev/protocol/rpc";
+import { RPC_ERROR_CODES, RPC_METHODS } from "@happier-dev/protocol/rpc";
 import { SOCKET_RPC_EVENTS } from "@happier-dev/protocol/socketRpc";
 import { createFakeSocket, getSocketHandler } from "../testkit/socketHarness";
 import { createEnvReset } from "../testkit/env";
@@ -32,6 +32,359 @@ describe("rpcHandler", () => {
   beforeEach(() => {
     dbMockFns.machineFindFirst.mockReset().mockResolvedValue(null);
     dbMockFns.sessionFindUnique.mockReset().mockResolvedValue(null);
+  });
+
+  it.each([
+    RPC_METHODS.SPAWN_HAPPY_SESSION,
+    `machine-1:${RPC_METHODS.DAEMON_SESSION_USAGE_LIMIT_CHECK_NOW}`,
+  ])("revalidates daemon compatibility before registering provider-starting RPC %s", async (method) => {
+    resetRpcAvailabilityEnv({
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__ENFORCEMENT: "required",
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_PROTOCOL_VERSION: "2",
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_VERSIONS_JSON: JSON.stringify({
+        daemon: "0.2.11",
+        "session-runner": "0.2.11",
+      }),
+    });
+    dbMockFns.machineFindFirst.mockResolvedValue({
+      id: "machine-1",
+      revokedAt: null,
+      replacedByMachineId: null,
+    });
+    const { rpcHandler } = await import("./rpcHandler");
+    const socket = createFakeSocket({
+      data: {
+        clientType: "machine-scoped",
+        machineId: "machine-1",
+        sessionSyncCompatibility: {
+          parseResult: {
+            status: "valid",
+            declaration: {
+              v: 1,
+              clientKind: "daemon",
+              appVersion: "0.2.10",
+              sessionSyncProtocolVersion: 2,
+            },
+          },
+        },
+      },
+    });
+    const userRpcListeners = new Map<string, any>();
+    rpcHandler("user-1", socket as any, userRpcListeners, new Map(), {
+      io: {} as any,
+      redisRegistry: { enabled: false },
+    });
+
+    await getSocketHandler(socket, SOCKET_RPC_EVENTS.REGISTER)({ method });
+
+    expect(socket.emit).toHaveBeenCalledWith(SOCKET_RPC_EVENTS.ERROR, expect.objectContaining({
+      type: "register",
+      error: "client-upgrade-required",
+    }));
+    expect(userRpcListeners.has(method)).toBe(false);
+    resetRpcAvailabilityEnv();
+  });
+
+  it("keeps non-provider-starting machine RPC registration available across a required floor", async () => {
+    vi.resetModules();
+    resetRpcAvailabilityEnv({
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__ENFORCEMENT: "required",
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_PROTOCOL_VERSION: "2",
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_VERSIONS_JSON: JSON.stringify({
+        daemon: "0.2.11",
+        "session-runner": "0.2.11",
+      }),
+    });
+    dbMockFns.machineFindFirst.mockResolvedValue({
+      id: "machine-1",
+      revokedAt: null,
+      replacedByMachineId: null,
+    });
+
+    try {
+      const { rpcHandler } = await import("./rpcHandler");
+      const socket = createFakeSocket({
+        data: {
+          clientType: "machine-scoped",
+          machineId: "machine-1",
+        },
+      });
+      const userRpcListeners = new Map<string, any>();
+      rpcHandler("user-1", socket as any, userRpcListeners, new Map(), {
+        io: {} as any,
+        redisRegistry: { enabled: false },
+      });
+
+      await getSocketHandler(socket, SOCKET_RPC_EVENTS.REGISTER)({ method: "machine-1:capabilities.invoke" });
+
+      expect(userRpcListeners.get("machine-1:capabilities.invoke")).toBe(socket);
+      expect(socket.emit).toHaveBeenCalledWith(SOCKET_RPC_EVENTS.REGISTERED, {
+        method: "machine-1:capabilities.invoke",
+      });
+      expect(socket.emit).not.toHaveBeenCalledWith(SOCKET_RPC_EVENTS.ERROR, expect.anything());
+    } finally {
+      resetRpcAvailabilityEnv();
+    }
+  });
+
+  it.each([
+    {
+      method: `machine-1:${RPC_METHODS.SPAWN_HAPPY_SESSION}`,
+      callParams: { directory: "/workspace" },
+    },
+    {
+      method: `machine-1:${RPC_METHODS.DAEMON_SESSION_USAGE_LIMIT_CHECK_NOW}`,
+      callParams: { sessionId: "session-1", operation: "consume_reset_credit" },
+    },
+  ])("revalidates daemon compatibility immediately before forwarding provider-starting RPC $method", async ({ method, callParams }) => {
+    vi.resetModules();
+    resetRpcAvailabilityEnv({
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__ENFORCEMENT: "required",
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_PROTOCOL_VERSION: "2",
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_VERSIONS_JSON: JSON.stringify({
+        daemon: "0.2.10",
+        "session-runner": "0.2.10",
+      }),
+    });
+    dbMockFns.machineFindFirst.mockResolvedValue({
+      id: "machine-1",
+      revokedAt: null,
+      replacedByMachineId: null,
+    });
+
+    try {
+      const { rpcHandler } = await import("./rpcHandler");
+      const targetEmitWithAck = vi.fn().mockResolvedValue({ type: "success", sessionId: "session-1" });
+      const targetTimeout = vi.fn(() => ({ emitWithAck: targetEmitWithAck }));
+      const targetSocket = createFakeSocket({
+        id: "daemon-socket",
+        timeout: targetTimeout as any,
+        data: {
+          clientType: "machine-scoped",
+          machineId: "machine-1",
+          sessionSyncCompatibility: {
+            parseResult: {
+              status: "valid",
+              declaration: {
+                v: 1,
+                clientKind: "daemon",
+                appVersion: "0.2.10",
+                sessionSyncProtocolVersion: 2,
+              },
+            },
+          },
+        },
+      });
+      const targetListeners = new Map<string, any>();
+      const allRpcListeners = new Map<string, any>();
+      rpcHandler("user-1", targetSocket as any, targetListeners, allRpcListeners, {
+        io: {} as any,
+        redisRegistry: { enabled: false },
+      });
+      await getSocketHandler(targetSocket, SOCKET_RPC_EVENTS.REGISTER)({ method });
+
+      const callerSocket = createFakeSocket({ id: "caller-socket" });
+      rpcHandler("user-1", callerSocket as any, new Map(), allRpcListeners, {
+        io: {} as any,
+        redisRegistry: { enabled: false },
+      });
+      const call = getSocketHandler(callerSocket, SOCKET_RPC_EVENTS.CALL);
+
+      const compatibleCallback = vi.fn();
+      await call({ method, params: callParams }, compatibleCallback);
+      expect(compatibleCallback).toHaveBeenCalledWith({
+        ok: true,
+        result: { type: "success", sessionId: "session-1" },
+      });
+      expect(targetEmitWithAck).toHaveBeenCalledTimes(1);
+
+      targetEmitWithAck.mockClear();
+      targetTimeout.mockClear();
+      resetRpcAvailabilityEnv({
+        HAPPIER_SESSION_SYNC_COMPATIBILITY__ENFORCEMENT: "required",
+        HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_PROTOCOL_VERSION: "2",
+        HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_VERSIONS_JSON: JSON.stringify({
+          daemon: "0.2.11",
+          "session-runner": "0.2.11",
+        }),
+      });
+
+      const incompatibleCallback = vi.fn();
+      await call({ method, params: callParams }, incompatibleCallback);
+
+      expect(targetTimeout).not.toHaveBeenCalled();
+      expect(targetEmitWithAck).not.toHaveBeenCalled();
+      expect(incompatibleCallback).toHaveBeenCalledWith({
+        ok: false,
+        error: "client-upgrade-required",
+        requirement: expect.objectContaining({
+          v: 1,
+          clientKind: "daemon",
+          minimumAppVersion: "0.2.11",
+          minimumSessionSyncProtocolVersion: 2,
+        }),
+      });
+    } finally {
+      resetRpcAvailabilityEnv();
+    }
+  });
+
+  it("revalidates a remote daemon before Redis forwards privileged spawn RPC", async () => {
+    vi.resetModules();
+    resetRpcAvailabilityEnv({
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__ENFORCEMENT: "required",
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_PROTOCOL_VERSION: "2",
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_VERSIONS_JSON: JSON.stringify({
+        daemon: "0.2.11",
+        "session-runner": "0.2.11",
+      }),
+    });
+    dbMockFns.machineFindFirst.mockResolvedValue({
+      id: "machine-1",
+      revokedAt: null,
+      replacedByMachineId: null,
+    });
+    const hmget = vi.fn().mockResolvedValue(["daemon-socket"]);
+    const evalFn = vi.fn();
+    const multi = vi.fn(() => ({ hset: () => ({ expire: () => ({ exec: vi.fn() }) }) }));
+    vi.doMock("@/storage/redis/redis", () => ({
+      getRedisClient: () => ({ hmget, eval: evalFn, multi }),
+    }));
+
+    try {
+      const { rpcHandler } = await import("./rpcHandler");
+      const method = "machine-1:spawn-happy-session";
+      const remoteTarget = createFakeSocket({
+        id: "daemon-socket",
+        data: {
+          clientType: "machine-scoped",
+          machineId: "machine-1",
+          sessionSyncCompatibility: {
+            parseResult: {
+              status: "valid",
+              declaration: {
+                v: 1,
+                clientKind: "daemon",
+                appVersion: "0.2.10",
+                sessionSyncProtocolVersion: 2,
+              },
+            },
+          },
+        },
+      });
+      const fetchSockets = vi.fn().mockResolvedValue([remoteTarget]);
+      const inRoom = vi.fn(() => ({ fetchSockets }));
+      const emitWithAck = vi.fn().mockResolvedValue([{ type: "success", sessionId: "session-1" }]);
+      const to = vi.fn(() => ({ emitWithAck }));
+      const ioTimeout = vi.fn(() => ({ to }));
+      const callerSocket = createFakeSocket({ id: "caller-socket" });
+      rpcHandler("user-1", callerSocket as any, new Map(), new Map(), {
+        io: { in: inRoom, timeout: ioTimeout } as any,
+        redisRegistry: { enabled: true, instanceId: "instance-1", ttlSeconds: 120 },
+      });
+
+      const callback = vi.fn();
+      await getSocketHandler(callerSocket, SOCKET_RPC_EVENTS.CALL)(
+        { method, params: { directory: "/workspace" } },
+        callback,
+      );
+
+      expect(inRoom).toHaveBeenCalledWith("daemon-socket");
+      expect(fetchSockets).toHaveBeenCalledTimes(1);
+      expect(ioTimeout).not.toHaveBeenCalled();
+      expect(emitWithAck).not.toHaveBeenCalled();
+      expect(callback).toHaveBeenCalledWith({
+        ok: false,
+        error: "client-upgrade-required",
+        requirement: expect.objectContaining({
+          v: 1,
+          clientKind: "daemon",
+          minimumAppVersion: "0.2.11",
+          minimumSessionSyncProtocolVersion: 2,
+        }),
+      });
+    } finally {
+      vi.doUnmock("@/storage/redis/redis");
+      resetRpcAvailabilityEnv();
+    }
+  });
+
+  it("revalidates an in-memory daemon before the Redis fallback forwards privileged spawn RPC", async () => {
+    vi.resetModules();
+    resetRpcAvailabilityEnv({
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__ENFORCEMENT: "required",
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_PROTOCOL_VERSION: "2",
+      HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_VERSIONS_JSON: JSON.stringify({
+        daemon: "0.2.11",
+        "session-runner": "0.2.11",
+      }),
+    });
+    dbMockFns.machineFindFirst.mockResolvedValue({
+      id: "machine-1",
+      revokedAt: null,
+      replacedByMachineId: null,
+    });
+    const hmget = vi.fn().mockResolvedValue([null]);
+    vi.doMock("@/storage/redis/redis", () => ({
+      getRedisClient: () => ({ hmget }),
+    }));
+
+    try {
+      const { rpcHandler } = await import("./rpcHandler");
+      const method = "machine-1:spawn-happy-session";
+      const emitWithAck = vi.fn().mockResolvedValue({ type: "success", sessionId: "session-1" });
+      const targetTimeout = vi.fn(() => ({ emitWithAck }));
+      const targetSocket = createFakeSocket({
+        id: "daemon-socket",
+        timeout: targetTimeout as any,
+        data: {
+          clientType: "machine-scoped",
+          machineId: "machine-1",
+          sessionSyncCompatibility: {
+            parseResult: {
+              status: "valid",
+              declaration: {
+                v: 1,
+                clientKind: "daemon",
+                appVersion: "0.2.10",
+                sessionSyncProtocolVersion: 2,
+              },
+            },
+          },
+        },
+      });
+      const allRpcListeners = new Map([
+        ["user-1", new Map([[method, targetSocket]])],
+      ]);
+      const callerSocket = createFakeSocket({ id: "caller-socket" });
+      rpcHandler("user-1", callerSocket as any, new Map(), allRpcListeners as any, {
+        io: {} as any,
+        redisRegistry: { enabled: true, instanceId: "instance-1", ttlSeconds: 120 },
+      });
+
+      const callback = vi.fn();
+      await getSocketHandler(callerSocket, SOCKET_RPC_EVENTS.CALL)(
+        { method, params: { directory: "/workspace" } },
+        callback,
+      );
+
+      expect(hmget).toHaveBeenCalled();
+      expect(targetTimeout).not.toHaveBeenCalled();
+      expect(emitWithAck).not.toHaveBeenCalled();
+      expect(callback).toHaveBeenCalledWith({
+        ok: false,
+        error: "client-upgrade-required",
+        requirement: expect.objectContaining({
+          v: 1,
+          clientKind: "daemon",
+          minimumAppVersion: "0.2.11",
+          minimumSessionSyncProtocolVersion: 2,
+        }),
+      });
+    } finally {
+      vi.doUnmock("@/storage/redis/redis");
+      resetRpcAvailabilityEnv();
+    }
   });
 
   it("waits for the owner listener map during delegated permission RPC grace fallback", async () => {

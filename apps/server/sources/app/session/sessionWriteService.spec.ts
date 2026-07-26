@@ -29,11 +29,11 @@ installDbModuleMock({ db: dbMocks.db });
 let createSessionMessage: typeof import("./sessionWriteService").createSessionMessage;
 let patchSession: typeof import("./sessionWriteService").patchSession;
 let updateSessionAgentState: typeof import("./sessionWriteService").updateSessionAgentState;
-let updateSessionRuntimeActivityProjection: typeof import("./sessionWriteService").updateSessionRuntimeActivityProjection;
 let updateSessionMetadata: typeof import("./sessionWriteService").updateSessionMetadata;
 let updateSessionReadCursor: typeof import("./sessionWriteService").updateSessionReadCursor;
 let applySessionReadCursorOperation: typeof import("./sessionWriteService").applySessionReadCursorOperation;
 let applySessionTurnMutation: typeof import("./sessionWriteService").applySessionTurnMutation;
+let reassertSessionLatestTurnStatus: typeof import("./sessionWriteService").reassertSessionLatestTurnStatus;
 
 describe("sessionWriteService", () => {
     const storagePolicyEnv = createEnvPatcher([
@@ -45,11 +45,11 @@ describe("sessionWriteService", () => {
             createSessionMessage,
             patchSession,
             updateSessionAgentState,
-            updateSessionRuntimeActivityProjection,
             updateSessionMetadata,
             updateSessionReadCursor,
             applySessionReadCursorOperation,
             applySessionTurnMutation,
+            reassertSessionLatestTurnStatus,
         } = await import("./sessionWriteService"));
     });
 
@@ -60,6 +60,9 @@ describe("sessionWriteService", () => {
         storagePolicyEnv.restore();
 
         currentTx = {
+            accessKey: {
+                findUnique: vi.fn(),
+            },
             session: {
                 findUnique: vi.fn(),
                 update: vi.fn(),
@@ -74,6 +77,7 @@ describe("sessionWriteService", () => {
             sessionTurnMutationReceipt: {
                 create: vi.fn(),
                 findUnique: vi.fn(),
+                update: vi.fn(),
             },
             sessionShare: {
                 findUnique: vi.fn(),
@@ -182,96 +186,40 @@ describe("sessionWriteService", () => {
         });
     });
 
-    describe("updateSessionRuntimeActivityProjection", () => {
-        it("persists a minimal runtime activity projection without touching foreground or ordering fields", async () => {
-            currentTx.session.findUnique
-                .mockResolvedValueOnce({ accountId: "u1", encryptionMode: "e2ee" })
-                .mockResolvedValueOnce({
-                    runtimeActivityActiveCount: 0,
-                    runtimeActivityObservedAt: null,
-                    runtimeActivityExpiresAt: null,
-                    runtimeActivitySourceClass: null,
-                });
-            currentTx.session.updateMany.mockResolvedValue({ count: 1 });
-            getSessionParticipantUserIds.mockResolvedValue(["u1", "u2"]);
-            markAccountChanged.mockResolvedValueOnce(201).mockResolvedValueOnce(202);
-
-            const res = await updateSessionRuntimeActivityProjection({
-                actorUserId: "u1",
-                sessionId: "s1",
-                activeCount: 2,
-                observedAt: 500,
-                expiresAt: 900,
-                sourceClass: "provider_detached_task",
-            });
-
-            expect(currentTx.session.updateMany).toHaveBeenCalledWith({
-                where: { id: "s1" },
-                data: {
-                    runtimeActivityActiveCount: 2,
-                    runtimeActivityObservedAt: BigInt(500),
-                    runtimeActivityExpiresAt: BigInt(900),
-                    runtimeActivitySourceClass: "provider_detached_task",
-                },
-            });
-            expect(currentTx.session.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("thinking");
-            expect(currentTx.session.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("active");
-            expect(currentTx.session.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("activeAt");
-            expect(currentTx.session.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("meaningfulActivityAt");
-            expect(currentTx.session.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("latestTurnStatus");
-            expect(res).toEqual({
-                ok: true,
-                didWrite: true,
-                projection: {
-                    runtimeActivityActiveCount: 2,
-                    runtimeActivityObservedAt: 500,
-                    runtimeActivityExpiresAt: 900,
-                    runtimeActivitySourceClass: "provider_detached_task",
-                },
-                participantCursors: [
-                    { accountId: "u1", cursor: 201 },
-                    { accountId: "u2", cursor: 202 },
-                ],
-                badgeAttentionChanged: false,
-            });
-        });
-
-        it("clears runtime activity absolutely and treats identical clears as no-ops", async () => {
-            currentTx.session.findUnique
-                .mockResolvedValueOnce({ accountId: "u1", encryptionMode: "e2ee" })
-                .mockResolvedValueOnce({
-                    runtimeActivityActiveCount: 0,
-                    runtimeActivityObservedAt: null,
-                    runtimeActivityExpiresAt: null,
-                    runtimeActivitySourceClass: null,
-                });
-
-            const res = await updateSessionRuntimeActivityProjection({
-                actorUserId: "u1",
-                sessionId: "s1",
-                activeCount: 0,
-                observedAt: 500,
-                expiresAt: 900,
-                sourceClass: "provider_detached_task",
-            });
-
-            expect(currentTx.session.updateMany).not.toHaveBeenCalled();
-            expect(res).toEqual({
-                ok: true,
-                didWrite: false,
-                projection: {
-                    runtimeActivityActiveCount: 0,
-                    runtimeActivityObservedAt: null,
-                    runtimeActivityExpiresAt: null,
-                    runtimeActivitySourceClass: null,
-                },
-                participantCursors: [],
-                badgeAttentionChanged: false,
-            });
-        });
-    });
-
     describe("createSessionMessage", () => {
+        it("rejects a trusted transcript observation when the publisher fence was replaced before the write transaction", async () => {
+            currentTx.accessKey.findUnique.mockResolvedValue({
+                machine: { revokedAt: null, replacedByMachineId: null },
+                session: { accountId: "u1" },
+            });
+            currentTx.session.findUnique.mockResolvedValue({
+                active: true,
+                archivedAt: null,
+                lastActiveAt: new Date(2_000),
+            });
+
+            const res = await createSessionMessage({
+                actorUserId: "u1",
+                sessionId: "s1",
+                ciphertext: "ciphertext",
+                localId: "assistant-1",
+                trustedPublisherFence: {
+                    accountId: "u1",
+                    machineId: "machine-1",
+                    sessionId: "s1",
+                    committedFence: new Date(1_000),
+                },
+                trustedSourceTimestamps: { createdAt: 100, updatedAt: 200 },
+                trustedTranscriptObservationProvenance: {
+                    kind: "non_dependent",
+                    source: "external",
+                },
+            });
+
+            expect(res).toEqual({ ok: false, error: "forbidden" });
+            expect(currentTx.sessionMessage.create).not.toHaveBeenCalled();
+        });
+
         it("returns existing message for (sessionId, localId) without writing or marking changes", async () => {
             currentTx.sessionMessage.findUnique.mockResolvedValue({
                 id: "m1",
@@ -312,6 +260,69 @@ describe("sessionWriteService", () => {
             expect(currentTx.session.update).not.toHaveBeenCalled();
             expect(currentTx.sessionMessage.create).not.toHaveBeenCalled();
             expect(currentTx.sessionMessage.update).not.toHaveBeenCalled();
+            expect(markAccountChanged).not.toHaveBeenCalled();
+        });
+
+        it("persists a newer trusted source watermark for identical content and rejects a later stale overwrite", async () => {
+            let stored = {
+                id: "m1",
+                seq: 4,
+                localId: "l1",
+                sidechainId: null,
+                messageRole: null,
+                content: { t: "encrypted", c: "same" },
+                transcriptObservationProvenance: {
+                    kind: "non_dependent",
+                    source: "external",
+                },
+                sourceCreatedAt: new Date(100),
+                sourceUpdatedAt: new Date(100),
+                createdAt: new Date(1),
+                updatedAt: new Date(2),
+            };
+            currentTx.sessionMessage.findUnique.mockImplementation(async () => stored);
+            currentTx.sessionMessage.update.mockImplementation(async ({ data }: any) => {
+                stored = { ...stored, ...data };
+                return stored;
+            });
+            currentTx.session.findUnique.mockResolvedValue({ accountId: "u1" });
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+
+            const sameContent = await createSessionMessage({
+                actorUserId: "u1",
+                sessionId: "s1",
+                ciphertext: "same",
+                localId: "l1",
+                trustedSourceTimestamps: { createdAt: 100, updatedAt: 300 },
+                trustedTranscriptObservationProvenance: {
+                    kind: "non_dependent",
+                    source: "external",
+                },
+            });
+            const staleDifferentContent = await createSessionMessage({
+                actorUserId: "u1",
+                sessionId: "s1",
+                ciphertext: "stale",
+                localId: "l1",
+                trustedSourceTimestamps: { createdAt: 100, updatedAt: 200 },
+                trustedTranscriptObservationProvenance: {
+                    kind: "non_dependent",
+                    source: "external",
+                },
+            });
+
+            expect(sameContent).toMatchObject({
+                ok: true,
+                didWrite: false,
+                didUpdate: false,
+                participantCursors: [],
+            });
+            expect(currentTx.sessionMessage.update).toHaveBeenCalledOnce();
+            expect(currentTx.sessionMessage.update).toHaveBeenCalledWith(expect.objectContaining({
+                where: { id: "m1" },
+                data: { sourceUpdatedAt: new Date(300) },
+            }));
+            expect(staleDifferentContent).toEqual({ ok: false, error: "invalid-params" });
             expect(markAccountChanged).not.toHaveBeenCalled();
         });
 
@@ -618,6 +629,7 @@ describe("sessionWriteService", () => {
 
         it("derives non-unread attention for owner-authored plaintext maintenance events", async () => {
             const createdAt = new Date("2020-01-01T00:00:00.000Z");
+            storagePolicyEnv.set("HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY", "optional");
             const content = {
                 t: "plain",
                 v: {
@@ -1050,6 +1062,7 @@ describe("sessionWriteService", () => {
 
         it("persists a ready-event projection for owner-authored plaintext ready events without a trusted hint", async () => {
             const createdAt = new Date("2020-01-01T00:00:00.000Z");
+            storagePolicyEnv.set("HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY", "optional");
             const readyContent = {
                 t: "plain",
                 v: {
@@ -1233,7 +1246,17 @@ describe("sessionWriteService", () => {
         });
 
         it("handles localId races by returning the winner row on P2002", async () => {
-            currentTx.sessionMessage.findUnique.mockResolvedValue(null);
+            currentTx.sessionMessage.findUnique
+                .mockResolvedValueOnce(null)
+                .mockResolvedValueOnce({
+                    id: "mExisting",
+                    seq: 9,
+                    localId: "l1",
+                    sidechainId: null,
+                    content: { t: "encrypted", c: "cipher" },
+                    createdAt: new Date(1),
+                    updatedAt: new Date(1),
+                });
             currentTx.session.findUnique.mockResolvedValue({ accountId: "u1" });
             currentTx.session.update.mockResolvedValue({ seq: 10 });
             currentTx.sessionMessage.create.mockRejectedValue({ code: "P2002" });
@@ -1276,8 +1299,138 @@ describe("sessionWriteService", () => {
             });
         });
 
+        it("persists a newer winner watermark after P2002 and rejects a later stale race overwrite", async () => {
+            let stored = {
+                id: "mExisting",
+                seq: 9,
+                localId: "l1",
+                sidechainId: null,
+                messageRole: null,
+                content: { t: "encrypted", c: "same" },
+                transcriptObservationProvenance: {
+                    kind: "non_dependent",
+                    source: "external",
+                },
+                sourceCreatedAt: new Date(100),
+                sourceUpdatedAt: new Date(100),
+                createdAt: new Date(1),
+                updatedAt: new Date(1),
+            };
+            let localIdLookup = 0;
+            currentTx.sessionMessage.findUnique.mockImplementation(async () => {
+                localIdLookup += 1;
+                return localIdLookup % 2 === 1 ? null : stored;
+            });
+            currentTx.sessionMessage.update.mockImplementation(async ({ data }: any) => {
+                stored = { ...stored, ...data };
+                return stored;
+            });
+            currentTx.sessionMessage.create.mockRejectedValue({ code: "P2002" });
+            currentTx.session.findUnique.mockResolvedValue({ accountId: "u1" });
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.session.update.mockResolvedValue({ seq: 10 });
+
+            const sameContent = await createSessionMessage({
+                actorUserId: "u1",
+                sessionId: "s1",
+                ciphertext: "same",
+                localId: "l1",
+                trustedSourceTimestamps: { createdAt: 100, updatedAt: 300 },
+                trustedTranscriptObservationProvenance: {
+                    kind: "non_dependent",
+                    source: "external",
+                },
+            });
+            const staleDifferentContent = await createSessionMessage({
+                actorUserId: "u1",
+                sessionId: "s1",
+                ciphertext: "stale",
+                localId: "l1",
+                trustedSourceTimestamps: { createdAt: 100, updatedAt: 200 },
+                trustedTranscriptObservationProvenance: {
+                    kind: "non_dependent",
+                    source: "external",
+                },
+            });
+
+            expect(sameContent).toMatchObject({
+                ok: true,
+                didWrite: false,
+                didUpdate: false,
+                participantCursors: [],
+            });
+            expect(currentTx.sessionMessage.update).toHaveBeenCalledOnce();
+            expect(currentTx.sessionMessage.update).toHaveBeenCalledWith(expect.objectContaining({
+                where: { id: "mExisting" },
+                data: { sourceUpdatedAt: new Date(300) },
+            }));
+            expect(staleDifferentContent).toEqual({ ok: false, error: "invalid-params" });
+            expect(currentTx.sessionMessage.create).toHaveBeenCalledTimes(2);
+            expect(markAccountChanged).not.toHaveBeenCalled();
+        });
+
+        it("rejects a localId race winner when observation provenance parity differs", async () => {
+            currentTx.sessionMessage.findUnique
+                .mockResolvedValueOnce(null)
+                .mockResolvedValueOnce({
+                    id: "mExisting",
+                    seq: 9,
+                    localId: "l1",
+                    sidechainId: null,
+                    content: { t: "encrypted", c: "cipher" },
+                    transcriptObservationProvenance: {
+                        kind: "non_dependent",
+                        source: "external",
+                    },
+                    sourceCreatedAt: new Date(100),
+                    sourceUpdatedAt: new Date(200),
+                    createdAt: new Date(1),
+                    updatedAt: new Date(1),
+                });
+            currentTx.session.findUnique.mockResolvedValue({ accountId: "u1" });
+            currentTx.session.update.mockResolvedValue({ seq: 10 });
+            currentTx.sessionMessage.create.mockRejectedValue({ code: "P2002" });
+
+            dbMocks.db.session.findUnique.mockResolvedValue({ accountId: "u1" });
+            dbMocks.db.sessionShare.findUnique.mockResolvedValue(null);
+            dbMocks.db.sessionMessage.findUnique.mockResolvedValue({
+                id: "mExisting",
+                seq: 9,
+                localId: "l1",
+                sidechainId: null,
+                content: { t: "encrypted", c: "cipher" },
+                transcriptObservationProvenance: {
+                    kind: "non_dependent",
+                    source: "external",
+                },
+                sourceCreatedAt: new Date(100),
+                sourceUpdatedAt: new Date(200),
+                createdAt: new Date(1),
+                updatedAt: new Date(1),
+            });
+
+            const res = await createSessionMessage({
+                actorUserId: "u1",
+                sessionId: "s1",
+                ciphertext: "cipher",
+                localId: "l1",
+            });
+
+            expect(res).toEqual({ ok: false, error: "invalid-params" });
+        });
+
         it("handles localId races by updating the winner row when content differs", async () => {
-            currentTx.sessionMessage.findUnique.mockResolvedValue(null);
+            currentTx.sessionMessage.findUnique
+                .mockResolvedValueOnce(null)
+                .mockResolvedValueOnce({
+                    id: "mExisting",
+                    seq: 9,
+                    localId: "l1",
+                    sidechainId: null,
+                    content: { t: "encrypted", c: "prev" },
+                    createdAt: new Date(1),
+                    updatedAt: new Date(1),
+                });
             currentTx.session.findUnique.mockResolvedValue({ accountId: "u1" });
             currentTx.session.update.mockResolvedValue({ seq: 10 });
             currentTx.sessionMessage.create.mockRejectedValue({ code: "P2002" });
@@ -1570,6 +1723,100 @@ describe("sessionWriteService", () => {
     });
 
     describe("updateSessionMetadata", () => {
+        it("returns the current version without a write when metadata ciphertext is unchanged", async () => {
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({ metadataVersion: 4, metadata: "mSame" });
+
+            const res = await updateSessionMetadata({
+                actorUserId: "u1",
+                sessionId: "s1",
+                expectedVersion: 4,
+                metadataCiphertext: "mSame",
+            });
+
+            expect(res).toEqual({
+                ok: true,
+                version: 4,
+                metadata: "mSame",
+                participantCursors: [],
+                badgeAttentionChanged: false,
+            });
+            expect(currentTx.session.updateMany).not.toHaveBeenCalled();
+            expect(markAccountChanged).not.toHaveBeenCalled();
+        });
+
+        it("returns the current version without a write when plain metadata is semantically unchanged", async () => {
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    metadataVersion: 4,
+                    metadata: '{"path":"/tmp/project","title":"Project"}',
+                    encryptionMode: "plain",
+                });
+
+            const res = await updateSessionMetadata({
+                actorUserId: "u1",
+                sessionId: "s1",
+                expectedVersion: 4,
+                metadataCiphertext: '{"title":"Project","path":"/tmp/project"}',
+            });
+
+            expect(res).toEqual({
+                ok: true,
+                version: 4,
+                metadata: '{"path":"/tmp/project","title":"Project"}',
+                participantCursors: [],
+                badgeAttentionChanged: false,
+            });
+            expect(currentTx.session.updateMany).not.toHaveBeenCalled();
+            expect(markAccountChanged).not.toHaveBeenCalled();
+        });
+
+        it("writes metadata once when the ciphertext changes", async () => {
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    metadataVersion: 4,
+                    metadata: "mOld",
+                    seq: 10,
+                    lastViewedSessionSeq: null,
+                    pendingCount: 0,
+                    pendingBlockedCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    active: true,
+                    archivedAt: null,
+                    latestReadyEventSeq: null,
+                });
+            currentTx.session.updateMany.mockResolvedValue({ count: 1 });
+            getSessionParticipantUserIds.mockResolvedValue(["u1"]);
+            markAccountChanged.mockResolvedValueOnce(123);
+
+            const res = await updateSessionMetadata({
+                actorUserId: "u1",
+                sessionId: "s1",
+                expectedVersion: 4,
+                metadataCiphertext: "mNew",
+            });
+
+            expect(res).toEqual({
+                ok: true,
+                version: 5,
+                metadata: "mNew",
+                participantCursors: [{ accountId: "u1", cursor: 123 }],
+                badgeAttentionChanged: false,
+            });
+            expect(currentTx.session.updateMany).toHaveBeenCalledTimes(1);
+            expect(currentTx.session.updateMany).toHaveBeenCalledWith({
+                where: { id: "s1", metadataVersion: 4 },
+                data: { metadata: "mNew", metadataVersion: 5 },
+            });
+        });
+
         it("returns version-mismatch with current value", async () => {
             currentTx.sessionShare.findUnique.mockResolvedValue(null);
             currentTx.session.findUnique
@@ -2093,6 +2340,259 @@ describe("sessionWriteService", () => {
             });
         });
 
+        it("does not finalize a new exact missing-turn receipt", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    id: "s1",
+                    seq: 5,
+                    lastViewedSessionSeq: 5,
+                    pendingCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    latestTurnStatus: null,
+                    latestTurnStatusObservedAt: null,
+                    latestTurnId: null,
+                    lastRuntimeIssue: null,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.sessionTurnMutationReceipt.findUnique.mockResolvedValue(null);
+            currentTx.sessionTurn.findMany.mockResolvedValue([]);
+
+            const res = await applySessionTurnMutation({
+                actorUserId: "u1",
+                mutation: {
+                    v: 1,
+                    sessionId: "s1",
+                    mutationId: "exact-end-before-begin",
+                    action: "end_session",
+                    turnId: "turn-1",
+                    observedAt: 200,
+                },
+            });
+
+            expect(res).toMatchObject({ ok: true, didApply: false, reason: "missing-turn" });
+            expect(currentTx.sessionTurnMutationReceipt.create).not.toHaveBeenCalled();
+        });
+
+        it("re-evaluates a matching predecessor exact no-op and replaces it only when positive", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    id: "s1",
+                    seq: 5,
+                    lastViewedSessionSeq: 5,
+                    pendingCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    latestTurnStatus: "in_progress",
+                    latestTurnStatusObservedAt: 100,
+                    latestTurnId: "turn-1",
+                    lastRuntimeIssue: null,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.sessionTurnMutationReceipt.findUnique.mockResolvedValue({
+                sessionId: "s1",
+                mutationId: "exact-end-before-begin",
+                turnId: "turn-1",
+                action: "end_session",
+                decision: "missing-turn",
+                observedAt: BigInt(200),
+                appliedAt: BigInt(201),
+            });
+            currentTx.sessionTurn.findMany.mockResolvedValue([{
+                turnId: "turn-1",
+                provider: "codex",
+                providerTurnId: null,
+                status: "in_progress",
+                startedAt: BigInt(100),
+                updatedAt: BigInt(100),
+                terminalAt: null,
+                lastRuntimeIssueJson: null,
+                transcriptAnchorsJson: null,
+                rollbackState: null,
+                rollbackReason: null,
+                providerRollbackOrdinal: null,
+                rollbackUpdatedAt: null,
+                lastMutationId: "delayed-begin",
+            }]);
+            currentTx.sessionTurn.update.mockResolvedValue({});
+            currentTx.session.update.mockResolvedValue({});
+            currentTx.sessionTurnMutationReceipt.update.mockResolvedValue({});
+            getSessionParticipantUserIds.mockResolvedValue(["u1"]);
+            markAccountChanged.mockResolvedValue(106);
+
+            const res = await applySessionTurnMutation({
+                actorUserId: "u1",
+                mutation: {
+                    v: 1,
+                    sessionId: "s1",
+                    mutationId: "exact-end-before-begin",
+                    action: "end_session",
+                    turnId: "turn-1",
+                    observedAt: 200,
+                },
+            });
+
+            expect(res).toMatchObject({
+                ok: true,
+                didApply: true,
+                receipt: { decision: "applied", turnId: "turn-1" },
+            });
+            expect(currentTx.sessionTurnMutationReceipt.update).toHaveBeenCalledWith({
+                where: { sessionId_mutationId: { sessionId: "s1", mutationId: "exact-end-before-begin" } },
+                data: expect.objectContaining({ decision: "applied" }),
+            });
+            expect(currentTx.sessionTurnMutationReceipt.create).not.toHaveBeenCalled();
+        });
+
+        it("does not replace a matching predecessor exact no-op while it remains non-positive", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    id: "s1",
+                    seq: 5,
+                    lastViewedSessionSeq: 5,
+                    pendingCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    latestTurnStatus: null,
+                    latestTurnStatusObservedAt: null,
+                    latestTurnId: null,
+                    lastRuntimeIssue: null,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.sessionTurnMutationReceipt.findUnique.mockResolvedValue({
+                sessionId: "s1",
+                mutationId: "exact-end-still-missing",
+                turnId: "turn-1",
+                action: "end_session",
+                decision: "missing-turn",
+                observedAt: BigInt(200),
+                appliedAt: BigInt(201),
+            });
+            currentTx.sessionTurn.findMany.mockResolvedValue([]);
+
+            const res = await applySessionTurnMutation({
+                actorUserId: "u1",
+                mutation: {
+                    v: 1,
+                    sessionId: "s1",
+                    mutationId: "exact-end-still-missing",
+                    action: "end_session",
+                    turnId: "turn-1",
+                    observedAt: 200,
+                },
+            });
+
+            expect(res).toMatchObject({ ok: true, didApply: false, reason: "missing-turn" });
+            expect(currentTx.sessionTurnMutationReceipt.update).not.toHaveBeenCalled();
+            expect(currentTx.sessionTurnMutationReceipt.create).not.toHaveBeenCalled();
+        });
+
+        it("keeps identity-mismatched stored exact rows as non-positive duplicates", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    id: "s1",
+                    seq: 5,
+                    lastViewedSessionSeq: 5,
+                    pendingCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    latestTurnStatus: "in_progress",
+                    latestTurnStatusObservedAt: 100,
+                    latestTurnId: "turn-1",
+                    lastRuntimeIssue: null,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.sessionTurnMutationReceipt.findUnique.mockResolvedValue({
+                sessionId: "s1",
+                mutationId: "exact-end-before-begin",
+                turnId: "other-turn",
+                action: "end_session",
+                decision: "missing-turn",
+                observedAt: BigInt(200),
+                appliedAt: BigInt(201),
+            });
+
+            const res = await applySessionTurnMutation({
+                actorUserId: "u1",
+                mutation: {
+                    v: 1,
+                    sessionId: "s1",
+                    mutationId: "exact-end-before-begin",
+                    action: "end_session",
+                    turnId: "turn-1",
+                    observedAt: 200,
+                },
+            });
+
+            expect(res).toMatchObject({ ok: true, didApply: false, reason: "duplicate-mutation" });
+            expect(currentTx.sessionTurn.findMany).not.toHaveBeenCalled();
+            expect(currentTx.sessionTurn.create).not.toHaveBeenCalled();
+            expect(currentTx.sessionTurn.update).not.toHaveBeenCalled();
+            expect(currentTx.session.update).not.toHaveBeenCalled();
+            expect(currentTx.sessionTurnMutationReceipt.update).not.toHaveBeenCalled();
+        });
+
+        it("keeps malformed stored exact rows as non-positive duplicates without reading or writing turns", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    id: "s1",
+                    seq: 5,
+                    lastViewedSessionSeq: 5,
+                    pendingCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    latestTurnStatus: "in_progress",
+                    latestTurnStatusObservedAt: 100,
+                    latestTurnId: "turn-1",
+                    lastRuntimeIssue: null,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.sessionTurnMutationReceipt.findUnique.mockResolvedValue({
+                sessionId: "s1",
+                mutationId: "exact-end-before-begin",
+                turnId: "turn-1",
+                action: "not-a-turn-action",
+                decision: "missing-turn",
+                observedAt: BigInt(200),
+                appliedAt: BigInt(201),
+            });
+
+            const res = await applySessionTurnMutation({
+                actorUserId: "u1",
+                mutation: {
+                    v: 1,
+                    sessionId: "s1",
+                    mutationId: "exact-end-before-begin",
+                    action: "end_session",
+                    turnId: "turn-1",
+                    observedAt: 200,
+                },
+            });
+
+            expect(res).toMatchObject({ ok: true, didApply: false, reason: "duplicate-mutation" });
+            expect(currentTx.sessionTurn.findMany).not.toHaveBeenCalled();
+            expect(currentTx.sessionTurn.create).not.toHaveBeenCalled();
+            expect(currentTx.sessionTurn.update).not.toHaveBeenCalled();
+            expect(currentTx.session.update).not.toHaveBeenCalled();
+            expect(currentTx.sessionTurnMutationReceipt.update).not.toHaveBeenCalled();
+            expect(currentTx.sessionTurnMutationReceipt.create).not.toHaveBeenCalled();
+        });
+
         it("terminalizes an existing in-progress turn", async () => {
             currentTx.session.findUnique
                 .mockResolvedValueOnce({ accountId: "u1" })
@@ -2258,6 +2758,61 @@ describe("sessionWriteService", () => {
                 participantCursors: [],
                 badgeAttentionChanged: false,
             });
+        });
+
+        it("replays a stored full-identity positive exact receipt after a lost acknowledgement", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    id: "s1",
+                    seq: 5,
+                    lastViewedSessionSeq: 5,
+                    pendingCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    latestTurnId: "turn-1",
+                    latestTurnStatus: "cancelled",
+                    latestTurnStatusObservedAt: 200,
+                    lastRuntimeIssue: null,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.sessionTurnMutationReceipt.findUnique.mockResolvedValue({
+                sessionId: "s1",
+                mutationId: "exact-end-applied",
+                turnId: "turn-1",
+                action: "end_session",
+                decision: "applied",
+                observedAt: BigInt(200),
+                appliedAt: BigInt(201),
+            });
+
+            const res = await applySessionTurnMutation({
+                actorUserId: "u1",
+                mutation: {
+                    v: 1,
+                    sessionId: "s1",
+                    mutationId: "exact-end-applied",
+                    action: "end_session",
+                    turnId: "turn-1",
+                    observedAt: 200,
+                },
+            });
+
+            expect(res).toMatchObject({
+                ok: true,
+                didApply: false,
+                reason: "duplicate-mutation",
+                receipt: {
+                    mutationId: "exact-end-applied",
+                    decision: "applied",
+                    turnId: "turn-1",
+                    observedAt: 200,
+                },
+            });
+            expect(currentTx.sessionTurn.findMany).not.toHaveBeenCalled();
+            expect(currentTx.sessionTurnMutationReceipt.update).not.toHaveBeenCalled();
         });
 
         it("replays the stored duplicate receipt after a begin-turn P2002 race", async () => {
@@ -3181,6 +3736,59 @@ describe("sessionWriteService", () => {
     });
 
     describe("patchSession", () => {
+        it("returns current metadata version without a write when a metadata patch is unchanged", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    metadataVersion: 4,
+                    metadata: "mSame",
+                    agentStateVersion: 0,
+                    agentState: null,
+                });
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+
+            const res = await patchSession({
+                actorUserId: "u1",
+                sessionId: "s1",
+                metadata: { ciphertext: "mSame", expectedVersion: 4 },
+            });
+
+            expect(res).toEqual({
+                ok: true,
+                participantCursors: [],
+                metadata: { version: 4, value: "mSame" },
+            });
+            expect(currentTx.session.updateMany).not.toHaveBeenCalled();
+            expect(markAccountChanged).not.toHaveBeenCalled();
+        });
+
+        it("returns current metadata version without a write when a plain metadata patch is semantically unchanged", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    metadataVersion: 4,
+                    metadata: '{"path":"/tmp/project","title":"Project"}',
+                    encryptionMode: "plain",
+                    agentStateVersion: 0,
+                    agentState: null,
+                });
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+
+            const res = await patchSession({
+                actorUserId: "u1",
+                sessionId: "s1",
+                metadata: { ciphertext: '{"title":"Project","path":"/tmp/project"}', expectedVersion: 4 },
+            });
+
+            expect(res).toEqual({
+                ok: true,
+                participantCursors: [],
+                metadata: { version: 4, value: '{"path":"/tmp/project","title":"Project"}' },
+            });
+            expect(currentTx.session.updateMany).not.toHaveBeenCalled();
+            expect(markAccountChanged).not.toHaveBeenCalled();
+        });
+
         it("returns version-mismatch with current values for requested fields", async () => {
             currentTx.session.findUnique
                 .mockResolvedValueOnce({ accountId: "u1" })

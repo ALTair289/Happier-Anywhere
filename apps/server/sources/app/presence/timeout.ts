@@ -3,9 +3,11 @@ import { parseIntEnv } from "@/config/env";
 import { delay } from "@/utils/runtime/delay";
 import { forever } from "@/utils/runtime/forever";
 import { shutdownSignal } from "@/utils/process/shutdown";
-import { buildMachineActivityEphemeral, buildSessionActivityEphemeral, eventRouter } from "@/app/events/eventRouter";
+import { buildMachineActivityEphemeral, eventRouter } from "@/app/events/eventRouter";
 import { isRetryableSqliteWriteError } from "@/storage/sqliteRetryClassifier";
 import { warn } from "@/utils/logging/log";
+import { expireSessionPublisherCandidates } from "./sessionPublisherPresenceTimeout";
+import { publishSessionPublisherLifecycleUpdate } from "@/app/session/runtimeActivity/publishPublisherLifecycleUpdate";
 
 export interface PresenceTimeoutConfig {
     sessionTimeoutMs: number;
@@ -25,38 +27,41 @@ export function resolvePresenceTimeoutConfig(env: NodeJS.ProcessEnv = process.en
     };
 }
 
-type TimedOutPresenceCandidate = {
+type TimedOutMachineCandidate = {
     id: string;
     accountId: string;
     lastActiveAt: Date;
 };
 
-type UpdateManyAndReturnDelegate = {
+type MachineUpdateManyAndReturnDelegate = {
     updateManyAndReturn?: (args: {
         where: {
             id: { in: string[] };
             active: true;
+            lastActiveAt: { lte: Date };
         };
         data: { active: false };
         select: { id: true; accountId: true; lastActiveAt: true };
-    }) => Promise<TimedOutPresenceCandidate[]>;
+    }) => Promise<TimedOutMachineCandidate[]>;
     updateMany: (args: {
         where: {
             id: { in: string[] };
             active: true;
+            lastActiveAt: { lte: Date };
         };
         data: { active: false };
     }) => Promise<{ count: number }>;
 };
 
-async function markTimedOutRowsInactive(
-    delegate: UpdateManyAndReturnDelegate,
-    candidates: TimedOutPresenceCandidate[],
-): Promise<TimedOutPresenceCandidate[]> {
+async function markTimedOutMachinesInactive(
+    delegate: MachineUpdateManyAndReturnDelegate,
+    candidates: TimedOutMachineCandidate[],
+    timedOutAt: Date,
+): Promise<TimedOutMachineCandidate[]> {
     if (candidates.length === 0) return [];
 
     const ids = candidates.map((candidate) => candidate.id);
-    const where = { id: { in: ids }, active: true } as const;
+    const where = { id: { in: ids }, active: true, lastActiveAt: { lte: timedOutAt } } as const;
     const data = { active: false } as const;
 
     if (delegate.updateManyAndReturn) {
@@ -84,14 +89,22 @@ export async function runPresenceTimeoutTick(timeoutConfig: PresenceTimeoutConfi
                     lte: new Date(timedOutBefore)
                 }
             },
-            select: { id: true, accountId: true, lastActiveAt: true },
+            select: { id: true, lastActiveAt: true },
         });
-        const changedSessions = await markTimedOutRowsInactive(db.session, sessions);
-        for (const session of changedSessions) {
-            eventRouter.emitEphemeral({
-                userId: session.accountId,
-                payload: buildSessionActivityEphemeral(session.id, false, session.lastActiveAt.getTime(), false),
-                recipientFilter: { type: 'user-scoped-only' }
+        const expired = await expireSessionPublisherCandidates({
+            candidates: sessions.map((session) => ({
+                sessionId: session.id,
+                observedFence: session.lastActiveAt,
+            })),
+            observedBefore: new Date(timedOutBefore),
+        });
+        for (const result of expired) {
+            if (result.status !== 'expired') continue;
+            await publishSessionPublisherLifecycleUpdate({
+                sessionId: result.sessionId,
+                participantCursors: result.participantCursors,
+                active: false,
+                activeAt: result.activeAt.getTime(),
             });
         }
     } catch (error) {
@@ -111,7 +124,7 @@ export async function runPresenceTimeoutTick(timeoutConfig: PresenceTimeoutConfi
             },
             select: { id: true, accountId: true, lastActiveAt: true },
         });
-        const changedMachines = await markTimedOutRowsInactive(db.machine, machines);
+        const changedMachines = await markTimedOutMachinesInactive(db.machine, machines, new Date(timedOutBefore));
         for (const machine of changedMachines) {
             eventRouter.emitEphemeral({
                 userId: machine.accountId,

@@ -16,7 +16,16 @@ vi.mock("@/app/share/sessionParticipants", () => ({
     getSessionParticipantUserIds,
 }));
 
-const accessKeyFindUnique = vi.hoisted(() => vi.fn(async (): Promise<{ machineId: string } | null> => ({ machineId: "m1" })));
+type AccessKeyAccessProof = Readonly<{
+    machine: Readonly<{ revokedAt: Date | null; replacedByMachineId: string | null }>;
+    session: Readonly<{ accountId: string }>;
+}>;
+
+const currentAccessProof: AccessKeyAccessProof = {
+    machine: { revokedAt: null, replacedByMachineId: null },
+    session: { accountId: "u1" },
+};
+const accessKeyFindUnique = vi.hoisted(() => vi.fn(async (): Promise<AccessKeyAccessProof | null> => currentAccessProof));
 vi.mock("@/storage/db", () => ({
     db: {
         accessKey: {
@@ -58,7 +67,7 @@ describe("sessionRelayAuthCache", () => {
         requireAccessLevel.mockReset();
         getSessionParticipantUserIds.mockReset();
         accessKeyFindUnique.mockReset();
-        accessKeyFindUnique.mockResolvedValue({ machineId: "m1" });
+        accessKeyFindUnique.mockResolvedValue(currentAccessProof);
         checkSessionAccess.mockImplementation(async (userId, sessionId) => ({
             userId,
             sessionId,
@@ -145,7 +154,14 @@ describe("sessionRelayAuthCache", () => {
                     sessionId: "s1",
                 },
             },
-            select: { machineId: true },
+            select: {
+                machine: {
+                    select: { revokedAt: true, replacedByMachineId: true },
+                },
+                session: {
+                    select: { accountId: true },
+                },
+            },
         });
         expect(checkSessionAccess).toHaveBeenCalledTimes(1);
         expect(checkSessionAccess).toHaveBeenCalledWith("u1", "s1");
@@ -189,6 +205,24 @@ describe("sessionRelayAuthCache", () => {
         expect(first).toBeNull();
         expect(second).toEqual(["u1", "u2"]);
         expect(accessKeyFindUnique).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+        ["a revoked machine", { ...currentAccessProof, machine: { ...currentAccessProof.machine, revokedAt: new Date(0) } }],
+        ["a replaced machine", { ...currentAccessProof, machine: { ...currentAccessProof.machine, replacedByMachineId: "m2" } }],
+        ["a session owned by another account", { ...currentAccessProof, session: { accountId: "u2" } }],
+    ] as const)("fails closed for %s even when an access-key row remains", async (_description, accessProof) => {
+        accessKeyFindUnique.mockResolvedValue(accessProof);
+        const { authorizeSessionRelayPublish } = await loadModule();
+        const socket = createBoundSocket();
+
+        await expect(authorizeSessionRelayPublish({
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s1",
+        })).resolves.toBeNull();
+        expect(checkSessionAccess).not.toHaveBeenCalled();
     });
 
     it("returns null and does not cache when the sender is not the session owner", async () => {

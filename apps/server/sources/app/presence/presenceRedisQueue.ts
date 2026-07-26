@@ -6,6 +6,7 @@ import { delay } from "@/utils/runtime/delay";
 import { shutdownSignal } from "@/utils/process/shutdown";
 import { log } from "@/utils/logging/log";
 import { randomUUID } from "node:crypto";
+import { createMachinePresenceUpdateManyArgs } from "./machinePresenceWritePlan";
 
 const STREAM_KEY = "presence:alive:v1";
 const GROUP = "presence-worker";
@@ -13,6 +14,10 @@ const DEFAULT_MAXLEN = 100_000;
 const DEFAULT_RECLAIM_IDLE_MS = 60_000;
 
 type PresenceKind = "session" | "machine";
+
+function machinePresenceKey(accountId: string, machineId: string): string {
+    return `${accountId}:${machineId}`;
+}
 
 function getStreamMaxLen(env: NodeJS.ProcessEnv): number | null {
     const raw = env.HAPPY_PRESENCE_STREAM_MAXLEN?.trim();
@@ -26,25 +31,6 @@ function getStreamMaxLen(env: NodeJS.ProcessEnv): number | null {
 function getConsumerName(env: NodeJS.ProcessEnv): string {
     // Must be stable per-process; `HAPPY_INSTANCE_ID` is also used for cluster-aware RPC.
     return env.HAPPIER_INSTANCE_ID?.trim() || env.HAPPY_INSTANCE_ID?.trim() || `worker:${process.pid}:${randomUUID()}`;
-}
-
-export async function publishSessionAlive(params: { sessionId: string; timestamp: number; accountId?: string | null }): Promise<void> {
-    const redis = getRedisClient();
-    const maxLen = getStreamMaxLen(process.env);
-    const maxLenArgs = maxLen ? (["MAXLEN", "~", String(maxLen)] as const) : ([] as const);
-    await redis.xadd(
-        STREAM_KEY,
-        ...maxLenArgs,
-        "*",
-        "kind",
-        "session",
-        "id",
-        params.sessionId,
-        "ts",
-        params.timestamp.toString(),
-        "accountId",
-        params.accountId ?? "",
-    );
 }
 
 export async function publishMachineAlive(params: { accountId: string; machineId: string; timestamp: number }): Promise<void> {
@@ -86,49 +72,65 @@ function parseFields(fields: Array<string>): Record<string, string> {
     return out;
 }
 
-async function flushBatch(batcher: PresenceBatcher): Promise<void> {
+async function flushBatch(batcher: PresenceBatcher): Promise<Map<string, number>> {
     const snapshot = batcher.snapshot();
-    const { sessions, machines } = snapshot;
-
-    if (sessions.length > 0) {
-        const results = await Promise.allSettled(
-            sessions.map((s) =>
-                db.session.update({
-                    where: { id: s.sessionId },
-                    data: { lastActiveAt: new Date(s.timestamp), active: true },
-                }),
-            ),
-        );
-        for (const r of results) {
-            if (r.status === "rejected") {
-                // Presence is best-effort; ignore missing/deleted entities and keep the worker alive.
-                log({ module: "presence-redis-worker", level: "warn" }, `Session presence update failed: ${r.reason}`);
-            }
-        }
-    }
+    const { machines } = snapshot;
+    const persistedMachineTimestamps = new Map<string, number>();
 
     if (machines.length > 0) {
         const results = await Promise.allSettled(
             machines.map((m) =>
-                db.machine.updateMany({
-                    where: {
-                        accountId: m.accountId,
-                        id: m.machineId,
-                        revokedAt: null,
-                        replacedByMachineId: null,
-                    },
-                    data: { lastActiveAt: new Date(m.timestamp), active: true },
-                }),
+                db.machine.updateMany(createMachinePresenceUpdateManyArgs({
+                    accountId: m.accountId,
+                    machineId: m.machineId,
+                    timestamp: m.timestamp,
+                })),
             ),
         );
-        for (const r of results) {
+        const persistedMachines: typeof machines = [];
+        for (let i = 0; i < results.length; i += 1) {
+            const r = results[i];
             if (r.status === "rejected") {
                 log({ module: "presence-redis-worker", level: "warn" }, `Machine presence update failed: ${r.reason}`);
+                continue;
             }
+            const machine = machines[i];
+            persistedMachines.push(machine);
+            persistedMachineTimestamps.set(machinePresenceKey(machine.accountId, machine.machineId), machine.timestamp);
         }
+        batcher.commit({ machines: persistedMachines });
     }
 
-    batcher.commit(snapshot);
+    return persistedMachineTimestamps;
+}
+
+function recordStreamEntry(params: Readonly<{
+    id: string;
+    fields: string[];
+    batcher: PresenceBatcher;
+    pendingDropAckIds: string[];
+    pendingMachineAcks: Map<string, Array<{ id: string; timestamp: number }>>;
+}>): void {
+    const map = parseFields(params.fields);
+    const kind = map.kind as PresenceKind | undefined;
+    const entityId = map.id;
+    const ts = Number(map.ts);
+    const accountId = map.accountId || "";
+
+    if (kind === "machine" && entityId && Number.isFinite(ts) && accountId) {
+        params.batcher.recordMachineAlive(accountId, entityId, ts);
+        const key = machinePresenceKey(accountId, entityId);
+        const entries = params.pendingMachineAcks.get(key) ?? [];
+        entries.push({ id: params.id, timestamp: ts });
+        params.pendingMachineAcks.set(key, entries);
+        return;
+    }
+
+    // Supported older servers may leave `kind=session` rows in this shared stream. Those rows do
+    // not carry the authenticated machine/socket/fence provenance required by the canonical
+    // session-publisher owner, so consuming them must fail closed. ACKing prevents replay without
+    // allowing a delayed or reclaimed row to reactivate an archived or successor-owned session.
+    params.pendingDropAckIds.push(params.id);
 }
 
 export function startPresenceRedisWorker(params?: {
@@ -147,17 +149,36 @@ export function startPresenceRedisWorker(params?: {
     const batcher = new PresenceBatcher();
     let flushTimer: NodeJS.Timeout | null = null;
     const consumerName = params?.consumerName ?? getConsumerName(process.env);
-    const pendingAckIds: string[] = [];
+    const pendingDropAckIds: string[] = [];
+    const pendingMachineAcks = new Map<string, Array<{ id: string; timestamp: number }>>();
     let lastReclaimAt = 0;
+
+    const flushAndAck = async () => {
+        const persistedMachineTimestamps = await flushBatch(batcher);
+        const ids = pendingDropAckIds.splice(0, pendingDropAckIds.length);
+        for (const [key, persistedTimestamp] of persistedMachineTimestamps) {
+            const entries = pendingMachineAcks.get(key);
+            if (!entries) continue;
+            const remaining = entries.filter((entry) => entry.timestamp > persistedTimestamp);
+            if (remaining.length === 0) pendingMachineAcks.delete(key);
+            else pendingMachineAcks.set(key, remaining);
+            ids.push(...entries.filter((entry) => entry.timestamp <= persistedTimestamp).map((entry) => entry.id));
+        }
+        if (ids.length > 0) {
+            await redis.xack(STREAM_KEY, GROUP, ...ids);
+        }
+    };
+
+    let flushChain = Promise.resolve();
+    const enqueueFlush = () => {
+        const flush = flushChain.then(flushAndAck);
+        flushChain = flush.catch(() => undefined);
+        return flush;
+    };
 
     const startTimer = () => {
         flushTimer = setInterval(() => {
-            flushBatch(batcher)
-                .then(async () => {
-                    if (pendingAckIds.length === 0) return;
-                    const ids = pendingAckIds.splice(0, pendingAckIds.length);
-                    await redis.xack(STREAM_KEY, GROUP, ...ids);
-                })
+            enqueueFlush()
                 .catch((e) => {
                 log({ module: "presence-redis-worker", level: "error" }, `Error flushing presence batch: ${e}`);
             });
@@ -170,11 +191,7 @@ export function startPresenceRedisWorker(params?: {
             clearInterval(flushTimer);
             flushTimer = null;
         }
-        await flushBatch(batcher);
-        if (pendingAckIds.length > 0) {
-            const ids = pendingAckIds.splice(0, pendingAckIds.length);
-            await redis.xack(STREAM_KEY, GROUP, ...ids);
-        }
+        await enqueueFlush();
     };
 
     void forever("presence-redis-worker", async () => {
@@ -198,24 +215,7 @@ export function startPresenceRedisWorker(params?: {
                     );
                     const entries = Array.isArray(res) ? res[1] : [];
                     for (const [id, fields] of entries as any[]) {
-                        const map = parseFields(fields as any);
-                        const kind = map.kind as PresenceKind | undefined;
-                        const entityId = map.id;
-                        const ts = Number(map.ts);
-                        const accountId = map.accountId || "";
-
-                        if (!kind || !entityId || !Number.isFinite(ts)) {
-                            pendingAckIds.push(id);
-                            continue;
-                        }
-
-                        if (kind === "session") {
-                            batcher.recordSessionAlive(entityId, ts);
-                        } else if (kind === "machine" && accountId) {
-                            batcher.recordMachineAlive(accountId, entityId, ts);
-                        }
-
-                        pendingAckIds.push(id);
+                        recordStreamEntry({ id, fields, batcher, pendingDropAckIds, pendingMachineAcks });
                     }
                 } catch (e) {
                     // Best-effort: do not kill the worker if reclaim fails.
@@ -243,24 +243,7 @@ export function startPresenceRedisWorker(params?: {
 
             for (const [, entries] of res as any) {
                 for (const [id, fields] of entries as any[]) {
-                    const map = parseFields(fields as any);
-                    const kind = map.kind as PresenceKind | undefined;
-                    const entityId = map.id;
-                    const ts = Number(map.ts);
-                    const accountId = map.accountId || "";
-
-                    if (!kind || !entityId || !Number.isFinite(ts)) {
-                        pendingAckIds.push(id);
-                        continue;
-                    }
-
-                    if (kind === "session") {
-                        batcher.recordSessionAlive(entityId, ts);
-                    } else if (kind === "machine" && accountId) {
-                        batcher.recordMachineAlive(accountId, entityId, ts);
-                    }
-
-                    pendingAckIds.push(id);
+                    recordStreamEntry({ id, fields, batcher, pendingDropAckIds, pendingMachineAcks });
                 }
             }
         }
