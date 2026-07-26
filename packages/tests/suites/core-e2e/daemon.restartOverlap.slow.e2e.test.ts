@@ -12,7 +12,7 @@ import {
   type DaemonState,
   type StartedDaemon,
 } from '../../src/testkit/daemon/daemon';
-import { daemonControlPostJson } from '../../src/testkit/daemon/controlServerClient';
+import { daemonControlPostJson, resolveDaemonSpawnSessionId } from '../../src/testkit/daemon/controlServerClient';
 import { fakeClaudeFixturePath, waitForFakeClaudeInvocation } from '../../src/testkit/fakeClaude';
 import { assertPidAlive, readFakeClaudeSdkInvocationCount, readFakeClaudeSessionId } from '../../src/testkit/providers/fakeClaudeContinuity';
 import { enqueueSessionPromptForScenario, waitForAssistantMessageContaining } from '../../src/testkit/providers/scenarios/sessionRuntime';
@@ -65,57 +65,6 @@ async function listDaemonSessions(params: {
   });
   expect(listed.status).toBe(200);
   return parseListedDaemonSessions(listed.data);
-}
-
-async function resolveSpawnedSessionId(params: {
-  port: number;
-  controlToken?: string | null;
-  spawnNonce?: string;
-  immediateSessionId?: string;
-  timeoutMs?: number;
-}): Promise<string> {
-  const immediateSessionId = typeof params.immediateSessionId === 'string' ? params.immediateSessionId.trim() : '';
-  if (immediateSessionId) return immediateSessionId;
-
-  const spawnNonce = typeof params.spawnNonce === 'string' ? params.spawnNonce.trim() : '';
-  if (!spawnNonce) {
-    throw new Error('Missing sessionId and spawnNonce from daemon spawn-session');
-  }
-
-  let resolvedSessionId = '';
-  await waitFor(async () => {
-    const resolved = await daemonControlPostJson<{
-      success: true;
-      status: 'success' | 'pending' | 'not_found';
-      sessionId?: string;
-    }>({
-      port: params.port,
-      path: '/spawn-session/resolve',
-      controlToken: params.controlToken,
-      body: { spawnNonce },
-      timeoutMs: 5_000,
-    });
-    expect(resolved.status).toBe(200);
-    expect(resolved.data.success).toBe(true);
-    if (resolved.data.status !== 'success') {
-      throw new Error(`spawn-session/resolve returned ${resolved.data.status}`);
-    }
-    const sessionId = typeof resolved.data.sessionId === 'string' ? resolved.data.sessionId.trim() : '';
-    if (!sessionId) {
-      throw new Error('spawn-session/resolve did not return a sessionId');
-    }
-    resolvedSessionId = sessionId;
-    return true;
-  }, {
-    timeoutMs: params.timeoutMs ?? 45_000,
-    intervalMs: 50,
-    context: 'spawn-session nonce resolution',
-  });
-
-  if (!resolvedSessionId) {
-    throw new Error('Failed to resolve spawned session id from nonce');
-  }
-  return resolvedSessionId;
 }
 
 async function waitForReplacementDaemonConfirmed(params: {
@@ -219,6 +168,7 @@ describe('core e2e: daemon overlap self-restart', () => {
       testDir,
       happyHomeDir: daemonHomeDir,
       env: daemonEnv,
+      startupTimeoutMs: 120_000,
       cleanupDescendantsOnExit: false,
     });
     const originalDaemonPid = daemon.state.pid;
@@ -236,11 +186,12 @@ describe('core e2e: daemon overlap self-restart', () => {
     });
     expect(spawnRes.status).toBe(200);
     expect(spawnRes.data.success).toBe(true);
-    const sessionId = await resolveSpawnedSessionId({
+    const sessionId = await resolveDaemonSpawnSessionId({
       port: daemon.state.httpPort,
       controlToken: daemon.state.controlToken,
       immediateSessionId: typeof spawnRes.data.sessionId === 'string' ? spawnRes.data.sessionId : '',
       spawnNonce: typeof spawnRes.data.spawnNonce === 'string' ? spawnRes.data.spawnNonce : '',
+      timeoutMs: 120_000,
     });
 
     const firstPrompt = `DAEMON_RESTART_OVERLAP_FIRST_${randomUUID()}`;

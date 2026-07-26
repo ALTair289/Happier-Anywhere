@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -10,10 +11,12 @@ import { isProcessAlive, terminateProcessTreeByPid } from '../process/processTre
 
 const cliLaunchSpecMock = vi.hoisted(() => ({
   resolveCliTestLaunchSpec: vi.fn(),
+  actualResolveCliTestLaunchSpec: null as typeof import('../process/cliLaunchSpec').resolveCliTestLaunchSpec | null,
 }));
 
 vi.mock('../process/cliLaunchSpec', async () => {
   const actual = await vi.importActual<typeof import('../process/cliLaunchSpec')>('../process/cliLaunchSpec');
+  cliLaunchSpecMock.actualResolveCliTestLaunchSpec = actual.resolveCliTestLaunchSpec;
   return {
     ...actual,
     resolveCliTestLaunchSpec: cliLaunchSpecMock.resolveCliTestLaunchSpec,
@@ -53,6 +56,47 @@ async function writeHoldingDaemonScript(scriptPath: string, opts: { writesState:
   await writeFile(scriptPath, contents, 'utf8');
 }
 
+type PreparedSnapshotComponent = 'ready-marker' | 'entrypoint' | 'node-modules';
+
+async function writePreparedDaemonSnapshot(
+  snapshotDir: string,
+  opts: { httpPort: number; missing?: PreparedSnapshotComponent },
+): Promise<string> {
+  const entrypoint = resolve(snapshotDir, 'dist', 'index.mjs');
+  await mkdir(resolve(snapshotDir, 'dist'), { recursive: true });
+
+  if (opts.missing !== 'ready-marker') {
+    await writeFile(resolve(snapshotDir, '.cli-dist-snapshot.ready.json'), '{"ready":true}\n', 'utf8');
+  }
+  if (opts.missing !== 'entrypoint') {
+    await writeHoldingDaemonScript(entrypoint, { writesState: true, httpPort: opts.httpPort });
+  }
+  if (opts.missing !== 'node-modules') {
+    await mkdir(resolve(snapshotDir, 'node_modules'), { recursive: true });
+  }
+
+  return entrypoint;
+}
+
+async function readSnapshotFixtureState(snapshotDir: string): Promise<Readonly<{
+  entries: string[];
+  readyMarker: string | null;
+  entrypoint: string | null;
+}>> {
+  const readOptionalFile = async (path: string): Promise<string | null> => {
+    if (!existsSync(path)) return null;
+    return await readFile(path, 'utf8');
+  };
+
+  return {
+    entries: existsSync(snapshotDir)
+      ? (await readdir(snapshotDir, { recursive: true })).map(String).sort()
+      : [],
+    readyMarker: await readOptionalFile(resolve(snapshotDir, '.cli-dist-snapshot.ready.json')),
+    entrypoint: await readOptionalFile(resolve(snapshotDir, 'dist', 'index.mjs')),
+  };
+}
+
 async function writeExitAfterStateDaemonScript(scriptPath: string, opts: { homeDir: string; serverId: string; httpPort: number }): Promise<void> {
   const contents = [
     "import { mkdirSync, writeFileSync } from 'node:fs';",
@@ -88,14 +132,118 @@ async function writeReplacementDaemonScript(scriptPath: string, opts: { serverId
 }
 
 describe('startTestDaemon', () => {
+  it('launches the exact caller-supplied prepared daemon snapshot through the canonical resolver', async () => {
+    const testDir = await mkdtemp(join(tmpdir(), 'happier-daemon-prepared-dist-exact-candidate-'));
+    const homeDir = resolve(testDir, 'home');
+    const snapshotDir = resolve(testDir, 'immutable-cli-candidate');
+    let daemon: Awaited<ReturnType<typeof startTestDaemon>> | null = null;
+
+    try {
+      await mkdir(homeDir, { recursive: true });
+      const snapshotEntrypoint = await writePreparedDaemonSnapshot(snapshotDir, { httpPort: 32_231 });
+
+      const actualResolveCliTestLaunchSpec = cliLaunchSpecMock.actualResolveCliTestLaunchSpec;
+      if (!actualResolveCliTestLaunchSpec) throw new Error('missing actual resolveCliTestLaunchSpec');
+      cliLaunchSpecMock.resolveCliTestLaunchSpec.mockImplementationOnce(actualResolveCliTestLaunchSpec);
+
+      daemon = await startTestDaemon({
+        testDir,
+        happyHomeDir: homeDir,
+        env: {},
+        snapshotDir,
+        preparedDistSnapshotOnly: true,
+        startupTimeoutMs: 15_000,
+      });
+
+      expect(daemon.state.httpPort).toBe(32_231);
+      expect(daemon.proc.child.spawnfile).toBe(process.execPath);
+      expect(daemon.proc.child.spawnargs).toEqual([
+        process.execPath,
+        '--preserve-symlinks',
+        snapshotEntrypoint,
+        'daemon',
+        'start-sync',
+      ]);
+    } finally {
+      if (daemon) await daemon.stop();
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each<{
+    label: string;
+    snapshotDir: 'whitespace' | 'fixture';
+    missing?: PreparedSnapshotComponent;
+  }>([
+    { label: 'whitespace-only snapshotDir', snapshotDir: 'whitespace' },
+    { label: 'missing ready marker', snapshotDir: 'fixture', missing: 'ready-marker' },
+    { label: 'missing dist/index.mjs', snapshotDir: 'fixture', missing: 'entrypoint' },
+    { label: 'missing node_modules', snapshotDir: 'fixture', missing: 'node-modules' },
+  ])('fails closed before spawn for $label', async ({ snapshotDir: snapshotKind, missing }) => {
+    const testDir = await mkdtemp(join(tmpdir(), 'happier-daemon-prepared-dist-fail-closed-'));
+    const homeDir = resolve(testDir, 'home');
+    const snapshotDir = snapshotKind === 'whitespace'
+      ? ' \t '
+      : resolve(testDir, 'incomplete-cli-candidate');
+
+    try {
+      await mkdir(homeDir, { recursive: true });
+      if (snapshotKind === 'fixture') {
+        if (!missing) throw new Error('fixture case must name a missing component');
+        await writePreparedDaemonSnapshot(snapshotDir, { httpPort: 32_232, missing });
+        const actualResolveCliTestLaunchSpec = cliLaunchSpecMock.actualResolveCliTestLaunchSpec;
+        if (!actualResolveCliTestLaunchSpec) throw new Error('missing actual resolveCliTestLaunchSpec');
+        cliLaunchSpecMock.resolveCliTestLaunchSpec.mockImplementationOnce(actualResolveCliTestLaunchSpec);
+      }
+      const fixtureBeforeLaunch = snapshotKind === 'fixture'
+        ? await readSnapshotFixtureState(snapshotDir)
+        : null;
+      const testDirEntriesBeforeLaunch = (await readdir(testDir)).sort();
+
+      const result = await startTestDaemon({
+        testDir,
+        happyHomeDir: homeDir,
+        env: {},
+        snapshotDir,
+        preparedDistSnapshotOnly: true,
+        startupTimeoutMs: 15_000,
+      }).then(
+        () => 'started' as const,
+        (error: unknown) => error,
+      );
+
+      expect(result).toBeInstanceOf(Error);
+      const message = String((result as Error).message);
+      if (snapshotKind === 'whitespace') {
+        expect(message).toContain('preparedDistSnapshotOnly requires an explicit snapshotDir');
+        expect(cliLaunchSpecMock.resolveCliTestLaunchSpec).not.toHaveBeenCalled();
+      } else {
+        expect(message).toContain('Expected an already-prepared CLI dist snapshot');
+        expect(message).toContain('phase=resolveCliTestLaunchSpec');
+        expect(message).toContain('processStatus=not-spawned');
+        expect(await readSnapshotFixtureState(snapshotDir)).toEqual(fixtureBeforeLaunch);
+      }
+      expect(existsSync(resolve(testDir, 'daemon.stdout.log'))).toBe(false);
+      expect(existsSync(resolve(testDir, 'daemon.stderr.log'))).toBe(false);
+      expect((await readdir(testDir)).sort()).toEqual(testDirEntriesBeforeLaunch);
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
+
   it('forces source subprocesses for source-entrypoint daemon tests', () => {
-    expect(sanitizeDaemonEnvForSpawn({
+    const sanitized = sanitizeDaemonEnvForSpawn({
       HAPPIER_E2E_PROVIDER_USE_CLI_SOURCE_ENTRYPOINT: '1',
       HAPPIER_CLI_SUBPROCESS_PREFER_TSX: undefined,
       HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT: '/stack/cli/dist/index.mjs',
-    })).toMatchObject({
+      HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT: '1111111111111111',
+    });
+
+    expect(sanitized).toMatchObject({
       HAPPIER_CLI_SUBPROCESS_PREFER_TSX: '1',
     });
+    expect(sanitized.HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT).toBeUndefined();
+    expect(sanitized.HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT).toBeUndefined();
   });
 
   it('defaults source-entrypoint daemon snapshots to copy-mode node_modules when unset', async () => {
