@@ -23,7 +23,6 @@ describe("connected services quota route rate limits", () => {
             ["GET", "/v2/connect/:serviceId/profiles/:profileId/quotas"],
             ["POST", "/v2/connect/:serviceId/profiles/:profileId/quotas/refresh"],
             ["DELETE", "/v2/connect/:serviceId/profiles/:profileId/quotas"],
-            ["POST", "/v3/connect/:serviceId/profiles/:profileId/quotas"],
             ["GET", "/v3/connect/:serviceId/profiles/:profileId/quotas"],
             ["POST", "/v3/connect/:serviceId/profiles/:profileId/quotas/refresh"],
             ["DELETE", "/v3/connect/:serviceId/profiles/:profileId/quotas"],
@@ -35,5 +34,7 @@ describe("connected services quota route rate limits", () => {
             expect(rateLimit?.keyGenerator).toEqual(expect.any(Function));
             expect(await rateLimit?.keyGenerator?.({ headers: { authorization: "Bearer token_1" }, ip: "203.0.113.9" })).toBe("uid:user-1");
         }
+
+        expect(app.routes.has("POST /v3/connect/:serviceId/profiles/:profileId/quotas")).toBe(false);
     });
 });

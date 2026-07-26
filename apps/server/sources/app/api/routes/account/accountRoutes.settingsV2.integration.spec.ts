@@ -186,11 +186,6 @@ describe("accountRoutes (/v2/account/settings) (integration)", () => {
                             t: "plain",
                             v: {
                                 schemaVersion: 2,
-                                sessionProviderUsageSettingsV1: {
-                                    v: 1,
-                                    gaugeMode: "hidden",
-                                    gaugeWindowMode: "weekly",
-                                },
                                 usageLimitRecoverySettingsV1: {
                                     v: 1,
                                     mode: "auto_wait",
@@ -222,11 +217,6 @@ describe("accountRoutes (/v2/account/settings) (integration)", () => {
                     content: {
                         t: "plain",
                         v: expect.objectContaining({
-                            sessionProviderUsageSettingsV1: {
-                                v: 1,
-                                gaugeMode: "hidden",
-                                gaugeWindowMode: "weekly",
-                            },
                             usageLimitRecoverySettingsV1: {
                                 v: 1,
                                 mode: "auto_wait",
