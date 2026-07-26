@@ -22,6 +22,7 @@ import {
 import { isPidAlive, readStackRuntimeStateFile } from '../stack/runtime_state.mjs';
 import { resolveHappyCliRuntimeInputGroups } from '../proc/cli_runtime_inputs.mjs';
 import { readCliDistBuildManifest } from '../cli/cliDistIntegrity.mjs';
+import { WORKSPACE_BUNDLE_LOCK_TIMEOUT_ERROR_CODE } from '../proc/cliDistBuildLock.mjs';
 
 export function createHappyCliReloadDescriptors({
   cliDir,
@@ -151,6 +152,7 @@ export async function startDevDaemon({
   publicServerUrl,
   runtimeStatePath = null,
   restart,
+  startLastGreen = false,
   isShuttingDown,
   env = process.env,
   stackName = null,
@@ -168,6 +170,7 @@ export async function startDevDaemon({
     runtimeStatePath,
     isShuttingDown,
     forceRestart: Boolean(restart),
+    admitPriorDistImmediately: Boolean(startLastGreen),
     env,
     stackName,
     cliIdentity,
@@ -202,7 +205,7 @@ export function createHappyCliReloadExecutor({
   let successorPublicationSuperseded = false;
   return {
     target: 'daemon',
-    async build() {
+    async build(context = {}) {
       successorDistClosureFingerprint = null;
       successorPublicationSuperseded = false;
       if (!startDaemon) {
@@ -210,7 +213,27 @@ export function createHappyCliReloadExecutor({
         return { skipped: true, reason: 'daemon-disabled' };
       }
       logger.log('[local] watch: happier-cli changed → rebuilding + restarting daemon...');
-      const buildResult = await ensureCliBuiltImpl(cliDir, { buildCli, env });
+      let buildResult;
+      for (;;) {
+        try {
+          buildResult = await ensureCliBuiltImpl(cliDir, { buildCli, env });
+          break;
+        } catch (error) {
+          if (
+            error?.code !== WORKSPACE_BUNDLE_LOCK_TIMEOUT_ERROR_CODE
+            || typeof context.revalidateGeneration !== 'function'
+          ) {
+            throw error;
+          }
+          if (!await context.revalidateGeneration()) {
+            return { skipped: true, reason: 'stale-generation' };
+          }
+          logger.warn(
+            '[local] watch: the shared happier-cli build is still active; ' +
+              'continuing to wait so this Stack can adopt its publication.',
+          );
+        }
+      }
 
       const distEntrypoint = join(cliDir, 'dist', 'index.mjs');
       const distManifest = resolveCliDistBuildManifestPath(cliDir);

@@ -620,6 +620,7 @@ async function main() {
         publicServerUrl,
         runtimeStatePath,
         restart,
+        startLastGreen: watchEnabled,
         isShuttingDown: () => shuttingDown,
         env: baseEnv,
         stackName,
@@ -674,6 +675,7 @@ async function main() {
           publicServerUrl,
           runtimeStatePath,
           restart: false,
+          startLastGreen: watchEnabled,
           isShuttingDown: () => shuttingDown,
           env: baseEnv,
           stackName,
@@ -822,6 +824,10 @@ async function main() {
   if (startMobile && expoRes?.port) {
     const metroUrl = await preferStackLocalhostUrl(`http://localhost:${expoRes.port}`, { stackName });
     console.log(`[local] mobile: metro ${metroUrl}`);
+  }
+
+  if (daemonReloadEnabled && reloadWatcher?.requestReload) {
+    void reloadWatcher.requestReload('daemon');
   }
 
   if (devTargets.length > 0) {

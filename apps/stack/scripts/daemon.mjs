@@ -796,6 +796,7 @@ export async function ensureHappierCliDistExists(
     cliCommand = '',
     admittedDistClosureFingerprint = null,
     env = process.env,
+    admitPriorDistImmediately = false,
   },
   {
     ensureCliBuiltImpl = ensureCliBuilt,
@@ -847,6 +848,29 @@ export async function ensureHappierCliDistExists(
     }
     const priorIntegrity = readIntegrity();
     let buildResult = null;
+    if (admitPriorDistImmediately && priorIntegrity.ok) {
+      try {
+        await probeCliDistRuntimeImportImpl(distEntrypoint, {
+          cwd: cliDir,
+          env,
+          timeoutMs: resolveStackDaemonStartVerifyTimeoutMs(env),
+        });
+        return {
+          ok: true,
+          current: true,
+          degraded: true,
+          fallbackFingerprint: priorIntegrity.fingerprint,
+          fallbackRejectedReason: null,
+          generationAdmissionRequired: true,
+          distEntrypoint,
+          built: false,
+          reason: 'admitted-prior-dist-for-watch-startup',
+        };
+      } catch {
+        // The prior publication is not runnable. Fall through to canonical freshness
+        // admission, which may repair it before the daemon is allowed to start.
+      }
+    }
     let buildError = null;
     try {
       buildResult = await ensureCliBuiltImpl(cliDir, { buildCli, env });
@@ -1702,6 +1726,7 @@ export async function startLocalDaemonWithAuth({
   runtimeBacked = false,
   admittedDistClosureFingerprint = null,
 }, {
+  admitPriorDistImmediately = false,
   restartDaemonViaControlServerImpl = restartDaemonViaControlServer,
 } = {}) {
   const resolvedStackName =
@@ -1760,6 +1785,7 @@ export async function startLocalDaemonWithAuth({
     admittedDistClosureFingerprint,
     env: baseEnv,
   });
+    admitPriorDistImmediately,
   const distEntrypoint =
     explicitCommand
       ? ''

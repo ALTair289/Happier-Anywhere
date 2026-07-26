@@ -527,6 +527,14 @@ export function startDevReloadCoordinator({
   }
   return {
     ...watcher,
+    requestReload(target) {
+      if (closed || !executorsByTarget.has(target)) return Promise.resolve();
+      return onChange({
+        eventType: 'requested',
+        filename: null,
+        forcedTarget: target,
+      });
+    },
     async close() {
       if (closed) return await inFlightPromise;
       closed = true;

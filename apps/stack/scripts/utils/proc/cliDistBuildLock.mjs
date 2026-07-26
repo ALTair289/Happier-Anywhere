@@ -4,7 +4,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 async function loadWorkspaceBundleLockModule() {
   try {
-    return await import('@happier-dev/cli-common/workspaceBundleLock');
+    const packageModule = await import('@happier-dev/cli-common/workspaceBundleLock');
+    if (typeof packageModule.WORKSPACE_BUNDLE_LOCK_TIMEOUT_ERROR_CODE === 'string') {
+      return packageModule;
+    }
   } catch (packageImportError) {
     // Source-dev upgrades may execute this stack file before the mounted cli-common copy has been
     // refreshed with a newly-added export. Fall back only to the canonical source module; packed
@@ -14,15 +17,25 @@ async function loadWorkspaceBundleLockModule() {
       '../../../../../packages/cli-common/workspaceBundleLock.mjs',
     );
     if (!existsSync(sourceModulePath)) throw packageImportError;
-    return await import(pathToFileURL(sourceModulePath).href);
   }
+  const sourceModulePath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../../../../packages/cli-common/workspaceBundleLock.mjs',
+  );
+  if (!existsSync(sourceModulePath)) {
+    throw new Error('The workspace bundle lock module does not expose its timeout contract');
+  }
+  return await import(pathToFileURL(sourceModulePath).href);
 }
 
 const {
+  WORKSPACE_BUNDLE_LOCK_TIMEOUT_ERROR_CODE,
   isWorkspaceBundleLockActive,
   resolveWorkspaceBundleLockPath,
   withWorkspaceBundleLock,
 } = await loadWorkspaceBundleLockModule();
+
+export { WORKSPACE_BUNDLE_LOCK_TIMEOUT_ERROR_CODE };
 
 export function resolveCliDistBuildLockPath(repoRoot) {
   return resolveWorkspaceBundleLockPath(repoRoot);

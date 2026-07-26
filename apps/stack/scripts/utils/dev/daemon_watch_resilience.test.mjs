@@ -195,6 +195,7 @@ test('startDevDaemon forwards stack context to daemon startup', async () => {
       internalServerUrl: 'http://127.0.0.1:3009',
       publicServerUrl: 'http://localhost:3009',
       restart: true,
+      startLastGreen: true,
       isShuttingDown: () => false,
       env: { TEST_ENV: '1' },
       stackName: 'dev',
@@ -209,6 +210,7 @@ test('startDevDaemon forwards stack context to daemon startup', async () => {
 
   assert.ok(capturedArgs);
   assert.equal(capturedArgs.forceRestart, true);
+  assert.equal(capturedArgs.admitPriorDistImmediately, true);
   assert.equal(capturedArgs.stackName, 'dev');
   assert.equal(capturedArgs.cliIdentity, 'reviewer');
   assert.equal(capturedArgs.env?.TEST_ENV, '1');
@@ -281,6 +283,62 @@ test('reload executor restarts from an already-current dist and preserves the st
   assert.equal(capturedBuildOptions?.env, env);
   assert.deepEqual(await executor.restart(), { restarted: true, mode: 'overlap' });
   assert.equal(restartCalls, 1, 'a watcher generation must not be consumed without activating the current dist');
+});
+
+test('reload executor retries lock contention and adopts the concurrently published CLI build', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-lock-adoption-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const cliDir = join(root, 'apps', 'cli');
+  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(distIndexPath), { recursive: true });
+  await writeFile(distIndexPath, 'export const daemon = true;\n', 'utf-8');
+  await writeDistBuildManifest(distIndexPath, 'abcdef1234567890');
+
+  let buildCalls = 0;
+  let restartCalls = 0;
+  const executor = createHappyCliReloadExecutor(
+    {
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+      stackName: 'dev',
+    },
+    {
+      ensureCliBuiltImpl: async () => {
+        buildCalls += 1;
+        if (buildCalls === 1) {
+          const error = new Error('Timed out waiting for CLI dist build lock');
+          error.code = 'EWORKSPACEBUNDLELOCKTIMEOUT';
+          throw error;
+        }
+        return {
+          built: false,
+          current: true,
+          reason: 'concurrent_build_already_completed',
+        };
+      },
+      pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
+      restartDaemonViaControlServerImpl: async () => {
+        restartCalls += 1;
+        return { status: 'restarting', previousPid: 111, pid: 222 };
+      },
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  assert.deepEqual(
+    await executor.build({ revalidateGeneration: async () => true }),
+    { ok: true },
+  );
+  assert.equal(buildCalls, 2);
+  assert.deepEqual(await executor.restart(), { restarted: true, mode: 'overlap' });
+  assert.equal(restartCalls, 1);
 });
 
 test('reload executor cold-starts an absent daemon from a runnable superseded publication', async (t) => {

@@ -323,6 +323,20 @@ function startCoordinator({
   };
 }
 
+test('explicit startup reconciliation rebuilds one requested target without a filesystem edit', async () => {
+  const calls = [];
+  const daemon = createDescriptor({ id: 'daemon:cli', target: 'daemon' });
+  const { watcher } = startCoordinator({
+    descriptors: [daemon],
+    executors: [createExecutor('daemon', calls)],
+    calls,
+  });
+
+  await watcher.requestReload('daemon');
+
+  assert.deepEqual(calls.slice(1), ['daemon:build:1', 'daemon:restart:1']);
+});
+
 test('construction shares one signature scan between coordinator and watcher baselines', async () => {
   const server = createDeferredAsyncDescriptor({ id: 'server:app', target: 'server' });
   let watcherBaseline;

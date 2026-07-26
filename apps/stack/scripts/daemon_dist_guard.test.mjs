@@ -38,6 +38,42 @@ function buildDaemonDistGuardEnv(overrides = {}) {
   };
 }
 
+test('watch startup admits a validated prior CLI publication without waiting for freshness build', async (t) => {
+  const repoDir = await mkdtemp(join(tmpdir(), 'hstack-last-green-cli-startup-'));
+  t.after(async () => rm(repoDir, { recursive: true, force: true }));
+  const cliDir = join(repoDir, 'apps', 'cli');
+  const cliBin = join(cliDir, 'bin', 'happier.mjs');
+  const distEntrypoint = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(cliBin), { recursive: true });
+  await mkdir(dirname(distEntrypoint), { recursive: true });
+  await writeFile(distEntrypoint, 'export {};\n', 'utf-8');
+  await writeDistBuildManifestForTest(distEntrypoint, 'abcdef1234567890');
+  const probes = [];
+
+  const result = await ensureHappierCliDistExists(
+    {
+      cliBin,
+      admitPriorDistImmediately: true,
+      env: { ...process.env, HAPPIER_STACK_REPO_DIR: repoDir },
+    },
+    {
+      ensureCliBuiltImpl: async () => {
+        throw new Error('freshness build must run in the background reload owner');
+      },
+      probeCliDistRuntimeImportImpl: async (entrypoint) => {
+        probes.push(entrypoint);
+      },
+    },
+  );
+
+  assert.deepEqual(probes, [distEntrypoint]);
+  assert.equal(result.ok, true);
+  assert.equal(result.current, true);
+  assert.equal(result.built, false);
+  assert.equal(result.reason, 'admitted-prior-dist-for-watch-startup');
+  assert.equal(result.fallbackFingerprint, 'abcdef1234567890');
+});
+
 test('source admission forces one last-chance build when builds are disabled and dist is invalid', async (t) => {
   const repoDir = await mkdtemp(join(tmpdir(), 'hstack-disabled-cli-bootstrap-'));
   t.after(async () => rm(repoDir, { recursive: true, force: true }));
