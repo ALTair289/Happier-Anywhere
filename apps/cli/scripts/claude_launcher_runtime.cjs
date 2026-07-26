@@ -1,9 +1,9 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
+const { expandHomeDirPath } = require('@happier-dev/cli-common/expandHomeDirPath');
 const { withWindowsHide } = require('./childProcessOptions.cjs');
 
 function resolvePathSafe(filePath) {
@@ -13,24 +13,6 @@ function resolvePathSafe(filePath) {
     } catch {
         return filePath;
     }
-}
-
-function resolveHomeDir() {
-    const envHome =
-        process.platform === 'win32'
-            ? (process.env.USERPROFILE || process.env.HOME)
-            : process.env.HOME;
-    const trimmed = typeof envHome === 'string' ? envHome.trim() : '';
-    return trimmed.length > 0 ? trimmed : os.homedir();
-}
-
-function expandHomeDirPath(filePath) {
-    const raw = String(filePath ?? '').trim();
-    if (raw === '~') return resolveHomeDir();
-    if (raw.startsWith('~/') || raw.startsWith('~\\')) {
-        return path.join(resolveHomeDir(), raw.slice(2));
-    }
-    return raw;
 }
 
 function shouldLogClaudeDetection() {
@@ -151,6 +133,7 @@ function runClaudeCli(cliPath) {
 module.exports = {
     attachChildSignalForwarding,
     buildClaudeBinarySpawnInvocation,
+    expandHomeDirPath,
     getClaudeCliPath,
     runClaudeCli,
 };

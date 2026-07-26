@@ -1,7 +1,60 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
 
-import { getClaudeCliPath } from '../scripts/claude_launcher_runtime.cjs';
+const require = createRequire(import.meta.url);
+const canonicalHomePathRuntime = require('@happier-dev/cli-common/expandHomeDirPath') as {
+  expandHomeDirPath(
+    value: string,
+    processEnv?: NodeJS.ProcessEnv,
+    platform?: NodeJS.Platform,
+  ): string;
+};
+const launcherRuntime = require('../scripts/claude_launcher_runtime.cjs') as {
+  expandHomeDirPath: typeof canonicalHomePathRuntime.expandHomeDirPath;
+  getClaudeCliPath(): string;
+};
+const { getClaudeCliPath } = launcherRuntime;
+
+describe('claude_launcher_runtime home expansion parity', () => {
+  it('delegates to the bundled cli-common implementation body', () => {
+    expect(launcherRuntime.expandHomeDirPath).toBe(canonicalHomePathRuntime.expandHomeDirPath);
+  });
+
+  it.each([
+    {
+      platform: 'linux' as const,
+      env: { HOME: '/Users/alice' },
+      cases: [
+        ['~', '/Users/alice'],
+        ['~/projects/repo', '/Users/alice/projects/repo'],
+        ['~\\projects\\repo', '/Users/alice/projects/repo'],
+        ['~/projects\\mixed/repo', '/Users/alice/projects/mixed/repo'],
+        ['~alice/projects/repo', '~alice/projects/repo'],
+        ['/Users/alice2/projects/repo', '/Users/alice2/projects/repo'],
+      ],
+    },
+    {
+      platform: 'win32' as const,
+      env: { USERPROFILE: 'C:\\Users\\alice', HOME: 'C:\\fallback' },
+      cases: [
+        ['~', 'C:\\Users\\alice'],
+        ['~/projects/repo', 'C:\\Users\\alice\\projects\\repo'],
+        ['~\\projects\\repo', 'C:\\Users\\alice\\projects\\repo'],
+        ['~/projects\\mixed/repo', 'C:\\Users\\alice\\projects\\mixed\\repo'],
+        ['~alice\\projects\\repo', '~alice\\projects\\repo'],
+        ['C:\\Users\\alice2\\projects\\repo', 'C:\\Users\\alice2\\projects\\repo'],
+      ],
+    },
+  ])(
+    'matches the canonical $platform separator and sibling-prefix contract',
+    ({ platform, env, cases }) => {
+      for (const [input, expected] of cases) {
+        expect(launcherRuntime.expandHomeDirPath(input, env, platform)).toBe(expected);
+      }
+    },
+  );
+});
 
 describe('claude_launcher_runtime getClaudeCliPath', () => {
   const savedEnv = { ...process.env };
