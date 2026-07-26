@@ -11,6 +11,7 @@ import type { ConnectedServicesProviderMaterializer } from '@/daemon/connectedSe
 import * as catalog from './catalog';
 import {
   AGENTS,
+  notifyTerminalAttachmentRetiredThroughCatalog,
   getAcpForkContinuationHandler,
   getConnectedServiceMaterializer,
   getConnectedServiceStateSharingDescriptor,
@@ -22,11 +23,51 @@ import {
   getSessionGoalControlAdapter,
   getProviderNativeForkHandler,
   getVendorResumeSupport,
+  resolveConnectedServiceGenerationApplicationScope,
   requireCatalogEntry,
 } from './catalog';
 import { DEFAULT_CATALOG_AGENT_ID } from './types';
 
 describe('AGENTS', () => {
+  it('fans exact terminal retirement out through provider-owned lifecycle hooks', async () => {
+    const original = AGENTS.codex;
+    const onTerminalAttachmentRetired = vi.fn(async () => {});
+    AGENTS.codex = original ? { ...original, onTerminalAttachmentRetired } : original;
+    try {
+      const attachmentInfo = {
+        version: 2 as const,
+        attachmentId: 'attachment-1' as never,
+        sessionId: 'session-1',
+        handle: {
+          attachmentId: 'attachment-1' as never,
+          kind: 'tmux' as const,
+          sessionName: 'host-1',
+          attachMetadata: {
+            attachStrategy: 'terminal_host' as const,
+            topology: 'shared' as const,
+            locality: 'same_machine' as const,
+            liveProbe: 'required' as const,
+          },
+        },
+        terminal: { mode: 'tmux' as const, tmux: { target: 'host-1' } },
+        updatedAt: 1,
+      };
+
+      await notifyTerminalAttachmentRetiredThroughCatalog({
+        happyHomeDir: '/tmp/happier',
+        sessionId: 'session-1',
+        attachmentInfo,
+      });
+
+      expect(onTerminalAttachmentRetired).toHaveBeenCalledWith({
+        happyHomeDir: '/tmp/happier',
+        sessionId: 'session-1',
+        attachmentInfo,
+      });
+    } finally {
+      AGENTS.codex = original;
+    }
+  });
   it('includes kilo', () => {
     expect(Object.prototype.hasOwnProperty.call(AGENTS, 'kilo')).toBe(true);
   });
@@ -68,6 +109,24 @@ describe('AGENTS', () => {
 
   it('uses the shared default agent id', () => {
     expect(DEFAULT_CATALOG_AGENT_ID).toBe(DEFAULT_AGENT_ID);
+  });
+
+  it('resolves generation application cardinality from the service-owning provider declaration', async () => {
+    await expect(resolveConnectedServiceGenerationApplicationScope('claude-subscription', 'claude')).resolves.toEqual({
+      status: 'supported',
+      scope: 'shared_group_auth_surface',
+      ownerId: 'claude',
+    });
+    await expect(resolveConnectedServiceGenerationApplicationScope('openai-codex', 'codex')).resolves.toEqual({
+      status: 'supported',
+      scope: 'per_session_runtime',
+      ownerId: 'codex',
+    });
+    await expect(resolveConnectedServiceGenerationApplicationScope('openai', 'opencode')).resolves.toEqual({
+      status: 'supported',
+      scope: 'per_session_runtime',
+      ownerId: 'opencode',
+    });
   });
 
   it('keeps cloud connect config in sync with catalog entries', async () => {
@@ -203,16 +262,47 @@ describe('AGENTS', () => {
     await expect(resolveDescriptor('claude')).resolves.toMatchObject({
       providerId: 'claude',
       serviceIds: expect.arrayContaining(['claude-subscription']),
-      spawnPreflightOauthRefresh: { mode: 'force' },
-      refreshedCredentialApplication: { mode: 'no_restart_required' },
+      generationApplicationScope: 'shared_group_auth_surface',
+      sharedGenerationApplicationServiceIds: ['claude-subscription'],
+      spawnPreflightOauthRefresh: { mode: 'expiry_window' },
+      refreshedCredentialApplication: {
+        mode: 'restart_required',
+        noRestartRequiredServiceIds: ['claude-subscription'],
+      },
     });
     await expect(resolveDescriptor('pi')).resolves.toMatchObject({
       providerId: 'pi',
+      generationApplicationScope: 'per_session_runtime',
       refreshedCredentialApplication: { mode: 'restart_required' },
+      predictiveSoftSwitch: { mode: 'unsupported' },
+      sameAccountFanoutStrategy: 'shared_group_auth_surface',
+      runtimeAuthApply: { directLiveHotAuth: 'unsupported' },
+    });
+    await expect(resolveDescriptor('opencode')).resolves.toMatchObject({
+      providerId: 'opencode',
+      generationApplicationScope: 'per_session_runtime',
+      refreshedCredentialApplication: { mode: 'restart_required' },
+      predictiveSoftSwitch: { mode: 'supported' },
+      sameAccountFanoutStrategy: 'shared_group_auth_surface',
+      runtimeAuthApply: {
+        directLiveHotAuth: {
+          supportsInTurnApply: false,
+          requiresExactRuntimeIdentity: false,
+          refreshSelectionResync: 'not_applicable',
+          authMode: {
+            kind: 'provider_owned',
+            name: 'broker_selection_indirection',
+          },
+        },
+      },
     });
     await expect(resolveDescriptor('codex')).resolves.toMatchObject({
       providerId: 'codex',
-      refreshedCredentialApplication: { mode: 'restart_required' },
+      generationApplicationScope: 'per_session_runtime',
+      refreshedCredentialApplication: {
+        mode: 'restart_required',
+        noRestartRequiredWhenAccessTokenCallbackServiceIds: ['openai-codex'],
+      },
       runtimeAuthApply: {
         directLiveHotAuth: {
           supportsInTurnApply: true,
@@ -232,6 +322,7 @@ describe('AGENTS', () => {
       refreshedCredentialApplication: { mode: 'restart_required' },
       predictiveSoftSwitch: { mode: 'unsupported' },
       sameAccountFanoutStrategy: 'none',
+      generationApplicationScope: 'per_session_runtime',
       runtimeAuthApply: { directLiveHotAuth: 'unsupported' },
     });
     await expect(resolveDescriptor('kilo')).resolves.toEqual({
@@ -241,6 +332,7 @@ describe('AGENTS', () => {
       refreshedCredentialApplication: { mode: 'no_restart_required' },
       predictiveSoftSwitch: { mode: 'unsupported', liveSessionRequirement: { kind: 'none' } },
       sameAccountFanoutStrategy: 'none',
+      generationApplicationScope: 'unsupported',
       runtimeAuthApply: { directLiveHotAuth: 'unsupported' },
     });
   });

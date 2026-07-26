@@ -18,6 +18,7 @@ const geminiConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCrede
   refreshedCredentialApplication: { mode: 'restart_required' },
   predictiveSoftSwitch: { mode: 'unsupported' },
   sameAccountFanoutStrategy: 'none',
+  generationApplicationScope: 'per_session_runtime',
   runtimeAuthApply: { directLiveHotAuth: 'unsupported' },
 };
 

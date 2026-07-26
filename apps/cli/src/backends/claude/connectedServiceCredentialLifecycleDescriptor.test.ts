@@ -13,6 +13,9 @@ describe('Claude connected-service credential lifecycle descriptor', () => {
         noRestartRequiredServiceIds: ['claude-subscription'],
       },
       sameAccountFanoutStrategy: 'shared_group_auth_surface',
+      generationApplicationScope: 'shared_group_auth_surface',
+      sharedGenerationApplicationServiceIds: ['claude-subscription'],
+      applySharedGenerationApplication: expect.any(Function),
       predictiveSoftSwitch: {
         mode: 'supported',
         liveSessionRequirement: {

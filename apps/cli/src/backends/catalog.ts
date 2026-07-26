@@ -1,6 +1,9 @@
 import type { AgentId } from '@/agent/core';
 import { AGENTS_CORE } from '@happier-dev/agents';
-import type { DirectSessionsProviderId } from '@happier-dev/protocol';
+import {
+  type ConnectedServiceId,
+  type DirectSessionsProviderId,
+} from '@happier-dev/protocol';
 import { BUILT_IN_CATALOG_DEFINED_ACP_AGENTS } from '@/agent/acp/catalog';
 import { agent as auggie } from '@/backends/auggie';
 import { agent as claude } from '@/backends/claude';
@@ -44,6 +47,10 @@ import {
   buildDefaultConnectedServiceCredentialLifecycleDescriptor,
   type ConnectedServiceCredentialLifecycleDescriptor,
 } from '@/daemon/connectedServices/credentials/lifecycleTypes';
+import type {
+  ProviderTerminalAttachmentControlProbe,
+  ProviderTerminalAttachmentRetirementHook,
+} from './types';
 
 export type { AgentCatalogEntry, AgentChecklistContributions, CatalogAgentId, CliDetectSpec } from './types';
 
@@ -73,6 +80,21 @@ export function getConnectedServiceQuotaFetcherDescriptors(): ReadonlyArray<Conn
   return Object.values(AGENTS)
     .map((entry) => entry?.connectedServiceQuotaFetcherDescriptor)
     .filter((descriptor): descriptor is ConnectedServiceQuotaFetcherDescriptor => descriptor !== undefined);
+}
+
+export const notifyTerminalAttachmentRetiredThroughCatalog: ProviderTerminalAttachmentRetirementHook = async (params) => {
+  const hooks = Object.values(AGENTS)
+    .map((entry) => entry?.onTerminalAttachmentRetired)
+    .filter((hook): hook is ProviderTerminalAttachmentRetirementHook => hook !== undefined);
+  await Promise.all(hooks.map(async (hook) => await hook(params)));
+};
+
+export async function hasTerminalAttachmentControlDescriptorThroughCatalog(
+  agentId: AgentId | null | undefined,
+  params: Parameters<ProviderTerminalAttachmentControlProbe>[0],
+): Promise<boolean> {
+  const entry = AGENTS[resolveCatalogAgentId(agentId)];
+  return await entry?.hasTerminalAttachmentControlDescriptor?.(params) ?? false;
 }
 
 const cachedVendorResumeSupportPromises = new Map<CatalogAgentId, Promise<VendorResumeSupportFn>>();
@@ -203,6 +225,59 @@ export async function resolveConnectedServiceCredentialLifecycleDescriptor(
       return descriptor ?? buildDefaultConnectedServiceCredentialLifecycleDescriptor(catalogId);
     },
   );
+}
+
+export type ConnectedServiceGenerationApplicationScopeResolution =
+  | Readonly<{
+      status: 'supported';
+      scope: 'per_session_runtime' | 'shared_group_auth_surface';
+      ownerId: string;
+    }>
+  | Readonly<{
+      status: 'unsupported' | 'unavailable';
+      errorCode: string;
+    }>;
+
+/** Resolves application cardinality from the sole catalog declaration that owns the service. */
+export async function resolveConnectedServiceGenerationApplicationScope(
+  serviceId: ConnectedServiceId,
+  agentId?: CatalogAgentId | null,
+): Promise<ConnectedServiceGenerationApplicationScopeResolution> {
+  const matches: ConnectedServiceCredentialLifecycleDescriptor[] = [];
+  try {
+    if (agentId) {
+      const descriptor = await resolveConnectedServiceCredentialLifecycleDescriptor(agentId);
+      if (!descriptor.serviceIds.includes(serviceId)) {
+        return { status: 'unsupported', errorCode: 'generation_application_scope_service_unsupported' };
+      }
+      matches.push(descriptor);
+    } else {
+      for (const entry of Object.values(AGENTS)) {
+        if (!entry) continue;
+        const descriptor = await resolveConnectedServiceCredentialLifecycleDescriptor(entry.id);
+        if (descriptor.serviceIds.includes(serviceId)) matches.push(descriptor);
+      }
+    }
+  } catch {
+    return { status: 'unavailable', errorCode: 'generation_application_scope_unavailable' };
+  }
+  if (matches.length === 0) {
+    return { status: 'unsupported', errorCode: 'generation_application_scope_unsupported' };
+  }
+  if (matches.length !== 1) {
+    return { status: 'unavailable', errorCode: 'generation_application_scope_ambiguous' };
+  }
+  const descriptor = matches[0]!;
+  if (descriptor.generationApplicationScope === 'unsupported') {
+    return { status: 'unsupported', errorCode: 'generation_application_scope_unsupported' };
+  }
+  if (descriptor.generationApplicationScope === 'shared_group_auth_surface') {
+    if (descriptor.sharedGenerationApplicationServiceIds?.includes(serviceId) !== true) {
+      return { status: 'unsupported', errorCode: 'generation_application_scope_service_unsupported' };
+    }
+    return { status: 'supported', scope: 'shared_group_auth_surface', ownerId: descriptor.providerId };
+  }
+  return { status: 'supported', scope: 'per_session_runtime', ownerId: descriptor.providerId };
 }
 
 export async function getConnectedServiceStateSharingDescriptor(agentId?: AgentId | null): Promise<ConnectedServiceStateSharingDescriptor | null> {

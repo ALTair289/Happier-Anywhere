@@ -22,6 +22,7 @@ const openCodeConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCre
   },
   predictiveSoftSwitch: { mode: 'supported' },
   sameAccountFanoutStrategy: 'shared_group_auth_surface',
+  generationApplicationScope: 'per_session_runtime',
   runtimeAuthApply: {
     directLiveHotAuth: {
       supportsInTurnApply: false,

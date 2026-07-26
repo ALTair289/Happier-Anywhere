@@ -17,6 +17,7 @@ import { codexAppServerCatalogControlAdapter } from '@/backends/codex/appServer/
 import { codexAppServerGoalControlAdapter } from '@/backends/codex/appServer/goalControl/codexAppServerGoalControlAdapter';
 import { codexAppServerUsageLimitRecoveryControlAdapter } from '@/backends/codex/appServer/usageLimitRecoveryControl/codexAppServerUsageLimitRecoveryControlAdapter';
 import { buildCodexRuntimeLocalHandoffMetadata } from '@/backends/codex/sessionHandoff/runtimeLocalMetadata';
+import { reconcileStableCodexHomesAtStartup } from '@/backends/codex/connectedServices/reconcileStableCodexHomes';
 import type { AgentCatalogEntry } from '../types';
 import type { ConnectedServiceCredentialLifecycleDescriptor } from '@/daemon/connectedServices/credentials/lifecycleTypes';
 import type { ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
@@ -25,9 +26,13 @@ const codexConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCreden
   providerId: 'codex',
   serviceIds: AGENTS_CORE.codex.connectedServices.supportedServiceIds,
   spawnPreflightOauthRefresh: { mode: 'expiry_window' },
-  refreshedCredentialApplication: { mode: 'restart_required' },
+  refreshedCredentialApplication: {
+    mode: 'restart_required',
+    noRestartRequiredWhenAccessTokenCallbackServiceIds: ['openai-codex'],
+  },
   predictiveSoftSwitch: { mode: 'supported' },
   sameAccountFanoutStrategy: 'provider_account_id',
+  generationApplicationScope: 'per_session_runtime',
   runtimeAuthApply: {
     directLiveHotAuth: {
       supportsInTurnApply: true,
@@ -38,6 +43,16 @@ const codexConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCreden
         surface: 'codex_chatgpt_auth_tokens',
       },
     },
+  },
+  buildLiveGenerationCurrentTruthRequest: ({ serviceId, currentTruth }) => ({
+    serviceId,
+    reason: 'diagnostic',
+    authGeneration: currentTruth,
+  }),
+  materializedHomeMaintenance: {
+    // Triage #4: stable codex homes are not refresh-target bound, so nothing else keeps their auth
+    // store format-valid or in sync with the store record. The startup reconcile owner drives this.
+    reconcileStableHomesAtStartup: reconcileStableCodexHomesAtStartup,
   },
 };
 

@@ -33,6 +33,7 @@ const piConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCredentia
   },
   predictiveSoftSwitch: { mode: 'unsupported' },
   sameAccountFanoutStrategy: 'shared_group_auth_surface',
+  generationApplicationScope: 'per_session_runtime',
   runtimeAuthApply: { directLiveHotAuth: 'unsupported' },
 };
 
