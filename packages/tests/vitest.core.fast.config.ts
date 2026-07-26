@@ -12,6 +12,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: [
+      'suites/contracts/**/*.test.ts',
       'suites/core-e2e/**/*.test.ts',
       'src/testkit/**/*.{test,spec}.ts',
     ],
