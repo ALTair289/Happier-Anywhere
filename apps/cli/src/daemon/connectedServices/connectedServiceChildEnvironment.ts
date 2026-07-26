@@ -1,11 +1,11 @@
 import {
   ConnectedServiceBindingsV1Schema,
+  ConnectedServiceCredentialRevisionV1Schema,
   type ConnectedServiceBindingSelectionV1,
   type ConnectedServiceId,
+  type ConnectedServiceCredentialRevisionV1,
   type ConnectedServiceProfileId,
 } from '@happier-dev/protocol';
-
-import type { ConnectedServiceResolvedSelection } from './materialize/materializeConnectedServicesForSpawn';
 
 export const HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY = 'HAPPIER_CONNECTED_SERVICE_SELECTIONS_JSON';
 export const HAPPIER_CONNECTED_SERVICE_MATERIALIZED_ENV_KEYS_ENV_KEY =
@@ -18,6 +18,7 @@ export type ConnectedServiceChildSelection =
       kind: 'profile';
       serviceId: ConnectedServiceId;
       profileId: string;
+      credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
     }>
   | Readonly<{
       kind: 'group';
@@ -26,6 +27,24 @@ export type ConnectedServiceChildSelection =
       activeProfileId: string;
       fallbackProfileId: string;
       generation: number;
+      credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
+    }>;
+
+type ConnectedServiceSerializableSelection =
+  | Readonly<{
+      kind: 'profile';
+      serviceId: ConnectedServiceId;
+      profileId: string;
+      credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
+    }>
+  | Readonly<{
+      kind: 'group';
+      serviceId: ConnectedServiceId;
+      groupId: string;
+      activeProfileId: string;
+      fallbackProfileId: string;
+      generation: number;
+      credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
     }>;
 
 export type ConnectedServiceRuntimeAuthContext = Readonly<{
@@ -52,8 +71,13 @@ function readGeneration(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
 }
 
+function readCredentialRevision(value: unknown): ConnectedServiceCredentialRevisionV1 | null {
+  const parsed = ConnectedServiceCredentialRevisionV1Schema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 export function serializeConnectedServiceChildSelections(
-  selectionsByServiceId: ReadonlyMap<ConnectedServiceId, ConnectedServiceResolvedSelection> | undefined,
+  selectionsByServiceId: ReadonlyMap<ConnectedServiceId, ConnectedServiceSerializableSelection> | undefined,
 ): string | null {
   if (!selectionsByServiceId || selectionsByServiceId.size === 0) return null;
   const selections: ConnectedServiceChildSelection[] = [];
@@ -63,6 +87,7 @@ export function serializeConnectedServiceChildSelections(
         kind: 'profile',
         serviceId: selection.serviceId,
         profileId: selection.profileId,
+        credentialRevision: selection.credentialRevision ?? null,
       });
       continue;
     }
@@ -73,6 +98,7 @@ export function serializeConnectedServiceChildSelections(
       activeProfileId: selection.activeProfileId,
       fallbackProfileId: selection.fallbackProfileId,
       generation: selection.generation,
+      credentialRevision: selection.credentialRevision ?? null,
     });
   }
   return selections.length > 0 ? JSON.stringify(selections) : null;
@@ -100,7 +126,12 @@ export function readConnectedServiceChildSelectionsFromEnv(
     if (kind === 'profile') {
       const profileId = readString(record.profileId);
       if (!profileId) continue;
-      selections.push({ kind: 'profile', serviceId, profileId });
+      selections.push({
+        kind: 'profile',
+        serviceId,
+        profileId,
+        credentialRevision: readCredentialRevision(record.credentialRevision),
+      });
       continue;
     }
     if (kind === 'group') {
@@ -115,6 +146,7 @@ export function readConnectedServiceChildSelectionsFromEnv(
         activeProfileId,
         fallbackProfileId,
         generation: readGeneration(record.generation),
+        credentialRevision: readCredentialRevision(record.credentialRevision),
       });
     }
   }

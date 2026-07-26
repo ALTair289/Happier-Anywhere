@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ConnectedServiceBindingsV1Schema,
+  ConnectedServiceCredentialRevisionV1Schema,
   type ConnectedServiceBindingsV1,
+  type ConnectedServiceId,
 } from '@happier-dev/protocol';
+
+import type { ConnectedServiceResolvedSelection } from './materialize/materializeConnectedServicesForSpawn';
 
 import {
   HAPPIER_CONNECTED_SERVICE_MATERIALIZED_ENV_KEYS_ENV_KEY,
@@ -12,6 +16,8 @@ import {
   resolveConnectedServiceRuntimeAuthContextFromEnv,
   resolveConnectedServiceRuntimeAuthContextFromSessionMetadata,
   resolveConnectedServiceRuntimeAuthContextFromSelection,
+  readConnectedServiceChildSelectionsFromEnv,
+  serializeConnectedServiceChildSelections,
   serializeConnectedServiceMaterializedEnvKeys,
 } from './connectedServiceChildEnvironment';
 
@@ -58,6 +64,30 @@ describe('connectedServiceChildEnvironment runtime auth context', () => {
       profileId: 'bot',
       groupId: 'happier',
     });
+  });
+
+  it('round-trips the exact credential revision in the child selection envelope', () => {
+    const selections = new Map<ConnectedServiceId, ConnectedServiceResolvedSelection>([['gemini', {
+      kind: 'group' as const,
+      serviceId: 'gemini' as const,
+      groupId: 'main',
+      activeProfileId: 'work',
+      fallbackProfileId: 'backup',
+      generation: 7,
+      credentialRevision: ConnectedServiceCredentialRevisionV1Schema.parse('csr_abcdefghijklmnopqrstuv'),
+      record: {} as never,
+      policy: null,
+    }]]);
+    const serialized = serializeConnectedServiceChildSelections(selections);
+
+    expect(readConnectedServiceChildSelectionsFromEnv({
+      [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: serialized ?? undefined,
+    })).toEqual([expect.objectContaining({
+      serviceId: 'gemini',
+      groupId: 'main',
+      generation: 7,
+      credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+    })]);
   });
 
   it('resolves the current connected-service binding from session metadata', () => {
