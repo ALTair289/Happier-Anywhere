@@ -39,6 +39,8 @@ test('parseDevTargetsConfig accepts the minimal POSIX and Windows target contrac
           platform: 'posix',
           ssh: 'happier-stack-linux',
           sshConfigFile: '/tmp/lima-happier-stack-linux.conf',
+          limaInstance: 'hslqa',
+          limaHome: '/tmp/lima-happier',
           repoDir: '/home/dev/happier',
           cliHomeDir: '/home/dev/.happier-stack/dev-targets/linux',
         },
@@ -60,6 +62,8 @@ test('parseDevTargetsConfig accepts the minimal POSIX and Windows target contrac
           platform: 'posix',
           ssh: 'happier-stack-linux',
           sshConfigFile: '/tmp/lima-happier-stack-linux.conf',
+          limaInstance: 'hslqa',
+          limaHome: '/tmp/lima-happier',
           repoDir: '/home/dev/happier',
           cliHomeDir: '/home/dev/.happier-stack/dev-targets/linux',
           remoteServerPort: null,
@@ -108,5 +112,22 @@ test('parseDevTargetsConfig rejects duplicate targets and unsafe SSH/path input'
         ],
       }),
     /unsafe repoDir/i,
+  );
+  assert.throws(
+    () =>
+      parseDevTargetsConfig({
+        version: 1,
+        targets: [
+          {
+            name: 'linux',
+            platform: 'posix',
+            ssh: 'host',
+            limaInstance: 'hslqa',
+            repoDir: '/repo',
+            cliHomeDir: '/home',
+          },
+        ],
+      }),
+    /limaInstance and limaHome must be configured together/i,
   );
 });

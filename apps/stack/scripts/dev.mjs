@@ -65,7 +65,7 @@ import { completeInterruptedStackStopBeforeStart } from './utils/stack/stop.mjs'
 import { resolveTauriPaneInvocation } from './utils/tui/tauri_mode.mjs';
 import { resolveReactNativeDevtoolsUrl } from './utils/dev/react_native_devtools.mjs';
 import { loadDevTargetsConfig } from './utils/dev_targets/config.mjs';
-import { startStackDevTargets } from './utils/dev_targets/supervisor.mjs';
+import { startStackDevTargetsInBackground } from './utils/dev_targets/supervisor.mjs';
 import { findExistingStackCredentialPath } from './utils/auth/credentials_paths.mjs';
 
  /**
@@ -684,24 +684,6 @@ async function main() {
     if (daemonLifecycleReconciler) watchers.push(daemonLifecycleReconciler);
   }
 
-  if (devTargets.length > 0) {
-    const credentialPath = findExistingStackCredentialPath({
-      cliHomeDir,
-      serverUrl: internalServerUrl,
-      env: baseEnv,
-    });
-    devTargetsController = await startStackDevTargets({
-      stackName,
-      stackBaseDir: loadedDevTargets.path ? dirname(loadedDevTargets.path) : autostart.baseDir,
-      sourceDir: resolve(cliDir, '..', '..'),
-      localServerPort: serverPort,
-      activeServerId: resolveStackActiveServerId({ env: baseEnv, stackName }),
-      credentialPath,
-      targets: devTargets,
-      env: baseEnv,
-    });
-  }
-
   const serverProcRef = { current: serverProc };
   if (startServer && stackMode && runtimeStatePath && !serverProcRef.current?.pid && !serverRuntimeProxyAlreadyOwned) {
     // If the server was already running when we started dev, `startDevServer` won't spawn a new process
@@ -840,6 +822,24 @@ async function main() {
   if (startMobile && expoRes?.port) {
     const metroUrl = await preferStackLocalhostUrl(`http://localhost:${expoRes.port}`, { stackName });
     console.log(`[local] mobile: metro ${metroUrl}`);
+  }
+
+  if (devTargets.length > 0) {
+    const credentialPath = findExistingStackCredentialPath({
+      cliHomeDir,
+      serverUrl: internalServerUrl,
+      env: baseEnv,
+    });
+    devTargetsController = startStackDevTargetsInBackground({
+      stackName,
+      stackBaseDir: loadedDevTargets.path ? dirname(loadedDevTargets.path) : autostart.baseDir,
+      sourceDir: resolve(cliDir, '..', '..'),
+      localServerPort: serverPort,
+      activeServerId: resolveStackActiveServerId({ env: baseEnv, stackName }),
+      credentialPath,
+      targets: devTargets,
+      env: baseEnv,
+    });
   }
 
   if (startTauri) {

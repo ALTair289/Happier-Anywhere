@@ -40,11 +40,13 @@ export function buildRemoteBootstrapCommand(target) {
       target,
       [
         '$ErrorActionPreference = "Stop"',
+        '$ProgressPreference = "SilentlyContinue"',
         `Set-Location -LiteralPath ${powershellQuote(target.repoDir)}`,
         'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "Node.js is required on the remote target" }',
         'if (-not (Get-Command corepack -ErrorAction SilentlyContinue)) { throw "Corepack is required on the remote target" }',
-        'corepack yarn install --frozen-lockfile',
-        'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+        '$installExitCode = 1',
+        'for ($attempt = 1; $attempt -le 3; $attempt++) { corepack yarn install --frozen-lockfile; $installExitCode = $LASTEXITCODE; if ($installExitCode -eq 0) { break }; if ($attempt -lt 3) { Start-Sleep -Seconds (2 * $attempt) } }',
+        'if ($installExitCode -ne 0) { exit $installExitCode }',
       ].join('; '),
     );
   }
@@ -112,6 +114,14 @@ export function buildRemoteInstallCredentialCommand(target, { stagedPath, finalP
 
 export function buildRemoteDaemonCommand(target, { serverUrl, activeServerId, stackName }) {
   const stackStorageDir = `${String(target.cliHomeDir).replace(/[\\/]+$/, '')}/stack-state`;
+  const stackBaseDir = `${stackStorageDir}/${stackName}`;
+  const stackEnvPath = `${stackBaseDir}/env`;
+  const stackEnvLines = [
+    `HAPPIER_STACK_REPO_DIR=${target.repoDir}`,
+    `HAPPIER_STACK_CLI_HOME_DIR=${target.cliHomeDir}`,
+    'HAPPIER_STACK_SERVER_COMPONENT=happier-server-light',
+    'HAPPIER_CLI_PKGROLL_TIMEOUT_MS=1800000',
+  ];
   if (target.platform === 'windows') {
     return wrapRemoteScript(
       target,
@@ -123,8 +133,11 @@ export function buildRemoteDaemonCommand(target, { serverUrl, activeServerId, st
         `$env:HAPPIER_STACK_STACK = ${powershellQuote(stackName)}`,
         `$env:HAPPIER_ACTIVE_SERVER_ID = ${powershellQuote(activeServerId)}`,
         `$env:HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID = ${powershellQuote(activeServerId)}`,
+        `New-Item -ItemType Directory -Force -Path ${powershellQuote(stackBaseDir)} | Out-Null`,
+        `$stackEnvPath = ${powershellQuote(stackEnvPath)}`,
+        `@(${stackEnvLines.map(powershellQuote).join(', ')}) | Set-Content -LiteralPath $stackEnvPath -Encoding Ascii`,
         `Set-Location -LiteralPath ${powershellQuote(target.repoDir)}`,
-        `corepack yarn workspace @happier-dev/stack dev --no-server --no-ui --no-browser --no-dev-targets --watch --server-url=${powershellQuote(serverUrl)}`,
+        `corepack yarn workspace @happier-dev/stack stack dev ${powershellQuote(stackName)} --no-server --no-ui --no-browser --no-dev-targets --watch --restart --server-url=${powershellQuote(serverUrl)}`,
         'exit $LASTEXITCODE',
       ].join('; '),
     );
@@ -139,8 +152,10 @@ export function buildRemoteDaemonCommand(target, { serverUrl, activeServerId, st
       `export HAPPIER_STACK_STACK=${posixQuote(stackName)}`,
       `export HAPPIER_ACTIVE_SERVER_ID=${posixQuote(activeServerId)}`,
       `export HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID=${posixQuote(activeServerId)}`,
+      `install -d -m 700 -- ${posixQuote(stackBaseDir)}`,
+      `printf '%s\\n' ${stackEnvLines.map(posixQuote).join(' ')} > ${posixQuote(stackEnvPath)}`,
       `cd -- ${posixQuote(target.repoDir)}`,
-      `exec corepack yarn workspace @happier-dev/stack dev --no-server --no-ui --no-browser --no-dev-targets --watch --server-url=${posixQuote(serverUrl)}`,
+      `exec corepack yarn workspace @happier-dev/stack stack dev ${posixQuote(stackName)} --no-server --no-ui --no-browser --no-dev-targets --watch --restart --server-url=${posixQuote(serverUrl)}`,
     ].join('; '),
   );
 }
@@ -150,7 +165,7 @@ export function buildSshWorkerArgs(
   { localServerPort, remoteServerPort, remoteCommand, sshArgs = [] },
 ) {
   return [
-    '-tt',
+    target.platform === 'windows' ? '-T' : '-tt',
     ...sshArgs,
     '-o',
     'BatchMode=yes',

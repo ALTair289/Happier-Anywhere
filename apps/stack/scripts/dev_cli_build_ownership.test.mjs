@@ -118,6 +118,21 @@ test('dev cold-start delegates CLI build admission exclusively to the daemon lau
   assert.match(source, /await startDevDaemon\(/);
 });
 
+test('dev reaches Expo before starting remote development targets', async () => {
+  const source = await readFile(join(scriptsDir, 'dev.mjs'), 'utf-8');
+  const expoStartIndex = source.lastIndexOf('(await ensureDevExpoServer({');
+  const devTargetsStartIndex = source.indexOf(
+    'devTargetsController = startStackDevTargetsInBackground({',
+  );
+
+  assert.notEqual(expoStartIndex, -1, 'expected the canonical Expo startup call');
+  assert.notEqual(devTargetsStartIndex, -1, 'expected background dev-target startup');
+  assert.ok(
+    expoStartIndex < devTargetsStartIndex,
+    'remote target bootstrap must not delay local Expo startup',
+  );
+});
+
 test('one CLI admission builds each missing or changed shared workspace once', async (t) => {
   const { cliDir, agentsDir, eventsPath } = await createCliBuildFixture(t);
 

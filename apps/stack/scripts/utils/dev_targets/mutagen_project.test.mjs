@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   buildMutagenProjectArgs,
   renderMutagenProject,
+  resolveMutagenSessionName,
 } from './mutagen_project.mjs';
 
 const targets = [
@@ -32,7 +33,7 @@ test('renderMutagenProject creates one-way source replicas while retaining targe
   });
 
   assert.match(rendered, /mode: "one-way-replica"/);
-  assert.match(rendered, /flushOnCreate: true/);
+  assert.doesNotMatch(rendered, /flushOnCreate/);
   assert.ok(rendered.includes('alpha: "/Users/dev/happier"'));
   assert.ok(rendered.includes('beta: "happier-stack-linux:/home/dev/happier"'));
   assert.ok(rendered.includes('beta: "happier-stack-windows:C:/Users/test_qa/happier"'));
@@ -40,6 +41,16 @@ test('renderMutagenProject creates one-way source replicas while retaining targe
   for (const ignored of [
     'node_modules',
     'dist',
+    'dist.staging.*',
+    'dist.__finalize_backup__.*',
+    'dist.__sync_tmp__.*',
+    'dist.__sync_backup__.*',
+    'package-dist.__sync_tmp__.*',
+    'package-dist.__sync_backup__.*',
+    '.*.__sync_tmp__.*',
+    '.*.__sync_backup__.*',
+    '.tmp.*',
+    '.backup.*',
     '.project',
     '.happier',
     'coverage',
@@ -79,6 +90,7 @@ test('buildMutagenProjectArgs isolates global configuration and addresses the ge
   assert.deepEqual(buildMutagenProjectArgs('start', '/tmp/stack/mutagen.yml'), [
     'project',
     'start',
+    '--paused',
     '--no-global-configuration',
     '--project-file',
     '/tmp/stack/mutagen.yml',
@@ -89,4 +101,16 @@ test('buildMutagenProjectArgs isolates global configuration and addresses the ge
     '--project-file',
     '/tmp/stack/mutagen.yml',
   ]);
+});
+
+test('resolveMutagenSessionName matches the generated project session key', () => {
+  assert.equal(resolveMutagenSessionName('linux'), 'happier-linux');
+  const distinctNames = ['qa.linux', 'qa-linux', 'qa_linux'].map(resolveMutagenSessionName);
+  assert.equal(new Set(distinctNames).size, distinctNames.length);
+  assert.ok(distinctNames.every((name) => /^[A-Za-z][A-Za-z0-9-]*$/.test(name)));
+  const escapedName = resolveMutagenSessionName('qa.linux');
+  assert.match(
+    renderMutagenProject({ sourceDir: '/source', targets: [{ ...targets[0], name: 'qa.linux' }] }),
+    new RegExp(`${escapedName}:`),
+  );
 });

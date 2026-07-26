@@ -43,6 +43,8 @@ test('dev-targets command adds, shows, diagnoses, lists, and removes stack-scope
         '--platform=posix',
         '--ssh=happier-stack-linux',
         '--ssh-config-file=/tmp/lima-happier-stack-linux.conf',
+        '--lima-instance=hslqa',
+        '--lima-home=/tmp/lima-happier',
         '--repo-dir=/home/dev/happier',
         '--cli-home-dir=/home/dev/.happier/linux',
       ],
@@ -50,6 +52,8 @@ test('dev-targets command adds, shows, diagnoses, lists, and removes stack-scope
     );
     assert.equal(added.target.name, 'linux');
     assert.equal(added.target.sshConfigFile, '/tmp/lima-happier-stack-linux.conf');
+    assert.equal(added.target.limaInstance, 'hslqa');
+    assert.equal(added.target.limaHome, '/tmp/lima-happier');
 
     const shown = await run(['show', 'linux', '--stack=repo-test'], root);
     assert.equal(shown.target.repoDir, '/home/dev/happier');

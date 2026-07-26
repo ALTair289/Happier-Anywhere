@@ -35,6 +35,10 @@ test('remote bootstrap installs target-local dependencies from synchronized sour
   const windowsCommand = buildRemoteBootstrapCommand(windows);
   assert.match(windowsCommand, /^powershell\.exe -NoProfile -NonInteractive -EncodedCommand /);
   assert.doesNotMatch(windowsCommand, /test qa/);
+  const decodedPowerShell = Buffer.from(windowsCommand.split(' ').at(-1), 'base64').toString('utf16le');
+  assert.match(decodedPowerShell, /ProgressPreference/);
+  assert.match(decodedPowerShell, /for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\)/);
+  assert.match(decodedPowerShell, /Start-Sleep/);
 });
 
 test('remote doctor checks prerequisites without changing the target', () => {
@@ -58,13 +62,16 @@ test('remote daemon command reuses the Stack dev owner without the repo-local en
   });
   assert.match(
     command,
-    /corepack yarn workspace @happier-dev\/stack dev --no-server --no-ui --no-browser --no-dev-targets --watch/,
+    /corepack yarn workspace @happier-dev\/stack stack dev .*repo-local-dev.* --no-server --no-ui --no-browser --no-dev-targets --watch/,
   );
+  assert.match(command, /--restart/);
+  assert.match(command, /stack-state\/repo-local-dev\/env/);
   assert.match(command, /HAPPIER_HOME_DIR/);
   assert.match(command, /HAPPIER_STACK_CLI_HOME_DIR/);
   assert.match(command, /HAPPIER_STACK_STORAGE_DIR/);
   assert.match(command, /HAPPIER_STACK_STACK/);
   assert.match(command, /HAPPIER_ACTIVE_SERVER_ID/);
+  assert.match(command, /HAPPIER_CLI_PKGROLL_TIMEOUT_MS=1800000/);
   assert.match(command, /http:\/\/127\.0\.0\.1:43005/);
   assert.doesNotMatch(command, /corepack yarn dev /);
 
@@ -76,10 +83,13 @@ test('remote daemon command reuses the Stack dev owner without the repo-local en
   const decodedPowerShell = Buffer.from(windowsCommand.split(' ').at(-1), 'base64').toString('utf16le');
   assert.match(decodedPowerShell, /\$env:HAPPIER_STACK_CLI_HOME_DIR/);
   assert.match(decodedPowerShell, /\$env:HAPPIER_STACK_STACK = 'repo-local-dev'/);
+  assert.match(decodedPowerShell, /HAPPIER_CLI_PKGROLL_TIMEOUT_MS=1800000/);
   assert.match(
     decodedPowerShell,
-    /corepack yarn workspace @happier-dev\/stack dev --no-server --no-ui --no-browser --no-dev-targets --watch/,
+    /corepack yarn workspace @happier-dev\/stack stack dev 'repo-local-dev' --no-server --no-ui --no-browser --no-dev-targets --watch/,
   );
+  assert.match(decodedPowerShell, /--restart/);
+  assert.match(decodedPowerShell, /stack-state\/repo-local-dev/);
 });
 
 test('SSH worker owns the reverse tunnel to the existing local server', () => {
@@ -105,4 +115,12 @@ test('SSH worker owns the reverse tunnel to the existing local server', () => {
       'bash -lc true',
     ],
   );
+
+  const windowsArgs = buildSshWorkerArgs(windows, {
+    localServerPort: 3005,
+    remoteServerPort: 43105,
+    remoteCommand: 'powershell.exe -EncodedCommand example',
+  });
+  assert.equal(windowsArgs[0], '-T');
+  assert.equal(windowsArgs.includes('-tt'), false);
 });

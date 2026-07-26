@@ -5,6 +5,7 @@ import { resolveStackEnvPath } from '../paths/paths.mjs';
 
 const TARGET_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 const SSH_TARGET_RE = /^(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+$/;
+const LIMA_INSTANCE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
 
 function requireNonEmptyString(value, label) {
   const normalized = String(value ?? '').trim();
@@ -40,6 +41,26 @@ function normalizeTarget(raw, index) {
   ) {
     throw new Error(`[dev-targets] target ${name}: sshConfigFile must be an absolute local path`);
   }
+  const limaInstance =
+    raw.limaInstance == null || String(raw.limaInstance).trim() === ''
+      ? null
+      : requireNonEmptyString(raw.limaInstance, `target ${name} limaInstance`);
+  const limaHome =
+    raw.limaHome == null || String(raw.limaHome).trim() === ''
+      ? null
+      : requireNonEmptyString(raw.limaHome, `target ${name} limaHome`);
+  if (Boolean(limaInstance) !== Boolean(limaHome)) {
+    throw new Error(`[dev-targets] target ${name}: limaInstance and limaHome must be configured together`);
+  }
+  if (limaInstance && !LIMA_INSTANCE_RE.test(limaInstance)) {
+    throw new Error(`[dev-targets] target ${name}: invalid limaInstance`);
+  }
+  if (limaHome && !limaHome.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(limaHome)) {
+    throw new Error(`[dev-targets] target ${name}: limaHome must be an absolute local path`);
+  }
+  if (limaInstance && platform !== 'posix') {
+    throw new Error(`[dev-targets] target ${name}: Lima targets must use platform "posix"`);
+  }
   const repoDir = requireNonEmptyString(raw.repoDir, `target ${name} repoDir`);
   if (repoDir === '/' || repoDir === '\\' || /^[A-Za-z]:[\\/]?$/.test(repoDir)) {
     throw new Error(`[dev-targets] target ${name}: unsafe repoDir`);
@@ -61,6 +82,7 @@ function normalizeTarget(raw, index) {
     platform,
     ssh,
     ...(sshConfigFile ? { sshConfigFile } : {}),
+    ...(limaInstance ? { limaInstance, limaHome } : {}),
     repoDir,
     cliHomeDir,
     remoteServerPort,
