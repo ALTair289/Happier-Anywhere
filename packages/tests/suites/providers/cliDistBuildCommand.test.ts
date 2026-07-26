@@ -2,6 +2,7 @@ import { lstatSync, mkdtempSync, mkdirSync, readFileSync, utimesSync, writeFileS
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
+import { parseWorkspaceLockLeaseValue } from '@happier-dev/cli-common/workspaceLockLease';
 import { describe, expect, it } from 'vitest';
 
 import { ensureCliDistBuilt, ensureCliSharedDepsBuilt, resolveCliDistBuildInvocation, withCliDistBuildLock } from '../../src/testkit/process/cliDist';
@@ -776,7 +777,7 @@ describe('providers: CLI dist build lock discipline', () => {
     expect(buildCalls).toBe(0);
   });
 
-  it('forwards a custom CLI dist build timeout to the workspace build command', async () => {
+  it('forwards the authenticated lease and custom timeout to the nested CLI build', async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), 'happier-cli-dist-timeout-'));
     const lockPath = resolve(repoRoot, '.project', 'tmp', 'cli-dist-build.lock');
     const testDir = resolve(repoRoot, 'logs');
@@ -788,6 +789,8 @@ describe('providers: CLI dist build lock discipline', () => {
     writeSharedDepsOutputs(repoRoot);
 
     let observedTimeoutMs: number | undefined;
+    let observedLease: ReturnType<typeof parseWorkspaceLockLeaseValue> = null;
+    let observedOwnerToken: string | undefined;
     const resolved = await ensureCliDistBuilt(
       { testDir, env: {} },
       {
@@ -796,6 +799,8 @@ describe('providers: CLI dist build lock discipline', () => {
         buildTimeoutMs: 600_000,
         runCommand: async (params) => {
           observedTimeoutMs = params.timeoutMs;
+          observedLease = parseWorkspaceLockLeaseValue(params.env?.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD);
+          observedOwnerToken = JSON.parse(readFileSync(lockPath, 'utf8')).token;
           writeFileSync(entrypoint, 'export {};\n', 'utf8');
         },
       },
@@ -803,6 +808,7 @@ describe('providers: CLI dist build lock discipline', () => {
 
     expect(resolved).toBe(entrypoint);
     expect(observedTimeoutMs).toBe(600_000);
+    expect(observedLease).toEqual({ path: lockPath, token: observedOwnerToken });
   });
 });
 

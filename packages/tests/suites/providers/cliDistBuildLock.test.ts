@@ -1,33 +1,74 @@
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+import { withWorkspaceBundleLock } from '@happier-dev/cli-common/workspaceBundleLock';
 import { describe, expect, it } from 'vitest';
 
 import { withCliDistBuildLock } from '../../src/testkit/process/cliDist';
 
 describe('providers: CLI dist build lock', () => {
-  it('reclaims stale lock files from dead owners', async () => {
-    const workDir = mkdtempSync(join(tmpdir(), 'happier-cli-dist-lock-'));
+  it('contends with the canonical owner and rejects path-only inheritance', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'happier-cli-dist-lock-contention-'));
     const lockPath = join(workDir, 'cli-dist-build.lock');
-    writeFileSync(lockPath, JSON.stringify({ createdAtMs: 1 }), 'utf8');
+    let testkitEntered = false;
 
-    const result = await withCliDistBuildLock(
+    await withWorkspaceBundleLock(
       async () => {
-        expect(existsSync(lockPath)).toBe(true);
-        return 'ok';
+        await expect(
+          withCliDistBuildLock(
+            async () => {
+              testkitEntered = true;
+            },
+            { lockPath, heldLockValue: lockPath, timeoutMs: 120, pollIntervalMs: 20, staleAfterMs: 0 },
+          ),
+        ).rejects.toThrow(/timed out waiting/i);
       },
       { lockPath, timeoutMs: 500, pollIntervalMs: 20, staleAfterMs: 0 },
     );
 
-    expect(result).toBe('ok');
+    expect(testkitEntered).toBe(false);
+  });
+
+  it('does not delete a canonical successor that acquires the path before cleanup', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'happier-cli-dist-lock-successor-'));
+    const lockPath = join(workDir, 'cli-dist-build.lock');
+    let releaseSuccessor!: () => void;
+    const successorRelease = new Promise<void>((resolve) => {
+      releaseSuccessor = resolve;
+    });
+    let successorEntered!: () => void;
+    const successorEntry = new Promise<void>((resolve) => {
+      successorEntered = resolve;
+    });
+    let successorPromise: Promise<void> | null = null;
+
+    await withCliDistBuildLock(
+      async () => {
+        unlinkSync(lockPath);
+        successorPromise = withWorkspaceBundleLock(
+          async () => {
+            successorEntered();
+            await successorRelease;
+          },
+          { lockPath, timeoutMs: 500, pollIntervalMs: 20 },
+        );
+        await successorEntry;
+      },
+      { lockPath, timeoutMs: 500, pollIntervalMs: 20 },
+    );
+
+    expect(existsSync(lockPath)).toBe(true);
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({ pid: process.pid });
+    releaseSuccessor();
+    await successorPromise;
     expect(existsSync(lockPath)).toBe(false);
   });
 
-  it('reclaims stale lock files even when the recorded pid is still alive', async () => {
+  it('reclaims stale lock files from dead owners', async () => {
     const workDir = mkdtempSync(join(tmpdir(), 'happier-cli-dist-lock-'));
     const lockPath = join(workDir, 'cli-dist-build.lock');
-    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, createdAtMs: 1 }), 'utf8');
+    writeFileSync(lockPath, JSON.stringify({ createdAtMs: 1 }), 'utf8');
 
     const result = await withCliDistBuildLock(
       async () => {
@@ -53,7 +94,7 @@ describe('providers: CLI dist build lock', () => {
         pollIntervalMs: 20,
         staleAfterMs: 120_000,
       }),
-    ).rejects.toThrow(/ownerPid=/);
+    ).rejects.toThrow(/pid=/);
 
     expect(existsSync(lockPath)).toBe(true);
   });

@@ -21,6 +21,8 @@ import {
   readProcessInstanceFingerprintSync,
 } from './processInstance.mjs';
 
+export const WORKSPACE_BUNDLE_LOCK_TIMEOUT_ERROR_CODE = 'EWORKSPACEBUNDLELOCKTIMEOUT';
+
 function sleepSync(ms) {
   if (!ms || ms <= 0) return;
   const buffer = new SharedArrayBuffer(4);
@@ -163,6 +165,14 @@ function describeLockOwner(snapshot, nowMs) {
   return `pid=${String(snapshot.owner.pid ?? 'unknown')} ageMs=${ageMs}`;
 }
 
+function createWorkspaceBundleLockTimeoutError({ errorLabel, lockPath, snapshot }) {
+  const error = new Error(
+    `Timed out waiting for ${errorLabel}: ${lockPath} (${describeLockOwner(snapshot, Date.now())})`,
+  );
+  error.code = WORKSPACE_BUNDLE_LOCK_TIMEOUT_ERROR_CODE;
+  return error;
+}
+
 function resolveHeldLockValue(options) {
   return String(options.heldLockValue ?? options.heldLockPath ?? '').trim();
 }
@@ -252,9 +262,7 @@ export async function withWorkspaceBundleLock(fn, options = {}) {
       }
       if (Date.now() - startedAt > timeoutMs) {
         const errorLabel = options.errorLabel ?? 'workspace bundle lock';
-        throw new Error(
-          `Timed out waiting for ${errorLabel}: ${lockPath} (${describeLockOwner(snapshot, Date.now())})`,
-        );
+        throw createWorkspaceBundleLockTimeoutError({ errorLabel, lockPath, snapshot });
       }
       waited = true;
       notifyWaiter(options, lockPath, snapshot, startedAt, staleAfterMs, timeoutMs);
@@ -346,9 +354,7 @@ export function withWorkspaceBundleLockSync(fn, options = {}) {
       }
       if (Date.now() - startedAt > timeoutMs) {
         const errorLabel = options.errorLabel ?? 'workspace bundle lock';
-        throw new Error(
-          `Timed out waiting for ${errorLabel}: ${lockPath} (${describeLockOwner(snapshot, Date.now())})`,
-        );
+        throw createWorkspaceBundleLockTimeoutError({ errorLabel, lockPath, snapshot });
       }
       waited = true;
       notifyWaiter(options, lockPath, snapshot, startedAt, staleAfterMs, timeoutMs);

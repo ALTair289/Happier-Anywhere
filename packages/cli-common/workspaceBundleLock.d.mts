@@ -5,6 +5,8 @@ export interface WorkspaceBundleLockContext {
   inherited: boolean;
 }
 
+export const WORKSPACE_BUNDLE_LOCK_TIMEOUT_ERROR_CODE: 'EWORKSPACEBUNDLELOCKTIMEOUT';
+
 export interface WorkspaceBundleLockOptions {
   lockPath: string;
   heldLockValue?: string;

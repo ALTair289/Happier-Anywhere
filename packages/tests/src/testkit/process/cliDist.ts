@@ -1,18 +1,21 @@
 import {
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
   symlinkSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { cp } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+
+import {
+  resolveWorkspaceBundleLockPath,
+  withWorkspaceBundleLock,
+  type WorkspaceBundleLockContext,
+} from '@happier-dev/cli-common/workspaceBundleLock';
 
 import { repoRootDir } from '../paths';
 import { sleep } from '../timing';
@@ -24,13 +27,9 @@ const ensureDistPromisesByRepoRoot = new Map<string, Promise<string>>();
 const ensureSharedPromisesByRepoRoot = new Map<string, Promise<void>>();
 export const DEFAULT_CLI_DIST_BUILD_TIMEOUT_MS = 600_000;
 
-type CliDistBuildLockOwner = {
-  pid: number | null;
-  createdAtMs: number | null;
-};
-
 type CliDistBuildLockOptions = {
   lockPath?: string;
+  heldLockValue?: string;
   timeoutMs?: number;
   pollIntervalMs?: number;
   staleAfterMs?: number;
@@ -83,94 +82,6 @@ type CliSharedDepPackageName = (typeof CLI_SHARED_DEP_PACKAGE_NAMES)[number];
 type EnsureCliDistSnapshotOptions = EnsureCliDistBuiltOptions & {
   snapshotDir: string;
 };
-
-function describeCliDistBuildLockOwner(lockPath: string, nowMs: number): string {
-  try {
-    const owner = parseCliDistLockOwner(readFileSync(lockPath, 'utf8'));
-    const ownerPid = owner.pid ?? 'unknown';
-    const ownerAgeMs = owner.createdAtMs != null ? Math.max(0, nowMs - owner.createdAtMs) : 'unknown';
-    return `ownerPid=${ownerPid} ownerAgeMs=${ownerAgeMs}`;
-  } catch {
-    return 'ownerPid=unknown ownerAgeMs=unknown';
-  }
-}
-
-function isRunningPid(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error: any) {
-    if (error?.code === 'ESRCH') return false;
-    return true;
-  }
-}
-
-function parseCliDistLockOwner(raw: string): CliDistBuildLockOwner {
-  const text = raw.trim();
-  if (!text) return { pid: null, createdAtMs: null };
-
-  if (/^\d+$/.test(text)) {
-    return { pid: Number.parseInt(text, 10), createdAtMs: null };
-  }
-
-  try {
-    const parsed = JSON.parse(text) as { pid?: unknown; createdAtMs?: unknown };
-    const pid = typeof parsed.pid === 'number' && Number.isFinite(parsed.pid) && parsed.pid > 0 ? parsed.pid : null;
-    const createdAtMs =
-      typeof parsed.createdAtMs === 'number' && Number.isFinite(parsed.createdAtMs) && parsed.createdAtMs > 0
-        ? parsed.createdAtMs
-        : null;
-    return { pid, createdAtMs };
-  } catch {
-    return { pid: null, createdAtMs: null };
-  }
-}
-
-function serializeCliDistLockOwner(createdAtMs: number): string {
-  return JSON.stringify({ pid: process.pid, createdAtMs });
-}
-
-function shouldReclaimCliDistBuildLock(lockPath: string, staleAfterMs: number, nowMs: number): boolean {
-  let owner: CliDistBuildLockOwner = { pid: null, createdAtMs: null };
-  try {
-    owner = parseCliDistLockOwner(readFileSync(lockPath, 'utf8'));
-  } catch {
-    return false;
-  }
-
-  if (owner.pid != null) {
-    if (isRunningPid(owner.pid)) {
-      if (owner.createdAtMs != null && nowMs - owner.createdAtMs <= staleAfterMs) {
-        return false;
-      }
-    } else {
-      try {
-        unlinkSync(lockPath);
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
-    try {
-      unlinkSync(lockPath);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  if (owner.createdAtMs != null && nowMs - owner.createdAtMs <= staleAfterMs) {
-    return false;
-  }
-
-  try {
-    unlinkSync(lockPath);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function findMissingDistChunkImports(distDir: string): string[] {
   // Sanity check: ensure local chunk imports resolve to files that exist on disk.
@@ -710,64 +621,20 @@ export async function ensureCliSharedDepsBuilt(
   }
 }
 
-export async function withCliDistBuildLock<T>(fn: () => Promise<T>, options: CliDistBuildLockOptions = {}): Promise<T> {
-  const lockPath = options.lockPath ?? resolve(repoRootDir(), '.project', 'tmp', 'cli-dist-build.lock');
-  mkdirSync(dirname(lockPath), { recursive: true });
-
-  const startedAt = Date.now();
+export async function withCliDistBuildLock<T>(
+  fn: (context: WorkspaceBundleLockContext) => Promise<T>,
+  options: CliDistBuildLockOptions = {},
+): Promise<T> {
+  const lockPath = options.lockPath ?? resolveWorkspaceBundleLockPath(repoRootDir());
   const timeoutMs = options.timeoutMs ?? DEFAULT_CLI_DIST_BUILD_TIMEOUT_MS;
-  const pollIntervalMs = options.pollIntervalMs ?? 250;
-  const staleAfterMs = options.staleAfterMs ?? timeoutMs;
-
-  let fd: number | null = null;
-  let heartbeatTimer: NodeJS.Timeout | null = null;
-  while (true) {
-    try {
-      fd = openSync(lockPath, 'wx');
-      writeFileSync(fd, serializeCliDistLockOwner(Date.now()), 'utf8');
-      break;
-    } catch (e: any) {
-      if (e?.code !== 'EEXIST') throw e;
-      if (shouldReclaimCliDistBuildLock(lockPath, staleAfterMs, Date.now())) {
-        continue;
-      }
-      if (Date.now() - startedAt > timeoutMs) {
-        const owner = describeCliDistBuildLockOwner(lockPath, Date.now());
-        throw new Error(`Timed out waiting for CLI dist build lock: ${lockPath} (${owner})`);
-      }
-      await sleep(pollIntervalMs);
-    }
-  }
-
-  try {
-    if (staleAfterMs > 0) {
-      const heartbeatIntervalMs = Math.max(250, Math.min(5_000, Math.floor(staleAfterMs / 4) || 250));
-      heartbeatTimer = setInterval(() => {
-        try {
-          writeFileSync(lockPath, serializeCliDistLockOwner(Date.now()), 'utf8');
-        } catch {
-          // Best-effort lease heartbeat only.
-        }
-      }, heartbeatIntervalMs);
-      heartbeatTimer.unref();
-    }
-
-    return await fn();
-  } finally {
-    if (heartbeatTimer) {
-      clearInterval(heartbeatTimer);
-    }
-    try {
-      if (fd != null) closeSync(fd);
-    } catch {
-      // ignore
-    }
-    try {
-      unlinkSync(lockPath);
-    } catch {
-      // ignore
-    }
-  }
+  return await withWorkspaceBundleLock(fn, {
+    lockPath,
+    heldLockValue: options.heldLockValue ?? process.env.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD,
+    timeoutMs,
+    pollIntervalMs: options.pollIntervalMs ?? 250,
+    staleAfterMs: options.staleAfterMs ?? timeoutMs,
+    errorLabel: 'CLI dist build lock',
+  });
 }
 
 export async function ensureCliDistBuilt(
@@ -816,7 +683,7 @@ export async function ensureCliDistBuilt(
     if (availableEntrypoint) return availableEntrypoint;
   }
 
-  const promise = withCliDistBuildLock(async () => {
+  const promise = withCliDistBuildLock(async ({ heldLockValue }) => {
     const reusableEntrypoint = resolveReusableEntrypoint();
     if (reusableEntrypoint) return reusableEntrypoint;
     if (!allowRebuild) {
@@ -848,7 +715,11 @@ export async function ensureCliDistBuilt(
         command: invocation.command,
         args: invocation.args,
         cwd: invocation.cwd,
-        env: { ...params.env, CI: '1' },
+        env: {
+          ...params.env,
+          CI: '1',
+          HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: heldLockValue,
+        },
         stdoutPath: resolve(params.testDir, 'cli.build.stdout.log'),
         stderrPath: resolve(params.testDir, 'cli.build.stderr.log'),
         timeoutMs: options.buildTimeoutMs ?? DEFAULT_CLI_DIST_BUILD_TIMEOUT_MS,

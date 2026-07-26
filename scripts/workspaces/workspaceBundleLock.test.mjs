@@ -167,6 +167,37 @@ test('withWorkspaceBundleLock still blocks a foreign process without a parent ha
   }
 });
 
+test('withWorkspaceBundleLock marks contention timeout as a retryable lock outcome', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'happier-workspace-bundle-lock-timeout-code-'));
+  try {
+    const lockPath = join(tempRoot, 'workspace-bundling.lock');
+    await withWorkspaceBundleLock(
+      async () => {
+        await assert.rejects(
+          withWorkspaceBundleLock(
+            async () => {},
+            {
+              lockPath,
+              timeoutMs: 20,
+              pollIntervalMs: 5,
+              staleAfterMs: 1_000,
+            },
+          ),
+          (error) => error?.code === 'EWORKSPACEBUNDLELOCKTIMEOUT',
+        );
+      },
+      {
+        lockPath,
+        timeoutMs: 2_000,
+        pollIntervalMs: 10,
+        staleAfterMs: 1_000,
+      },
+    );
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('withWorkspaceBundleLock still reclaims a stale dead-owner lock', async () => {
   const tempRoot = mkdtempSync(join(tmpdir(), 'happier-workspace-bundle-lock-dead-owner-'));
   try {
@@ -275,6 +306,7 @@ test('withWorkspaceBundleLockSync uses the shared workspace bundle lock owner fo
         timeoutMs: 2_000,
         pollIntervalMs: 10,
         staleAfterMs: 1_000,
+        readProcessInstanceFingerprintImpl: () => 'test-process-instance',
       },
     );
 
