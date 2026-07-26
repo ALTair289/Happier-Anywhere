@@ -29,13 +29,18 @@ import { registerSessionTransferRpcHandlers } from '@/transfers/rpc/registerSess
 import { createTransferPathAllowanceRegistry } from '@/transfers/targets/createTransferPathAllowanceRegistry';
 import { registerRipgrepHandler } from './ripgrep';
 import { registerDifftasticHandler } from './difftastic';
-import { registerSessionUserMessageSendHandler } from './sessionUserMessageSend';
-import { registerSessionPendingQueueMaterializeNextHandler } from './sessionPendingQueueMaterializeNext';
+import {
+    registerSessionUserMessageSendHandler,
+    type ExplicitUserRecoveryDecision,
+    type SessionUserMessageEnqueueResult,
+} from './sessionUserMessageSend';
+import { registerSessionPendingQueueWakeHandlers } from './sessionPendingQueueWake';
 import { registerSessionControlHandlers, type SessionRuntimeControls } from './sessionControls';
 import {
     type FilesystemAccessPolicy,
     resolveFilesystemPolicyDefaultDirectory,
 } from './fileSystem/accessPolicy/filesystemAccessPolicy';
+import type { PendingFirstInput } from '@/daemon/spawn/pendingFirstInput';
 
 /*
  * Spawn Session Options and Result
@@ -55,12 +60,8 @@ export interface SpawnSessionOptions {
      */
     spawnNonce?: string;
     accountSettingsVersionHint?: number;
-    /**
-     * Optional initial prompt to seed for daemon-driven session starts.
-     * The spawned process consumes this prompt from environment and sends it
-     * through the normal session user-message pipeline.
-     */
-    initialPrompt?: string;
+    /** Internal producer custody promoted to canonical Pending only after the real session exists. */
+    pendingFirstInput?: PendingFirstInput;
     sessionId?: string;
     /**
      * Resume an existing agent session by id (vendor resume).
@@ -97,6 +98,7 @@ export interface SpawnSessionOptions {
      * delivered once without replaying older turns.
      */
     initialTranscriptAfterSeq?: number;
+    executionAuthorization?: import('@happier-dev/protocol').SpawnSessionExecutionAuthorization;
     /**
      * Optional native goal to apply immediately after provider attach/resume and before
      * pending queue replay.
@@ -211,9 +213,30 @@ export interface SpawnSessionOptions {
     transcriptStorage?: 'persisted' | 'direct';
 }
 export type SpawnSessionResult =
-    | { type: 'success'; sessionId?: string }
+    | {
+        type: 'success';
+        sessionId?: string;
+        spawnNonce?: string;
+        sessionIdStatus?: 'available' | 'pending';
+        /**
+         * Canonical daemon disposition for callers that must distinguish a runner
+         * accepted by this request from a live runner that merely predated it.
+         * Older producers omit this field; ownership-sensitive callers must treat
+         * omission as ambiguous rather than inferring ownership.
+         */
+        runnerAcceptance?: 'newly_accepted' | 'same_request_runner' | 'preexisting_or_adopted';
+    }
     | { type: 'requestToApproveDirectoryCreation'; directory: string }
     | { type: 'error'; errorCode: SpawnSessionErrorCode; errorMessage: string; errorDetail?: SpawnSessionErrorDetail };
+
+/**
+ * In-process-only acceptance hook for handoff custody. The canonical daemon spawn
+ * owner invokes it after ruling out adoption, while still inside spawn
+ * serialization, and before any runner launch can become observable.
+ */
+export type SpawnSessionRunnerAcceptanceHooks = Readonly<{
+    onBeforeRunnerLaunchAccepted: () => Promise<void>;
+}>;
 
 export type SessionHandlersRegistration = Readonly<{
     transferSessionStore: TransferSessionStore;
@@ -229,17 +252,27 @@ export function registerSessionHandlers(
     opts?: Readonly<{
         getSessionMetadata?: () => Metadata | null;
         updateSessionMetadata?: (handler: (metadata: Metadata) => Metadata) => Promise<void> | void;
+        updateSessionMetadataWithResult?: <TResult>(handler: (metadata: Metadata) => Readonly<{
+            metadata: Metadata;
+            result: TResult;
+        }>) => Promise<TResult> | TResult;
         enqueueSessionUserMessage?: ((request: {
             text: string;
             localId?: string;
             meta: Record<string, unknown>;
-        }) => Promise<void> | void) | null;
+        }) => Promise<SessionUserMessageEnqueueResult> | SessionUserMessageEnqueueResult) | null;
+        revalidateExplicitUserRequest?: ((request: {
+            localId: string;
+        }) => Promise<ExplicitUserRecoveryDecision> | ExplicitUserRecoveryDecision) | null;
         setAdditionalAllowedReadDirs?: (dirs: string[]) => void;
         setAdditionalAllowedWriteDirs?: (dirs: string[]) => void;
         accessPolicy?: FilesystemAccessPolicy;
         sessionRuntimeControls?: SessionRuntimeControls | null;
         /** QAE-1: daemon-side propagation for successful wait-resume cancels. */
-        notifyUsageLimitWaitResumeCancelled?: ((request: Readonly<{ sessionId: string }>) => Promise<unknown> | unknown) | null;
+        notifyUsageLimitWaitResumeCancelled?: ((request: Readonly<{
+            sessionId: string;
+            attemptId: string;
+        }>) => Promise<unknown> | unknown) | null;
     }>,
 ): SessionHandlersRegistration {
     const pathAllowanceRegistry = createTransferPathAllowanceRegistry({
@@ -279,14 +312,16 @@ export function registerSessionHandlers(
     registerSessionUserMessageSendHandler(rpcHandlerManager, {
         workingDirectory: effectiveWorkingDirectory,
         enqueueSessionUserMessage: opts?.enqueueSessionUserMessage ?? null,
+        revalidateExplicitUserRequest: opts?.revalidateExplicitUserRequest ?? null,
         sessionRuntimeControls: opts?.sessionRuntimeControls ?? null,
     });
-    registerSessionPendingQueueMaterializeNextHandler(rpcHandlerManager, {
+    registerSessionPendingQueueWakeHandlers(rpcHandlerManager, {
         sessionRuntimeControls: opts?.sessionRuntimeControls ?? null,
     });
     registerSessionControlHandlers(rpcHandlerManager, {
         getSessionMetadata: opts?.getSessionMetadata ?? null,
         updateSessionMetadata: opts?.updateSessionMetadata ?? null,
+        updateSessionMetadataWithResult: opts?.updateSessionMetadataWithResult ?? null,
         sessionRuntimeControls: opts?.sessionRuntimeControls ?? null,
         notifyUsageLimitWaitResumeCancelled: opts?.notifyUsageLimitWaitResumeCancelled ?? null,
     });

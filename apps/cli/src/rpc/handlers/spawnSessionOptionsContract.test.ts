@@ -7,6 +7,33 @@ import {
 import type { SpawnSessionOptions } from './registerSessionHandlers';
 
 describe('SpawnDaemonSessionRequestSchema', () => {
+  it('preserves exact pending first-input localId bytes and rejects blank identities', () => {
+    const parsed = SpawnDaemonSessionRequestSchema.parse({
+      directory: '/tmp',
+      pendingFirstInput: { text: 'send me', localId: ' spawn-first:opaque ' },
+    });
+
+    expect(parsed.pendingFirstInput).toEqual({
+      text: 'send me',
+      localId: ' spawn-first:opaque ',
+    });
+    expect(() => SpawnDaemonSessionRequestSchema.parse({
+      directory: '/tmp',
+      pendingFirstInput: { text: 'send me', localId: '   ' },
+    })).toThrow();
+  });
+
+  it('preserves exact nonblank opaque mode and model identifiers', () => {
+    const parsed = SpawnDaemonSessionRequestSchema.parse({
+      directory: '/tmp',
+      agentModeId: ' plan\t',
+      modelId: ' model-a\t',
+    });
+
+    expect(parsed.agentModeId).toBe(' plan\t');
+    expect(parsed.modelId).toBe(' model-a\t');
+  });
+
   it('accepts Windows terminal modes in the terminal payload', () => {
     const parsed = SpawnDaemonSessionRequestSchema.parse({
       directory: '/tmp',
@@ -95,6 +122,22 @@ describe('SpawnDaemonSessionRequestSchema', () => {
     });
 
     expect(parsed.initialTranscriptAfterSeq).toBe(36);
+  });
+
+  it('accepts fresh user-request execution authorization with an opaque request id', () => {
+    const parsed = SpawnDaemonSessionRequestSchema.parse({
+      directory: '/tmp',
+      initialTranscriptAfterSeq: 36,
+      executionAuthorization: {
+        provenance: 'user_request',
+        requestId: ' message-local-id-1 ',
+      },
+    });
+
+    expect(parsed.executionAuthorization).toEqual({
+      provenance: 'user_request',
+      requestId: ' message-local-id-1 ',
+    });
   });
 
   it('accepts multiline initial goal controls from resume requests', () => {

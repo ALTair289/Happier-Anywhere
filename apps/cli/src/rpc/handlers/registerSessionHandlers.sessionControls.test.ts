@@ -9,6 +9,7 @@ import { SessionUsageLimitRecoveryOperationResultV1Schema } from '@happier-dev/p
 import type { Metadata } from '@/api/types';
 import type { RpcHandler, RpcHandlerRegistrar } from '@/api/rpc/types';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
+import { updateSessionMetadataWithAckResult } from '@/api/session/stateUpdates';
 
 const featureDecisionMocks = vi.hoisted(() => ({
   resolveCliFeatureDecisionForServer: vi.fn(async () => ({
@@ -68,6 +69,8 @@ describe('registerSessionHandlers session controls', () => {
     expect(parseUsageLimitResult(await handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_ENABLE)?.({
       sessionId: 'sess_1',
       issueFingerprint: 'usage-limit:sess_1:reset',
+      armedAtMs: 1,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
       rememberPreference: true,
     }))).toEqual({
       ok: false,
@@ -305,6 +308,7 @@ describe('registerSessionHandlers session controls', () => {
     expect(parseUsageLimitResult(await handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
       sessionId: 'sess_1',
       issueFingerprint: 'usage-limit:sess_1:reset',
+      armedAtMs: 1,
     }))).toEqual({
       ok: true,
       status: 'cancelled',
@@ -338,6 +342,7 @@ describe('registerSessionHandlers session controls', () => {
     expect(cancelUsageLimitWaitResume).toHaveBeenCalledWith({
       sessionId: 'sess_1',
       issueFingerprint: 'usage-limit:sess_1:reset',
+      armedAtMs: 1,
     });
     expect(checkUsageLimitRecoveryNow).toHaveBeenCalledWith({
       sessionId: 'sess_1',
@@ -403,8 +408,14 @@ describe('registerSessionHandlers session controls', () => {
 
     expect(parseUsageLimitResult(await handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
       sessionId: 'sess_1',
+      issueFingerprint: 'usage-limit:sess_1:reset',
+      armedAtMs: 1,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
     }))).toMatchObject({ ok: true, status: 'cancelled' });
-    expect(notifyUsageLimitWaitResumeCancelled).toHaveBeenCalledWith({ sessionId: 'sess_1' });
+    expect(notifyUsageLimitWaitResumeCancelled).toHaveBeenCalledWith({
+      sessionId: 'sess_1',
+      attemptId: 'runtime-auth-attempt:exact-1',
+    });
   });
 
   it('propagates successful wait-resume cancels to the daemon recovery owner (no provider runtime control)', async () => {
@@ -421,6 +432,7 @@ describe('registerSessionHandlers session controls', () => {
         status: 'waiting',
         issueFingerprint: 'usage-limit:sess_1:reset',
         armedAtMs: 1,
+        runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
         resetAtMs: null,
         nextCheckAtMs: null,
         attemptCount: 0,
@@ -430,21 +442,234 @@ describe('registerSessionHandlers session controls', () => {
         selectedAuth: { kind: 'native' },
       },
     } as Metadata;
-    const updateSessionMetadata = vi.fn(async (handler: (metadata: Metadata) => Metadata) => {
-      metadata = handler(metadata);
-    });
+    let metadataUpdateCalls = 0;
+    const updateSessionMetadataWithResult = async <TResult>(handler: (value: Metadata) => Readonly<{ metadata: Metadata; result: TResult }>) => {
+      metadataUpdateCalls += 1;
+      const update = handler(metadata);
+      metadata = update.metadata;
+      return update.result;
+    };
     const notifyUsageLimitWaitResumeCancelled = vi.fn(async () => ({ ok: true }));
 
     registerSessionHandlers(registrar, process.cwd(), {
       getSessionMetadata: () => metadata,
-      updateSessionMetadata,
+      updateSessionMetadataWithResult,
       notifyUsageLimitWaitResumeCancelled,
     });
 
     expect(parseUsageLimitResult(await handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
       sessionId: 'sess_1',
+      issueFingerprint: 'usage-limit:sess_1:reset',
+      armedAtMs: 1,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
     }))).toMatchObject({ ok: true, status: 'cancelled' });
-    expect(notifyUsageLimitWaitResumeCancelled).toHaveBeenCalledWith({ sessionId: 'sess_1' });
+    expect(notifyUsageLimitWaitResumeCancelled).toHaveBeenCalledWith({
+      sessionId: 'sess_1',
+      attemptId: 'runtime-auth-attempt:exact-1',
+    });
+    expect(metadataUpdateCalls).toBe(1);
+  });
+
+  it('does not let a delayed exact cancel for attempt A cancel newer attempt B', async () => {
+    const { handlers, registrar } = createRegistrar();
+    let metadata = {
+      path: process.cwd(),
+      sessionUsageLimitRecoveryV1: {
+        v: 1 as const,
+        status: 'waiting' as const,
+        issueFingerprint: 'attempt-B',
+        armedAtMs: 200,
+        resetAtMs: null,
+        nextCheckAtMs: null,
+        attemptCount: 0,
+        maxAttempts: 3,
+        lastProbeError: null,
+        resumePromptMode: 'standard' as const,
+        selectedAuth: { kind: 'native' as const },
+      },
+    } as Metadata;
+    let metadataUpdateCalls = 0;
+    const updateSessionMetadataWithResult = async <TResult>(handler: (value: Metadata) => Readonly<{ metadata: Metadata; result: TResult }>) => {
+      metadataUpdateCalls += 1;
+      const update = handler(metadata);
+      metadata = update.metadata;
+      return update.result;
+    };
+    const notifyUsageLimitWaitResumeCancelled = vi.fn(async () => ({ ok: true }));
+    registerSessionHandlers(registrar, process.cwd(), {
+      getSessionMetadata: () => metadata,
+      updateSessionMetadataWithResult,
+      notifyUsageLimitWaitResumeCancelled,
+    });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
+      sessionId: 'sess_1',
+      issueFingerprint: 'attempt-A',
+      armedAtMs: 100,
+    })).resolves.toMatchObject({ ok: false, errorCode: 'usage_limit_recovery_attempt_superseded' });
+    expect(metadata.sessionUsageLimitRecoveryV1).toMatchObject({
+      issueFingerprint: 'attempt-B',
+      armedAtMs: 200,
+      status: 'waiting',
+    });
+    expect(metadataUpdateCalls).toBe(0);
+    expect(notifyUsageLimitWaitResumeCancelled).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { requestAttemptId: 'runtime-auth-attempt:a' },
+    { requestAttemptId: undefined },
+  ])('does not cancel same-tuple runtime B for mismatched or missing request id $requestAttemptId', async ({ requestAttemptId }) => {
+    const { handlers, registrar } = createRegistrar();
+    let metadata = {
+      path: process.cwd(),
+      sessionUsageLimitRecoveryV1: {
+        v: 1 as const,
+        status: 'waiting' as const,
+        issueFingerprint: 'same-tuple',
+        armedAtMs: 100,
+        runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:b',
+        resetAtMs: null,
+        nextCheckAtMs: null,
+        attemptCount: 0,
+        maxAttempts: 3,
+        lastProbeError: null,
+        resumePromptMode: 'standard' as const,
+        selectedAuth: { kind: 'native' as const },
+      },
+    } as Metadata;
+    let metadataUpdateCalls = 0;
+    const updateSessionMetadataWithResult = async <TResult>(handler: (value: Metadata) => Readonly<{ metadata: Metadata; result: TResult }>) => {
+      metadataUpdateCalls += 1;
+      const update = handler(metadata);
+      metadata = update.metadata;
+      return update.result;
+    };
+    const notifyUsageLimitWaitResumeCancelled = vi.fn(async () => ({ ok: true }));
+    registerSessionHandlers(registrar, process.cwd(), {
+      getSessionMetadata: () => metadata,
+      updateSessionMetadataWithResult,
+      notifyUsageLimitWaitResumeCancelled,
+    });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
+      sessionId: 'sess_1',
+      issueFingerprint: 'same-tuple',
+      armedAtMs: 100,
+      ...(requestAttemptId ? { runtimeAuthRecoveryAttemptId: requestAttemptId } : {}),
+    })).resolves.toMatchObject({ ok: false, errorCode: 'usage_limit_recovery_attempt_superseded' });
+    expect(metadata.sessionUsageLimitRecoveryV1).toMatchObject({ status: 'waiting', runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:b' });
+    expect(metadataUpdateCalls).toBe(0);
+    expect(notifyUsageLimitWaitResumeCancelled).not.toHaveBeenCalled();
+  });
+
+  it('returns superseded when metadata changes identity before fallback cancel commits', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const attemptA = {
+      v: 1 as const, status: 'waiting' as const, issueFingerprint: 'same-tuple', armedAtMs: 100,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:a', resetAtMs: null, nextCheckAtMs: null,
+      attemptCount: 0, maxAttempts: 3, lastProbeError: null, resumePromptMode: 'standard' as const,
+      selectedAuth: { kind: 'native' as const },
+    };
+    let metadata = { path: process.cwd(), sessionUsageLimitRecoveryV1: attemptA } as Metadata;
+    const attemptB = { ...attemptA, runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:b' };
+    const updateSessionMetadataWithResult = async <TResult>(handler: (value: Metadata) => Readonly<{ metadata: Metadata; result: TResult }>) => {
+      const update = handler({ ...metadata, sessionUsageLimitRecoveryV1: attemptB } as Metadata);
+      metadata = update.metadata;
+      return update.result;
+    };
+    const notifyUsageLimitWaitResumeCancelled = vi.fn(async () => ({ ok: true }));
+    registerSessionHandlers(registrar, process.cwd(), {
+      getSessionMetadata: () => metadata,
+      updateSessionMetadataWithResult,
+      notifyUsageLimitWaitResumeCancelled,
+    });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
+      sessionId: 'sess_1', issueFingerprint: 'same-tuple', armedAtMs: 100,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:a',
+    })).resolves.toMatchObject({ ok: false, errorCode: 'usage_limit_recovery_attempt_superseded' });
+    expect(metadata.sessionUsageLimitRecoveryV1).toMatchObject({
+      status: 'waiting', runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:b',
+    });
+    expect(notifyUsageLimitWaitResumeCancelled).not.toHaveBeenCalled();
+  });
+
+  it('derives fallback cancellation from the retry invocation whose metadata ack commits', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const attemptA = {
+      v: 1 as const, status: 'waiting' as const, issueFingerprint: 'same-tuple', armedAtMs: 100,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:a', resetAtMs: null, nextCheckAtMs: null,
+      attemptCount: 0, maxAttempts: 3, lastProbeError: null, resumePromptMode: 'standard' as const,
+      selectedAuth: { kind: 'native' as const },
+    };
+    const attemptB = { ...attemptA, runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:b' };
+    let metadata = { path: process.cwd(), sessionUsageLimitRecoveryV1: attemptA } as Metadata;
+    let version = 1;
+    let ackCount = 0;
+    const socket = {
+      emitWithAck: vi.fn(async (_event: string, payload: { metadata: string }) => {
+        ackCount += 1;
+        if (ackCount === 1) {
+          return { result: 'version-mismatch', metadata: JSON.stringify({ path: process.cwd(), sessionUsageLimitRecoveryV1: attemptB }), version: 2 };
+        }
+        return { result: 'success', metadata: payload.metadata, version: 3 };
+      }),
+    };
+    const updateSessionMetadataWithResult = async <TResult>(
+      handler: (value: Metadata) => Readonly<{ metadata: Metadata; result: TResult }>,
+    ) => await updateSessionMetadataWithAckResult({
+      socket,
+      sessionId: 'sess_1',
+      sessionEncryptionMode: 'plain',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'legacy',
+      getMetadata: () => metadata,
+      setMetadata: (next) => { metadata = next ?? ({} as Metadata); },
+      getMetadataVersion: () => version,
+      setMetadataVersion: (next) => { version = next; },
+      syncSessionSnapshotFromServer: async () => {},
+      handler,
+    });
+    const notifyUsageLimitWaitResumeCancelled = vi.fn(async () => ({ ok: true }));
+    registerSessionHandlers(registrar, process.cwd(), {
+      getSessionMetadata: () => metadata,
+      updateSessionMetadataWithResult,
+      notifyUsageLimitWaitResumeCancelled,
+    });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
+      sessionId: 'sess_1', issueFingerprint: 'same-tuple', armedAtMs: 100,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:a',
+    })).resolves.toMatchObject({ ok: false, errorCode: 'usage_limit_recovery_attempt_superseded' });
+    expect(metadata.sessionUsageLimitRecoveryV1).toMatchObject({
+      status: 'waiting', runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:b',
+    });
+    expect(version).toBe(3);
+    expect(socket.emitWithAck).toHaveBeenCalledTimes(2);
+    expect(notifyUsageLimitWaitResumeCancelled).not.toHaveBeenCalled();
+  });
+
+  it('reports fallback metadata persistence failure without notifying the daemon', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const current = {
+      v: 1 as const, status: 'waiting' as const, issueFingerprint: 'same-tuple', armedAtMs: 100,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:a', resetAtMs: null, nextCheckAtMs: null,
+      attemptCount: 0, maxAttempts: 3, lastProbeError: null, resumePromptMode: 'standard' as const,
+      selectedAuth: { kind: 'native' as const },
+    };
+    const notifyUsageLimitWaitResumeCancelled = vi.fn(async () => ({ ok: true }));
+    registerSessionHandlers(registrar, process.cwd(), {
+      getSessionMetadata: () => ({ path: process.cwd(), sessionUsageLimitRecoveryV1: current } as Metadata),
+      updateSessionMetadataWithResult: async () => { throw new Error('metadata transport failed'); },
+      notifyUsageLimitWaitResumeCancelled,
+    });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
+      sessionId: 'sess_1', issueFingerprint: 'same-tuple', armedAtMs: 100,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:a',
+    })).resolves.toMatchObject({ ok: false, errorCode: 'usage_limit_recovery_cancel_persistence_failed' });
+    expect(notifyUsageLimitWaitResumeCancelled).not.toHaveBeenCalled();
   });
 
   it('does not propagate failed wait-resume cancels and survives notifier failures', async () => {
@@ -467,6 +692,9 @@ describe('registerSessionHandlers session controls', () => {
 
     expect(parseUsageLimitResult(await handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
       sessionId: 'sess_1',
+      issueFingerprint: 'usage-limit:sess_1:reset',
+      armedAtMs: 1,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
     }))).toMatchObject({ ok: false });
     expect(notifyUsageLimitWaitResumeCancelled).not.toHaveBeenCalled();
 
@@ -474,8 +702,14 @@ describe('registerSessionHandlers session controls', () => {
     cancelUsageLimitWaitResume.mockResolvedValueOnce({ ok: true, recovery: { status: 'cancelled' } } as never);
     expect(parseUsageLimitResult(await handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
       sessionId: 'sess_1',
+      issueFingerprint: 'usage-limit:sess_1:reset',
+      armedAtMs: 1,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
     }))).toMatchObject({ ok: true, status: 'cancelled' });
-    expect(notifyUsageLimitWaitResumeCancelled).toHaveBeenCalledWith({ sessionId: 'sess_1' });
+    expect(notifyUsageLimitWaitResumeCancelled).toHaveBeenCalledWith({
+      sessionId: 'sess_1',
+      attemptId: 'runtime-auth-attempt:exact-1',
+    });
   });
 
   it('rejects non-boolean rememberPreference values before dispatching runtime controls', async () => {
@@ -513,10 +747,18 @@ describe('registerSessionHandlers session controls', () => {
     const updateSessionMetadata = vi.fn(async (handler: (metadata: Metadata) => Metadata) => {
       metadata = handler(metadata);
     });
+    const updateSessionMetadataWithResult = async <TResult>(
+      handler: (value: Metadata) => Readonly<{ metadata: Metadata; result: TResult }>,
+    ) => {
+      const update = handler(metadata);
+      metadata = update.metadata;
+      return update.result;
+    };
 
     registerSessionHandlers(registrar, process.cwd(), {
       getSessionMetadata: () => metadata,
       updateSessionMetadata,
+      updateSessionMetadataWithResult,
     });
 
     // F1: never `ok: true, status: 'waiting'` with no finite timing and no runner.
@@ -565,6 +807,8 @@ describe('registerSessionHandlers session controls', () => {
     } as Metadata;
     expect(parseUsageLimitResult(await handlers.get(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
       sessionId: 'sess_1',
+      issueFingerprint: 'usage-limit:sess_1:reset',
+      armedAtMs: 1,
     }))).toEqual({
       ok: true,
       status: 'cancelled',
@@ -574,7 +818,7 @@ describe('registerSessionHandlers session controls', () => {
     expect((metadata as Record<string, unknown>).sessionUsageLimitRecoveryV1).toMatchObject({
       status: 'cancelled',
     });
-    expect(updateSessionMetadata).toHaveBeenCalledTimes(1);
+    expect(updateSessionMetadata).not.toHaveBeenCalled();
   });
 
   it('lets runtime message controls intercept provider-specific messages before enqueueing', async () => {
@@ -584,9 +828,11 @@ describe('registerSessionHandlers session controls', () => {
       result: { ok: true, reviewTurnId: 'turn-review-native' },
     }));
     const enqueueSessionUserMessage = vi.fn(async () => {});
+    const revalidateExplicitUserRequest = vi.fn(async (_request: { localId: string }) => ({ status: 'ready' as const }));
 
     registerSessionHandlers(registrar, process.cwd(), {
       enqueueSessionUserMessage,
+      revalidateExplicitUserRequest,
       sessionRuntimeControls: {
         handleUserMessage,
       },
@@ -602,8 +848,296 @@ describe('registerSessionHandlers session controls', () => {
       reviewTurnId: 'turn-review-native',
     });
 
+    expect(revalidateExplicitUserRequest).toHaveBeenCalledExactlyOnceWith({
+      localId: 'local-review-command',
+    });
     expect(handleUserMessage).toHaveBeenCalledWith(request);
     expect(enqueueSessionUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('consumes a blocking recovery decision before provider interception', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const handleUserMessage = vi.fn(async () => ({
+      handled: true as const,
+      result: { ok: true, deliveredVia: 'provider' },
+    }));
+    const enqueueSessionUserMessage = vi.fn(async () => {});
+
+    registerSessionHandlers(registrar, process.cwd(), {
+      enqueueSessionUserMessage,
+      revalidateExplicitUserRequest: vi.fn(async () => ({
+        status: 'waiting' as const,
+        errorCode: 'session_user_message_recovery_pending',
+      })),
+      sessionRuntimeControls: { handleUserMessage },
+    });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)?.({
+      text: '/codex.review do not execute yet',
+      localId: 'blocked-provider-command',
+      meta: { source: 'test' },
+    })).resolves.toEqual({
+      ok: false,
+      status: 'waiting',
+      errorCode: 'session_user_message_recovery_pending',
+      error: 'session_user_message_recovery_pending',
+    });
+    expect(handleUserMessage).not.toHaveBeenCalled();
+    expect(enqueueSessionUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('generates one opaque id at common ingress before recovery and provider delivery', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const revalidateExplicitUserRequest = vi.fn(async (_request: { localId: string }) => ({ status: 'ready' as const }));
+    const handleUserMessage = vi.fn(async () => ({
+      handled: true as const,
+      result: { ok: true },
+    }));
+    registerSessionHandlers(registrar, process.cwd(), {
+      revalidateExplicitUserRequest,
+      sessionRuntimeControls: { handleUserMessage },
+    });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)?.({
+      text: '/codex.review generated identity',
+      meta: { source: 'legacy-client' },
+    })).resolves.toEqual({ ok: true });
+
+    const generatedLocalId = revalidateExplicitUserRequest.mock.calls[0]?.[0].localId;
+    expect(generatedLocalId).toEqual(expect.any(String));
+    expect(generatedLocalId?.trim()).toBe(generatedLocalId);
+    expect(generatedLocalId?.length).toBeGreaterThan(0);
+    expect(handleUserMessage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      localId: generatedLocalId,
+    }));
+  });
+
+  it('fails closed on a whitespace-only id before recovery, provider, or generic delivery', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const revalidateExplicitUserRequest = vi.fn(async () => ({ status: 'ready' as const }));
+    const handleUserMessage = vi.fn(async () => ({ handled: false as const }));
+    const enqueueSessionUserMessage = vi.fn(async () => {});
+    registerSessionHandlers(registrar, process.cwd(), {
+      enqueueSessionUserMessage,
+      revalidateExplicitUserRequest,
+      sessionRuntimeControls: { handleUserMessage },
+    });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)?.({
+      text: 'must not deliver',
+      localId: ' \t ',
+      meta: {},
+    })).resolves.toEqual({
+      ok: false,
+      error: 'Invalid params',
+      errorCode: 'session_user_message_invalid_input',
+    });
+    expect(revalidateExplicitUserRequest).not.toHaveBeenCalled();
+    expect(handleUserMessage).not.toHaveBeenCalled();
+    expect(enqueueSessionUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('uses the same generated id and recovery outcome for generic delivery', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const revalidateExplicitUserRequest = vi.fn(async (_request: { localId: string }) => ({ status: 'ready' as const }));
+    const handleUserMessage = vi.fn(async () => ({ handled: false as const }));
+    const enqueueSessionUserMessage = vi.fn(async () => {});
+    registerSessionHandlers(registrar, process.cwd(), {
+      enqueueSessionUserMessage,
+      revalidateExplicitUserRequest,
+      sessionRuntimeControls: { handleUserMessage },
+    });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)?.({
+      text: 'generic generated identity',
+      meta: {},
+    })).resolves.toEqual({ ok: true });
+
+    const generatedLocalId = revalidateExplicitUserRequest.mock.calls[0]?.[0].localId;
+    expect(handleUserMessage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ localId: generatedLocalId }));
+    expect(enqueueSessionUserMessage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ localId: generatedLocalId }));
+  });
+
+  it('replays one complete exact-id outcome, rejects payload collisions, and keeps whitespace ids distinct', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const handleUserMessage = vi.fn(async (request: { localId?: string }) => ({
+      handled: true as const,
+      result: { ok: true, delivery: `provider:${request.localId}` },
+    }));
+    const revalidateExplicitUserRequest = vi.fn(async () => ({ status: 'ready' as const }));
+
+    registerSessionHandlers(registrar, process.cwd(), {
+      revalidateExplicitUserRequest,
+      sessionRuntimeControls: { handleUserMessage },
+    });
+    const handler = handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)!;
+    const request = { text: '/codex.review exact', localId: 'opaque-id', meta: { source: 'test' } };
+
+    const [first, replay] = await Promise.all([handler(request), handler(request)]);
+    expect(first).toEqual({ ok: true, delivery: 'provider:opaque-id' });
+    expect(replay).toEqual(first);
+    await expect(handler({ ...request, text: '/codex.review different' })).resolves.toEqual({
+      ok: false,
+      error: 'session_user_message_id_payload_conflict',
+      errorCode: 'session_user_message_id_payload_conflict',
+    });
+    await expect(handler({ ...request, localId: ' opaque-id' })).resolves.toEqual({
+      ok: true,
+      delivery: 'provider: opaque-id',
+    });
+
+    expect(revalidateExplicitUserRequest).toHaveBeenCalledTimes(2);
+    expect(handleUserMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the outcome registry bounded after more than 1000 completed deliveries', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const handleUserMessage = vi.fn(async (request: { localId?: string }) => ({
+      handled: true as const,
+      result: { ok: true, localId: request.localId },
+    }));
+    registerSessionHandlers(registrar, process.cwd(), {
+      sessionRuntimeControls: { handleUserMessage },
+    });
+    const handler = handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)!;
+
+    for (let index = 0; index < 1_005; index += 1) {
+      await expect(handler({ text: `message-${index}`, localId: `completed-${index}`, meta: {} }))
+        .resolves.toEqual({ ok: true, localId: `completed-${index}` });
+    }
+    await expect(handler({ text: 'message-1004', localId: 'completed-1004', meta: {} }))
+      .resolves.toEqual({ ok: true, localId: 'completed-1004' });
+    await expect(handler({ text: 'collision', localId: 'completed-1004', meta: {} })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'session_user_message_id_payload_conflict',
+    });
+    expect(handleUserMessage).toHaveBeenCalledTimes(1_005);
+  });
+
+  it('never evicts in-flight outcomes when the registry is full', async () => {
+    const { handlers, registrar } = createRegistrar();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const handleUserMessage = vi.fn(async (request: { localId?: string }) => {
+      await blocked;
+      return { handled: true as const, result: { ok: true, localId: request.localId } };
+    });
+    registerSessionHandlers(registrar, process.cwd(), {
+      sessionRuntimeControls: { handleUserMessage },
+    });
+    const handler = handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)!;
+    const inFlight = Array.from({ length: 1_000 }, (_, index) => handler({
+      text: `in-flight-${index}`,
+      localId: `in-flight-${index}`,
+      meta: {},
+    }));
+    await vi.waitFor(() => expect(handleUserMessage).toHaveBeenCalledTimes(1_000));
+
+    const exactReplay = handler({ text: 'in-flight-0', localId: 'in-flight-0', meta: {} });
+    await expect(handler({ text: 'different', localId: 'in-flight-0', meta: {} })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'session_user_message_id_payload_conflict',
+    });
+    await expect(handler({ text: 'refused', localId: 'in-flight-overflow', meta: {} })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'session_user_message_delivery_registry_unavailable',
+    });
+    expect(handleUserMessage).toHaveBeenCalledTimes(1_000);
+
+    release();
+    await expect(exactReplay).resolves.toEqual({ ok: true, localId: 'in-flight-0' });
+    await Promise.all(inFlight);
+    expect(handleUserMessage).toHaveBeenCalledTimes(1_000);
+  });
+
+  it('returns a typed recovery block instead of acknowledging provider delivery', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const enqueueSessionUserMessage = vi.fn(async () => ({
+      recoveryBlocked: {
+        status: 'unavailable' as const,
+        errorCode: 'session_user_message_recovery_control_unavailable',
+      },
+    }));
+
+    registerSessionHandlers(registrar, process.cwd(), { enqueueSessionUserMessage });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)?.({
+      text: 'retry with current daemon authority',
+      localId: 'fresh-request-1',
+      meta: { source: 'test' },
+    })).resolves.toEqual({
+      ok: false,
+      status: 'unavailable',
+      errorCode: 'session_user_message_recovery_control_unavailable',
+      error: 'session_user_message_recovery_control_unavailable',
+    });
+  });
+
+  it('registers user-message send when runtime controls are the only message owner', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const handleUserMessage = vi.fn(async () => ({
+      handled: true as const,
+      result: { ok: true, deliveredVia: 'runtime-controls' },
+    }));
+
+    registerSessionHandlers(registrar, process.cwd(), {
+      sessionRuntimeControls: {
+        handleUserMessage,
+      },
+    });
+
+    const request = {
+      text: 'first Claude turn',
+      localId: 'first-turn-local',
+      meta: { source: 'new-session' },
+    };
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)?.(request)).resolves.toEqual({
+      ok: true,
+      deliveredVia: 'runtime-controls',
+    });
+    expect(handleUserMessage).toHaveBeenCalledWith(request);
+  });
+
+  it('treats a runtime message control that returns void as handled', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const handleUserMessage = vi.fn(async () => undefined);
+    const enqueueSessionUserMessage = vi.fn(async () => {});
+
+    registerSessionHandlers(registrar, process.cwd(), {
+      enqueueSessionUserMessage,
+      sessionRuntimeControls: {
+        handleUserMessage,
+      },
+    });
+
+    const request = {
+      text: 'first Claude turn',
+      localId: 'first-turn-local',
+      meta: { source: 'new-session' },
+    };
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)?.(request)).resolves.toEqual({
+      ok: true,
+    });
+    expect(handleUserMessage).toHaveBeenCalledWith(request);
+    expect(enqueueSessionUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('registers user-message send when enqueue is the only message owner', async () => {
+    const { handlers, registrar } = createRegistrar();
+
+    registerSessionHandlers(registrar, process.cwd(), {
+      enqueueSessionUserMessage: vi.fn(async () => {}),
+    });
+
+    expect(handlers.has(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)).toBe(true);
+  });
+
+  it('does not register user-message send when no message owner exists', async () => {
+    const { handlers, registrar } = createRegistrar();
+
+    registerSessionHandlers(registrar, process.cwd(), {});
+
+    expect(handlers.has(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)).toBe(false);
   });
 
   it('preserves trusted uploaded image metadata for runtime message controls', async () => {

@@ -7,11 +7,11 @@ import {
   type PermissionIntent,
 } from '@happier-dev/agents';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
-import { readRpcErrorCode } from '@happier-dev/protocol/rpcErrors';
+import { readPendingLocalId } from '@happier-dev/protocol';
 
 import { fetchEncryptedTranscriptPageAfterSeq } from '@/api/session/fetchEncryptedTranscriptWindow';
 import {
-  materializeNextPendingQueueV2MessageViaHttp,
+  enqueuePendingQueueV2MessageViaHttp,
   type PendingQueueDeliveryBlockedReason,
   readBlockedPendingQueueV2DeliveryByLocalIdFromServer,
 } from '@/api/session/pendingQueueV2Transport';
@@ -29,7 +29,6 @@ import {
 import { fetchSessionById } from '@/session/transport/http/sessionsHttp';
 import { callSessionRpc } from '@/session/transport/rpc/sessionRpc';
 import { waitForIdleViaSocket } from '@/session/transport/socket/sessionSocketAgentState';
-import { sendSessionMessageViaSocketCommitted } from '@/session/transport/socket/sessionSocketSendMessage';
 import {
   decryptSessionPayload,
   encryptSessionPayload,
@@ -41,20 +40,16 @@ import {
 } from '@/session/shared/sessionTurnLifecycle';
 
 import { resolveSessionTransportContext } from './resolveSessionTransportContext';
+import { requestInactiveSessionResume } from './requestInactiveSessionResume';
 
 export type SendSessionMessageResult =
-  | Readonly<{ ok: true; sessionId: string; localId: string; waited: boolean }>
+  | Readonly<{ ok: true; sessionId: string; localId: string; waited: boolean; suppressed?: true }>
   | Readonly<{
       ok: false;
       code: 'session_not_found' | 'session_id_ambiguous' | 'unsupported' | 'timeout' | 'wait_failed';
       candidates?: string[];
       message?: string;
     }>;
-
-export type SendSessionMessageSocketCommit = Readonly<{
-  sessionId: string;
-  localId: string;
-}>;
 
 function parsePermissionIntentOrThrow(raw: string): PermissionIntent {
   const parsed = parsePermissionIntentAlias(raw);
@@ -64,39 +59,6 @@ function parsePermissionIntentOrThrow(raw: string): PermissionIntent {
     throw err;
   }
   return parsed;
-}
-
-function isFallbackSafeRuntimeRpcError(error: unknown): boolean {
-  if (readRpcErrorCode(error) === 'session_not_found') {
-    return true;
-  }
-
-  const errorMessage = error instanceof Error ? error.message : String(error ?? '');
-  if (
-    errorMessage === 'Method not found'
-    || errorMessage === 'RPC method not available'
-    || errorMessage === 'Socket connect timeout'
-  ) {
-    return true;
-  }
-
-  return errorMessage.toLowerCase().includes('connect_error');
-}
-
-async function nudgePendingQueueBestEffort(params: Readonly<{
-  token: string;
-  sessionId: string;
-}>): Promise<void> {
-  try {
-    await materializeNextPendingQueueV2MessageViaHttp({
-      token: params.token,
-      sessionId: params.sessionId,
-    });
-  } catch {
-    // Best-effort only. Callers may layer stronger retry loops when materialization
-    // is safety-critical, but ordinary socket-fallback sends should still attempt
-    // one canonical nudge here.
-  }
 }
 
 function resolvePermissionIntent(params: Readonly<{
@@ -314,6 +276,7 @@ type AssistantTurnOutcome =
 type CurrentPromptDeliveryOutcome =
   | Readonly<{ kind: 'materialized'; message: TranscriptMessageLookupResult }>
   | Readonly<{ kind: 'blocked'; reason: PendingQueueDeliveryBlockedReason }>
+  | Readonly<{ kind: 'unavailable' }>
   | Readonly<{ kind: 'missing' }>;
 
 const CURRENT_PROMPT_DELIVERY_POLL_MS = 250;
@@ -326,16 +289,19 @@ async function readBlockedPromptDeliveryReason(params: Readonly<{
   token: string;
   sessionId: string;
   localId: string;
-}>): Promise<PendingQueueDeliveryBlockedReason | null> {
+}>): Promise<
+  | Readonly<{ kind: 'available'; reason: PendingQueueDeliveryBlockedReason | null }>
+  | Readonly<{ kind: 'unavailable' }>
+> {
   try {
     const blocked = await readBlockedPendingQueueV2DeliveryByLocalIdFromServer({
       token: params.token,
       sessionId: params.sessionId,
       localId: params.localId,
     });
-    return blocked?.reason ?? null;
+    return { kind: 'available', reason: blocked?.reason ?? null };
   } catch {
-    return null;
+    return { kind: 'unavailable' };
   }
 }
 
@@ -359,15 +325,18 @@ async function waitForCurrentPromptDelivery(params: Readonly<{
       return { kind: 'materialized', message: materialized };
     }
 
-    const blockedReason = await readBlockedPromptDeliveryReason(params);
-    if (blockedReason) {
-      return { kind: 'blocked', reason: blockedReason };
+    const blockedProjection = await readBlockedPromptDeliveryReason(params);
+    if (blockedProjection.kind === 'available' && blockedProjection.reason) {
+      return { kind: 'blocked', reason: blockedProjection.reason };
     }
   }
 
-  const blockedReason = await readBlockedPromptDeliveryReason(params);
-  if (blockedReason) {
-    return { kind: 'blocked', reason: blockedReason };
+  const blockedProjection = await readBlockedPromptDeliveryReason(params);
+  if (blockedProjection.kind === 'unavailable') {
+    return { kind: 'unavailable' };
+  }
+  if (blockedProjection.reason) {
+    return { kind: 'blocked', reason: blockedProjection.reason };
   }
   return { kind: 'missing' };
 }
@@ -459,9 +428,10 @@ export async function sendSessionMessage(params: Readonly<{
   wait: boolean;
   timeoutMs: number;
   localId?: string;
+  resumeInactiveSession?: boolean;
   permissionModeOverride?: string;
   modelOverride?: string | null;
-  onCommittedViaSocket?: (input: SendSessionMessageSocketCommit) => Promise<void> | void;
+  pendingAdmissionMode?: 'continuation_if_no_queued_user_input';
 }>): Promise<SendSessionMessageResult> {
   const sessionTarget = await resolveSessionTransportContext({
     credentials: params.credentials,
@@ -479,9 +449,10 @@ export async function sendSessionMessage(params: Readonly<{
     throw new Error('Resolved session transport context is missing session id');
   }
 
-  const localId = typeof params.localId === 'string' && params.localId.trim().length > 0
-    ? params.localId.trim()
-    : randomUUID();
+  if (params.localId !== undefined && readPendingLocalId(params.localId) === null) {
+    throw new Error('Pending localId must not be blank');
+  }
+  const localId = readPendingLocalId(params.localId) ?? randomUUID();
   const decryptedMetadata = tryDecryptSessionMetadata({
     credentials: params.credentials,
     rawSession: sessionTarget.rawSession,
@@ -513,59 +484,97 @@ export async function sendSessionMessage(params: Readonly<{
   const content =
     sessionTarget.mode === 'plain'
       ? ({ t: 'plain', v: record } as const)
-      : ({ t: 'encrypted', c: encryptSessionPayload({ ctx: sessionTarget.ctx, payload: record }) } as const);
+      : ({
+          t: 'encrypted',
+          c: encryptSessionPayload({
+            ctx: sessionTarget.ctx,
+            payload: record,
+            ...(params.pendingAdmissionMode ? { idempotencyKey: localId } : {}),
+          }),
+        } as const);
 
   const shouldUseRuntimeRpc = sessionTarget.rawSession.active === true;
-  async function commitViaSocket(): Promise<void> {
-    await sendSessionMessageViaSocketCommitted({
-      token: params.credentials.token,
-      sessionId: sessionId,
-      content,
-      localId,
-      messageRole: 'user',
-      sentFrom: 'cli',
-      permissionMode: permissionIntent,
-    });
-    await nudgePendingQueueBestEffort({
+  let enqueueResult: Awaited<ReturnType<typeof enqueuePendingQueueV2MessageViaHttp>>;
+  try {
+    enqueueResult = await enqueuePendingQueueV2MessageViaHttp({
       token: params.credentials.token,
       sessionId,
+      body: content.t === 'encrypted'
+        ? {
+            localId,
+            ciphertext: content.c,
+            messageRole: 'user',
+            requestedAction: { v: 1, kind: 'send_now' },
+            ...(params.pendingAdmissionMode ? { deliveryMode: params.pendingAdmissionMode } : {}),
+          }
+        : {
+            localId,
+            content,
+            messageRole: 'user',
+            requestedAction: { v: 1, kind: 'send_now' },
+            ...(params.pendingAdmissionMode ? { deliveryMode: params.pendingAdmissionMode } : {}),
+          },
     });
-    await params.onCommittedViaSocket?.({
-      sessionId: sessionId,
-      localId,
-    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error ?? '');
+    return {
+      ok: false,
+      code: 'timeout',
+      message: errorMessage || 'Pending enqueue acknowledgement was not confirmed',
+    };
   }
-  if (shouldUseRuntimeRpc) {
-    try {
-      await callSessionRpc({
-        token: params.credentials.token,
-        sessionId: sessionId,
-        mode: sessionTarget.mode,
-        ctx: sessionTarget.ctx,
-        method: `${sessionId}:${SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND}`,
-        request: {
-          text: params.message,
-          localId,
-          meta: record.meta,
-        },
-      });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error ?? '');
-      if (errorMessage === 'RPC call timeout') {
+
+  if (enqueueResult?.suppressed === true) {
+    return { ok: true, sessionId, localId, waited: false, suppressed: true };
+  }
+
+  // The server found this exact localId in the terminal transcript. Starting
+  // an inactive runtime now would create work without pending custody.
+  if (enqueueResult?.terminal === true) {
+    return { ok: true, sessionId, localId, waited: false };
+  }
+
+  if (!shouldUseRuntimeRpc && params.resumeInactiveSession !== false) {
+    const resumeResult = await requestInactiveSessionResume({
+      credentials: params.credentials,
+      sessionId,
+      localId,
+      rawSession: sessionTarget.rawSession,
+      metadata: asRecord(decryptedMetadata) ?? {},
+      timeoutMs: params.timeoutMs,
+    });
+    if (resumeResult.ok) {
+      if (!params.wait) {
         return {
-          ok: false,
-          code: 'timeout',
-          message: errorMessage,
+          ok: true,
+          sessionId,
+          localId,
+          waited: false,
         };
       }
-      if (!isFallbackSafeRuntimeRpcError(error)) {
-        throw error;
-      }
-
-      await commitViaSocket();
+      // The common wait path below observes exact materialization and terminal
+      // evidence; resume acknowledgement alone is never provider acceptance.
+    } else {
+      return {
+        ok: false,
+        code: resumeResult.code,
+        message: resumeResult.message,
+      };
     }
-  } else {
-    await commitViaSocket();
+  }
+
+  if (shouldUseRuntimeRpc) {
+    // The enqueue event is the durable wake. This direct nudge only reduces latency when the
+    // runner is already connected; failure cannot revoke or bypass the canonical Pending row.
+    await callSessionRpc({
+      token: params.credentials.token,
+      sessionId,
+      mode: sessionTarget.mode,
+      ctx: sessionTarget.ctx,
+      method: `${sessionId}:${SESSION_RPC_METHODS.SESSION_PENDING_QUEUE_WAKE_V1}`,
+      request: { protocolVersion: 1 },
+      timeoutMs: Math.min(5_000, params.timeoutMs),
+    }).catch(() => undefined);
   }
 
   if (!params.wait) {
@@ -593,6 +602,12 @@ export async function sendSessionMessage(params: Readonly<{
         ok: false,
         code: 'wait_failed',
         message: formatBlockedPromptDeliveryFailure(promptDelivery.reason),
+      };
+    }
+    if (promptDelivery.kind === 'unavailable') {
+      return {
+        ok: false,
+        code: 'wait_failed',
       };
     }
     if (promptDelivery.kind !== 'materialized') {

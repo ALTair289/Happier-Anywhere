@@ -123,6 +123,7 @@ import {
   encodeBase64,
   sealEncryptedDataKeyEnvelopeV1,
 } from '@happier-dev/protocol';
+import { createPendingFirstInput } from '@/daemon/spawn/pendingFirstInput';
 import { SPAWN_SESSION_ERROR_CODES } from '@/rpc/handlers/registerSessionHandlers';
 
 const env = process.env;
@@ -180,6 +181,24 @@ function allowSessionAgentActions(...actionIds: string[]): void {
       ]),
     ),
   });
+}
+
+function expectSingleSpawnWithPendingFirstInput(text: string): void {
+  expect(spawnDaemonSession).toHaveBeenCalledTimes(1);
+  const request = spawnDaemonSession.mock.calls[0]?.[0] as {
+    spawnNonce?: unknown;
+    pendingFirstInput?: unknown;
+    initialPrompt?: unknown;
+  } | undefined;
+  expect(request?.spawnNonce).toEqual(expect.stringMatching(/^[0-9a-f-]{36}$/i));
+  if (typeof request?.spawnNonce !== 'string') {
+    throw new Error('expected spawn nonce');
+  }
+  expect(request.pendingFirstInput).toEqual(createPendingFirstInput({
+    text,
+    spawnNonce: request.spawnNonce,
+  }));
+  expect(request).not.toHaveProperty('initialPrompt');
 }
 
 describe('createCliActionExecutor', () => {
@@ -803,7 +822,7 @@ describe('createCliActionExecutor', () => {
       machineId: 'machine-1',
       backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
       modelId: 'gpt-5',
-      initialPrompt: 'Hello from CLI action',
+      modelUpdatedAt: expect.any(Number),
       connectedServices: {
         v: 1,
         bindingsByServiceId: {
@@ -817,6 +836,7 @@ describe('createCliActionExecutor', () => {
       },
       connectedServicesUpdatedAt: expect.any(Number),
     }));
+    expectSingleSpawnWithPendingFirstInput('Hello from CLI action');
     expect(updateSessionMetadataWithRetry).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'sess-new',
       token: 'token',
@@ -929,9 +949,11 @@ describe('createCliActionExecutor', () => {
       machineId: 'machine-1',
       backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
       permissionMode: 'acceptEdits',
+      permissionModeUpdatedAt: expect.any(Number),
       agentModeId: 'plan',
+      agentModeUpdatedAt: expect.any(Number),
       modelId: 'claude-opus-4-8',
-      initialPrompt: 'Rich spawn',
+      modelUpdatedAt: expect.any(Number),
       sessionConfigOptionOverrides: {
         v: 1,
         updatedAt: 10,
@@ -958,6 +980,7 @@ describe('createCliActionExecutor', () => {
         }),
       },
     }));
+    expectSingleSpawnWithPendingFirstInput('Rich spawn');
   });
 
   it('inherits the current session backend target for session-agent spawn when no explicit target is provided', async () => {
@@ -1022,8 +1045,10 @@ describe('createCliActionExecutor', () => {
       directory: '/repo/current',
       machineId: 'machine-1',
       backendTarget: { kind: 'configuredAcpBackend', backendId: 'review-bot' },
-      initialPrompt: 'Spawn with inherited configured backend',
+      permissionMode: 'safe-yolo',
+      permissionModeUpdatedAt: 123,
     }));
+    expectSingleSpawnWithPendingFirstInput('Spawn with inherited configured backend');
   });
 
   it('prefers the live raw-session metadata over stale fetched metadata for session-agent spawn inheritance', async () => {
@@ -1116,6 +1141,7 @@ describe('createCliActionExecutor', () => {
       permissionMode: 'safe-yolo',
       permissionModeUpdatedAt: 123,
       modelId: 'claude-opus-parent',
+      modelUpdatedAt: 124,
       sessionConfigOptionOverrides: inheritedConfig,
       profileId: 'parent-profile',
       connectedServices: {
@@ -1135,8 +1161,8 @@ describe('createCliActionExecutor', () => {
         forceIncludeServerIds: ['repo-tools'],
         forceExcludeServerIds: ['secret-env-server'],
       },
-      initialPrompt: 'Use inherited parent context.',
     }));
+    expectSingleSpawnWithPendingFirstInput('Use inherited parent context.');
   });
 
   it('inherits configured ACP backend metadata for session-agent spawn when no live backend target is available', async () => {
@@ -1212,8 +1238,10 @@ describe('createCliActionExecutor', () => {
       directory: '/repo/current',
       machineId: 'machine-1',
       backendTarget: { kind: 'configuredAcpBackend', backendId: 'review-bot' },
-      initialPrompt: 'Spawn with metadata configured backend',
+      permissionMode: 'safe-yolo',
+      permissionModeUpdatedAt: 123,
     }));
+    expectSingleSpawnWithPendingFirstInput('Spawn with metadata configured backend');
   });
 
   it('honors public spawn aliases and terminal launch fields at the CLI action boundary', async () => {
@@ -1267,11 +1295,16 @@ describe('createCliActionExecutor', () => {
       directory: '/repo/explicit',
       machineId: 'explicit-machine',
       backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
-      initialPrompt: 'Use public prompt alias',
+      permissionMode: 'safe-yolo',
+      permissionModeUpdatedAt: 123,
       sessionConfigOptionOverrides: expect.objectContaining({
         v: 1,
+        updatedAt: expect.any(Number),
         overrides: expect.objectContaining({
-          reasoning_effort: expect.objectContaining({ value: 'xhigh' }),
+          reasoning_effort: expect.objectContaining({
+            updatedAt: expect.any(Number),
+            value: 'xhigh',
+          }),
         }),
       }),
       terminal: {
@@ -1282,6 +1315,7 @@ describe('createCliActionExecutor', () => {
       windowsRemoteSessionConsole: 'hidden',
       windowsTerminalWindowName: 'Happier QA',
     }));
+    expectSingleSpawnWithPendingFirstInput('Use public prompt alias');
   });
 
   it('denies explicit session-agent spawn overrides disallowed by spawn policy', async () => {
@@ -1425,6 +1459,50 @@ describe('createCliActionExecutor', () => {
     expect(resolveDaemonSpawnSessionByNonce).toHaveBeenCalledTimes(1);
     expect(resolveDaemonSpawnSessionByNonce).toHaveBeenCalledWith(expect.stringMatching(/^[0-9a-f-]{36}$/i));
     expect(fetchSessionsPage).not.toHaveBeenCalled();
+  });
+
+  it('resumes an ambiguous action request by stable identity without submitting a second spawn', async () => {
+    const executor = createPlainExecutor({
+      rawSession: { metadata: { machineId: 'machine-1', path: '/repo/current', host: 'leeroy-mbp' } },
+    });
+    spawnDaemonSession.mockResolvedValue({
+      error: 'Request failed: /spawn-session, The socket connection was closed unexpectedly',
+    });
+    resolveDaemonSpawnSessionByNonce
+      .mockResolvedValueOnce({ status: 'unsupported' })
+      .mockResolvedValueOnce({ status: 'success', sessionId: 'sess-resumed-attempt' });
+    fetchSessionById.mockResolvedValue({
+      id: 'sess-resumed-attempt',
+      createdAt: 1,
+      updatedAt: 2,
+      active: true,
+      activeAt: 2,
+      pendingCount: 0,
+      metadataVersion: 1,
+      metadata: { path: '/repo/current', host: 'leeroy-mbp' },
+    });
+    const context = {
+      surface: 'cli' as const,
+      defaultSessionId: 'sess-1',
+      actionRequestId: 'attempt-1',
+    };
+
+    await expect(executor.execute('session.spawn_new', {
+      path: '/repo/current',
+      backendTargetKey: 'agent:codex',
+    }, context)).resolves.toMatchObject({ ok: false });
+    const resumed = await executor.execute('session.spawn_new', {
+      path: '/repo/current',
+      backendTargetKey: 'agent:codex',
+    }, context);
+    expect(resumed).toMatchObject({
+      ok: true,
+      result: { type: 'success', sessionId: 'sess-resumed-attempt' },
+    });
+
+    expect(spawnDaemonSession).toHaveBeenCalledTimes(1);
+    expect(resolveDaemonSpawnSessionByNonce).toHaveBeenCalledTimes(2);
+    expect(resolveDaemonSpawnSessionByNonce).toHaveBeenCalledWith('session.spawn_new:sess-1:attempt-1');
   });
 
   it('recovers session.spawn_new via spawn nonce resolution before fallback row scans', async () => {
@@ -1610,7 +1688,7 @@ describe('createCliActionExecutor', () => {
     expect(fetchSessionsPage).not.toHaveBeenCalled();
   });
 
-  it('recovers session.spawn_new when daemon ACKs before the session id is available', async () => {
+  it('keeps one accepted spawn pending beyond three seconds until its session id resolves', async () => {
     const executor = createPlainExecutor({
       rawSession: {
         metadata: {
@@ -1626,10 +1704,15 @@ describe('createCliActionExecutor', () => {
       spawnNonce: 'spawn-response-nonce',
       sessionIdStatus: 'pending',
     });
-    resolveDaemonSpawnSessionByNonce.mockResolvedValue({
-      status: 'success',
-      sessionId: 'sess-recovered-ack-pending',
-    });
+    resolveDaemonSpawnSessionByNonce
+      .mockResolvedValueOnce({ status: 'pending' })
+      .mockResolvedValueOnce({ status: 'pending' })
+      .mockResolvedValueOnce({ status: 'pending' })
+      .mockResolvedValueOnce({ status: 'pending' })
+      .mockResolvedValueOnce({
+        status: 'success',
+        sessionId: 'sess-recovered-ack-pending',
+      });
     fetchSessionById.mockResolvedValue({
       id: 'sess-recovered-ack-pending',
       createdAt: Date.now(),
@@ -1652,6 +1735,11 @@ describe('createCliActionExecutor', () => {
       },
     });
 
+    let nowMs = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
+      nowMs += 1_000;
+      return nowMs;
+    });
     const result = await executor.execute(
       'session.spawn_new',
       {
@@ -1659,7 +1747,7 @@ describe('createCliActionExecutor', () => {
         backendTargetKey: 'agent:codex',
       },
       { surface: 'cli', defaultSessionId: 'sess-1' },
-    );
+    ).finally(() => nowSpy.mockRestore());
 
     expect(result).toMatchObject({
       ok: true,
@@ -1669,8 +1757,11 @@ describe('createCliActionExecutor', () => {
         created: true,
       },
     });
-    expect(resolveDaemonSpawnSessionByNonce).toHaveBeenCalledTimes(1);
-    expect(resolveDaemonSpawnSessionByNonce).toHaveBeenCalledWith(expect.stringMatching(/^[0-9a-f-]{36}$/i));
+    expect(spawnDaemonSession).toHaveBeenCalledTimes(1);
+    expect(resolveDaemonSpawnSessionByNonce).toHaveBeenCalledTimes(5);
+    const sentSpawnNonce = spawnDaemonSession.mock.calls[0]?.[0]?.spawnNonce;
+    expect(sentSpawnNonce).toEqual(expect.stringMatching(/^[0-9a-f-]{36}$/i));
+    expect(resolveDaemonSpawnSessionByNonce).toHaveBeenCalledWith(sentSpawnNonce);
     expect(fetchSessionsPage).not.toHaveBeenCalled();
   });
 

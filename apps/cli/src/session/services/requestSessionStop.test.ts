@@ -1,0 +1,446 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
+import { reloadConfiguration } from '@/configuration';
+import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
+
+const mocks = vi.hoisted(() => ({
+  resolveSessionIdOrPrefix: vi.fn(),
+  stopDaemonSession: vi.fn(),
+  listSessionMarkers: vi.fn(),
+  removeSessionMarker: vi.fn(),
+  fetchSessionByIdCompat: vi.fn(),
+  waitForTrackedRunnerProcessesExit: vi.fn(),
+  isPidSafeHappySessionProcess: vi.fn(),
+  disposeTerminalHost: vi.fn(async () => undefined),
+  updateSessionMetadataWithRetry: vi.fn(),
+  persistedMetadata: {} as Record<string, unknown>,
+}));
+
+vi.mock('@/session/query/resolveSessionId', () => ({
+  resolveSessionIdOrPrefix: mocks.resolveSessionIdOrPrefix,
+}));
+
+vi.mock('@/daemon/controlClient', () => ({
+  stopDaemonSession: mocks.stopDaemonSession,
+}));
+
+vi.mock('@/daemon/sessionRegistry', () => ({
+  listSessionMarkers: mocks.listSessionMarkers,
+  removeSessionMarker: mocks.removeSessionMarker,
+}));
+
+vi.mock('@/session/transport/http/sessionsHttp', () => ({
+  fetchSessionByIdCompat: mocks.fetchSessionByIdCompat,
+}));
+
+vi.mock('@/daemon/sessions/waitForTrackedRunnerProcessesExit', () => ({
+  waitForTrackedRunnerProcessesExit: mocks.waitForTrackedRunnerProcessesExit,
+}));
+
+vi.mock('@/session/metadata/updateSessionMetadataWithRetry', () => ({
+  updateSessionMetadataWithRetry: mocks.updateSessionMetadataWithRetry,
+}));
+
+vi.mock('@/daemon/pidSafety', () => ({
+  isPidSafeHappySessionProcess: mocks.isPidSafeHappySessionProcess,
+}));
+
+vi.mock('@/integrations/terminalHost/defaultRegistry', () => ({
+  createDefaultTerminalHostRegistry: vi.fn(async () => ({
+    zellij: {
+      kind: 'zellij',
+      createOrAttachHost: vi.fn(),
+      injectUserPrompt: vi.fn(),
+      interruptTurn: vi.fn(),
+      evaluateLiveness: vi.fn(),
+      dispose: mocks.disposeTerminalHost,
+    },
+  })),
+}));
+
+describe('requestSessionStop marker fallback', () => {
+  let happyHomeDir = '';
+  const previousHappyHomeDir = process.env.HAPPIER_HOME_DIR;
+  const credentials = {
+    token: 'token-1',
+    encryption: { type: 'legacy' as const, secret: new Uint8Array(32).fill(1) },
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    happyHomeDir = await createTempDir('happier-marker-stop-');
+    process.env.HAPPIER_HOME_DIR = happyHomeDir;
+    reloadConfiguration();
+    mocks.resolveSessionIdOrPrefix.mockResolvedValue({ ok: true, sessionId: 'sess-marker-stop' });
+    mocks.stopDaemonSession.mockResolvedValue({ status: 'not_found' });
+    mocks.listSessionMarkers.mockResolvedValue([{
+      pid: 4242,
+      happySessionId: 'sess-marker-stop',
+      startedBy: 'daemon',
+      processCommandHash: 'a'.repeat(64),
+      respawn: {
+        version: 1,
+        directory: '/tmp/project',
+        terminal: { mode: 'plain' },
+      },
+    }]);
+    mocks.isPidSafeHappySessionProcess.mockResolvedValue(true);
+    mocks.waitForTrackedRunnerProcessesExit.mockResolvedValue(true);
+    mocks.fetchSessionByIdCompat.mockResolvedValue({ id: 'sess-marker-stop', active: false });
+    mocks.removeSessionMarker.mockResolvedValue(undefined);
+    mocks.persistedMetadata = {};
+    mocks.updateSessionMetadataWithRetry.mockImplementation(async ({ updater }: {
+      updater: (metadata: Record<string, unknown>) => Record<string, unknown>;
+    }) => {
+      mocks.persistedMetadata = updater(mocks.persistedMetadata);
+      return { version: 2, metadata: mocks.persistedMetadata };
+    });
+    vi.spyOn(process, 'kill').mockImplementation(() => true as never);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (previousHappyHomeDir === undefined) delete process.env.HAPPIER_HOME_DIR;
+    else process.env.HAPPIER_HOME_DIR = previousHappyHomeDir;
+    reloadConfiguration();
+    if (happyHomeDir) await removeTempDir(happyHomeDir);
+    happyHomeDir = '';
+  });
+
+  it('observes exact marker PID exit before treating the aggregate stop as complete', async () => {
+    const { requestSessionStop } = await import('./requestSessionStop');
+
+    await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
+      ok: true,
+      sessionId: 'sess-marker-stop',
+      stopped: true,
+    });
+
+    expect(mocks.waitForTrackedRunnerProcessesExit).toHaveBeenCalledWith({
+      runners: [{ pid: 4242 }],
+      timeoutMs: expect.any(Number),
+      pollIntervalMs: expect.any(Number),
+    });
+  });
+
+  it('does not start marker fallback for a transport-ambiguous plain runner without exact attachment identity', async () => {
+    mocks.stopDaemonSession.mockRejectedValue(new Error('local control timeout'));
+
+    const { requestSessionStop } = await import('./requestSessionStop');
+    await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
+      ok: true,
+      sessionId: 'sess-marker-stop',
+      stopped: false,
+    });
+
+    expect(mocks.waitForTrackedRunnerProcessesExit).not.toHaveBeenCalled();
+  });
+
+  it('does not let pre-existing inactive metadata turn a daemon-incomplete stop into success', async () => {
+    mocks.stopDaemonSession.mockResolvedValue({
+      status: 'incomplete',
+      reason: 'runner_exit_timeout',
+    });
+
+    const { requestSessionStop } = await import('./requestSessionStop');
+    await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
+      ok: true,
+      sessionId: 'sess-marker-stop',
+      stopped: false,
+    });
+
+    expect(mocks.waitForTrackedRunnerProcessesExit).not.toHaveBeenCalled();
+    expect(mocks.fetchSessionByIdCompat).not.toHaveBeenCalled();
+  });
+
+  it('does not let pre-existing inactive metadata turn an incomplete marker stop into success', async () => {
+    mocks.waitForTrackedRunnerProcessesExit.mockResolvedValue(false);
+
+    const { requestSessionStop } = await import('./requestSessionStop');
+    await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
+      ok: true,
+      sessionId: 'sess-marker-stop',
+      stopped: false,
+    });
+
+    expect(mocks.fetchSessionByIdCompat).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when a terminal-bearing marker has a corrupt attachment descriptor', async () => {
+    mocks.listSessionMarkers.mockResolvedValue([{
+      pid: 4242,
+      happySessionId: 'sess-marker-stop',
+      startedBy: 'daemon',
+      processCommandHash: 'a'.repeat(64),
+      respawn: {
+        version: 1,
+        directory: '/tmp/project',
+        terminal: { mode: 'tmux', tmux: { sessionName: 'owned-host' } },
+      },
+    }]);
+    const sessionsDir = join(happyHomeDir, 'terminal', 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    await writeFile(join(sessionsDir, 'sess-marker-stop.json'), 'not-json', 'utf8');
+
+    const { requestSessionStop } = await import('./requestSessionStop');
+    await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
+      ok: true,
+      sessionId: 'sess-marker-stop',
+      stopped: false,
+    });
+
+    expect(mocks.removeSessionMarker).not.toHaveBeenCalled();
+    expect(mocks.fetchSessionByIdCompat).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when terminal-bearing marker topology survives but its descriptor is absent', async () => {
+    mocks.listSessionMarkers.mockResolvedValue([{
+      pid: 4242,
+      happySessionId: 'sess-marker-stop',
+      startedBy: 'daemon',
+      processCommandHash: 'a'.repeat(64),
+      respawn: {
+        version: 1,
+        directory: '/tmp/project',
+        terminal: { mode: 'tmux', tmux: { sessionName: 'owned-host' } },
+      },
+    }]);
+
+    const { requestSessionStop } = await import('./requestSessionStop');
+    await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
+      ok: true,
+      sessionId: 'sess-marker-stop',
+      stopped: false,
+    });
+
+    expect(mocks.removeSessionMarker).not.toHaveBeenCalled();
+    expect(mocks.fetchSessionByIdCompat).not.toHaveBeenCalled();
+  });
+
+  it('retires matching serviceability when transport ambiguity falls back to an exact preserved host', async () => {
+    const attachmentId = 'attachment-preserved-stop';
+    mocks.listSessionMarkers.mockResolvedValue([{
+      pid: 4242,
+      happySessionId: 'sess-marker-stop',
+      startedBy: 'daemon',
+      processCommandHash: 'a'.repeat(64),
+      respawn: {
+        version: 1,
+        directory: '/tmp/project',
+        terminal: {
+          mode: 'zellij',
+          zellij: {
+            sessionName: 'preserved-host',
+            paneId: 'terminal_1',
+            socketDirV1: '/tmp/preserved-zellij',
+          },
+        },
+      },
+    }]);
+    const sessionsDir = join(happyHomeDir, 'terminal', 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    await writeFile(join(sessionsDir, 'sess-marker-stop.json'), JSON.stringify({
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-marker-stop',
+      handle: {
+        attachmentId,
+        kind: 'zellij',
+        sessionName: 'preserved-host',
+        paneId: 'terminal_1',
+        socketDir: '/tmp/preserved-zellij',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          liveProbe: 'required',
+        },
+      },
+      terminal: {
+        mode: 'zellij',
+        zellij: {
+          sessionName: 'preserved-host',
+          paneId: 'terminal_1',
+          socketDirV1: '/tmp/preserved-zellij',
+        },
+      },
+      updatedAt: 1,
+    }), 'utf8');
+    mocks.waitForTrackedRunnerProcessesExit.mockResolvedValue(true);
+    mocks.stopDaemonSession.mockRejectedValue(new Error('local control timeout'));
+    mocks.persistedMetadata = {
+      terminal: {
+        mode: 'zellij',
+        controlServiceabilityV1: {
+          v: 1,
+          attachmentId,
+          state: 'recoverable_unservable',
+          observedAt: 100,
+          reason: 'control_descriptor_missing',
+        },
+      },
+    };
+
+    const { requestSessionStop } = await import('./requestSessionStop');
+    await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
+      ok: true,
+      sessionId: 'sess-marker-stop',
+      stopped: true,
+    });
+
+    expect(mocks.isPidSafeHappySessionProcess).not.toHaveBeenCalled();
+    expect(mocks.disposeTerminalHost).toHaveBeenCalledTimes(1);
+    expect(mocks.persistedMetadata).toMatchObject({
+      terminal: {
+        mode: 'zellij',
+        controlServiceabilityV1: {
+          attachmentId,
+          state: 'unknown',
+          reason: 'attachment_retired',
+          retired: true,
+        },
+      },
+    });
+  });
+
+  it('preserves replacement serviceability during transport-ambiguous exact marker fallback', async () => {
+    const attachmentId = 'attachment-retired';
+    const replacementAttachmentId = 'attachment-replacement';
+    mocks.stopDaemonSession.mockRejectedValue(new Error('local control timeout'));
+    mocks.listSessionMarkers.mockResolvedValue([{
+      pid: 4242,
+      happySessionId: 'sess-marker-stop',
+      startedBy: 'daemon',
+      processCommandHash: 'a'.repeat(64),
+      respawn: {
+        version: 1,
+        directory: '/tmp/project',
+        terminal: { mode: 'zellij', zellij: { sessionName: 'preserved-host', paneId: 'terminal_1', socketDirV1: '/tmp/preserved-zellij' } },
+      },
+    }]);
+    const sessionsDir = join(happyHomeDir, 'terminal', 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    await writeFile(join(sessionsDir, 'sess-marker-stop.json'), JSON.stringify({
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-marker-stop',
+      handle: {
+        attachmentId,
+        kind: 'zellij',
+        sessionName: 'preserved-host',
+        paneId: 'terminal_1',
+        socketDir: '/tmp/preserved-zellij',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared', locality: 'same_machine', liveProbe: 'required' },
+      },
+      terminal: { mode: 'zellij', zellij: { sessionName: 'preserved-host', paneId: 'terminal_1', socketDirV1: '/tmp/preserved-zellij' } },
+      updatedAt: 1,
+    }), 'utf8');
+    mocks.persistedMetadata = {
+      terminal: {
+        mode: 'zellij',
+        controlServiceabilityV1: { v: 1, attachmentId: replacementAttachmentId, state: 'servable', observedAt: 200 },
+      },
+    };
+
+    const { requestSessionStop } = await import('./requestSessionStop');
+    await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
+      ok: true,
+      sessionId: 'sess-marker-stop',
+      stopped: true,
+    });
+    expect(mocks.persistedMetadata).toMatchObject({
+      terminal: { controlServiceabilityV1: { attachmentId: replacementAttachmentId, state: 'servable' } },
+    });
+  });
+
+  it('does not let an ambiguous retry destroy an attachment installed after the daemon request began', async () => {
+    const originalAttachmentId = 'attachment-before-daemon-stop';
+    const replacementAttachmentId = 'attachment-after-daemon-stop';
+    mocks.listSessionMarkers.mockResolvedValue([{
+      pid: 4242,
+      happySessionId: 'sess-marker-stop',
+      startedBy: 'daemon',
+      processCommandHash: 'a'.repeat(64),
+      respawn: {
+        version: 1,
+        directory: '/tmp/project',
+        terminal: { mode: 'zellij', zellij: { sessionName: 'preserved-host', paneId: 'terminal_1', socketDirV1: '/tmp/preserved-zellij' } },
+      },
+    }]);
+    const sessionsDir = join(happyHomeDir, 'terminal', 'sessions');
+    const descriptorPath = join(sessionsDir, 'sess-marker-stop.json');
+    await mkdir(sessionsDir, { recursive: true });
+    const descriptor = (attachmentId: string) => ({
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-marker-stop',
+      handle: {
+        attachmentId,
+        kind: 'zellij',
+        sessionName: 'preserved-host',
+        paneId: 'terminal_1',
+        socketDir: '/tmp/preserved-zellij',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared', locality: 'same_machine', liveProbe: 'required' },
+      },
+      terminal: { mode: 'zellij', zellij: { sessionName: 'preserved-host', paneId: 'terminal_1', socketDirV1: '/tmp/preserved-zellij' } },
+      updatedAt: attachmentId === originalAttachmentId ? 1 : 2,
+    });
+    await writeFile(descriptorPath, JSON.stringify(descriptor(originalAttachmentId)), 'utf8');
+    mocks.stopDaemonSession.mockImplementation(async () => {
+      await writeFile(descriptorPath, JSON.stringify(descriptor(replacementAttachmentId)), 'utf8');
+      throw new Error('local control timeout');
+    });
+
+    const { requestSessionStop } = await import('./requestSessionStop');
+    await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
+      ok: true,
+      sessionId: 'sess-marker-stop',
+      stopped: false,
+    });
+    expect(mocks.disposeTerminalHost).not.toHaveBeenCalled();
+  });
+
+  it('does not report full success when exact marker fallback cannot retire serviceability', async () => {
+    const attachmentId = 'attachment-retirement-failure';
+    mocks.stopDaemonSession.mockRejectedValue(new Error('local control timeout'));
+    mocks.listSessionMarkers.mockResolvedValue([{
+      pid: 4242,
+      happySessionId: 'sess-marker-stop',
+      startedBy: 'daemon',
+      processCommandHash: 'a'.repeat(64),
+      respawn: {
+        version: 1,
+        directory: '/tmp/project',
+        terminal: { mode: 'zellij', zellij: { sessionName: 'preserved-host', paneId: 'terminal_1', socketDirV1: '/tmp/preserved-zellij' } },
+      },
+    }]);
+    const sessionsDir = join(happyHomeDir, 'terminal', 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    await writeFile(join(sessionsDir, 'sess-marker-stop.json'), JSON.stringify({
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-marker-stop',
+      handle: {
+        attachmentId,
+        kind: 'zellij',
+        sessionName: 'preserved-host',
+        paneId: 'terminal_1',
+        socketDir: '/tmp/preserved-zellij',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared', locality: 'same_machine', liveProbe: 'required' },
+      },
+      terminal: { mode: 'zellij', zellij: { sessionName: 'preserved-host', paneId: 'terminal_1', socketDirV1: '/tmp/preserved-zellij' } },
+      updatedAt: 1,
+    }), 'utf8');
+    mocks.updateSessionMetadataWithRetry.mockRejectedValueOnce(new Error('metadata persistence unavailable'));
+
+    const { requestSessionStop } = await import('./requestSessionStop');
+    await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
+      ok: true,
+      sessionId: 'sess-marker-stop',
+      stopped: false,
+    });
+    expect(mocks.disposeTerminalHost).toHaveBeenCalledTimes(1);
+  });
+});

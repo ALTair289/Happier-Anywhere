@@ -1,6 +1,13 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 describe('sendSessionMessage', () => {
+    beforeEach(() => {
+        vi.doMock('@/api/session/pendingQueueV2Transport', async (importOriginal) => ({
+            ...await importOriginal<typeof import('@/api/session/pendingQueueV2Transport')>(),
+            enqueuePendingQueueV2MessageViaHttp: vi.fn(async () => undefined),
+        }));
+    });
+
     afterEach(() => {
         vi.doUnmock('@/api/session/pendingQueueV2Transport');
         vi.resetModules();
@@ -62,7 +69,7 @@ describe('sendSessionMessage', () => {
             ...defaultSessionSnapshot,
             ...(options.sessionSnapshot ?? {}),
         }));
-        const callSessionRpc = vi.fn(async () => ({ ok: true }));
+        const callSessionRpc = vi.fn(async (params: { request: { selector: { localId: string } } }) => ({ ok: true, result: 'dispatch_issued', localId: params.request.selector.localId }));
         const waitForIdleViaSocket = vi.fn(async () => ({ idle: true as const, observedAt: 456 }));
 
         vi.doMock('@/api/session/fetchEncryptedTranscriptWindow', () => ({
@@ -221,7 +228,7 @@ describe('sendSessionMessage', () => {
             pendingPermissionRequestCount: 0,
             pendingUserActionRequestCount: 0,
         }));
-        const callSessionRpc = vi.fn(async () => ({ ok: true }));
+        const callSessionRpc = vi.fn(async (params: { request: { selector: { localId: string } } }) => ({ ok: true, result: 'dispatch_issued', localId: params.request.selector.localId }));
         const waitForIdleViaSocket = vi.fn(async () => ({ idle: true as const, observedAt: 456 }));
 
         vi.doMock('@/api/session/fetchEncryptedTranscriptWindow', () => ({
@@ -310,7 +317,7 @@ describe('sendSessionMessage', () => {
             pendingPermissionRequestCount: 0,
             pendingUserActionRequestCount: 0,
         }));
-        const callSessionRpc = vi.fn(async () => ({ ok: true }));
+        const callSessionRpc = vi.fn(async (params: { request: { selector: { localId: string } } }) => ({ ok: true, result: 'dispatch_issued', localId: params.request.selector.localId }));
         const waitForIdleViaSocket = vi.fn(async () => ({ idle: true as const, observedAt: 456 }));
 
         vi.doMock('@/api/session/fetchEncryptedTranscriptWindow', () => ({
@@ -387,7 +394,7 @@ describe('sendSessionMessage', () => {
             pendingPermissionRequestCount: 0,
             pendingUserActionRequestCount: 0,
         }));
-        const callSessionRpc = vi.fn(async () => ({ ok: true }));
+        const callSessionRpc = vi.fn(async (params: { request: { selector: { localId: string } } }) => ({ ok: true, result: 'dispatch_issued', localId: params.request.selector.localId }));
         const waitForIdleViaSocket = vi.fn(async () => ({ idle: true as const, observedAt: 456 }));
 
         vi.doMock('@/api/session/fetchEncryptedTranscriptWindow', () => ({
@@ -398,6 +405,7 @@ describe('sendSessionMessage', () => {
             waitForTranscriptEncryptedMessageByLocalId,
         }));
         vi.doMock('@/api/session/pendingQueueV2Transport', () => ({
+            enqueuePendingQueueV2MessageViaHttp: vi.fn(async () => undefined),
             materializeNextPendingQueueV2MessageViaHttp: vi.fn(async () => ({
                 didMaterialize: false,
                 localId: null,
@@ -466,6 +474,75 @@ describe('sendSessionMessage', () => {
         expect(fetchEncryptedTranscriptPageAfterSeq).not.toHaveBeenCalled();
     });
 
+    it('keeps an unavailable pending projection distinct from an authoritative missing prompt', async () => {
+        const waitForTranscriptEncryptedMessageByLocalId = vi.fn(async () => null);
+        const readBlockedPendingQueueV2DeliveryByLocalIdFromServer = vi.fn(async () => {
+            throw new Error('Invalid pending queue delivery status projection');
+        });
+
+        vi.doMock('@/api/session/fetchEncryptedTranscriptWindow', () => ({
+            fetchEncryptedTranscriptPageAfterSeq: vi.fn(async () => []),
+            fetchEncryptedTranscriptPageLatest: vi.fn(async () => []),
+        }));
+        vi.doMock('@/api/session/transcriptMessageLookup', () => ({
+            waitForTranscriptEncryptedMessageByLocalId,
+        }));
+        vi.doMock('@/api/session/pendingQueueV2Transport', () => ({
+            enqueuePendingQueueV2MessageViaHttp: vi.fn(async () => undefined),
+            materializeNextPendingQueueV2MessageViaHttp: vi.fn(async () => ({
+                didMaterialize: false,
+                localId: null,
+                didWrite: false,
+            })),
+            readBlockedPendingQueueV2DeliveryByLocalIdFromServer,
+        }));
+        vi.doMock('@/session/transport/http/sessionsHttp', () => ({
+            fetchSessionById: vi.fn(async () => null),
+        }));
+        vi.doMock('@/session/transport/rpc/sessionRpc', () => ({
+            callSessionRpc: vi.fn(async (params: { request: { selector: { localId: string } } }) => ({ ok: true, result: 'dispatch_issued', localId: params.request.selector.localId })),
+        }));
+        vi.doMock('@/session/transport/socket/sessionSocketSendMessage', () => ({
+            sendSessionMessageViaSocketCommitted: vi.fn(async () => undefined),
+        }));
+        vi.doMock('@/session/transport/socket/sessionSocketAgentState', () => ({
+            waitForIdleViaSocket: vi.fn(async () => ({ idle: true as const, observedAt: 456 })),
+        }));
+        vi.doMock('./resolveSessionTransportContext', () => ({
+            resolveSessionTransportContext: vi.fn(async () => ({
+                ok: true,
+                sessionId: 'sess-1',
+                mode: 'plain',
+                ctx: { encryptionKey: new Uint8Array(32).fill(1), encryptionVariant: 'dataKey' },
+                rawSession: {
+                    id: 'sess-1',
+                    active: true,
+                    metadata: '{}',
+                    agentState: null,
+                    latestTurnStatus: 'completed',
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                },
+            })),
+        }));
+
+        const { sendSessionMessage } = await import('./sendSessionMessage');
+        const machineKey = new Uint8Array(32).fill(1);
+
+        await expect(sendSessionMessage({
+            credentials: { token: 'token', encryption: { type: 'dataKey', publicKey: machineKey, machineKey } },
+            idOrPrefix: 'sess-1',
+            message: 'hello',
+            wait: true,
+            timeoutMs: 10,
+            localId: 'local-user',
+        })).resolves.toMatchObject({
+            ok: false,
+            code: 'wait_failed',
+        });
+        expect(readBlockedPendingQueueV2DeliveryByLocalIdFromServer).toHaveBeenCalled();
+    });
+
     it('does not report waited success when socket idle only observed a bare ready event after the current user turn', async () => {
         const userMessageRow = {
             id: 'msg-user',
@@ -499,7 +576,7 @@ describe('sendSessionMessage', () => {
             pendingPermissionRequestCount: 0,
             pendingUserActionRequestCount: 0,
         }));
-        const callSessionRpc = vi.fn(async () => ({ ok: true }));
+        const callSessionRpc = vi.fn(async (params: { request: { selector: { localId: string } } }) => ({ ok: true, result: 'dispatch_issued', localId: params.request.selector.localId }));
         const waitForIdleViaSocket = vi.fn(async () => ({ idle: true as const, observedAt: 456 }));
 
         vi.doMock('@/api/session/fetchEncryptedTranscriptWindow', () => ({
@@ -756,7 +833,7 @@ describe('sendSessionMessage', () => {
             pendingPermissionRequestCount: 0,
             pendingUserActionRequestCount: 0,
         }));
-        const callSessionRpc = vi.fn(async () => ({ ok: true }));
+        const callSessionRpc = vi.fn(async (params: { request: { selector: { localId: string } } }) => ({ ok: true, result: 'dispatch_issued', localId: params.request.selector.localId }));
         const waitForIdleViaSocket = vi.fn(async (request: Readonly<{
             initialTurnActivity?: Readonly<{ turnInFlight?: boolean }>;
         }>) => {
@@ -832,15 +909,19 @@ describe('sendSessionMessage', () => {
         }
     });
 
-    it('uses an explicit localId for runtime RPC delivery when provided', async () => {
+    it('uses an explicit localId and send_now action for durable delivery, then wakes the canonical owner', async () => {
         const callSessionRpc = vi.fn(async () => ({ ok: true }));
         const sendSessionMessageViaSocketCommitted = vi.fn(async () => undefined);
+        const enqueuePendingQueueV2MessageViaHttp = vi.fn(async () => undefined);
 
         vi.doMock('@/session/transport/rpc/sessionRpc', () => ({
             callSessionRpc,
         }));
         vi.doMock('@/session/transport/socket/sessionSocketSendMessage', () => ({
             sendSessionMessageViaSocketCommitted,
+        }));
+        vi.doMock('@/api/session/pendingQueueV2Transport', () => ({
+            enqueuePendingQueueV2MessageViaHttp,
         }));
         vi.doMock('./resolveSessionTransportContext', () => ({
             resolveSessionTransportContext: vi.fn(async () => ({
@@ -867,7 +948,69 @@ describe('sendSessionMessage', () => {
             credentials: { token: 'token', encryption: { type: 'dataKey', publicKey: machineKey, machineKey } },
             idOrPrefix: 'sess-1',
             message: 'continue',
+            localId: ' connected-service-continuation:test\n',
+            wait: false,
+            timeoutMs: 1,
+        })).resolves.toEqual({
+            ok: true,
+            sessionId: 'sess-1',
+            localId: ' connected-service-continuation:test\n',
+            waited: false,
+        });
+
+        expect(enqueuePendingQueueV2MessageViaHttp).toHaveBeenCalledWith(expect.objectContaining({
+            token: 'token',
+            sessionId: 'sess-1',
+            body: expect.objectContaining({
+                localId: ' connected-service-continuation:test\n',
+                requestedAction: { v: 1, kind: 'send_now' },
+            }),
+        }));
+        expect(callSessionRpc).toHaveBeenCalledOnce();
+        expect(callSessionRpc).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'sess-1:session.pendingQueue.wake.v1',
+            request: { protocolVersion: 1 },
+        }));
+        expect(sendSessionMessageViaSocketCommitted).not.toHaveBeenCalled();
+    });
+
+    it('passes continuation replacement admission to Pending and reports atomic suppression', async () => {
+        const callSessionRpc = vi.fn(async () => ({ ok: true }));
+        const enqueuePendingQueueV2MessageViaHttp = vi.fn(async (_input: unknown) => ({
+            didWrite: false,
+            terminal: false,
+            suppressed: true,
+        }));
+
+        vi.doMock('@/session/transport/rpc/sessionRpc', () => ({ callSessionRpc }));
+        vi.doMock('@/api/session/pendingQueueV2Transport', () => ({ enqueuePendingQueueV2MessageViaHttp }));
+        vi.doMock('./resolveSessionTransportContext', () => ({
+            resolveSessionTransportContext: vi.fn(async () => ({
+                ok: true,
+                sessionId: 'sess-1',
+                mode: 'e2ee',
+                ctx: { encryptionKey: new Uint8Array(32).fill(1), encryptionVariant: 'dataKey' },
+                rawSession: {
+                    id: 'sess-1',
+                    active: true,
+                    metadata: '{}',
+                    agentState: null,
+                    latestTurnStatus: 'completed',
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                },
+            })),
+        }));
+
+        const { sendSessionMessage } = await import('./sendSessionMessage');
+        const machineKey = new Uint8Array(32).fill(1);
+
+        await expect(sendSessionMessage({
+            credentials: { token: 'token', encryption: { type: 'dataKey', publicKey: machineKey, machineKey } },
+            idOrPrefix: 'sess-1',
+            message: 'continue',
             localId: 'connected-service-continuation:test',
+            pendingAdmissionMode: 'continuation_if_no_queued_user_input',
             wait: false,
             timeoutMs: 1,
         })).resolves.toEqual({
@@ -875,20 +1018,36 @@ describe('sendSessionMessage', () => {
             sessionId: 'sess-1',
             localId: 'connected-service-continuation:test',
             waited: false,
+            suppressed: true,
+        });
+        await sendSessionMessage({
+            credentials: { token: 'token', encryption: { type: 'dataKey', publicKey: machineKey, machineKey } },
+            idOrPrefix: 'sess-1',
+            message: 'continue',
+            localId: 'connected-service-continuation:test',
+            pendingAdmissionMode: 'continuation_if_no_queued_user_input',
+            wait: false,
+            timeoutMs: 1,
         });
 
-        expect(callSessionRpc).toHaveBeenCalledWith(expect.objectContaining({
-            request: expect.objectContaining({
+        expect(enqueuePendingQueueV2MessageViaHttp).toHaveBeenCalledWith(expect.objectContaining({
+            token: 'token',
+            sessionId: 'sess-1',
+            body: expect.objectContaining({
                 localId: 'connected-service-continuation:test',
+                requestedAction: { v: 1, kind: 'send_now' },
+                deliveryMode: 'continuation_if_no_queued_user_input',
             }),
         }));
-        expect(sendSessionMessageViaSocketCommitted).not.toHaveBeenCalled();
+        expect(enqueuePendingQueueV2MessageViaHttp.mock.calls[1]?.[0])
+            .toEqual(enqueuePendingQueueV2MessageViaHttp.mock.calls[0]?.[0]);
+        expect(callSessionRpc).not.toHaveBeenCalled();
     });
 
-    it('invokes onCommittedViaSocket when the message is committed through the pending queue path', async () => {
+    it('durably enqueues an inactive prompt before one user-authorized resume on its recorded machine', async () => {
         const sendSessionMessageViaSocketCommitted = vi.fn(async () => undefined);
-        const materializeNextPendingQueueV2MessageViaHttp = vi.fn(async () => ({ didMaterialize: true }));
-        const onCommittedViaSocket = vi.fn(async () => undefined);
+        const enqueuePendingQueueV2MessageViaHttp = vi.fn(async () => undefined);
+        const requestInactiveSessionResume = vi.fn(async () => ({ ok: true as const }));
 
         vi.doMock('@/session/transport/rpc/sessionRpc', () => ({
             callSessionRpc: vi.fn(async () => ({ ok: true })),
@@ -897,7 +1056,10 @@ describe('sendSessionMessage', () => {
             sendSessionMessageViaSocketCommitted,
         }));
         vi.doMock('@/api/session/pendingQueueV2Transport', () => ({
-            materializeNextPendingQueueV2MessageViaHttp,
+            enqueuePendingQueueV2MessageViaHttp,
+        }));
+        vi.doMock('./requestInactiveSessionResume', () => ({
+            requestInactiveSessionResume,
         }));
         vi.doMock('./resolveSessionTransportContext', () => ({
             resolveSessionTransportContext: vi.fn(async () => ({
@@ -908,7 +1070,16 @@ describe('sendSessionMessage', () => {
                 rawSession: {
                     id: 'sess-1',
                     active: false,
-                    metadata: '{}',
+                    encryptionMode: 'plain',
+                    path: '/repo',
+                    machineId: 'machine-session',
+                    seq: 41,
+                    metadata: JSON.stringify({
+                        agentId: 'claude',
+                        path: '/repo',
+                        machineId: 'machine-session',
+                        claudeSessionId: 'provider-session-1',
+                    }),
                     agentState: null,
                     latestTurnStatus: 'completed',
                     pendingPermissionRequestCount: 0,
@@ -927,7 +1098,6 @@ describe('sendSessionMessage', () => {
             localId: 'connected-service-continuation:test',
             wait: false,
             timeoutMs: 1,
-            onCommittedViaSocket,
         })).resolves.toEqual({
             ok: true,
             sessionId: 'sess-1',
@@ -935,21 +1105,142 @@ describe('sendSessionMessage', () => {
             waited: false,
         });
 
-        expect(sendSessionMessageViaSocketCommitted).toHaveBeenCalledTimes(1);
-        expect(materializeNextPendingQueueV2MessageViaHttp).toHaveBeenCalledWith({
+        expect(enqueuePendingQueueV2MessageViaHttp).toHaveBeenCalledWith(expect.objectContaining({
             token: 'token',
             sessionId: 'sess-1',
-        });
-        expect(onCommittedViaSocket).toHaveBeenCalledWith({
+            body: expect.objectContaining({ localId: 'connected-service-continuation:test' }),
+        }));
+        expect(enqueuePendingQueueV2MessageViaHttp.mock.invocationCallOrder[0]).toBeLessThan(
+            requestInactiveSessionResume.mock.invocationCallOrder[0],
+        );
+        expect(requestInactiveSessionResume).toHaveBeenCalledWith(expect.objectContaining({
             sessionId: 'sess-1',
             localId: 'connected-service-continuation:test',
+            rawSession: expect.objectContaining({
+                machineId: 'machine-session',
+                path: '/repo',
+            }),
+            metadata: expect.objectContaining({
+                machineId: 'machine-session',
+                path: '/repo',
+            }),
+        }));
+        await expect(sendSessionMessage({
+            credentials: { token: 'token', encryption: { type: 'dataKey', publicKey: machineKey, machineKey } },
+            idOrPrefix: 'sess-1',
+            message: 'continue later',
+            localId: 'connected-service-continuation:pending-only',
+            resumeInactiveSession: false,
+            wait: false,
+            timeoutMs: 1,
+        })).resolves.toEqual({
+            ok: true,
+            sessionId: 'sess-1',
+            localId: 'connected-service-continuation:pending-only',
+            waited: false,
         });
+        expect(requestInactiveSessionResume).toHaveBeenCalledTimes(1);
+        expect(sendSessionMessageViaSocketCommitted).not.toHaveBeenCalled();
     });
 
-    it('invokes onCommittedViaSocket when runtime RPC falls back to socket-committed delivery', async () => {
+    it('does not resume an inactive session when the durable enqueue reports a terminal replay', async () => {
+        const enqueuePendingQueueV2MessageViaHttp = vi.fn(async () => ({
+            didWrite: false,
+            terminal: true as const,
+        }));
+        const requestInactiveSessionResume = vi.fn(async () => ({ ok: true as const }));
+
+        vi.doMock('@/api/session/pendingQueueV2Transport', () => ({ enqueuePendingQueueV2MessageViaHttp }));
+        vi.doMock('./requestInactiveSessionResume', () => ({ requestInactiveSessionResume }));
+        vi.doMock('./resolveSessionTransportContext', () => ({
+            resolveSessionTransportContext: vi.fn(async () => ({
+                ok: true,
+                sessionId: 'sess-1',
+                mode: 'plain',
+                ctx: { encryptionKey: new Uint8Array(32).fill(1), encryptionVariant: 'dataKey' },
+                rawSession: {
+                    id: 'sess-1',
+                    active: false,
+                    encryptionMode: 'plain',
+                    path: '/repo',
+                    machineId: 'machine-session',
+                    metadata: JSON.stringify({ agentId: 'claude', path: '/repo', machineId: 'machine-session' }),
+                },
+            })),
+        }));
+
+        const { sendSessionMessage } = await import('./sendSessionMessage');
+        const machineKey = new Uint8Array(32).fill(1);
+        await expect(sendSessionMessage({
+            credentials: { token: 'token', encryption: { type: 'dataKey', publicKey: machineKey, machineKey } },
+            idOrPrefix: 'sess-1',
+            message: 'continue',
+            localId: 'already-accepted-local-id',
+            wait: false,
+            timeoutMs: 1,
+        })).resolves.toEqual({
+            ok: true,
+            sessionId: 'sess-1',
+            localId: 'already-accepted-local-id',
+            waited: false,
+        });
+
+        expect(enqueuePendingQueueV2MessageViaHttp).toHaveBeenCalledTimes(1);
+        expect(requestInactiveSessionResume).not.toHaveBeenCalled();
+    });
+
+    it('retains inactive custody and reports resume failure without an alternate wake or transcript commit', async () => {
+        const enqueuePendingQueueV2MessageViaHttp = vi.fn(async () => undefined);
+        const callSessionRpc = vi.fn(async (params: { request: { selector: { localId: string } } }) => ({ ok: true, result: 'dispatch_issued', localId: params.request.selector.localId }));
+        const requestInactiveSessionResume = vi.fn(async () => ({
+            ok: false as const,
+            code: 'timeout' as const,
+            message: 'Machine resume acknowledgement timed out',
+        }));
+
+        vi.doMock('@/api/session/pendingQueueV2Transport', () => ({ enqueuePendingQueueV2MessageViaHttp }));
+        vi.doMock('@/session/transport/rpc/sessionRpc', () => ({ callSessionRpc }));
+        vi.doMock('./requestInactiveSessionResume', () => ({ requestInactiveSessionResume }));
+        vi.doMock('./resolveSessionTransportContext', () => ({
+            resolveSessionTransportContext: vi.fn(async () => ({
+                ok: true,
+                sessionId: 'sess-1',
+                mode: 'plain',
+                ctx: { encryptionKey: new Uint8Array(32).fill(1), encryptionVariant: 'dataKey' },
+                rawSession: {
+                    id: 'sess-1',
+                    active: false,
+                    encryptionMode: 'plain',
+                    path: '/repo',
+                    machineId: 'machine-session',
+                    metadata: JSON.stringify({ agentId: 'claude', path: '/repo', machineId: 'machine-session' }),
+                },
+            })),
+        }));
+
+        const { sendSessionMessage } = await import('./sendSessionMessage');
+        const machineKey = new Uint8Array(32).fill(1);
+        await expect(sendSessionMessage({
+            credentials: { token: 'token', encryption: { type: 'dataKey', publicKey: machineKey, machineKey } },
+            idOrPrefix: 'sess-1',
+            message: 'continue',
+            localId: 'local-timeout',
+            wait: false,
+            timeoutMs: 1,
+        })).resolves.toEqual({
+            ok: false,
+            code: 'timeout',
+            message: 'Machine resume acknowledgement timed out',
+        });
+
+        expect(enqueuePendingQueueV2MessageViaHttp).toHaveBeenCalledTimes(1);
+        expect(requestInactiveSessionResume).toHaveBeenCalledTimes(1);
+        expect(callSessionRpc).not.toHaveBeenCalled();
+    });
+
+    it('retains pending custody without transcript fallback when the canonical wake is unavailable', async () => {
         const sendSessionMessageViaSocketCommitted = vi.fn(async () => undefined);
-        const materializeNextPendingQueueV2MessageViaHttp = vi.fn(async () => ({ didMaterialize: true }));
-        const onCommittedViaSocket = vi.fn(async () => undefined);
+        const enqueuePendingQueueV2MessageViaHttp = vi.fn(async () => undefined);
 
         vi.doMock('@/session/transport/rpc/sessionRpc', () => ({
             callSessionRpc: vi.fn(async () => {
@@ -960,7 +1251,7 @@ describe('sendSessionMessage', () => {
             sendSessionMessageViaSocketCommitted,
         }));
         vi.doMock('@/api/session/pendingQueueV2Transport', () => ({
-            materializeNextPendingQueueV2MessageViaHttp,
+            enqueuePendingQueueV2MessageViaHttp,
         }));
         vi.doMock('./resolveSessionTransportContext', () => ({
             resolveSessionTransportContext: vi.fn(async () => ({
@@ -990,7 +1281,6 @@ describe('sendSessionMessage', () => {
             localId: 'connected-service-continuation:test',
             wait: false,
             timeoutMs: 1,
-            onCommittedViaSocket,
         })).resolves.toEqual({
             ok: true,
             sessionId: 'sess-1',
@@ -998,14 +1288,7 @@ describe('sendSessionMessage', () => {
             waited: false,
         });
 
-        expect(sendSessionMessageViaSocketCommitted).toHaveBeenCalledTimes(1);
-        expect(materializeNextPendingQueueV2MessageViaHttp).toHaveBeenCalledWith({
-            token: 'token',
-            sessionId: 'sess-1',
-        });
-        expect(onCommittedViaSocket).toHaveBeenCalledWith({
-            sessionId: 'sess-1',
-            localId: 'connected-service-continuation:test',
-        });
+        expect(enqueuePendingQueueV2MessageViaHttp).toHaveBeenCalledTimes(1);
+        expect(sendSessionMessageViaSocketCommitted).not.toHaveBeenCalled();
     });
 });

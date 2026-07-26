@@ -29,6 +29,7 @@ import { fetchAccountProfile } from '@/api/accountProfile';
 import { getPreferredHostName } from '@/daemon/machine/metadata';
 import type { Credentials } from '@/persistence';
 import { readSettings } from '@/persistence';
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 import { bootstrapAccountSettingsContext } from '@/settings/accountSettings/bootstrapAccountSettingsContext';
 import { createSpawnedSession } from '@/session/services/createSpawnedSession';
 import {
@@ -120,6 +121,9 @@ export type ScheduleInactiveSessionUsageLimitRecoveryCheck = (input: Readonly<{
 
 export type CancelInactiveSessionUsageLimitRecoveryCheck = (input: Readonly<{
   sessionId: string;
+  issueFingerprint: string;
+  armedAtMs: number;
+  runtimeAuthRecoveryAttemptId?: string;
 }>) => void;
 
 /**
@@ -130,6 +134,7 @@ export type CancelInactiveSessionUsageLimitRecoveryCheck = (input: Readonly<{
  */
 export type CancelConnectedServiceRuntimeAuthRecovery = (input: Readonly<{
   sessionId: string;
+  attemptId: string;
 }>) => Promise<unknown> | unknown;
 
 export type NotifyConnectedServiceRuntimeAuthFailure = NotifyRuntimeAuthFailure;
@@ -504,7 +509,7 @@ export function createCliActionInventoryDeps(params: Readonly<{
         ? (args as { backendTargetKey: string }).backendTargetKey
         : undefined;
       const modelId = typeof (args as { modelId?: unknown }).modelId === 'string'
-        ? (args as { modelId: string }).modelId.trim()
+        ? readNonBlankSessionControlIdentifier((args as { modelId: string }).modelId) ?? ''
         : '';
       const optionRegistry = await createOptionRegistry();
       return await optionRegistry.agentsConfigOptionsList({
@@ -532,7 +537,7 @@ export function createCliActionInventoryDeps(params: Readonly<{
       const items = Array.isArray(sessionModes?.availableModes)
         ? sessionModes.availableModes
           .map((entry) => {
-            const modeId = typeof entry?.id === 'string' ? entry.id.trim() : '';
+            const modeId = readNonBlankSessionControlIdentifier(entry?.id) ?? '';
             if (!modeId) return null;
             const label = typeof entry?.name === 'string' && entry.name.trim().length > 0
               ? entry.name.trim()
@@ -592,6 +597,7 @@ export function createCliActionDeps(params: Readonly<{
   let usageLimitRecoveryFeatureEnabledPromise: Promise<boolean> | null = null;
   let accountProfilePromise: Promise<Awaited<ReturnType<typeof fetchAccountProfile>> | null> | null = null;
   const actionFeatureDecisionPromises = new Map<FeatureId, Promise<boolean>>();
+  const ambiguousSpawnActionRequestIds = new Set<string>();
 
   const resolveActionFeatureEnabled = async (featureId: FeatureId): Promise<boolean> => {
     const cached = actionFeatureDecisionPromises.get(featureId);
@@ -964,7 +970,6 @@ export function createCliActionDeps(params: Readonly<{
         credentials: params.credentials,
         metadata,
         rawSession: transport.rawSession,
-        requestProvider,
       }),
       ...(params.resumeInactiveSessionWhenUsageLimitReady
         ? { resumeInactiveSessionWhenReady: params.resumeInactiveSessionWhenUsageLimitReady }
@@ -1043,12 +1048,19 @@ export function createCliActionDeps(params: Readonly<{
       return;
     }
     if (recovery.status === 'cancelled' || recovery.status === 'exhausted') {
-      params.cancelInactiveSessionUsageLimitRecoveryCheck?.({ sessionId });
+      params.cancelInactiveSessionUsageLimitRecoveryCheck?.({
+        sessionId,
+        issueFingerprint: recovery.issueFingerprint,
+        armedAtMs: recovery.armedAtMs,
+        ...(recovery.runtimeAuthRecoveryAttemptId
+          ? { runtimeAuthRecoveryAttemptId: recovery.runtimeAuthRecoveryAttemptId }
+          : {}),
+      });
     }
   };
 
   // Forward only a real per-operation choice as the explicit precedence tier;
-  // the routed owner resolves stored intent, account setting, group policy, and
+  // the routed owner resolves stored intent, group policy, account setting, and
   // provider config when no explicit value was requested (RD-REC-5).
   const readExplicitUsageLimitRecoveryResumePromptMode = (
     explicit?: 'standard' | 'off' | 'custom',
@@ -1252,6 +1264,8 @@ export function createCliActionDeps(params: Readonly<{
       surface,
       callerSurface,
       callerPermissionMode,
+      actionRequestId,
+      resumeActionRequest,
     }) => {
       if (!params.credentials) {
         notSupported();
@@ -1312,7 +1326,41 @@ export function createCliActionDeps(params: Readonly<{
       });
       if (!normalized.ok) return normalized.result;
 
-      const created = await createSpawnedSession(normalized.createParams);
+      const normalizedActionRequestId = readNonBlankSessionControlIdentifier(actionRequestId);
+      const spawnNonce = normalizedActionRequestId
+        ? `session.spawn_new:${params.sessionId}:${normalizedActionRequestId}`
+        : null;
+      const resumeOnly = Boolean(
+        spawnNonce
+        && (resumeActionRequest === true || ambiguousSpawnActionRequestIds.has(spawnNonce)),
+      );
+      if (spawnNonce && !resumeOnly) {
+        ambiguousSpawnActionRequestIds.add(spawnNonce);
+      }
+
+      let created: Awaited<ReturnType<typeof createSpawnedSession>>;
+      try {
+        created = await createSpawnedSession({
+          ...normalized.createParams,
+          ...(spawnNonce ? { spawnNonce } : {}),
+          ...(resumeOnly ? { resumeOnly: true } : {}),
+        });
+      } catch (error) {
+        const details = error && typeof error === 'object'
+          ? (error as { details?: unknown }).details
+          : null;
+        const ambiguousNonce = details && typeof details === 'object'
+          && typeof (details as { spawnNonce?: unknown }).spawnNonce === 'string'
+          ? (details as { spawnNonce: string }).spawnNonce
+          : null;
+        if (spawnNonce && ambiguousNonce !== spawnNonce) {
+          ambiguousSpawnActionRequestIds.delete(spawnNonce);
+        }
+        throw error;
+      }
+      if (spawnNonce) {
+        ambiguousSpawnActionRequestIds.delete(spawnNonce);
+      }
 
       return {
         type: 'success',
@@ -1407,7 +1455,7 @@ export function createCliActionDeps(params: Readonly<{
         ...(modelOverride === null
           ? { modelOverride: null }
           : typeof modelOverride === 'string' && modelOverride.trim().length > 0
-            ? { modelOverride: modelOverride.trim() }
+            ? { modelOverride }
             : {}),
       });
       if (!res.ok) {
@@ -1474,7 +1522,7 @@ export function createCliActionDeps(params: Readonly<{
       if (!params.credentials) {
         return { ok: false, errorCode: 'not_authenticated', error: 'not_authenticated' };
       }
-      const normalizedModelId = String(modelId ?? '').trim();
+      const normalizedModelId = readNonBlankSessionControlIdentifier(modelId) ?? '';
       if (!normalizedModelId) {
         return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
       }
@@ -1576,7 +1624,7 @@ export function createCliActionDeps(params: Readonly<{
       return result;
     },
 
-    sessionUsageLimitWaitResumeCancel: async ({ sessionId, issueFingerprint }) => {
+    sessionUsageLimitWaitResumeCancel: async ({ sessionId, issueFingerprint, armedAtMs, runtimeAuthRecoveryAttemptId }) => {
       if (!await usageLimitRecoveryFeatureEnabled()) {
         return usageLimitRecoveryFeatureDisabledResult({ sessionId });
       }
@@ -1588,20 +1636,37 @@ export function createCliActionDeps(params: Readonly<{
           : normalizedIssueFingerprint === null
             ? { issueFingerprint: null }
             : {}),
+        ...(typeof armedAtMs === 'number' && Number.isFinite(armedAtMs) ? { armedAtMs: Math.trunc(armedAtMs) } : {}),
+        ...(typeof runtimeAuthRecoveryAttemptId === 'string' && runtimeAuthRecoveryAttemptId.trim().length > 0
+          ? { runtimeAuthRecoveryAttemptId: runtimeAuthRecoveryAttemptId.trim() }
+          : {}),
       };
       const result = await callRoutedUsageLimitRecoveryControl(sessionId, 'cancel', request);
       const rawResult = result && typeof result === 'object' && !Array.isArray(result)
         ? result as Record<string, unknown>
         : null;
       if (rawResult?.ok === true) {
-        params.cancelInactiveSessionUsageLimitRecoveryCheck?.({ sessionId });
-        // QAE-1: also clear the daemon runtime-auth recovery store — a waiting
-        // intent left armed here resumes the session involuntarily at reset.
-        // Best-effort: store-cancel failures must not fail the user cancel.
-        try {
-          await params.cancelConnectedServiceRuntimeAuthRecovery?.({ sessionId });
-        } catch {
-          // non-fatal; the wiring owner logs its own failures
+        if (typeof normalizedIssueFingerprint !== 'string' || typeof armedAtMs !== 'number') return result;
+        const exactAttempt = {
+          sessionId,
+          issueFingerprint: normalizedIssueFingerprint,
+          armedAtMs: Math.trunc(armedAtMs),
+          ...(typeof runtimeAuthRecoveryAttemptId === 'string' && runtimeAuthRecoveryAttemptId.trim().length > 0
+            ? { runtimeAuthRecoveryAttemptId: runtimeAuthRecoveryAttemptId.trim() }
+            : {}),
+        };
+        params.cancelInactiveSessionUsageLimitRecoveryCheck?.(exactAttempt);
+        if (typeof runtimeAuthRecoveryAttemptId === 'string' && runtimeAuthRecoveryAttemptId.trim().length > 0) {
+          // Runtime-auth attempts have their own immutable identity. Their armedAt
+          // timestamp is sampled independently and is not an exact-match key.
+          try {
+            await params.cancelConnectedServiceRuntimeAuthRecovery?.({
+              sessionId,
+              attemptId: runtimeAuthRecoveryAttemptId.trim(),
+            });
+          } catch {
+            // non-fatal; the wiring owner logs its own failures
+          }
         }
       }
       return result;
@@ -1927,7 +1992,7 @@ export function createCliActionDeps(params: Readonly<{
         return { ok: false, errorCode: 'not_authenticated', error: 'not_authenticated' };
       }
 
-      const normalizedModeId = String(modeId ?? '').trim();
+      const normalizedModeId = readNonBlankSessionControlIdentifier(modeId) ?? '';
       const updatedAt = Date.now();
       const res = await setSessionMode({
         credentials: params.credentials,

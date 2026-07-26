@@ -11,6 +11,11 @@ const mocks = vi.hoisted(() => ({
   axiosGet: vi.fn(async (): Promise<unknown> => ({ status: 200, data: { id: 'acct_1', connectedServicesV2: [] } })),
   bootstrapAccountSettingsContext: vi.fn(async (): Promise<unknown> => ({ settings: {}, settingsVersion: 1, loadedAtMs: 1 })),
   callSessionRpc: vi.fn(async () => ({ ok: true })),
+  createSpawnedSession: vi.fn(async () => ({
+    sessionId: 'spawned_1',
+    created: true,
+    session: { id: 'spawned_1' },
+  })),
   detectProviderMcpServers: vi.fn(async (): Promise<unknown> => ({ servers: [], warnings: [] })),
   getSessionCatalogControlAdapter: vi.fn(async (_agentId?: unknown): Promise<unknown> => null),
   getSessionGoalControlAdapter: vi.fn(async (_agentId?: unknown): Promise<unknown> => null),
@@ -71,6 +76,7 @@ vi.mock('@/persistence', async (importOriginal) => ({
   readSettings: mocks.readSettings,
 }));
 vi.mock('@/session/transport/rpc/sessionRpc', () => ({ callSessionRpc: mocks.callSessionRpc }));
+vi.mock('@/session/services/createSpawnedSession', () => ({ createSpawnedSession: mocks.createSpawnedSession }));
 vi.mock('@/session/services/getSessionEvents', () => ({ getSessionEvents: mocks.getSessionEvents }));
 vi.mock('@/session/services/getSessionTranscript', () => ({ getSessionTranscript: mocks.getSessionTranscript }));
 vi.mock('@/session/services/listSessions', () => ({ listSessions: mocks.listSessions }));
@@ -112,6 +118,12 @@ describe('createCliActionDeps session controls', () => {
     mocks.bootstrapAccountSettingsContext.mockResolvedValue({ settings: {}, settingsVersion: 1, loadedAtMs: 1 });
     mocks.callSessionRpc.mockReset();
     mocks.callSessionRpc.mockResolvedValue({ ok: true });
+    mocks.createSpawnedSession.mockReset();
+    mocks.createSpawnedSession.mockResolvedValue({
+      sessionId: 'spawned_1',
+      created: true,
+      session: { id: 'spawned_1' },
+    });
     mocks.detectProviderMcpServers.mockReset();
     mocks.detectProviderMcpServers.mockResolvedValue({ servers: [], warnings: [] });
     mocks.getSessionCatalogControlAdapter.mockReset();
@@ -188,6 +200,33 @@ describe('createCliActionDeps session controls', () => {
     expect(result.source).toBe('static');
     expect(result.items?.some((item) => item.id === 'stale-current-session-only')).toBe(false);
     expect(result.items?.some((item) => item.id === 'claude-opus-4-8')).toBe(true);
+  });
+
+  it('lists session mode identifiers without transforming provider-owned bytes', async () => {
+    const deps = createCliActionInventoryDeps({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      ctx: { encryptionKey: new Uint8Array(32).fill(1), encryptionVariant: 'legacy' },
+      mode: 'plain',
+      rawSession: {
+        metadata: {
+          sessionModesV1: {
+            v: 1,
+            provider: 'cursor',
+            updatedAt: 1,
+            currentModeId: ' plan ',
+            availableModes: [{ id: ' plan ', name: 'Plan' }],
+          },
+        },
+      },
+    });
+
+    const result = await deps.sessionModesList?.({ sessionId: 'sess_1' });
+    expect(result).toEqual({
+      sessionId: 'sess_1',
+      items: [{ id: ' plan ', label: 'Plan' }],
+    });
   });
 
   it('lists agent session modes and config options from the shared option registry', async () => {
@@ -394,6 +433,66 @@ describe('createCliActionDeps session controls', () => {
     });
     expect(JSON.stringify(result)).not.toContain('SECRET_VALUE');
     expect(JSON.stringify(result)).not.toContain('secret_binding_id');
+  });
+
+  it('reads current account settings for spawn profile inventory without recreating deps', async () => {
+    mocks.bootstrapAccountSettingsContext
+      .mockResolvedValueOnce({
+        settings: {
+          profiles: [
+            {
+              id: 'old-profile',
+              name: 'Old profile',
+              compatibilityByTargetKey: { 'agent:codex': true },
+              defaultEnabled: true,
+              isBuiltIn: false,
+            },
+          ],
+        },
+        settingsVersion: 1,
+        loadedAtMs: 1,
+      })
+      .mockResolvedValueOnce({
+        settings: {
+          profiles: [
+            {
+              id: 'new-profile',
+              name: 'New profile',
+              compatibilityByTargetKey: { 'agent:codex': true },
+              defaultEnabled: true,
+              isBuiltIn: false,
+            },
+          ],
+        },
+        settingsVersion: 2,
+        loadedAtMs: 2,
+      });
+    const deps = createCliActionDeps({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      ctx: {
+        encryptionKey: new Uint8Array(32).fill(1),
+        encryptionVariant: 'legacy',
+      },
+      mode: 'plain',
+      rawSession: { metadata: {} },
+    });
+
+    await deps.sessionsSpawnProfilesList?.({
+      agentId: 'codex',
+      backendTargetKey: 'agent:codex',
+      limit: 200,
+    });
+    const result = await deps.sessionsSpawnProfilesList?.({
+      agentId: 'codex',
+      backendTargetKey: 'agent:codex',
+      limit: 200,
+    }) as { items?: readonly Record<string, unknown>[] } | undefined;
+
+    expect(mocks.bootstrapAccountSettingsContext).toHaveBeenCalledTimes(2);
+    expect(result?.items?.map((item) => item.id)).toContain('new-profile');
+    expect(result?.items?.map((item) => item.id)).not.toContain('old-profile');
   });
 
   it('lists spawn connected-service options from account profile projection without credential material', async () => {
@@ -715,6 +814,27 @@ describe('createCliActionDeps session controls', () => {
     expect(mocks.sendSessionMessage).not.toHaveBeenCalled();
   });
 
+  it('preserves exact nonblank opaque model override bytes through the CLI service adapter', async () => {
+    const deps = createCliActionDeps({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      ctx: { encryptionKey: new Uint8Array(32).fill(1), encryptionVariant: 'legacy' },
+      mode: 'plain',
+      rawSession: { metadata: {} },
+    });
+
+    await deps.sessionSendMessage({
+      sessionId: 'sess_1',
+      message: 'hello',
+      modelOverride: ' model-a\t',
+    });
+
+    expect(mocks.sendSessionMessage).toHaveBeenCalledWith(expect.objectContaining({
+      modelOverride: ' model-a\t',
+    }));
+  });
+
   it('wires transcript and events actions to the canonical services', async () => {
     const credentials = createCredentials();
     const deps = createCliActionDeps({
@@ -763,114 +883,6 @@ describe('createCliActionDeps session controls', () => {
       kinds: ['tool-call'],
       includeRaw: true,
       maxPayloadChars: 256,
-    });
-  });
-
-  it('lists models from the newest valid session-model alias', async () => {
-    const deps = createCliActionDeps({
-      token: 'token',
-      credentials: createCredentials(),
-      sessionId: 'sess_1',
-      ctx: {
-        encryptionKey: new Uint8Array(32).fill(1),
-        encryptionVariant: 'legacy',
-      },
-      mode: 'plain',
-      rawSession: {
-        metadata: {
-          sessionModelsV1: {
-            v: 1,
-            provider: 'grok',
-            updatedAt: 10,
-            currentModelId: 'stale-model',
-            availableModels: [{ id: 'stale-model', name: 'Stale model' }],
-          },
-          acpSessionModelsV1: {
-            v: 1,
-            provider: 'grok',
-            updatedAt: 20,
-            currentModelId: 'grok-4.5',
-            availableModels: [{ id: 'grok-4.5', name: 'Grok 4.5' }],
-          },
-        },
-      },
-    });
-
-    await expect(deps.agentsModelsList?.({ agentId: 'grok' })).resolves.toMatchObject({
-      agentId: 'grok',
-      source: 'session_metadata',
-      items: [
-        { id: 'default', label: 'Default' },
-        { id: 'grok-4.5', label: 'Grok 4.5' },
-      ],
-    });
-  });
-
-  it.each([
-    { label: 'literal true', capabilities: { modelScopedConfigTombstonesV1: true }, expectedValue: null },
-    { label: 'literal false', capabilities: { modelScopedConfigTombstonesV1: false }, expectedValue: 'high' },
-    { label: 'missing', capabilities: {}, expectedValue: 'high' },
-    { label: 'malformed', capabilities: { modelScopedConfigTombstonesV1: 'true' }, expectedValue: 'high' },
-  ])('retires model-scoped config only when target agent state advertises $label support', async ({ capabilities, expectedValue }) => {
-    const sourceMetadata = {
-      sessionModelsV1: {
-        v: 1,
-        provider: 'grok',
-        updatedAt: 10,
-        currentModelId: 'model-a',
-        availableModels: [{
-          id: 'model-a',
-          name: 'Model A',
-          modelOptions: [{
-            id: 'reasoning_effort',
-            name: 'Thinking',
-            type: 'select',
-            currentValue: 'high',
-          }],
-        }],
-      },
-      sessionConfigOptionOverridesV1: {
-        v: 1,
-        updatedAt: 10,
-        overrides: { reasoning_effort: { updatedAt: 10, value: 'high' } },
-      },
-    };
-    let writtenMetadata: Record<string, unknown> | null = null;
-    mocks.resolveSessionTransportContext.mockResolvedValue({
-      ok: true as const,
-      sessionId: 'sess_1',
-      rawSession: { active: true, agentState: { capabilities } },
-      ctx: {
-        encryptionKey: new Uint8Array(32).fill(3),
-        encryptionVariant: 'legacy' as const,
-      },
-      mode: 'plain' as const,
-    });
-    mocks.updateSessionMetadataWithRetry.mockImplementationOnce(async (params: {
-      updater: (metadata: Record<string, unknown>) => Record<string, unknown>;
-    }) => {
-      writtenMetadata = params.updater(sourceMetadata);
-      return { version: 2, metadata: writtenMetadata };
-    });
-    const deps = createCliActionDeps({
-      token: 'token',
-      credentials: createCredentials(),
-      sessionId: 'sess_1',
-      ctx: {
-        encryptionKey: new Uint8Array(32).fill(1),
-        encryptionVariant: 'legacy',
-      },
-      mode: 'plain',
-      rawSession: { metadata: {} },
-    });
-
-    await expect(deps.sessionModelSet?.({ sessionId: 'sess_1', modelId: 'model-b' }))
-      .resolves.toMatchObject({ ok: true, sessionId: 'sess_1', modelId: 'model-b' });
-
-    expect(writtenMetadata).toMatchObject({
-      sessionConfigOptionOverridesV1: {
-        overrides: { reasoning_effort: { value: expectedValue } },
-      },
     });
   });
 
@@ -1279,6 +1291,42 @@ describe('createCliActionDeps session controls', () => {
     expect(mocks.sendSessionMessage).not.toHaveBeenCalled();
   });
 
+  it('uses the forwarded session-agent caller permission mode for spawn non-escalation', async () => {
+    const deps = createCliActionDeps({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      ctx: {
+        encryptionKey: new Uint8Array(32).fill(1),
+        encryptionVariant: 'legacy',
+      },
+      mode: 'plain',
+      rawSession: {
+        path: '/repo/current',
+        host: 'leeroy-mbp',
+        machineId: 'machine-1',
+        metadata: {
+          permissionMode: 'default',
+          permissionModeUpdatedAt: 100,
+        },
+      },
+    });
+
+    await expect(deps.sessionSpawnNew({
+      callerSurface: 'session_agent',
+      callerPermissionMode: 'bypassPermissions',
+      permissionMode: 'bypassPermissions',
+    })).resolves.toMatchObject({
+      type: 'success',
+      sessionId: 'spawned_1',
+    });
+
+    expect(mocks.createSpawnedSession).toHaveBeenCalledWith(expect.objectContaining({
+      directory: '/repo/current',
+      permissionMode: 'bypassPermissions',
+    }));
+  });
+
   it('calls native usage-limit recovery RPCs', async () => {
     const deps = createCliActionDeps({
       token: 'token',
@@ -1433,6 +1481,7 @@ describe('createCliActionDeps session controls', () => {
             status: 'waiting',
             issueFingerprint: 'usage-limit:sess_inactive:reset',
             armedAtMs: 1,
+            runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
             resetAtMs: 2,
             nextCheckAtMs: 2,
             attemptCount: 0,
@@ -1478,7 +1527,9 @@ describe('createCliActionDeps session controls', () => {
     });
     await expect(deps.sessionUsageLimitWaitResumeCancel?.({
       sessionId: 'sess_inactive',
-      issueFingerprint: null,
+      issueFingerprint: 'usage-limit:sess_inactive:reset',
+      armedAtMs: 1,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
     })).resolves.toMatchObject({
       ok: true,
       status: 'cancelled',
@@ -1540,6 +1591,7 @@ describe('createCliActionDeps session controls', () => {
       ok: true,
       status: 'resumed',
       sessionId: 'sess_inactive',
+      metadata: expect.objectContaining({ machineId: 'machine-local' }),
     });
 
     expect(resumeInactiveSessionWhenReady).toHaveBeenCalledWith(expect.objectContaining({
@@ -1799,6 +1851,7 @@ describe('createCliActionDeps session controls', () => {
             status: 'waiting',
             issueFingerprint: 'usage-limit:sess_inactive:reset',
             armedAtMs: 1,
+            runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
             resetAtMs: 2,
             nextCheckAtMs: 2,
             attemptCount: 0,
@@ -1832,7 +1885,9 @@ describe('createCliActionDeps session controls', () => {
 
     await expect(deps.sessionUsageLimitWaitResumeCancel?.({
       sessionId: 'sess_inactive',
-      issueFingerprint: null,
+      issueFingerprint: 'usage-limit:sess_inactive:reset',
+      armedAtMs: 1,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
     })).resolves.toMatchObject({
       ok: true,
       status: 'cancelled',
@@ -1841,6 +1896,9 @@ describe('createCliActionDeps session controls', () => {
 
     expect(cancelInactiveSessionUsageLimitRecoveryCheck).toHaveBeenCalledWith({
       sessionId: 'sess_inactive',
+      issueFingerprint: 'usage-limit:sess_inactive:reset',
+      armedAtMs: 1,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
     });
   });
 
@@ -1863,6 +1921,7 @@ describe('createCliActionDeps session controls', () => {
             status: 'waiting',
             issueFingerprint: 'usage-limit:sess_inactive:reset',
             armedAtMs: 1,
+            runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
             resetAtMs: 2,
             nextCheckAtMs: 2,
             attemptCount: 0,
@@ -1896,7 +1955,9 @@ describe('createCliActionDeps session controls', () => {
 
     await expect(deps.sessionUsageLimitWaitResumeCancel?.({
       sessionId: 'sess_inactive',
-      issueFingerprint: null,
+      issueFingerprint: 'usage-limit:sess_inactive:reset',
+      armedAtMs: 1,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
     })).resolves.toMatchObject({
       ok: true,
       status: 'cancelled',
@@ -1905,6 +1966,7 @@ describe('createCliActionDeps session controls', () => {
 
     expect(cancelConnectedServiceRuntimeAuthRecovery).toHaveBeenCalledWith({
       sessionId: 'sess_inactive',
+      attemptId: 'runtime-auth-attempt:exact-1',
     });
   });
 
@@ -2236,40 +2298,6 @@ describe('createCliActionDeps session controls', () => {
     expect(mocks.callSessionRpc).toHaveBeenCalledWith(expect.objectContaining({
       method: 'sess_1:permission',
       request: { id: 'perm_pending_ok_1', approved: true },
-    }));
-  });
-
-  it('preserves exact nonblank question-key bytes through the CLI action adapter', async () => {
-    mocks.resolveSessionTransportContext.mockResolvedValueOnce({
-      ok: true as const,
-      sessionId: 'sess_1',
-      rawSession: {
-        active: true,
-        agentState: {
-          capabilities: { structuredQuestionAnswersV1Supported: true },
-          requests: { ask_exact_1: { kind: 'user_action', tool: 'AskUserQuestion', createdAt: 1 } },
-          completedRequests: {},
-        },
-      },
-      ctx: { encryptionKey: new Uint8Array(32).fill(3), encryptionVariant: 'legacy' as const },
-      mode: 'plain' as const,
-    });
-    const deps = createCliActionDeps({
-      token: 'token',
-      credentials: createCredentials(),
-      sessionId: 'sess_1',
-      ctx: { encryptionKey: new Uint8Array(32).fill(1), encryptionVariant: 'legacy' },
-      mode: 'plain',
-      rawSession: { metadata: {} },
-    });
-
-    await expect(deps.sessionUserActionAnswer?.({
-      sessionId: 'sess_1',
-      requestId: 'ask_exact_1',
-      answers: [{ question: '  exact provider key  ', values: ['Yes'] }],
-    })).resolves.toEqual({ ok: true });
-    expect(mocks.callSessionRpc).toHaveBeenCalledWith(expect.objectContaining({
-      request: { id: 'ask_exact_1', structuredAnswersV1: { '  exact provider key  ': ['Yes'] } },
     }));
   });
 

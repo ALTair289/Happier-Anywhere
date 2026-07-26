@@ -3,6 +3,34 @@ import { describe, expect, it, vi } from 'vitest';
 import { createCliActionOptionProviderRegistry } from './actionOptionProviderRegistry';
 
 describe('createCliActionOptionProviderRegistry', () => {
+  it('matches model-scoped options by the exact opaque model identifier', async () => {
+    const probeModels = vi.fn(async () => ({
+      provider: 'cursor' as const,
+      availableModels: [
+        { id: 'model-a', name: 'Plain', modelOptions: [{ id: 'plain', name: 'Plain option', type: 'select', currentValue: 'x' }] },
+        { id: ' model-a ', name: 'Spaced', modelOptions: [{ id: 'spaced', name: 'Spaced option', type: 'select', currentValue: 'y' }] },
+      ],
+      supportsFreeform: false,
+      source: 'dynamic' as const,
+    }));
+    const registry = createCliActionOptionProviderRegistry({
+      probeModels,
+      probeModes: vi.fn(),
+      probeConfigOptions: vi.fn(async () => ({ provider: 'cursor' as const, configOptions: [], source: 'dynamic' as const })),
+      cwd: '/repo',
+      credentials: null,
+      accountSettings: null,
+    });
+
+    const result = await registry.agentsConfigOptionsList({
+      agentId: 'cursor',
+      backendTargetKey: 'agent:cursor',
+      modelId: ' model-a ',
+    });
+
+    expect(result.items.map((item) => item.id)).toEqual(['spaced']);
+  });
+
   it('lists models through the backend-aware model probe', async () => {
     const probeModels = vi.fn(async () => ({
       provider: 'claude' as const,

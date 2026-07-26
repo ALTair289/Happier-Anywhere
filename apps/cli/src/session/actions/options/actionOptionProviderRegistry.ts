@@ -18,6 +18,7 @@ import {
   type ProbedAgentConfigOptionsResult,
   type ProbedAgentConfigOptionValue,
 } from '@/capabilities/probes/agentConfigOptionsProbe';
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 import { normalizeActionOptionLimit } from './actionOptionInputNormalization';
 
 type ProbeModels = typeof probeAgentModelsBestEffort;
@@ -167,7 +168,7 @@ function collectModelScopedConfigOptions(params: Readonly<{
   models: ProbedAgentModelsResult['availableModels'];
   modelId?: string;
 }>): readonly ConfigOptionItem[] {
-  const requestedModelId = typeof params.modelId === 'string' ? params.modelId.trim() : '';
+  const requestedModelId = readNonBlankSessionControlIdentifier(params.modelId) ?? '';
   const candidateModels = requestedModelId && requestedModelId !== 'default'
     ? params.models.filter((model) => model.id === requestedModelId)
     : params.models;
