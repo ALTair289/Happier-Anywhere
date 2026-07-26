@@ -7,7 +7,7 @@ export type SocketAckError = Error & Readonly<{
     timeoutMs?: number;
 }>;
 
-type EmitWithAckSocket = {
+export type EmitWithAckSocket = {
     connected?: boolean;
     emitWithAck: (event: string, ...args: any[]) => Promise<unknown>;
     timeout?: (ms: number) => EmitWithAckSocket;

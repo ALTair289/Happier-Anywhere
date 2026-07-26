@@ -5,7 +5,12 @@ import {
   createTransferPathAllowanceRegistry,
   type TransferPathAllowanceRegistry,
 } from '@/transfers/targets/createTransferPathAllowanceRegistry';
-import { SessionMediaItemV1Schema, type SessionMediaItemV1 } from '@happier-dev/protocol';
+import {
+  SessionMediaItemV1Schema,
+  SessionMediaUnavailableV1Schema,
+  type SessionMediaItemV1,
+  type SessionMediaUnavailableV1,
+} from '@happier-dev/protocol';
 import { logger } from '@/ui/logger';
 
 import {
@@ -35,6 +40,11 @@ export type SessionMediaUnavailableDiagnostic = Readonly<{
   agentId?: string;
   toolCallIdHash?: string;
   generationIdHash?: string;
+}>;
+
+export type SessionMediaPersistResult = Readonly<{
+  media: readonly SessionMediaItemV1[];
+  unavailable: readonly SessionMediaUnavailableV1[];
 }>;
 
 function boundedCorrelationHash(value: string): string {
@@ -99,16 +109,18 @@ function buildMessageLocalId(message: RuntimeSessionMediaMessage, index: number)
 
 export function createAgentSessionMediaPersister(
   params: AgentSessionMediaPersisterParams,
-): { persist: (message: RuntimeSessionMediaMessage) => Promise<SessionMediaItemV1[]> } {
+): { persist: (message: RuntimeSessionMediaMessage) => Promise<SessionMediaPersistResult> } {
   const pathAllowanceRegistry = params.pathAllowanceRegistry ?? createTransferPathAllowanceRegistry();
 
   const reportUnavailable = (
     message: RuntimeSessionMediaMessage,
     media: SessionMediaSource,
+    index: number,
     code: string,
-  ): void => {
+  ): SessionMediaUnavailableV1 => {
+    const boundedCode = /^[a-z0-9._-]{1,128}$/.test(code) ? code : 'persistence_failed';
     const diagnostic: SessionMediaUnavailableDiagnostic = {
-      code: code.slice(0, 128),
+      code: boundedCode,
       source: message.source.slice(0, 128),
       ...(typeof media.origin.agentId === 'string'
         ? { agentId: media.origin.agentId.slice(0, 512) }
@@ -126,11 +138,31 @@ export function createAgentSessionMediaPersister(
     } catch {
       logger.debug('[session-media] Media unavailable observer failed (non-fatal)');
     }
+    return SessionMediaUnavailableV1Schema.parse({
+      id: boundedCorrelationHash(buildMessageLocalId(message, index)),
+      role: 'output',
+      category: mapMediaCategory(media.origin),
+      mediaKind: 'image',
+      code: boundedCode,
+      origin: {
+        source: media.origin.source,
+        ...(typeof media.origin.agentId === 'string'
+          ? { agentId: media.origin.agentId.slice(0, 512) }
+          : {}),
+        ...(typeof media.origin.toolCallId === 'string'
+          ? { toolCallIdHash: boundedCorrelationHash(media.origin.toolCallId) }
+          : {}),
+        ...(typeof media.origin.generationId === 'string'
+          ? { generationIdHash: boundedCorrelationHash(media.origin.generationId) }
+          : {}),
+      },
+    });
   };
 
   return {
     async persist(message) {
       const items: SessionMediaItemV1[] = [];
+      const unavailable: SessionMediaUnavailableV1[] = [];
       for (let index = 0; index < message.media.length; index += 1) {
         const media = message.media[index]!;
         let result: Awaited<ReturnType<typeof persistSessionMediaItem>>;
@@ -159,7 +191,7 @@ export function createAgentSessionMediaPersister(
             },
           });
         } catch {
-          reportUnavailable(message, media, 'persistence_failed');
+          unavailable.push(reportUnavailable(message, media, index, 'persistence_failed'));
           continue;
         }
         if (result.success) {
@@ -167,13 +199,13 @@ export function createAgentSessionMediaPersister(
           if (parsed.success) {
             items.push(parsed.data);
           } else {
-            reportUnavailable(message, media, 'invalid_persisted_metadata');
+            unavailable.push(reportUnavailable(message, media, index, 'invalid_persisted_metadata'));
           }
         } else {
-          reportUnavailable(message, media, result.code);
+          unavailable.push(reportUnavailable(message, media, index, result.code));
         }
       }
-      return items;
+      return { media: items, unavailable };
     },
   };
 }

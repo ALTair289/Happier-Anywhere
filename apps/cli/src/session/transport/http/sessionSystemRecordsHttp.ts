@@ -13,6 +13,10 @@ import {
 } from '@happier-dev/protocol';
 
 import { createHttpStatusError, isAuthenticationStatus } from '@/api/client/httpStatusError';
+import {
+  buildCurrentCliClientCompatibilityHttpHeaders,
+  throwIfCliClientUpgradeRequired,
+} from '@/api/clientCompatibility/cliClientCompatibility';
 import { configuration } from '@/configuration';
 import { resolveServerHttpBaseUrl } from './serverHttpBaseUrl';
 
@@ -46,11 +50,13 @@ function buildHeaders(token: string, extra?: Record<string, string>): Record<str
   return {
     Authorization: `Bearer ${token}`,
     'Content-Type': 'application/json',
+    ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     ...(extra ?? {}),
   };
 }
 
-function handleCommonStatus(status: number, route: string): void {
+function handleCommonStatus(status: number, payload: unknown, route: string): void {
+  throwIfCliClientUpgradeRequired(status, payload);
   if (isAuthenticationStatus(status)) {
     throwAuthenticationStatusError(status);
   }
@@ -86,7 +92,7 @@ export async function upsertSessionSystemRecord(params: Readonly<{
     validateStatus: () => true,
   });
 
-  handleCommonStatus(response.status, route);
+  handleCommonStatus(response.status, response.data, route);
   return parseOrThrow(SessionSystemRecordUpsertResponseSchema, response.data, `Unexpected ${route} response shape`).record;
 }
 
@@ -115,7 +121,7 @@ export async function fetchSessionSystemRecordsPage(params: Readonly<{
     validateStatus: () => true,
   });
 
-  handleCommonStatus(response.status, route);
+  handleCommonStatus(response.status, response.data, route);
   const parsed: SessionSystemRecordPageResponse = parseOrThrow(
     SessionSystemRecordPageResponseSchema,
     response.data,
@@ -144,7 +150,7 @@ export async function fetchLatestSessionSystemRecord(params: Readonly<{
     validateStatus: () => true,
   });
 
-  handleCommonStatus(response.status, route);
+  handleCommonStatus(response.status, response.data, route);
   return parseOrThrow(SessionSystemRecordLatestResponseSchema, response.data, `Unexpected ${route} response shape`).record;
 }
 
@@ -164,6 +170,6 @@ export async function fetchSessionSystemRecord(params: Readonly<{
     validateStatus: () => true,
   });
 
-  handleCommonStatus(response.status, route);
+  handleCommonStatus(response.status, response.data, route);
   return parseOrThrow(SessionSystemRecordLookupResponseSchema, response.data, `Unexpected ${route} response shape`).record;
 }

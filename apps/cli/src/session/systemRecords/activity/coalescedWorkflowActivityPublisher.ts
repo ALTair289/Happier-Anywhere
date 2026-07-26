@@ -18,9 +18,9 @@ import type { WorkflowActivityPublisher } from './publishWorkflowActivitySnapsho
  * - `flush()` drains pending work immediately (terminal flush / stream close / session finalization).
  * - `dispose()` stops scheduling.
  *
- * Per-run fingerprint/no-op suppression already lives upstream in the tracker (it advances
- * `recordRevision` only on material change and reports `changedRunIds` accordingly), so this layer
- * never needs to diff snapshots; an empty change set is simply a no-op.
+ * Per-run fingerprint/no-op suppression already lives upstream in the tracker, which reports
+ * `changedRunIds` only for material changes, so this layer never needs to diff snapshots; an empty
+ * change set is simply a no-op. The durable publisher owns record revisions.
  */
 export type CoalescedWorkflowActivityPublisher = Readonly<{
   /** Record a tracker observation. Triggers an immediate or debounced publish. */
@@ -41,24 +41,41 @@ export function createCoalescedWorkflowActivityPublisher(params: Readonly<{
   const pendingChangedRunIds = new Set<string>();
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
+  // The currently-running publish drain (scheduler- OR flush-driven). `flush()` awaits this so a
+  // caller that needs the terminal write to have LANDED (startup reconciliation, stream close,
+  // shutdown) never returns while a `notify`-triggered immediate drain is still mid-publish — the
+  // scheduler fires drains fire-and-forget, so without this a `flush()` racing an in-flight drain
+  // would see an already-cleared pending set and return before the headline write completed.
+  let inFlightDrain: Promise<void> | null = null;
+
+  const runPublishDrain = async (): Promise<void> => {
+    if (disposed) return;
+    if (pendingChangedRunIds.size === 0) return;
+    const changedRunIds = [...pendingChangedRunIds];
+    pendingChangedRunIds.clear();
+    try {
+      const result = await params.publisher.publish({
+        snapshots: params.getSnapshots(),
+        changedRunIds,
+      });
+      scheduleRetry(result.failedRunIds);
+    } catch (error) {
+      scheduleRetry(changedRunIds);
+      throw error;
+    }
+  };
+
+  const trackedPublishDrain = (): Promise<void> => {
+    const drain = runPublishDrain();
+    const tracked = drain.finally(() => {
+      if (inFlightDrain === tracked) inFlightDrain = null;
+    });
+    inFlightDrain = tracked;
+    return tracked;
+  };
 
   const scheduler = createCoalescedScheduler({
-    drain: async () => {
-      if (disposed) return;
-      if (pendingChangedRunIds.size === 0) return;
-      const changedRunIds = [...pendingChangedRunIds];
-      pendingChangedRunIds.clear();
-      try {
-        const result = await params.publisher.publish({
-          snapshots: params.getSnapshots(),
-          changedRunIds,
-        });
-        scheduleRetry(result.failedRunIds);
-      } catch (error) {
-        scheduleRetry(changedRunIds);
-        throw error;
-      }
-    },
+    drain: trackedPublishDrain,
     onError: params.onError,
   });
 
@@ -108,19 +125,23 @@ export function createCoalescedWorkflowActivityPublisher(params: Readonly<{
 
   async function flush(): Promise<void> {
     if (disposed) return;
-    clearDebounce();
-    if (pendingChangedRunIds.size === 0) return;
-    const changedRunIds = [...pendingChangedRunIds];
-    pendingChangedRunIds.clear();
-    try {
-      const result = await params.publisher.publish({
-        snapshots: params.getSnapshots(),
-        changedRunIds,
-      });
-      scheduleRetry(result.failedRunIds);
-    } catch (error) {
-      scheduleRetry(changedRunIds);
-      throw error;
+    // Drain to quiescence. `notify` fires scheduler drains fire-and-forget, and each drain may
+    // schedule a follow-up (a `do/while` re-drain for triggers that arrived mid-publish, or a
+    // `scheduleRetry` debounce). A single await/drain would return while later terminal writes are
+    // still pending, leaving the headline stuck at an early snapshot. So: cancel any debounce timer,
+    // await the in-flight drain so its writes LAND, then drain any work that surfaced — repeat until
+    // no drain is running and nothing is pending. A hard iteration cap guards against a pathological
+    // publisher that never settles (it would only ever drop trailing retries, never lose committed
+    // state, since the headline is rebuilt from committed runs on every publish).
+    for (let iteration = 0; iteration < 1_000; iteration += 1) {
+      if (disposed) return;
+      clearDebounce();
+      if (inFlightDrain) {
+        await inFlightDrain;
+        continue;
+      }
+      if (pendingChangedRunIds.size === 0) return;
+      await trackedPublishDrain();
     }
   }
 

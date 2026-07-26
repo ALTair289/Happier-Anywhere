@@ -5,6 +5,28 @@ import type { LlmTaskRunnerConfigV1 } from '@happier-dev/protocol';
 import { runReplaySummaryForDialog, type ReplaySummaryTextPromptRunner } from './runReplaySummaryForDialog';
 
 describe('runReplaySummaryForDialog', () => {
+  it('forwards the configured model identifier without transforming its bytes', async () => {
+    const calls: Array<{ modelId?: string }> = [];
+    await runReplaySummaryForDialog({
+      cwd: '/repo',
+      parentSessionId: 'sess_parent',
+      runner: {
+        v: 1,
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        modelId: ' model-a\t',
+      },
+      dialog: [{ role: 'User', createdAt: 1, text: 'hello' }],
+      deps: {
+        runTextPrompt: async (args) => {
+          calls.push({ modelId: args.modelId });
+          return 'summary';
+        },
+      },
+    });
+
+    expect(calls).toEqual([{ modelId: ' model-a\t' }]);
+  });
+
   it('uses the configured runner and includes dialog messages in the summarizer prompt', async () => {
     const calls: Array<{ backendTarget: unknown; modelId?: string; permissionMode?: string; prompt: string }> = [];
 

@@ -20,6 +20,7 @@ import {
   type MemorySystemRecordPayload,
   openMemorySystemRecordPayload,
 } from './memorySystemRecords';
+import { fetchAllSessionSystemRecords } from '../fetchAllSessionSystemRecords';
 
 export type FetchMemorySummaryShardSystemRecordsDeps = Readonly<{
   fetchSessionSystemRecordsPage: typeof fetchSessionSystemRecordsPage;
@@ -46,37 +47,25 @@ export async function fetchMemorySummaryShardSystemRecords(params: Readonly<{
   fetchSessionSystemRecordsPage?: FetchMemorySummaryShardSystemRecordsDeps['fetchSessionSystemRecordsPage'];
 }>): Promise<SessionSummaryShardV1[]> {
   const fetchPage = params.fetchSessionSystemRecordsPage ?? fetchSessionSystemRecordsPage;
-  const out: SessionSummaryShardV1[] = [];
-  let cursor: string | undefined;
-  const seenCursors = new Set<string>();
-  while (true) {
-    const page: FetchSessionSystemRecordsPageResult = await fetchPage({
+  const records = await fetchAllSessionSystemRecords<SessionSystemRecord>({
+    fetchPage: async (cursor): Promise<FetchSessionSystemRecordsPageResult> => await fetchPage({
       token: params.token,
       sessionId: params.sessionId,
       namespace: MEMORY_SYSTEM_RECORD_NAMESPACE,
       kind: MEMORY_SYSTEM_RECORD_KINDS.summaryShard,
       ...(cursor ? { cursor } : {}),
       limit: params.limit ?? 100,
+    }),
+  });
+  return records.flatMap((record) => {
+    const payload = openMemorySystemRecordPayload({
+      namespace: record.namespace,
+      kind: MEMORY_SYSTEM_RECORD_KINDS.summaryShard,
+      content: record.content,
+      ctx: params.ctx,
     });
-
-    for (const record of page.records) {
-      const payload = openMemorySystemRecordPayload({
-        namespace: record.namespace,
-        kind: MEMORY_SYSTEM_RECORD_KINDS.summaryShard,
-        content: record.content,
-        ctx: params.ctx,
-      });
-      if (isSummaryShardPayload(payload)) {
-        out.push(payload);
-      }
-    }
-
-    if (!page.hasNext || !page.nextCursor) break;
-    if (seenCursors.has(page.nextCursor)) break;
-    seenCursors.add(page.nextCursor);
-    cursor = page.nextCursor;
-  }
-  return out;
+    return isSummaryShardPayload(payload) ? [payload] : [];
+  });
 }
 
 export async function fetchLatestMemorySynopsisSystemRecord(params: Readonly<{

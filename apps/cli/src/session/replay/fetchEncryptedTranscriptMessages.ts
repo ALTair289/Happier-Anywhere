@@ -2,6 +2,7 @@ import axios from 'axios';
 
 import { createAuthenticationHttpStatusError, isAuthenticationStatus } from '@/api/client/httpStatusError';
 import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
+import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 
 export type RawTranscriptRow = Readonly<{
   id?: unknown;
@@ -36,6 +37,7 @@ export async function fetchEncryptedTranscriptMessagesPage(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
+      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     params: {
       limit: params.limit,

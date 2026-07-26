@@ -6,6 +6,17 @@ import {
 } from './memorySynopsisPointerV1';
 
 describe('memorySynopsisPointerV1', () => {
+  it('preserves the exact nonblank durable local id', () => {
+    expect(readMemorySynopsisPointerV1FromSessionMetadata({
+      memorySynopsisPointerV1: {
+        v: 1,
+        localId: ' memory:synopsis:v1:10\n',
+        seqTo: 10,
+        updatedAtMs: 99,
+      },
+    })?.localId).toBe(' memory:synopsis:v1:10\n');
+  });
+
   it('writes a pointer with deterministic localId', () => {
     const updated = applyMemorySynopsisPointerV1ToSessionMetadata({
       metadata: {},
@@ -49,4 +60,3 @@ describe('memorySynopsisPointerV1', () => {
     expect(updated).toBe(base);
   });
 });
-

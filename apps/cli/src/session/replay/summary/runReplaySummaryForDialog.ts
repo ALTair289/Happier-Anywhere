@@ -1,5 +1,6 @@
 import type { BackendTargetRefV1, LlmTaskRunnerConfigV1 } from '@happier-dev/protocol';
 
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 import { runEphemeralExecutionRunTextPromptWithRunnerConfig } from '@/agent/executionRuns/tasks/runEphemeralExecutionRunTextPromptWithRunnerConfig';
 
 import type { HappierReplayDialogItem } from '../types';
@@ -70,7 +71,7 @@ export async function runReplaySummaryForDialog(params: Readonly<{
 }>): Promise<string> {
   const backendTarget = params.runner?.backendTarget;
   if (!backendTarget) return '';
-  const modelId = typeof params.runner.modelId === 'string' && params.runner.modelId.trim().length > 0 ? params.runner.modelId.trim() : undefined;
+  const modelId = readNonBlankSessionControlIdentifier(params.runner.modelId) ?? undefined;
   const permissionMode =
     typeof params.runner.permissionMode === 'string' && params.runner.permissionMode.trim().length > 0
       ? params.runner.permissionMode.trim()

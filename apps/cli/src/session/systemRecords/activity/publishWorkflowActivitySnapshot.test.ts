@@ -52,14 +52,14 @@ describe('createWorkflowActivityPublisher', () => {
     expect(writeHeadline).toHaveBeenCalledTimes(1);
   });
 
-  it('assigns durable decimal record revisions instead of trusting tracker-provided revisions', async () => {
+  it('owns the durable decimal record revision sequence', async () => {
     const committed: SessionWorkflowRunSnapshotV1[] = [];
     const commitRecord = vi.fn<CommitRecord>(async (snapshot) => { committed.push(snapshot); });
     const writeHeadline = vi.fn<WriteHeadline>(async () => {});
     const publisher = createWorkflowActivityPublisher({ commitRecord, writeHeadline, backendId: 'claude' });
 
     await publisher.publish({
-      snapshots: new Map([['a', runSnapshot({ runId: 'a', recordRevision: '99', updatedAt: 2000 })]]),
+      snapshots: new Map([['a', runSnapshot({ runId: 'a', recordRevision: '0', updatedAt: 2000 })]]),
       changedRunIds: ['a'],
     });
 
@@ -67,7 +67,7 @@ describe('createWorkflowActivityPublisher', () => {
     expect(writeHeadline.mock.calls[0]?.[0].activeRuns[0]).toMatchObject({ runId: 'a', recordRevision: '1' });
 
     await publisher.publish({
-      snapshots: new Map([['a', runSnapshot({ runId: 'a', recordRevision: '100', completedAgents: 1, updatedAt: 3000 })]]),
+      snapshots: new Map([['a', runSnapshot({ runId: 'a', recordRevision: '0', completedAgents: 1, updatedAt: 3000 })]]),
       changedRunIds: ['a'],
     });
 

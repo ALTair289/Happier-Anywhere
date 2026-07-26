@@ -39,7 +39,21 @@ describe('createAgentSessionMediaPersister', () => {
             toolCallId: 'image-call-io-failure',
           },
         }],
-      })).resolves.toEqual([]);
+      })).resolves.toEqual({
+        media: [],
+        unavailable: [{
+          id: expect.stringMatching(/^[a-f0-9]{64}$/),
+          role: 'output',
+          category: 'generated',
+          mediaKind: 'image',
+          code: 'persistence_failed',
+          origin: {
+            source: 'provider-generated',
+            agentId: 'cursor',
+            toolCallIdHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
+        }],
+      });
 
       expect(diagnostics).toEqual([{
         code: 'persistence_failed',
@@ -76,7 +90,21 @@ describe('createAgentSessionMediaPersister', () => {
             toolCallId: '/Users/alice/private/image-call-missing',
           },
         }],
-      })).resolves.toEqual([]);
+      })).resolves.toEqual({
+        media: [],
+        unavailable: [{
+          id: expect.stringMatching(/^[a-f0-9]{64}$/),
+          role: 'output',
+          category: 'generated',
+          mediaKind: 'image',
+          code: 'invalid_source_file',
+          origin: {
+            source: 'provider-generated',
+            agentId: 'cursor',
+            toolCallIdHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
+        }],
+      });
 
       expect(diagnostics).toEqual([{
         code: 'invalid_source_file',
@@ -107,7 +135,7 @@ describe('createAgentSessionMediaPersister', () => {
         sessionId: 'session-1',
         accessPolicy: createSessionMediaAccessPolicy({ workingDirectory }),
       });
-      const items = await persister.persist({
+      const result = await persister.persist({
         type: 'session-media',
         source: 'cursor-generate-image',
         media: [{
@@ -124,7 +152,8 @@ describe('createAgentSessionMediaPersister', () => {
         }],
       });
 
-      expect(items).toMatchObject([{
+      expect(result.unavailable).toEqual([]);
+      expect(result.media).toMatchObject([{
         description: 'Generated architecture diagram',
         references: [{
           mediaKind: 'image',
@@ -139,7 +168,7 @@ describe('createAgentSessionMediaPersister', () => {
           generationId: 'image-call-1',
         },
       }]);
-      expect(items[0]?.path).not.toContain('image-call-1');
+      expect(result.media[0]?.path).not.toContain('image-call-1');
     } finally {
       await rm(workingDirectory, { recursive: true, force: true });
     }

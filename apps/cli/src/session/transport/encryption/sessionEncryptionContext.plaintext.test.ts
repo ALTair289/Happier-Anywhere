@@ -1,11 +1,52 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  decryptSessionPayload,
   decryptStoredSessionPayload,
+  encryptSessionPayload,
   encryptStoredSessionPayload,
   resolveSessionStoredContentEncryptionMode,
   tryDecryptSessionMetadata,
 } from './sessionEncryptionContext';
+
+describe.each(['legacy', 'dataKey'] as const)('idempotent session payload encryption (%s)', (encryptionVariant) => {
+  const ctx = {
+    encryptionKey: new Uint8Array(32).fill(7),
+    encryptionVariant,
+  } as const;
+
+  it('reuses exact ciphertext only for the same local id and frozen payload', () => {
+    const payload = { role: 'user', content: { type: 'text', text: 'continue' } };
+    const first = encryptSessionPayload({ ctx, payload, idempotencyKey: 'continuation:one' });
+    const retry = encryptSessionPayload({ ctx, payload, idempotencyKey: 'continuation:one' });
+    const changedPayload = encryptSessionPayload({
+      ctx,
+      payload: { role: 'user', content: { type: 'text', text: 'different' } },
+      idempotencyKey: 'continuation:one',
+    });
+    const changedIdentity = encryptSessionPayload({ ctx, payload, idempotencyKey: 'continuation:two' });
+
+    expect(retry).toBe(first);
+    expect(changedPayload).not.toBe(first);
+    expect(changedIdentity).not.toBe(first);
+    expect(decryptSessionPayload({ ctx, ciphertextBase64: first })).toEqual(payload);
+    expect(decryptSessionPayload({ ctx, ciphertextBase64: changedPayload })).toEqual({
+      role: 'user',
+      content: { type: 'text', text: 'different' },
+    });
+  });
+
+  it('keeps ordinary sends randomly encrypted when no idempotency key is supplied', () => {
+    const payload = { role: 'user', content: { type: 'text', text: 'ordinary send' } };
+
+    const first = encryptSessionPayload({ ctx, payload });
+    const second = encryptSessionPayload({ ctx, payload });
+
+    expect(second).not.toBe(first);
+    expect(decryptSessionPayload({ ctx, ciphertextBase64: first })).toEqual(payload);
+    expect(decryptSessionPayload({ ctx, ciphertextBase64: second })).toEqual(payload);
+  });
+});
 
 describe('decryptStoredSessionPayload (plaintext)', () => {
   const ctx = {

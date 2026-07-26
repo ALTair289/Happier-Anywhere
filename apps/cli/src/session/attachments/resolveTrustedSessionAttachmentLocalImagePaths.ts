@@ -45,30 +45,31 @@ function resolveAttachmentPath(cwd: string, uploadPath: string): string {
   return path.isAbsolute(uploadPath) ? uploadPath : path.resolve(cwd, uploadPath);
 }
 
-async function fileMatchesDeclaredUpload(params: Readonly<{
+async function readMatchingDeclaredUpload(params: Readonly<{
   cwd: string;
   uploadPath: string;
   sha256: string;
   sizeBytes: number | null;
-}>): Promise<boolean> {
+}>): Promise<Buffer | null> {
   try {
     const absolutePath = resolveAttachmentPath(params.cwd, params.uploadPath);
     const fileStat = await stat(absolutePath);
-    if (!fileStat.isFile()) return false;
-    if (params.sizeBytes !== null && fileStat.size !== params.sizeBytes) return false;
+    if (!fileStat.isFile()) return null;
+    if (params.sizeBytes !== null && fileStat.size !== params.sizeBytes) return null;
     const content = await readFile(absolutePath);
-    return createHash('sha256').update(content).digest('hex') === params.sha256;
+    if (params.sizeBytes !== null && content.byteLength !== params.sizeBytes) return null;
+    return createHash('sha256').update(content).digest('hex') === params.sha256 ? content : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-export async function resolveTrustedSessionAttachmentLocalImagePaths(params: Readonly<{
+export async function readTrustedSessionAttachmentLocalImages(params: Readonly<{
   cwd: string;
   metadata: unknown;
-}>): Promise<ReadonlySet<string>> {
+}>): Promise<ReadonlyMap<string, Buffer>> {
   const metadata = asRecord(params.metadata);
-  const trusted = new Set<string>();
+  const trusted = new Map<string, Buffer>();
   if (!metadata) return trusted;
 
   const candidatePaths = readAttachmentEnvelopeLocalImagePaths(metadata);
@@ -79,16 +80,20 @@ export async function resolveTrustedSessionAttachmentLocalImagePaths(params: Rea
     if (!normalizedPath || !candidatePaths.has(normalizedPath)) continue;
     const sha256 = readSha256(attachment.sha256);
     if (!sha256) continue;
-    const sizeBytes = readSizeBytes(attachment.sizeBytes);
-    if (await fileMatchesDeclaredUpload({
+    const content = await readMatchingDeclaredUpload({
       cwd: params.cwd,
       uploadPath: normalizedPath,
       sha256,
-      sizeBytes,
-    })) {
-      trusted.add(normalizedPath);
-    }
+      sizeBytes: readSizeBytes(attachment.sizeBytes),
+    });
+    if (content) trusted.set(normalizedPath, content);
   }
-
   return trusted;
+}
+
+export async function resolveTrustedSessionAttachmentLocalImagePaths(params: Readonly<{
+  cwd: string;
+  metadata: unknown;
+}>): Promise<ReadonlySet<string>> {
+  return new Set((await readTrustedSessionAttachmentLocalImages(params)).keys());
 }

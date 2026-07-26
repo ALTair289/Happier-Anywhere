@@ -1,4 +1,5 @@
 import { buildMemorySynopsisSystemRecordLocalId } from '@/session/systemRecords/memory/memorySystemRecords';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 export type MemorySynopsisPointerV1 = Readonly<{
   v: 1;
@@ -16,7 +17,7 @@ function normalizePointerCandidate(value: unknown): MemorySynopsisPointerV1 | nu
   const rec = asRecord(value);
   if (!rec) return null;
   if (rec.v !== 1) return null;
-  const localId = typeof rec.localId === 'string' ? rec.localId.trim() : '';
+  const localId = readNonBlankOpaqueIdentifier(rec.localId) ?? '';
   const seqTo = typeof rec.seqTo === 'number' && Number.isFinite(rec.seqTo) ? Math.max(0, Math.floor(rec.seqTo)) : NaN;
   const updatedAtMs =
     typeof rec.updatedAtMs === 'number' && Number.isFinite(rec.updatedAtMs) ? Math.max(0, Math.floor(rec.updatedAtMs)) : NaN;

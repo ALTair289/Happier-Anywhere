@@ -65,6 +65,7 @@ function buildRunHeadline(
     totalAgents: snapshot.totalAgents,
     completedAgents: snapshot.completedAgents,
   };
+  if (snapshot.statusReason !== undefined) headline.statusReason = snapshot.statusReason;
   if (snapshot.workflowToolUseId !== undefined) headline.workflowToolUseId = snapshot.workflowToolUseId;
   if (snapshot.failedAgents !== undefined) headline.failedAgents = snapshot.failedAgents;
   if (snapshot.blockedAgents !== undefined) headline.blockedAgents = snapshot.blockedAgents;

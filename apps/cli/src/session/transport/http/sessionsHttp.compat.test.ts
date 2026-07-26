@@ -9,6 +9,27 @@ import {
 import { fetchSessionByIdCompat } from './sessionsHttp';
 
 describe('sessionControl.sessionsHttp.fetchSessionByIdCompat', () => {
+  it('surfaces HTTP 426 as a typed terminal upgrade requirement', async () => {
+    vi.spyOn(axios, 'get').mockResolvedValueOnce({
+      status: 426,
+      data: {
+        error: 'client-upgrade-required',
+        requirement: {
+          v: 1,
+          minimumSessionSyncProtocolVersion: 2,
+          clientKind: 'session-runner',
+          minimumAppVersion: '9.0.0',
+          updateUrl: null,
+        },
+      },
+    } as any);
+
+    await expect(fetchSessionByIdCompat({ token: 't', sessionId: 's1' })).rejects.toMatchObject({
+      name: 'CliClientUpgradeRequiredError',
+      statusCode: 426,
+    });
+  });
+
   it('sends a structured request-purpose header when a session detail reason is provided', async () => {
     const getSpy = vi.spyOn(axios, 'get');
     getSpy.mockResolvedValueOnce({

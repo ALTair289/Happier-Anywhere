@@ -93,6 +93,8 @@ describe('sessionControl.sessionSystemRecordsHttp', () => {
         headers: expect.objectContaining({
           Authorization: 'Bearer token-1',
           'Idempotency-Key': 'memory:summary_shard:v1:1-2',
+          'x-happier-client-kind': 'session-runner',
+          'x-happier-session-sync-protocol': '2',
         }),
       }),
     );
@@ -164,6 +166,10 @@ describe('sessionControl.sessionSystemRecordsHttp', () => {
       1,
       'http://server.example.test/v2/sessions/sess-1/system-records',
       expect.objectContaining({
+        headers: expect.objectContaining({
+          'x-happier-client-kind': 'session-runner',
+          'x-happier-session-sync-protocol': '2',
+        }),
         params: {
           namespace: 'memory',
           kind: 'summary_shard.v1',
@@ -211,6 +217,36 @@ describe('sessionControl.sessionSystemRecordsHttp', () => {
       name: 'HttpStatusError',
       response: { status: 401 },
       code: 'not_authenticated',
+    });
+  });
+
+  it('surfaces required compatibility rejection as a typed terminal error', async () => {
+    process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
+    vi.resetModules();
+    const { fetchSessionSystemRecordsPage } = await import('./sessionSystemRecordsHttp');
+
+    vi.spyOn(axios, 'get').mockResolvedValueOnce({
+      status: 426,
+      data: {
+        error: 'client-upgrade-required',
+        requirement: {
+          v: 1,
+          minimumSessionSyncProtocolVersion: 2,
+          clientKind: 'session-runner',
+          minimumAppVersion: '9.0.0',
+          updateUrl: null,
+        },
+      },
+    } as never);
+
+    await expect(fetchSessionSystemRecordsPage({
+      token: 'token-1',
+      sessionId: 'sess-1',
+      namespace: 'activity',
+      kind: 'workflow_run.v1',
+    })).rejects.toMatchObject({
+      name: 'CliClientUpgradeRequiredError',
+      statusCode: 426,
     });
   });
 });

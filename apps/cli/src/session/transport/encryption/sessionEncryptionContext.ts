@@ -1,5 +1,8 @@
+import { createHmac } from 'node:crypto';
+
+import { stringifySerializedJsonValue } from '@happier-dev/protocol';
 import type { Credentials } from '@/persistence';
-import { decodeBase64, decrypt, encodeBase64, encrypt } from '@/api/encryption';
+import { decodeBase64, decrypt, encodeBase64, encrypt, encryptWithDerivedNonce } from '@/api/encryption';
 import { openSessionDataEncryptionKey } from '@/api/client/openSessionDataEncryptionKey';
 import { tryParseJsonRecord } from '@/utils/tryParseJsonRecord';
 
@@ -95,8 +98,48 @@ export function decryptStoredSessionPayload(params: Readonly<{
 export function encryptSessionPayload(params: Readonly<{
   ctx: SessionEncryptionContext;
   payload: unknown;
+  idempotencyKey?: string;
 }>): string {
-  return encodeBase64(encrypt(params.ctx.encryptionKey, params.ctx.encryptionVariant, params.payload), 'base64');
+  const nonce = params.idempotencyKey === undefined
+    ? undefined
+    : deriveIdempotentSessionPayloadNonce({
+        ctx: params.ctx,
+        idempotencyKey: params.idempotencyKey,
+        payload: params.payload,
+      });
+  const ciphertext = nonce === undefined
+    ? encrypt(params.ctx.encryptionKey, params.ctx.encryptionVariant, params.payload)
+    : encryptWithDerivedNonce(params.ctx.encryptionKey, params.ctx.encryptionVariant, params.payload, nonce);
+  return encodeBase64(ciphertext, 'base64');
+}
+
+function deriveIdempotentSessionPayloadNonce(params: Readonly<{
+  ctx: SessionEncryptionContext;
+  idempotencyKey: string;
+  payload: unknown;
+}>): Uint8Array {
+  // A keyed synthetic nonce makes same-ID/same-content retries byte-identical
+  // without reusing a nonce when either the identity or plaintext changes.
+  const fields = [
+    'happier.session-pending.idempotent-content.v1',
+    params.ctx.encryptionVariant,
+    params.idempotencyKey,
+    stringifySerializedJsonValue(params.payload),
+  ];
+  const encodedFields = fields.map((field) => new TextEncoder().encode(field));
+  const totalLength = encodedFields.reduce((total, field) => total + 4 + field.length, 0);
+  const input = new Uint8Array(totalLength);
+  const view = new DataView(input.buffer);
+  let offset = 0;
+  for (const field of encodedFields) {
+    view.setUint32(offset, field.length, false);
+    offset += 4;
+    input.set(field, offset);
+    offset += field.length;
+  }
+  const digest = createHmac('sha256', params.ctx.encryptionKey).update(input).digest();
+  const nonceLength = params.ctx.encryptionVariant === 'legacy' ? 24 : 12;
+  return new Uint8Array(digest.subarray(0, nonceLength));
 }
 
 export function decryptSessionPayload(params: Readonly<{

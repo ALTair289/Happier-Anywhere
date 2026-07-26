@@ -21,6 +21,10 @@ import {
   buildSessionDetailRequestPurpose,
   type SessionSnapshotRefreshReasonInput,
 } from '@/api/session/sessionSnapshotRefreshReason';
+import {
+  buildCurrentCliClientCompatibilityHttpHeaders,
+  throwIfCliClientUpgradeRequired,
+} from '@/api/clientCompatibility/cliClientCompatibility';
 
 export type RawSessionRecord = V2SessionByIdResponse['session'];
 export type RawSessionListRow = V2SessionListResponse['sessions'][number];
@@ -43,6 +47,10 @@ function throwAuthenticationStatusError(status: number, message = `Unauthorized 
 
 function throwUnexpectedHttpStatusError(status: number, message: string): never {
   throw createHttpStatusError(status, message);
+}
+
+function enforceSessionCompatibilityResponse(response: Readonly<{ status: number; data?: unknown }>): void {
+  throwIfCliClientUpgradeRequired(response.status, response.data);
 }
 
 type SessionByIdHttpResponse = AxiosResponse<unknown>;
@@ -77,6 +85,7 @@ async function getSessionByIdResponse(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
+      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
       'X-Happier-Request-Purpose': requestPurpose,
     },
     timeout: configuration.sessionControlHttpTimeoutMs,
@@ -94,6 +103,7 @@ async function getSessionByIdResponse(params: Readonly<{
 
 export async function fetchSessionById(params: Readonly<{ token: string; sessionId: string; reason?: SessionSnapshotRefreshReasonInput }>): Promise<RawSessionRecord | null> {
   const response = await getSessionByIdResponse(params);
+  enforceSessionCompatibilityResponse(response);
 
   if (response.status === 404) return null;
   if (isAuthenticationStatus(response.status)) {
@@ -123,6 +133,7 @@ function looksLikeMissingV2SessionRoute404(data: unknown, sessionId: string): bo
 
 export async function fetchSessionByIdCompat(params: Readonly<{ token: string; sessionId: string; reason?: SessionSnapshotRefreshReasonInput }>): Promise<RawSessionRecord | null> {
   const response = await getSessionByIdResponse(params);
+  enforceSessionCompatibilityResponse(response);
 
   if (response.status === 404) {
     if (!looksLikeMissingV2SessionRoute404(response.data, params.sessionId)) return null;
@@ -169,6 +180,7 @@ export async function patchSessionMetadata(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
+      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     timeout: configuration.sessionControlHttpTimeoutMs,
     validateStatus: () => true,
@@ -240,6 +252,7 @@ export async function fetchSessionsPage(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
+      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     params: params.activeOnly
       ? { ...(limit ? { limit } : {}) }
@@ -306,6 +319,7 @@ export async function commitSessionStoredMessage(params: Readonly<{
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
       'Idempotency-Key': params.localId,
+      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     timeout: 20_000,
     validateStatus: () => true,
@@ -378,6 +392,7 @@ export async function getOrCreateSessionByTag(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.credentials.token}`,
       'Content-Type': 'application/json',
+      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     timeout: 60_000,
     validateStatus: () => true,
@@ -414,6 +429,7 @@ async function postArchiveMutation(params: Readonly<{
       headers: {
         Authorization: `Bearer ${params.token}`,
         'Content-Type': 'application/json',
+        ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
       },
       timeout: 10_000,
       validateStatus: () => true,
