@@ -25,6 +25,12 @@ type ProviderAccountUsageStore = Readonly<{
 
 type StoreModule = Readonly<{
   createProviderAccountUsageStore(): ProviderAccountUsageStore;
+  isProviderAccountUsageStoreMutationAccepted(result: Readonly<{
+    status: 'snapshot_advanced' | 'source_linked' | 'duplicate' | 'older';
+    recordId: string;
+    snapshotAdvanced: boolean;
+    sourceLinked: boolean;
+  }>): boolean;
 }>;
 
 async function loadStoreModule(): Promise<StoreModule | null> {
@@ -67,6 +73,24 @@ function createSnapshot(overrides: Partial<ProviderAccountUsageSnapshotV1> = {})
 }
 
 describe('provider account usage store', () => {
+  it('uses the typed status as the only mutation-acceptance authority', async () => {
+    const module = await loadStoreModule();
+    expect(module).not.toBeNull();
+    const recordId = createSnapshot().recordId;
+    expect(module!.isProviderAccountUsageStoreMutationAccepted({
+      status: 'duplicate',
+      recordId,
+      snapshotAdvanced: true,
+      sourceLinked: true,
+    })).toBe(false);
+    expect(module!.isProviderAccountUsageStoreMutationAccepted({
+      status: 'snapshot_advanced',
+      recordId,
+      snapshotAdvanced: false,
+      sourceLinked: false,
+    })).toBe(true);
+  });
+
   it('records one stable provider-subject snapshot and resolves explicit sources without exposing alias lookup', async () => {
     const module = await loadStoreModule();
     expect(module).not.toBeNull();

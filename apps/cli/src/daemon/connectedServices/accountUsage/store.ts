@@ -26,6 +26,12 @@ export type ProviderAccountUsageStoreMutationResult = Readonly<{
   sourceLinked: boolean;
 }>;
 
+export function isProviderAccountUsageStoreMutationAccepted(
+  result: Readonly<{ status: string }>,
+): boolean {
+  return result.status === 'snapshot_advanced' || result.status === 'source_linked';
+}
+
 export type ProviderAccountUsageStore = Readonly<{
   recordSnapshot(
     snapshot: ProviderAccountUsageSnapshotV1,
@@ -38,13 +44,15 @@ export type ProviderAccountUsageStore = Readonly<{
 
 function sourceKey(source: ConnectedServiceUsageSourceV1): string {
   const parsed = ConnectedServiceUsageSourceV1Schema.parse(source);
-  return JSON.stringify([
-    parsed.serviceId,
-    parsed.profileId,
-    parsed.bindingKind,
-    parsed.groupId ?? '',
-    parsed.groupGeneration ?? '',
-  ]);
+  return parsed.bindingKind === 'profile'
+    ? JSON.stringify(['profile', parsed.serviceId, parsed.profileId])
+    : JSON.stringify([
+      'group_member',
+      parsed.serviceId,
+      parsed.profileId,
+      parsed.groupId,
+      parsed.groupGeneration ?? null,
+    ]);
 }
 
 function normalizeObservation(
