@@ -8,7 +8,10 @@
  */
 
 import type { ApiClient } from '@/api/api';
-import type { ApiSessionClient } from '@/api/session/sessionClient';
+import type {
+    ApiSessionClient,
+    SessionRuntimeActivityClientConfig,
+} from '@/api/session/sessionClient';
 import type { AgentState, Metadata, Session } from '@/api/types';
 import { configuration } from '@/configuration';
 import { createOfflineSessionStub } from '@/api/offline/offlineSessionStub';
@@ -28,6 +31,8 @@ export interface SetupOfflineReconnectionOptions {
     state: AgentState;
     /** Initial API response (null if server unreachable) */
     response: Session | null;
+    runtimeActivity?: SessionRuntimeActivityClientConfig;
+    configureSessionClient?: (session: ApiSessionClient) => void;
     /**
      * Optional: receive reconnection status messages (reconnected/auth failed).
      * Defaults to `console.log` when omitted.
@@ -98,7 +103,11 @@ export function setupOfflineReconnection(opts: SetupOfflineReconnectionOptions):
             onReconnected: async () => {
                 const resp = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
                 if (!resp) throw new Error('Server unavailable');
-                const realSession = api.sessionSyncClient(resp);
+                const realSession = api.sessionSyncClient(
+                    resp,
+                    opts.runtimeActivity,
+                );
+                opts.configureSessionClient?.(realSession);
                 connectionState.recover();
                 // Notify caller to swap the session reference
                 try {
@@ -113,7 +122,8 @@ export function setupOfflineReconnection(opts: SetupOfflineReconnectionOptions):
 
         return { session, reconnectionHandle, isOffline: true };
     } else {
-        session = api.sessionSyncClient(response);
+        session = api.sessionSyncClient(response, opts.runtimeActivity);
+        opts.configureSessionClient?.(session);
         return { session, reconnectionHandle: null, isOffline: false };
     }
 }

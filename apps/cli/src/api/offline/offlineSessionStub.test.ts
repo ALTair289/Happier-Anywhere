@@ -30,4 +30,14 @@ describe('createOfflineSessionStub', () => {
         await expect(session.getCommittedUserMessageSeq('l1')).toBeNull();
         await expect(session.waitForCommittedUserMessageSeq('l1')).resolves.toBeNull();
     });
+
+    it('reports committed transcript writes as unavailable instead of claiming durability', async () => {
+        const session = createOfflineSessionStub('tag');
+
+        await expect(session.sendAgentMessageCommitted(
+            'gemini',
+            { type: 'message', message: 'retained until attachment' },
+            { localId: 'offline-segment-1' },
+        )).rejects.toThrow(/offline.*not.*persist/i);
+    });
 });

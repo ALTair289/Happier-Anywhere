@@ -33,6 +33,7 @@ type ApiSessionClientStubContract = Pick<
     | 'ensureMetadataSnapshot'
     | 'refreshSessionSnapshotFromServerBestEffort'
     | 'waitForMetadataUpdate'
+    | 'waitForPendingEligibilityUpdate'
     | 'shouldAttemptPendingMaterialization'
     | 'reconcilePendingQueueState'
     | 'materializeNextPendingMessageSafely'
@@ -73,7 +74,9 @@ class OfflineSessionStub extends EventEmitter implements ApiSessionClientStubCon
         _provider: ACPProvider,
         _body: ACPMessageData,
         _opts: { localId: string; meta?: Record<string, unknown> },
-    ): Promise<void> {}
+    ): Promise<void> {
+        throw new Error('Offline transcript write was not persisted');
+    }
     sendClaudeSessionMessage(_body: unknown, _meta?: Record<string, unknown>): void {}
     recordClaudeJsonlMessageConsumed(_body: unknown, _meta?: Record<string, unknown>): void {}
     async fetchCommittedClaudeJsonlMessageBaseline(): Promise<import('@/backends/claude/utils/claudeJsonlMessageKey').CommittedClaudeJsonlMessageBaseline> { return { keys: new Set(), complete: true, oldestCoveredAtMs: null }; }
@@ -91,6 +94,7 @@ class OfflineSessionStub extends EventEmitter implements ApiSessionClientStubCon
     async ensureMetadataSnapshot(): Promise<Metadata | null> { return null; }
     async refreshSessionSnapshotFromServerBestEffort(): Promise<void> {}
     async waitForMetadataUpdate(): Promise<boolean> { return false; }
+    async waitForPendingEligibilityUpdate(): Promise<boolean> { return false; }
     shouldAttemptPendingMaterialization(): boolean { return false; }
     async reconcilePendingQueueState(): Promise<boolean> { return false; }
     async materializeNextPendingMessageSafely(): Promise<{ type: 'deferred'; reason: 'supervisor_offline' }> {
