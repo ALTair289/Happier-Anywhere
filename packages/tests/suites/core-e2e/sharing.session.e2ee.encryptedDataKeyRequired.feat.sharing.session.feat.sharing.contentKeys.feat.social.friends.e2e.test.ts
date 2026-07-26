@@ -104,4 +104,3 @@ describe('core e2e: e2ee direct share requires encryptedDataKey', () => {
     expect(typeof ok.data?.share?.id).toBe('string');
   }, 180_000);
 });
-
