@@ -1,4 +1,8 @@
-import type { ConnectedServiceCredentialRecordV1 } from '@happier-dev/protocol';
+import {
+  ConnectedServiceCredentialRevisionV1Schema,
+  type ConnectedServiceCredentialRecordV1,
+  type ConnectedServiceCredentialRevisionV1,
+} from '@happier-dev/protocol';
 
 import type { ClaudeSubscriptionNativeAuthSelectionDescriptor } from './nativeAuth/materializeClaudeCodeNativeAuth';
 import {
@@ -10,6 +14,7 @@ export type ClaudeSharedGroupHotApplyTarget = Readonly<{
   record: ConnectedServiceCredentialRecordV1 & { kind: 'oauth'; serviceId: 'claude-subscription' };
   metadata: ClaudeRuntimeAuthSharedGroupSurfaceMetadata;
   selectionDescriptor: Extract<ClaudeSubscriptionNativeAuthSelectionDescriptor, { kind: 'group' }>;
+  credentialRevision: ConnectedServiceCredentialRevisionV1;
 }>;
 
 function readRecord(value: unknown): Record<string, unknown> | null {
@@ -50,10 +55,12 @@ export function resolveClaudeSharedGroupHotApplyTarget(
   const groupId = readString(selectionRecord.groupId);
   const activeProfileId = readString(selectionRecord.activeProfileId);
   const generation = readNumber(selectionRecord.generation);
-  if (!record || !metadata || !groupId || !activeProfileId || generation === null) return null;
+  const credentialRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(selectionRecord.credentialRevision);
+  if (!record || !metadata || !groupId || !activeProfileId || generation === null || !credentialRevision.success) return null;
   return {
     record,
     metadata,
+    credentialRevision: credentialRevision.data,
     selectionDescriptor: {
       kind: 'group',
       serviceId: 'claude-subscription',

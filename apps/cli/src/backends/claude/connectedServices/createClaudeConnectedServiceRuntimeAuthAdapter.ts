@@ -4,18 +4,16 @@ import { classifyClaudeConnectedServiceRuntimeAuthFailure } from './classifyClau
 import { mapClaudeRateLimitEventToUsageDetails } from './mapClaudeRateLimitEventToUsageDetails';
 import { resolveClaudeConnectedServiceRuntimeAuthSwitchPlan } from './claudeConnectedServiceRuntimeAuthSwitchPlan';
 import { resolveClaudeSharedGroupHotApplyTarget } from './claudeSharedGroupHotApplyTarget';
-import { readClaudeMaterializedOAuthAccountIdentity } from './resolveClaudeRuntimeProviderAccountIdentity';
+import { materializeClaudeSharedGroupRuntimeAuth } from './materializeClaudeSharedGroupRuntimeAuth';
 import { classifyClaudeCodeCredentialHealth } from './nativeAuth/claudeCodeCredentialHealth';
 import {
   buildClaudeCodeCredentialPayload,
   computeClaudeCodeCredentialAccountProofFingerprint,
   resolveClaudeCodeCredentialsFilePath,
 } from './nativeAuth/claudeCodeCredentialFile';
-import {
-  materializeClaudeSubscriptionNativeAuthHome,
-  type ClaudeSubscriptionNativeAuthSelectionDescriptor,
-} from './nativeAuth/materializeClaudeCodeNativeAuth';
+import type { ClaudeSubscriptionNativeAuthSelectionDescriptor } from './nativeAuth/materializeClaudeCodeNativeAuth';
 import { verifyClaudeCodeNativeAuth } from './nativeAuth/verifyClaudeCodeNativeAuth';
+import { verifyClaudeSharedGroupGenerationApplication } from './verifyClaudeSharedGroupGenerationApplication';
 import type {
   ConnectedServiceProviderRuntimeAuthAdapter,
   ConnectedServiceRuntimeFailureInput,
@@ -146,19 +144,7 @@ export function createClaudeConnectedServiceRuntimeAuthAdapter(): ConnectedServi
       if (!target) {
         return { applied: false, reason: 'hot_apply_unsupported', recovery: 'restart_rematerialize' };
       }
-      const materialized = await materializeClaudeSubscriptionNativeAuthHome({
-        record: target.record,
-        targetClaudeConfigDir: target.metadata.runtimeClaudeConfigDir,
-        sourceEnv: {
-          ...process.env,
-          CLAUDE_CONFIG_DIR: target.metadata.runtimeClaudeConfigDir,
-        },
-        accountSettings: null,
-        sessionDirectory: null,
-        vendorResumeId: null,
-        candidatePersistedSessionFile: null,
-        selectionDescriptor: target.selectionDescriptor,
-      });
+      const materialized = await materializeClaudeSharedGroupRuntimeAuth(target);
       const blockingDiagnostics = materialized.diagnostics.filter((diagnostic) => diagnostic.severity === 'blocking');
       if (blockingDiagnostics.length > 0 || materialized.status !== 'materialized') {
         return {
@@ -178,7 +164,6 @@ export function createClaudeConnectedServiceRuntimeAuthAdapter(): ConnectedServi
         verification: buildSharedGroupVerification({
           record: target.record,
           selectionDescriptor: target.selectionDescriptor,
-          materializedIdentity: await readClaudeMaterializedOAuthAccountIdentity(target.metadata.runtimeClaudeConfigDir),
         }),
       };
     },
@@ -243,18 +228,22 @@ export function createClaudeConnectedServiceRuntimeAuthAdapter(): ConnectedServi
       }
       const target = resolveClaudeSharedGroupHotApplyTarget(input.selection);
       if (target && await materializedCredentialMatchesRecord({ record, claudeConfigDir })) {
-        return buildSharedGroupVerification({
-          record: target.record,
-          selectionDescriptor: target.selectionDescriptor,
-          materializedIdentity: await readClaudeMaterializedOAuthAccountIdentity(claudeConfigDir),
-        }) ?? {
-          status: 'unavailable',
-          retryable: true,
-          reason: 'claude_code_runtime_account_adoption_unproven',
-          errorClassification: {
-            missingScopes: [],
-          },
-        };
+        const proof = await verifyClaudeSharedGroupGenerationApplication({
+          serviceId: 'claude-subscription',
+          groupId: target.selectionDescriptor.groupId,
+          profileId: target.selectionDescriptor.activeProfileId,
+          generation: target.selectionDescriptor.generation,
+          credentialRevision: target.credentialRevision,
+          environmentVariables: { CLAUDE_CONFIG_DIR: claudeConfigDir },
+        });
+        if (proof.status === 'verified') {
+          return {
+            ...proof,
+            proofStrength: 'exact' as const,
+            providerAccountId: readCredentialProviderAccountId(record),
+            activeAccountId: readCredentialProviderEmail(record),
+          };
+        }
       }
       return {
         status: 'unavailable',
