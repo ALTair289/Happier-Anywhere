@@ -15,10 +15,10 @@ describe("computeSessionContributesToActivityBadge", () => {
             lastRuntimeIssue: null,
             active: true,
             archivedAt: null,
+            runtimeActivityState: "active",
             runtimeActivityActiveCount: 1,
             runtimeActivityObservedAt: 1_000,
-            runtimeActivityExpiresAt: 2_000,
-            runtimeActivitySourceClass: "provider_detached_task",
+            runtimeActivityRevision: 1,
         };
 
         expect(computeSessionContributesToActivityBadge(sessionWithRuntimeActivity)).toBe(false);
@@ -36,10 +36,10 @@ describe("computeSessionContributesToActivityBadge", () => {
             lastRuntimeIssue: null,
             active: true,
             archivedAt: null,
+            runtimeActivityState: "active",
             runtimeActivityActiveCount: 1,
             runtimeActivityObservedAt: 1_000,
-            runtimeActivityExpiresAt: 2_000,
-            runtimeActivitySourceClass: "provider_detached_task",
+            runtimeActivityRevision: 1,
         };
 
         expect(computeSessionContributesToActivityBadge(sessionWithBlockedPending)).toBe(true);

@@ -4,7 +4,7 @@ import {
     SessionRuntimeIssueV1Schema,
     type V2SessionRecord,
 } from "@happier-dev/protocol";
-import { normalizeStoredSessionRuntimeActivityProjection } from "@/app/session/runtimeActivityProjection";
+import { normalizeStoredSessionRuntimeActivityProjection } from "@/app/session/runtimeActivity/projection";
 
 export function parseStoredSessionRuntimeIssue(value: string | null | undefined): V2SessionRecord["lastRuntimeIssue"] {
     if (!value) return null;
@@ -60,10 +60,10 @@ const V2_SESSION_LIST_ROW_BASE_SELECT = {
     latestTurnStatus: true,
     latestTurnStatusObservedAt: true,
     lastRuntimeIssue: true,
+    runtimeActivityState: true,
+    runtimeActivityRevision: true,
     runtimeActivityActiveCount: true,
     runtimeActivityObservedAt: true,
-    runtimeActivityExpiresAt: true,
-    runtimeActivitySourceClass: true,
     pendingCount: true,
     pendingBlockedCount: true,
     pendingVersion: true,
@@ -81,10 +81,6 @@ const {
     latestReadyEventAt: _legacySelectLatestReadyEventAt,
     thinking: _legacySelectThinking,
     thinkingAt: _legacySelectThinkingAt,
-    runtimeActivityActiveCount: _legacySelectRuntimeActivityActiveCount,
-    runtimeActivityObservedAt: _legacySelectRuntimeActivityObservedAt,
-    runtimeActivityExpiresAt: _legacySelectRuntimeActivityExpiresAt,
-    runtimeActivitySourceClass: _legacySelectRuntimeActivitySourceClass,
     ...V2_SESSION_LIST_ROW_LEGACY_SELECT
 } = V2_SESSION_LIST_ROW_BASE_SELECT;
 
@@ -156,10 +152,10 @@ function readBooleanField(row: V2SessionListRowCompat, field: string): boolean {
 
 export type SessionRuntimeActivityProjectionFields = Pick<
     V2SessionRecord,
+    | "runtimeActivityState"
+    | "runtimeActivityRevision"
     | "runtimeActivityActiveCount"
     | "runtimeActivityObservedAt"
-    | "runtimeActivityExpiresAt"
-    | "runtimeActivitySourceClass"
 >;
 
 export function mapStoredSessionRuntimeActivityProjection(row: object): SessionRuntimeActivityProjectionFields {

@@ -24,7 +24,6 @@ import {
     findV2SessionListRows,
     mapV2SessionListRows,
     resolveV2SessionListCursorForVisibleRows,
-    runWithV2SessionListProjectionFallback,
     V2_SESSION_LIST_ORDER_BY,
 } from "./v2SessionListPage";
 import { createV2SessionListInitialPage } from "./v2SessionListInitialPage";
@@ -77,10 +76,10 @@ const V1_SESSION_LIST_ROW_SELECT = {
     latestTurnStatus: true,
     latestTurnStatusObservedAt: true,
     lastRuntimeIssue: true,
+    runtimeActivityState: true,
+    runtimeActivityRevision: true,
     runtimeActivityActiveCount: true,
     runtimeActivityObservedAt: true,
-    runtimeActivityExpiresAt: true,
-    runtimeActivitySourceClass: true,
     dataEncryptionKey: true,
     pendingCount: true,
     pendingBlockedCount: true,
@@ -88,14 +87,6 @@ const V1_SESSION_LIST_ROW_SELECT = {
     active: true,
     lastActiveAt: true,
 } as const satisfies Prisma.SessionSelect;
-
-const {
-    runtimeActivityActiveCount: _v1LegacyRuntimeActivityActiveCount,
-    runtimeActivityObservedAt: _v1LegacyRuntimeActivityObservedAt,
-    runtimeActivityExpiresAt: _v1LegacyRuntimeActivityExpiresAt,
-    runtimeActivitySourceClass: _v1LegacyRuntimeActivitySourceClass,
-    ...V1_SESSION_LIST_LEGACY_ROW_SELECT
-} = V1_SESSION_LIST_ROW_SELECT;
 
 function createV1SessionShareSelect(sessionSelect: Prisma.SessionSelect): Prisma.SessionShareSelect {
     return {
@@ -109,18 +100,11 @@ function createV1SessionShareSelect(sessionSelect: Prisma.SessionSelect): Prisma
 }
 
 async function findV1SessionListRows(userId: string) {
-    return await runWithV2SessionListProjectionFallback(
-        () => findV1SessionListRowsWithSelect({
-            userId,
-            sessionSelect: V1_SESSION_LIST_ROW_SELECT,
-            shareSessionSelect: V1_SESSION_LIST_ROW_SELECT,
-        }),
-        () => findV1SessionListRowsWithSelect({
-            userId,
-            sessionSelect: V1_SESSION_LIST_LEGACY_ROW_SELECT,
-            shareSessionSelect: V1_SESSION_LIST_LEGACY_ROW_SELECT,
-        }),
-    );
+    return await findV1SessionListRowsWithSelect({
+        userId,
+        sessionSelect: V1_SESSION_LIST_ROW_SELECT,
+        shareSessionSelect: V1_SESSION_LIST_ROW_SELECT,
+    });
 }
 
 async function findV1SessionListRowsWithSelect(params: Readonly<{

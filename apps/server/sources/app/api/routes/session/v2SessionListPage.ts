@@ -70,7 +70,7 @@ export async function runWithV2SessionListProjectionFallback<T>(
 
 export function isMissingSessionProjectionColumnError(error: unknown): boolean {
     const text = JSON.stringify(error, (_key, value) => value instanceof Error ? { message: value.message, name: value.name } : value);
-    return /pendingRequestObservedAt|latestReadyEventSeq|latestReadyEventAt|thinkingAt|thinking|runtimeActivityActiveCount|runtimeActivityObservedAt|runtimeActivityExpiresAt|runtimeActivitySourceClass/i.test(text)
+    return /pendingRequestObservedAt|latestReadyEventSeq|latestReadyEventAt|thinkingAt|thinking/i.test(text)
         && /column|field|P2022|no such/i.test(text);
 }
 

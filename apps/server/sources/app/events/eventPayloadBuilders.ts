@@ -2,9 +2,10 @@ import { AccountProfile } from "@/types";
 import { getPublicUrl } from "@/storage/blob/files";
 import { resolveMessageAttentionImpact } from "@/app/session/messageAttentionImpact";
 import { type UpdatePayload, type EphemeralPayload } from "./eventPayloadTypes";
+import { SessionRuntimeActivityProjectionSchema } from "@happier-dev/protocol";
 import type {
     PrimaryTurnStatusV1,
-    SessionRuntimeActivitySourceClassV1,
+    SessionRuntimeActivityState,
     SessionMessageAttentionImpact,
     SessionMessageRole,
     SessionRuntimeIssueV1,
@@ -31,8 +32,31 @@ function serializeOptionalMillis(value: number | bigint | null | undefined): num
     return null;
 }
 
-function normalizeRuntimeActivityActiveCount(value: number | null | undefined): number {
-    return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : 0;
+function serializeRuntimeActivityInteger(value: unknown): unknown {
+    if (typeof value !== "bigint") return value;
+    return value >= BigInt(0) && value <= BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number(value)
+        : value;
+}
+
+function readPublicRuntimeActivityProjection(input: Readonly<{
+    runtimeActivityState?: unknown;
+    runtimeActivityRevision?: number | bigint | null;
+    runtimeActivityActiveCount?: unknown;
+    runtimeActivityObservedAt?: number | bigint | null;
+}>) {
+    const projection = SessionRuntimeActivityProjectionSchema.parse({
+        state: input.runtimeActivityState,
+        revision: serializeRuntimeActivityInteger(input.runtimeActivityRevision),
+        activeCount: input.runtimeActivityActiveCount,
+        observedAt: serializeRuntimeActivityInteger(input.runtimeActivityObservedAt),
+    });
+    return {
+        runtimeActivityState: projection.state,
+        runtimeActivityRevision: projection.revision,
+        runtimeActivityActiveCount: projection.activeCount,
+        runtimeActivityObservedAt: projection.observedAt,
+    };
 }
 
 function serializeUpdateMessage(message: UpdateMessagePayloadInput, options?: UpdateMessagePayloadOptions) {
@@ -69,19 +93,12 @@ export function buildNewSessionUpdate(session: {
     createdAt: Date;
     updatedAt: Date;
     meaningfulActivityAt?: Date | null;
+    runtimeActivityState?: SessionRuntimeActivityState | null;
+    runtimeActivityRevision?: number | bigint | null;
     runtimeActivityActiveCount?: number | null;
     runtimeActivityObservedAt?: number | bigint | null;
-    runtimeActivityExpiresAt?: number | bigint | null;
-    runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
 }, updateSeq: number, updateId: string): UpdatePayload {
-    const runtimeActivityActiveCount = normalizeRuntimeActivityActiveCount(session.runtimeActivityActiveCount);
-    const runtimeActivityObservedAt = runtimeActivityActiveCount > 0
-        ? serializeOptionalMillis(session.runtimeActivityObservedAt)
-        : null;
-    const runtimeActivityExpiresAt = runtimeActivityActiveCount > 0
-        ? serializeOptionalMillis(session.runtimeActivityExpiresAt)
-        : null;
-    const runtimeActivitySourceClass = runtimeActivityActiveCount > 0 ? session.runtimeActivitySourceClass ?? null : null;
+    const runtimeActivityProjection = readPublicRuntimeActivityProjection(session);
 
     return {
         id: updateId,
@@ -102,10 +119,7 @@ export function buildNewSessionUpdate(session: {
             createdAt: session.createdAt.getTime(),
             updatedAt: session.updatedAt.getTime(),
             meaningfulActivityAt: (session.meaningfulActivityAt ?? session.createdAt).getTime(),
-            runtimeActivityActiveCount,
-            runtimeActivityObservedAt,
-            runtimeActivityExpiresAt,
-            runtimeActivitySourceClass,
+            ...runtimeActivityProjection,
         },
         createdAt: Date.now()
     };
@@ -172,19 +186,23 @@ export function buildUpdateSessionUpdate(
         latestTurnStatus?: PrimaryTurnStatusV1 | null;
         latestTurnStatusObservedAt?: number | null;
         lastRuntimeIssue?: SessionRuntimeIssueV1 | null;
+        runtimeActivityState?: SessionRuntimeActivityState | null;
+        runtimeActivityRevision?: number;
         runtimeActivityActiveCount?: number;
         runtimeActivityObservedAt?: number | null;
-        runtimeActivityExpiresAt?: number | null;
-        runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
         meaningfulActivityAt?: number;
         archivedAt?: number | null;
     },
 ): UpdatePayload {
-    const projectionHasRuntimeActivityActiveCount = projection && "runtimeActivityActiveCount" in projection;
-    const runtimeActivityActiveCount = projectionHasRuntimeActivityActiveCount
-        ? normalizeRuntimeActivityActiveCount(projection.runtimeActivityActiveCount)
+    const hasRuntimeActivityProjection = projection && [
+        'runtimeActivityState',
+        'runtimeActivityRevision',
+        'runtimeActivityActiveCount',
+        'runtimeActivityObservedAt',
+    ].some((key) => Object.prototype.hasOwnProperty.call(projection, key));
+    const runtimeActivityProjection = hasRuntimeActivityProjection
+        ? readPublicRuntimeActivityProjection(projection)
         : null;
-    const shouldClearRuntimeActivity = runtimeActivityActiveCount === 0;
 
     return {
         id: updateId,
@@ -220,24 +238,7 @@ export function buildUpdateSessionUpdate(
                 ? { latestTurnStatusObservedAt: projection.latestTurnStatusObservedAt ?? null }
                 : {}),
             ...(projection && 'lastRuntimeIssue' in projection ? { lastRuntimeIssue: projection.lastRuntimeIssue ?? null } : {}),
-            ...(projectionHasRuntimeActivityActiveCount
-                ? { runtimeActivityActiveCount }
-                : {}),
-            ...(projection && 'runtimeActivityObservedAt' in projection
-                ? { runtimeActivityObservedAt: shouldClearRuntimeActivity ? null : projection.runtimeActivityObservedAt ?? null }
-                : shouldClearRuntimeActivity
-                    ? { runtimeActivityObservedAt: null }
-                : {}),
-            ...(projection && 'runtimeActivityExpiresAt' in projection
-                ? { runtimeActivityExpiresAt: shouldClearRuntimeActivity ? null : projection.runtimeActivityExpiresAt ?? null }
-                : shouldClearRuntimeActivity
-                    ? { runtimeActivityExpiresAt: null }
-                : {}),
-            ...(projection && 'runtimeActivitySourceClass' in projection
-                ? { runtimeActivitySourceClass: shouldClearRuntimeActivity ? null : projection.runtimeActivitySourceClass ?? null }
-                : shouldClearRuntimeActivity
-                    ? { runtimeActivitySourceClass: null }
-                : {}),
+            ...(runtimeActivityProjection ?? {}),
             ...(typeof projection?.meaningfulActivityAt === "number" && Number.isFinite(projection.meaningfulActivityAt)
                 ? { meaningfulActivityAt: projection.meaningfulActivityAt }
                 : {}),
