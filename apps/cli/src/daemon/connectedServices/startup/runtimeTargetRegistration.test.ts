@@ -32,6 +32,73 @@ describe('registerConnectedServiceRuntimeTargetForDaemon onRegisteredTarget', ()
     expect(onRegisteredTarget).toHaveBeenCalledWith(expect.objectContaining({ pid: 4321, agentId: 'claude' }));
   });
 
+  it('does not replay registration side effects for an unchanged target revision', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const onRegisteredTarget = vi.fn();
+    const registration = {
+      runtimeRegistry: registry,
+      pid: 4321,
+      agentId: 'claude' as const,
+      sessionId: 'sess-spawn-evidence',
+      connectedServicesBindingsRaw: connectedBindings,
+      materializationKey: 'mk-spawn-evidence',
+      onRegisteredTarget,
+    };
+
+    registerConnectedServiceRuntimeTargetForDaemon(registration);
+    registerConnectedServiceRuntimeTargetForDaemon(registration);
+
+    expect(onRegisteredTarget).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers every registration to current-truth reconciliation even when registry metadata is unchanged', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const onRuntimeTargetRegistration = vi.fn();
+    registry.onTargetRegistration(onRuntimeTargetRegistration);
+    const registration = {
+      runtimeRegistry: registry,
+      pid: 4321,
+      agentId: 'claude' as const,
+      sessionId: 'sess-current-truth',
+      connectedServicesBindingsRaw: connectedBindings,
+      materializationKey: 'mk-current-truth',
+    };
+
+    registerConnectedServiceRuntimeTargetForDaemon(registration);
+    registerConnectedServiceRuntimeTargetForDaemon(registration);
+
+    expect(onRuntimeTargetRegistration).toHaveBeenCalledTimes(2);
+  });
+
+  it('replays registration side effects when late session adoption changes the target revision', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const onRegisteredTarget = vi.fn();
+
+    registerConnectedServiceRuntimeTargetForDaemon({
+      runtimeRegistry: registry,
+      pid: 4321,
+      agentId: 'claude',
+      connectedServicesBindingsRaw: connectedBindings,
+      materializationKey: 'mk-spawn-evidence',
+      onRegisteredTarget,
+    });
+    registerConnectedServiceRuntimeTargetForDaemon({
+      runtimeRegistry: registry,
+      pid: 4321,
+      agentId: 'claude',
+      sessionId: 'sess-adopted-late',
+      connectedServicesBindingsRaw: connectedBindings,
+      materializationKey: 'mk-spawn-evidence',
+      onRegisteredTarget,
+    });
+
+    expect(onRegisteredTarget).toHaveBeenCalledTimes(2);
+    expect(onRegisteredTarget).toHaveBeenLastCalledWith(expect.objectContaining({
+      sessionId: 'sess-adopted-late',
+      revision: 2,
+    }));
+  });
+
   it('does not invoke onRegisteredTarget when there is no connected-service registration data', () => {
     const registry = new ConnectedServiceRuntimeRegistry();
     const onRegisteredTarget = vi.fn();

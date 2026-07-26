@@ -13,12 +13,29 @@ import {
   ConnectedServiceRuntimeRegistry,
   type ConnectedServiceRuntimeTarget,
   type ConnectedServiceRuntimeTargetInput,
+  type ConnectedServiceRuntimeTargetRegistration as RuntimeTargetRegistration,
 } from '../runtimeRegistry/registry';
 import { resolveTrackedConnectedServiceBindingsRaw } from '../trackedSessionConnectedServiceBindings';
 
 type AccessTokenRefreshResolver = (
   metadata: unknown,
 ) => ConnectedServiceRuntimeTargetInput['accessTokenRefresh'] | undefined;
+
+export function shouldReconcileConnectedServiceRuntimeTargetRegistration(input: Readonly<{
+  registration: Readonly<{
+    key: RuntimeTargetRegistration['key'];
+    target: Pick<ConnectedServiceRuntimeTarget, 'pid' | 'sessionId'>;
+  }>;
+  tracked: Pick<TrackedSession, 'pid' | 'happySessionId' | 'happySessionMetadataFromLocalWebhook'> | null;
+}>): boolean {
+  if (input.registration.key.kind === 'execution_run') return true;
+  const tracked = input.tracked;
+  if (!tracked || tracked.pid !== input.registration.key.pid) return false;
+  if (!tracked.happySessionMetadataFromLocalWebhook) return false;
+  const targetSessionId = input.registration.target.sessionId?.trim() ?? '';
+  const trackedSessionId = input.tracked.happySessionId?.trim() ?? '';
+  return !targetSessionId || !trackedSessionId || targetSessionId === trackedSessionId;
+}
 
 export function readTrackedConnectedServiceMaterializationIdentityId(tracked: TrackedSession): string | null {
   return readTrackedConnectedServiceMaterializationIdentity(tracked)?.id ?? null;
@@ -54,11 +71,11 @@ type ConnectedServiceRuntimeTargetRegistration = ConnectedServiceRuntimeTargetIn
 
 export function registerConnectedServiceRuntimeTargetForDaemon(
   input: ConnectedServiceRuntimeTargetRegistration,
-): void {
+): ConnectedServiceRuntimeTarget | null {
   const registry = input.runtimeRegistry;
-  if (!registry) return;
+  if (!registry) return null;
   const pid = Math.trunc(Number(input.pid));
-  if (!Number.isFinite(pid) || pid <= 0) return;
+  if (!Number.isFinite(pid) || pid <= 0) return null;
 
   const sessionId = typeof input.sessionId === 'string' && input.sessionId.trim().length > 0
     ? input.sessionId.trim()
@@ -67,6 +84,7 @@ export function registerConnectedServiceRuntimeTargetForDaemon(
     && input.brokerSelectionIdentity.trim().length > 0
     ? input.brokerSelectionIdentity.trim()
     : undefined;
+  const previousTarget = registry.getByPid(pid);
   if (sessionId) {
     registry.adoptSessionId({ pid, sessionId });
   }
@@ -76,7 +94,7 @@ export function registerConnectedServiceRuntimeTargetForDaemon(
     hasConnectedServiceRegistrationBindings(input.connectedServicesBindingsRaw)
     || readConnectedServiceChildSelectionsFromEnv(connectedServiceSelectionsEnv ?? {}).length > 0
     || (input.runtimeAccountIdentitySelections?.length ?? 0) > 0;
-  if (!hasRegistrationData) return;
+  if (!hasRegistrationData) return null;
 
   const target = registry.registerTarget({
     pid,
@@ -97,7 +115,10 @@ export function registerConnectedServiceRuntimeTargetForDaemon(
     }),
     ...(input.accessTokenRefresh === undefined ? {} : { accessTokenRefresh: input.accessTokenRefresh }),
   });
-  input.onRegisteredTarget?.(target);
+  if (target !== previousTarget) {
+    input.onRegisteredTarget?.(target);
+  }
+  return target;
 }
 
 export function readNonEmptyMetadataString(value: unknown): string | null {
@@ -108,15 +129,16 @@ export function registerConnectedServiceTrackedSessionTargetsForDaemon(input: Re
   tracked: TrackedSession;
   runtimeRegistry?: ConnectedServiceRuntimeRegistry | null;
   resolveAccessTokenRefresh?: AccessTokenRefreshResolver;
+  onRegisteredTarget?: (target: ConnectedServiceRuntimeTarget) => void;
   /**
    * Resolve the broker selection identity (R3-6) from the tracked session's spawn env. Injected by
    * the daemon wiring so this startup module stays free of backend-specific env-var-name imports;
    * a provider whose managed server is SHARED (OpenCode/Pi) exposes a stable identity here.
    */
   resolveBrokerSelectionIdentity?: (tracked: TrackedSession) => string | null;
-}>): void {
+}>): ConnectedServiceRuntimeTarget | null {
   const pid = Math.trunc(Number(input.tracked.pid));
-  if (!Number.isFinite(pid) || pid <= 0) return;
+  if (!Number.isFinite(pid) || pid <= 0) return null;
 
   const sessionId = typeof input.tracked.happySessionId === 'string' && input.tracked.happySessionId.trim().length > 0
     ? input.tracked.happySessionId.trim()
@@ -130,7 +152,7 @@ export function registerConnectedServiceTrackedSessionTargetsForDaemon(input: Re
   const connectedServicesBindingsRaw = resolveTrackedConnectedServiceBindingsRaw(input.tracked);
   const connectedServiceSelectionsEnv = input.tracked.spawnOptions?.environmentVariables;
   const materializationIdentity = readTrackedConnectedServiceMaterializationIdentity(input.tracked);
-  registerConnectedServiceRuntimeTargetForDaemon({
+  return registerConnectedServiceRuntimeTargetForDaemon({
     runtimeRegistry: input.runtimeRegistry,
     pid,
     ...(sessionId ? { sessionId } : {}),
@@ -145,6 +167,7 @@ export function registerConnectedServiceTrackedSessionTargetsForDaemon(input: Re
     sessionDirectory: readNonEmptyMetadataString(input.tracked.spawnOptions?.directory)
       ?? readNonEmptyMetadataString(input.tracked.happySessionMetadataFromLocalWebhook?.path),
     accessTokenRefresh: input.resolveAccessTokenRefresh?.(input.tracked.happySessionMetadataFromLocalWebhook),
+    ...(input.onRegisteredTarget ? { onRegisteredTarget: input.onRegisteredTarget } : {}),
   });
 }
 
