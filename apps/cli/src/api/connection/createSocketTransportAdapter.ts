@@ -144,8 +144,8 @@ export function createSocketTransportAdapter(
             connect();
             await waitForConnected;
         },
-        async disconnect(options?: { intentional?: boolean }): Promise<void> {
-            intentionalDisconnect = options?.intentional === true;
+        async disconnect(disconnectOptions?: { intentional?: boolean }): Promise<void> {
+            intentionalDisconnect = disconnectOptions?.intentional === true;
             if (typeof socket.disconnect === 'function') {
                 socket.disconnect();
                 return;

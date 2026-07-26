@@ -54,6 +54,7 @@ export interface RpcHandlerConfig {
     encryptionVariant: 'legacy' | 'dataKey';
     encryptionMode?: 'e2ee' | 'plain';
     logger?: (message: string, data?: any) => void;
+    onRegistrationError?: (error: unknown) => void;
     authorizeRequest?: (request: Readonly<{
         method: string;
         params: unknown;

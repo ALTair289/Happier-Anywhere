@@ -178,6 +178,66 @@ describe('request supervision', () => {
     } satisfies ReadinessProbeResult);
   });
 
+  it('keeps durable domain-write failures operation-local while still reporting authentication loss', async () => {
+    const supervisor = createSupervisor();
+    const serviceUnavailable = new HttpStatusError(503, 'settlement temporarily unavailable');
+
+    await expect(
+      runSupervisedRequest({
+        supervisor,
+        purpose: 'durable_write',
+        request: async () => {
+          throw serviceUnavailable;
+        },
+      }),
+    ).rejects.toBe(serviceUnavailable);
+
+    expect(supervisor.reportProbeResult).not.toHaveBeenCalled();
+
+    await expect(
+      runSupervisedRequest({
+        supervisor,
+        purpose: 'durable_write',
+        request: async () => {
+          throw new HttpStatusError(401, 'expired token');
+        },
+      }),
+    ).rejects.toThrow(/expired token/i);
+
+    expect(supervisor.reportProbeResult).toHaveBeenCalledOnce();
+    expect(supervisor.reportProbeResult).toHaveBeenCalledWith({
+      status: 'auth_failed',
+      statusCode: 401,
+      errorMessage: 'expired token',
+    } satisfies ReadinessProbeResult);
+  });
+
+  it('keeps every non-probe HTTP request outcome from deciding socket health', async () => {
+    const purposes = [
+      undefined,
+      'durable_write',
+      'recovery_read',
+      'transcript_sync',
+      'ephemeral_update',
+      'snapshot_fetch',
+    ] as const;
+
+    for (const purpose of purposes) {
+      const supervisor = createSupervisor();
+      const serviceUnavailable = new HttpStatusError(503, `domain failure for ${purpose ?? 'legacy request'}`);
+
+      await expect(runSupervisedRequest({
+        supervisor,
+        ...(purpose ? { purpose } : {}),
+        request: async () => {
+          throw serviceUnavailable;
+        },
+      })).rejects.toBe(serviceUnavailable);
+
+      expect(supervisor.reportProbeResult).not.toHaveBeenCalled();
+    }
+  });
+
   it('reports socket connect auth errors back into the supervisor', async () => {
     const supervisor = createSupervisor();
     const socketAuthError = Object.assign(new Error('invalid token'), {

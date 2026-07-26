@@ -28,6 +28,7 @@ export class RpcHandlerManager {
     private readonly encryptionVariant: 'legacy' | 'dataKey';
     private readonly encryptionMode: 'e2ee' | 'plain';
     private readonly logger: (message: string, data?: any) => void;
+    private readonly onRegistrationError: RpcHandlerConfig['onRegistrationError'];
     private readonly authorizeRequest: RpcHandlerConfig['authorizeRequest'];
     private socket: Socket | null = null;
     private inFlightRequestCount = 0;
@@ -39,6 +40,7 @@ export class RpcHandlerManager {
         this.encryptionVariant = config.encryptionVariant;
         this.encryptionMode = config.encryptionMode ?? 'e2ee';
         this.logger = config.logger || ((msg, data) => defaultLogger.debug(msg, data));
+        this.onRegistrationError = config.onRegistrationError;
         this.authorizeRequest = config.authorizeRequest;
     }
 
@@ -123,13 +125,6 @@ export class RpcHandlerManager {
             }
             return response;
         } catch (error) {
-            const scopePrefix = `${this.scopePrefix}:`;
-            const methodSuffix = request.method.startsWith(scopePrefix)
-                ? request.method.slice(scopePrefix.length)
-                : '';
-            if (isPublicRpcHandlerError(error) && isDelegatedSessionApprovalRpcMethod(methodSuffix)) {
-                return toSocketRpcTargetFailureV1(error);
-            }
             this.logger('[RPC] [ERROR] Error handling request', { error });
             const errorResponse = {
                 error: error instanceof Error ? error.message : 'Unknown error'
@@ -162,6 +157,19 @@ export class RpcHandlerManager {
 
     onSocketConnect(socket: Socket): void {
         this.socket = socket;
+        socket.on(SOCKET_RPC_EVENTS.ERROR, (error: unknown) => {
+            if (this.socket !== socket) {
+                return;
+            }
+            const type = error && typeof error === 'object' && !Array.isArray(error)
+                ? (error as Record<string, unknown>).type
+                : null;
+            if (type !== 'register') {
+                return;
+            }
+            this.logger('[RPC] [ERROR] Handler registration rejected', { error });
+            this.onRegistrationError?.(error);
+        });
         for (const [prefixedMethod] of this.handlers) {
             socket.emit(SOCKET_RPC_EVENTS.REGISTER, { method: prefixedMethod });
         }

@@ -77,6 +77,44 @@ describe('serializeAxiosErrorForLog', () => {
     expect(JSON.stringify(serialized)).not.toContain('secret should not be logged');
   });
 
+  it('preserves safe settlement correlation and retry diagnostics without logging the response body', () => {
+    const config = createAxiosConfig({
+      method: 'post',
+      url: 'https://api.example.test/v2/sessions/s1/pending/local-1/delivery/accepted',
+      data: { selector: { localId: 'secret-local-id' } },
+    });
+    const err = new AxiosError(
+      'Request failed with status 503',
+      'ERR_BAD_RESPONSE',
+      config,
+      undefined,
+      {
+        status: 503,
+        statusText: 'Service Unavailable',
+        headers: { 'retry-after': '9' },
+        config,
+        data: {
+          error: 'transaction-unavailable',
+          retryAfterMs: 1_250,
+          correlationId: 'req-accepted-busy',
+          message: 'secret response detail',
+        },
+      },
+    );
+
+    const serialized = serializeAxiosErrorForLog(err);
+
+    expect(serialized).toEqual(expect.objectContaining({
+      status: 503,
+      responseError: 'transaction-unavailable',
+      responseRetryAfterMs: 1_250,
+      responseCorrelationId: 'req-accepted-busy',
+    }));
+    expect(serialized).not.toHaveProperty('data');
+    expect(JSON.stringify(serialized)).not.toContain('secret-local-id');
+    expect(JSON.stringify(serialized)).not.toContain('secret response detail');
+  });
+
   it('redacts Telegram bot tokens embedded in path segments', () => {
     const err = new AxiosError('boom', 'ECONNRESET', createAxiosConfig({
       method: 'post',

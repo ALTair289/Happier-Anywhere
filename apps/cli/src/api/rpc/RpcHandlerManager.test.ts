@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { RpcHandlerManager } from './RpcHandlerManager';
 import { RPC_ERROR_CODES, RPC_ERROR_MESSAGES } from '@happier-dev/protocol/rpc';
 import { decodeBase64, encodeBase64, encrypt, decrypt } from '@/api/encryption';
-import { PUBLIC_RPC_HANDLER_ERROR_CODES, PublicRpcHandlerError } from '@happier-dev/protocol/rpcErrors';
+import { SOCKET_RPC_EVENTS } from '@happier-dev/protocol/socketRpc';
+import type { Socket } from 'socket.io-client';
 
 function createDeferredVoid(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
@@ -12,6 +13,68 @@ function createDeferredVoid(): { promise: Promise<void>; resolve: () => void } {
   });
   return { promise, resolve };
 }
+
+function createSocketEventBoundary() {
+  const handlers = new Map<string, Array<(payload: unknown) => void>>();
+  const socket = {
+    emit: vi.fn(),
+    on: vi.fn((event: string, handler: (payload: unknown) => void) => {
+      const current = handlers.get(event) ?? [];
+      current.push(handler);
+      handlers.set(event, current);
+      return socket;
+    }),
+  };
+  return {
+    // Socket.IO is the system boundary under test; only its event surface is needed here.
+    socket: socket as unknown as Socket,
+    trigger(event: string, payload: unknown) {
+      for (const handler of handlers.get(event) ?? []) {
+        handler(payload);
+      }
+    },
+  };
+}
+
+describe('RpcHandlerManager registration receipts', () => {
+  it('surfaces registration errors from only the active socket epoch', () => {
+    const onRegistrationError = vi.fn();
+    const config = {
+      scopePrefix: 'machine-1',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'dataKey' as const,
+      logger: () => {},
+      onRegistrationError,
+    };
+    const rpc = new RpcHandlerManager(config);
+    const first = createSocketEventBoundary();
+    const second = createSocketEventBoundary();
+
+    rpc.onSocketConnect(first.socket);
+    first.trigger(SOCKET_RPC_EVENTS.ERROR, {
+      type: 'register',
+      error: 'client-upgrade-required',
+      requirement: { v: 1 },
+    });
+
+    rpc.onSocketConnect(second.socket);
+    first.trigger(SOCKET_RPC_EVENTS.ERROR, {
+      type: 'register',
+      error: 'stale-error',
+    });
+    second.trigger(SOCKET_RPC_EVENTS.ERROR, {
+      type: 'unregister',
+      error: 'not-a-registration-error',
+    });
+
+    expect(onRegistrationError).toHaveBeenCalledTimes(1);
+    expect(onRegistrationError).toHaveBeenCalledWith({
+      type: 'register',
+      error: 'client-upgrade-required',
+      requirement: { v: 1 },
+    });
+  });
+});
 
 describe('RpcHandlerManager.invokeLocal', () => {
   it('invokes a registered handler without encryption', async () => {
@@ -72,32 +135,6 @@ describe('RpcHandlerManager.handleRequest (plaintext)', () => {
 
     const res = await rpc.handleRequest({ method: 'sess_1:missing.method', params: {} });
     expect(res).toEqual({ error: RPC_ERROR_MESSAGES.METHOD_NOT_FOUND, errorCode: RPC_ERROR_CODES.METHOD_NOT_FOUND });
-  });
-
-  it('returns an allowlisted public failure without the private handler message', async () => {
-    const logger = vi.fn();
-    const rpc = new RpcHandlerManager({
-      scopePrefix: 'sess_1',
-      encryptionKey: new Uint8Array(32),
-      encryptionVariant: 'dataKey',
-      encryptionMode: 'plain',
-      logger,
-    });
-    rpc.registerHandler('permission', async () => {
-      throw new PublicRpcHandlerError(
-        PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_RECEIVER_NOT_OWNER,
-        'private question and answer',
-      );
-    });
-
-    const res = await rpc.handleRequest({ method: 'sess_1:permission', params: {} });
-    expect(res).toEqual({
-      type: 'socket-rpc-target-failure-v1',
-      errorCode: 'STRUCTURED_QUESTION_RECEIVER_NOT_OWNER',
-      error: 'This answer could not be handled safely. Update or reconnect Happier, then try again.',
-    });
-    expect(JSON.stringify(res)).not.toContain('private question');
-    expect(JSON.stringify(logger.mock.calls)).not.toContain('private question');
   });
 });
 
@@ -194,60 +231,6 @@ describe('RpcHandlerManager.handleRequest (encrypted)', () => {
         decodeBase64(res as string),
       ),
     ).toBeUndefined();
-  });
-
-  it('returns the public target-failure envelope outside encryption', async () => {
-    const encryptionKey = new Uint8Array(32).fill(4);
-    const logger = vi.fn();
-    const rpc = new RpcHandlerManager({
-      scopePrefix: 'sess_1',
-      encryptionKey,
-      encryptionVariant: 'dataKey',
-      logger,
-    });
-    rpc.registerHandler('session.structuredQuestion.respond.v1', async () => {
-      throw new PublicRpcHandlerError(
-        PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_INVALID,
-        'private payload',
-      );
-    });
-
-    const res = await rpc.handleRequest({
-      method: 'sess_1:session.structuredQuestion.respond.v1',
-      params: encodeBase64(encrypt(encryptionKey, 'dataKey', {})),
-    });
-    expect(res).toEqual(expect.objectContaining({
-      type: 'socket-rpc-target-failure-v1',
-      errorCode: 'STRUCTURED_QUESTION_INVALID',
-    }));
-    expect(JSON.stringify(res)).not.toContain('private payload');
-    expect(JSON.stringify(logger.mock.calls)).not.toContain('private payload');
-  });
-
-  it('keeps explicit public-handler errors encrypted for unrelated RPC methods', async () => {
-    const encryptionKey = new Uint8Array(32).fill(6);
-    const rpc = new RpcHandlerManager({
-      scopePrefix: 'sess_1',
-      encryptionKey,
-      encryptionVariant: 'dataKey',
-      logger: () => {},
-    });
-    rpc.registerHandler('demo.unrelated', async () => {
-      throw new PublicRpcHandlerError(
-        PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_INVALID,
-        'private unrelated failure',
-      );
-    });
-
-    const res = await rpc.handleRequest({
-      method: 'sess_1:demo.unrelated',
-      params: encodeBase64(encrypt(encryptionKey, 'dataKey', {})),
-    });
-
-    expect(typeof res).toBe('string');
-    expect(decrypt(encryptionKey, 'dataKey', decodeBase64(res as string))).toEqual({
-      error: 'private unrelated failure',
-    });
   });
 });
 
