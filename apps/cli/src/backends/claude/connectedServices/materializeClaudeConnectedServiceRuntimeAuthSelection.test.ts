@@ -92,6 +92,7 @@ describe('materializeClaudeConnectedServiceRuntimeAuthSelection', () => {
     await writeFile(
       join(homeDir, '.claude.json'),
       `${JSON.stringify({
+        hasCompletedOnboarding: true,
         oauthAccount: { accessToken: 'ambient-root-token-must-not-copy' },
         projects: {
           [projectDir]: {
@@ -244,7 +245,10 @@ describe('materializeClaudeConnectedServiceRuntimeAuthSelection', () => {
     expect(credential.claudeAiOauth).not.toHaveProperty('refreshToken');
     expect(credential.claudeAiOauth.scopes).toContain('user:sessions:claude_code');
     const targetRootConfig = JSON.parse(await readFile(join(groupClaudeConfigDir, '.claude.json'), 'utf8'));
-    expect(targetRootConfig.oauthAccount).toBeUndefined();
+    expect(targetRootConfig.oauthAccount).toEqual({
+      accountUuid: 'provider-account',
+    });
+    expect(targetRootConfig.hasCompletedOnboarding).toBe(true);
     expect(targetRootConfig.projects).toEqual({
       [projectDir]: {
         hasTrustDialogAccepted: true,

@@ -8,6 +8,7 @@ import type { ConnectedServiceRuntimeAuthSelectionMaterializer } from '@/daemon/
 import type { ConnectedServiceResolvedSelection } from '@/daemon/connectedServices/materialize/materializeConnectedServicesForSpawn';
 import { resolveExistingSessionAttachContext } from '@/daemon/sessionEncryption/resolveExistingSessionAttachContext';
 import { resolveTrackedConnectedServiceSwitchContinuityContext } from '@/daemon/connectedServices/sessionAuthSwitch/resolveTrackedConnectedServiceSwitchContinuityContext';
+import { HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import type { Credentials } from '@/persistence';
 
 import { materializeClaudeConnectedServiceSelection } from './materializeClaudeConnectedServiceSelection';
@@ -36,6 +37,17 @@ function samePath(left: string | null | undefined, right: string | null | undefi
   const leftTrimmed = left.trim();
   const rightTrimmed = right.trim();
   return leftTrimmed.length > 0 && rightTrimmed.length > 0 && resolve(leftTrimmed) === resolve(rightTrimmed);
+}
+
+function targetsClaudeSharedGroupRuntimeConfig(
+  trackedEnv: NodeJS.ProcessEnv | undefined,
+  runtimeClaudeConfigDir: string,
+): boolean {
+  return samePath(trackedEnv?.CLAUDE_CONFIG_DIR, runtimeClaudeConfigDir)
+    || samePath(
+      trackedEnv?.[HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY],
+      runtimeClaudeConfigDir,
+    );
 }
 
 async function resolvePersistedClaudeSessionMetadata(params: Readonly<{
@@ -117,7 +129,7 @@ function buildPreflightRuntimeAuthSelection(params: Readonly<{
     fallbackProfileId: params.selection.fallbackProfileId,
     selection: params.selection,
   });
-  if (!runtimeClaudeConfigDir || !samePath(params.trackedEnv?.CLAUDE_CONFIG_DIR, runtimeClaudeConfigDir)) {
+  if (!runtimeClaudeConfigDir || !targetsClaudeSharedGroupRuntimeConfig(params.trackedEnv, runtimeClaudeConfigDir)) {
     return params.baseSelection;
   }
 
@@ -241,7 +253,7 @@ export const materializeClaudeConnectedServiceRuntimeAuthSelection: ConnectedSer
   const sharedGroupSurfaceMetadata = params.input.serviceId === 'claude-subscription'
     && selection?.kind === 'group'
     && record.kind === 'oauth'
-    && samePath(trackedEnv?.CLAUDE_CONFIG_DIR, materializedClaudeConfigDir)
+    && targetsClaudeSharedGroupRuntimeConfig(trackedEnv, materializedClaudeConfigDir)
     ? buildClaudeRuntimeAuthSharedGroupSurfaceMetadata({
         runtimeClaudeConfigDir: materializedClaudeConfigDir,
         runtimeMaterializedRoot: materialized.targetMaterializedRoot,
