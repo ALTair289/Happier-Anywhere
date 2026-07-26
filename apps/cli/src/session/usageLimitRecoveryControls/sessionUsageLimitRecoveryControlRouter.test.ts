@@ -172,6 +172,48 @@ describe('sessionUsageLimitRecoveryControlRouter', () => {
     expect(mocks.updateSessionMetadataWithRetry).toHaveBeenCalledTimes(1);
   });
 
+  it('starts a fresh epoch when explicitly re-arming a terminal intent for the same issue', async () => {
+    const cancelled = {
+      v: 1,
+      status: 'cancelled',
+      issueFingerprint: 'usage-limit:codex:turn-1:1700000000000:1700000060000',
+      armedAtMs: 1_700_000_000_000,
+      resetAtMs: 1_700_000_060_000,
+      nextCheckAtMs: 1_700_000_060_000,
+      attemptCount: 2,
+      maxAttempts: 3,
+      lastProbeError: 'cancelled',
+      resumePromptMode: 'standard',
+      selectedAuth: { kind: 'native' },
+    };
+
+    await routeSessionUsageLimitRecoveryWaitResumeEnable({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      rawSession: createRawSession({
+        latestTurnStatus: 'failed',
+        lastRuntimeIssue: createUsageLimitIssue(),
+      }),
+      metadata: createMetadata({ sessionUsageLimitRecoveryV1: cancelled }),
+      currentMachineId: 'machine-local',
+      ctx,
+      mode: 'plain',
+      request: { sessionId: 'sess_1', remember: true },
+      callLiveSessionRpc: vi.fn(),
+      resolveAdapter: vi.fn(),
+    });
+
+    const persisted = lastMetadataUpdaterResult({ sessionUsageLimitRecoveryV1: cancelled });
+    expect(persisted.sessionUsageLimitRecoveryV1).toMatchObject({
+      status: 'waiting',
+      issueFingerprint: cancelled.issueFingerprint,
+      attemptCount: 0,
+    });
+    expect((persisted.sessionUsageLimitRecoveryV1 as { armedAtMs: number }).armedAtMs)
+      .toBeGreaterThan(cancelled.armedAtMs);
+  });
+
   it('preserves an existing inactive recovery resumePromptMode when re-arming without explicit input', async () => {
     const recovery = {
       v: 1,
@@ -302,34 +344,6 @@ describe('sessionUsageLimitRecoveryControlRouter', () => {
     });
 
     expect(loadGroupPolicy).toHaveBeenCalledTimes(1);
-    expect(lastMetadataUpdaterResult({})).toMatchObject({
-      sessionUsageLimitRecoveryV1: {
-        resumePromptMode: 'off',
-      },
-    });
-  });
-
-  it('arms inactive wait-resume from the provider-config tier when all higher tiers are silent', async () => {
-    await routeSessionUsageLimitRecoveryWaitResumeEnable({
-      token: 'token',
-      credentials: createCredentials(),
-      sessionId: 'sess_1',
-      rawSession: createRawSession({
-        latestTurnStatus: 'failed',
-        lastRuntimeIssue: createUsageLimitIssue(),
-      }),
-      metadata: createMetadata(),
-      currentMachineId: 'machine-local',
-      ctx,
-      mode: 'plain',
-      request: { sessionId: 'sess_1', remember: true },
-      callLiveSessionRpc: vi.fn(),
-      resolveAdapter: vi.fn(),
-      resumePromptTierSources: {
-        loadProviderConfig: async () => ({ resumePromptMode: 'off' }),
-      },
-    });
-
     expect(lastMetadataUpdaterResult({})).toMatchObject({
       sessionUsageLimitRecoveryV1: {
         resumePromptMode: 'off',
@@ -520,7 +534,7 @@ describe('sessionUsageLimitRecoveryControlRouter', () => {
     expect(resolveAdapter).not.toHaveBeenCalled();
   });
 
-  it('clears inactive local wait-resume metadata without live session RPC', async () => {
+  it('terminally cancels inactive local wait-resume metadata without live session RPC', async () => {
     const recovery = {
       v: 1,
       status: 'waiting',
@@ -544,7 +558,11 @@ describe('sessionUsageLimitRecoveryControlRouter', () => {
       currentMachineId: 'machine-local',
       ctx,
       mode: 'plain',
-      request: { sessionId: 'sess_1', issueFingerprint: null },
+      request: {
+        sessionId: 'sess_1',
+        issueFingerprint: 'usage-limit:sess_1:reset',
+        armedAtMs: 1,
+      },
       callLiveSessionRpc,
       resolveAdapter: vi.fn(),
     });
@@ -557,10 +575,108 @@ describe('sessionUsageLimitRecoveryControlRouter', () => {
       metadata: expect.any(Object),
     });
     expect(lastMetadataUpdaterResult({ concurrent: 'preserved', sessionUsageLimitRecoveryV1: recovery }))
-      .toEqual({ concurrent: 'preserved' });
+      .toMatchObject({
+        concurrent: 'preserved',
+        sessionUsageLimitRecoveryV1: {
+          issueFingerprint: 'usage-limit:sess_1:reset',
+          armedAtMs: 1,
+          status: 'cancelled',
+          nextCheckAtMs: null,
+        },
+      });
 
     expect(callLiveSessionRpc).not.toHaveBeenCalled();
     expect(mocks.updateSessionMetadataWithRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let delayed exact cancel A mutate newer same-fingerprint attempt B at metadata CAS', async () => {
+    const attemptA = {
+      v: 1 as const,
+      status: 'waiting' as const,
+      issueFingerprint: 'same-issue',
+      armedAtMs: 100,
+      resetAtMs: 200,
+      nextCheckAtMs: 200,
+      attemptCount: 0,
+      maxAttempts: 3,
+      lastProbeError: null,
+      resumePromptMode: 'standard' as const,
+      selectedAuth: { kind: 'native' as const },
+    };
+    const attemptB = { ...attemptA, armedAtMs: 101 };
+    mocks.updateSessionMetadataWithRetry.mockImplementationOnce(async (params: {
+      updater: (metadata: Record<string, unknown>) => Record<string, unknown>;
+    }) => ({
+      version: 2,
+      metadata: params.updater(createMetadata({ sessionUsageLimitRecoveryV1: attemptB })),
+    }));
+
+    const result = await routeSessionUsageLimitRecoveryWaitResumeCancel({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      rawSession: createRawSession(),
+      metadata: createMetadata({ sessionUsageLimitRecoveryV1: attemptA }),
+      currentMachineId: 'machine-local',
+      ctx,
+      mode: 'plain',
+      request: { sessionId: 'sess_1', issueFingerprint: 'same-issue', armedAtMs: 100 },
+      callLiveSessionRpc: vi.fn(),
+    });
+
+    expect(parseOperationResult(result)).toMatchObject({
+      ok: false,
+      errorCode: 'session_usage_limit_recovery_control_issue_mismatch',
+    });
+    expect((result as { metadata?: Record<string, unknown> }).metadata).toBeUndefined();
+  });
+
+  it('does not let delayed runtime cancel A mutate runtime B with the same usage tuple at metadata CAS', async () => {
+    const attemptA = {
+      v: 1 as const,
+      status: 'waiting' as const,
+      issueFingerprint: 'same-issue',
+      armedAtMs: 100,
+      runtimeAuthRecoveryAttemptId: 'runtime-a',
+      resetAtMs: 200,
+      nextCheckAtMs: 200,
+      attemptCount: 0,
+      maxAttempts: 3,
+      lastProbeError: null,
+      resumePromptMode: 'standard' as const,
+      selectedAuth: { kind: 'native' as const },
+    };
+    const attemptB = { ...attemptA, runtimeAuthRecoveryAttemptId: 'runtime-b' };
+    mocks.updateSessionMetadataWithRetry.mockImplementationOnce(async (params: {
+      updater: (metadata: Record<string, unknown>) => Record<string, unknown>;
+    }) => ({
+      version: 2,
+      metadata: params.updater(createMetadata({ sessionUsageLimitRecoveryV1: attemptB })),
+    }));
+
+    const result = await routeSessionUsageLimitRecoveryWaitResumeCancel({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      rawSession: createRawSession(),
+      metadata: createMetadata({ sessionUsageLimitRecoveryV1: attemptA }),
+      currentMachineId: 'machine-local',
+      ctx,
+      mode: 'plain',
+      request: {
+        sessionId: 'sess_1',
+        issueFingerprint: attemptA.issueFingerprint,
+        armedAtMs: attemptA.armedAtMs,
+        runtimeAuthRecoveryAttemptId: attemptA.runtimeAuthRecoveryAttemptId,
+      },
+      callLiveSessionRpc: vi.fn(),
+    });
+
+    expect(parseOperationResult(result)).toMatchObject({
+      ok: false,
+      errorCode: 'session_usage_limit_recovery_control_issue_mismatch',
+    });
+    expect((result as { metadata?: Record<string, unknown> }).metadata).toBeUndefined();
   });
 
   it('returns a schema-valid inactive result when wait-resume cannot derive a recovery issue', async () => {
@@ -789,11 +905,11 @@ describe('sessionUsageLimitRecoveryControlRouter', () => {
         machineId: 'machine-local',
         sessionUsageLimitRecoveryV1: {
           v: 1,
-          status: 'cancelled',
+          status: 'paused',
           issueFingerprint: 'usage-limit:claude:turn-1:1:2',
           armedAtMs: 1,
           resetAtMs: 2,
-          nextCheckAtMs: 2,
+          nextCheckAtMs: null,
           attemptCount: 1,
           maxAttempts: 3,
           lastProbeError: null,
@@ -824,11 +940,11 @@ describe('sessionUsageLimitRecoveryControlRouter', () => {
       metadata: expect.any(Object),
     });
 
-    expect(mocks.updateSessionMetadataWithRetry).toHaveBeenCalledTimes(1);
+    expect(mocks.updateSessionMetadataWithRetry).toHaveBeenCalledTimes(2);
     expect(resumeInactiveSessionWhenReady).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'sess_1',
       metadata: expect.objectContaining({
-        sessionUsageLimitRecoveryV1: expect.objectContaining({ status: 'cancelled' }),
+        sessionUsageLimitRecoveryV1: expect.objectContaining({ status: 'paused' }),
       }),
     }));
   });
@@ -879,11 +995,11 @@ describe('sessionUsageLimitRecoveryControlRouter', () => {
         machineId: 'machine-local',
         sessionUsageLimitRecoveryV1: {
           v: 1,
-          status: 'cancelled',
+          status: 'paused',
           issueFingerprint: 'usage-limit:claude:turn-1:1:2',
           armedAtMs: 1,
           resetAtMs: 2,
-          nextCheckAtMs: 2,
+          nextCheckAtMs: null,
           attemptCount: 1,
           maxAttempts: 3,
           lastProbeError: null,

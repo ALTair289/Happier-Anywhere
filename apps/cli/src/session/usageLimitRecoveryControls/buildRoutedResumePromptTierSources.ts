@@ -1,8 +1,4 @@
 import {
-  inferAgentIdFromSessionMetadata,
-  resolveAgentIdFromFlavor,
-} from '@happier-dev/agents';
-import {
   ConnectedServiceIdSchema,
   SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
   SessionRuntimeIssueV1Schema,
@@ -12,12 +8,10 @@ import {
 } from '@happier-dev/protocol';
 
 import { createConnectedServiceCredentialApi } from '@/api/connectedServices/connectedServiceCredentialApi';
-import { getSessionUsageLimitRecoveryControlAdapter } from '@/backends/catalog';
 import type { Credentials } from '@/persistence';
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 import type { RawSessionRecord } from '@/session/transport/http/sessionsHttp';
 import type { RoutedUsageLimitRecoveryResumePromptTierSources } from './resolveRoutedUsageLimitRecoveryResumePromptMode';
-import type { ResolveSessionUsageLimitRecoveryControlAdapter } from './sessionUsageLimitRecoveryControlTypes';
 
 type GroupPolicyApi = Readonly<{
   getConnectedServiceAuthGroup: (params: {
@@ -30,10 +24,7 @@ export type BuildRoutedResumePromptTierSourcesParams = Readonly<{
   credentials?: Credentials;
   metadata: Record<string, unknown> | null;
   rawSession: RawSessionRecord;
-  /** Backend provider id from the request payload (for example "codex"). */
-  requestProvider?: string | null;
-  /** Boundary seams (HTTP + provider catalog); production callers omit these. */
-  resolveAdapter?: ResolveSessionUsageLimitRecoveryControlAdapter;
+  /** Boundary seam for the group-policy HTTP API; production callers omit it. */
   createGroupPolicyApi?: (credentials: Credentials) => Promise<GroupPolicyApi>;
   readAccountSettings?: () => unknown;
 }>;
@@ -65,13 +56,12 @@ function readGroupRefFromLatestIssue(
 }
 
 /**
- * Builds the lower resume-prompt-mode precedence tiers (account setting,
- * group policy, provider config) for the routed usage-limit recovery owner.
+ * Builds the lower resume-prompt-mode precedence tiers (group policy, then
+ * account setting) for the routed usage-limit recovery owner.
  *
  * Group policy is fetched lazily from the server for the recovery's selected
  * auth group (stored intent first, latest usage-limit issue as fallback);
- * provider config is consulted lazily through the provider's usage-limit
- * recovery control adapter. Loader failures resolve as silent tiers.
+ * loader failures resolve as a silent group tier.
  */
 export function buildRoutedResumePromptTierSources(
   params: BuildRoutedResumePromptTierSourcesParams,
@@ -90,14 +80,6 @@ export function buildRoutedResumePromptTierSources(
       const api = await (params.createGroupPolicyApi ?? createConnectedServiceCredentialApi)(credentials);
       const group = await api.getConnectedServiceAuthGroup(groupRef);
       return group?.policy ?? null;
-    },
-    loadProviderConfig: async () => {
-      const agentId = resolveAgentIdFromFlavor(params.requestProvider)
-        ?? (params.metadata ? inferAgentIdFromSessionMetadata(params.metadata) : null);
-      if (!agentId) return null;
-      const resolveAdapter = params.resolveAdapter ?? getSessionUsageLimitRecoveryControlAdapter;
-      const adapter = await resolveAdapter(agentId);
-      return await adapter?.resolveResumePromptConfig?.() ?? null;
     },
   };
 }

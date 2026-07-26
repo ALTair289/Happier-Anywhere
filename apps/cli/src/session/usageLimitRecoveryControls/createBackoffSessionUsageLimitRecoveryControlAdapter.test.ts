@@ -117,7 +117,16 @@ describe('createBackoffSessionUsageLimitRecoveryControlAdapter', () => {
       metadata: { sessionUsageLimitRecoveryV1: createWaitingIntent() },
     });
 
-    expect(result).toMatchObject({ ok: true, status: 'ready' });
+    expect(result).toMatchObject({
+      ok: true,
+      status: 'ready',
+      metadata: {
+        sessionUsageLimitRecoveryV1: {
+          status: 'paused',
+          nextCheckAtMs: null,
+        },
+      },
+    });
   });
 
   it('declares a persisted pending intent ready when turn status evidence is unavailable', async () => {
@@ -129,7 +138,16 @@ describe('createBackoffSessionUsageLimitRecoveryControlAdapter', () => {
       metadata: { sessionUsageLimitRecoveryV1: createWaitingIntent() },
     });
 
-    expect(result).toMatchObject({ ok: true, status: 'ready' });
+    expect(result).toMatchObject({
+      ok: true,
+      status: 'ready',
+      metadata: {
+        sessionUsageLimitRecoveryV1: {
+          status: 'paused',
+          nextCheckAtMs: null,
+        },
+      },
+    });
   });
 
   it('preserves group identity when the latest issue omits profileId', async () => {

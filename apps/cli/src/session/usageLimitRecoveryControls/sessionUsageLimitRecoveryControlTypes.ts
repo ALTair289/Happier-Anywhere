@@ -24,15 +24,6 @@ export type SessionUsageLimitRecoveryControlAdapterParams = Readonly<{
 export type SessionUsageLimitRecoveryControlAdapter = Readonly<{
   checkNow?: (params: SessionUsageLimitRecoveryControlAdapterParams) => Promise<unknown>;
   consumeResetCredit?: (params: SessionUsageLimitRecoveryControlAdapterParams) => Promise<unknown>;
-  /**
-   * Optional provider/runtime config contribution to the resume-prompt-mode
-   * precedence (plan tier 5: e.g. provider env knobs). Consulted only when the
-   * explicit, stored-intent, account-setting, and group-policy tiers are silent.
-   */
-  resolveResumePromptConfig?: () =>
-    | Promise<Readonly<{ resumePromptMode?: 'standard' | 'off' | 'custom' }> | null>
-    | Readonly<{ resumePromptMode?: 'standard' | 'off' | 'custom' }>
-    | null;
 }>;
 
 export type ResolveSessionUsageLimitRecoveryControlAdapter = (

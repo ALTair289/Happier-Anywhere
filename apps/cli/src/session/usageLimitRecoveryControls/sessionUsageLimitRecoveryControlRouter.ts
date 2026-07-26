@@ -14,7 +14,6 @@ import { RPC_ERROR_CODES } from '@happier-dev/protocol/rpc';
 import { getSessionUsageLimitRecoveryControlAdapter } from '@/backends/catalog';
 import type { Credentials } from '@/persistence';
 import { resolveMachineControlLocalityProof } from '@/session/machineControlLocality';
-import { updateSessionMetadataWithRetry } from '@/session/metadata/updateSessionMetadataWithRetry';
 import type {
   SessionEncryptionContext,
   SessionStoredContentEncryptionMode,
@@ -38,6 +37,8 @@ import {
   USAGE_LIMIT_CHECK_NOW_RATE_LIMITED_CODE,
 } from './usageLimitCheckNowRateLimiter';
 import { resolveUsageLimitRecoverySelectedAuthFromIssue } from './usageLimitRecoverySelectedAuth';
+import { persistUsageLimitRecoveryFieldDurably } from './persistUsageLimitRecoveryFieldDurably';
+import { hasSameUsageLimitRecoveryIdentity } from './mergeUsageLimitRecoveryIntent';
 
 type RouteSessionUsageLimitRecoveryControlParams = Readonly<{
   token: string;
@@ -61,7 +62,7 @@ type RouteSessionUsageLimitRecoveryControlParams = Readonly<{
   }>) => Promise<boolean> | boolean;
   resolveAdapter?: ResolveSessionUsageLimitRecoveryControlAdapter;
   /**
-   * Lower precedence tiers (account setting, group policy, provider config)
+   * Lower precedence tiers (group policy, then account setting)
    * for resume-prompt-mode resolution. Explicit request values and the stored
    * intent always win over these tiers.
    */
@@ -84,6 +85,8 @@ type RouteSessionUsageLimitRecoveryWaitResumeCancelParams =
     request: Readonly<{
       sessionId: string;
       issueFingerprint?: string | null;
+      armedAtMs?: number;
+      runtimeAuthRecoveryAttemptId?: string;
     }>;
   }>;
 
@@ -204,35 +207,29 @@ function readMetadataResult(value: unknown): Record<string, unknown> | null {
   return metadata as Record<string, unknown>;
 }
 
-function buildUsageLimitRecoveryMetadataPatch(metadata: Record<string, unknown>): Record<string, unknown> | null {
-  if (!Object.prototype.hasOwnProperty.call(metadata, SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY)) return null;
-  return {
-    [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: metadata[SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY],
-  };
-}
-
 async function persistAdapterMetadataResult(
   params: RouteSessionUsageLimitRecoveryControlParams,
   result: unknown,
 ): Promise<unknown> {
   const nextMetadata = readMetadataResult(result);
-  const metadataPatch = nextMetadata ? buildUsageLimitRecoveryMetadataPatch(nextMetadata) : null;
-  if (!metadataPatch || !params.credentials) return result;
+  if (
+    !nextMetadata
+    || !Object.prototype.hasOwnProperty.call(nextMetadata, SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY)
+    || !params.credentials
+  ) return result;
 
-  const persisted = await updateSessionMetadataWithRetry({
+  const persisted = await persistUsageLimitRecoveryFieldDurably({
     token: params.token,
     credentials: params.credentials,
     sessionId: params.sessionId,
     rawSession: params.rawSession,
-    updater: (currentMetadata) => ({
-      ...currentMetadata,
-      ...metadataPatch,
-    }),
+    currentMetadata: params.metadata ?? {},
+    nextMetadata,
   });
 
   return {
     ...(result as Record<string, unknown>),
-    metadata: persisted.metadata,
+    metadata: persisted,
   };
 }
 
@@ -327,6 +324,7 @@ async function buildEnabledRecoveryIntent(
   return {
     ...base,
     status: 'waiting',
+    ...(existing?.status === 'cancelled' ? { attemptCount: 0 } : {}),
     ...(issueFingerprint ? { issueFingerprint } : {}),
     resumePromptMode,
     lastProbeError: null,
@@ -336,16 +334,19 @@ async function buildEnabledRecoveryIntent(
 async function persistUsageLimitRecoveryMetadata(
   params: RouteSessionUsageLimitRecoveryControlParams,
   updater: (metadata: Record<string, unknown>) => Record<string, unknown>,
+  mode: 'converge' | 'rearm' | 'explicit_rearm' | 'cancel' = 'converge',
 ): Promise<Record<string, unknown> | null> {
   if (!params.credentials) return null;
-  const persisted = await updateSessionMetadataWithRetry({
+  const currentMetadata = params.metadata ?? {};
+  return await persistUsageLimitRecoveryFieldDurably({
     token: params.token,
     credentials: params.credentials,
     sessionId: params.sessionId,
     rawSession: params.rawSession,
-    updater,
+    currentMetadata,
+    nextMetadata: updater(currentMetadata),
+    mode,
   });
-  return persisted.metadata;
 }
 
 function ensureLocalInactiveControlContext(
@@ -406,11 +407,13 @@ export async function routeSessionUsageLimitRecoveryWaitResumeEnable(
   const persistedMetadata = await persistUsageLimitRecoveryMetadata(params, (currentMetadata) => ({
     ...currentMetadata,
     [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: nextIntent,
-  }));
+  }), 'explicit_rearm');
+
+  const persistedIntent = persistedMetadata ? parseRecoveryIntent(persistedMetadata) : null;
 
   return attachCliSessionUsageLimitRecoveryOperationMetadata(operationResult(params, {
     ok: true,
-    recovery: { status: nextIntent.status },
+    recovery: { status: persistedIntent?.status ?? nextIntent.status },
     ...(persistedMetadata ? { metadata: persistedMetadata } : {}),
   }), persistedMetadata);
 }
@@ -430,22 +433,45 @@ export async function routeSessionUsageLimitRecoveryWaitResumeCancel(
 
   const existing = parseRecoveryIntent(context.metadata);
   const requestedFingerprint = params.request.issueFingerprint;
+  const requestedArmedAtMs = params.request.armedAtMs;
   if (
-    existing
-    && typeof requestedFingerprint === 'string'
-    && requestedFingerprint.trim().length > 0
-    && existing.issueFingerprint !== requestedFingerprint.trim()
+    !existing
+    || typeof requestedFingerprint !== 'string'
+    || requestedFingerprint.trim().length === 0
+    || typeof requestedArmedAtMs !== 'number'
   ) {
+    return operationResult(params, stableError('session_usage_limit_recovery_control_attempt_identity_required'));
+  }
+  const requestedIdentity = {
+    issueFingerprint: requestedFingerprint.trim(),
+    armedAtMs: Math.trunc(requestedArmedAtMs),
+    ...(typeof params.request.runtimeAuthRecoveryAttemptId === 'string'
+      && params.request.runtimeAuthRecoveryAttemptId.trim().length > 0
+      ? { runtimeAuthRecoveryAttemptId: params.request.runtimeAuthRecoveryAttemptId.trim() }
+      : {}),
+  };
+  if (!hasSameUsageLimitRecoveryIdentity(existing, requestedIdentity)) {
     return operationResult(params, stableError('session_usage_limit_recovery_control_issue_mismatch'));
   }
 
-  const persistedMetadata = await persistUsageLimitRecoveryMetadata(params, (currentMetadata) => {
-    const {
-      [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: _removed,
-      ...rest
-    } = currentMetadata;
-    return rest;
-  });
+  const persistedMetadata = await persistUsageLimitRecoveryMetadata(params, (currentMetadata) => ({
+    ...currentMetadata,
+    [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: {
+      ...existing,
+      status: 'cancelled',
+      nextCheckAtMs: null,
+    },
+  }), 'cancel');
+  const persistedIntent = persistedMetadata ? parseRecoveryIntent(persistedMetadata) : null;
+  if (
+    persistedIntent
+    && (
+      !hasSameUsageLimitRecoveryIdentity(persistedIntent, existing)
+      || persistedIntent.status !== 'cancelled'
+    )
+  ) {
+    return operationResult(params, stableError('session_usage_limit_recovery_control_issue_mismatch'));
+  }
 
   return attachCliSessionUsageLimitRecoveryOperationMetadata(operationResult(params, {
     ok: true,
@@ -501,10 +527,23 @@ export async function routeSessionUsageLimitRecoveryCheckNow(
       metadata: resultMetadata ?? context.metadata,
     });
     if (resumed) {
+      const settledMetadata = await persistUsageLimitRecoveryMetadata(params, (currentMetadata) => {
+        const currentRecovery = parseRecoveryIntent(currentMetadata)
+          ?? (resultMetadata ? parseRecoveryIntent(resultMetadata) : null);
+        if (!currentRecovery) return currentMetadata;
+        return {
+          ...currentMetadata,
+          [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: {
+            ...currentRecovery,
+            status: 'cancelled',
+            nextCheckAtMs: null,
+          },
+        };
+      });
       return attachCliSessionUsageLimitRecoveryOperationMetadata(operationResult(params, {
         ...normalizedResult,
         status: 'resumed',
-      }), resultMetadata);
+      }), settledMetadata ?? resultMetadata);
     }
     return operationResult(params, stableError('session_usage_limit_recovery_resume_failed'));
   }

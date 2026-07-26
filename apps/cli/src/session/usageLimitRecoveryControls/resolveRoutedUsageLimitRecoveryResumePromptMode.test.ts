@@ -17,13 +17,12 @@ const offIntent = {
 } as const;
 
 describe('resolveRoutedUsageLimitRecoveryResumePromptMode', () => {
-  it('resolves the full plan tier order: explicit > intent > account > group > provider > default', async () => {
+  it('resolves the full plan tier order: explicit > intent > group > account > default', async () => {
     await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({
       explicit: 'standard',
       existingIntent: offIntent,
       accountSettings: { usageLimitRecoverySettingsV1: { resumePromptMode: 'off' } },
       loadGroupPolicy: () => ({ resumePromptMode: 'off' }),
-      loadProviderConfig: () => ({ resumePromptMode: 'off' }),
     })).resolves.toBe('standard');
 
     await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({
@@ -34,43 +33,39 @@ describe('resolveRoutedUsageLimitRecoveryResumePromptMode', () => {
     await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({
       accountSettings: { usageLimitRecoverySettingsV1: { resumePromptMode: 'off' } },
       loadGroupPolicy: () => ({ resumePromptMode: 'standard' }),
-    })).resolves.toBe('off');
+    })).resolves.toBe('standard');
 
     await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({
       loadGroupPolicy: () => ({ resumePromptMode: 'off' }),
-      loadProviderConfig: () => ({ resumePromptMode: 'standard' }),
-    })).resolves.toBe('off');
-
-    await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({
-      loadProviderConfig: () => ({ resumePromptMode: 'off' }),
     })).resolves.toBe('off');
 
     await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({})).resolves.toBe('standard');
   });
 
-  it('does not consult group or provider tiers when a higher tier decides', async () => {
+  it('loads group policy before consulting the lower account tier', async () => {
     const loadGroupPolicy = vi.fn(() => ({ resumePromptMode: 'off' }));
-    const loadProviderConfig = vi.fn(() => ({ resumePromptMode: 'off' }));
 
     await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({
       accountSettings: { usageLimitRecoverySettingsV1: { resumePromptMode: 'standard' } },
       loadGroupPolicy,
-      loadProviderConfig,
-    })).resolves.toBe('standard');
+    })).resolves.toBe('off');
 
-    expect(loadGroupPolicy).not.toHaveBeenCalled();
-    expect(loadProviderConfig).not.toHaveBeenCalled();
+    expect(loadGroupPolicy).toHaveBeenCalledTimes(1);
   });
 
-  it('does not consult the provider tier when group policy decides', async () => {
-    const loadProviderConfig = vi.fn(() => ({ resumePromptMode: 'off' }));
+  it('does not load group policy once explicit or persisted intent mode decides', async () => {
+    const loadGroupPolicy = vi.fn(() => ({ resumePromptMode: 'off' }));
 
     await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({
-      loadGroupPolicy: () => ({ resumePromptMode: 'standard' }),
-      loadProviderConfig,
+      explicit: 'standard',
+      loadGroupPolicy,
     })).resolves.toBe('standard');
+    await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({
+      existingIntent: offIntent,
+      loadGroupPolicy,
+    })).resolves.toBe('off');
 
-    expect(loadProviderConfig).not.toHaveBeenCalled();
+    expect(loadGroupPolicy).not.toHaveBeenCalled();
   });
 
   it('falls through tiers on loader failure and on invalid values', async () => {
@@ -81,15 +76,11 @@ describe('resolveRoutedUsageLimitRecoveryResumePromptMode', () => {
       loadGroupPolicy: () => {
         throw new Error('group fetch failed');
       },
-      loadProviderConfig: async () => ({ resumePromptMode: 'off' }),
-    })).resolves.toBe('off');
+    })).resolves.toBe('standard');
 
     await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({
       loadGroupPolicy: async () => {
         throw new Error('group fetch failed');
-      },
-      loadProviderConfig: async () => {
-        throw new Error('provider config failed');
       },
     })).resolves.toBe('standard');
   });
@@ -100,12 +91,10 @@ describe('resolveRoutedUsageLimitRecoveryResumePromptMode', () => {
       accountSettings: { usageLimitRecoverySettingsV1: { resumePromptMode: 'off' } },
     })).resolves.toBe('custom');
 
-    const loadProviderConfig = vi.fn(() => ({ resumePromptMode: 'off' }));
     await expect(resolveRoutedUsageLimitRecoveryResumePromptMode({
       accountSettings: { usageLimitRecoverySettingsV1: { resumePromptMode: 'custom' } },
-      loadProviderConfig,
-    })).resolves.toBe('custom');
-    expect(loadProviderConfig).not.toHaveBeenCalled();
+      loadGroupPolicy: () => ({ resumePromptMode: 'off' }),
+    })).resolves.toBe('off');
   });
 
   it('reads the account tier from both nested and flat settings shapes', async () => {

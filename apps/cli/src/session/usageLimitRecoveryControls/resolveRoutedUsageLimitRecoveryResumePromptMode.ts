@@ -9,18 +9,17 @@ import {
  * Plan tier order (Jun 10 usage-limit recovery unification plan, P1):
  *   1. explicit per-operation `resumePromptMode`
  *   2. existing recovery intent mode
- *   3. account setting default
- *   4. group-policy compatibility value
- *   5. provider/runtime config
- *   6. provider/runtime default (`standard`)
+ *   3. group policy
+ *   4. account setting default
+ *   5. standard default
  *
- * Tiers 4–5 may require I/O (group fetch, provider adapter), so they are loader
- * callbacks consulted only when every higher tier is silent.
+ * Group policy may require I/O, so it is loaded only when the explicit and
+ * persisted-intent tiers are silent. Account settings are already available
+ * locally but remain lower precedence than group policy.
  */
 export type RoutedUsageLimitRecoveryResumePromptTierSources = Readonly<{
   accountSettings?: unknown;
   loadGroupPolicy?: () => Promise<unknown> | unknown;
-  loadProviderConfig?: () => Promise<unknown> | unknown;
 }>;
 
 function readRecord(value: unknown): Record<string, unknown> | null {
@@ -33,13 +32,6 @@ function readMode(value: unknown): SessionUsageLimitRecoveryResumePromptModeV1 |
   return value === 'standard' || value === 'off' || value === 'custom' ? value : null;
 }
 
-function readAccountSettingsMode(value: unknown): SessionUsageLimitRecoveryResumePromptModeV1 | null {
-  const accountSettings = readRecord(value);
-  if (!accountSettings) return null;
-  const nested = readRecord(accountSettings.usageLimitRecoverySettingsV1);
-  return readMode(nested?.resumePromptMode) ?? readMode(accountSettings.resumePromptMode);
-}
-
 async function safeLoad(loader?: () => Promise<unknown> | unknown): Promise<unknown> {
   if (!loader) return null;
   try {
@@ -50,10 +42,9 @@ async function safeLoad(loader?: () => Promise<unknown> | unknown): Promise<unkn
 }
 
 /**
- * Routed owner for resume-prompt-mode precedence: materializes the lazy
- * group-policy/provider-config tiers only when needed, then delegates the
- * canonical ordering to the protocol resolver so there is exactly one
- * precedence definition.
+ * Routed owner for resume-prompt-mode precedence: materializes the lazy group
+ * policy only when needed, then delegates the canonical ordering to the
+ * protocol resolver so there is exactly one precedence definition.
  */
 export async function resolveRoutedUsageLimitRecoveryResumePromptMode(
   input: Readonly<{
@@ -61,22 +52,15 @@ export async function resolveRoutedUsageLimitRecoveryResumePromptMode(
     existingIntent?: unknown;
   }> & RoutedUsageLimitRecoveryResumePromptTierSources,
 ): Promise<SessionUsageLimitRecoveryResumePromptModeV1> {
-  const fastTierDecided =
+  const higherTierDecided =
     readMode(input.explicit) !== null
-    || readMode(readRecord(input.existingIntent)?.resumePromptMode) !== null
-    || readAccountSettingsMode(input.accountSettings) !== null;
-
-  const groupPolicy = fastTierDecided ? undefined : await safeLoad(input.loadGroupPolicy);
-  const groupTierDecided = readMode(readRecord(groupPolicy)?.resumePromptMode) !== null;
-  const providerConfig = fastTierDecided || groupTierDecided
-    ? undefined
-    : await safeLoad(input.loadProviderConfig);
+    || readMode(readRecord(input.existingIntent)?.resumePromptMode) !== null;
+  const groupPolicy = higherTierDecided ? undefined : await safeLoad(input.loadGroupPolicy);
 
   return resolveSessionUsageLimitRecoveryResumePromptModeV1({
     explicit: input.explicit,
     existingIntent: input.existingIntent,
-    accountSettings: input.accountSettings,
     groupPolicy,
-    providerConfig,
+    accountSettings: input.accountSettings,
   });
 }

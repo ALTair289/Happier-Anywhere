@@ -136,32 +136,4 @@ describe('buildRoutedResumePromptTierSources', () => {
     expect(getConnectedServiceAuthGroup).not.toHaveBeenCalled();
   });
 
-  it('consults the provider adapter resume-prompt config for the provider tier', async () => {
-    const resolveResumePromptConfig = vi.fn(async () => ({ resumePromptMode: 'off' as const }));
-    const resolveAdapter = vi.fn(async () => ({ resolveResumePromptConfig }));
-
-    const sources = buildRoutedResumePromptTierSources({
-      credentials: createCredentials(),
-      metadata: { machineId: 'machine-local' },
-      rawSession: createRawSession(),
-      requestProvider: 'codex',
-      resolveAdapter,
-      readAccountSettings: () => null,
-    });
-
-    await expect(sources.loadProviderConfig?.()).resolves.toEqual({ resumePromptMode: 'off' });
-    expect(resolveAdapter).toHaveBeenCalledWith('codex');
-  });
-
-  it('resolves a null provider tier when no agent or adapter config exists', async () => {
-    const sources = buildRoutedResumePromptTierSources({
-      credentials: createCredentials(),
-      metadata: { machineId: 'machine-local' },
-      rawSession: createRawSession(),
-      resolveAdapter: vi.fn(async () => ({})),
-      readAccountSettings: () => null,
-    });
-
-    await expect(sources.loadProviderConfig?.()).resolves.toBeNull();
-  });
 });

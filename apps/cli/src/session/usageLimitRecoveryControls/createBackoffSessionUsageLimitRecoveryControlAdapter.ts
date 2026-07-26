@@ -214,7 +214,8 @@ function buildNextIntent(params: Readonly<{
       adapterStatus: 'ready',
       intent: {
         ...baseIntent,
-        status: 'cancelled',
+        status: 'paused',
+        nextCheckAtMs: null,
         attemptCount,
         lastProbeError: null,
       },
@@ -240,7 +241,6 @@ export function createBackoffSessionUsageLimitRecoveryControlAdapter(options: Re
   defaultMaxAttempts: number;
   defaultNativeServiceId?: ConnectedServiceId | null;
   issueProviderFilter?: string | null;
-  resolveResumePromptConfig?: SessionUsageLimitRecoveryControlAdapter['resolveResumePromptConfig'];
   nowMs?: () => number;
   processEnv?: NodeJS.ProcessEnv;
 }>): SessionUsageLimitRecoveryControlAdapter {
@@ -248,9 +248,6 @@ export function createBackoffSessionUsageLimitRecoveryControlAdapter(options: Re
   const processEnv = options.processEnv ?? process.env;
 
   return {
-    ...(options.resolveResumePromptConfig
-      ? { resolveResumePromptConfig: options.resolveResumePromptConfig }
-      : {}),
     checkNow: async (params): Promise<BackoffUsageLimitRecoveryControlResult> => {
       const now = nowMs();
       const latestIssue = readLatestUsageLimitIssue({
