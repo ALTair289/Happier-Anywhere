@@ -1,6 +1,8 @@
 import {
   ConnectedServiceCredentialRecordV1Schema,
+  ConnectedServiceCredentialRevisionV1Schema,
   type ConnectedServiceCredentialRecordV1,
+  type ConnectedServiceCredentialRevisionV1,
 } from '@happier-dev/protocol';
 
 import type { CodexConnectedServiceRefreshSelection } from './authApplication/types';
@@ -9,6 +11,7 @@ export type CodexConnectedServiceRuntimeAuthExpected = Readonly<{
   profileId?: string;
   groupId?: string;
   generation?: string | number;
+  credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
 }>;
 
 export type CodexConnectedServiceRuntimeAuthApplyRequest = Readonly<{
@@ -62,11 +65,13 @@ export function readCodexConnectedServiceRuntimeAuthExpected(value: unknown): Co
   const profileId = readString(record.profileId);
   const groupId = readString(record.groupId);
   const generation = readProtocolGeneration(record.generation);
-  if (!profileId && !groupId && generation === undefined) return null;
+  const credentialRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(record.credentialRevision);
+  if (!profileId && !groupId && generation === undefined && !credentialRevision.success) return null;
   return {
     ...(profileId ? { profileId } : {}),
     ...(groupId ? { groupId } : {}),
     ...(generation === undefined ? {} : { generation }),
+    ...(credentialRevision.success ? { credentialRevision: credentialRevision.data } : {}),
   };
 }
 
@@ -89,6 +94,8 @@ function buildRuntimeApplyExpected(
   if (groupId) expected.groupId = groupId;
   const generation = readNonNegativeInteger(selection?.generation);
   if (generation !== null) expected.generation = generation;
+  const credentialRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(selection?.credentialRevision);
+  if (credentialRevision.success) expected.credentialRevision = credentialRevision.data;
   return expected;
 }
 

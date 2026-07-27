@@ -5,6 +5,7 @@ import type { ApiSessionClient } from '@/api/session/sessionClient';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
 import type { AcpPermissionHandler } from '@/agent/acp/AcpBackend';
 import type { CodexAcpBackendOptions, CodexAcpBackendResult } from './backend';
+import { createSessionProviderInputConsumerFixture } from '@/testkit/backends/catalogAcpRuntime';
 
 const captured: { prompts: string[] } = { prompts: [] };
 
@@ -75,6 +76,7 @@ describe('Codex ACP runtime (change title instruction)', () => {
       permissionHandler: permissionHandler as AcpPermissionHandler,
       onThinkingChange() {},
       permissionMode: 'default',
+      providerInputConsumer: createSessionProviderInputConsumerFixture(),
     });
 
     await runtime.startOrLoad({ resumeId: null });

@@ -1,4 +1,4 @@
-import type { ConnectedServiceCredentialRecordV1 } from '@happier-dev/protocol';
+import type { ConnectedServiceCredentialRecordV1, ConnectedServiceCredentialRevisionV1 } from '@happier-dev/protocol';
 
 export type CodexLoginStartClient = Readonly<{
   request: (method: string, params?: unknown) => Promise<unknown>;
@@ -26,6 +26,8 @@ export type CodexConnectedServiceRuntimeIdentitySeed = Readonly<{
   profileId: string;
   groupId?: string;
   generation?: string | number;
+  credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
+  credentialFingerprint: string | null;
   source: 'spawn_selection' | 'group_switch_selection' | 'applied_credential';
 }>;
 

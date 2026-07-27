@@ -1,5 +1,6 @@
 import type { Metadata } from '@/api/types';
 import type { SessionTurnLifecycle } from '@/agent/runtime/session/turn/types';
+import type { SessionRuntimeIssueV1 } from '@happier-dev/protocol';
 import {
     buildCodexAppServerRollbackEvidenceSet,
     resolveCodexAppServerRollbackPlan,
@@ -16,7 +17,6 @@ const CODEX_APP_SERVER_ROLLBACK_RANGES_METADATA_KEY = 'sessionRollbackRangesV1';
 const MAX_RETAINED_CODEX_APP_SERVER_TURN_ENTRIES = 200;
 const MAX_RETAINED_CODEX_APP_SERVER_USER_MESSAGE_SEQS_PER_TURN = 50;
 const COMMITTED_USER_MESSAGE_SEQ_WAIT_TIMEOUT_MS = 1_000;
-const COMMITTED_USER_MESSAGE_SEQ_WAIT_POLL_MS = 20;
 
 type CodexAppServerSessionTurnTranscriptAnchors = Readonly<{
     startUserMessageSeq?: number;
@@ -30,7 +30,7 @@ type CodexAppServerSessionTurnTrackerSession = Readonly<{
     getCommittedUserMessageSeq?: (localId: string) => number | null;
     waitForCommittedUserMessageSeq?: (
         localId: string,
-        options?: Readonly<{ timeoutMs?: number; pollMs?: number }>,
+        options?: Readonly<{ timeoutMs?: number }>,
     ) => Promise<number | null>;
     sessionTurnLifecycle?: SessionTurnLifecycle;
 }>;
@@ -192,7 +192,6 @@ export function createCodexAppServerSessionTurnTracker(params: Readonly<{
         if (syncSeq !== null) return syncSeq;
         return normalizeSeq(await params.session.waitForCommittedUserMessageSeq?.(trimmedLocalId, {
             timeoutMs: COMMITTED_USER_MESSAGE_SEQ_WAIT_TIMEOUT_MS,
-            pollMs: COMMITTED_USER_MESSAGE_SEQ_WAIT_POLL_MS,
         }) ?? null);
     };
 
@@ -678,7 +677,10 @@ export function createCodexAppServerSessionTurnTracker(params: Readonly<{
             activeTurn = null;
         },
 
-        async failActiveTurn(paramsForFailure: Readonly<{ endSeqInclusive: number | null }>): Promise<void> {
+        async failActiveTurn(paramsForFailure: Readonly<{
+            endSeqInclusive: number | null;
+            issue?: SessionRuntimeIssueV1 | null;
+        }>): Promise<void> {
             if (!activeTurn || activeTurn.kind !== 'tracked') {
                 activeTurn = null;
                 return;
@@ -707,6 +709,8 @@ export function createCodexAppServerSessionTurnTracker(params: Readonly<{
                 try {
                     await lifecycle.failTurn({
                         provider: CODEX_AGENT_ID,
+                        ...(activeTurn.providerTurnId ? { providerTurnId: activeTurn.providerTurnId } : {}),
+                        ...(paramsForFailure.issue ? { issue: paramsForFailure.issue } : {}),
                     });
                 } catch (error) {
                     params.onMetadataWriteError?.(error);

@@ -28,7 +28,7 @@ export type CodexUsageLimitSwitchAttemptStatus =
   | 'switch_limit_reached';
 
 export type CodexUsageLimitSwitchProgress =
-  | Readonly<{ kind: 'retry' }>
+  | Readonly<{ kind: 'ready_to_try' }>
   | Readonly<{ kind: 'wait_until_reset'; nextCheckAtMs: number }>
   | Readonly<{ kind: 'exhausted'; reason: string }>;
 
@@ -91,7 +91,7 @@ export function resolveCodexUsageLimitSwitchProgress(input: Readonly<{
       // Codex requires exact live provider account proof before treating the switch as fresh
       // quota. `weakly_verified` is sufficient for auth-surface providers, not for Codex.
       if (input.verificationStatus === 'verified') {
-        return { kind: 'retry' };
+        return { kind: 'ready_to_try' };
       }
       return waitUntilReset();
     }

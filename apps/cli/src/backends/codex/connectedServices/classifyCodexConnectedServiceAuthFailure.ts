@@ -1,7 +1,14 @@
-import type { ConnectedServiceId, ConnectedServiceLimitCategoryV1, ConnectedServiceProfileId } from '@happier-dev/protocol';
+import {
+  ConnectedServiceCredentialRevisionV1Schema,
+  type ConnectedServiceCredentialRevisionV1,
+  type ConnectedServiceId,
+  type ConnectedServiceLimitCategoryV1,
+  type ConnectedServiceProfileId,
+} from '@happier-dev/protocol';
 
 import { classifyPrimarySessionRuntimeIssue } from '@/agent/runtime/session/errors/classifyPrimarySessionRuntimeIssue';
 import { classifyProviderLimitEvidence } from '@/daemon/connectedServices/quotas/normalization';
+import { normalizeConnectedServiceAccessTokenFingerprint } from '@/daemon/connectedServices/refresh/credentialFreshness/tokenFingerprint';
 
 export type CodexConnectedServiceRuntimeFailureKind =
   | 'usage_limit'
@@ -19,6 +26,7 @@ export type CodexConnectedServiceRuntimeFailureClassification = Readonly<{
   profileId: ConnectedServiceProfileId | null;
   groupId: string | null;
   groupGeneration?: number | null;
+  credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
   resetsAtMs: number | null;
   retryAfterMs: number | null;
   quotaScope?: 'provider';
@@ -26,6 +34,7 @@ export type CodexConnectedServiceRuntimeFailureClassification = Readonly<{
   rateLimits: unknown | null;
   sourceProviderAccountId?: string | null;
   sourceAccountLabel?: string | null;
+  failingAccessTokenFingerprint?: string | null;
   source: 'structured_provider_error' | 'stable_provider_message' | 'provider_runtime_marker';
   recoveryAction?: CodexConnectedServiceRecoveryAction | null;
 }>;
@@ -44,6 +53,8 @@ export type ClassifyCodexConnectedServiceAuthFailureInput = Readonly<{
     providerAccountId?: string | null;
     accountLabel?: string | null;
     groupGeneration?: string | number | null;
+    credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
+    credentialFingerprint?: string | null;
   }> | null;
 }>;
 
@@ -167,6 +178,12 @@ function buildClassification(
     ? readString(input.sourceAccountIdentity?.accountLabel)
     : null;
   const groupGeneration = readNonNegativeInteger(input.sourceAccountIdentity?.groupGeneration);
+  const credentialRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(
+    input.sourceAccountIdentity?.credentialRevision,
+  );
+  const failingAccessTokenFingerprint = normalizeConnectedServiceAccessTokenFingerprint(
+    input.sourceAccountIdentity?.credentialFingerprint,
+  );
   return {
     kind: params.kind,
     ...(params.limitCategory ? { limitCategory: params.limitCategory } : {}),
@@ -174,6 +191,7 @@ function buildClassification(
     profileId: input.profileId,
     groupId: input.groupId,
     ...(groupGeneration !== null ? { groupGeneration } : {}),
+    ...(credentialRevision.success ? { credentialRevision: credentialRevision.data } : {}),
     resetsAtMs: params.resetsAtMs ?? null,
     retryAfterMs: params.retryAfterMs ?? null,
     ...(params.quotaScope ? { quotaScope: params.quotaScope } : {}),
@@ -181,6 +199,7 @@ function buildClassification(
     rateLimits: params.rateLimits ?? null,
     ...(sourceProviderAccountId ? { sourceProviderAccountId } : {}),
     ...(sourceProviderAccountId && sourceAccountLabel !== null ? { sourceAccountLabel } : {}),
+    ...(failingAccessTokenFingerprint ? { failingAccessTokenFingerprint } : {}),
     source: params.source,
     ...(params.recoveryAction ? { recoveryAction: params.recoveryAction } : {}),
   };
@@ -255,7 +274,9 @@ export function classifyCodexConnectedServiceAuthFailure(
   const generic = classifyPrimarySessionRuntimeIssue({
     provider: 'codex',
     cause: 'status_error',
-    error: input.error,
+    // The app-server wraps stable provider copy below `error` or `turn.error`.
+    // Classify that extracted provider text rather than the transport envelope.
+    error: text || input.error,
   });
   if (generic.source === 'usage_limit') {
     return buildClassification(input, {

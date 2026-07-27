@@ -4,7 +4,7 @@ import * as z from 'zod/v4';
 import { RequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import { logger } from '@/ui/logger';
-import type { PermissionResult } from '@/agent/permissions/BasePermissionHandler';
+import type { PermissionResult } from '@/agent/permissions/permissionResult';
 
 import {
     getCodexElicitationToolCallId,
@@ -78,10 +78,9 @@ function buildPatchToolInput(params: Record<string, unknown>, message: string): 
     return { message, reason, grantRoot, changes };
 }
 
-function mapResultToDecision(result: {
-    decision: 'approved' | 'approved_for_session' | 'approved_execpolicy_amendment' | 'denied' | 'abort';
-    execPolicyAmendment?: { command: string[] };
-}): ReviewDecision {
+function mapResultToDecision(
+    result: Pick<PermissionResult, 'decision' | 'execPolicyAmendment'>,
+): ReviewDecision {
     switch (result.decision) {
         case 'approved_execpolicy_amendment':
             if (result.execPolicyAmendment?.command?.length) {

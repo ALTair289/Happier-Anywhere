@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 
 import { resolveCodexInitialConnectedServiceRuntimeIdentity } from './resolveCodexInitialConnectedServiceRuntimeIdentity';
+import { computeConnectedServiceAccessTokenFingerprint } from '@/daemon/connectedServices/refresh/credentialFreshness/tokenFingerprint';
 
 function buildJwt(payload: Record<string, unknown>): string {
   return [
@@ -28,12 +29,13 @@ describe('resolveCodexInitialConnectedServiceRuntimeIdentity', () => {
     tempDirs.push(dir);
     const codexHome = join(dir, 'codex-home');
     await mkdir(codexHome, { recursive: true });
+    const accessToken = buildJwt({ email: 'team@example.test', exp: 4_102_444_800 });
     await writeFile(
       join(codexHome, 'auth.json'),
       JSON.stringify({
         tokens: {
           id_token: buildJwt({ email: 'team@example.test', exp: 4_102_444_800 }),
-          access_token: buildJwt({ email: 'team@example.test', exp: 4_102_444_800 }),
+          access_token: accessToken,
           account_id: 'acct_team_exact',
         },
       }),
@@ -51,6 +53,7 @@ describe('resolveCodexInitialConnectedServiceRuntimeIdentity', () => {
         activeProfileId: 'team',
         fallbackProfileId: 'backup',
         generation: 9,
+        credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
       }]),
     })).toEqual({
       serviceId: 'openai-codex',
@@ -59,6 +62,8 @@ describe('resolveCodexInitialConnectedServiceRuntimeIdentity', () => {
       profileId: 'team',
       groupId: 'main',
       generation: 9,
+      credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+      credentialFingerprint: computeConnectedServiceAccessTokenFingerprint(accessToken),
       source: 'spawn_selection',
     });
   });
@@ -68,12 +73,13 @@ describe('resolveCodexInitialConnectedServiceRuntimeIdentity', () => {
     tempDirs.push(dir);
     const codexHome = join(dir, 'codex-home');
     await mkdir(codexHome, { recursive: true });
+    const accessToken = buildJwt({ email: 'team@example.test', exp: 4_102_444_800 });
     await writeFile(
       join(codexHome, 'auth.json'),
       JSON.stringify({
         tokens: {
           id_token: buildJwt({ email: 'team@example.test', exp: 4_102_444_800 }),
-          access_token: buildJwt({ email: 'team@example.test', exp: 4_102_444_800 }),
+          access_token: accessToken,
           account_id: 'acct_team_exact',
         },
       }),
@@ -113,6 +119,65 @@ describe('resolveCodexInitialConnectedServiceRuntimeIdentity', () => {
       profileId: 'team',
       groupId: 'main',
       generation: 9,
+      credentialRevision: null,
+      credentialFingerprint: computeConnectedServiceAccessTokenFingerprint(accessToken),
+      source: 'spawn_selection',
+    });
+  });
+
+  it('does not stitch stale session metadata into the materialized auth identity', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-codex-runtime-identity-stale-metadata-'));
+    tempDirs.push(dir);
+    const codexHome = join(dir, 'codex-home');
+    await mkdir(codexHome, { recursive: true });
+    const accessToken = buildJwt({ email: 'materialized@example.test', exp: 4_102_444_800 });
+    await writeFile(
+      join(codexHome, 'auth.json'),
+      JSON.stringify({
+        tokens: {
+          id_token: buildJwt({ email: 'materialized@example.test', exp: 4_102_444_800 }),
+          access_token: accessToken,
+          account_id: 'acct_materialized',
+        },
+      }),
+      'utf8',
+    );
+
+    expect(resolveCodexInitialConnectedServiceRuntimeIdentity({
+      HOME: dir,
+      USERPROFILE: dir,
+      CODEX_HOME: codexHome,
+      [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+        kind: 'group',
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        activeProfileId: 'materialized',
+        fallbackProfileId: 'backup',
+        generation: 9,
+      }]),
+    }, {
+      getMetadataSnapshot: () => ({
+        connectedServices: {
+          v: 1,
+          bindingsByServiceId: {
+            'openai-codex': {
+              source: 'connected',
+              selection: 'group',
+              groupId: 'main',
+              profileId: 'newer-metadata-only',
+            },
+          },
+        },
+      }),
+    })).toEqual({
+      serviceId: 'openai-codex',
+      activeAccountId: 'acct_materialized',
+      accountLabel: 'materialized@example.test',
+      profileId: 'materialized',
+      groupId: 'main',
+      generation: 9,
+      credentialRevision: null,
+      credentialFingerprint: computeConnectedServiceAccessTokenFingerprint(accessToken),
       source: 'spawn_selection',
     });
   });

@@ -6,9 +6,9 @@ import { existsSync } from 'node:fs';
 import { logger } from '@/ui/logger';
 import { resolveHasTTY } from '@/ui/tty/resolveHasTTY';
 import { Credentials } from '@/persistence';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import type { Metadata } from '@/api/types';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import {
-    notifyDaemonConnectedServiceQuotaSnapshot,
     refreshDaemonOpenAiCodexChatGptAuthTokensForBridge,
     type OpenAiCodexDaemonRefreshSelection,
 } from '@/daemon/controlClient';
@@ -31,8 +31,12 @@ import { hashObject } from '@/utils/deterministicJson';
 import { resolve, join } from 'node:path';
 import { createSessionMetadata } from '@/agent/runtime/createSessionMetadata';
 import { resolveRunnerMcpServers } from '@/mcp/runtime/resolveRunnerMcpServers';
+import { applyRunnerMcpSessionContext } from '@/mcp/runtime/applyRunnerMcpSessionContext';
 import { MessageBuffer } from "@/ui/ink/messageBuffer";
 import { trimIdent } from "@/utils/trimIdent";
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
+import { readPendingLocalId } from '@happier-dev/protocol';
+import { readNewestSessionModelsMetadataStateV1 } from '@happier-dev/agents';
 import type { CodexSessionConfig } from './types';
 import { registerKillSessionHandler } from '@/rpc/handlers/killSession';
 import { delay } from "@/utils/time";
@@ -41,11 +45,12 @@ import { formatErrorForUi } from '@/ui/formatErrorForUi';
 import { registerRunnerTerminationHandlers } from '@/agent/runtime/runnerTerminationHandlers';
 import {
     createSessionProviderInputConsumer,
-    createSessionProviderPendingDrainAdapter,
     type SessionProviderInputConsumerSession,
 } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 import {
-    resolveSessionPendingActiveTurnDeliveryPolicy,
+    resolveRuntimeAwarePendingForegroundSteerability,
+    resolveSessionPendingForegroundSteerability,
     resolveSessionPendingQueueDeliveryTiming,
     resolveSessionPendingQueueMaxPopPerWake,
 } from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
@@ -74,8 +79,14 @@ import { normalizePermissionModeToIntent, resolvePermissionModeUpdatedAtFromMess
 import { publishCodexSessionIdMetadata } from './utils/codexSessionIdMetadata';
 import { createCodexAcpRuntime } from './acp/runtime';
 import { createCodexAppServerRuntime } from './appServer/runtime';
+import {
+    createCodexAcpProviderInputOutcomeBridge,
+    createCodexAppServerProviderInputOutcomeBridge,
+    type CodexAcpProviderInputOutcomeBridge,
+    type CodexAppServerProviderInputOutcomeBridge,
+} from './appServer/codexAppServerProviderInputOutcome';
+import { reportSessionToDaemonIfRunning } from '@/agent/runtime/startupSideEffects';
 import { isCodexAppServerNoActiveTurnToSteerError } from './appServer/appServerCompatibility';
-import { returnOrBlockUndeliverableProviderPrompt } from '@/agent/runtime/session/pendingDelivery/undeliverableProviderPrompt';
 import { rememberCodexUsageLimitRecoveryPreference } from './appServer/rememberCodexUsageLimitRecoveryPreference';
 import { resolveConfiguredCodexHome } from './utils/resolveConfiguredCodexHome';
 import { buildCodexAppServerConfigOverrides } from './appServer/buildCodexAppServerConfigOverrides';
@@ -91,6 +102,8 @@ import { initializeBackendRunSession } from '@/agent/runtime/initializeBackendRu
 import { initializeBackendApiContext } from '@/agent/runtime/initializeBackendApiContext';
 import { codexLocalLauncher, type CodexLauncherResult } from './codexLocalLauncher';
 import { sendReadyWithPushNotification } from '@/agent/runtime/sendReadyWithPushNotification';
+import { resolveProviderPromptFailureDeliveryReason } from '@/agent/runtime/providerPromptSubmission';
+import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 import { getSessionNotificationTitle } from '@/agent/runtime/readyNotificationContext';
 import { resolveReadyNotificationAssistantText } from '@/agent/runtime/readyNotificationAssistantText';
 import type { ReadyNotificationTurnContext } from '@/agent/runtime/runPermissionModePromptLoop';
@@ -134,6 +147,7 @@ import { requestSwitchToLocal as requestCodexSwitchToLocal } from './localContro
 import { runMetadataOverridesWatcherLoop } from './utils/metadataOverridesWatcher';
 import { updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
 import { createStartupTiming } from '@/agent/runtime/startup/startupTiming';
+import { startSessionHeartbeatLoop } from '@/agent/runtime/session/startSessionHeartbeatLoop';
 import { initializeRuntimeOverridesSynchronizer } from '@/agent/runtime/runtimeOverridesSynchronizer';
 import { createSessionModeOverrideSynchronizer } from '@/agent/runtime/sessionModeOverrideSync';
 import { createSessionConfigOptionOverrideSynchronizer } from '@/agent/runtime/sessionConfigOptionOverrideSync';
@@ -260,6 +274,7 @@ export async function runCodex(opts: {
         promptMetadata?: unknown;
         suppressUserEcho?: boolean;
         providerPromptAlreadyResolved?: boolean;
+        pendingProviderAction?: import('@/agent/runtime/modeMessageQueue').PendingProviderAction;
     }
 
     type CodexRemoteRuntime = Readonly<{
@@ -282,14 +297,19 @@ export async function runCodex(opts: {
         setSessionModel: (model: string) => Promise<void>;
         setSessionConfigOption: (key: string, value: string | number | boolean | null) => Promise<void>;
         steerPrompt: (prompt: string, options?: { metadata?: unknown; localId?: string | null; localIds?: readonly string[]; userMessageSeq?: number | null }) => Promise<void>;
-        sendPrompt: (prompt: string, options?: { metadata?: unknown; localId?: string | null; localIds?: readonly string[]; userMessageSeq?: number | null }) => Promise<void>;
+        sendPrompt: (prompt: string, options?: { metadata?: unknown; localId?: string | null; localIds?: readonly string[]; userMessageSeq?: number | null; appliedModelId?: string | null }) => Promise<void>;
         sendPromptWithMeta?: (params: {
             text: string;
             localId?: string | null;
             meta?: Record<string, unknown>;
             onProviderPromptAccepted?: () => void;
         }) => Promise<void>;
-        setOnPromptAcceptedByProvider?: (callback: ((input: Readonly<{ localIds?: readonly string[] | null; userMessageSeq: number | null }>) => void) | null) => void;
+        setOnPromptAcceptedByProvider?: (callback: ((input: Readonly<{
+            localIds?: readonly string[] | null;
+            userMessageSeq: number | null;
+            providerTurnId: string;
+            appliedModelId?: string;
+        }>) => void) | null) => void;
         setOnUndeliverablePrompts?: (callback: ((prompts: ReadonlyArray<Readonly<{ localIds?: readonly string[] | null; text: string; userMessageSeq: number | null }>>) => void) | null) => void;
         compactContext: (command: string) => Promise<void>;
         refreshGoal?: () => Promise<unknown>;
@@ -356,9 +376,6 @@ export async function runCodex(opts: {
     const hasResumeArg = typeof opts.resume === 'string' && opts.resume.trim().length > 0;
     const accountSettings = hasResumeArg ? null : (opts.accountSettingsContext?.settings ?? null);
     const pendingQueueDrainMaxPopPerWake = resolveSessionPendingQueueMaxPopPerWake(opts.accountSettingsContext?.settings ?? null);
-    const pendingQueueDeliveryTiming = resolveSessionPendingQueueDeliveryTiming(opts.accountSettingsContext?.settings ?? null);
-    const resolvePendingActiveTurnDeliveryPolicy = () =>
-        resolveSessionPendingActiveTurnDeliveryPolicy(opts.accountSettingsContext?.settings ?? null);
     const permissionModeSeed = resolvePermissionModeSeedForAgentStart({
         agentId: 'codex',
         explicitPermissionMode: opts.permissionMode,
@@ -391,118 +408,40 @@ export async function runCodex(opts: {
             appendSystemPrompt: resolveAppendSystemPromptQueueKeyValue(mode),
         }),
     );
-    type PendingProviderPromptReplay = Readonly<{
-        localIds: readonly string[];
-        message: string;
-        mode: EnhancedMode;
-        userMessageSeq: number | null;
-    }>;
-    type UndeliverableProviderPromptReplayInput = Readonly<{
-        localIds?: readonly string[] | null;
-        text: string;
-        userMessageSeq: number | null;
-    }>;
-    const undeliverableProviderPromptsBySeq = new Map<number, PendingProviderPromptReplay>();
-    const undeliverableProviderPromptsByLocalId = new Map<string, PendingProviderPromptReplay>();
-    const deferredUndeliverableProviderPromptReplays: UndeliverableProviderPromptReplayInput[] = [];
-    let deferUndeliverableProviderPromptReplayDepth = 0;
     const normalizeProviderPromptLocalIds = (
         values: readonly (string | null | undefined)[] | null | undefined,
     ): string[] => {
         const seen = new Set<string>();
         const localIds: string[] = [];
         for (const value of values ?? []) {
-            const localId = typeof value === 'string' ? value.trim() : '';
+            const localId = readPendingLocalId(value) ?? '';
             if (!localId || seen.has(localId)) continue;
             seen.add(localId);
             localIds.push(localId);
         }
         return localIds;
     };
-    const providerPromptLocalIdsOption = (localIds: readonly string[]): { localIds?: readonly string[] } =>
-        localIds.length > 0 ? { localIds } : {};
+    const providerPromptIdentityOption = (
+        localIds: readonly string[],
+    ): { localId?: string; localIds?: readonly string[] } => {
+        if (localIds.length === 1) {
+            return { localId: localIds[0] };
+        }
+        return localIds.length > 1 ? { localIds } : {};
+    };
     const confirmProviderAcceptedPrompt = (message: Readonly<{
-        maxUserMessageSeq?: number | null;
         userMessageLocalIds?: readonly string[] | null;
         mode?: Readonly<{ localId?: string | null }> | null;
-    }>): void => {
+    }>, appliedModelId?: string | null): void => {
         const localIds = normalizeProviderPromptLocalIds([
             ...(message.userMessageLocalIds ?? []),
             message.mode?.localId ?? null,
         ]);
-        if (localIds.length > 0) {
-            session.confirmUserMessageDeliveredToProvider?.(message.maxUserMessageSeq ?? null, { localIds });
+        if (useCodexAppServer) {
+            codexAppServerProviderInputOutcomes?.observeAcceptedLocalInput({ localIds });
             return;
         }
-        session.confirmUserMessageDeliveredToProvider?.(message.maxUserMessageSeq ?? null);
-    };
-    const registerUndeliverableProviderPromptReplay = (
-        input: PendingProviderPromptReplay,
-    ): void => {
-        if (typeof input.userMessageSeq === 'number') {
-            undeliverableProviderPromptsBySeq.set(input.userMessageSeq, input);
-        }
-        for (const localId of input.localIds) {
-            undeliverableProviderPromptsByLocalId.set(localId, input);
-        }
-    };
-    const clearUndeliverableProviderPromptReplay = (input: PendingProviderPromptReplay | Readonly<{
-        localIds?: readonly string[] | null;
-        userMessageSeq: number | null;
-    }>): void => {
-        if (typeof input.userMessageSeq === 'number') {
-            undeliverableProviderPromptsBySeq.delete(input.userMessageSeq);
-        }
-        for (const localId of normalizeProviderPromptLocalIds(input.localIds ?? [])) {
-            undeliverableProviderPromptsByLocalId.delete(localId);
-        }
-    };
-    const findUndeliverableProviderPromptReplay = (input: Readonly<{
-        localIds?: readonly string[] | null;
-        userMessageSeq?: number | null;
-    }>): PendingProviderPromptReplay | null => {
-        if (typeof input.userMessageSeq === 'number') {
-            const queued = undeliverableProviderPromptsBySeq.get(input.userMessageSeq);
-            if (queued) return queued;
-        }
-        for (const localId of normalizeProviderPromptLocalIds(input.localIds ?? [])) {
-            const queued = undeliverableProviderPromptsByLocalId.get(localId);
-            if (queued) return queued;
-        }
-        return null;
-    };
-    const handleUndeliverableProviderPromptReplay = (
-        prompt: UndeliverableProviderPromptReplayInput,
-    ): void => {
-        const localIds = normalizeProviderPromptLocalIds(prompt.localIds ?? []);
-        const queued = findUndeliverableProviderPromptReplay({
-            localIds,
-            userMessageSeq: prompt.userMessageSeq,
-        });
-        returnOrBlockUndeliverableProviderPrompt({
-            input: { queued, localIds, userMessageSeq: prompt.userMessageSeq },
-            localIds,
-            blockPendingMessageDelivery: session.blockPendingMessageDelivery?.bind(session),
-            blockReason: 'provider_rejected_before_acceptance',
-            onBlocked: (input) => {
-                clearUndeliverableProviderPromptReplay(input.queued ?? {
-                    localIds: input.localIds,
-                    userMessageSeq: input.userMessageSeq,
-                });
-            },
-            requeueLegacyInput: (input) => {
-                if (!input.queued) return;
-                clearUndeliverableProviderPromptReplay(input.queued);
-                messageQueue.unshift(input.queued.message, input.queued.mode, {
-                    userMessageLocalIds: input.queued.localIds,
-                    userMessageSeq: input.queued.userMessageSeq,
-                });
-            },
-            logPrefix: '[codex]',
-        });
-        if (!queued) {
-            clearUndeliverableProviderPromptReplay({ localIds, userMessageSeq: prompt.userMessageSeq });
-        }
+        codexAcpProviderInputOutcomes?.observeAccepted({ localIds, appliedModelId });
     };
     const blockProviderPromptDeliveryBeforeAcceptance = async (input: Readonly<{
         localIds: readonly string[];
@@ -514,36 +453,10 @@ export async function runCodex(opts: {
             return;
         }
 
-        const blocked = await session.blockPendingMessageDelivery({
+        await session.blockPendingMessageDelivery({
             localIds,
             reason: input.reason,
         });
-        if (blocked) {
-            clearUndeliverableProviderPromptReplay({
-                localIds,
-                userMessageSeq: input.userMessageSeq,
-            });
-        }
-    };
-    const flushDeferredUndeliverableProviderPromptReplays = (): void => {
-        if (deferredUndeliverableProviderPromptReplays.length === 0) return;
-        const prompts = deferredUndeliverableProviderPromptReplays.splice(0);
-        for (const prompt of prompts) {
-            handleUndeliverableProviderPromptReplay(prompt);
-        }
-    };
-    const withDeferredUndeliverableProviderPromptReplay = async <T>(
-        work: () => Promise<T>,
-    ): Promise<T> => {
-        deferUndeliverableProviderPromptReplayDepth += 1;
-        try {
-            return await work();
-        } finally {
-            deferUndeliverableProviderPromptReplayDepth -= 1;
-            if (deferUndeliverableProviderPromptReplayDepth === 0) {
-                flushDeferredUndeliverableProviderPromptReplays();
-            }
-        }
     };
     const messageBuffer = new MessageBuffer();
 
@@ -652,12 +565,11 @@ export async function runCodex(opts: {
         }
     }
 
-    const hasExplicitPermissionMode = typeof opts.permissionMode === 'string' || permissionModeSeededFromCache;
     const shouldFastStartLocal =
         mode === 'local' &&
         startedByForLocalControl === 'cli' &&
         (typeof opts.existingSessionId !== 'string' || !opts.existingSessionId.trim()) &&
-        (!resumeIdFromArgs || hasExplicitPermissionMode);
+        !resumeIdFromArgs;
 
     type CodexFastStartArtifacts = {
         deferredSession: DeferredApiSessionClient;
@@ -739,6 +651,53 @@ export async function runCodex(opts: {
 
     logger.debug(`Using machineId: ${machineId}`);
 
+    // Resolve the remote provider before the session is reported to the daemon. Once reported,
+    // pending delivery is reachable, so the session must already know whether provider custody is
+    // retained until an ACP/app-server acknowledgement.
+    let useCodexAcp = codexBackendMode === 'acp';
+    const useCodexAppServer = codexBackendMode === 'appServer';
+    const remoteResumeBackendLabel = useCodexAppServer ? 'app-server' : 'ACP';
+    const resumeRequested = typeof opts.resume === 'string' && opts.resume.trim().length > 0;
+    let codexAcpAutoInstallError: string | null = null;
+    if (useCodexAcp) {
+        const ensureRuntimeInstallablesResult = await ensureRuntimeInstallablesForLaunch({
+            installableKeys: requireCatalogEntry('codex').runtimeInstallableKeys ?? [],
+            settings: opts.accountSettingsContext?.settings ?? null,
+            machineId,
+        });
+        if (!ensureRuntimeInstallablesResult.ok) {
+            codexAcpAutoInstallError = ensureRuntimeInstallablesResult.logPath
+                ? `${ensureRuntimeInstallablesResult.errorMessage} (install log: ${ensureRuntimeInstallablesResult.logPath})`
+                : ensureRuntimeInstallablesResult.errorMessage;
+        }
+        try {
+            const resolved = resolveCodexAcpSpawn();
+            const availability = validateCodexAcpSpawnAvailability(resolved);
+            if (!availability.ok) throw new Error(availability.errorMessage);
+        } catch (e) {
+            const baseReason = formatErrorForUi(e);
+            const reason = codexAcpAutoInstallError
+                ? `${baseReason}; auto-install failed: ${codexAcpAutoInstallError}`
+                : baseReason;
+            if (resumeRequested) {
+                throw new Error(
+                    `Codex ACP is required to resume sessions, but it cannot start on this machine.\n` +
+                    `Reason: ${reason}\n` +
+                    `Fix: install codex-acp via Happier → Machine Details → Installables, add codex-acp to PATH, or disable ACP for this session.`,
+                );
+            }
+            useCodexAcp = false;
+            localControlState.experimentalCodexAcpEnabled = false;
+            localControlState.localControlBackend = null;
+            codexAcpFallbackToMcpMessage =
+                codexAcpFallbackToMcpMessage ??
+                `Codex ACP could not start (${reason}). Falling back to MCP for this new session.`;
+        }
+    }
+    if (!useCodexAcp && !useCodexAppServer && resumeRequested) {
+        throw new Error('Codex resume is not available on plain MCP. Use the default app-server backend, or switch Codex to ACP for ACP-based resume.');
+    }
+
     const { state, metadata } = createSessionMetadata({
         flavor: 'codex',
         machineId,
@@ -752,7 +711,28 @@ export async function runCodex(opts: {
         modelId: initialModelId ?? undefined,
         modelUpdatedAt: initialModelUpdatedAt,
     });
+    const codexAppServerDaemonReportReadiness: {
+        promise: Promise<void> | null;
+        resolve: (() => void) | null;
+    } = { promise: null, resolve: null };
+    codexAppServerDaemonReportReadiness.promise = useCodexAppServer
+        ? new Promise<void>((resolve) => {
+            codexAppServerDaemonReportReadiness.resolve = resolve;
+        })
+        : null;
+    const startupMetadata: Metadata = useCodexAppServer
+        ? {
+            ...metadata,
+            connectedServiceAccessTokenRefreshV1: {
+                v: 1,
+                mode: 'daemon_callback',
+                serviceIds: ['openai-codex'],
+            },
+        }
+        : metadata;
     let session: ApiSessionClient;
+    let codexAppServerProviderInputOutcomes: CodexAppServerProviderInputOutcomeBridge | null = null;
+    let codexAcpProviderInputOutcomes: CodexAcpProviderInputOutcomeBridge | null = null;
     let workspaceDirFromMetadata: string | null = null;
     // Permission handler declared here so it can be updated in onSessionSwap callback
     // (assigned later after client setup)
@@ -785,23 +765,10 @@ export async function runCodex(opts: {
             permissionModeUpdatedAt: params.permissionModeUpdatedAt,
         });
     };
-    let shouldApplyCodexRemoteProviderAcceptancePolicy = false;
-    const applyCodexRemoteProviderAcceptancePolicy = (
-        targetSession: Pick<ApiSessionClient, 'deferDeliveredUserMessageWatermarkToProviderAcceptance'>,
-    ): void => {
-        if (!shouldApplyCodexRemoteProviderAcceptancePolicy) return;
-        targetSession.deferDeliveredUserMessageWatermarkToProviderAcceptance?.({
-            pendingMaterialization: 'commitAtMaterialize',
-        });
-    };
+    // CS-FIX-3: no hand-rolled notify closure here — delivery routes through the ONE shared
+    // full-payload daemon deliver helper (inside the factory when no notify is supplied), so
+    // `sourceProviderAccountId` is always forwarded like the claude + codex-default paths.
     const quotaSnapshotDeliveryOutbox = createCodexQuotaSnapshotDeliveryOutboxForNotify({
-        notify: async ({ sessionId, serviceId, groupId, groupGeneration, snapshot }) => await notifyDaemonConnectedServiceQuotaSnapshot({
-            sessionId,
-            serviceId,
-            ...(groupId !== undefined ? { groupId } : {}),
-            ...(groupGeneration !== undefined ? { groupGeneration } : {}),
-            snapshot,
-        }),
         onDiagnostic: (diagnostic) => {
             logger.debug('[Codex] Connected-service quota snapshot delivery diagnostic', diagnostic);
         },
@@ -822,7 +789,7 @@ export async function runCodex(opts: {
     const initializedSession = await initializeBackendRunSession({
         api,
         sessionTag,
-        metadata,
+        metadata: startupMetadata,
         state,
         existingSessionId: opts.existingSessionId,
         uiLogPrefix: '[codex]',
@@ -841,7 +808,16 @@ export async function runCodex(opts: {
         allowOfflineStub: true,
         onSessionSwap: (newSession) => {
             session = newSession;
-            applyCodexRemoteProviderAcceptancePolicy(newSession);
+            if (useCodexAppServer) {
+                codexAppServerProviderInputOutcomes = createCodexAppServerProviderInputOutcomeBridge(newSession, {
+                    isCurrentRuntimeMode: () => useCodexAppServer,
+                });
+            } else {
+                codexAcpProviderInputOutcomes = createCodexAcpProviderInputOutcomeBridge(
+                    newSession,
+                    useCodexAcp ? 'acp' : 'mcp',
+                );
+            }
             // Update permission handler with new session to avoid stale reference
             if (permissionHandler) {
                 permissionHandler.updateSession(newSession);
@@ -864,9 +840,26 @@ export async function runCodex(opts: {
         onDaemonSessionReported: async ({ sessionId }) => {
             await flushQuotaSnapshotsAfterDaemonSessionReport(sessionId);
         },
+        ...(codexAppServerDaemonReportReadiness.promise
+            ? {
+                waitForDaemonReportReadiness: async () => {
+                    await codexAppServerDaemonReportReadiness.promise;
+                },
+            }
+            : {}),
     });
     stopRunSessionSpan();
     session = initializedSession.session;
+    if (useCodexAppServer) {
+        codexAppServerProviderInputOutcomes = createCodexAppServerProviderInputOutcomeBridge(session, {
+            isCurrentRuntimeMode: () => useCodexAppServer,
+        });
+    } else {
+        codexAcpProviderInputOutcomes = createCodexAcpProviderInputOutcomeBridge(
+            session,
+            useCodexAcp ? 'acp' : 'mcp',
+        );
+    }
     reconnectionHandle = initializedSession.reconnectionHandle;
     // Do not attach the deferred session to an offline stub; wait for the reconnection swap.
     if (initializedSession.attachedToExistingSession || initializedSession.reportedSessionId) {
@@ -881,20 +874,27 @@ export async function runCodex(opts: {
             async (materializeOpts) => {
                 const materialize = session.materializeNextPendingMessageSafely;
                 if (typeof materialize !== 'function') {
-                    return { type: 'no_pending' };
+                    return { type: 'retryable_transport' };
                 }
                 return await materialize.call(session, materializeOpts);
             };
 
         return {
             materializeNextPendingMessageSafely,
-            popPendingMessage: async () => {
-                const result = await materializeNextPendingMessageSafely({ reconcileWhenEmpty: 'force' });
-                return result.type === 'materialized';
-            },
             shouldAttemptPendingMaterialization: () => session.shouldAttemptPendingMaterialization?.() ?? true,
             reconcilePendingQueueState: (opts) => session.reconcilePendingQueueState?.(opts),
-            waitForMetadataUpdate: (signal) => session.waitForMetadataUpdate(signal),
+            waitForPendingEligibilityUpdate: (signal) => session.waitForPendingEligibilityUpdate(signal),
+            ...(typeof session.readRuntimeActivitySnapshotTail === 'function'
+                ? {
+                    readRuntimeActivitySnapshotTail: session.readRuntimeActivitySnapshotTail.bind(session),
+                }
+                : {}),
+            ...(typeof session.waitForRuntimeActivitySnapshotTailChange === 'function'
+                ? {
+                    waitForRuntimeActivitySnapshotTailChange:
+                        session.waitForRuntimeActivitySnapshotTailChange.bind(session),
+                }
+                : {}),
         };
     };
 
@@ -915,9 +915,55 @@ export async function runCodex(opts: {
     // Late-initialized when a remote Codex runtime is enabled; referenced by the user-message binding for in-flight steering.
     let codexAcpRuntime: ReturnType<typeof createCodexAcpRuntime> | null = null;
     let codexAppServerRuntime: ReturnType<typeof createCodexAppServerRuntime> | null = null;
+    let providerInputConsumer: SessionProviderInputConsumer<EnhancedMode, string> | null = null;
+    let syncOverridesFromMetadata: () => void = () => {};
+    let providerInputAdmissionClosed = false;
+    let providerInputDispatchDrain: Promise<void> = Promise.resolve();
+    const closeProviderInputAdmission = (): Promise<void> => {
+        providerInputAdmissionClosed = true;
+        if (providerInputConsumer) {
+            providerInputDispatchDrain = providerInputConsumer.closeProviderInputAdmissionAndWaitForDispatches();
+        }
+        return providerInputDispatchDrain;
+    };
+    const runProviderInputDispatch = async <Value>(dispatch: () => Promise<Value>) => {
+        if (providerInputAdmissionClosed || !providerInputConsumer) {
+            return { status: 'cancelled' as const };
+        }
+        return await providerInputConsumer.runProviderInputDispatch({
+            abortSignal: abortController.signal,
+            dispatch,
+        });
+    };
+    const dispatchProviderInputOrThrow = async <Value>(dispatch: () => Promise<Value>): Promise<Value> => {
+        const outcome = await runProviderInputDispatch(dispatch);
+        if (outcome.status === 'cancelled') {
+            const error = new Error('Provider input admission closed');
+            error.name = 'AbortError';
+            throw error;
+        }
+        return outcome.value;
+    };
     let liveAppliedCodexRefreshSelection: OpenAiCodexDaemonRefreshSelection | null = null;
     const getCodexRemoteRuntime = (): CodexRemoteRuntime | null => {
         return codexAcpRuntime ?? codexAppServerRuntime;
+    };
+    const resolvePendingForegroundSteerability = () => {
+        const configuredSteerability = resolveSessionPendingForegroundSteerability(
+            opts.accountSettingsContext?.settings ?? null,
+        );
+        const runtime = getCodexRemoteRuntime();
+        const hasActiveProviderTurn = runtime
+            ? (runtime.hasActiveProviderTurn?.() ?? runtime.isTurnInFlight())
+            : false;
+        const canSteerPrompt = runtime
+            ? (runtime.canSteerPrompt?.() ?? runtime.isTurnInFlight())
+            : false;
+        return resolveRuntimeAwarePendingForegroundSteerability({
+            configuredSteerability,
+            hasActiveProviderTurn,
+            canSteerPrompt,
+        });
     };
 
     // Track current overrides to apply per message
@@ -946,7 +992,7 @@ export async function runCodex(opts: {
         }
     };
 
-    session.onUserMessage((message, info) => {
+    session.onUserMessage(async (message, info) => {
         const userMessageSeq = info?.seq ?? null;
         // Resolve permission mode (accept all modes, will be mapped in switch statement)
         const activeTurnPermissionModeBeforeMessage = currentPermissionMode ?? initialPermissionMode;
@@ -992,19 +1038,51 @@ export async function runCodex(opts: {
             localId: message.localId ?? null,
             model: messageModel,
             promptMetadata: message.meta,
+            ...(info?.pendingProviderAction ? { pendingProviderAction: info.pendingProviderAction } : {}),
         };
 
         const text = message.content.text;
         const special = parseSpecialCommand(text);
         const runtime = getCodexRemoteRuntime();
-        if (runtime && shouldUseInFlightSteer({
+        const pendingProviderAction = info?.pendingProviderAction;
+        const hasActiveProviderTurn = runtime
+            ? (runtime.hasActiveProviderTurn?.() ?? runtime.isTurnInFlight())
+            : false;
+        if (pendingProviderAction === 'interrupt_and_send' && runtime && hasActiveProviderTurn) {
+            const localIds = normalizeProviderPromptLocalIds([message.localId ?? null]);
+            await (async () => {
+                try {
+                    await runtime.cancel();
+                    pushMessageToQueueWithSpecialCommands({
+                        queue: messageQueue,
+                        message: text,
+                        text,
+                        mode: enhancedMode,
+                        userMessageSeq,
+                        userMessageLocalIds: localIds,
+                        providerAcceptancePending: info?.providerAcceptancePending === true,
+                        pendingProviderAction,
+                        prioritize: true,
+                    });
+                } catch {
+                    await blockProviderPromptDeliveryBeforeAcceptance({
+                        localIds,
+                        reason: 'provider_rejected_before_acceptance',
+                        userMessageSeq,
+                    });
+                }
+            })();
+            return;
+        }
+        const mayAttemptLiveSteer = pendingProviderAction === 'steer' || pendingProviderAction === undefined;
+        if (runtime && mayAttemptLiveSteer && shouldUseInFlightSteer({
             runtime,
             didChangePermissionMode,
             isPromptNonSteerable: isNonSteerablePromptPayload(text),
         })) {
             // This message will not go through the main prompt loop queue; display it immediately.
             messageBuffer.addMessage(text, 'user');
-            void (async () => {
+            await (async () => {
                 let providerPromptText = text;
                 let permissionHandlerApplyGenerationForSteer: number | null = null;
                 const resolvedMode: EnhancedMode = {
@@ -1013,6 +1091,10 @@ export async function runCodex(opts: {
                     providerPromptAlreadyResolved: true,
                 };
                 try {
+                    const inputConsumer = providerInputConsumer;
+                    if (!inputConsumer) {
+                        return;
+                    }
                     const localIds = normalizeProviderPromptLocalIds([message.localId ?? null]);
                     const replaySeedResolution = await resolveCodexQueuedPromptWithReplaySeed({
                         sessionClient: session,
@@ -1023,25 +1105,20 @@ export async function runCodex(opts: {
                     });
                     didReplaySeedBootstrap = replaySeedResolution.didBootstrap;
                     providerPromptText = replaySeedResolution.text;
-                    registerUndeliverableProviderPromptReplay({
-                        localIds,
-                        message: providerPromptText,
-                        mode: resolvedMode,
-                        userMessageSeq,
-                    });
                     permissionHandlerApplyGenerationForSteer = didChangePermissionMode
                         ? applyPermissionModeToActiveCodexPermissionHandler({
                             permissionMode: resolvedMode.permissionMode,
                             permissionModeUpdatedAt: resolvedMode.permissionModeUpdatedAt,
                         })
                         : null;
-                    await runtime.steerPrompt(providerPromptText, {
-                        ...providerPromptLocalIdsOption(localIds),
-                        metadata: message.meta,
-                        localId: message.localId ?? null,
-                        userMessageSeq,
+                    await dispatchProviderInputOrThrow(async () => {
+                        await runtime.steerPrompt(providerPromptText, {
+                            ...providerPromptIdentityOption(localIds),
+                            metadata: message.meta,
+                            userMessageSeq,
+                        });
                     });
-                } catch {
+                } catch (error) {
                     const localIds = normalizeProviderPromptLocalIds([message.localId ?? null]);
                     if (didChangePermissionMode && permissionHandlerApplyGenerationForSteer !== null) {
                         restorePermissionModeForActiveCodexTurnIfUnchanged(permissionHandlerApplyGenerationForSteer, {
@@ -1049,7 +1126,22 @@ export async function runCodex(opts: {
                             permissionModeUpdatedAt: activeTurnPermissionModeUpdatedAtBeforeMessage,
                         });
                     }
-                    clearUndeliverableProviderPromptReplay({ localIds, userMessageSeq });
+                    if (!isCodexAppServerNoActiveTurnToSteerError(error)) {
+                        await blockProviderPromptDeliveryBeforeAcceptance({
+                            localIds,
+                            reason: resolveProviderPromptFailureDeliveryReason(error, true),
+                            userMessageSeq,
+                        });
+                        return;
+                    }
+                    if (pendingProviderAction === 'steer') {
+                        await blockProviderPromptDeliveryBeforeAcceptance({
+                            localIds,
+                            reason: 'steering_unavailable',
+                            userMessageSeq,
+                        });
+                        return;
+                    }
                     pushMessageToQueueWithSpecialCommands({
                         queue: messageQueue,
                         message: providerPromptText,
@@ -1057,9 +1149,22 @@ export async function runCodex(opts: {
                         mode: resolvedMode,
                         userMessageSeq,
                         userMessageLocalIds: localIds,
+                        providerAcceptancePending: info?.providerAcceptancePending === true,
                     });
                 }
             })();
+            return;
+        }
+
+        if (
+            pendingProviderAction === 'steer'
+        ) {
+            const localIds = normalizeProviderPromptLocalIds([message.localId ?? null]);
+            await blockProviderPromptDeliveryBeforeAcceptance({
+                localIds,
+                reason: 'steering_unavailable',
+                userMessageSeq,
+            });
             return;
         }
 
@@ -1070,6 +1175,9 @@ export async function runCodex(opts: {
             mode: enhancedMode,
             userMessageSeq,
             userMessageLocalIds: normalizeProviderPromptLocalIds([message.localId ?? null]),
+            providerAcceptancePending: info?.providerAcceptancePending === true,
+            pendingProviderAction,
+            prioritize: pendingProviderAction !== undefined,
         });
     });
 
@@ -1080,11 +1188,11 @@ export async function runCodex(opts: {
         session.sendSessionEvent({ type: 'message', message });
     }
 
-    session.keepAlive(thinking, mode);
-    // Periodic keep-alive; store handle so we can clear on exit
-    const keepAliveInterval = setInterval(() => {
-        session.keepAlive(thinking, mode);
-    }, 2000);
+    const keepAliveInterval = startSessionHeartbeatLoop({
+        getThinking: () => thinking,
+        getMode: () => mode,
+        keepAlive: (nextThinking, nextMode) => session.keepAlive(nextThinking, nextMode),
+    });
     const turnAssistantPreviewTracker = createTurnAssistantPreviewTracker();
 
     let resumeIdFromLocalControl: string | null = null;
@@ -1167,53 +1275,6 @@ export async function runCodex(opts: {
         logger.debug('[Codex] Resume requested via --resume:', storedSessionIdForResume);
     }
 
-    let useCodexAcp = codexBackendMode === 'acp';
-    const useCodexAppServer = codexBackendMode === 'appServer';
-    const remoteResumeBackendLabel = useCodexAppServer ? 'app-server' : 'ACP';
-    const resumeRequested = typeof opts.resume === 'string' && opts.resume.trim().length > 0;
-    let codexAcpAutoInstallError: string | null = null;
-    if (useCodexAcp) {
-        const ensureRuntimeInstallablesResult = await ensureRuntimeInstallablesForLaunch({
-            installableKeys: requireCatalogEntry('codex').runtimeInstallableKeys ?? [],
-            settings: opts.accountSettingsContext?.settings ?? null,
-            machineId,
-        });
-        if (!ensureRuntimeInstallablesResult.ok) {
-            codexAcpAutoInstallError = ensureRuntimeInstallablesResult.logPath
-                ? `${ensureRuntimeInstallablesResult.errorMessage} (install log: ${ensureRuntimeInstallablesResult.logPath})`
-                : ensureRuntimeInstallablesResult.errorMessage;
-        }
-        try {
-            const resolved = resolveCodexAcpSpawn();
-            const availability = validateCodexAcpSpawnAvailability(resolved);
-            if (!availability.ok) throw new Error(availability.errorMessage);
-        } catch (e) {
-            const baseReason = formatErrorForUi(e);
-            const reason = codexAcpAutoInstallError
-                ? `${baseReason}; auto-install failed: ${codexAcpAutoInstallError}`
-                : baseReason;
-            if (resumeRequested) {
-                throw new Error(
-                    `Codex ACP is required to resume sessions, but it cannot start on this machine.\n` +
-                    `Reason: ${reason}\n` +
-                    `Fix: install codex-acp via Happier → Machine Details → Installables, add codex-acp to PATH, or disable ACP for this session.`,
-                );
-            }
-            useCodexAcp = false;
-            // Ensure local-control affordances reflect the resolved remote backend (ACP has failed closed).
-            localControlState.experimentalCodexAcpEnabled = false;
-            localControlState.localControlBackend = null;
-            codexAcpFallbackToMcpMessage =
-                codexAcpFallbackToMcpMessage ??
-                `Codex ACP could not start (${reason}). Falling back to MCP for this new session.`;
-        }
-    }
-    if (!useCodexAcp && !useCodexAppServer && resumeRequested) {
-        throw new Error('Codex resume is not available on plain MCP. Use the default app-server backend, or switch Codex to ACP for ACP-based resume.');
-    }
-    shouldApplyCodexRemoteProviderAcceptancePolicy = useCodexAcp || useCodexAppServer;
-    applyCodexRemoteProviderAcceptancePolicy(session);
-
 	    if (codexAcpFallbackToMcpMessage && codexAcpFallbackToMcpMessage !== initialCodexAcpFallbackToMcpMessage) {
 	        session.sendSessionEvent({ type: 'message', message: codexAcpFallbackToMcpMessage });
 	        messageBuffer.addMessage(codexAcpFallbackToMcpMessage, 'status');
@@ -1285,6 +1346,10 @@ export async function runCodex(opts: {
         process,
         exit: (code) => process.exit(code),
         sessionExitReport: { sessionId: session.sessionId },
+        onTerminationRequested: () => {
+            session.beginRuntimeTermination?.();
+            void closeProviderInputAdmission();
+        },
         onTerminate: async (event, outcome) => {
             logger.debug('[Codex] Runner termination requested', {
                 kind: event.kind,
@@ -1321,6 +1386,7 @@ export async function runCodex(opts: {
             }
 
             try {
+                await closeProviderInputAdmission();
                 await cleanupCodexRunResources({
                     session,
                     reconnectionHandle,
@@ -1482,13 +1548,22 @@ export async function runCodex(opts: {
     let mcpServers: Awaited<ReturnType<typeof resolveRunnerMcpServers>>['mcpServers'] = {};
     let codexAppServerProcessEnv = process.env;
     let codexAppServerConfigOverrides: string[] = [];
+    const mcpSession = applyRunnerMcpSessionContext(session, {
+        getPermissionMode: () => currentPermissionMode ?? initialPermissionMode,
+        getBackendTarget: () => ({ kind: 'builtInAgent', agentId: 'codex' }),
+        getCurrentSessionLocation: () => ({
+            path: directory,
+            host: initialMachineMetadata.host,
+            machineId,
+        }),
+    });
     const happierBridge = await resolveRunnerMcpServers({
-        session,
+        session: mcpSession,
         credentials: opts.credentials,
         accountSettings,
         machineId,
         directory,
-        sessionMetadata: session.getMetadataSnapshot(),
+        sessionMetadata: mcpSession.getMetadataSnapshot?.() ?? null,
         commandMode: 'current-process',
     });
     happierMcpServer = happierBridge.happierMcpServer;
@@ -1580,6 +1655,23 @@ export async function runCodex(opts: {
         return resolveVendorResumeIdFromSessionMetadata('codex', metadata);
     };
 
+    const inputConsumer = createSessionProviderInputConsumer<EnhancedMode, string>({
+        messageQueue,
+        session: createCodexInputConsumerSession(),
+        pendingDrainMaxPopPerWake: pendingQueueDrainMaxPopPerWake,
+        resolveActiveTurnSteerability: resolvePendingForegroundSteerability,
+        resolvePendingQueueDeliveryTiming: () => resolveSessionPendingQueueDeliveryTiming(
+            getActiveAccountSettingsSnapshot()?.settings
+            ?? opts.accountSettingsContext?.settings
+            ?? null,
+        ),
+        onMetadataUpdate: () => syncOverridesFromMetadata(),
+    });
+    providerInputConsumer = inputConsumer;
+    if (providerInputAdmissionClosed) {
+        providerInputDispatchDrain = inputConsumer.closeProviderInputAdmissionAndWaitForDispatches();
+    }
+
     if (useCodexAcp) {
         codexAcpRuntime = createCodexAcpRuntime({
             directory,
@@ -1591,6 +1683,7 @@ export async function runCodex(opts: {
             getPermissionMode: () => currentPermissionMode ?? initialPermissionMode,
             onThinkingChange: (value) => { thinking = value; },
             pendingQueueDrainMaxPopPerWake,
+            providerInputConsumer: inputConsumer as SessionProviderInputConsumer<unknown, unknown>,
         });
         try {
             publishInFlightSteerCapability({ session, runtime: codexAcpRuntime });
@@ -1601,6 +1694,7 @@ export async function runCodex(opts: {
         codexAppServerRuntime = createCodexAppServerRuntime({
             directory,
             activeServerDir: configuration.activeServerDir,
+            daemonStatePath: configuration.daemonStateFile,
             processEnv: codexAppServerProcessEnv,
             configOverrides: codexAppServerConfigOverrides,
             initialConnectedServiceRuntimeIdentity: resolveCodexInitialConnectedServiceRuntimeIdentity(codexAppServerProcessEnv, session),
@@ -1610,11 +1704,8 @@ export async function runCodex(opts: {
             permissionHandler,
             getPermissionMode: () => runtimePermissionModeRef.current,
             pendingQueue: {
-                ...createSessionProviderPendingDrainAdapter(createCodexInputConsumerSession(), {
-                    maxPopPerWake: pendingQueueDrainMaxPopPerWake,
-                    resolveActiveTurnDeliveryPolicy: resolvePendingActiveTurnDeliveryPolicy,
-                    pendingQueueDeliveryTiming,
-                }),
+                drainPending: (drainOpts) => inputConsumer.drainPending(drainOpts),
+                pumpPendingWhileActive: (pumpOpts) => inputConsumer.pumpPendingWhileActive(pumpOpts),
                 drainAfterStartOrLoad: true,
                 maxPopPerWake: pendingQueueDrainMaxPopPerWake,
             },
@@ -1629,9 +1720,11 @@ export async function runCodex(opts: {
                     session,
                     sessionId: session.sessionId,
                     rawSnapshot,
+                    appliedIdentity: context?.appliedIdentity ?? null,
                     activeAccountId: context?.activeAccountId ?? null,
                     accountLabel: context?.accountLabel ?? null,
                     rawResetCredits: context?.rawResetCredits ?? null,
+                    ...(context?.policyDisposition ? { policyDisposition: context.policyDisposition } : {}),
                     deliveryOutbox: quotaSnapshotDeliveryOutbox,
                 });
             },
@@ -1658,17 +1751,8 @@ export async function runCodex(opts: {
                         }
                         return false;
                     },
-                    commitUsageLimitRecoveryMetadata: (updater) => {
-                        updateMetadataBestEffort(
-                            session,
-                            updater,
-                            '[Codex]',
-                            'runtime_auth_usage_limit_recovery',
-                        );
-                        return true;
-                    },
                 });
-                return recoveryReport.report;
+                return recoveryReport;
             },
             onConnectedServiceAuthGenerationApplied: ({ selection }) => {
                 const previousSelection = liveAppliedCodexRefreshSelection;
@@ -1729,15 +1813,6 @@ export async function runCodex(opts: {
                             }
                             return false;
                         },
-                        commitUsageLimitRecoveryMetadata: (updater) => {
-                            updateMetadataBestEffort(
-                                session,
-                                updater,
-                                '[Codex]',
-                                'runtime_auth_usage_limit_recovery',
-                            );
-                            return true;
-                        },
                     });
                     throw attachRuntimeAuthClassificationToError(error, classification);
                 }
@@ -1764,37 +1839,62 @@ export async function runCodex(opts: {
                 }
                 : {}),
         });
-        codexAppServerRuntime.setOnPromptAcceptedByProvider?.(({ localIds, userMessageSeq }) => {
+        codexAppServerRuntime.setOnPromptAcceptedByProvider?.(({ localIds, providerTurnId, appliedModelId }) => {
             const normalizedLocalIds = normalizeProviderPromptLocalIds(localIds ?? []);
-            if (normalizedLocalIds.length > 0) {
-                session.confirmUserMessageDeliveredToProvider?.(userMessageSeq, { localIds: normalizedLocalIds });
-            } else {
-                session.confirmUserMessageDeliveredToProvider?.(userMessageSeq);
+            const publishedExactOutcome = codexAppServerProviderInputOutcomes?.observeAccepted({
+                localIds: normalizedLocalIds,
+                providerTurnId,
+                appliedModelId,
+            }) === true;
+            if (!publishedExactOutcome) {
+                logger.debug('[codex-app-server] ignored provider acceptance without one exact Queue localId outcome binding', {
+                    localIdCount: normalizedLocalIds.length,
+                    providerTurnId,
+                });
             }
-            const queued = findUndeliverableProviderPromptReplay({
-                localIds: normalizedLocalIds,
-                userMessageSeq,
-            });
-            clearUndeliverableProviderPromptReplay(queued ?? {
-                localIds: normalizedLocalIds,
-                userMessageSeq,
-            });
         });
         codexAppServerRuntime.setOnUndeliverablePrompts?.((prompts) => {
             for (const prompt of prompts) {
-                if (deferUndeliverableProviderPromptReplayDepth > 0) {
-                    deferredUndeliverableProviderPromptReplays.push(prompt);
-                } else {
-                    handleUndeliverableProviderPromptReplay(prompt);
+                const localIds = normalizeProviderPromptLocalIds(prompt.localIds ?? []);
+                if (localIds.length !== 1) {
+                    logger.debug('[codex-app-server] ignored undeliverable prompt without one exact Pending localId', {
+                        localIdCount: localIds.length,
+                        userMessageSeq: prompt.userMessageSeq,
+                    });
+                    continue;
                 }
+                void blockProviderPromptDeliveryBeforeAcceptance({
+                    localIds,
+                    reason: 'provider_rejected_before_acceptance',
+                    userMessageSeq: prompt.userMessageSeq,
+                });
             }
         });
         session.setSessionRuntimeControls?.(codexAppServerRuntime);
+        codexAppServerDaemonReportReadiness.resolve?.();
+        codexAppServerDaemonReportReadiness.resolve = null;
         try {
             publishInFlightSteerCapability({ session, runtime: codexAppServerRuntime });
         } catch (e) {
             logger.debug('[codex] Failed to publish in-flight steer capability (non-fatal)', e);
         }
+    }
+
+    const callbackMetadata = session.getMetadataSnapshot?.();
+    if (!useCodexAppServer && callbackMetadata && session.sessionId?.trim()) {
+        void reportSessionToDaemonIfRunning({
+            sessionId: session.sessionId,
+            metadata: {
+                ...callbackMetadata,
+                connectedServiceAccessTokenRefreshV1: {
+                    v: 1,
+                    mode: useCodexAppServer ? 'daemon_callback' : 'unavailable',
+                    serviceIds: ['openai-codex'],
+                },
+            },
+        }).catch((error) => {
+            logger.debug('[codex] Failed to report OAuth refresh callback capability (non-fatal)', error);
+        });
     }
 
     if (client) {
@@ -1839,7 +1939,9 @@ export async function runCodex(opts: {
                     isolate: boolean;
                     hash: string;
                     maxUserMessageSeq?: number | null;
-                    userMessageLocalIds?: readonly string[];
+                    userMessageLocalIds?: readonly string[] | null;
+                    providerAcceptancePending?: boolean;
+                    pendingProviderAction?: import('@/agent/runtime/modeMessageQueue').PendingProviderAction;
                 } | null = null;
 
 	        const codexRemoteRuntimeForSync = getCodexRemoteRuntime();
@@ -1932,22 +2034,12 @@ export async function runCodex(opts: {
 		            },
 		        });
 
-	        const syncOverridesFromMetadata = (): void => {
+	        syncOverridesFromMetadata = (): void => {
 	            runtimeOverridesSync?.syncFromMetadata();
 	            sessionModeSync?.syncFromMetadata();
 	            configOptionSync?.syncFromMetadata();
 	            modelSync?.syncFromMetadata();
 	        };
-        const inputConsumer = createSessionProviderInputConsumer<EnhancedMode, string>({
-            messageQueue,
-            session: createCodexInputConsumerSession(),
-            pendingDrainMaxPopPerWake: pendingQueueDrainMaxPopPerWake,
-            resolveActiveTurnDeliveryPolicy: resolvePendingActiveTurnDeliveryPolicy,
-            pendingQueueDeliveryTiming,
-            onMetadataUpdate: () => {
-                syncOverridesFromMetadata();
-            },
-        });
 	        
 	        // Attach flows (and next_prompt apply timing) can result in a stable metadata snapshot
 	        // that never changes during this process lifetime. Ensure we adopt the latest persisted
@@ -2133,6 +2225,8 @@ export async function runCodex(opts: {
                 hash: string;
                 maxUserMessageSeq?: number | null;
                 userMessageLocalIds?: readonly string[] | null;
+                providerAcceptancePending?: boolean;
+                pendingProviderAction?: import('@/agent/runtime/modeMessageQueue').PendingProviderAction;
             } | null = pending;
                 pending = null;
                 if (!message) {
@@ -2197,9 +2291,9 @@ export async function runCodex(opts: {
             }
 
 	            let readyTurnContext: ReadyNotificationTurnContext | undefined;
-                let forceFlushRemoteRuntimeAfterStaleSteer = false;
                 let shouldBlockProviderDeliveryOnTurnFailure = false;
                 let didAttemptProviderSend = false;
+                let providerTurnSettledBeforeRuntimeAuthRecovery = false;
                 let providerDeliveryLocalIds: string[] = [];
                 const providerDeliveryUserMessageSeq = message.maxUserMessageSeq ?? null;
             try {
@@ -2237,29 +2331,19 @@ export async function runCodex(opts: {
                         throw new Error('Codex remote runtime was not initialized');
                     }
                     const canUseInFlightSteerForQueuedMessage =
-                        codexRuntime.canSteerPrompt ? codexRuntime.canSteerPrompt() : codexRuntime.isTurnInFlight();
+                        (message.pendingProviderAction === 'steer' || message.pendingProviderAction === undefined)
+                        && (codexRuntime.canSteerPrompt ? codexRuntime.canSteerPrompt() : codexRuntime.isTurnInFlight());
                     if (wasCreated && useCodexAppServer && specialCommand.type === null && canUseInFlightSteerForQueuedMessage) {
                         if (shouldLogAcpDebug) {
                             logger.debug('[CodexAppServer] steerPrompt begin for queued message while turn is in flight');
                         }
                         const providerPromptText = await resolveProviderPromptText();
-                        registerUndeliverableProviderPromptReplay({
-                            localIds,
-                            message: providerPromptText,
-                            mode: {
-                                ...message.mode,
-                                suppressUserEcho: true,
-                                providerPromptAlreadyResolved: true,
-                            },
-                            userMessageSeq: message.maxUserMessageSeq ?? null,
-                        });
                         try {
-                            await withDeferredUndeliverableProviderPromptReplay(async () => {
-                                didAttemptProviderSend = true;
+                            didAttemptProviderSend = true;
+                            await dispatchProviderInputOrThrow(async () => {
                                 await codexRuntime.steerPrompt(providerPromptText, {
-                                    ...providerPromptLocalIdsOption(localIds),
+                                    ...providerPromptIdentityOption(localIds),
                                     metadata: message.mode.promptMetadata,
-                                    localId,
                                     userMessageSeq: message.maxUserMessageSeq ?? null,
                                 });
                             });
@@ -2268,15 +2352,15 @@ export async function runCodex(opts: {
                             }
                             continue;
                         } catch (error) {
-                            clearUndeliverableProviderPromptReplay({
-                                localIds,
-                                userMessageSeq: message.maxUserMessageSeq ?? null,
-                            });
                             if (!isCodexAppServerNoActiveTurnToSteerError(error)) {
                                 throw error;
                             }
-                            logger.debug('[CodexAppServer] Native turn already inactive during queued steer; retrying as a fresh turn');
-                            forceFlushRemoteRuntimeAfterStaleSteer = true;
+                            await blockProviderPromptDeliveryBeforeAcceptance({
+                                localIds,
+                                reason: 'steering_unavailable',
+                                userMessageSeq: message.maxUserMessageSeq ?? null,
+                            });
+                            continue;
                         }
                     }
                     codexRuntime.beginTurn();
@@ -2295,11 +2379,12 @@ export async function runCodex(opts: {
                             messageBuffer.addMessage('Resuming previous context…', 'status');
                             const resumeSignal = startOrLoadAbortController.signal;
                             await seedCodexAppServerOverridesBeforeStartOrLoad();
+                            const initialGoal = consumeInitialGoalForStartOrLoad();
                             const startOrLoadPromise = Promise.resolve(codexRuntime.startOrLoad({
                                 resumeId,
                                 // Avoid importing ACP replay history into Happier on resume; Happier transcript is the source of truth.
                                 importHistory: false,
-                                ...consumeInitialGoalForStartOrLoad(),
+                                ...initialGoal,
                             })).then(() => undefined);
                             try {
                                 await awaitWithAbortSignal(
@@ -2349,11 +2434,11 @@ export async function runCodex(opts: {
                                 logger.debug('[Codex ACP] Resume failed; starting a new session instead', e);
                                 messageBuffer.addMessage('Resume failed; starting a new session.', 'status');
                                 session.sendSessionEvent({ type: 'message', message: 'Resume failed; starting a new session.' });
-                                await codexRuntime.reset();
                                 const startSignal = startOrLoadAbortController.signal;
                                 await seedCodexAppServerOverridesBeforeStartOrLoad();
+                                const initialGoal = consumeInitialGoalForStartOrLoad();
                                 const fallbackPromise = Promise.resolve(codexRuntime.startOrLoad({
-                                    ...consumeInitialGoalForStartOrLoad(),
+                                    ...initialGoal,
                                 })).then(() => undefined);
                                 try {
                                     await awaitWithAbortSignal(
@@ -2381,8 +2466,9 @@ export async function runCodex(opts: {
                         } else {
                             const startSignal = startOrLoadAbortController.signal;
                             await seedCodexAppServerOverridesBeforeStartOrLoad();
+                            const initialGoal = consumeInitialGoalForStartOrLoad();
                             const startOrLoadPromise = Promise.resolve(codexRuntime.startOrLoad({
-                                ...consumeInitialGoalForStartOrLoad(),
+                                ...initialGoal,
                             })).then(() => undefined);
                             try {
                                 await awaitWithAbortSignal(
@@ -2468,51 +2554,40 @@ export async function runCodex(opts: {
                         startedFreshSession: startedFreshSessionForTurn,
                         systemPromptText,
                     });
-                    registerUndeliverableProviderPromptReplay({
-                        localIds,
-                        message: promptForProvider,
-                        mode: {
-                            ...message.mode,
-                            suppressUserEcho: true,
-                            providerPromptAlreadyResolved: true,
-                        },
+                    didAttemptProviderSend = true;
+                    const sessionModelState = readNewestSessionModelsMetadataStateV1(
+                        session.getMetadataSnapshot(),
+                    );
+                    const appliedModelIdForPrompt = sessionModelState?.provider === 'codex'
+                        ? sessionModelState.currentModelId
+                        : message.mode.model ?? null;
+                    const promptOptions = {
+                        ...providerPromptIdentityOption(localIds),
+                        metadata: message.mode.promptMetadata,
                         userMessageSeq: message.maxUserMessageSeq ?? null,
-                    });
-                    try {
-                        await withDeferredUndeliverableProviderPromptReplay(async () => {
-                            didAttemptProviderSend = true;
-                            const promptOptions = {
-                                ...providerPromptLocalIdsOption(localIds),
-                                metadata: message.mode.promptMetadata,
-                                localId,
-                                userMessageSeq: message.maxUserMessageSeq ?? null,
-                            };
-                            if (useCodexAcp) {
-                                if (codexRuntime.sendPromptWithMeta) {
-                                    await codexRuntime.sendPromptWithMeta({
-                                        text: promptForProvider,
-                                        localId,
-                                        meta: typeof message.mode.promptMetadata === 'object' && message.mode.promptMetadata !== null
-                                            ? message.mode.promptMetadata as Record<string, unknown>
-                                            : undefined,
-                                        onProviderPromptAccepted: () => {
-                                            confirmProviderAcceptedPrompt(message);
-                                        },
-                                    });
-                                } else {
-                                    await codexRuntime.sendPrompt(promptForProvider, promptOptions);
-                                    confirmProviderAcceptedPrompt(message);
-                                }
+                        appliedModelId: appliedModelIdForPrompt,
+                    };
+                    await dispatchProviderInputOrThrow(async () => {
+                        if (useCodexAcp) {
+                            if (codexRuntime.sendPromptWithMeta) {
+                                await codexRuntime.sendPromptWithMeta({
+                                    text: promptForProvider,
+                                    localId,
+                                    meta: typeof message.mode.promptMetadata === 'object' && message.mode.promptMetadata !== null
+                                        ? message.mode.promptMetadata as Record<string, unknown>
+                                        : undefined,
+                                    onProviderPromptAccepted: () => {
+                                        confirmProviderAcceptedPrompt(message, appliedModelIdForPrompt);
+                                    },
+                                });
                             } else {
                                 await codexRuntime.sendPrompt(promptForProvider, promptOptions);
+                                confirmProviderAcceptedPrompt(message, appliedModelIdForPrompt);
                             }
-                        });
-                    } finally {
-                        clearUndeliverableProviderPromptReplay({
-                            localIds,
-                            userMessageSeq: message.maxUserMessageSeq ?? null,
-                        });
-                    }
+                        } else {
+                            await codexRuntime.sendPrompt(promptForProvider, promptOptions);
+                        }
+                    });
                     if (shouldLogAcpDebug) {
                         logger.debug('[CodexACP] sendPrompt complete');
                     }
@@ -2555,10 +2630,11 @@ export async function runCodex(opts: {
 
                     thinking = true;
                     session.keepAlive(thinking, 'remote');
-                    const startResponse = await mcpClient.startSession(
+                    didAttemptProviderSend = true;
+                    const startResponse = await dispatchProviderInputOrThrow(async () => await mcpClient.startSession(
                         startConfig,
-                        { signal: abortController.signal }
-                    );
+                        { signal: abortController.signal },
+                    ));
                     const startError = extractCodexToolErrorText(startResponse);
                     if (startError) {
                         forwardCodexErrorToUi(startError);
@@ -2573,10 +2649,11 @@ export async function runCodex(opts: {
                 } else {
                     thinking = true;
                     session.keepAlive(thinking, 'remote');
-                    const response = await mcpClient.continueSession(
+                    didAttemptProviderSend = true;
+                    const response = await dispatchProviderInputOrThrow(async () => await mcpClient.continueSession(
                         providerPromptText,
-                        { signal: abortController.signal }
-                    );
+                        { signal: abortController.signal },
+                    ));
                     logger.debug('[Codex] continueSession response:', response);
                     const continueError = extractCodexToolErrorText(response);
                     if (continueError) {
@@ -2587,15 +2664,14 @@ export async function runCodex(opts: {
                     }
                     publishCodexThreadIdToMetadata();
                 }
+                confirmProviderAcceptedPrompt(message, message.mode.model ?? null);
                 }
             } catch (error) {
                 if (shouldBlockProviderDeliveryOnTurnFailure) {
                     await blockProviderPromptDeliveryBeforeAcceptance({
                         localIds: providerDeliveryLocalIds,
                         userMessageSeq: providerDeliveryUserMessageSeq,
-                        reason: didAttemptProviderSend
-                            ? 'provider_rejected_before_acceptance'
-                            : 'runtime_disposed_before_delivery',
+                        reason: resolveProviderPromptFailureDeliveryReason(error, didAttemptProviderSend),
                     });
                 }
 
@@ -2620,6 +2696,16 @@ export async function runCodex(opts: {
                             '[Codex] Runtime auth failure reported to daemon',
                             summarizeRuntimeAuthClassificationForLog(runtimeAuthClassification),
                         );
+                        const runtime = useCodexAcp || useCodexAppServer
+                            ? getCodexRemoteRuntime()
+                            : null;
+                        if (runtime) {
+                            // The exact provider turn has already failed. Publish its terminal
+                            // boundary before Connected Services attempts refresh/switch/continuation
+                            // so recovery cannot wait on the turn that is waiting on recovery.
+                            await runtime.flushTurn();
+                            providerTurnSettledBeforeRuntimeAuthRecovery = true;
+                        }
                         const recoveryReport = await reportConnectedServiceRuntimeAuthFailureToDaemon({
                             sessionId: session.sessionId,
                             switchesThisTurn: 0,
@@ -2641,15 +2727,6 @@ export async function runCodex(opts: {
                                     return true;
                                 }
                                 return false;
-                            },
-                            commitUsageLimitRecoveryMetadata: (updater) => {
-                                updateMetadataBestEffort(
-                                    session,
-                                    updater,
-                                    '[Codex]',
-                                    'runtime_auth_usage_limit_recovery',
-                                );
-                                return true;
                             },
                         }).emitted;
                     } else {
@@ -2678,10 +2755,9 @@ export async function runCodex(opts: {
                     : false;
                 const preserveActiveAppServerTurn =
                     useCodexAppServer
-                    && !forceFlushRemoteRuntimeAfterStaleSteer
                     && hasActiveAppServerProviderTurn;
                 if (useCodexAcp || useCodexAppServer) {
-                    if (!preserveActiveAppServerTurn) {
+                    if (!preserveActiveAppServerTurn && !providerTurnSettledBeforeRuntimeAuthRecovery) {
                         await remoteRuntime?.flushTurn();
                     }
                 }
@@ -2746,6 +2822,7 @@ export async function runCodex(opts: {
     } finally {
         terminationHandlers.dispose();
         quotaSnapshotDeliveryOutbox.clearSession(session.sessionId);
+        await closeProviderInputAdmission();
         await cleanupCodexRunResources({
             session,
             reconnectionHandle,

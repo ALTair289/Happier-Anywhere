@@ -64,10 +64,13 @@ export function createCodexChatGptBridgeRefreshHooks(input: Readonly<{
           accessToken,
           chatgptAccountId: providerAccountId,
           chatgptPlanType: input.chatgptPlanType,
+          ...(source.revisionSemantics === 'revisioned'
+            ? { credentialRevision: source.credentialRevision }
+            : {}),
         }),
       };
     },
-    finalizeRefreshedResponse: async ({ selection, credential }) => {
+    finalizeRefreshedResponse: async ({ selection, credential, credentialRevision }) => {
       const codexSelection = toCodexChatGptAuthTokensRefreshSelection(selection);
       const profileId = resolveCodexChatGptAuthTokensRefreshProfileId(codexSelection);
       const rematerializedTargets = await capabilities.rematerializeTargets({
@@ -88,6 +91,7 @@ export function createCodexChatGptBridgeRefreshHooks(input: Readonly<{
         accessToken: credential.oauth.accessToken,
         chatgptAccountId: credential.oauth.providerAccountId,
         chatgptPlanType: input.chatgptPlanType,
+        credentialRevision,
       };
     },
   };

@@ -1,5 +1,6 @@
 import {
   ConnectedServiceAuthGroupIdSchema,
+  ConnectedServiceCredentialRevisionV1Schema,
   ConnectedServiceProfileIdSchema,
 } from '@happier-dev/protocol';
 import { z } from 'zod';
@@ -31,6 +32,7 @@ export const CodexChatGptAuthTokensRefreshResponseSchema = z.object({
   accessToken: z.string().min(1),
   chatgptAccountId: z.string().nullable(),
   chatgptPlanType: z.string().nullable(),
+  credentialRevision: ConnectedServiceCredentialRevisionV1Schema.optional(),
   selectionEpoch: z.number().int().nonnegative().optional(),
 });
 

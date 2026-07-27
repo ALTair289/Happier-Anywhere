@@ -21,7 +21,7 @@ describe('buildCodexMcpStartConfig (canonical suite)', () => {
     expect(out.model).toBeUndefined();
   });
 
-  it('includes trimmed model when provided', () => {
+  it('includes an opaque model identifier without transforming its bytes', () => {
     const out = buildCodexMcpStartConfig({
       prompt: 'hi',
       sandbox: 'workspace-write',
@@ -30,10 +30,10 @@ describe('buildCodexMcpStartConfig (canonical suite)', () => {
       model: '  gpt-5-codex-high  ',
     });
 
-    expect(out.model).toBe('gpt-5-codex-high');
+    expect(out.model).toBe('  gpt-5-codex-high  ');
   });
 
-  it('writes model_reasoning_effort into config when provided', () => {
+  it('writes the opaque model_reasoning_effort value without transforming its bytes', () => {
     const out = buildCodexMcpStartConfig({
       prompt: 'hi',
       sandbox: 'workspace-write',
@@ -43,7 +43,7 @@ describe('buildCodexMcpStartConfig (canonical suite)', () => {
       modelReasoningEffort: '  high  ',
     });
 
-    expect(out.config?.model_reasoning_effort).toBe('high');
+    expect(out.config?.model_reasoning_effort).toBe('  high  ');
   });
 
   it('omits model_reasoning_effort when not provided', () => {

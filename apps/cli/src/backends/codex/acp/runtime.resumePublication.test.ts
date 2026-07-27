@@ -98,6 +98,13 @@ describe('Codex ACP resume identity publication', () => {
       } as AcpPermissionHandler,
       onThinkingChange() {},
       permissionMode: 'default',
+      providerInputConsumer: {
+        waitForNextInput: async () => null,
+        runProviderInputDispatch: async <Value>({ dispatch }: { dispatch: () => Promise<Value> }) => ({ status: 'dispatched' as const, value: await dispatch() }),
+        closeProviderInputAdmissionAndWaitForDispatches: async () => {},
+        drainPending: async () => ({ materialized: 0, stoppedReason: 'no_pending' as const }),
+        pumpPendingWhileActive: async () => {},
+      },
     });
 
     await expect(runtime.startOrLoad({ resumeId })).resolves.toBe(resumeId);

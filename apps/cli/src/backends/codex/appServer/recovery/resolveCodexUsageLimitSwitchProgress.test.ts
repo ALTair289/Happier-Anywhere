@@ -16,7 +16,7 @@ describe('resolveCodexUsageLimitSwitchProgress', () => {
     expect(result).toEqual({ kind: 'wait_until_reset', nextCheckAtMs: 5_000 });
   });
 
-  it('treats a verified switch as progress without relying on profile id difference', () => {
+  it('treats a verified switch as ready to try without claiming provider recovery', () => {
     const result = resolveCodexUsageLimitSwitchProgress({
       switchAttemptStatus: 'switched',
       exhaustedProfileId: 'work',
@@ -26,7 +26,7 @@ describe('resolveCodexUsageLimitSwitchProgress', () => {
       nowMs: 1_000,
     });
 
-    expect(result).toEqual({ kind: 'retry' });
+    expect(result).toEqual({ kind: 'ready_to_try' });
   });
 
   it('does NOT treat a switch to the same exhausted profile as progress (live loop fix)', () => {
@@ -137,6 +137,6 @@ describe('resolveCodexUsageLimitSwitchProgress', () => {
       verificationStatus: 'verified',
       resetAtMs: 5_000,
       nowMs: 1_000,
-    })).toEqual({ kind: 'retry' });
+    })).toEqual({ kind: 'ready_to_try' });
   });
 });

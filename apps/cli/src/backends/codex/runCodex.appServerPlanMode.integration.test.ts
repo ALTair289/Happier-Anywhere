@@ -50,13 +50,12 @@ const createSessionProviderInputConsumerSpy = vi.fn((opts: any) => ({
       waitForMetadataUpdate: opts.session?.waitForMetadataUpdate,
     });
   },
+  runProviderInputDispatch: async ({ dispatch }: any) => ({ status: 'dispatched', value: await dispatch() }),
+  closeProviderInputAdmissionAndWaitForDispatches: vi.fn(async () => undefined),
   drainPending: vi.fn(async () => ({ materialized: 0, stoppedReason: 'no_pending' })),
 }));
 vi.mock('@/agent/runtime/sessionInput/SessionProviderInputConsumer', () => ({
   createSessionProviderInputConsumer: (opts: any) => createSessionProviderInputConsumerSpy(opts),
-  createSessionProviderPendingDrainAdapter: () => ({
-    drainPending: vi.fn(async () => ({ materialized: 0, stoppedReason: 'no_pending' })),
-  }),
 }));
 
 const resolveCodexMcpServerSpawnSpy = vi.fn<() => Promise<{ mode: string; command: string }>>(async () => ({

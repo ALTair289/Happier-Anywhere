@@ -4,6 +4,7 @@ import type { ApiSessionClient } from '@/api/session/sessionClient';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
 import type { AcpPermissionHandler } from '@/agent/acp/AcpBackend';
 import type { CodexAcpBackendOptions, CodexAcpBackendResult } from './backend';
+import { createSessionProviderInputConsumerFixture } from '@/testkit/backends/catalogAcpRuntime';
 
 const createCalls: Array<{ opts: CodexAcpBackendOptions }> = [];
 
@@ -73,6 +74,7 @@ describe('Codex ACP runtime permission mode wiring', () => {
       onThinkingChange() {},
       permissionMode,
       getPermissionMode: () => permissionMode,
+      providerInputConsumer: createSessionProviderInputConsumerFixture(),
     });
 
     await runtime.startOrLoad({});

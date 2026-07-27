@@ -80,11 +80,13 @@ async function main() {
   await server.connect(stdio);
 }
 
-// Start and surface fatal errors to stderr only
-main().catch((err) => {
-  try {
-    process.stderr.write(`[happier-mcp] Fatal: ${err instanceof Error ? err.message : String(err)}\n`);
-  } finally {
-    process.exit(1);
-  }
-});
+// Import-only candidate validation must not start the stdio runtime.
+if (process.env.HAPPIER_CLI_DIST_INTEGRITY_PROBE !== '1') {
+  main().catch((err) => {
+    try {
+      process.stderr.write(`[happier-mcp] Fatal: ${err instanceof Error ? err.message : String(err)}\n`);
+    } finally {
+      process.exit(1);
+    }
+  });
+}

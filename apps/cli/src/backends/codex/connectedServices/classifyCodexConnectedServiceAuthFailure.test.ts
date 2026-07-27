@@ -49,6 +49,8 @@ describe('classifyCodexConnectedServiceAuthFailure', () => {
         providerAccountId: 'acct-source',
         accountLabel: 'source@example.test',
         groupGeneration: 42,
+        credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+        credentialFingerprint: 'sha256:abcdef12',
       },
     });
 
@@ -57,6 +59,8 @@ describe('classifyCodexConnectedServiceAuthFailure', () => {
       sourceProviderAccountId: 'acct-source',
       sourceAccountLabel: 'source@example.test',
       groupGeneration: 42,
+      credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+      failingAccessTokenFingerprint: 'sha256:abcdef12',
     });
   });
 
@@ -90,6 +94,29 @@ describe('classifyCodexConnectedServiceAuthFailure', () => {
 
     expect(result?.kind).toBe('usage_limit');
     expect(result?.recoveryAction).toEqual({ kind: 'quota_recovery_required' });
+  });
+
+  it('classifies a stable usage-limit message nested in an app-server terminal error', () => {
+    const result = classifyCodexConnectedServiceAuthFailure({
+      providerErrorPath: true,
+      error: {
+        turn: {
+          error: {
+            message: "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits.",
+          },
+        },
+      },
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      groupId: 'pool',
+    });
+
+    expect(result).toMatchObject({
+      kind: 'usage_limit',
+      limitCategory: 'usage_limit',
+      source: 'stable_provider_message',
+      recoveryAction: { kind: 'quota_recovery_required' },
+    });
   });
 
   it('preserves structured retry-after usage-limit timing when no reset time is present', () => {

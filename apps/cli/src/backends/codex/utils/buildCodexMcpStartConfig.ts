@@ -1,3 +1,4 @@
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 import type { CodexSessionConfig } from '../types';
 
 export function buildCodexMcpStartConfig(opts: Readonly<{
@@ -15,8 +16,8 @@ export function buildCodexMcpStartConfig(opts: Readonly<{
   modelReasoningEffort?: string | null;
   cwd?: string | null;
 }>): CodexSessionConfig {
-  const model = typeof opts.model === 'string' ? opts.model.trim() : '';
-  const modelReasoningEffort = typeof opts.modelReasoningEffort === 'string' ? opts.modelReasoningEffort.trim() : '';
+  const model = readNonBlankSessionControlIdentifier(opts.model);
+  const modelReasoningEffort = readNonBlankSessionControlIdentifier(opts.modelReasoningEffort);
   const baseInstructions = typeof opts.baseInstructions === 'string' ? opts.baseInstructions.trim() : '';
   const cwd = typeof opts.cwd === 'string' ? opts.cwd.trim() : '';
 
@@ -27,9 +28,9 @@ export function buildCodexMcpStartConfig(opts: Readonly<{
     ...(baseInstructions ? { 'base-instructions': baseInstructions } : {}),
     config: {
       mcp_servers: opts.mcpServers,
-      ...(modelReasoningEffort ? { model_reasoning_effort: modelReasoningEffort } : {}),
+      ...(modelReasoningEffort !== null ? { model_reasoning_effort: modelReasoningEffort } : {}),
     },
-    ...(model ? { model } : {}),
+    ...(model !== null ? { model } : {}),
     ...(cwd ? { cwd } : {}),
   };
 }

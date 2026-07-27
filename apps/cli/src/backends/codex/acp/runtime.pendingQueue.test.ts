@@ -7,6 +7,7 @@ import type { Metadata } from '@/api/types';
 import type { AcpPermissionHandler } from '@/agent/acp/AcpBackend';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
 import type { CodexAcpBackendOptions, CodexAcpBackendResult } from './backend';
+import { createSessionProviderInputConsumerFixture } from '@/testkit/backends/catalogAcpRuntime';
 
 function makeFakeBackend() {
   const handlers: AgentMessageHandler[] = [];
@@ -38,7 +39,7 @@ vi.mock('@/backends/codex/acp/backend', async () => {
 });
 
 describe('Codex ACP runtime pending queue wiring', () => {
-  it('drains pending messages through safe materialization instead of direct legacy pop', async () => {
+  it('drains pending messages through the injected full input consumer', async () => {
     let metadata = {} as Metadata;
     const materializeNextPendingMessageSafely = vi
       .fn<() => Promise<MaterializeNextPendingResult>>()
@@ -86,6 +87,8 @@ describe('Codex ACP runtime pending queue wiring', () => {
     const permissionHandler: Pick<AcpPermissionHandler, 'handleToolCall'> = {
       handleToolCall: async (_toolCallId, _toolName, _input) => ({ decision: 'approved' }),
     };
+    const providerInputConsumer = createSessionProviderInputConsumerFixture();
+    const drainPending = vi.spyOn(providerInputConsumer, 'drainPending');
 
     const { createCodexAcpRuntime } = await import('./runtime');
     const runtime = createCodexAcpRuntime({
@@ -96,10 +99,16 @@ describe('Codex ACP runtime pending queue wiring', () => {
       permissionHandler: permissionHandler as AcpPermissionHandler,
       onThinkingChange() {},
       permissionMode: 'default',
+      providerInputConsumer,
     });
 
     await expect(runtime.startOrLoad({ resumeId: null })).resolves.toBe('codex-acp-session-1');
-    expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith({ reconcileWhenEmpty: 'force' });
+    expect(drainPending).toHaveBeenCalledWith(expect.objectContaining({
+      abortSignal: expect.any(AbortSignal),
+      logPrefix: '[ACP]',
+      reason: 'acp-pending-pump',
+    }));
+    expect(materializeNextPendingMessageSafely).not.toHaveBeenCalled();
     expect(popPendingMessage).not.toHaveBeenCalled();
 
     await runtime.reset();

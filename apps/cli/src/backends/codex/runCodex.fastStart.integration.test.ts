@@ -301,7 +301,7 @@ describe('runCodex fast-start', () => {
 
   });
 
-  it('fast-starts local TUI for --resume sessions when permission mode is explicit', async () => {
+  it('does not fast-start a local --resume child before resume preflight completes', async () => {
     const { runCodex } = await import('./runCodex');
 
     const credentials = { token: 'test' } as Credentials;
@@ -319,8 +319,11 @@ describe('runCodex fast-start', () => {
     });
 
     try {
-      await expect(waitFor(localStarted.promise, 75)).resolves.toBeUndefined();
+      await new Promise<void>((resolve) => setTimeout(resolve, 75));
+      expect(codexLocalLauncherSpy).not.toHaveBeenCalled();
       expect(initResolved).toBe(false);
+      await expect(waitFor(localStarted.promise, 1_000)).resolves.toBeUndefined();
+      expect(initResolved).toBe(true);
     } catch (e) {
       testError = e;
     } finally {

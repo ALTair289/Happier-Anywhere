@@ -9,6 +9,7 @@ function createClientDouble(requestImpl: DisposableCodexAppServerClient['request
         notify: vi.fn(async () => {}),
         registerRequestHandler: vi.fn(() => () => {}),
         registerNotificationHandler: vi.fn(() => () => {}),
+        onExit: vi.fn(() => () => {}),
         dispose: vi.fn(async () => {}),
     };
 }

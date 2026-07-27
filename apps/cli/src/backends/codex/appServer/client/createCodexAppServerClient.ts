@@ -48,7 +48,10 @@ export type CodexAppServerClientDisposeOptions = Readonly<{
     pendingRequestError?: Error;
 }>;
 
+export type CodexAppServerExitHandler = (error: Error) => void | Promise<void>;
+
 export type DisposableCodexAppServerClient = CodexAppServerClient & Readonly<{
+    onExit: (handler: CodexAppServerExitHandler) => () => void;
     dispose: (options?: CodexAppServerClientDisposeOptions) => Promise<void>;
 }>;
 
@@ -340,6 +343,7 @@ export async function createCodexAppServerClient(params: Readonly<{
     const pendingRequests = new Map<string, PendingRequest>();
     const requestHandlers = new Map<string, JsonRpcRequestHandler>();
     const notificationHandlers = new Map<string, Set<JsonRpcNotificationHandler>>();
+    const exitHandlers = new Set<CodexAppServerExitHandler>();
     let writeChain = Promise.resolve();
     let nextId = 0;
     let disposing = false;
@@ -537,7 +541,11 @@ export async function createCodexAppServerClient(params: Readonly<{
         const suffix = stderrBuffer.trim()
             ? `\n${sanitizeCodexAppServerRpcDiagnosticString(stderrBuffer.trim())}`
             : '';
-        failWith(new Error(`Codex app-server exited before completing the request (code=${code ?? 'null'} signal=${signal ?? 'null'})${suffix}`));
+        const failure = new Error(`Codex app-server exited before completing the request (code=${code ?? 'null'} signal=${signal ?? 'null'})${suffix}`);
+        failWith(failure);
+        for (const handler of [...exitHandlers]) {
+            void Promise.resolve(handler(failure)).catch(() => undefined);
+        }
     });
 
     const request = async (
@@ -646,6 +654,13 @@ export async function createCodexAppServerClient(params: Readonly<{
         return await disposePromise;
     };
 
+    const onExit = (handler: CodexAppServerExitHandler): (() => void) => {
+        exitHandlers.add(handler);
+        return () => {
+            exitHandlers.delete(handler);
+        };
+    };
+
     try {
         await request('initialize', {
             clientInfo: {
@@ -659,7 +674,7 @@ export async function createCodexAppServerClient(params: Readonly<{
         });
         await notify('initialized');
 
-        return { request, notify, registerRequestHandler, registerNotificationHandler, dispose };
+        return { request, notify, registerRequestHandler, registerNotificationHandler, onExit, dispose };
     } catch (error) {
         await dispose().catch(() => undefined);
         throw error;

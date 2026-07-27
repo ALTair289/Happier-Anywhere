@@ -10,9 +10,10 @@ import {
 } from '@happier-dev/agents';
 import {
     buildConnectedServiceCredentialRecord,
+    SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1,
+    SessionMediaMessageMetaEnvelopeV1Schema,
     SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
     type AccountSettings,
-    type SessionMediaItemV1,
 } from '@happier-dev/protocol';
 
 import type { ApiSessionClient } from '@/api/session/sessionClient';
@@ -21,6 +22,8 @@ import type { Metadata } from '@/api/types';
 import type { AgentMessage } from '@/agent';
 import type { SessionTurnLifecycle } from '@/agent/runtime/session/turn/types';
 import { createSessionTurnLifecycle } from '@/agent/runtime/session/turn/lifecycle';
+import { MessageQueue2 } from '@/agent/runtime/modeMessageQueue';
+import { createSessionProviderInputConsumer } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
 import { waitForCondition } from '@/testkit/async/waitFor';
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
 import { runScmCommand } from '@/scm/runtime';
@@ -30,8 +33,9 @@ import {
 } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import { setActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 import { HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR } from '@/daemon/spawn/spawnExplicitEnvKeysMarker';
+import { logger } from '@/ui/logger';
 
-import { createCodexAppServerRuntime } from './runtime';
+import { createCodexAppServerRuntime, writeUsageLimitRecoveryIntentToMetadata } from './runtime';
 import { createCodexAppServerProcessEnv, createCodexAppServerTestEnvScope } from './testkit/fakeCodexAppServer';
 
 type CommittedSnapshotBody = Readonly<{
@@ -51,6 +55,54 @@ type TestCommittedMessageOptions = Readonly<{
 }>;
 
 type RuntimeSessionMediaMessage = Extract<AgentMessage, { type: 'session-media' }>;
+
+function createRuntimeMetadata(path: string): Metadata {
+    return {
+        path,
+        host: 'test-host',
+        homeDir: path,
+        happyHomeDir: join(path, '.happier'),
+        happyLibDir: join(path, '.happier', 'lib'),
+        happyToolsDir: join(path, '.happier', 'tools'),
+    };
+}
+
+it('recomputes the Codex scheduler usage-limit merge from latest metadata at the write boundary', async () => {
+    const terminal = {
+        v: 1 as const,
+        status: 'cancelled' as const,
+        issueFingerprint: 'usage-limit:codex:turn-1',
+        armedAtMs: 100,
+        resetAtMs: null,
+        nextCheckAtMs: null,
+        attemptCount: 3,
+        maxAttempts: 4,
+        lastProbeError: null,
+        resumePromptMode: 'standard' as const,
+        selectedAuth: { kind: 'native' as const },
+    };
+    const staleWaiting = {
+        ...terminal,
+        status: 'waiting' as const,
+        nextCheckAtMs: 200,
+        attemptCount: 1,
+    };
+    let metadata = { path: '/tmp/session', sessionUsageLimitRecoveryV1: terminal } as unknown as Metadata;
+    const session = {
+        updateMetadata: vi.fn(async (updater: (latest: Metadata) => Metadata) => {
+            metadata = updater(metadata);
+        }),
+    } as unknown as ApiSessionClient;
+
+    await writeUsageLimitRecoveryIntentToMetadata(session, staleWaiting);
+
+    expect(metadata).toMatchObject({
+        sessionUsageLimitRecoveryV1: {
+            status: 'cancelled',
+            attemptCount: 3,
+        },
+    });
+});
 
 function createSessionTurnLifecycleTestDouble(overrides: Partial<SessionTurnLifecycle> = {}): SessionTurnLifecycle {
     return {
@@ -73,29 +125,37 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
     dir: string;
     requestLogPath: string;
     rateLimitReadResult?: unknown;
+    rateLimitReadError?: Readonly<{ code: number; message: string }>;
+    rateLimitReadDelayMs?: number;
     accountReadResult?: unknown;
     rejectRateLimitRead?: boolean;
     rejectAccountRead?: boolean;
+    rejectAccountReadCount?: number;
     loginStartError?: Readonly<{
         code: number;
         message: string;
     }>;
+    loginStartResponseDelayMs?: number;
     rollbackError?: Readonly<{
         code: number;
         message: string;
     }>;
-    rejectInterruptAsNoActiveTurn?: boolean;
+    rejectFirstInterruptAsNoActiveTurn?: boolean;
     rejectSteerAsNoActiveTurn?: boolean;
     rejectPermissionsProfile?: boolean;
     rejectGoalMethods?: boolean;
     rejectGoalMethodsAsInvalidRequest?: boolean;
     emitGoalContinuationTurn?: boolean;
+    emitGoalContinuationUsageLimitFailure?: boolean;
     emitGoalContinuationItemsBeforeStarted?: boolean;
     rejectReviewStartMethodUnavailable?: boolean;
     rejectStructuredTurnInput?: boolean;
     rejectStructuredSteerInput?: boolean;
     emitResumeContinuationUserInputRequest?: boolean;
+    emitHistoricalResumeUserInputRequestBeforeResponse?: boolean;
     emitResumeTurnStartedBeforeResponse?: boolean;
+    emitResumeHistoryBoundaryNotifications?: boolean;
+    emitHistoricalNotificationOnResume?: boolean;
     resumeResponseDelayMs?: number;
     threadReadResponseDelayMs?: number;
     emitIdleMcpRequestAfterThreadStart?: boolean;
@@ -104,6 +164,7 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
     requireResumeBeforeThreadRead?: boolean;
     oversizedResumePayloadChars?: number;
     omitTurnStartedForPrompt?: string;
+    omitTurnCompletedForPrompt?: string;
 }>): Promise<string> {
     const scriptPath = join(params.dir, 'fake-codex-app-server.mjs');
     const script = [
@@ -114,6 +175,8 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         'const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });',
         'let staleTerminalTurnId = null;',
         'let loginStartCount = 0;',
+        'let accountReadCount = 0;',
+        'let interruptCount = 0;',
         'const resumedThreadIds = new Set();',
         'for await (const line of rl) {',
         '    if (!line.trim()) continue;',
@@ -187,6 +250,47 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            }, 20);',
         '            continue;',
         '        }',
+        `        if (${JSON.stringify(params.emitResumeHistoryBoundaryNotifications === true)}) {`,
+        '            const historicalTurnId = "turn-resume-history";',
+        '            const historicalItemId = "item-resume-history";',
+        '            const liveTurnId = "turn-resume-live";',
+        '            const liveItemId = "item-resume-live";',
+        '            process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: resumedThreadId, turn: { id: historicalTurnId } } }) + "\\n");',
+        '            process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: resumedThreadId, turnId: historicalTurnId, itemId: historicalItemId, delta: "Historical replay" } }) + "\\n");',
+        '            process.stdout.write(JSON.stringify({ method: "item/completed", params: { threadId: resumedThreadId, turnId: historicalTurnId, item: { id: historicalItemId, type: "agentMessage", text: "Historical replay" } } }) + "\\n");',
+        '            process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: resumedThreadId, turn: { id: historicalTurnId, status: "completed" } } }) + "\\n");',
+        '            process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: resumedThreadId, turn: { id: liveTurnId } } }) + "\\n");',
+        '            process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: resumedThreadId, turnId: liveTurnId, itemId: liveItemId, delta: "Genuinely live" } }) + "\\n");',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ id: msg.id, result: { thread: { id: resumedThreadId, turns: [{ id: historicalTurnId, status: "completed", items: [{ id: historicalItemId, type: "agentMessage", text: "Historical replay" }] }] }, model: "gpt-5.4", serviceTier: null } }) + "\\n");',
+        '            }, 20);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "item/completed", params: { threadId: resumedThreadId, turnId: liveTurnId, item: { id: liveItemId, type: "agentMessage", text: "Genuinely live" } } }) + "\\n");',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: resumedThreadId, turn: { id: liveTurnId, status: "completed" } } }) + "\\n");',
+        '            }, 35);',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.emitHistoricalResumeUserInputRequestBeforeResponse === true)}) {`,
+        '            const historicalTurnId = "turn-resume-request-history";',
+        '            const historicalItemId = "resume_tool_input_history";',
+        '            process.stdout.write(JSON.stringify({ id: "resume-request-input-history", method: "item/tool/requestUserInput", params: { threadId: resumedThreadId, turnId: historicalTurnId, itemId: historicalItemId, item: { id: historicalItemId, type: "mcpToolCall", server: "happier", tool: "confirm", arguments: { prompt: "continue" } }, questions: [{ id: "resume_question_history", question: "Continue old turn?" }] } }) + "\\n");',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ id: msg.id, result: { thread: { id: resumedThreadId, turns: [{ id: historicalTurnId, status: "completed", items: [{ id: historicalItemId, type: "mcpToolCall" }] }] }, model: "gpt-5.4", serviceTier: null } }) + "\\n");',
+        '            }, 20);',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.emitHistoricalNotificationOnResume === true)}) {`,
+        '            const historicalTurnId = "turn-resume-recovery-history";',
+        '            const historicalItemId = "item-resume-recovery-history";',
+        '            process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: resumedThreadId, turn: { id: historicalTurnId } } }) + "\\n");',
+        '            process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: resumedThreadId, turnId: historicalTurnId, itemId: historicalItemId, delta: "Historical recovery replay" } }) + "\\n");',
+        '            process.stdout.write(JSON.stringify({ method: "item/completed", params: { threadId: resumedThreadId, turnId: historicalTurnId, item: { id: historicalItemId, type: "agentMessage", text: "Historical recovery replay" } } }) + "\\n");',
+        '            process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: resumedThreadId, turn: { id: historicalTurnId, status: "completed" } } }) + "\\n");',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ id: msg.id, result: { thread: { id: resumedThreadId, turns: [{ id: historicalTurnId, status: "completed", items: [{ id: historicalItemId, type: "agentMessage", text: "Historical recovery replay" }] }] }, model: "gpt-5.4", serviceTier: null } }) + "\\n");',
+        '            }, 20);',
+        '            continue;',
+        '        }',
         `        const oversizedPayload = ${JSON.stringify(params.oversizedResumePayloadChars ?? 0)} > 0 ? "x".repeat(${JSON.stringify(params.oversizedResumePayloadChars ?? 0)}) : undefined;`,
         '        const resumeResponse = JSON.stringify({ id: msg.id, result: { threadId: resumedThreadId, model: msg.params?.model ?? (adoptsOverrideThread ? "gpt-5.4-mini" : "gpt-5.4"), serviceTier: Object.prototype.hasOwnProperty.call(msg.params ?? {}, "serviceTier") ? msg.params.serviceTier : null, activePermissionProfile: msg.params?.permissions ?? null, ...(oversizedPayload ? { oversizedPayload } : {}) } }) + "\\n";',
         `        if (${JSON.stringify(params.resumeResponseDelayMs ?? 0)} > 0) {`,
@@ -206,14 +310,23 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        continue;',
         '    }',
         '    if (msg.method === "account/rateLimits/read") {',
+        `        if (${JSON.stringify(params.rateLimitReadError ?? null)}) {`,
+        `            setTimeout(() => process.stdout.write(JSON.stringify({ id: msg.id, error: ${JSON.stringify(params.rateLimitReadError ?? null)} }) + "\\n"), ${JSON.stringify(params.rateLimitReadDelayMs ?? 0)});`,
+        '            continue;',
+        '        }',
         `        if (${JSON.stringify(params.rejectRateLimitRead === true)}) {`,
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32000, message: "connection reset while reading rate limits" } }) + "\\n");',
         '            continue;',
         '        }',
-        `        process.stdout.write(JSON.stringify({ id: msg.id, result: ${JSON.stringify(params.rateLimitReadResult ?? { plan_type: 'pro', primary: { used_percent: 12, resets_at: '2026-05-17T12:00:00.000Z' } })} }) + "\\n");`,
+        `        setTimeout(() => process.stdout.write(JSON.stringify({ id: msg.id, result: ${JSON.stringify(params.rateLimitReadResult ?? { plan_type: 'pro', primary: { used_percent: 12, resets_at: '2026-05-17T12:00:00.000Z' } })} }) + "\\n"), ${JSON.stringify(params.rateLimitReadDelayMs ?? 0)});`,
         '        continue;',
         '    }',
         '    if (msg.method === "account/read") {',
+        '        accountReadCount += 1;',
+        `        if (accountReadCount <= ${JSON.stringify(params.rejectAccountReadCount ?? 0)}) {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32000, message: "account/read cold spawn not ready" } }) + "\\n");',
+        '            continue;',
+        '        }',
         `        if (${JSON.stringify(params.rejectAccountRead === true)} && loginStartCount > 0) {`,
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32000, message: "account/read diagnostics unavailable" } }) + "\\n");',
         '            continue;',
@@ -227,7 +340,11 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            continue;',
         '        }',
         '        loginStartCount += 1;',
-        '        process.stdout.write(JSON.stringify({ id: msg.id, result: { ok: true } }) + "\\n");',
+        `        if (${JSON.stringify(params.loginStartResponseDelayMs ?? 0)} > 0) {`,
+        `            setTimeout(() => process.stdout.write(JSON.stringify({ id: msg.id, result: { ok: true } }) + "\\n"), ${JSON.stringify(params.loginStartResponseDelayMs ?? 0)});`,
+        '        } else {',
+        '            process.stdout.write(JSON.stringify({ id: msg.id, result: { ok: true } }) + "\\n");',
+        '        }',
         '        continue;',
         '    }',
         '    if (msg.method === "thread/goal/get") {',
@@ -253,9 +370,18 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        }',
         '        process.stdout.write(JSON.stringify({ id: msg.id, result: { goal: { threadId: msg.params?.threadId ?? "thread-started", objective: msg.params?.objective ?? "Current objective", status: msg.params?.status ?? "active", tokenBudget: Object.prototype.hasOwnProperty.call(msg.params ?? {}, "tokenBudget") ? msg.params.tokenBudget : undefined, updatedAt: "2026-05-13T10:05:00.000Z" } } }) + "\\n");',
         '        process.stdout.write(JSON.stringify({ method: "thread/goal/updated", params: { threadId: msg.params?.threadId ?? "thread-started", goal: { threadId: msg.params?.threadId ?? "thread-started", objective: msg.params?.objective ?? "Current objective", status: msg.params?.status ?? "active", tokenBudget: Object.prototype.hasOwnProperty.call(msg.params ?? {}, "tokenBudget") ? msg.params.tokenBudget : undefined, updatedAt: "2026-05-13T10:05:00.000Z" } } }) + "\\n");',
-        `        if (${JSON.stringify(params.emitGoalContinuationTurn === true)}) {`,
+        `        if (${JSON.stringify(params.emitGoalContinuationTurn === true || params.emitGoalContinuationUsageLimitFailure === true)}) {`,
         '            const goalThreadId = msg.params?.threadId ?? "thread-started";',
         '            const goalTurnId = "turn-goal-continuation";',
+        `            if (${JSON.stringify(params.emitGoalContinuationUsageLimitFailure === true)}) {`,
+        '                setTimeout(() => {',
+        '                    process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: goalThreadId, turn: { id: goalTurnId } } }) + "\\n");',
+        '                }, 80);',
+        '                setTimeout(() => {',
+        '                    process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: goalThreadId, turn: { id: goalTurnId, status: "failed", error: { message: "Usage limit reached", codexErrorInfo: "UsageLimitExceeded", additionalDetails: null } } } }) + "\\n");',
+        '                }, 100);',
+        '                continue;',
+        '            }',
         `            if (${JSON.stringify(params.emitGoalContinuationItemsBeforeStarted === true)}) {`,
         '                setTimeout(() => {',
         '                    process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: goalThreadId, turnId: goalTurnId, itemId: "goal_msg_1", delta: "Goal continuation" } }) + "\\n");',
@@ -397,9 +523,61 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            setTimeout(() => {',
         '                process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: turnId }, threadId: msg.params?.threadId ?? null } }) + "\\n");',
         '            }, 15);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId, status: "failed", error: { message: "Usage limit reached", codexErrorInfo: "UsageLimitExceeded", additionalDetails: null } } } }) + "\\n");',
+        '            }, 25);',
         '            continue;',
         '        }',
-        '        const respondDelayMs = (text === "connected-service-invalidation-before-acceptance" || text === "connected-service-invalidation-before-acceptance-after-activity") && matchingTurnStartCount === 1 ? 120000 : text === "steer-delay" ? 60 : text === "overlap-start" ? 80 : 0;',
+        '        if (text === "usage-limit-error-then-primary-activity") {',
+        '            process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: turnId }, threadId: msg.params?.threadId ?? null } }) + "\\n");',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
+        '            }, 5);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "error", params: { threadId: msg.params?.threadId ?? null, turnId, willRetry: false, error: { message: "Usage limit reached", codexErrorInfo: "UsageLimitExceeded", additionalDetails: null } } }) + "\\n");',
+        '            }, 10);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: msg.params?.threadId ?? null, turnId, itemId: "continued_after_usage_warning", delta: "Continued after usage warning" } }) + "\\n");',
+        '            }, 800);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "item/completed", params: { threadId: msg.params?.threadId ?? null, turnId, item: { id: "continued_after_usage_warning", type: "agentMessage", text: "Continued after usage warning" } } }) + "\\n");',
+        '            }, 805);',
+        '            continue;',
+        '        }',
+        '        if (text === "nonterminal-error-then-process-exit") {',
+        '            process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: turnId }, threadId: msg.params?.threadId ?? null } }) + "\\n");',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
+        '            }, 5);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "error", params: { threadId: msg.params?.threadId ?? null, turnId, willRetry: false, error: { message: "Usage limit reached", codexErrorInfo: "UsageLimitExceeded", additionalDetails: null } } }) + "\\n");',
+        '            }, 10);',
+        '            setTimeout(async () => {',
+        '                await appendFile(requestLogPath, JSON.stringify({ id: null, method: "test/process-exit", params: null, result: null, error: null }) + "\\n");',
+        '                process.exit(19);',
+        '            }, 15);',
+        '            continue;',
+        '        }',
+        '        const respondDelayMs = (text === "connected-service-invalidation-before-acceptance" || text === "connected-service-invalidation-before-acceptance-after-activity") && matchingTurnStartCount === 1 ? 120000 : text === "steer-delay" ? 60 : (text === "overlap-start" || text === "unknown-terminal-before-turn-start-response" || text === "owned-terminal-before-turn-start-response" || text === "owned-then-unknown-terminal-before-turn-start-response" || text === "unknown-then-owned-terminal-before-turn-start-response") ? 80 : 0;',
+        '        if (text === "unknown-terminal-before-turn-start-response") {',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: "turn-unknown-before-start-response" } } }) + "\\n");',
+        '            }, 5);',
+        '        }',
+        '        if (text === "owned-terminal-before-turn-start-response") {',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
+        '            }, 5);',
+        '        }',
+        '        if (text === "owned-then-unknown-terminal-before-turn-start-response" || text === "unknown-then-owned-terminal-before-turn-start-response") {',
+        '            const ownedFirst = text === "owned-then-unknown-terminal-before-turn-start-response";',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: ownedFirst ? turnId : turnId + "-unknown" } } }) + "\\n");',
+        '            }, 5);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: ownedFirst ? turnId + "-unknown" : turnId } } }) + "\\n");',
+        '            }, 10);',
+        '        }',
         '        if (text === "bridge-stale-terminal-old-turn") {',
         '            staleTerminalTurnId = turnId;',
         '            setTimeout(() => {',
@@ -459,9 +637,40 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            continue;',
         '        }',
         '        setTimeout(() => {',
-        '            process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: turnId }, threadId: msg.params?.threadId ?? null } }) + "\\n");',
+        '            const result = text === "no-id-response-unknown-before-owned-start" || text === "no-id-response-owned-terminal-before-owned-start" || text === "child-terminal-before-primary-identity-no-activity" || text === "child-terminal-after-primary-idless-activity"',
+        '                ? { threadId: msg.params?.threadId ?? null }',
+        '                : { turn: { id: turnId }, threadId: msg.params?.threadId ?? null };',
+        '            process.stdout.write(JSON.stringify({ id: msg.id, result }) + "\\n");',
         '        }, respondDelayMs);',
-        '        if (text === "overlap-start") {',
+        '        if (text === "child-terminal-before-primary-identity-no-activity" || text === "child-terminal-after-primary-idless-activity") {',
+        '            if (text === "child-terminal-after-primary-idless-activity") {',
+        '                setTimeout(() => {',
+        '                    process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: msg.params?.threadId ?? null, itemId: "primary_activity", delta: "working" } }) + "\\n");',
+        '                }, 3);',
+        '            }',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: "thread-child-terminal", turn: { id: "turn-child-terminal" } } }) + "\\n");',
+        '            }, 5);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
+        '            }, 300);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
+        '            }, 320);',
+        '        } else if (text === "no-id-response-unknown-before-owned-start" || text === "no-id-response-owned-terminal-before-owned-start") {',
+        '            const unknownFirst = text === "no-id-response-unknown-before-owned-start";',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: unknownFirst ? turnId + "-unknown" : turnId } } }) + "\\n");',
+        '            }, 5);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
+        '            }, 120);',
+        '            if (unknownFirst) {',
+        '                setTimeout(() => {',
+        '                    process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
+        '                }, 140);',
+        '            }',
+        '        } else if (text === "overlap-start") {',
         '            setTimeout(() => {',
         '                process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
         '            }, 5);',
@@ -957,6 +1166,12 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            }, 8);',
         '            continue;',
         '        }',
+        '        if (text === "usage-limit-after-mid-turn-auth-apply") {',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId, status: "failed", error: { message: "Usage limit reached", codexErrorInfo: "UsageLimitExceeded", resetsAt: "2026-05-17T12:00:00.000Z", planType: "pro", rateLimits: { primary: { usedPercent: 100 } }, additionalDetails: null } } } }) + "\\n");',
+        '            }, 150);',
+        '            continue;',
+        '        }',
         '        if (text === "usage-limit-then-late-raw-item") {',
         '            setTimeout(() => {',
         '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId, status: "failed", error: { message: "Usage limit reached", codexErrorInfo: "UsageLimitExceeded", resetsAt: "2026-05-17T12:00:00.000Z", additionalDetails: null } } } }) + "\\n");',
@@ -973,6 +1188,9 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            setTimeout(() => {',
         '                process.stdout.write(JSON.stringify({ method: "error", params: { threadId: msg.params?.threadId ?? null, turnId, willRetry: false, error: { message: "You\'ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 5:37 PM.", codexErrorInfo: "other", additionalDetails: null } } }) + "\\n");',
         '            }, 8);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId, status: "failed", error: { message: "You\'ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 5:37 PM.", codexErrorInfo: "other", additionalDetails: null } } } }) + "\\n");',
+        '            }, 14);',
         '            continue;',
         '        }',
         '        if (text === "refresh-token-was-already-used") {',
@@ -1116,6 +1334,24 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            }, 18);',
         '            continue;',
         '        }',
+        '        if (text === "bridge-late-child-terminal") {',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: "thread-late-child", turnId: "turn-late-child", itemId: "late_child_msg", delta: "Child still working" } }) + "\\n");',
+        '            }, 6);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "item/completed", params: { threadId: "thread-late-child", turnId: "turn-late-child", item: { id: "late_child_msg", type: "agentMessage", text: "Child still working" } } }) + "\\n");',
+        '            }, 7);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
+        '            }, 15);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: "thread-late-child", turn: { id: "turn-late-child" } } }) + "\\n");',
+        '            }, 180);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: "thread-late-child", turn: { id: "turn-late-child" } } }) + "\\n");',
+        '            }, 190);',
+        '            continue;',
+        '        }',
         '        if (text === "bridge-approvals") {',
         '            setTimeout(() => {',
         '                process.stdout.write(JSON.stringify({ method: "item/started", params: { item: { id: "cmd_approval", type: "commandExecution", command: "rm -rf /tmp/demo", cwd: "/repo" } } }) + "\\n");',
@@ -1176,6 +1412,42 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        if (text === "cancel-no-active") {',
         '            continue;',
         '        }',
+        '        if (text === "goal-successor-during-terminal-settle" || text === "goal-successor-stream-first-during-terminal-settle" || text === "goal-successor-long-lived-during-terminal-settle") {',
+        '            const successorTurnId = "turn-native-goal-successor-during-terminal-settle";',
+        '            const successorStreamFirst = text === "goal-successor-stream-first-during-terminal-settle";',
+        '            const successorCompletionDelayMs = text === "goal-successor-long-lived-during-terminal-settle" ? 250 : 4;',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
+        '            }, respondDelayMs + completionDelayMs);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: msg.params?.threadId ?? null, turn: { id: successorTurnId } } }) + "\\n");',
+        '            }, respondDelayMs + completionDelayMs + (successorStreamFirst ? 3 : 1));',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: msg.params?.threadId ?? null, turnId: successorTurnId, itemId: "goal_successor_msg_1", delta: "Goal successor" } }) + "\\n");',
+        '            }, respondDelayMs + completionDelayMs + (successorStreamFirst ? 1 : 2));',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "item/completed", params: { threadId: msg.params?.threadId ?? null, turnId: successorTurnId, item: { id: "goal_successor_msg_1", type: "agentMessage", text: "Goal successor" } } }) + "\\n");',
+        '            }, respondDelayMs + completionDelayMs + (successorStreamFirst ? 2 : 3));',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: successorTurnId } } }) + "\\n");',
+        '            }, respondDelayMs + completionDelayMs + successorCompletionDelayMs);',
+        '            continue;',
+        '        }',
+        '        if (text === "ignore-unknown-mismatched-turn-completion") {',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId + "-unknown" } } }) + "\\n");',
+        '            }, respondDelayMs + 7);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: msg.params?.threadId ?? null, turnId, itemId: "mismatched_terminal_msg_1", delta: "Still owned by the active turn" } }) + "\\n");',
+        '            }, respondDelayMs + 9);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "item/completed", params: { threadId: msg.params?.threadId ?? null, turnId, item: { id: "mismatched_terminal_msg_1", type: "agentMessage", text: "Still owned by the active turn" } } }) + "\\n");',
+        '            }, respondDelayMs + 10);',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
+        '            }, respondDelayMs + completionDelayMs);',
+        '            continue;',
+        '        }',
         '        if (text === "interrupt-notification-before-terminal") {',
         '            process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: turnId }, threadId: msg.params?.threadId ?? null } }) + "\\n");',
         '            setTimeout(() => {',
@@ -1186,13 +1458,18 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            }, 60);',
         '            continue;',
         '        }',
+        '        if (text === "owned-terminal-before-turn-start-response" || text === "owned-then-unknown-terminal-before-turn-start-response" || text === "unknown-then-owned-terminal-before-turn-start-response" || text === "no-id-response-unknown-before-owned-start" || text === "no-id-response-owned-terminal-before-owned-start" || text === "child-terminal-before-primary-identity-no-activity" || text === "child-terminal-after-primary-idless-activity") {',
+            '            continue;',
+        '        }',
+        `        if (text === ${JSON.stringify(params.omitTurnCompletedForPrompt ?? null)}) continue;`,
         '        setTimeout(() => {',
         '            process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
         '        }, respondDelayMs + completionDelayMs);',
         '        continue;',
         '    }',
         '    if (msg.method === "turn/interrupt") {',
-        `        if (${JSON.stringify(params.rejectInterruptAsNoActiveTurn === true)}) {`,
+        '        interruptCount += 1;',
+        `        if (${JSON.stringify(params.rejectFirstInterruptAsNoActiveTurn === true)} && interruptCount === 1) {`,
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32000, message: "no active turn to interrupt" } }) + "\\n");',
         '            continue;',
         '        }',
@@ -1200,10 +1477,17 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        process.stdout.write(JSON.stringify({ id: msg.id, result: { ok: true } }) + "\\n");',
         '        setTimeout(() => {',
         '            process.stdout.write(JSON.stringify({ method: "turn/interrupted", params: { threadId: msg.params?.threadId ?? null, turn: turnId ? { id: turnId } : undefined } }) + "\\n");',
-        '        }, 5);',
+        '        }, turnId === "turn-cancel-no-active" ? 150 : 5);',
         '        continue;',
         '    }',
         '    if (msg.method === "turn/steer") {',
+        '        const steerText = Array.isArray(msg.params?.input) ? String(msg.params.input[0]?.text ?? "") : "";',
+        '        if (steerText === "late-no-active-steer") {',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32000, message: "no active turn to steer" } }) + "\\n");',
+        '            }, 80);',
+        '            continue;',
+        '        }',
         `        if (${JSON.stringify(params.rejectSteerAsNoActiveTurn === true)}) {`,
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32000, message: "no active turn to steer" } }) + "\\n");',
         '            continue;',
@@ -1212,15 +1496,21 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        const turnId = typeof msg.params?.turnId === "string" ? msg.params.turnId : null;',
         '        const selected = expectedTurnId ?? turnId;',
         `        if (${JSON.stringify(params.rejectStructuredSteerInput === true)} && Array.isArray(msg.params?.input) && msg.params.input.length > 1) {`,
-        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: structured steer input unsupported" } }) + "\\n");',
+        '            if (steerText === "structured-fallback-owner-change") {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: selected } } }) + "\\n");',
+        '                setTimeout(() => {',
+        '                    process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: structured steer input unsupported" } }) + "\\n");',
+        '                }, 20);',
+        '            } else {',
+        '                process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: structured steer input unsupported" } }) + "\\n");',
+        '            }',
         '            continue;',
         '        }',
         '        if (!selected) {',
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "turn/steer requires expectedTurnId" } }) + "\\n");',
         '            continue;',
         '        }',
-        '        const steerText = Array.isArray(msg.params?.input) ? String(msg.params.input[0]?.text ?? "") : "";',
-        '        const steerResponseDelayMs = steerText === "overlap-steer" ? 120 : 0;',
+        '        const steerResponseDelayMs = steerText === "overlap-steer" ? 250 : 0;',
         '        setTimeout(() => {',
         '            process.stdout.write(JSON.stringify({ id: msg.id, result: { turnId: selected } }) + "\\n");',
         '        }, steerResponseDelayMs);',
@@ -1273,34 +1563,43 @@ describe('createCodexAppServerRuntime', () => {
                 code: number;
                 message: string;
             }>;
-            rejectInterruptAsNoActiveTurn?: boolean;
+            rejectFirstInterruptAsNoActiveTurn?: boolean;
             rejectSteerAsNoActiveTurn?: boolean;
             rejectPermissionsProfile?: boolean;
             rejectGoalMethods?: boolean;
             rejectGoalMethodsAsInvalidRequest?: boolean;
             emitGoalContinuationTurn?: boolean;
+            emitGoalContinuationUsageLimitFailure?: boolean;
             emitGoalContinuationItemsBeforeStarted?: boolean;
             rejectReviewStartMethodUnavailable?: boolean;
             rejectStructuredTurnInput?: boolean;
             rejectStructuredSteerInput?: boolean;
             emitResumeContinuationUserInputRequest?: boolean;
+            emitHistoricalResumeUserInputRequestBeforeResponse?: boolean;
             emitResumeTurnStartedBeforeResponse?: boolean;
+            emitResumeHistoryBoundaryNotifications?: boolean;
+            emitHistoricalNotificationOnResume?: boolean;
             resumeResponseDelayMs?: number;
             threadReadResponseDelayMs?: number;
             emitIdleMcpRequestAfterThreadStart?: boolean;
             rejectPermissionsProfileAsStringShape?: boolean;
             rateLimitReadResult?: unknown;
+            rateLimitReadError?: Readonly<{ code: number; message: string }>;
+            rateLimitReadDelayMs?: number;
             accountReadResult?: unknown;
             rejectRateLimitRead?: boolean;
             rejectAccountRead?: boolean;
+            rejectAccountReadCount?: number;
             loginStartError?: Readonly<{
                 code: number;
                 message: string;
             }>;
+            loginStartResponseDelayMs?: number;
             rejectThreadRead?: boolean;
             requireResumeBeforeThreadRead?: boolean;
             oversizedResumePayloadChars?: number;
             omitTurnStartedForPrompt?: string;
+            omitTurnCompletedForPrompt?: string;
             maxJsonLineChars?: number;
             rpcTimeoutMs?: number;
             startupRpcTimeoutMs?: number;
@@ -1318,31 +1617,40 @@ describe('createCodexAppServerRuntime', () => {
             dir: root,
             requestLogPath,
             rollbackError: options.rollbackError,
-            rejectInterruptAsNoActiveTurn: options.rejectInterruptAsNoActiveTurn,
+            rejectFirstInterruptAsNoActiveTurn: options.rejectFirstInterruptAsNoActiveTurn,
             rejectSteerAsNoActiveTurn: options.rejectSteerAsNoActiveTurn,
             rejectPermissionsProfile: options.rejectPermissionsProfile,
             rejectGoalMethods: options.rejectGoalMethods,
             rejectGoalMethodsAsInvalidRequest: options.rejectGoalMethodsAsInvalidRequest,
             emitGoalContinuationTurn: options.emitGoalContinuationTurn,
+            emitGoalContinuationUsageLimitFailure: options.emitGoalContinuationUsageLimitFailure,
             emitGoalContinuationItemsBeforeStarted: options.emitGoalContinuationItemsBeforeStarted,
             rejectReviewStartMethodUnavailable: options.rejectReviewStartMethodUnavailable,
             rejectStructuredTurnInput: options.rejectStructuredTurnInput,
             rejectStructuredSteerInput: options.rejectStructuredSteerInput,
             emitResumeContinuationUserInputRequest: options.emitResumeContinuationUserInputRequest,
+            emitHistoricalResumeUserInputRequestBeforeResponse: options.emitHistoricalResumeUserInputRequestBeforeResponse,
             emitResumeTurnStartedBeforeResponse: options.emitResumeTurnStartedBeforeResponse,
+            emitResumeHistoryBoundaryNotifications: options.emitResumeHistoryBoundaryNotifications,
+            emitHistoricalNotificationOnResume: options.emitHistoricalNotificationOnResume,
             resumeResponseDelayMs: options.resumeResponseDelayMs,
             threadReadResponseDelayMs: options.threadReadResponseDelayMs,
             emitIdleMcpRequestAfterThreadStart: options.emitIdleMcpRequestAfterThreadStart,
             rejectPermissionsProfileAsStringShape: options.rejectPermissionsProfileAsStringShape,
             rateLimitReadResult: options.rateLimitReadResult,
+            rateLimitReadError: options.rateLimitReadError,
+            rateLimitReadDelayMs: options.rateLimitReadDelayMs,
             accountReadResult: options.accountReadResult,
             rejectRateLimitRead: options.rejectRateLimitRead,
             rejectAccountRead: options.rejectAccountRead,
+            rejectAccountReadCount: options.rejectAccountReadCount,
             loginStartError: options.loginStartError,
+            loginStartResponseDelayMs: options.loginStartResponseDelayMs,
             rejectThreadRead: options.rejectThreadRead,
             requireResumeBeforeThreadRead: options.requireResumeBeforeThreadRead,
             oversizedResumePayloadChars: options.oversizedResumePayloadChars,
             omitTurnStartedForPrompt: options.omitTurnStartedForPrompt,
+            omitTurnCompletedForPrompt: options.omitTurnCompletedForPrompt,
         });
         envScope.patch({
             HAPPIER_CODEX_APP_SERVER_BIN: fakeAppServer,
@@ -1633,7 +1941,7 @@ describe('createCodexAppServerRuntime', () => {
         );
     });
 
-    it('defaults resumed sessions to lean metadata recovery after app-server loads the thread', async () => {
+    it('hydrates authoritative thread history after an oversized resume response', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-resume-oversized-', {
             requireResumeBeforeThreadRead: true,
             oversizedResumePayloadChars: 4 * 1024,
@@ -1659,12 +1967,12 @@ describe('createCodexAppServerRuntime', () => {
             method: 'thread/read',
             params: {
                 threadId: 'resume-123',
-                includeTurns: false,
+                includeTurns: true,
             },
         });
     });
 
-    it('waits beyond the normal startup timeout for recoverable oversized no-history resumes', async () => {
+    it('waits beyond the normal startup timeout for authoritative oversized-resume recovery', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-resume-delayed-oversized-', {
             requireResumeBeforeThreadRead: true,
             resumeResponseDelayMs: 500,
@@ -1694,19 +2002,22 @@ describe('createCodexAppServerRuntime', () => {
             method: 'thread/read',
             params: {
                 threadId: 'resume-slow',
-                includeTurns: false,
+                includeTurns: true,
             },
         });
     });
 
-    it('uses the resume recovery timeout for lean thread metadata reads after oversized resumes', async () => {
+    it('uses the resume recovery timeout for authoritative history reads after oversized resumes', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-resume-oversized-delayed-read-', {
             requireResumeBeforeThreadRead: true,
             threadReadResponseDelayMs: 500,
             oversizedResumePayloadChars: 4 * 1024,
             maxJsonLineChars: 1024,
             rpcTimeoutMs: 250,
-            startupRpcTimeoutMs: 250,
+            // Initialization is not the behavior under test and can exceed the normal
+            // RPC budget on a loaded development machine. Keep the ordinary RPC timeout
+            // below the delayed thread/read response while giving startup its own budget.
+            startupRpcTimeoutMs: 1000,
             resumeRecoveryTimeoutMs: 1200,
         });
 
@@ -1729,7 +2040,7 @@ describe('createCodexAppServerRuntime', () => {
             method: 'thread/read',
             params: {
                 threadId: 'resume-slow-read',
-                includeTurns: false,
+                includeTurns: true,
             },
         });
     });
@@ -1965,6 +2276,16 @@ describe('createCodexAppServerRuntime', () => {
         const runtime = createCodexAppServerRuntime({
             directory: root,
             onThinkingChange: vi.fn(),
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_handoff',
+                accountLabel: 'handoff@example.test',
+                profileId: 'handoff-profile',
+                groupId: 'handoff-group',
+                generation: 1,
+                credentialFingerprint: 'sha256:handoff0',
+                source: 'spawn_selection',
+            },
             session: {
                 sessionId: 'session-usage-limit-cancel',
                 updateMetadata,
@@ -2301,8 +2622,14 @@ describe('createCodexAppServerRuntime', () => {
                 instructions: 'delayed-review',
             },
         });
-        await new Promise((resolve) => setTimeout(resolve, 5));
+        await waitForCondition(() => runtime.isTurnInFlight(), {
+            timeoutMs: 2_000,
+            intervalMs: 1,
+            label: 'native review enters active control turn',
+        });
 
+        expect(runtime.canSteerPrompt()).toBe(false);
+        await expect(runtime.steerPrompt('must-remain-queued-during-native-review')).rejects.toThrow(/not steerable/i);
         await expect(runtime.sendPrompt('second prompt')).rejects.toThrow(/turn in flight/);
         await reviewPromise;
     });
@@ -2564,6 +2891,229 @@ describe('createCodexAppServerRuntime', () => {
         expect(requestLog.filter((entry) => entry.method === 'turn/start')).toEqual([]);
     });
 
+    it.each([
+        ['turn-start first', 'goal-successor-during-terminal-settle'],
+        ['stream first', 'goal-successor-stream-first-during-terminal-settle'],
+    ] as const)('hands off a completed tracked turn to an immediate same-thread goal successor (%s)', async (_order, prompt) => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-goal-successor-handoff-');
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const session = {
+            updateMetadata: vi.fn(),
+            sendAgentMessageCommitted: vi.fn(async () => {}),
+            sendCodexMessage: vi.fn(),
+            sessionTurnLifecycle,
+        };
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: session as any,
+            permissionMode: 'default',
+        });
+
+        await runtime.startOrLoad({});
+        const initialTurn = runtime.sendPrompt(prompt);
+        await (runtime as unknown as { setGoal: (objective: string) => Promise<void> }).setGoal('Continue autonomously');
+        await initialTurn;
+
+        await waitForCondition(() => {
+            const committedCalls = session.sendAgentMessageCommitted.mock.calls as unknown as Array<
+                [string, { type?: string; message?: string }, { localId: string }]
+            >;
+            return committedCalls.some(([, body]) => (
+                body.type === 'message' && String(body.message ?? '').includes('Goal successor')
+            ));
+        }, {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'same-thread goal successor transcript event',
+        });
+        await waitForCondition(() => vi.mocked(sessionTurnLifecycle.completeTurn).mock.calls.length === 2, {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'both predecessor and goal successor lifecycle completions',
+            debug: () => JSON.stringify({
+                beginTurnCalls: vi.mocked(sessionTurnLifecycle.beginTurn).mock.calls,
+                completeTurnCalls: vi.mocked(sessionTurnLifecycle.completeTurn).mock.calls,
+                turnInFlight: runtime.isTurnInFlight(),
+            }),
+        });
+
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(2);
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenLastCalledWith(expect.objectContaining({
+            provider: 'codex',
+            providerTurnId: 'turn-native-goal-successor-during-terminal-settle',
+        }));
+        expect(runtime.isTurnInFlight()).toBe(false);
+    });
+
+    it('fences fresh prompts during handoff and permits explicit steering once the regular successor starts', async () => {
+        const { root, requestLogPath, fakeAppServer } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-goal-successor-atomic-handoff-',
+        );
+        let releasePredecessorCompletion!: () => void;
+        const predecessorCompletionGate = new Promise<void>((resolve) => {
+            releasePredecessorCompletion = resolve;
+        });
+        let completionCount = 0;
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble({
+            completeTurn: vi.fn(async () => {
+                completionCount += 1;
+                if (completionCount === 1) await predecessorCompletionGate;
+            }),
+        });
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            processEnv: createCodexAppServerProcessEnv(fakeAppServer, {
+                [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+                    kind: 'group',
+                    serviceId: 'openai-codex',
+                    groupId: 'handoff-group',
+                    activeProfileId: 'handoff-profile',
+                    fallbackProfileId: 'handoff-fallback',
+                    generation: 1,
+                }]),
+            }),
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_handoff',
+                accountLabel: null,
+                profileId: 'handoff-profile',
+                groupId: 'handoff-group',
+                generation: 1,
+                credentialFingerprint: 'sha256:handoff1',
+                source: 'spawn_selection',
+            },
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sendAgentMessageCommitted: vi.fn(async () => {}),
+                sendCodexMessage: vi.fn(),
+                sessionTurnLifecycle,
+            } as any,
+            permissionMode: 'default',
+        });
+
+        await runtime.startOrLoad({});
+        const initialTurn = runtime.sendPrompt('goal-successor-during-terminal-settle');
+        await (runtime as unknown as { setGoal: (objective: string) => Promise<void> }).setGoal('Continue autonomously');
+        await waitForCondition(() => completionCount === 1, {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'predecessor lifecycle completion enters handoff gate',
+        });
+        await expect((runtime as any).readConnectedServiceRuntimeIdentity({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            requireExactProof: true,
+        })).resolves.toMatchObject({
+            ok: true,
+            runtime: {
+                inProviderTurn: true,
+                safeToApply: false,
+            },
+        });
+        await expect((runtime as any).rollbackConversation({
+            v: 1,
+            target: { type: 'latest_turn' },
+        })).resolves.toMatchObject({
+            ok: false,
+            errorCode: 'turn_in_flight',
+        });
+
+        const competingPrompt = runtime.sendPrompt('must-not-start-during-native-handoff');
+        competingPrompt.catch(() => undefined);
+        try {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            const requestLog = await readRequestLog(requestLogPath);
+            const competingTurnStarts = requestLog.filter((entry) => {
+                if (entry.method !== 'turn/start') return false;
+                const input = (entry.params as { input?: Array<{ text?: unknown }> } | null)?.input;
+                return input?.[0]?.text === 'must-not-start-during-native-handoff';
+            });
+            expect(competingTurnStarts).toHaveLength(0);
+        } finally {
+            releasePredecessorCompletion();
+        }
+
+        await initialTurn;
+        // The initiating prompt owns exactly the predecessor turn. Its caller must preserve the
+        // runtime while the separately-owned native successor is active.
+        expect(runtime.hasActiveProviderTurn()).toBe(true);
+        expect(runtime.canSteerPrompt()).toBe(true);
+        await runtime.steerPrompt('explicit-steer-into-native-goal-successor');
+        const requestLogAfterSteer = await readRequestLog(requestLogPath);
+        expect(requestLogAfterSteer).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                method: 'turn/steer',
+                params: expect.objectContaining({
+                    threadId: 'thread-started',
+                    expectedTurnId: 'turn-native-goal-successor-during-terminal-settle',
+                    input: expect.arrayContaining([
+                        expect.objectContaining({ text: 'explicit-steer-into-native-goal-successor' }),
+                    ]),
+                }),
+            }),
+        ]));
+        await expect(competingPrompt).rejects.toThrow(/turn in flight/i);
+        await waitForCondition(() => vi.mocked(sessionTurnLifecycle.completeTurn).mock.calls.length === 2, {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'native successor completes after atomic handoff',
+        });
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(2);
+        expect(runtime.isTurnInFlight()).toBe(false);
+    });
+
+    it('does not resurrect a native successor when reset disposes the runtime during handoff', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-goal-successor-reset-handoff-',
+        );
+        let releasePredecessorCompletion!: () => void;
+        const predecessorCompletionGate = new Promise<void>((resolve) => {
+            releasePredecessorCompletion = resolve;
+        });
+        let completionCount = 0;
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble({
+            completeTurn: vi.fn(async () => {
+                completionCount += 1;
+                if (completionCount === 1) await predecessorCompletionGate;
+            }),
+        });
+        const onThinkingChange = vi.fn();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange,
+            session: {
+                updateMetadata: vi.fn(),
+                sendAgentMessageCommitted: vi.fn(async () => {}),
+                sendCodexMessage: vi.fn(),
+                sessionTurnLifecycle,
+            } as any,
+            permissionMode: 'default',
+        });
+
+        await runtime.startOrLoad({});
+        const initialTurn = runtime.sendPrompt('goal-successor-during-terminal-settle');
+        await (runtime as unknown as { setGoal: (objective: string) => Promise<void> }).setGoal('Continue autonomously');
+        await waitForCondition(() => completionCount === 1, {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'predecessor completion enters reset handoff gate',
+        });
+
+        const reset = runtime.reset();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        releasePredecessorCompletion();
+        await Promise.all([reset, initialTurn]);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        expect(runtime.getSessionId()).toBeNull();
+        expect(runtime.hasActiveProviderTurn()).toBe(false);
+        expect(runtime.isTurnInFlight()).toBe(false);
+        expect(onThinkingChange).toHaveBeenLastCalledWith(false);
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+    });
+
     it('adopts native app-server goal continuation turns from same-thread stream events', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-goal-continuation-stream-first-', {
             emitGoalContinuationTurn: true,
@@ -2683,6 +3233,52 @@ describe('createCodexAppServerRuntime', () => {
         expect(requestLog.filter((entry) => entry.method === 'turn/start')).toEqual([]);
     });
 
+    it('declines historical server requests received before resume history hydration', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-resume-historical-request-',
+            { emitHistoricalResumeUserInputRequestBeforeResponse: true },
+        );
+        const permissionHandler = {
+            handleToolCall: vi.fn().mockResolvedValue({
+                decision: 'approved',
+                answers: { resume_question_history: ['yes'] },
+            }),
+        };
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sendAgentMessageCommitted: vi.fn(async () => {}),
+                sendCodexMessage: vi.fn(),
+                sessionTurnLifecycle,
+            } as any,
+            permissionHandler: permissionHandler as any,
+        });
+
+        await runtime.startOrLoad({ resumeId: 'thread-resume-historical-request' });
+        await waitForCondition(async () => {
+            const requestLog = await readRequestLog(requestLogPath);
+            return requestLog.some((entry) => entry.id === 'resume-request-input-history');
+        }, {
+            timeoutMs: 500,
+            intervalMs: 5,
+            label: 'historical resume request denial',
+        });
+
+        expect(permissionHandler.handleToolCall).not.toHaveBeenCalled();
+        expect(sessionTurnLifecycle.beginTurn).not.toHaveBeenCalled();
+        const requestLog = await readRequestLog(requestLogPath);
+        expect(requestLog).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                id: 'resume-request-input-history',
+                result: { answers: {} },
+                error: null,
+            }),
+        ]));
+    });
+
     it('preserves provider-adopted resumed turns that start before thread resume responds', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-resume-start-before-response-', {
             emitResumeTurnStartedBeforeResponse: true,
@@ -2722,6 +3318,67 @@ describe('createCodexAppServerRuntime', () => {
         } finally {
             await runtime.reset();
         }
+    });
+
+    it('rejects historical resume notifications while releasing one genuinely live buffered turn after history hydration', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-resume-history-boundary-',
+            { emitResumeHistoryBoundaryNotifications: true },
+        );
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const onThinkingChange = vi.fn();
+        const sendAgentMessageCommitted = vi.fn(async (
+            _provider: string,
+            _body: { type?: string; message?: string },
+        ) => {});
+
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange,
+            session: {
+                updateMetadata: vi.fn(),
+                sendAgentMessageCommitted,
+                sendCodexMessage: vi.fn(),
+                sessionTurnLifecycle,
+            } as any,
+            permissionMode: 'default',
+        });
+
+        await runtime.startOrLoad({ resumeId: 'thread-resume-history-boundary' });
+        await waitForCondition(() => runtime.isTurnInFlight() === false, {
+            timeoutMs: 1_000,
+            intervalMs: 2,
+            label: 'genuinely live buffered resume turn completion',
+        });
+
+        await runtime.startOrLoad({ resumeId: 'thread-resume-history-boundary-second-attach' });
+        await waitForCondition(() => vi.mocked(sessionTurnLifecycle.completeTurn).mock.calls.length === 2, {
+            timeoutMs: 1_000,
+            intervalMs: 2,
+            label: 'genuinely live buffered second resume turn completion',
+        });
+
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(2);
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledWith(expect.objectContaining({
+            provider: 'codex',
+            providerTurnId: 'turn-resume-live',
+        }));
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(2);
+        expect(onThinkingChange).toHaveBeenCalledTimes(4);
+        expect(onThinkingChange).toHaveBeenNthCalledWith(1, true);
+        expect(onThinkingChange).toHaveBeenNthCalledWith(2, false);
+        expect(onThinkingChange).toHaveBeenNthCalledWith(3, true);
+        expect(onThinkingChange).toHaveBeenNthCalledWith(4, false);
+
+        const committedAssistantMessages = sendAgentMessageCommitted.mock.calls
+            .map(([, body]) => body)
+            .filter((body) => body?.type === 'message')
+            .map((body) => body.message);
+        expect(committedAssistantMessages).toContain('Genuinely live');
+        expect(committedAssistantMessages).not.toContain('Historical replay');
+
+        const requestLog = await readRequestLog(requestLogPath);
+        expect(requestLog.filter((entry) => entry.method === 'turn/start')).toEqual([]);
     });
 
     it('returns stable unsupported results when app-server goal methods are unavailable', async () => {
@@ -2865,16 +3522,20 @@ describe('createCodexAppServerRuntime', () => {
         ]);
     });
 
-    it('clears in-flight state when native interrupt reports no active turn', async () => {
+    it('retries the exact interrupt through the provider startup gap and waits for its terminal', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-interrupt-no-active-', {
-            rejectInterruptAsNoActiveTurn: true,
+            rejectFirstInterruptAsNoActiveTurn: true,
         });
 
         const onThinkingChange = vi.fn();
+        const cancelTurn = vi.fn(async () => {});
         const runtime = createCodexAppServerRuntime({
             directory: root,
             onThinkingChange,
-            session: { updateMetadata: vi.fn() } as any,
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble({ cancelTurn }),
+            } as any,
         });
 
         await runtime.startOrLoad({});
@@ -2885,15 +3546,34 @@ describe('createCodexAppServerRuntime', () => {
             label: 'Codex app-server turn to enter in-flight state',
         });
 
-        await expect(runtime.cancel()).resolves.toBeUndefined();
+        const cancel = runtime.cancel();
+        await new Promise((resolve) => setTimeout(resolve, 75));
+
+        const requestsBeforeTerminal = (await readFile(requestLogPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+        expect(requestsBeforeTerminal.filter((entry: { method: string }) => entry.method === 'turn/interrupt')).toEqual([
+            expect.objectContaining({
+                params: expect.objectContaining({ threadId: 'thread-started', turnId: 'turn-cancel-no-active' }),
+            }),
+            expect.objectContaining({
+                params: expect.objectContaining({ threadId: 'thread-started', turnId: 'turn-cancel-no-active' }),
+            }),
+        ]);
+        expect(runtime.isTurnInFlight()).toBe(true);
+        expect(cancelTurn).not.toHaveBeenCalled();
+
+        await expect(cancel).resolves.toBeUndefined();
         await sendPromptPromise;
 
         expect(runtime.isTurnInFlight()).toBe(false);
+        expect(cancelTurn).toHaveBeenCalledOnce();
         expect(onThinkingChange).toHaveBeenCalledWith(true);
         expect(onThinkingChange).toHaveBeenLastCalledWith(false);
 
         const requestLog = (await readFile(requestLogPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
         expect(requestLog.filter((entry: { method: string }) => entry.method === 'turn/interrupt')).toEqual([
+            expect.objectContaining({
+                params: expect.objectContaining({ threadId: 'thread-started', turnId: 'turn-cancel-no-active' }),
+            }),
             expect.objectContaining({
                 params: expect.objectContaining({ threadId: 'thread-started', turnId: 'turn-cancel-no-active' }),
             }),
@@ -2930,7 +3610,11 @@ describe('createCodexAppServerRuntime', () => {
 
     it('advertises in-flight steer support and can call turn/steer while a turn is in flight', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-steer-');
-        const acceptedPrompts: Array<{ localIds?: readonly string[] | null; userMessageSeq: number | null }> = [];
+        const acceptedPrompts: Array<{
+            localIds?: readonly string[] | null;
+            userMessageSeq: number | null;
+            providerTurnId: string;
+        }> = [];
 
         const runtime = createCodexAppServerRuntime({
             directory: root,
@@ -2949,7 +3633,7 @@ describe('createCodexAppServerRuntime', () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
 
         expect(runtime.isTurnInFlight()).toBe(true);
-        await runtime.steerPrompt('nudge', { localId: 'local-steer-42', userMessageSeq: 42 });
+        await runtime.steerPrompt('nudge', { localId: ' local-steer-42\n', userMessageSeq: 42 });
         await sendPromptPromise;
 
         const requestLog = (await readFile(requestLogPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
@@ -2963,12 +3647,209 @@ describe('createCodexAppServerRuntime', () => {
             }),
         ]);
         expect(requestLog.filter((entry: { method: string }) => entry.method === 'turn/start')).toHaveLength(1);
-        expect(acceptedPrompts).toContainEqual({ localIds: ['local-steer-42'], userMessageSeq: 42 });
+        expect(acceptedPrompts).toContainEqual({
+            localIds: [' local-steer-42\n'],
+            userMessageSeq: 42,
+            providerTurnId: 'turn-overlap-start',
+        });
+    });
+
+    it('materializes a woken head steer during a genuinely active turn and leaves its FIFO neighbor queued', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-active-turn-pending-');
+        const metadataWakes: Array<(updated: boolean) => void> = [];
+        let runtime!: ReturnType<typeof createCodexAppServerRuntime>;
+        const materializeNextPendingMessageSafely = vi
+            .fn()
+            .mockResolvedValueOnce({ type: 'no_pending' as const })
+            .mockImplementationOnce(async () => {
+                await runtime.steerPrompt('pending head steer', {
+                    localId: 'pending-head-steer',
+                });
+                return {
+                    type: 'materialized' as const,
+                    localId: 'pending-head-steer',
+                    seq: 12,
+                    content: null,
+                };
+            })
+            .mockImplementationOnce(async () => {
+                throw new Error('later ordinary FIFO neighbor must remain queued during the active turn');
+            });
+        const inputConsumer = createSessionProviderInputConsumer({
+            messageQueue: new MessageQueue2<{ id: string }>(() => 'hash'),
+            session: {
+                materializeNextPendingMessageSafely,
+                waitForPendingEligibilityUpdate: async (signal) => await new Promise<boolean>((resolve) => {
+                    const finish = (updated: boolean) => {
+                        signal?.removeEventListener('abort', onAbort);
+                        resolve(updated);
+                    };
+                    const onAbort = () => finish(false);
+                    metadataWakes.push(finish);
+                    signal?.addEventListener('abort', onAbort, { once: true });
+                }),
+            },
+        });
+
+        runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+            pendingQueue: {
+                drainPending: (opts) => inputConsumer.drainPending(opts),
+                pumpPendingWhileActive: (opts) => inputConsumer.pumpPendingWhileActive(opts),
+            },
+        });
+
+        await runtime.startOrLoad({});
+        const activeTurn = runtime.sendPrompt('overlap-start');
+        await waitForCondition(
+            () => runtime.canSteerPrompt() && materializeNextPendingMessageSafely.mock.calls.length === 1,
+            {
+                timeoutMs: 1_000,
+                intervalMs: 10,
+                label: 'active Codex turn to arm and complete its immediate Pending pass',
+            },
+        );
+
+        metadataWakes.shift()?.(true);
+        await waitForCondition(async () => (
+            (await readRequestLog(requestLogPath)).filter((entry) => entry.method === 'turn/steer').length === 1
+        ), {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'woken Pending head to invoke one native Codex steer',
+        });
+        expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(2);
+
+        await activeTurn;
+
+        const requestLog = await readRequestLog(requestLogPath);
+        expect(requestLog.filter((entry) => entry.method === 'turn/steer')).toEqual([
+            expect.objectContaining({
+                params: expect.objectContaining({
+                    expectedTurnId: 'turn-overlap-start',
+                    input: [{ type: 'text', text: 'pending head steer' }],
+                }),
+            }),
+        ]);
+        expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(2);
+    });
+
+    it('blocks turn/start and turn/steer on unavailable group truth until a valid generation is applied', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-group-unavailable-');
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            onConnectedServiceAuthGenerationApplied: vi.fn(async () => {}),
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_original',
+                accountLabel: 'original@example.test',
+                profileId: 'original',
+                groupId: 'team',
+                generation: 1,
+                credentialFingerprint: 'sha256:original',
+                source: 'spawn_selection',
+            },
+            session: { updateMetadata: vi.fn() } as any,
+        });
+        const replacement = buildConnectedServiceCredentialRecord({
+            now: 1_000,
+            serviceId: 'openai-codex',
+            profileId: 'replacement',
+            kind: 'oauth',
+            expiresAt: 2_000,
+            oauth: {
+                accessToken: 'replacement-access',
+                refreshToken: 'replacement-refresh',
+                idToken: 'replacement-id',
+                scope: null,
+                tokenType: null,
+                providerAccountId: 'acct_replacement',
+                providerEmail: 'replacement@example.test',
+            },
+        });
+        const applyValidGeneration = () => runtime.applyConnectedServiceAuthGeneration({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            expected: { profileId: 'replacement', groupId: 'team', generation: 2 },
+            authGeneration: {
+                credential: replacement,
+                selection: {
+                    kind: 'group',
+                    serviceId: 'openai-codex',
+                    groupId: 'team',
+                    activeProfileId: 'replacement',
+                    generation: 2,
+                },
+            },
+        });
+
+        await runtime.startOrLoad({});
+        await expect(runtime.applyConnectedServiceAuthGeneration({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            authGeneration: {
+                kind: 'current_auth_group_unavailable',
+                groupId: 'team',
+                unavailableReason: 'group_missing',
+            },
+        })).resolves.toMatchObject({ ok: true, appliedVia: 'current_truth_fence' });
+        await expect(runtime.sendPrompt('must-not-start')).rejects.toMatchObject({
+            code: 'connected_service_auth_group_unavailable',
+        });
+        expect((await readRequestLog(requestLogPath)).filter((entry) => entry.method === 'turn/start')).toHaveLength(0);
+
+        await runtime.applyConnectedServiceAuthGeneration({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            authGeneration: {
+                kind: 'current_auth_group_available',
+                groupId: 'replacement-team',
+                generation: 1,
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+            },
+        });
+        await expect(runtime.sendPrompt('works-after-group-rebinding')).resolves.toBeUndefined();
+        await runtime.applyConnectedServiceAuthGeneration({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            authGeneration: {
+                kind: 'current_auth_group_unavailable',
+                groupId: 'team',
+                unavailableReason: 'group_missing',
+            },
+        });
+
+        await expect(applyValidGeneration()).resolves.toMatchObject({ ok: true });
+        const activeTurn = runtime.sendPrompt('overlap-start');
+        await waitForCondition(() => runtime.canSteerPrompt(), {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'Codex app-server turn to become steerable before unavailable truth',
+        });
+        await runtime.applyConnectedServiceAuthGeneration({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            authGeneration: {
+                kind: 'current_auth_group_unavailable',
+                groupId: 'team',
+                unavailableReason: 'active_profile_missing',
+            },
+        });
+        await expect(runtime.steerPrompt('must-not-steer')).rejects.toMatchObject({
+            code: 'connected_service_auth_group_unavailable',
+        });
+        expect((await readRequestLog(requestLogPath)).filter((entry) => entry.method === 'turn/steer')).toHaveLength(0);
+        await activeTurn;
+        await expect(applyValidGeneration()).resolves.toMatchObject({ ok: true });
+        await expect(runtime.sendPrompt('works-after-valid-generation')).resolves.toBeUndefined();
     });
 
     it('does not let a delayed turn/start response confirm an overlapping steer prompt', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-steer-overlap-');
-        const acceptedPrompts: Array<{ userMessageSeq: number | null }> = [];
+        const acceptedPrompts: Array<{ userMessageSeq: number | null; providerTurnId: string }> = [];
 
         const runtime = createCodexAppServerRuntime({
             directory: root,
@@ -3003,10 +3884,16 @@ describe('createCodexAppServerRuntime', () => {
         });
 
         await new Promise((resolve) => setTimeout(resolve, 100));
-        expect(acceptedPrompts).toEqual([{ userMessageSeq: 10 }]);
+        expect(acceptedPrompts).toEqual([{
+            userMessageSeq: 10,
+            providerTurnId: 'turn-overlap-start',
+        }]);
 
         await steerPromise;
-        expect(acceptedPrompts).toEqual([{ userMessageSeq: 10 }, { userMessageSeq: 11 }]);
+        expect(acceptedPrompts).toEqual([
+            { userMessageSeq: 10, providerTurnId: 'turn-overlap-start' },
+            { userMessageSeq: 11, providerTurnId: 'turn-overlap-start' },
+        ]);
         await sendPromptPromise;
     });
 
@@ -3047,6 +3934,57 @@ describe('createCodexAppServerRuntime', () => {
                 }),
             }),
         ]);
+    });
+
+    it('does not let a late no-active steer response clear a same-thread successor', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-steer-late-no-active-successor-',
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sendAgentMessageCommitted: vi.fn(async () => {}),
+                sendCodexMessage: vi.fn(),
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+            } as any,
+            permissionMode: 'default',
+        });
+
+        await runtime.startOrLoad({});
+        const predecessor = runtime.sendPrompt('goal-successor-long-lived-during-terminal-settle');
+        await (runtime as unknown as { setGoal: (objective: string) => Promise<void> }).setGoal('Continue autonomously');
+        await waitForCondition(() => runtime.canSteerPrompt(), {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'predecessor to become steerable before delayed stale response',
+        });
+
+        const staleSteer = runtime.steerPrompt('late-no-active-steer');
+        staleSteer.catch(() => undefined);
+        await predecessor;
+        await waitForCondition(() => runtime.canSteerPrompt(), {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'same-thread successor to become steerable',
+        });
+
+        await expect(staleSteer).rejects.toThrow(/no active turn to steer/i);
+        expect(runtime.hasActiveProviderTurn()).toBe(true);
+        expect(runtime.canSteerPrompt()).toBe(true);
+        await runtime.steerPrompt('successor-remains-owned');
+
+        const requestLog = await readRequestLog(requestLogPath);
+        expect(requestLog).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                method: 'turn/steer',
+                params: expect.objectContaining({
+                    expectedTurnId: 'turn-native-goal-successor-during-terminal-settle',
+                    input: [{ type: 'text', text: 'successor-remains-owned' }],
+                }),
+            }),
+        ]));
     });
 
     it('retries turn start with text-only input while keeping native permissions when structured input is unsupported', async () => {
@@ -3142,6 +4080,40 @@ describe('createCodexAppServerRuntime', () => {
                 }),
             }),
         ]);
+    });
+
+    it('does not retry a structured steer after the active turn owner terminates', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-steer-structured-fallback-owner-race-',
+            { rejectStructuredSteerInput: true },
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        await runtime.startOrLoad({});
+        const sendPromptPromise = runtime.sendPrompt('overlap-start');
+        await waitForCondition(() => runtime.canSteerPrompt(), {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'active turn to become steerable before structured fallback race',
+        });
+
+        await expect(runtime.steerPrompt('structured-fallback-owner-change', {
+            metadata: {
+                happierStructuredInputV1: {
+                    vendorPluginMentions: [
+                        { displayName: 'Reviewer', vendorPluginRef: 'plugin://reviewer@codex' },
+                    ],
+                },
+            },
+        })).rejects.toThrow('Codex app-server active turn is not steerable');
+        await sendPromptPromise;
+
+        const requestLog = await readRequestLog(requestLogPath);
+        expect(requestLog.filter((entry) => entry.method === 'turn/steer')).toHaveLength(1);
     });
 
     it('records one durable turn-start boundary for a steered turn and rejects the steer user row as a point rollback target', async () => {
@@ -3248,6 +4220,7 @@ describe('createCodexAppServerRuntime', () => {
         });
 
         expect(runtime.isTurnInFlight()).toBe(true);
+        await expect(runtime.steerPrompt('late-nudge')).rejects.toThrow('Codex app-server active turn is not steerable');
         await sendPromptPromise;
     });
 
@@ -3304,7 +4277,21 @@ describe('createCodexAppServerRuntime', () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
 
         expect(runtime.isTurnInFlight()).toBe(true);
-        await runtime.steerPrompt('nudge-early');
+        expect(runtime.canSteerPrompt()).toBe(false);
+
+        let steerSettled = false;
+        const steerPromise = runtime.steerPrompt('nudge-early');
+        void steerPromise.then(
+            () => { steerSettled = true; },
+            () => { steerSettled = true; },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        expect(steerSettled).toBe(false);
+        const earlyRequestLog = await readRequestLog(requestLogPath);
+        expect(earlyRequestLog.filter((entry) => entry.method === 'turn/steer')).toHaveLength(0);
+
+        await steerPromise;
         await sendPromptPromise;
 
         const requestLog = (await readFile(requestLogPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
@@ -3317,6 +4304,69 @@ describe('createCodexAppServerRuntime', () => {
                 }),
             }),
         ]);
+    });
+
+    it('does not steer a turn whose ownership changes while structured input is resolving', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-steer-input-owner-race-',
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+        const uploadedPath = '.happier/uploads/messages/race/screenshot.png';
+        const uploadedContent = Buffer.from('race screenshot');
+        const sha256 = createHash('sha256').update(uploadedContent).digest('hex');
+        await mkdir(join(root, '.happier', 'uploads', 'messages', 'race'), { recursive: true });
+        await writeFile(join(root, uploadedPath), uploadedContent);
+
+        await runtime.startOrLoad({});
+        const sendPromptPromise = runtime.sendPrompt('overlap-start');
+        await waitForCondition(() => runtime.canSteerPrompt(), {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'active turn to become steerable before input resolution race',
+        });
+
+        let scheduledOwnerChange = false;
+        const metadata = {
+            get happier() {
+                if (!scheduledOwnerChange) {
+                    scheduledOwnerChange = true;
+                    queueMicrotask(() => {
+                        void runtime.flushTurn();
+                    });
+                }
+                return {
+                    kind: 'attachments.v1',
+                    payload: {
+                        attachments: [{
+                            path: uploadedPath,
+                            mimeType: 'image/png',
+                            sizeBytes: uploadedContent.byteLength,
+                            sha256,
+                        }],
+                    },
+                };
+            },
+            happierStructuredInputV1: {
+                attachments: [{
+                    kind: 'image',
+                    localPath: uploadedPath,
+                    path: uploadedPath,
+                    sha256,
+                    provenance: { kind: 'sessionAttachmentUpload' },
+                }],
+            },
+        };
+
+        await expect(runtime.steerPrompt('must-not-steer-after-owner-change', { metadata }))
+            .rejects.toThrow('Codex app-server active turn is not steerable');
+        await sendPromptPromise;
+
+        const requestLog = await readRequestLog(requestLogPath);
+        expect(requestLog.filter((entry) => entry.method === 'turn/steer')).toHaveLength(0);
     });
 
     it('bridges stream notifications into transcript deltas and tool updates during sendPrompt', async () => {
@@ -3704,9 +4754,10 @@ describe('createCodexAppServerRuntime', () => {
             sendAgentMessageCommitted: vi.fn(async () => {}),
             sendCodexMessage: vi.fn(),
         };
-        const sessionMediaPersist = vi.fn(
-            async (_message: RuntimeSessionMediaMessage): Promise<readonly SessionMediaItemV1[]> => [persistedMediaItem],
-        );
+        const sessionMediaPersist = vi.fn(async (_message: RuntimeSessionMediaMessage) => ({
+            media: [persistedMediaItem],
+            unavailable: [],
+        }));
         const runtime = createCodexAppServerRuntime({
             directory: root,
             onThinkingChange: vi.fn(),
@@ -3740,6 +4791,99 @@ describe('createCodexAppServerRuntime', () => {
         expect(JSON.stringify(finalAssistant?.opts.meta)).not.toContain('attachments.v1');
     });
 
+    it('bounds large and mixed persister results to the canonical combined media envelope limit', async () => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-generated-image-bound-');
+        const logSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+        const buildMedia = (id: string) => ({
+            id,
+            role: 'output' as const,
+            category: 'generated' as const,
+            mediaKind: 'image' as const,
+            mimeType: 'image/png' as const,
+            name: `${id}.png`,
+            path: `.happier/uploads/generated/${id}.png`,
+            sizeBytes: 67,
+            origin: { source: 'provider-generated' as const, generationId: id },
+        });
+        const buildUnavailable = (id: string) => ({
+            id,
+            role: 'output' as const,
+            category: 'generated' as const,
+            mediaKind: 'image' as const,
+            code: 'provider_file_unavailable',
+            origin: { source: 'provider-generated' as const },
+        });
+        const session = {
+            updateMetadata: vi.fn(),
+            sendAgentMessageCommitted: vi.fn(async () => {}),
+            sendCodexMessage: vi.fn(),
+        };
+        let persistenceAttempt = 0;
+        const sessionMediaPersist = vi.fn(async (_message: RuntimeSessionMediaMessage) => {
+            persistenceAttempt += 1;
+            return persistenceAttempt === 1
+                ? {
+                    media: Array.from(
+                        { length: SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1 + 1 },
+                        (_, index) => buildMedia(`large-${index}`),
+                    ),
+                    unavailable: [],
+                }
+                : {
+                    media: Array.from({ length: 200 }, (_, index) => buildMedia(`mixed-${index}`)),
+                    unavailable: Array.from({ length: 100 }, (_, index) => buildUnavailable(`mixed-${index}`)),
+                };
+        });
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: session as any,
+            sessionMedia: { persist: sessionMediaPersist },
+        });
+
+        await runtime.startOrLoad({});
+        await runtime.sendPrompt('bridge-generated-image');
+        await runtime.sendPrompt('bridge-generated-image');
+
+        const committedCalls = session.sendAgentMessageCommitted.mock.calls as unknown as Array<
+            [string, ACPMessageData, { meta?: { happier?: unknown } } | undefined]
+        >;
+        const mediaEnvelopes = committedCalls
+            .map(([, , options]) => (options as { meta?: { happier?: unknown } } | undefined)?.meta?.happier)
+            .filter((value): value is Record<string, unknown> => value !== null && typeof value === 'object')
+            .filter((value) => Reflect.get(value, 'kind') === 'session_media.v1');
+        expect(mediaEnvelopes).toHaveLength(2);
+        expect(mediaEnvelopes.every((envelope) => SessionMediaMessageMetaEnvelopeV1Schema.safeParse(envelope).success))
+            .toBe(true);
+
+        const firstPayload = Reflect.get(mediaEnvelopes[0]!, 'payload') as {
+            media: unknown[];
+            unavailable?: unknown[];
+        };
+        expect(firstPayload.media).toHaveLength(SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1);
+        expect(firstPayload.unavailable).toBeUndefined();
+
+        const secondPayload = Reflect.get(mediaEnvelopes[1]!, 'payload') as {
+            media: unknown[];
+            unavailable?: unknown[];
+        };
+        expect(secondPayload.media).toHaveLength(200);
+        expect(secondPayload.unavailable).toHaveLength(SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1 - 200);
+        expect(logSpy.mock.calls.filter(
+            ([message]) => message === '[codex-app-server] Bounded excess session media entries',
+        )).toEqual([
+            ['[codex-app-server] Bounded excess session media entries', {
+                droppedCount: 1,
+                maxEntries: SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1,
+            }],
+            ['[codex-app-server] Bounded excess session media entries', {
+                droppedCount: 44,
+                maxEntries: SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1,
+            }],
+        ]);
+        logSpy.mockRestore();
+    });
+
     it('dedupes repeated Codex app-server media updates before persistence', async () => {
         const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-generated-image-dedupe-');
 
@@ -3763,9 +4907,10 @@ describe('createCodexAppServerRuntime', () => {
             sendAgentMessageCommitted: vi.fn(async () => {}),
             sendCodexMessage: vi.fn(),
         };
-        const sessionMediaPersist = vi.fn(
-            async (_message: RuntimeSessionMediaMessage): Promise<readonly SessionMediaItemV1[]> => [persistedMediaItem],
-        );
+        const sessionMediaPersist = vi.fn(async (_message: RuntimeSessionMediaMessage) => ({
+            media: [persistedMediaItem],
+            unavailable: [],
+        }));
         const runtime = createCodexAppServerRuntime({
             directory: root,
             onThinkingChange: vi.fn(),
@@ -4510,6 +5655,367 @@ describe('createCodexAppServerRuntime', () => {
                 })],
             ]),
         );
+    });
+
+    it('finalizes a known child whose terminal arrives after the primary turn has cleared', async () => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-late-child-terminal-');
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const sendAgentMessage = vi.fn();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle,
+                sendAgentMessage,
+                sendAgentMessageCommitted: vi.fn(async () => {}),
+            } as any,
+        });
+
+        await runtime.startOrLoad({});
+        await runtime.sendPrompt('bridge-late-child-terminal');
+
+        expect(runtime.isTurnInFlight()).toBe(false);
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(1);
+        await waitForCondition(() => sendAgentMessage.mock.calls.some(([, message]) => (
+            message?.type === 'tool-result' && message.callId === 'thread-late-child'
+        )), {
+            timeoutMs: 1_000,
+            intervalMs: 2,
+            label: 'late child terminal finalization',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        expect(sendAgentMessage.mock.calls.filter(([, message]) => (
+            message?.type === 'tool-result' && message.callId === 'thread-late-child'
+        ))).toHaveLength(1);
+        expect(runtime.isTurnInFlight()).toBe(false);
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores an unknown mismatched terminal id until the owned provider turn completes', async () => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-finalize-mismatched-turn-');
+
+        const onThinkingChange = vi.fn();
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const sendAgentMessageCommitted = vi.fn(async (
+            _provider: string,
+            _body: { type?: string; message?: string },
+        ) => {});
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange,
+            session: { updateMetadata: vi.fn(), sessionTurnLifecycle, sendAgentMessageCommitted } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({});
+        // A terminal id that was never observed as the active provider turn is not authoritative.
+        // The real owned turn continues streaming and must retain the sole lifecycle owner.
+        await runtime.sendPrompt('ignore-unknown-mismatched-turn-completion');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        expect(runtime.isTurnInFlight()).toBe(false);
+        expect(onThinkingChange).toHaveBeenCalledWith(true);
+        expect(onThinkingChange).toHaveBeenLastCalledWith(false);
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(1);
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledWith({ provider: 'codex' });
+        expect(sendAgentMessageCommitted.mock.calls).toEqual(expect.arrayContaining([
+            [
+                'codex',
+                expect.objectContaining({
+                    type: 'message',
+                    message: 'Still owned by the active turn',
+                }),
+                expect.any(Object),
+            ],
+        ]));
+    });
+
+    it('keeps the native turn authoritative when a nonterminal error is followed by primary activity', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-nonterminal-error-owner-',
+        );
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        let observedContinuedMessage = false;
+        const sendAgentMessageCommitted = vi.fn(async (
+            _provider: string,
+            message: Readonly<{ type?: string; message?: string }>,
+            _options: unknown,
+        ) => {
+            observedContinuedMessage ||= (
+                message.type === 'message'
+                && message.message === 'Continued after usage warning'
+            );
+        });
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle,
+                sendAgentMessageCommitted,
+            } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({});
+        const prompt = runtime.sendPrompt('usage-limit-error-then-primary-activity');
+
+        await waitForCondition(() => observedContinuedMessage, {
+            timeoutMs: 2_000,
+            intervalMs: 2,
+            label: 'primary activity after nonterminal error',
+        });
+
+        expect(runtime.hasActiveProviderTurn()).toBe(true);
+        expect(runtime.isTurnInFlight()).toBe(true);
+        expect(sessionTurnLifecycle.failTurn).not.toHaveBeenCalled();
+        await expect(runtime.sendPrompt('must-not-start-second-turn'))
+            .rejects.toThrow('Codex app-server already has a turn in flight');
+
+        await runtime.steerPrompt('steer-existing-turn');
+        await runtime.cancel();
+        await expect(prompt).resolves.toBeUndefined();
+
+        const requestLog = await readRequestLog(requestLogPath);
+        expect(requestLog.filter((entry) => entry.method === 'turn/start')).toHaveLength(1);
+        expect(requestLog).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                method: 'turn/steer',
+                params: expect.objectContaining({
+                    expectedTurnId: 'turn-usage-limit-error-then-primary-activity',
+                }),
+            }),
+            expect.objectContaining({
+                method: 'turn/interrupt',
+                params: expect.objectContaining({
+                    turnId: 'turn-usage-limit-error-then-primary-activity',
+                }),
+            }),
+        ]));
+    });
+
+    it('releases the native turn when the provider process exits after a nonterminal error', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-nonterminal-error-exit-',
+        );
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle,
+            } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({});
+        const promptOutcome = runtime.sendPrompt('nonterminal-error-then-process-exit').catch((error: unknown) => error);
+
+        await waitForCondition(() => runtime.hasActiveProviderTurn(), {
+            timeoutMs: 1_000,
+            intervalMs: 2,
+            label: 'native owner before app-server exit',
+        });
+        await waitForCondition(async () => (
+            await readRequestLog(requestLogPath)
+        ).some((entry) => entry.method === 'test/process-exit'), {
+            timeoutMs: 1_000,
+            intervalMs: 2,
+            label: 'fake app-server process-exit marker',
+        });
+        await waitForCondition(() => !runtime.hasActiveProviderTurn(), {
+            timeoutMs: 1_000,
+            intervalMs: 2,
+            label: 'native owner release after app-server exit',
+        });
+
+        await expect(promptOutcome).resolves.toMatchObject({
+            message: expect.stringContaining('Codex app-server exited before completing the request'),
+        });
+        expect(runtime.isTurnInFlight()).toBe(false);
+        expect(sessionTurnLifecycle.failTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not let an unknown terminal id claim a pending turn before its provider id is observed', async () => {
+        const { root } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-unknown-terminal-before-start-response-',
+        );
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle,
+            } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({});
+        const prompt = runtime.sendPrompt('unknown-terminal-before-turn-start-response');
+        await new Promise((resolve) => setTimeout(resolve, 45));
+
+        expect(runtime.isTurnInFlight()).toBe(true);
+        expect(sessionTurnLifecycle.completeTurn).not.toHaveBeenCalled();
+
+        await prompt;
+        expect(runtime.isTurnInFlight()).toBe(false);
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it('replays an owned terminal notification after the delayed turn start response identifies it', async () => {
+        const { root } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-owned-terminal-before-start-response-',
+        );
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle,
+            } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({});
+        const completed = await Promise.race([
+            runtime.sendPrompt('owned-terminal-before-turn-start-response').then(() => true),
+            new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
+        ]);
+
+        expect(completed).toBe(true);
+        expect(runtime.isTurnInFlight()).toBe(false);
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        'owned-then-unknown-terminal-before-turn-start-response',
+        'unknown-then-owned-terminal-before-turn-start-response',
+    ])('retains the owned early terminal when competing unknown terminals arrive before start acknowledgement (%s)', async (prompt) => {
+        const { root } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-competing-terminals-before-start-response-',
+        );
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle,
+            } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({});
+        const completed = await Promise.race([
+            runtime.sendPrompt(prompt).then(() => true),
+            new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
+        ]);
+
+        expect(completed).toBe(true);
+        expect(runtime.isTurnInFlight()).toBe(false);
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        'no-id-response-unknown-before-owned-start',
+        'no-id-response-owned-terminal-before-owned-start',
+    ])('waits for authoritative provider identity before accepting a concrete terminal after an id-less start response (%s)', async (prompt) => {
+        const { root } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-idless-start-response-terminal-correlation-',
+        );
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle,
+            } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({});
+        let resolved = false;
+        const completion = runtime.sendPrompt(prompt).then(() => {
+            resolved = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 40));
+
+        expect(resolved).toBe(false);
+        expect(runtime.isTurnInFlight()).toBe(true);
+        expect(sessionTurnLifecycle.completeTurn).not.toHaveBeenCalled();
+
+        await Promise.race([
+            completion,
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out waiting for authoritative turn identity')), 500)),
+        ]);
+        expect(runtime.isTurnInFlight()).toBe(false);
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        'child-terminal-before-primary-identity-no-activity',
+        'child-terminal-after-primary-idless-activity',
+    ])('finalizes a child terminal without binding or buffering it against an unidentified primary (%s)', async (prompt) => {
+        const { root } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-child-terminal-primary-correlation-',
+        );
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const sendAgentMessage = vi.fn();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle,
+                sendAgentMessage,
+            } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({});
+        let resolved = false;
+        const completion = runtime.sendPrompt(prompt).then(() => {
+            resolved = true;
+        });
+        await waitForCondition(() => sendAgentMessage.mock.calls.some(([, message]) => (
+            message?.type === 'tool-result' && message.callId === 'thread-child-terminal'
+        )), {
+            timeoutMs: 200,
+            intervalMs: 2,
+            label: 'child terminal finalization before primary identity',
+        });
+
+        expect(resolved).toBe(false);
+        expect(runtime.isTurnInFlight()).toBe(true);
+        expect(sessionTurnLifecycle.completeTurn).not.toHaveBeenCalled();
+        expect(sendAgentMessage.mock.calls).toEqual(expect.arrayContaining([
+            ['codex', expect.objectContaining({
+                type: 'tool-result',
+                callId: 'thread-child-terminal',
+                output: expect.objectContaining({
+                    status: 'completed',
+                    threadId: 'thread-child-terminal',
+                }),
+            })],
+        ]));
+
+        await Promise.race([
+            completion,
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out waiting for the primary terminal')), 1_000)),
+        ]);
+        expect(runtime.isTurnInFlight()).toBe(false);
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(1);
     });
 
     it('bridges approval and request-user-input server requests through the permission handler', async () => {
@@ -5490,7 +6996,15 @@ describe('createCodexAppServerRuntime', () => {
         });
 
         await runtime.startOrLoad({});
-        await expect(runtime.compactContext('/compact')).resolves.toBeUndefined();
+        const compactPromise = runtime.compactContext('/compact');
+        await waitForCondition(() => runtime.isTurnInFlight(), {
+            timeoutMs: 1_000,
+            intervalMs: 1,
+            label: 'manual compaction enters active control turn',
+        });
+        expect(runtime.canSteerPrompt()).toBe(false);
+        await expect(runtime.steerPrompt('must-remain-queued-during-manual-compaction')).rejects.toThrow(/not steerable/i);
+        await expect(compactPromise).resolves.toBeUndefined();
 
         const requestLog = (await readFile(requestLogPath, 'utf8'))
             .split('\n')
@@ -5607,6 +7121,17 @@ describe('createCodexAppServerRuntime', () => {
         const runtime = createCodexAppServerRuntime({
             directory: root,
             processEnv,
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_group_seed',
+                accountLabel: null,
+                profileId: 'leeroy',
+                groupId: 'happier',
+                generation: 7,
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+                credentialFingerprint: 'sha256:group001',
+                source: 'spawn_selection',
+            },
             onThinkingChange: vi.fn(),
             session: {
                 updateMetadata: vi.fn(),
@@ -5624,6 +7149,8 @@ describe('createCodexAppServerRuntime', () => {
                 serviceId: 'openai-codex',
                 profileId: 'leeroy',
                 groupId: 'happier',
+                groupGeneration: 7,
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
             },
         });
         expect(sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
@@ -5642,7 +7169,266 @@ describe('createCodexAppServerRuntime', () => {
         }));
     });
 
-    it('recovers connected-service group context from session metadata when env selection is absent', async () => {
+    it('attributes a delayed turn failure to frozen auth while keeping a later prompt eligible on hot-applied auth', async () => {
+        const { root, fakeAppServer, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-turn-identity-race-',
+            { accountReadResult: { account: { id: 'acct_replacement', email: 'replacement@example.test' } } },
+        );
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        let metadata: Metadata = {
+            path: root,
+            host: 'test-host',
+            homeDir: root,
+            happyHomeDir: join(root, '.happier'),
+            happyLibDir: join(root, '.happier', 'lib'),
+            happyToolsDir: join(root, '.happier', 'tools'),
+        };
+        (metadata as Record<string, unknown>).connectedServices = {
+            v: 1,
+            bindingsByServiceId: {
+                'openai-codex': {
+                    source: 'connected',
+                    selection: 'group',
+                    groupId: 'happier',
+                    profileId: 'original',
+                },
+            },
+        };
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            processEnv: createCodexAppServerProcessEnv(fakeAppServer),
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_original',
+                accountLabel: 'original@example.test',
+                profileId: 'original',
+                groupId: 'happier',
+                generation: 7,
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+                credentialFingerprint: 'sha256:11111111',
+                source: 'spawn_selection',
+            },
+            onThinkingChange: vi.fn(),
+            onConnectedServiceAuthGenerationApplied: vi.fn(async () => {}),
+            session: {
+                sessionId: 'session-turn-identity-race',
+                updateMetadata: vi.fn(async (handler: (current: Metadata) => Metadata) => {
+                    metadata = handler(metadata);
+                }),
+                sessionTurnLifecycle,
+                getMetadataSnapshot: () => metadata,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+        const replacement = buildConnectedServiceCredentialRecord({
+            now: 1_000,
+            serviceId: 'openai-codex',
+            profileId: 'replacement',
+            kind: 'oauth',
+            expiresAt: 2_000,
+            oauth: {
+                accessToken: 'replacement-access',
+                refreshToken: 'replacement-refresh',
+                idToken: 'replacement-id',
+                scope: null,
+                tokenType: null,
+                providerAccountId: 'acct_replacement',
+                providerEmail: 'replacement@example.test',
+            },
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            const failedTurn = runtime.sendPrompt('usage-limit-after-mid-turn-auth-apply');
+            await waitForCondition(async () => {
+                const requestLog = await readRequestLog(requestLogPath);
+                return requestLog.some((entry) => entry.method === 'turn/start');
+            }, {
+                timeoutMs: 1_000,
+                intervalMs: 10,
+                label: 'provider turn to start before connected-service auth apply',
+            });
+
+            const runtimeControls = runtime as typeof runtime & {
+                applyConnectedServiceAuthGeneration: (request: unknown) => Promise<unknown>;
+            };
+            await expect(runtimeControls.applyConnectedServiceAuthGeneration({
+                serviceId: 'openai-codex',
+                reason: 'same_provider_account_exhausted',
+                requireDirectLiveHotApply: true,
+                expected: {
+                    profileId: 'replacement',
+                    groupId: 'happier',
+                    generation: 8,
+                    credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
+                },
+                authGeneration: {
+                    credential: replacement,
+                    selection: {
+                        kind: 'group',
+                        serviceId: 'openai-codex',
+                        groupId: 'happier',
+                        activeProfileId: 'replacement',
+                        fallbackProfileId: 'original',
+                        generation: 8,
+                    },
+                    forcedWorkspaceId: null,
+                },
+            })).resolves.toMatchObject({ ok: true, activeAccountId: 'acct_replacement' });
+            (metadata as Record<string, unknown>).connectedServices = {
+                v: 1,
+                bindingsByServiceId: {
+                    'openai-codex': {
+                        source: 'connected',
+                        selection: 'group',
+                        groupId: 'happier',
+                        profileId: 'replacement',
+                    },
+                },
+            };
+
+            await expect(failedTurn).rejects.toMatchObject({
+                runtimeAuthClassification: {
+                    kind: 'usage_limit',
+                    profileId: 'original',
+                    groupId: 'happier',
+                    groupGeneration: 7,
+                    credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+                    sourceProviderAccountId: 'acct_original',
+                    sourceAccountLabel: 'original@example.test',
+                    failingAccessTokenFingerprint: 'sha256:11111111',
+                },
+            });
+
+            await expect(runtime.sendPrompt('ordinary-prompt-after-superseded-failure')).resolves.toBeUndefined();
+            await expect((runtime as unknown as {
+                readConnectedServiceRuntimeIdentity: (request: unknown) => Promise<unknown>;
+            }).readConnectedServiceRuntimeIdentity({
+                serviceId: 'openai-codex',
+                reason: 'diagnostic',
+                expected: {
+                    profileId: 'replacement',
+                    groupId: 'happier',
+                    generation: 8,
+                },
+                requireExactProof: true,
+            })).resolves.toMatchObject({
+                ok: true,
+                runtime: {
+                    profileId: 'replacement',
+                    groupId: 'happier',
+                    generation: 8,
+                    credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
+                },
+            });
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('keeps provider-started turn failures provisional when auth changes before first observation', async () => {
+        const { root, fakeAppServer } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-provider-started-identity-race-',
+            {
+                emitGoalContinuationUsageLimitFailure: true,
+                accountReadResult: {
+                    account: { id: 'acct_replacement', email: 'replacement@example.test' },
+                },
+            },
+        );
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            processEnv: createCodexAppServerProcessEnv(fakeAppServer),
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_original',
+                accountLabel: 'original@example.test',
+                profileId: 'original',
+                groupId: 'happier',
+                generation: 7,
+                credentialFingerprint: 'sha256:11111111',
+                source: 'spawn_selection',
+            },
+            onThinkingChange: vi.fn(),
+            onConnectedServiceAuthGenerationApplied: vi.fn(async () => {}),
+            session: {
+                sessionId: 'session-provider-started-identity-race',
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+        const replacement = buildConnectedServiceCredentialRecord({
+            now: 1_000,
+            serviceId: 'openai-codex',
+            profileId: 'replacement',
+            kind: 'oauth',
+            expiresAt: 2_000,
+            oauth: {
+                accessToken: 'replacement-access',
+                refreshToken: 'replacement-refresh',
+                idToken: 'replacement-id',
+                scope: null,
+                tokenType: null,
+                providerAccountId: 'acct_replacement',
+                providerEmail: 'replacement@example.test',
+            },
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await (runtime as unknown as { setGoal: (objective: string) => Promise<void> })
+                .setGoal('Continue autonomously under the current credential');
+            const runtimeControls = runtime as typeof runtime & {
+                applyConnectedServiceAuthGeneration: (request: unknown) => Promise<unknown>;
+            };
+            await expect(runtimeControls.applyConnectedServiceAuthGeneration({
+                serviceId: 'openai-codex',
+                reason: 'same_provider_account_exhausted',
+                requireDirectLiveHotApply: true,
+                expected: { profileId: 'replacement', groupId: 'happier', generation: 8 },
+                authGeneration: {
+                    credential: replacement,
+                    selection: {
+                        kind: 'group',
+                        serviceId: 'openai-codex',
+                        groupId: 'happier',
+                        activeProfileId: 'replacement',
+                        fallbackProfileId: 'original',
+                        generation: 8,
+                    },
+                    forcedWorkspaceId: null,
+                },
+            })).resolves.toMatchObject({ ok: true, activeAccountId: 'acct_replacement' });
+
+            await waitForCondition(() => vi.mocked(sessionTurnLifecycle.failTurn).mock.calls.length > 0, {
+                timeoutMs: 1_000,
+                intervalMs: 10,
+                label: 'provider-started usage-limit failure after auth observation race',
+            });
+            expect(sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
+                provider: 'codex',
+                issue: expect.objectContaining({
+                    source: 'usage_limit',
+                    usageLimit: expect.objectContaining({
+                        recoverability: 'wait',
+                        connectedService: {
+                            serviceId: 'openai-codex',
+                            profileId: null,
+                            groupId: null,
+                        },
+                    }),
+                }),
+            }));
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('does not infer connected-service failure identity from mutable session metadata', async () => {
         const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-limit-metadata-group-');
         const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
         const metadata: Metadata = {
@@ -5683,8 +7469,8 @@ describe('createCodexAppServerRuntime', () => {
             runtimeAuthClassification: {
                 kind: 'usage_limit',
                 serviceId: 'openai-codex',
-                profileId: 'leeroy',
-                groupId: 'happier',
+                profileId: null,
+                groupId: null,
             },
         });
         expect(sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
@@ -5692,11 +7478,11 @@ describe('createCodexAppServerRuntime', () => {
             issue: expect.objectContaining({
                 source: 'usage_limit',
                 usageLimit: expect.objectContaining({
-                    recoverability: 'switch_account',
+                    recoverability: 'wait',
                     connectedService: {
                         serviceId: 'openai-codex',
-                        profileId: 'leeroy',
-                        groupId: 'happier',
+                        profileId: null,
+                        groupId: null,
                     },
                 }),
             }),
@@ -5719,7 +7505,7 @@ describe('createCodexAppServerRuntime', () => {
             },
         });
         const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
-        const metadata: Metadata = {
+        let metadata: Metadata = {
             path: root,
             host: 'test-host',
             homeDir: root,
@@ -5772,6 +7558,7 @@ describe('createCodexAppServerRuntime', () => {
                 profileId: 'backup',
                 groupId: 'happier',
                 generation: 7,
+                credentialFingerprint: 'sha256:deadbeef',
                 source: 'spawn_selection',
             },
             onThinkingChange: vi.fn(),
@@ -5779,7 +7566,9 @@ describe('createCodexAppServerRuntime', () => {
             onUsageLimitGroupRecovery,
             session: {
                 sessionId: 'session-stale-env-group',
-                updateMetadata: vi.fn(),
+                updateMetadata: vi.fn(async (updater: (current: Metadata) => Metadata) => {
+                    metadata = updater(metadata);
+                }),
                 sessionTurnLifecycle,
                 getMetadataSnapshot: () => metadata,
                 sendCodexMessage: vi.fn(),
@@ -5799,6 +7588,7 @@ describe('createCodexAppServerRuntime', () => {
                     groupGeneration: 7,
                     sourceProviderAccountId: 'acct_team_seeded',
                     sourceAccountLabel: 'team@example.test',
+                    failingAccessTokenFingerprint: 'sha256:deadbeef',
                 },
             });
             expect(sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
@@ -5825,6 +7615,14 @@ describe('createCodexAppServerRuntime', () => {
                 activeAccountId: 'acct_team_seeded',
                 accountLabel: 'team@example.test',
                 rawResetCredits: null,
+                appliedIdentity: expect.objectContaining({
+                    serviceId: 'openai-codex',
+                    profileId: 'backup',
+                    groupId: 'happier',
+                    groupGeneration: 7,
+                    activeAccountId: 'acct_team_seeded',
+                }),
+                policyDisposition: 'evidence_only',
             });
             const requestLogBeforeManualCheck = await readRequestLog(requestLogPath);
             expect(requestLogBeforeManualCheck.map((entry) => entry.method)).toEqual(expect.arrayContaining([
@@ -5868,7 +7666,7 @@ describe('createCodexAppServerRuntime', () => {
         }
     });
 
-    it('prefers fresh live account id over seeded runtime identity for rate-limit snapshot attribution', async () => {
+    it('fails closed instead of joining a mismatched live account to the seeded profile and generation', async () => {
         const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-limit-live-account-id-', {
             rateLimitReadResult: {
                 plan_type: 'pro',
@@ -5923,6 +7721,7 @@ describe('createCodexAppServerRuntime', () => {
                 profileId: 'backup',
                 groupId: 'happier',
                 generation: 7,
+                credentialFingerprint: 'sha256:seeded1',
                 source: 'spawn_selection',
             },
             onThinkingChange: vi.fn(),
@@ -5967,9 +7766,10 @@ describe('createCodexAppServerRuntime', () => {
                     resets_at: '2026-05-17T12:00:00.000Z',
                 },
             }, {
-                activeAccountId: 'acct_live_codex',
-                accountLabel: 'live@example.test',
+                activeAccountId: null,
+                accountLabel: null,
                 rawResetCredits: null,
+                policyDisposition: 'evidence_only',
             });
             await expect((runtime as any).readConnectedServiceRuntimeIdentity({
                 serviceId: 'openai-codex',
@@ -5980,20 +7780,10 @@ describe('createCodexAppServerRuntime', () => {
                     generation: 7,
                 },
                 requireExactProof: true,
-            })).resolves.toMatchObject({
-                ok: true,
-                identity: {
-                    strategy: 'provider_account_id',
-                    proofStrength: 'exact',
-                    providerAccountId: 'acct_live_codex',
-                    accountLabel: 'live@example.test',
-                    source: 'live_account_read',
-                },
-                runtime: {
-                    profileId: 'backup',
-                    groupId: 'happier',
-                    generation: 7,
-                },
+            })).resolves.toEqual({
+                ok: false,
+                errorCode: 'runtime_identity_probe_missing_exact_identity',
+                error: 'runtime_identity_probe_missing_exact_identity',
             });
         } finally {
             await runtime.reset();
@@ -6070,6 +7860,16 @@ describe('createCodexAppServerRuntime', () => {
         const runtime = createCodexAppServerRuntime({
             directory: root,
             processEnv,
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_bot',
+                accountLabel: 'bot@example.test',
+                profileId: 'bot',
+                groupId: 'happier',
+                generation: 9,
+                credentialFingerprint: 'sha256:b0b0b0b0',
+                source: 'spawn_selection',
+            },
             onThinkingChange: vi.fn(),
             session: {
                 sessionId: 'session-refresh-token-reused',
@@ -6131,6 +7931,16 @@ describe('createCodexAppServerRuntime', () => {
         const runtime = createCodexAppServerRuntime({
             directory: root,
             processEnv,
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_bot',
+                accountLabel: 'bot@example.test',
+                profileId: 'bot',
+                groupId: 'happier',
+                generation: 9,
+                credentialFingerprint: 'sha256:b0b0b0b0',
+                source: 'spawn_selection',
+            },
             onThinkingChange: vi.fn(),
             session: {
                 sessionId: 'session-early-usage-limit',
@@ -6171,7 +7981,10 @@ describe('createCodexAppServerRuntime', () => {
                 }),
             }),
         ]));
-        expect(onPromptAcceptedByProvider).not.toHaveBeenCalled();
+        expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
+            providerTurnId: 'turn-usage-limit-before-turn-response',
+            userMessageSeq: 50,
+        });
     });
 
     it('arms usage-limit wait/resume from the latest issue and probes Codex rate limits on check-now', async () => {
@@ -6274,6 +8087,347 @@ describe('createCodexAppServerRuntime', () => {
                 sessionUsageLimitRecoveryV1: {
                     status: 'cancelled',
                 },
+            });
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('allocates distinct same-millisecond epochs through the production metadata transaction and preserves them across restart', async () => {
+        const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-cas-');
+        const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+        let metadata: Metadata = {
+            ...createRuntimeMetadata(root),
+            sessionUsageLimitRecoveryV1: {
+                v: 1,
+                status: 'waiting',
+                issueFingerprint: 'base-issue',
+                armedAtMs: 999,
+                resetAtMs: 5_000,
+                nextCheckAtMs: 5_000,
+                attemptCount: 0,
+                maxAttempts: 3,
+                lastProbeError: null,
+                resumePromptMode: 'standard',
+                selectedAuth: { kind: 'native' },
+            },
+        };
+        const pendingUpdates: Array<Readonly<{
+            commit: () => void;
+        }>> = [];
+        let holdUsageUpdates = false;
+        const updateMetadata = vi.fn(async (handler: (current: Metadata) => Metadata) => {
+            if (!holdUsageUpdates) {
+                metadata = handler(metadata);
+                return;
+            }
+            await new Promise<void>((resolve, reject) => {
+                pendingUpdates.push({
+                    commit: () => {
+                        try {
+                            metadata = handler(metadata);
+                            resolve();
+                        } catch (error) {
+                            reject(error);
+                        }
+                    },
+                });
+            });
+        });
+        const createRuntime = () => createCodexAppServerRuntime({
+            directory: root,
+            processEnv: createCodexAppServerProcessEnv(fakeAppServer),
+            onThinkingChange: vi.fn(),
+            session: {
+                sessionId: 'session-usage-cas',
+                updateMetadata,
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                getMetadataSnapshot: () => metadata,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+        const olderRuntime = createRuntime();
+        const newerRuntime = createRuntime();
+
+        try {
+            await Promise.all([olderRuntime.startOrLoad({}), newerRuntime.startOrLoad({})]);
+            await Promise.all([
+                expect(olderRuntime.sendPrompt('usage-limit-structured')).rejects.toMatchObject({ runtimeAuthClassification: { kind: 'usage_limit' } }),
+                expect(newerRuntime.sendPrompt('usage-limit-structured')).rejects.toMatchObject({ runtimeAuthClassification: { kind: 'usage_limit' } }),
+            ]);
+            const olderControls = olderRuntime as typeof olderRuntime & {
+                enableUsageLimitWaitResume: (request: { sessionId: string; issueFingerprint: string }) => Promise<unknown>;
+            };
+            const newerControls = newerRuntime as typeof newerRuntime & {
+                enableUsageLimitWaitResume: (request: { sessionId: string; issueFingerprint: string }) => Promise<unknown>;
+            };
+
+            holdUsageUpdates = true;
+            const older = olderControls.enableUsageLimitWaitResume({
+                sessionId: 'session-usage-cas',
+                issueFingerprint: 'z-older',
+            });
+            const newer = newerControls.enableUsageLimitWaitResume({
+                sessionId: 'session-usage-cas',
+                issueFingerprint: 'a-newer',
+            });
+            await waitForCondition(() => pendingUpdates.length === 2, {
+                timeoutMs: 1_000,
+                label: 'two production usage-limit metadata transactions',
+            });
+            pendingUpdates[0]!.commit();
+            const olderResult = await older;
+            pendingUpdates[1]!.commit();
+            const newerResult = await newer;
+
+            expect(olderResult).toMatchObject({ ok: true, recovery: { issueFingerprint: 'z-older', armedAtMs: 1_000 } });
+            expect(newerResult).toMatchObject({ ok: true, recovery: { issueFingerprint: 'a-newer', armedAtMs: 1_001 } });
+            expect(metadata).toMatchObject({
+                sessionUsageLimitRecoveryV1: { issueFingerprint: 'a-newer', armedAtMs: 1_001 },
+            });
+
+            await Promise.all([olderRuntime.reset(), newerRuntime.reset()]);
+            holdUsageUpdates = false;
+            const replacement = createRuntime();
+            try {
+                await replacement.startOrLoad({});
+                await expect(replacement.sendPrompt('usage-limit-structured')).rejects.toMatchObject({ runtimeAuthClassification: { kind: 'usage_limit' } });
+                const replacementControls = replacement as typeof replacement & {
+                    enableUsageLimitWaitResume: (request: { sessionId: string; issueFingerprint: string }) => Promise<unknown>;
+                };
+                await expect(replacementControls.enableUsageLimitWaitResume({
+                    sessionId: 'session-usage-cas',
+                    issueFingerprint: 'm-after-restart',
+                })).resolves.toMatchObject({
+                    ok: true,
+                    recovery: { issueFingerprint: 'm-after-restart', armedAtMs: 1_002 },
+                });
+            } finally {
+                await replacement.reset();
+            }
+        } finally {
+            nowSpy.mockRestore();
+            await Promise.allSettled([olderRuntime.reset(), newerRuntime.reset()]);
+        }
+    });
+
+    it('reports a superseded exact cancel when attempt B commits between attempt A observation and settlement', async () => {
+        const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-cancel-cas-');
+        const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_001);
+        let metadata: Metadata = createRuntimeMetadata(root);
+        const pendingUpdates: Array<Readonly<{ commit: () => void }>> = [];
+        let holdUsageUpdates = false;
+        const updateMetadata = vi.fn(async (handler: (current: Metadata) => Metadata) => {
+            if (!holdUsageUpdates) {
+                metadata = handler(metadata);
+                return;
+            }
+            await new Promise<void>((resolve, reject) => {
+                pendingUpdates.push({
+                    commit: () => {
+                        try {
+                            metadata = handler(metadata);
+                            resolve();
+                        } catch (error) {
+                            reject(error);
+                        }
+                    },
+                });
+            });
+        });
+        const createRuntime = () => createCodexAppServerRuntime({
+            directory: root,
+            processEnv: createCodexAppServerProcessEnv(fakeAppServer),
+            onThinkingChange: vi.fn(),
+            session: {
+                sessionId: 'session-usage-cancel-cas',
+                updateMetadata,
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                getMetadataSnapshot: () => metadata,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+        const cancellingRuntime = createRuntime();
+        const rearmingRuntime = createRuntime();
+
+        try {
+            await Promise.all([cancellingRuntime.startOrLoad({}), rearmingRuntime.startOrLoad({})]);
+            await expect(rearmingRuntime.sendPrompt('usage-limit-structured')).rejects.toMatchObject({ runtimeAuthClassification: { kind: 'usage_limit' } });
+            metadata = {
+                ...createRuntimeMetadata(root),
+                sessionUsageLimitRecoveryV1: {
+                    v: 1,
+                    status: 'waiting',
+                    issueFingerprint: 'attempt-a',
+                    armedAtMs: 1_000,
+                    resetAtMs: 5_000,
+                    nextCheckAtMs: 5_000,
+                    attemptCount: 0,
+                    maxAttempts: 3,
+                    lastProbeError: null,
+                    resumePromptMode: 'standard',
+                    selectedAuth: { kind: 'native' },
+                },
+            };
+            const cancelControls = cancellingRuntime as typeof cancellingRuntime & {
+                cancelUsageLimitWaitResume: (request: { sessionId: string; issueFingerprint: string; armedAtMs: number }) => Promise<unknown>;
+            };
+            const rearmControls = rearmingRuntime as typeof rearmingRuntime & {
+                enableUsageLimitWaitResume: (request: { sessionId: string; issueFingerprint: string }) => Promise<unknown>;
+                cancelUsageLimitWaitResume: (request: { sessionId: string; issueFingerprint: string; armedAtMs: number }) => Promise<unknown>;
+            };
+
+            holdUsageUpdates = true;
+            const cancelA = cancelControls.cancelUsageLimitWaitResume({
+                sessionId: 'session-usage-cancel-cas',
+                issueFingerprint: 'attempt-a',
+                armedAtMs: 1_000,
+            });
+            await waitForCondition(() => pendingUpdates.length === 1, { timeoutMs: 1_000, label: 'attempt A cancel transaction' });
+            const enableB = rearmControls.enableUsageLimitWaitResume({
+                sessionId: 'session-usage-cancel-cas',
+                issueFingerprint: 'attempt-b',
+            });
+            await waitForCondition(() => pendingUpdates.length === 2, { timeoutMs: 1_000, label: 'attempt B rearm transaction' });
+            pendingUpdates[1]!.commit();
+            const enabledB = await enableB as { recovery: { armedAtMs: number } };
+            pendingUpdates[0]!.commit();
+
+            await expect(cancelA).resolves.toMatchObject({
+                ok: false,
+                errorCode: 'usage_limit_recovery_attempt_superseded',
+            });
+            expect(metadata).toMatchObject({
+                sessionUsageLimitRecoveryV1: { issueFingerprint: 'attempt-b', armedAtMs: enabledB.recovery.armedAtMs, status: 'waiting' },
+            });
+
+            holdUsageUpdates = false;
+            await expect(rearmControls.cancelUsageLimitWaitResume({
+                sessionId: 'session-usage-cancel-cas',
+                issueFingerprint: 'attempt-b',
+                armedAtMs: enabledB.recovery.armedAtMs,
+            })).resolves.toMatchObject({ ok: true, recovery: { status: 'cancelled' } });
+        } finally {
+            nowSpy.mockRestore();
+            await Promise.allSettled([cancellingRuntime.reset(), rearmingRuntime.reset()]);
+        }
+    });
+
+    it('returns a typed failure when the production usage-limit metadata transaction cannot persist', async () => {
+        const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-persist-failure-');
+        let metadata: Metadata = createRuntimeMetadata(root);
+        let failUsagePersistence = false;
+        const updateMetadata = vi.fn(async (handler: (current: Metadata) => Metadata) => {
+            const next = handler(metadata);
+            if (failUsagePersistence && SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY in next) {
+                throw new Error('metadata persistence unavailable');
+            }
+            metadata = next;
+        });
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            processEnv: createCodexAppServerProcessEnv(fakeAppServer),
+            onThinkingChange: vi.fn(),
+            session: {
+                sessionId: 'session-usage-persist-failure',
+                updateMetadata,
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                getMetadataSnapshot: () => metadata,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await expect(runtime.sendPrompt('usage-limit-structured')).rejects.toMatchObject({ runtimeAuthClassification: { kind: 'usage_limit' } });
+            failUsagePersistence = true;
+            const controls = runtime as typeof runtime & {
+                enableUsageLimitWaitResume: (request: { sessionId: string; issueFingerprint: string }) => Promise<unknown>;
+            };
+            await expect(controls.enableUsageLimitWaitResume({
+                sessionId: 'session-usage-persist-failure',
+                issueFingerprint: 'persist-failure',
+            })).resolves.toMatchObject({
+                ok: false,
+                errorCode: 'usage_limit_recovery_persistence_failed',
+            });
+            expect(metadata).not.toHaveProperty(SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY);
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it.each([
+        ['mismatched generation', JSON.stringify({ daemonExecutionGenerationV1: 'daemon-after-restart' })],
+        ['malformed JSON', '{'],
+        ['non-string generation field', JSON.stringify({ daemonExecutionGenerationV1: ['daemon-before-restart'] })],
+        ['missing daemon state', null],
+    ])('keeps a surviving runner automatic usage-limit retry active across %s', async (_label, daemonStateContents) => {
+        const { root, fakeAppServer, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-stale-daemon-usage-recovery-',
+        );
+        const daemonStatePath = join(root, 'daemon.state.json');
+        if (daemonStateContents !== null) {
+            await writeFile(daemonStatePath, daemonStateContents);
+        }
+        let metadata: Metadata = {
+            path: root,
+            host: 'test-host',
+            homeDir: root,
+            happyHomeDir: join(root, '.happier'),
+            happyLibDir: join(root, '.happier', 'lib'),
+            happyToolsDir: join(root, '.happier', 'tools'),
+        };
+        const updateMetadata = vi.fn(async (handler: (current: Metadata) => Metadata) => {
+            metadata = handler(metadata);
+        });
+        const processEnv = createCodexAppServerProcessEnv(fakeAppServer, {
+            CODEX_HOME: join(root, 'codex-home'),
+            OPENAI_API_KEY: 'test-openai-key',
+            HAPPIER_DAEMON_EXECUTION_GENERATION_V1: 'daemon-before-restart',
+        });
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            daemonStatePath,
+            processEnv,
+            onThinkingChange: vi.fn(),
+            session: {
+                sessionId: 'session-stale-daemon-usage-recovery',
+                updateMetadata,
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                getMetadataSnapshot: () => metadata,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await expect(runtime.sendPrompt('usage-limit-structured')).rejects.toMatchObject({
+                runtimeAuthClassification: { kind: 'usage_limit' },
+            });
+            const runtimeControls = runtime as typeof runtime & {
+                enableUsageLimitWaitResume?: (request: { sessionId: string }) => Promise<unknown>;
+                checkUsageLimitRecoveryNow?: (request: { sessionId: string }) => Promise<unknown>;
+            };
+
+            await runtimeControls.enableUsageLimitWaitResume?.({
+                sessionId: 'session-stale-daemon-usage-recovery',
+            });
+            await waitForCondition(async () => (
+                (await readRequestLog(requestLogPath)).filter((entry) => entry.method === 'thread/resume').length === 1
+            ), {
+                timeoutMs: 2_000,
+                label: 'surviving-runner usage recovery to continue',
+            });
+
+            const requestLog = await readRequestLog(requestLogPath);
+            expect(requestLog.filter((entry) => entry.method === 'thread/resume')).toHaveLength(1);
+            expect(metadata).toMatchObject({
+                sessionUsageLimitRecoveryV1: { status: 'cancelled' },
             });
         } finally {
             await runtime.reset();
@@ -6428,15 +8582,20 @@ describe('createCodexAppServerRuntime', () => {
             metadata = handler(metadata);
         });
         const onUsageLimitGroupRecovery = vi.fn(async () => ({
-            ok: true,
-            result: {
-                status: 'switch_attempted',
+            handled: true,
+            statusCode: null,
+            statusMessage: null,
+            report: {
+                ok: true,
                 result: {
-                    status: 'switched',
-                    activeProfileId: 'backup',
-                    generation: 2,
-                    verificationByServiceId: {
-                        'openai-codex': { status: 'verified', reason: 'active_account_match' },
+                    status: 'switch_attempted',
+                    result: {
+                        status: 'switched',
+                        activeProfileId: 'backup',
+                        generation: 2,
+                        verificationByServiceId: {
+                            'openai-codex': { status: 'verified', reason: 'active_account_match' },
+                        },
                     },
                 },
             },
@@ -6496,12 +8655,12 @@ describe('createCodexAppServerRuntime', () => {
 
             await expect(runtimeControls.checkUsageLimitRecoveryNow?.({ sessionId: 'session-usage-group-recovery' })).resolves.toMatchObject({
                 ok: true,
-                status: 'waiting',
+                status: 'ready',
             });
             expect(metadata).toMatchObject({
                 sessionUsageLimitRecoveryV1: {
-                    status: 'waiting',
-                    nextCheckAtMs: expect.any(Number),
+                    status: 'paused',
+                    nextCheckAtMs: null,
                     selectedAuth: {
                         kind: 'group',
                         serviceId: 'openai-codex',
@@ -6510,8 +8669,6 @@ describe('createCodexAppServerRuntime', () => {
                     },
                 },
             });
-            const recovery = (metadata as Record<string, unknown>)[SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY] as { nextCheckAtMs?: number };
-            expect(recovery.nextCheckAtMs).toBeLessThanOrEqual(Date.now());
             expect(onUsageLimitGroupRecovery).toHaveBeenCalledWith({
                 sessionId: 'session-usage-group-recovery',
                 classification: expect.objectContaining({
@@ -6550,14 +8707,19 @@ describe('createCodexAppServerRuntime', () => {
             metadata = handler(metadata);
         });
         const onUsageLimitGroupRecovery = vi.fn(async () => ({
-            ok: true,
-            result: {
-                status: 'switch_attempted',
+            handled: true,
+            statusCode: null,
+            statusMessage: null,
+            report: {
+                ok: true,
                 result: {
-                    status: 'generation_apply_failed',
-                    activeProfileId: 'backup',
-                    generation: 2,
-                    errorCode: 'provider_session_state_unavailable_for_resume',
+                    status: 'switch_attempted',
+                    result: {
+                        status: 'generation_apply_failed',
+                        activeProfileId: 'backup',
+                        generation: 2,
+                        errorCode: 'provider_session_state_unavailable_for_resume',
+                    },
                 },
             },
         }));
@@ -6692,6 +8854,376 @@ describe('createCodexAppServerRuntime', () => {
         }
     });
 
+    it('routes a source-real token_invalidated quota-probe verdict into connected credential recovery', async () => {
+        const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-probe-token-invalid-', {
+            rateLimitReadError: {
+                code: -32000,
+                message: 'unexpected status 401 Unauthorized: authentication token has been invalidated; auth error code: token_invalidated',
+            },
+        });
+        let metadata: Metadata = {
+            path: root,
+            host: 'test-host',
+            homeDir: root,
+            happyHomeDir: join(root, '.happier'),
+            happyLibDir: join(root, '.happier', 'lib'),
+            happyToolsDir: join(root, '.happier', 'tools'),
+        };
+        const updateMetadata = vi.fn(async (handler: (current: Metadata) => Metadata) => {
+            metadata = handler(metadata);
+        });
+        const onUsageLimitGroupRecovery = vi.fn(async () => ({
+            handled: true,
+            statusCode: null,
+            statusMessage: null,
+            report: {
+                ok: true,
+                result: { status: 'recovery_action_required', action: { kind: 'reconnect_profile' } },
+            },
+        }));
+        const processEnv = createCodexAppServerProcessEnv(fakeAppServer, {
+            CODEX_HOME: join(root, 'codex-home'),
+            OPENAI_API_KEY: 'test-openai-key',
+            [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+                kind: 'group',
+                serviceId: 'openai-codex',
+                groupId: 'team',
+                activeProfileId: 'primary',
+                fallbackProfileId: 'primary',
+                generation: 7,
+            }]),
+        });
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            processEnv,
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_primary',
+                accountLabel: null,
+                profileId: 'primary',
+                groupId: 'team',
+                generation: 7,
+                credentialFingerprint: 'sha256:primary1',
+                source: 'spawn_selection',
+            },
+            onThinkingChange: vi.fn(),
+            onUsageLimitGroupRecovery,
+            session: {
+                sessionId: 'session-usage-probe-token-invalid',
+                updateMetadata,
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                getMetadataSnapshot: () => metadata,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await expect(runtime.sendPrompt('usage-limit-structured')).rejects.toMatchObject({
+                runtimeAuthClassification: { kind: 'usage_limit' },
+            });
+            const runtimeControls = runtime as typeof runtime & {
+                enableUsageLimitWaitResume?: (request: { sessionId: string }) => Promise<unknown>;
+                checkUsageLimitRecoveryNow?: (request: { sessionId: string }) => Promise<unknown>;
+            };
+            await runtimeControls.enableUsageLimitWaitResume?.({
+                sessionId: 'session-usage-probe-token-invalid',
+            });
+
+            await expect(runtimeControls.checkUsageLimitRecoveryNow?.({
+                sessionId: 'session-usage-probe-token-invalid',
+            })).resolves.toMatchObject({ ok: true, status: 'exhausted' });
+            expect(onUsageLimitGroupRecovery).toHaveBeenCalledWith({
+                sessionId: 'session-usage-probe-token-invalid',
+                classification: expect.objectContaining({
+                    kind: 'auth_expired',
+                    serviceId: 'openai-codex',
+                    profileId: 'primary',
+                    groupId: 'team',
+                    groupGeneration: 7,
+                }),
+            });
+            expect(metadata).toMatchObject({
+                sessionUsageLimitRecoveryV1: {
+                    status: 'exhausted',
+                    lastProbeError: 'connected_service_probe_credential_recovery_committed',
+                },
+            });
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it.each(['recovery_retry_scheduled', 'recovery_handler_failed', 'action_required'] as const)(
+      'keeps waiting when token_invalidated recovery reports %s without a committed disposition',
+      async (recoveryStatus) => {
+        const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-probe-token-invalid-unhandled-', {
+            rateLimitReadError: {
+                code: -32000,
+                message: 'unexpected status 401 Unauthorized: authentication token has been invalidated; auth error code: token_invalidated',
+            },
+        });
+        let metadata: Metadata = {
+            path: root,
+            host: 'test-host',
+            homeDir: root,
+            happyHomeDir: join(root, '.happier'),
+            happyLibDir: join(root, '.happier', 'lib'),
+            happyToolsDir: join(root, '.happier', 'tools'),
+        };
+        const onUsageLimitGroupRecovery = vi.fn(async () => ({
+            handled: true,
+            report: { ok: true, result: { status: recoveryStatus } },
+            statusCode: null,
+            statusMessage: null,
+        }));
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            processEnv: createCodexAppServerProcessEnv(fakeAppServer, {
+                CODEX_HOME: join(root, 'codex-home'),
+                OPENAI_API_KEY: 'test-openai-key',
+                [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+                    kind: 'group', serviceId: 'openai-codex', groupId: 'team', activeProfileId: 'primary', generation: 7,
+                }]),
+            }),
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_primary',
+                accountLabel: null,
+                profileId: 'primary',
+                groupId: 'team',
+                generation: 7,
+                credentialFingerprint: 'sha256:primary1',
+                source: 'spawn_selection',
+            },
+            onThinkingChange: vi.fn(),
+            onUsageLimitGroupRecovery,
+            session: {
+                sessionId: 'session-usage-probe-token-invalid-unhandled',
+                updateMetadata: vi.fn(async (handler: (current: Metadata) => Metadata) => { metadata = handler(metadata); }),
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                getMetadataSnapshot: () => metadata,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await expect(runtime.sendPrompt('usage-limit-structured')).rejects.toMatchObject({
+                runtimeAuthClassification: { kind: 'usage_limit' },
+            });
+            const controls = runtime as typeof runtime & {
+                enableUsageLimitWaitResume?: (request: { sessionId: string }) => Promise<unknown>;
+                checkUsageLimitRecoveryNow?: (request: { sessionId: string }) => Promise<unknown>;
+            };
+            await controls.enableUsageLimitWaitResume?.({ sessionId: 'session-usage-probe-token-invalid-unhandled' });
+            await expect(controls.checkUsageLimitRecoveryNow?.({
+                sessionId: 'session-usage-probe-token-invalid-unhandled',
+            })).resolves.toMatchObject({ ok: true, status: 'waiting' });
+            expect(onUsageLimitGroupRecovery).toHaveBeenCalledOnce();
+            expect(metadata).toMatchObject({
+                sessionUsageLimitRecoveryV1: {
+                    status: 'waiting',
+                    lastProbeError: 'connected_service_probe_credential_recovery_uncommitted',
+                },
+            });
+        } finally {
+            await runtime.reset();
+        }
+      },
+    );
+
+    it('settles token_invalidated waiting from an explicit terminal recovery receipt independent of presentation handling', async () => {
+        const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-usage-probe-terminal-receipt-', {
+            rateLimitReadError: {
+                code: -32000,
+                message: 'unexpected status 401 Unauthorized: authentication token has been invalidated; auth error code: token_invalidated',
+            },
+        });
+        let metadata: Metadata = {
+            path: root,
+            host: 'test-host',
+            homeDir: root,
+            happyHomeDir: join(root, '.happier'),
+            happyLibDir: join(root, '.happier', 'lib'),
+            happyToolsDir: join(root, '.happier', 'tools'),
+        };
+        const onUsageLimitGroupRecovery = vi.fn(async () => ({
+            handled: false,
+            report: { ok: true, result: { status: 'recovery_retry_scheduled' } },
+            statusCode: null,
+            statusMessage: null,
+            recoveryReceipt: {
+                reportId: 'runtime-auth-report:terminal-receipt',
+                attemptId: 'attempt-terminal-receipt',
+                transition: 'terminal',
+                eventLocalId: 'runtime-auth-recovery:attempt-terminal-receipt:terminal',
+            },
+        }));
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            processEnv: createCodexAppServerProcessEnv(fakeAppServer, {
+                CODEX_HOME: join(root, 'codex-home'),
+                OPENAI_API_KEY: 'test-openai-key',
+                [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+                    kind: 'group', serviceId: 'openai-codex', groupId: 'team', activeProfileId: 'primary', generation: 7,
+                }]),
+            }),
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex', activeAccountId: 'acct_primary', accountLabel: null,
+                profileId: 'primary', groupId: 'team', generation: 7,
+                credentialFingerprint: 'sha256:primary1', source: 'spawn_selection',
+            },
+            onThinkingChange: vi.fn(),
+            onUsageLimitGroupRecovery,
+            session: {
+                sessionId: 'session-usage-probe-terminal-receipt',
+                updateMetadata: vi.fn(async (handler: (current: Metadata) => Metadata) => { metadata = handler(metadata); }),
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                getMetadataSnapshot: () => metadata,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await expect(runtime.sendPrompt('usage-limit-structured')).rejects.toMatchObject({
+                runtimeAuthClassification: { kind: 'usage_limit' },
+            });
+            const controls = runtime as typeof runtime & {
+                enableUsageLimitWaitResume?: (request: { sessionId: string }) => Promise<unknown>;
+                checkUsageLimitRecoveryNow?: (request: { sessionId: string }) => Promise<unknown>;
+            };
+            await controls.enableUsageLimitWaitResume?.({ sessionId: 'session-usage-probe-terminal-receipt' });
+            await expect(controls.checkUsageLimitRecoveryNow?.({
+                sessionId: 'session-usage-probe-terminal-receipt',
+            })).resolves.toMatchObject({ ok: true, status: 'exhausted' });
+            expect(metadata).toMatchObject({
+                sessionUsageLimitRecoveryV1: {
+                    status: 'exhausted',
+                    lastProbeError: 'connected_service_probe_credential_recovery_committed',
+                },
+            });
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('does not attribute a delayed quota-probe auth error to a credential hot-applied after the request began', async () => {
+        const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-runtime-quota-probe-identity-race-', {
+            rateLimitReadDelayMs: 200,
+            rateLimitReadError: {
+                code: -32000,
+                message: 'unexpected status 401 Unauthorized: authentication token has been invalidated; auth error code: token_invalidated',
+            },
+            accountReadResult: { account: { email: 'replacement@example.test' } },
+        });
+        let metadata: Metadata = {
+            path: root,
+            host: 'test-host',
+            homeDir: root,
+            happyHomeDir: join(root, '.happier'),
+            happyLibDir: join(root, '.happier', 'lib'),
+            happyToolsDir: join(root, '.happier', 'tools'),
+        };
+        const onUsageLimitGroupRecovery = vi.fn(async () => ({
+            handled: false,
+            report: null,
+            statusCode: null,
+            statusMessage: null,
+        }));
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            processEnv: createCodexAppServerProcessEnv(fakeAppServer),
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_original',
+                accountLabel: 'original@example.test',
+                profileId: 'original',
+                groupId: 'team',
+                generation: 7,
+                credentialFingerprint: 'sha256:original1',
+                source: 'spawn_selection',
+            },
+            onThinkingChange: vi.fn(),
+            onUsageLimitGroupRecovery,
+            onConnectedServiceAuthGenerationApplied: vi.fn(async () => {}),
+            session: {
+                sessionId: 'session-quota-probe-identity-race',
+                updateMetadata: vi.fn(async (handler: (current: Metadata) => Metadata) => { metadata = handler(metadata); }),
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                getMetadataSnapshot: () => metadata,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+        const replacement = buildConnectedServiceCredentialRecord({
+            now: 1_000,
+            serviceId: 'openai-codex',
+            profileId: 'replacement',
+            kind: 'oauth',
+            expiresAt: 2_000,
+            oauth: {
+                accessToken: 'replacement-access',
+                refreshToken: 'replacement-refresh',
+                idToken: 'replacement-id',
+                scope: null,
+                tokenType: null,
+                providerAccountId: 'acct_replacement',
+                providerEmail: 'replacement@example.test',
+            },
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await expect(runtime.sendPrompt('usage-limit-structured')).rejects.toMatchObject({
+                runtimeAuthClassification: { kind: 'usage_limit' },
+            });
+            const controls = runtime as typeof runtime & {
+                enableUsageLimitWaitResume?: (request: { sessionId: string }) => Promise<unknown>;
+                checkUsageLimitRecoveryNow?: (request: { sessionId: string }) => Promise<unknown>;
+                applyConnectedServiceAuthGeneration?: (request: unknown) => Promise<unknown>;
+            };
+            await controls.enableUsageLimitWaitResume?.({ sessionId: 'session-quota-probe-identity-race' });
+            onUsageLimitGroupRecovery.mockClear();
+
+            const check = controls.checkUsageLimitRecoveryNow?.({ sessionId: 'session-quota-probe-identity-race' });
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            const apply = controls.applyConnectedServiceAuthGeneration?.({
+                serviceId: 'openai-codex',
+                reason: 'usage_limit',
+                expected: { profileId: 'replacement', groupId: 'team', generation: 8 },
+                authGeneration: {
+                    credential: replacement,
+                    selection: {
+                        kind: 'group',
+                        serviceId: 'openai-codex',
+                        groupId: 'team',
+                        activeProfileId: 'replacement',
+                        fallbackProfileId: 'original',
+                        generation: 8,
+                    },
+                    forcedWorkspaceId: null,
+                },
+            });
+
+            await expect(check).resolves.toMatchObject({ ok: true, status: 'waiting' });
+            await expect(apply).resolves.toMatchObject({ ok: true, activeAccountId: 'acct_replacement' });
+            expect(onUsageLimitGroupRecovery).not.toHaveBeenCalled();
+            expect(metadata).toMatchObject({
+                sessionUsageLimitRecoveryV1: {
+                    status: 'waiting',
+                    lastProbeError: 'codex_app_server_rate_limit_probe_unavailable',
+                },
+            });
+        } finally {
+            await runtime.reset();
+        }
+    });
+
     it('auto-arms usage-limit wait/resume when the account setting is auto-wait', async () => {
         const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-auto-wait-');
         setActiveAccountSettingsSnapshot({
@@ -6749,6 +9281,68 @@ describe('createCodexAppServerRuntime', () => {
             await runtime.reset();
         }
     });
+
+    it.each(['off', 'custom'] as const)(
+        'auto-arms usage-limit wait/resume preserving the account resumePromptMode=%s',
+        async (resumePromptMode) => {
+            const { root, fakeAppServer } = await createRuntimeFixture(`happier-codex-app-server-runtime-usage-auto-wait-resume-${resumePromptMode}-`);
+            setActiveAccountSettingsSnapshot({
+                source: 'network',
+                settings: {
+                    usageLimitRecoverySettingsV1: { v: 1, mode: 'auto_wait', resumePromptMode },
+                } as AccountSettings,
+                settingsVersion: 1,
+                loadedAtMs: Date.now(),
+                settingsSecretsReadKeys: [],
+            });
+            let metadata: Metadata = {
+                path: root,
+                host: 'test-host',
+                homeDir: root,
+                happyHomeDir: join(root, '.happier'),
+                happyLibDir: join(root, '.happier', 'lib'),
+                happyToolsDir: join(root, '.happier', 'tools'),
+            };
+            const updateMetadata = vi.fn(async (handler: (current: Metadata) => Metadata) => {
+                metadata = handler(metadata);
+            });
+            const processEnv = createCodexAppServerProcessEnv(fakeAppServer, {
+                CODEX_HOME: join(root, 'codex-home'),
+                OPENAI_API_KEY: 'test-openai-key',
+            });
+            const runtime = createCodexAppServerRuntime({
+                directory: root,
+                processEnv,
+                onThinkingChange: vi.fn(),
+                session: {
+                    sessionId: `session-usage-auto-wait-resume-${resumePromptMode}`,
+                    updateMetadata,
+                    sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                    getMetadataSnapshot: () => metadata,
+                    sendCodexMessage: vi.fn(),
+                    sendSessionEvent: vi.fn(),
+                } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+            });
+
+            try {
+                await runtime.startOrLoad({});
+                await expect(runtime.sendPrompt('usage-limit-structured')).rejects.toMatchObject({
+                    runtimeAuthClassification: { kind: 'usage_limit' },
+                });
+
+                // The auto-armed recovery intent must carry the account's configured resume-prompt
+                // behavior, not silently default to 'standard'.
+                expect(metadata).toMatchObject({
+                    sessionUsageLimitRecoveryV1: {
+                        status: 'waiting',
+                        resumePromptMode,
+                    },
+                });
+            } finally {
+                await runtime.reset();
+            }
+        },
+    );
 
     it('auto-arms usage-limit recovery with a derived next check when only retry-after timing is available', async () => {
         const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-retry-after-auto-wait-');
@@ -6818,7 +9412,7 @@ describe('createCodexAppServerRuntime', () => {
         }
     });
 
-    it('restores a persisted usage-limit wait/resume intent after start', async () => {
+    it('keeps a persisted usage-limit intent dormant after start without resuming the provider', async () => {
         const { root, fakeAppServer, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-recovery-restore-');
         let metadata: Metadata = {
             path: root,
@@ -6864,19 +9458,12 @@ describe('createCodexAppServerRuntime', () => {
         try {
             await runtime.startOrLoad({});
 
-            await expect.poll(async () => (await readRequestLog(requestLogPath)).map((entry) => entry.method)).toContain('thread/resume');
+            await new Promise((resolve) => setTimeout(resolve, 100));
             const requestLog = await readRequestLog(requestLogPath);
-            expect(requestLog.map((entry) => entry.method)).toContain('account/rateLimits/read');
-            expect(requestLog.filter((entry) => entry.method === 'thread/resume')).toEqual([
-                expect.objectContaining({
-                    params: expect.objectContaining({
-                        threadId: 'thread-started',
-                    }),
-                }),
-            ]);
+            expect(requestLog.map((entry) => entry.method)).not.toContain('thread/resume');
             expect(metadata).toMatchObject({
                 sessionUsageLimitRecoveryV1: {
-                    status: 'cancelled',
+                    status: 'waiting',
                 },
             });
         } finally {
@@ -6936,15 +9523,23 @@ describe('createCodexAppServerRuntime', () => {
         (runtime as any).setOnPromptAcceptedByProvider(onPromptAcceptedByProvider);
 
         await runtime.startOrLoad({});
-        await runtime.sendPrompt('hello-world', { userMessageSeq: 42 } as any);
+        await runtime.sendPrompt('hello-world', {
+            userMessageSeq: 42,
+            appliedModelId: 'gpt-5.6-sol',
+        } as any);
 
-        expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({ userMessageSeq: 42 });
+        expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
+            userMessageSeq: 42,
+            providerTurnId: 'turn-hello-world',
+            appliedModelId: 'gpt-5.6-sol',
+        });
         expect(onPromptAcceptedByProvider).toHaveBeenCalledTimes(1);
     });
 
-    it('falls back to successful turn/start response as prompt acceptance when turn/started is absent', async () => {
+    it('uses the exact turn/start response as prompt acceptance while notification and completion remain outstanding', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-prompt-accepted-response-', {
             omitTurnStartedForPrompt: 'turn-start-response-only',
+            omitTurnCompletedForPrompt: 'turn-start-response-only',
         });
 
         const onPromptAcceptedByProvider = vi.fn();
@@ -6961,7 +9556,14 @@ describe('createCodexAppServerRuntime', () => {
         (runtime as any).setOnPromptAcceptedByProvider(onPromptAcceptedByProvider);
 
         await runtime.startOrLoad({});
-        await runtime.sendPrompt('turn-start-response-only', { userMessageSeq: 43 } as any);
+        const send = runtime.sendPrompt('turn-start-response-only', {
+            localId: 'local-turn-start-response-only',
+            userMessageSeq: 43,
+        } as any);
+
+        await vi.waitFor(() => {
+            expect(onPromptAcceptedByProvider).toHaveBeenCalledTimes(1);
+        });
 
         const requestLog = await readRequestLog(requestLogPath);
         expect(requestLog).toEqual(expect.arrayContaining([
@@ -6972,8 +9574,14 @@ describe('createCodexAppServerRuntime', () => {
                 }),
             }),
         ]));
-        expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({ userMessageSeq: 43 });
-        expect(onPromptAcceptedByProvider).toHaveBeenCalledTimes(1);
+        expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
+            localIds: ['local-turn-start-response-only'],
+            userMessageSeq: 43,
+            providerTurnId: 'turn-turn-start-response-only',
+        });
+        expect(runtime.isTurnInFlight()).toBe(true);
+        await runtime.reset();
+        await send.catch(() => undefined);
     });
 
     it('merges sparse Codex account/rateLimits/updated notifications with the last known snapshot', async () => {
@@ -7023,11 +9631,23 @@ describe('createCodexAppServerRuntime', () => {
             accessToken: 'fresh-access',
             chatgptAccountId: 'acct_123',
             chatgptPlanType: 'plus',
+            credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
         }));
         const runtime = createCodexAppServerRuntime({
             directory: root,
             onThinkingChange: vi.fn(),
             onChatGptAuthTokensRefresh,
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_123',
+                accountLabel: null,
+                profileId: 'primary',
+                groupId: 'main',
+                generation: 7,
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+                credentialFingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                source: 'spawn_selection',
+            },
             session: {
                 updateMetadata: vi.fn(),
                 sendCodexMessage: vi.fn(),
@@ -7041,6 +9661,14 @@ describe('createCodexAppServerRuntime', () => {
         expect(onChatGptAuthTokensRefresh).toHaveBeenCalledWith({
             chatgptPlanType: 'plus',
         });
+        await waitForCondition(async () => {
+            const entries = await readRequestLog(requestLogPath);
+            return entries.some((entry) => entry.id === 'refresh-chatgpt-tokens' && entry.result);
+        }, {
+            timeoutMs: 1_000,
+            intervalMs: 5,
+            label: 'ChatGPT token refresh response write',
+        });
         const requestLog = await readRequestLog(requestLogPath);
         expect(requestLog).toEqual(expect.arrayContaining([
             expect.objectContaining({
@@ -7049,11 +9677,77 @@ describe('createCodexAppServerRuntime', () => {
                     accessToken: 'fresh-access',
                     chatgptAccountId: 'acct_123',
                     chatgptPlanType: 'plus',
+                    credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
                 },
             }),
         ]));
         const refreshResponse = requestLog.find((entry) => entry.id === 'refresh-chatgpt-tokens' && entry.result);
         expect(refreshResponse?.result).not.toHaveProperty('refreshToken');
+        await expect((runtime as any).readConnectedServiceRuntimeIdentity({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            requireExactProof: true,
+        })).resolves.toMatchObject({
+            ok: true,
+            runtime: {
+                credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
+            },
+        });
+    });
+
+    it('retains the exact runtime revision when a surviving predecessor daemon omits it from a token refresh response', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-predecessor-chatgpt-refresh-',
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            onChatGptAuthTokensRefresh: vi.fn(async () => ({
+                accessToken: 'fresh-access-from-predecessor',
+                chatgptAccountId: 'acct_123',
+                chatgptPlanType: 'plus',
+            })),
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_123',
+                accountLabel: null,
+                profileId: 'primary',
+                groupId: 'main',
+                generation: 7,
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+                credentialFingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                source: 'spawn_selection',
+            },
+            session: {
+                updateMetadata: vi.fn(),
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as any,
+        });
+
+        await runtime.startOrLoad({});
+        await runtime.sendPrompt('bridge-chatgpt-refresh');
+        await waitForCondition(async () => {
+            const entries = await readRequestLog(requestLogPath);
+            return entries.some((entry) => entry.id === 'refresh-chatgpt-tokens' && entry.result);
+        }, {
+            timeoutMs: 1_000,
+            intervalMs: 5,
+            label: 'predecessor ChatGPT token refresh response write',
+        });
+        const requestLog = await readRequestLog(requestLogPath);
+        const refreshResponse = requestLog.find((entry) => entry.id === 'refresh-chatgpt-tokens' && entry.result);
+        expect(refreshResponse?.result).not.toHaveProperty('credentialRevision');
+        await expect((runtime as any).readConnectedServiceRuntimeIdentity({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            requireExactProof: true,
+        })).resolves.toMatchObject({
+            ok: true,
+            runtime: {
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+            },
+        });
     });
 
     it('routes Codex cached-account changes to daemon runtime-auth recovery instead of locally resuming as success', async () => {
@@ -7148,6 +9842,36 @@ describe('createCodexAppServerRuntime', () => {
         expect(sendCodexMessage).not.toHaveBeenCalledWith(expect.objectContaining({
             type: 'turn_aborted',
         }));
+    });
+
+    it('re-arms history hydration when context-window recovery resumes the existing client', async () => {
+        const { root } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-context-window-history-rearm-',
+            { emitHistoricalNotificationOnResume: true },
+        );
+        const sendAgentMessageCommitted = vi.fn(async (
+            _provider: string,
+            _body: { type?: string; message?: string },
+        ) => {});
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sendAgentMessageCommitted,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as any,
+        });
+
+        await runtime.startOrLoad({});
+        await expect(runtime.sendPrompt('context-window-exhausted-once')).resolves.toBeUndefined();
+
+        const committedAssistantText = sendAgentMessageCommitted.mock.calls
+            .map(([, body]) => body)
+            .filter((body) => body.type === 'message')
+            .map((body) => body.message);
+        expect(committedAssistantText).not.toContain('Historical recovery replay');
     });
 
     it('continues instead of replaying the original prompt after context-window exhaustion with turn activity', async () => {
@@ -7308,6 +10032,14 @@ describe('createCodexAppServerRuntime', () => {
         expect(caughtError).toBeInstanceOf(Error);
         expect((caughtError as Error).message).toContain('ORIGINAL_CAPACITY_FAILURE');
         expect((caughtError as Error).message).not.toContain('RETRY_CAPACITY_FAILURE');
+        expect(caughtError).toMatchObject({
+            runtimeAuthClassification: {
+                kind: 'capacity',
+                limitCategory: 'capacity',
+                quotaScope: 'provider',
+                serviceId: 'openai-codex',
+            },
+        });
 
         const requestLog = await readRequestLog(requestLogPath);
         expect(requestLog.filter((entry) => entry.method === 'thread/compact/start')).toHaveLength(0);
@@ -7684,6 +10416,7 @@ describe('createCodexAppServerRuntime', () => {
                 profileId: 'team',
                 groupId: 'main',
                 generation: 42,
+                credentialFingerprint: 'sha256:spawn042',
                 source: 'spawn_selection',
             },
             session: {
@@ -7719,7 +10452,7 @@ describe('createCodexAppServerRuntime', () => {
         });
     });
 
-    it('live-probes exact runtime identity for cold same-account fanout siblings', async () => {
+    it('uses the frozen exact applied identity for cold same-account fanout siblings', async () => {
         const { root, fakeAppServer, requestLogPath } = await createRuntimeFixture(
             'happier-codex-app-server-runtime-cold-sibling-live-identity-',
             {
@@ -7744,6 +10477,16 @@ describe('createCodexAppServerRuntime', () => {
         const runtime = createCodexAppServerRuntime({
             directory: root,
             processEnv,
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_live_sibling',
+                accountLabel: null,
+                profileId: 'target',
+                groupId: 'main',
+                generation: 12,
+                credentialFingerprint: 'sha256:sibling1',
+                source: 'spawn_selection',
+            },
             onThinkingChange: vi.fn(),
             session: {
                 updateMetadata: vi.fn(),
@@ -7770,8 +10513,7 @@ describe('createCodexAppServerRuntime', () => {
                 strategy: 'provider_account_id',
                 proofStrength: 'exact',
                 providerAccountId: 'acct_live_sibling',
-                accountLabel: 'sibling@example.test',
-                source: 'live_account_read',
+                source: 'spawn_selection',
             },
             runtime: {
                 safeToProbe: true,
@@ -7783,7 +10525,7 @@ describe('createCodexAppServerRuntime', () => {
             },
         });
         const requestLog = await readRequestLog(requestLogPath);
-        expect(requestLog.map((entry) => entry.method)).toContain('account/read');
+        expect(requestLog.map((entry) => entry.method)).not.toContain('account/read');
     });
 
     it('uses daemon expected runtime context with live account proof when local selection is missing', async () => {
@@ -7822,14 +10564,66 @@ describe('createCodexAppServerRuntime', () => {
             },
             requireExactProof: true,
         })).resolves.toEqual({
+            ok: false,
+            errorCode: 'runtime_identity_probe_missing_exact_identity',
+            error: 'runtime_identity_probe_missing_exact_identity',
+        });
+        const requestLog = await readRequestLog(requestLogPath);
+        expect(requestLog.map((entry) => entry.method)).toContain('account/read');
+    });
+
+    it('does not replace a frozen exact identity when an optional live account read would fail', async () => {
+        const { root, fakeAppServer } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-cold-sibling-live-identity-retry-',
+            {
+                rejectAccountReadCount: 1,
+                accountReadResult: {
+                    account: {
+                        id: 'acct_live_retry',
+                        email: 'retry@example.test',
+                    },
+                },
+            },
+        );
+        const processEnv = createCodexAppServerProcessEnv(fakeAppServer);
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            processEnv,
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_live_retry',
+                accountLabel: null,
+                profileId: 'daemon-profile',
+                groupId: 'main',
+                generation: 12,
+                credentialFingerprint: 'sha256:retry001',
+                source: 'spawn_selection',
+            },
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as any,
+        } as any);
+
+        await expect((runtime as any).readConnectedServiceRuntimeIdentity({
+            serviceId: 'openai-codex',
+            reason: 'same_provider_account_exhausted',
+            expected: {
+                profileId: 'daemon-profile',
+                groupId: 'main',
+                generation: 12,
+            },
+            requireExactProof: true,
+        })).resolves.toEqual({
             ok: true,
             serviceId: 'openai-codex',
             identity: {
                 strategy: 'provider_account_id',
                 proofStrength: 'exact',
-                providerAccountId: 'acct_live_expected',
-                accountLabel: 'expected@example.test',
-                source: 'live_account_read',
+                providerAccountId: 'acct_live_retry',
+                source: 'spawn_selection',
             },
             runtime: {
                 safeToProbe: true,
@@ -7840,8 +10634,6 @@ describe('createCodexAppServerRuntime', () => {
                 generation: 12,
             },
         });
-        const requestLog = await readRequestLog(requestLogPath);
-        expect(requestLog.map((entry) => entry.method)).toContain('account/read');
     });
 
     it('refreshes stale cached runtime identity from current selection and live account proof', async () => {
@@ -7876,6 +10668,7 @@ describe('createCodexAppServerRuntime', () => {
                 profileId: 'stale',
                 groupId: 'main',
                 generation: 7,
+                credentialFingerprint: 'sha256:stale001',
                 source: 'spawn_selection',
             },
             onThinkingChange: vi.fn(),
@@ -7898,23 +10691,9 @@ describe('createCodexAppServerRuntime', () => {
             },
             requireExactProof: true,
         })).resolves.toEqual({
-            ok: true,
-            serviceId: 'openai-codex',
-            identity: {
-                strategy: 'provider_account_id',
-                proofStrength: 'exact',
-                providerAccountId: 'acct_live_current',
-                accountLabel: 'current@example.test',
-                source: 'live_account_read',
-            },
-            runtime: {
-                safeToProbe: true,
-                safeToApply: true,
-                inProviderTurn: false,
-                profileId: 'current',
-                groupId: 'main',
-                generation: 12,
-            },
+            ok: false,
+            errorCode: 'runtime_identity_probe_missing_exact_identity',
+            error: 'runtime_identity_probe_missing_exact_identity',
         });
         const requestLog = await readRequestLog(requestLogPath);
         expect(requestLog.map((entry) => entry.method)).toContain('account/read');
@@ -7932,6 +10711,7 @@ describe('createCodexAppServerRuntime', () => {
                 profileId: 'runtime-current',
                 groupId: 'main',
                 generation: 337,
+                credentialFingerprint: 'sha256:runtime3',
                 source: 'spawn_selection',
             },
             session: {
@@ -7964,6 +10744,51 @@ describe('createCodexAppServerRuntime', () => {
                 profileId: 'runtime-current',
                 groupId: 'main',
                 generation: 337,
+            },
+        });
+    });
+
+    it('returns exact current runtime identity when the daemon expected opaque target is stale', async () => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-stale-exact-expected-');
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            initialConnectedServiceRuntimeIdentity: {
+                serviceId: 'openai-codex',
+                activeAccountId: 'acct_current',
+                accountLabel: 'current@example.test',
+                profileId: 'current',
+                groupId: 'main',
+                generation: 8,
+                credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
+                credentialFingerprint: 'sha256:current8',
+                source: 'spawn_selection',
+            },
+            session: {
+                updateMetadata: vi.fn(),
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as any,
+        } as any);
+
+        await expect((runtime as any).readConnectedServiceRuntimeIdentity({
+            serviceId: 'openai-codex',
+            reason: 'same_provider_account_exhausted',
+            expected: {
+                profileId: 'reported',
+                groupId: 'main',
+                generation: 7,
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+            },
+            requireExactProof: true,
+        })).resolves.toMatchObject({
+            ok: true,
+            serviceId: 'openai-codex',
+            runtime: {
+                profileId: 'current',
+                groupId: 'main',
+                generation: 8,
+                credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
             },
         });
     });
@@ -8045,7 +10870,9 @@ describe('createCodexAppServerRuntime', () => {
     });
 
     it('direct-live applies connected-service auth while a provider turn is in flight', async () => {
-        const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-live-auth-busy-');
+        const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-live-auth-busy-', {
+            omitTurnCompletedForPrompt: 'overlap-start',
+        });
         const runtime = createCodexAppServerRuntime({
             directory: root,
             onThinkingChange: vi.fn(),
@@ -8075,6 +10902,7 @@ describe('createCodexAppServerRuntime', () => {
 
         await runtime.startOrLoad({});
         const promptPromise = runtime.sendPrompt('overlap-start');
+        const promptOutcome = promptPromise.catch(() => undefined);
         await waitForCondition(async () => {
             const requestLog = await readRequestLog(requestLogPath);
             return requestLog.some((entry) => {
@@ -8093,6 +10921,7 @@ describe('createCodexAppServerRuntime', () => {
             requireDirectLiveHotApply: true,
             expected: {
                 profileId: 'target',
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
             },
             authGeneration: {
                 credential: candidate,
@@ -8130,14 +10959,85 @@ describe('createCodexAppServerRuntime', () => {
                 inProviderTurn: true,
                 safeToApply: false,
                 profileId: 'target',
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
             },
         });
         expect(identityResponse.runtime).not.toHaveProperty('safeToDirectLiveApply');
         expect(identityResponse.runtime).not.toHaveProperty('requiresTurnBoundaryForApply');
 
-        await expect(promptPromise).resolves.toBeUndefined();
+        expect(runtime.isTurnInFlight()).toBe(true);
         const requestLog = await readRequestLog(requestLogPath);
         expect(requestLog.map((entry) => entry.method)).toContain('account/login/start');
+        await runtime.reset();
+        await promptOutcome;
+    });
+
+    it('diagnoses whether a new prompt can start while direct-live auth mutation is unfinished', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-live-auth-new-prompt-',
+            { loginStartResponseDelayMs: 20 },
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            onConnectedServiceAuthGenerationApplied: vi.fn(async () => {}),
+            session: {
+                updateMetadata: vi.fn(),
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as any,
+        });
+        const candidate = buildConnectedServiceCredentialRecord({
+            now: 1000,
+            serviceId: 'openai-codex',
+            profileId: 'target',
+            kind: 'oauth',
+            expiresAt: 2000,
+            oauth: {
+                accessToken: 'target-access',
+                refreshToken: 'target-refresh',
+                idToken: 'target-id',
+                scope: null,
+                tokenType: null,
+                providerAccountId: 'acct_target',
+                providerEmail: null,
+            },
+        });
+
+        await runtime.startOrLoad({});
+        const inFlightPrompt = runtime.sendPrompt('overlap-start');
+        await waitForCondition(async () => (
+            (await readRequestLog(requestLogPath)).some((entry) => {
+                const params = entry.params as { input?: Array<{ text?: string }> } | null;
+                return entry.method === 'turn/start' && params?.input?.[0]?.text === 'overlap-start';
+            })
+        ), {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'Codex prompt to enter its active provider turn before live auth apply',
+        });
+        const authApply = (runtime as any).applyConnectedServiceAuthGeneration({
+            serviceId: 'openai-codex',
+            reason: 'same_provider_account_exhausted',
+            requireDirectLiveHotApply: true,
+            expected: { profileId: 'target' },
+            authGeneration: {
+                credential: candidate,
+                forcedWorkspaceId: null,
+            },
+        });
+        await expect(runtime.sendPrompt('new-prompt-during-auth-apply'))
+            .rejects.toThrow('already has a turn in flight');
+
+        await expect(authApply).resolves.toMatchObject({ ok: true, appliedVia: 'direct_live_hot_auth' });
+        await expect(inFlightPrompt).resolves.toBeUndefined();
+        const requestLog = await readRequestLog(requestLogPath);
+        expect(requestLog.map((entry) => entry.method)).toContain('account/login/start');
+        expect(requestLog.some((entry) => {
+            const params = entry.params as { input?: Array<{ text?: string }> } | null;
+            return entry.method === 'turn/start'
+                && params?.input?.[0]?.text === 'new-prompt-during-auth-apply';
+        })).toBe(false);
     });
 
     it('invalidates connected-service auth transports by restarting the app-server and resuming the same thread', async () => {
@@ -8194,6 +11094,7 @@ describe('createCodexAppServerRuntime', () => {
         const acceptedPrompts: Array<Readonly<{
             localIds?: readonly string[] | null;
             userMessageSeq: number | null;
+            providerTurnId: string;
         }>> = [];
         const runtime = createCodexAppServerRuntime({
             directory: root,
@@ -8260,6 +11161,7 @@ describe('createCodexAppServerRuntime', () => {
         expect(acceptedPrompts).toEqual([{
             localIds: ['local-auth-invalidation'],
             userMessageSeq: 927,
+            providerTurnId: 'turn-Please continue the interrupted work from the compacted Codex context. Do not restart or repeat completed work.',
         }]);
         expect(undeliverablePrompts).toEqual([]);
         // Intentional connected-service switch must NOT use the native "refused to continue" copy.
