@@ -10,6 +10,7 @@ type Timer = ReturnType<typeof setTimeout>;
 const DEFAULT_DRAIN_DELAY_MS = 2_000;
 const DEFAULT_RETRY_DELAY_MS = 10_000;
 const DEFAULT_DRAIN_LIMIT = 8;
+const DEFAULT_MAX_AUTOMATIC_ATTEMPTS = 3;
 
 let scheduledTimer: Timer | null = null;
 let drainInFlight = false;
@@ -38,18 +39,27 @@ export function resetRuntimeAuthFailureReportOutboxDrainSchedulerForTests(): voi
   drainInFlight = false;
 }
 
-export function scheduleRuntimeAuthFailureReportOutboxDrainToDaemon(input: Readonly<{
+type DrainScheduleInput = Readonly<{
   outboxDir?: string;
   logger?: RuntimeAuthFailureReportOutboxDrainLogger;
   logPrefix?: string;
   delayMs?: number;
   retryDelayMs?: number;
+  maxAutomaticAttempts?: number;
   limit?: number;
   nowMs?: () => number;
   setTimeoutFn?: typeof setTimeout;
   clearTimeoutFn?: typeof clearTimeout;
   drain?: typeof drainRuntimeAuthFailureReportOutboxToDaemon;
-}> = {}): void {
+}>;
+
+function readMaxAutomaticAttempts(value: number | undefined): number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+    ? value
+    : DEFAULT_MAX_AUTOMATIC_ATTEMPTS;
+}
+
+function scheduleDrain(input: DrainScheduleInput, automaticAttempt: number): void {
   if (scheduledTimer || drainInFlight) return;
 
   const setTimeoutFn = input.setTimeoutFn ?? setTimeout;
@@ -57,22 +67,18 @@ export function scheduleRuntimeAuthFailureReportOutboxDrainToDaemon(input: Reado
   const delayMs = readDelayMs(input.delayMs, DEFAULT_DRAIN_DELAY_MS);
   scheduledTimer = setTimeoutFn(() => {
     clearScheduledTimer(clearTimeoutFn);
-    void drainOnce(input);
+    void drainOnce(input, automaticAttempt);
   }, delayMs);
   unrefTimer(scheduledTimer);
 }
 
-async function drainOnce(input: Readonly<{
-  outboxDir?: string;
-  logger?: RuntimeAuthFailureReportOutboxDrainLogger;
-  logPrefix?: string;
-  retryDelayMs?: number;
-  limit?: number;
-  nowMs?: () => number;
-  setTimeoutFn?: typeof setTimeout;
-  clearTimeoutFn?: typeof clearTimeout;
-  drain?: typeof drainRuntimeAuthFailureReportOutboxToDaemon;
-}>): Promise<void> {
+export function scheduleRuntimeAuthFailureReportOutboxDrainToDaemon(
+  input: DrainScheduleInput = {},
+): void {
+  scheduleDrain(input, 1);
+}
+
+async function drainOnce(input: DrainScheduleInput, automaticAttempt: number): Promise<void> {
   if (drainInFlight) return;
 
   const logger = input.logger ?? defaultLogger;
@@ -95,10 +101,10 @@ async function drainOnce(input: Readonly<{
     drainInFlight = false;
   }
 
-  if (shouldRetry) {
-    scheduleRuntimeAuthFailureReportOutboxDrainToDaemon({
+  if (shouldRetry && automaticAttempt < readMaxAutomaticAttempts(input.maxAutomaticAttempts)) {
+    scheduleDrain({
       ...input,
       delayMs: readDelayMs(input.retryDelayMs, DEFAULT_RETRY_DELAY_MS),
-    });
+    }, automaticAttempt + 1);
   }
 }

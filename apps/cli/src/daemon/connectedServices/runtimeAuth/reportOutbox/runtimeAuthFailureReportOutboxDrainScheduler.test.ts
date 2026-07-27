@@ -62,4 +62,29 @@ describe('runtimeAuthFailureReportOutboxDrainScheduler', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(drain).toHaveBeenCalledTimes(2);
   });
+
+  it('stops after three automatic attempts and allows a later trigger to retry the retained item', async () => {
+    const drain = vi.fn(async () => ({ delivered: 0, dropped: 0, retried: 1 }));
+
+    scheduleRuntimeAuthFailureReportOutboxDrainToDaemon({
+      delayMs: 10,
+      retryDelayMs: 20,
+      drain,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(20);
+    await vi.advanceTimersByTimeAsync(20);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(drain).toHaveBeenCalledTimes(3);
+
+    scheduleRuntimeAuthFailureReportOutboxDrainToDaemon({
+      delayMs: 10,
+      retryDelayMs: 20,
+      drain,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(drain).toHaveBeenCalledTimes(4);
+  });
 });
