@@ -137,7 +137,7 @@ export async function handleSessionCommand(
       console.log('happier session voice-agent start <session-id> --backends <id1,id2> --instructions <text> [--json]');
       console.log('happier session actions list [--json]');
       console.log('happier session actions describe <action-id> [--json]');
-      console.log('happier session actions execute <session-id> <action-id> [--input-json <json>] [--json]');
+      console.log('happier session actions execute <session-id> <action-id> [--input-json <json>] [--action-request-id <id>] [--resume-action-request] [--json]');
       console.log('happier session run start <session-id> --intent <intent> --backend <backend-target> [--json]');
       console.log('happier session run list <session-id> [--json]');
       console.log('happier session run get <session-id> <run-id> [--include-structured] [--json]');

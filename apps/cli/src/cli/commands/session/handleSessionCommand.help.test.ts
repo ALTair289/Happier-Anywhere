@@ -25,7 +25,7 @@ describe('handleSessionCommand help output', () => {
       expect(output.text()).toContain('happier session history <session-id-or-prefix> [--limit N] [--format compact|raw] [--include-meta] [--include-structured-payload] [--json]');
       expect(output.text()).toContain('happier session actions list [--json]');
       expect(output.text()).toContain('happier session actions describe <action-id> [--json]');
-      expect(output.text()).toContain('happier session actions execute <session-id> <action-id> [--input-json <json>] [--json]');
+      expect(output.text()).toContain('happier session actions execute <session-id> <action-id> [--input-json <json>] [--action-request-id <id>] [--resume-action-request] [--json]');
       expect(output.text()).toContain('happier session run start <session-id> --intent <intent> --backend <backend-target> [--json]');
       expect(output.text()).toContain('happier session run send <session-id> <run-id> <message> [--resume] [--json]');
       expect(output.text()).toContain('happier session run stop <session-id> <run-id> [--json]');

@@ -31,7 +31,7 @@ describe('happier session actions (unit)', () => {
 
     const output = captureConsoleJsonOutput();
     try {
-      await handleSessionCommand(['actions', 'execute', 'sess-1', 'review.start', '--input-json', '{"instructions":"Review."}', '--json'], {
+      await handleSessionCommand(['actions', 'execute', 'sess-1', 'review.start', '--input-json', '{"instructions":"Review."}', '--action-request-id', 'attempt-1', '--resume-action-request', '--json'], {
         readCredentialsFn: async () => ({
           token: 'token_test',
           encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
@@ -48,7 +48,12 @@ describe('happier session actions (unit)', () => {
       expect(execute).toHaveBeenCalledWith(
         'review.start',
         { instructions: 'Review.' },
-        { defaultSessionId: 'sess-1', surface: 'cli' },
+        {
+          defaultSessionId: 'sess-1',
+          surface: 'cli',
+          actionRequestId: 'attempt-1',
+          resumeActionRequest: true,
+        },
       );
     } finally {
       output.restore();
