@@ -76,6 +76,7 @@ export interface SessionsDomainSlice {
     sessions: Record<string, Session>;
     sessionLocalStateScope: ServerAccountScope | null;
     sessionListRenderables: Record<string, SessionListRenderableSession>;
+    sessionListRenderableDelta: SessionListRenderableDelta;
     sessionListViewData: SessionListViewItem[] | null;
     sessionListViewDataByServerId: Record<string, SessionListViewItem[] | null>;
     sessionScmStatus: Record<string, ScmStatus | null>;
@@ -130,6 +131,13 @@ export interface SessionsDomainSlice {
     updateSessionModelMode: (sessionId: string, mode: SessionModelMode) => void;
     deleteSession: (sessionId: string) => void;
 }
+
+export type SessionListRenderableDelta = Readonly<{
+    revision: number;
+    changedSessionIds: readonly string[];
+    removedSessionIds: readonly string[];
+    rebuiltSessionListViewData: boolean;
+}>;
 
 export interface MachinesDomainSlice {
     machines: Record<string, Machine>;

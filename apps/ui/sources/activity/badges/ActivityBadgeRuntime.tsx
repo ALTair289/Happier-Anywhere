@@ -22,6 +22,7 @@ import {
     type ActivityBadgeSessionOptions,
     type LocalActivityBadgeSnapshot,
 } from './createLocalActivityBadgeSnapshotSelector';
+import type { StorageState } from '@/sync/store/types';
 
 type ServerBadgeSnapshot = Readonly<{
     count: number;
@@ -61,7 +62,14 @@ function useLocalActivityBadgeSnapshot(params: Readonly<{
         params.hasNonNumericInboxAttention,
         params.sessionOptions,
     ]);
-    return getStorage()(useShallow(selector));
+    const source = getStorage()(useShallow((state) => ({
+        sessions: state.sessions,
+        sessionListRenderables: state.sessionListRenderables,
+        sessionListRenderableDelta: state.sessionListRenderableDelta,
+        sessionMessages: state.sessionMessages,
+        isDataReady: state.isDataReady,
+    })));
+    return selector(source as StorageState);
 }
 
 export function ActivityBadgeRuntime(): React.ReactElement | null {

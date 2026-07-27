@@ -42,7 +42,7 @@ function readRequestSignature(value: unknown): string {
         kind?: unknown;
         createdAt?: unknown;
     }>;
-    return collectRecordIds(requests).sort().map((requestId) => {
+    return collectRecordIds(requests).map((requestId) => {
         const request = requests[requestId];
         return [
             requestId,
@@ -56,7 +56,7 @@ function readRequestSignature(value: unknown): string {
 function readCompletedRequestSignature(value: unknown): string {
     if (!value || typeof value !== 'object') return '';
     const completed = value as Record<string, { completedAt?: unknown; createdAt?: unknown }>;
-    return collectRecordIds(completed).sort().map((requestId) => {
+    return collectRecordIds(completed).map((requestId) => {
         const request = completed[requestId];
         return [
             requestId,
@@ -188,7 +188,7 @@ function buildCachedRecordSignature<T>(
     cache: Map<string, SignatureCacheEntry<T>>,
     buildValueSignature: (value: T) => string,
 ): string {
-    const ids = collectRecordIds(record).sort();
+    const ids = collectRecordIds(record);
     for (const cachedId of cache.keys()) {
         if (!Object.prototype.hasOwnProperty.call(record, cachedId)) {
             cache.delete(cachedId);
@@ -212,7 +212,7 @@ function buildSessionMessagesRecordSignature(
     sessionMessages: StorageState['sessionMessages'],
     cache: Map<string, SignatureCacheEntry<StorageState['sessionMessages'][string]>>,
 ): string {
-    const ids = collectRecordIds(sessions).sort();
+    const ids = collectRecordIds(sessions);
     for (const cachedId of cache.keys()) {
         if (!Object.prototype.hasOwnProperty.call(sessions, cachedId)) {
             cache.delete(cachedId);
@@ -241,7 +241,7 @@ function buildRuntimeFreshnessRecordSignature(
     sessionSignatureCache: ReadonlyMap<string, SignatureCacheEntry<Session>>,
     sessionMessagesSignatureCache: ReadonlyMap<string, SignatureCacheEntry<StorageState['sessionMessages'][string]>>,
 ): string {
-    const ids = collectRecordIds(sessions).sort();
+    const ids = collectRecordIds(sessions);
     prunePendingRequestObservedAtCache(pendingRequestObservedAtCache, new Set(ids));
 
     return ids.map((id) => {
@@ -291,10 +291,41 @@ export function createInboxSessionContentSelector(
     const sessionMessagesSignatureCache = new Map<string, SignatureCacheEntry<StorageState['sessionMessages'][string]>>();
     const pendingRequestObservedAtCache = new Map<string, PendingRequestObservedAtCacheEntry>();
     let previousSignature: string | null = null;
+    let previousDeltaRevision: number | null = null;
     let previousResult = false;
 
     return (state: StorageState): boolean => {
         const nowMs = Date.now();
+        const delta = state.sessionListRenderableDelta;
+        const canApplyDelta = previousSignature !== null
+            && delta
+            && previousDeltaRevision !== null
+            && delta.revision !== previousDeltaRevision
+            && delta.rebuiltSessionListViewData !== true;
+        if (canApplyDelta) {
+            for (const sessionId of delta.changedSessionIds) {
+                const nextResult = evaluateInboxSessionContent({
+                    sessionsById: state.sessions[sessionId] ? { [sessionId]: state.sessions[sessionId] } : {},
+                    sessionRowsById: state.sessionListRenderables[sessionId]
+                        ? { [sessionId]: state.sessionListRenderables[sessionId] }
+                        : {},
+                    sessionMessagesById: state.sessionMessages,
+                    nowMs,
+                });
+                if (nextResult) {
+                    previousDeltaRevision = delta.revision;
+                    previousResult = true;
+                    previousSignature = `${delta.revision}\u001c1`;
+                    return true;
+                }
+            }
+
+            if (previousResult === false) {
+                previousDeltaRevision = delta.revision;
+                previousSignature = `${delta.revision}\u001c0`;
+                return false;
+            }
+        }
         const nextSignature = [
             buildCachedRecordSignature(state.sessions, sessionSignatureCache, buildSessionInboxSignature),
             buildCachedRecordSignature(
@@ -321,6 +352,7 @@ export function createInboxSessionContentSelector(
         }
 
         previousSignature = nextSignature;
+        previousDeltaRevision = delta?.revision ?? null;
         previousResult = evaluateInboxSessionContent({
             sessionsById: state.sessions,
             sessionRowsById: state.sessionListRenderables,

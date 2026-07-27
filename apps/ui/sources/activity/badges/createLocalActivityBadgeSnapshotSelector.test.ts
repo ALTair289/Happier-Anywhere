@@ -20,6 +20,12 @@ function createStorageState(overrides: Partial<StorageState>): StorageState {
         sessions: {},
         sessionListRenderables: {},
         sessionMessages: {},
+        sessionListRenderableDelta: {
+            revision: 0,
+            changedSessionIds: [],
+            removedSessionIds: [],
+            rebuiltSessionListViewData: false,
+        },
         isDataReady: true,
         ...overrides,
     }).getState();
@@ -219,6 +225,123 @@ describe('createLocalActivityBadgeSnapshotSelector', () => {
 
         expect(second).not.toBe(first);
         expect(second.count).toBe(0);
+    });
+
+    it('uses the session-list delta to avoid sorting or re-reading unchanged sessions', () => {
+        const selector = createLocalActivityBadgeSnapshotSelector({
+            badgesEnabled: true,
+            friendRequestCount: 0,
+            hasNonNumericInboxAttention: false,
+            sessionOptions: {
+                showPendingPermissionRequests: true,
+                showPendingUserActionRequests: true,
+                showUnread: true,
+            },
+        });
+        let unchangedSeqReads = 0;
+        const unchanged = createRenderable({
+            id: 'unchanged',
+            hasUnreadMessages: true,
+        });
+        Object.defineProperty(unchanged, 'seq', {
+            configurable: true,
+            enumerable: true,
+            get: () => {
+                unchangedSeqReads += 1;
+                return 1;
+            },
+        });
+        const changed = createRenderable({
+            id: 'changed',
+            hasUnreadMessages: false,
+        });
+        const first = selector(createStorageState({
+            sessionListRenderables: { unchanged, changed },
+            sessionListRenderableDelta: {
+                revision: 1,
+                changedSessionIds: ['unchanged', 'changed'],
+                removedSessionIds: [],
+                rebuiltSessionListViewData: true,
+            },
+        }));
+        const unchangedSeqReadsAfterFirstSelection = unchangedSeqReads;
+        const sortSpy = vi.spyOn(Array.prototype, 'sort');
+
+        const second = selector(createStorageState({
+            sessionListRenderables: {
+                unchanged,
+                changed: createRenderable({
+                    id: 'changed',
+                    hasUnreadMessages: true,
+                }),
+            },
+            sessionListRenderableDelta: {
+                revision: 2,
+                changedSessionIds: ['changed'],
+                removedSessionIds: [],
+                rebuiltSessionListViewData: false,
+            },
+        }));
+
+        expect(second).not.toBe(first);
+        expect(second.count).toBe(2);
+        expect(unchangedSeqReads).toBe(unchangedSeqReadsAfterFirstSelection);
+        expect(sortSpy).not.toHaveBeenCalled();
+    });
+
+    it('does no per-session derivation work on a delta tick that changes no session', () => {
+        const selector = createLocalActivityBadgeSnapshotSelector({
+            badgesEnabled: true,
+            friendRequestCount: 0,
+            hasNonNumericInboxAttention: false,
+            sessionOptions: {
+                showPendingPermissionRequests: true,
+                showPendingUserActionRequests: true,
+                showUnread: true,
+            },
+        });
+        let sessionFieldReads = 0;
+        const renderable = createRenderable({
+            id: 'session1',
+            hasUnreadMessages: true,
+        });
+        Object.defineProperty(renderable, 'seq', {
+            configurable: true,
+            enumerable: true,
+            get: () => {
+                sessionFieldReads += 1;
+                return 1;
+            },
+        });
+        const first = selector(createStorageState({
+            sessionListRenderables: { session1: renderable },
+            sessionListRenderableDelta: {
+                revision: 1,
+                changedSessionIds: ['session1'],
+                removedSessionIds: [],
+                rebuiltSessionListViewData: true,
+            },
+        }));
+        const readsAfterFirst = sessionFieldReads;
+
+        // A subsequent wave that touched no session (empty changed/removed) with
+        // the same renderable identity must take the delta fast path and perform
+        // zero per-session derivation while returning the memoized snapshot.
+        const second = selector(createStorageState({
+            sessionListRenderables: { session1: renderable },
+            sessionListRenderableDelta: {
+                revision: 2,
+                changedSessionIds: [],
+                removedSessionIds: [],
+                rebuiltSessionListViewData: false,
+            },
+        }));
+
+        expect(second).toEqual(first);
+        expect(second.count).toBe(1);
+        // The observable performance contract: the empty delta re-derived no
+        // session, so the guarded per-session field was never read again.
+        expect(sessionFieldReads).toBe(readsAfterFirst);
     });
 
     it('computes badge snapshots without Object.values over store session records', () => {

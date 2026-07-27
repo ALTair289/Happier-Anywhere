@@ -126,6 +126,52 @@ function readSessionListSessionById(data: readonly any[] | null, sessionId: stri
 }
 
 describe('sessions domain: sessionListViewData rebuild gating', () => {
+    it('publishes changed renderable ids for incremental session-list consumers', async () => {
+        mockSessionPersistenceBoundaries();
+        const { createSessionsDomain } = await import('./sessions');
+        const initial = {
+            id: 's1',
+            seq: 1,
+            createdAt: 1_000,
+            updatedAt: 1_000,
+            active: true,
+            activeAt: 1_000,
+            archivedAt: null,
+            metadata: null,
+            metadataVersion: 1,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0,
+            presence: 'online',
+            latestReadyEventSeq: 1,
+        };
+        const { domain, get } = createHarness(createSessionsDomain);
+
+        domain.applySessions([initial]);
+        const firstDelta = get().sessionListRenderableDelta;
+        expect(firstDelta).toEqual(expect.objectContaining({
+            revision: 1,
+            changedSessionIds: ['s1'],
+            removedSessionIds: [],
+            rebuiltSessionListViewData: true,
+        }));
+
+        domain.applySessions([{
+            ...initial,
+            seq: 2,
+            updatedAt: 1_001,
+            latestReadyEventSeq: 2,
+        }]);
+
+        expect(get().sessionListRenderableDelta).toEqual(expect.objectContaining({
+            revision: firstDelta.revision + 1,
+            changedSessionIds: ['s1'],
+            removedSessionIds: [],
+            rebuiltSessionListViewData: false,
+        }));
+    });
+
     it('keeps manual unread renderables unread when only a partial transcript slice is cached', async () => {
         mockSessionPersistenceBoundaries();
         const { createSessionsDomain } = await import('./sessions');

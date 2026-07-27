@@ -86,6 +86,7 @@ import { persistSessionPermissionData } from './sessionPermissionPersistence';
 import { resolveMergedSessionPermissionMode } from './resolveMergedSessionPermissionMode';
 import {
     applySessionListRenderableCommitPlan,
+    buildNextSessionListRenderableDelta,
     buildSessionListViewDataForRenderableState,
     didSessionListRenderableListViewFieldsChangeForSettings,
     planSessionListRenderableMergeCommit,
@@ -126,6 +127,7 @@ function applyReachableSessionListRenderablesForState(input: Readonly<{
 export type SessionsDomain = {
     sessions: Record<string, Session>;
     sessionListRenderables: Record<string, SessionListRenderableSession>;
+    sessionListRenderableDelta: import('./sessionListRenderableCommit').SessionListRenderableDelta;
     sessionsData: (string | Session)[] | null;
     sessionListViewData: SessionListViewItem[] | null;
     sessionListViewDataByServerId: Record<string, SessionListViewItem[] | null>;
@@ -575,6 +577,12 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
     return {
         sessions: {},
         sessionListRenderables: {},
+        sessionListRenderableDelta: {
+            revision: 0,
+            changedSessionIds: [],
+            removedSessionIds: [],
+            rebuiltSessionListViewData: false,
+        },
         sessionsData: null,  // Legacy - to be removed
         sessionListViewData: null,
         sessionListViewDataByServerId: {},
@@ -675,6 +683,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
             let needsProjectManagerUpdate = Object.keys(state.sessions).length === 0;
             let changedSessionCount = 0;
             let changedRenderableCount = 0;
+            const changedConsumerSessionIds = new Set<string>();
             let reconciledSessionMessageCount = 0;
             let needsReachablePeerReevaluation = false;
             let didReachablePeerReevaluation = false;
@@ -877,6 +886,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                     : nextSession;
                 if (mergedSession !== previousSession) {
                     changedSessionCount += 1;
+                    changedConsumerSessionIds.add(session.id);
                     if (mergedSessions === state.sessions) {
                         mergedSessions = { ...state.sessions };
                     }
@@ -971,6 +981,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                 });
                 if (mergedRenderable !== previousRenderable) {
                     changedRenderableCount += 1;
+                    changedConsumerSessionIds.add(session.id);
                     if (assessment.didListViewFieldsChange) {
                         listViewFieldChangeCount += 1;
                     }
@@ -1102,6 +1113,12 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                 ...state,
                 sessions: mergedSessions,
                 sessionListRenderables: mergedRenderables,
+                sessionListRenderableDelta: buildNextSessionListRenderableDelta({
+                    previous: state.sessionListRenderableDelta,
+                    changedSessionIds: Array.from(changedConsumerSessionIds),
+                    removedSessionIds: [],
+                    rebuiltSessionListViewData: needsSessionListViewDataRebuild,
+                }),
                 sessionMessages: updatedSessionMessages,
             };
 

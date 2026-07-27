@@ -49,11 +49,13 @@ function createState(params: Readonly<{
     sessions?: Record<string, Session>;
     sessionListRenderables?: Record<string, SessionListRenderableSession>;
     sessionMessages?: Record<string, SessionMessages>;
+    sessionListRenderableDelta?: StorageState['sessionListRenderableDelta'];
 }>): StorageState {
     return {
         sessions: params.sessions ?? {},
         sessionListRenderables: params.sessionListRenderables ?? {},
         sessionMessages: params.sessionMessages ?? {},
+        sessionListRenderableDelta: params.sessionListRenderableDelta,
     } as StorageState;
 }
 
@@ -195,6 +197,106 @@ describe('createInboxSessionContentSelector', () => {
         }));
 
         expect(evaluate).toHaveBeenCalledTimes(2);
+    });
+
+    it('uses the session-list delta without sorting records on incremental updates', () => {
+        const evaluate = vi.fn((input) => input.sessionRowsById?.changed?.hasUnreadMessages === true);
+        const selectInboxSessionContent = createInboxSessionContentSelector(evaluate);
+
+        selectInboxSessionContent(createState({
+            sessionListRenderables: {
+                unchanged: {
+                    id: 'unchanged',
+                    seq: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    active: false,
+                    activeAt: 1,
+                    thinking: false,
+                    thinkingAt: 0,
+                    presence: 'online',
+                    metadata: null,
+                    metadataVersion: 0,
+                    agentStateVersion: 0,
+                    hasUnreadMessages: false,
+                } as SessionListRenderableSession,
+                changed: {
+                    id: 'changed',
+                    seq: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    active: false,
+                    activeAt: 1,
+                    thinking: false,
+                    thinkingAt: 0,
+                    presence: 'online',
+                    metadata: null,
+                    metadataVersion: 0,
+                    agentStateVersion: 0,
+                    hasUnreadMessages: false,
+                } as SessionListRenderableSession,
+            },
+            sessionListRenderableDelta: {
+                revision: 1,
+                changedSessionIds: ['unchanged', 'changed'],
+                removedSessionIds: [],
+                rebuiltSessionListViewData: true,
+            },
+        }));
+        expect(evaluate).toHaveBeenCalledTimes(1);
+        const sortSpy = vi.spyOn(Array.prototype, 'sort');
+
+        expect(selectInboxSessionContent(createState({
+            sessionListRenderables: {
+                unchanged: {
+                    id: 'unchanged',
+                    seq: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    active: false,
+                    activeAt: 1,
+                    thinking: false,
+                    thinkingAt: 0,
+                    presence: 'online',
+                    metadata: null,
+                    metadataVersion: 0,
+                    agentStateVersion: 0,
+                    hasUnreadMessages: false,
+                } as SessionListRenderableSession,
+                changed: {
+                    id: 'changed',
+                    seq: 2,
+                    createdAt: 1,
+                    updatedAt: 2,
+                    active: false,
+                    activeAt: 1,
+                    thinking: false,
+                    thinkingAt: 0,
+                    presence: 'online',
+                    metadata: null,
+                    metadataVersion: 0,
+                    agentStateVersion: 0,
+                    hasUnreadMessages: true,
+                } as SessionListRenderableSession,
+            },
+            sessionListRenderableDelta: {
+                revision: 2,
+                changedSessionIds: ['changed'],
+                removedSessionIds: [],
+                rebuiltSessionListViewData: false,
+            },
+        }))).toBe(true);
+
+        expect(evaluate).toHaveBeenCalledTimes(2);
+        expect(evaluate).toHaveBeenLastCalledWith({
+            sessionsById: {},
+            sessionRowsById: {
+                changed: expect.objectContaining({ id: 'changed' }),
+            },
+            sessionMessagesById: {},
+            nowMs: expect.any(Number),
+        });
+        expect(sortSpy).not.toHaveBeenCalled();
     });
 
     it('evaluates inbox candidates without Object.values over store session records', () => {
