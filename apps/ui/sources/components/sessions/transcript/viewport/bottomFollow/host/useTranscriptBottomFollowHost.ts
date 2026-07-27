@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useCommittedTranscriptRef } from '@/components/sessions/transcript/viewport/lifecycle/host/useCommittedTranscriptRef';
 import { Platform } from 'react-native';
 
 import { fireAndForget } from '@/utils/system/fireAndForget';
@@ -312,7 +313,10 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
     const scheduleBottomFollowWriteTimerRef =
         React.useRef<((write: BottomFollowScheduledWrite<WebTranscriptScrollMetrics>) => void) | null>(null);
 
-    liveTailCarveTelemetryRef.current = liveTailCarveTelemetry;
+    useCommittedTranscriptRef(
+        liveTailCarveTelemetryRef,
+        liveTailCarveTelemetry,
+    );
 
     React.useLayoutEffect(() => {
         if (!nativeHotTailResetRequired) return;
@@ -704,13 +708,14 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         for (const effect of effects) {
             if (
                 effect.type !== 'issue-entry-settle-reconfirm-pin' ||
-                effect.sessionId !== sessionId
+                effect.sessionId !== sessionId ||
+                continuousFollowOwner === 'renderer'
             ) {
                 continue;
             }
             authorizeImmediateBottomFollowWriteRef.current('settle-reconfirm', 'mount-settle');
         }
-    }, [sessionId]);
+    }, [continuousFollowOwner, sessionId]);
 
     const observeNativeConfirmation = React.useCallback((params: Readonly<{
         contentHeight: number;
@@ -1002,6 +1007,10 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         writer: BottomFollowAutomaticWriter,
         reason: TranscriptViewportTelemetryScrollReason,
     ): boolean => {
+        // Blank recovery detects the fault; it does not own the response. Like the
+        // `settle-reconfirm` and `proactive-auto-follow` siblings, the app must not write the
+        // viewport while the renderer owns continuous follow.
+        if (writer === 'blank-recovery' && continuousFollowOwner === 'renderer') return false;
         const plan = planBottomFollowWriteSchedulerEvent(bottomFollowWriteSchedulerStateRef.current, {
             reason,
             type: 'authorize-immediate-write',
@@ -1010,11 +1019,17 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         bottomFollowWriteSchedulerStateRef.current = plan.state;
         applyBottomFollowWriteSchedulerEffects(plan.effects);
         return plan.effects.some((effect) => effect.type === 'authorize-write');
-    }, [applyBottomFollowWriteSchedulerEffects]);
+    }, [applyBottomFollowWriteSchedulerEffects, continuousFollowOwner]);
 
     const authorizeImmediateBottomFollowWriteRef = React.useRef(authorizeImmediateBottomFollowWrite);
-    authorizeImmediateBottomFollowWriteRef.current = authorizeImmediateBottomFollowWrite;
-    externalAuthorizeImmediateBottomFollowWriteRef.current = authorizeImmediateBottomFollowWrite;
+    useCommittedTranscriptRef(
+        authorizeImmediateBottomFollowWriteRef,
+        authorizeImmediateBottomFollowWrite,
+    );
+    useCommittedTranscriptRef(
+        externalAuthorizeImmediateBottomFollowWriteRef,
+        authorizeImmediateBottomFollowWrite,
+    );
 
     const [beginExplicitJumpWriteBarrier, endExplicitJumpWriteBarrier] = useExplicitJumpWriteBarrier({
         applyEffects: applyBottomFollowWriteSchedulerEffects,
@@ -1065,7 +1080,10 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         sessionId,
         shouldKeepPendingNativeMountSettleBottomPin,
     ]);
-    flushPendingNativeMountSettleBottomPinRef.current = flushPendingNativeMountSettleBottomPin;
+    useCommittedTranscriptRef(
+        flushPendingNativeMountSettleBottomPinRef,
+        flushPendingNativeMountSettleBottomPin,
+    );
 
     const pinNativeLiveTailForHotTailHeight = React.useCallback((height: number) => {
         if (Platform.OS === 'web' || !usesNativeFlashListBottomMaintenance) return;
@@ -1094,7 +1112,10 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         resolveViewportTelemetryMode,
         usesNativeFlashListBottomMaintenance,
     ]);
-    pinNativeLiveTailForHotTailHeightRef.current = pinNativeLiveTailForHotTailHeight;
+    useCommittedTranscriptRef(
+        pinNativeLiveTailForHotTailHeightRef,
+        pinNativeLiveTailForHotTailHeight,
+    );
 
     const applyNativeMountSettlePendingFlushRequest = React.useCallback((
         decision: NativeMountSettlePendingFlushTriggerDecision,
@@ -1153,12 +1174,12 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         if (nextFollowBottomIntentKey == null) return;
         if (lastFollowBottomIntentKeyRef.current === nextFollowBottomIntentKey) return;
         lastFollowBottomIntentKeyRef.current = nextFollowBottomIntentKey;
-        commitExplicitReturnToLiveTailState('follow-bottom-intent');
         invalidateViewportAnchorCapture();
         const plan = lifecycleHost.planFollowBottomIntentTakeover({ sessionId });
         commitBottomFollowModeState(plan.state.bottomFollowState);
         applyFollowBottomIntentTakeoverApplyEffects(plan.followBottomIntentTakeoverEffects);
         pinToBottom('jump-to-bottom');
+        commitExplicitReturnToLiveTailState('follow-bottom-intent');
     }, [
         applyFollowBottomIntentTakeoverApplyEffects,
         commitBottomFollowModeState,
@@ -1220,7 +1241,10 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
             applyScheduledPinToBottomFire(handle);
         }, write.delayMs);
     }, [applyScheduledPinToBottomFire]);
-    scheduleBottomFollowWriteTimerRef.current = scheduleBottomFollowWriteTimer;
+    useCommittedTranscriptRef(
+        scheduleBottomFollowWriteTimerRef,
+        scheduleBottomFollowWriteTimer,
+    );
 
     const requestBottomFollowScheduledWrite = React.useCallback((
         previousWebMetrics: WebTranscriptScrollMetrics | null = null,
@@ -1247,7 +1271,10 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         resolveAutoPinWaitMs,
         usesNativeFlashListBottomMaintenance,
     ]);
-    requestBottomFollowScheduledWriteRef.current = requestBottomFollowScheduledWrite;
+    useCommittedTranscriptRef(
+        requestBottomFollowScheduledWriteRef,
+        requestBottomFollowScheduledWrite,
+    );
 
     const applyScheduledContentGrowthLiveTailCommand = React.useCallback((
         params: Readonly<{

@@ -22,7 +22,9 @@ function createStableMembers() {
     return {
         applyFollowBottomIntentTakeoverApplyEffects: vi.fn(),
         applyNativeExplicitJumpConfirmationEffects: vi.fn(),
-        authorizeImmediateBottomFollowWriteRef: createRef(() => false),
+        authorizeImmediateBottomFollowWriteRef: createRef<
+            BottomFollowHostDeps['authorizeImmediateBottomFollowWriteRef']['current']
+        >(vi.fn(() => false)),
         canAutoFollowForReason: vi.fn(() => true),
         commitBottomFollowModeState: vi.fn(),
         commitExplicitReturnToLiveTailState: vi.fn(),
@@ -39,7 +41,7 @@ function createStableMembers() {
         lifecycleHost: {
             clearNativeExplicitJumpConfirmation: vi.fn(),
             getMountSettleSnapshot: vi.fn(() => ({ isMountSettleActive: false })),
-            observeNativeScrollConfirmation: vi.fn(() => ({
+            observeNativeScrollConfirmation: vi.fn<BottomFollowHostDeps['lifecycleHost']['observeNativeScrollConfirmation']>(() => ({
                 consumed: false,
                 entrySettleEffects: [],
                 explicitJumpEffects: [],
@@ -106,6 +108,129 @@ function buildDeps(members: ReturnType<typeof createStableMembers>): BottomFollo
 }
 
 describe('useTranscriptBottomFollowHost identity stability', () => {
+    it('installs the renderer tail before publishing accepted own-send follow state', async () => {
+        const members = createStableMembers();
+        const order: string[] = [];
+        members.tryPinToBottomDom.mockImplementation(() => {
+            order.push('renderer-held-end');
+            return true;
+        });
+        members.executeViewportCommand.mockImplementation(() => {
+            order.push('renderer-held-end');
+            return true;
+        });
+        members.commitExplicitReturnToLiveTailState.mockImplementation(() => {
+            order.push('semantic-following');
+        });
+        const deps = {
+            ...buildDeps(members),
+            usesNativeFlashListBottomMaintenance: false,
+        };
+        const hook = await renderHook(
+            (deps: BottomFollowHostDeps) => useTranscriptBottomFollowHost(deps),
+            { initialProps: deps },
+        );
+
+        await hook.rerender({
+            ...deps,
+            followBottomIntentKey: 1,
+        });
+
+        expect(order).toEqual([
+            'renderer-held-end',
+            'semantic-following',
+        ]);
+        await hook.unmount();
+    });
+
+    it('does not issue the native settle-reconfirm writer when the renderer owns continuous follow', async () => {
+        const members = createStableMembers();
+        members.lifecycleHost.observeNativeScrollConfirmation.mockReturnValue({
+            consumed: true,
+            entrySettleEffects: [{
+                sessionId: 's1',
+                type: 'issue-entry-settle-reconfirm-pin',
+            }],
+            explicitJumpEffects: [],
+        });
+        const deps = {
+            ...buildDeps(members),
+            continuousFollowOwner: 'renderer' as const,
+        };
+        const hook = await renderHook(
+            (nextDeps: BottomFollowHostDeps) => useTranscriptBottomFollowHost(nextDeps),
+            { initialProps: deps },
+        );
+
+        hook.getCurrent().observeNativeConfirmation({
+            contentHeight: 1000,
+            distanceFromBottom: 0,
+            isTrusted: false,
+            mountSettleStable: true,
+        });
+
+        expect(members.executeViewportCommand).not.toHaveBeenCalled();
+        await hook.unmount();
+    });
+
+    it('does not issue the blank-recovery forced pin when the renderer owns continuous follow', async () => {
+        const members = createStableMembers();
+        const hook = await renderHook(
+            (nextDeps: BottomFollowHostDeps) => useTranscriptBottomFollowHost(nextDeps),
+            {
+                initialProps: {
+                    ...buildDeps(members),
+                    continuousFollowOwner: 'renderer' as const,
+                    usesNativeFlashListBottomMaintenance: false,
+                },
+            },
+        );
+        members.executeViewportCommand.mockClear();
+        members.resolveViewportCommand.mockClear();
+
+        const authorized = members.authorizeImmediateBottomFollowWriteRef.current(
+            'blank-recovery',
+            'passive-drift',
+        );
+
+        expect(members.resolveViewportCommand).not.toHaveBeenCalled();
+        expect(members.executeViewportCommand).not.toHaveBeenCalled();
+        expect(authorized).toBe(false);
+        await hook.unmount();
+    });
+
+    it('still issues the blank-recovery forced pin when the app owns continuous follow', async () => {
+        const members = createStableMembers();
+        const hook = await renderHook(
+            (nextDeps: BottomFollowHostDeps) => useTranscriptBottomFollowHost(nextDeps),
+            {
+                initialProps: {
+                    ...buildDeps(members),
+                    continuousFollowOwner: 'app' as const,
+                },
+            },
+        );
+        members.executeViewportCommand.mockClear();
+        members.resolveViewportCommand.mockClear();
+
+        const authorized = members.authorizeImmediateBottomFollowWriteRef.current(
+            'blank-recovery',
+            'passive-drift',
+        );
+
+        expect(members.resolveViewportCommand).toHaveBeenCalledWith(expect.objectContaining({
+            animated: false,
+            force: true,
+            mode: 'follow-bottom',
+            reason: 'passive-drift',
+            sessionId: 's1',
+            type: 'pin-bottom',
+        }));
+        expect(members.executeViewportCommand).toHaveBeenCalledTimes(1);
+        expect(authorized).toBe(true);
+        await hook.unmount();
+    });
+
     it('keeps host callbacks referentially stable across re-renders with fresh deps object identities', async () => {
         const members = createStableMembers();
         const hook = await renderHook(
