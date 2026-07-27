@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveSpawnConnectedServicesDefaults } from './spawnConnectedServicesDefaults';
+import {
+  resolveSpawnConnectedServicesDefaultDisposition,
+  resolveSpawnConnectedServicesDefaults,
+} from './spawnConnectedServicesDefaults';
 
 const codexProfileDefaultSettings = {
   connectedServicesDefaultAuthByAgentIdV1: {
@@ -88,5 +91,19 @@ describe('resolveSpawnConnectedServicesDefaults (R4-2 literal resolver)', () => 
       serviceIds: ['openai'],
     });
     expect(result).toBeNull();
+  });
+
+  it('preserves protocol-tolerant native fallback for a malformed persisted default blob', () => {
+    expect(resolveSpawnConnectedServicesDefaultDisposition({
+      accountSettings: {},
+      agentId: 'codex',
+    })).toEqual({ kind: 'native' });
+
+    expect(resolveSpawnConnectedServicesDefaultDisposition({
+      accountSettings: {
+        connectedServicesDefaultAuthByAgentIdV1: { v: 999 },
+      },
+      agentId: 'codex',
+    })).toEqual({ kind: 'native' });
   });
 });

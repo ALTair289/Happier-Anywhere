@@ -41,6 +41,7 @@ afterEach(() => {
   delete process.env.HAPPIER_CODEX_BACKEND_MODE;
   delete process.env.HAPPIER_EXPERIMENTAL_CODEX_ACP;
   delete process.env.HAPPIER_DAEMON_SPAWN_SELF_MIGRATE_CGROUP;
+  delete process.env.CONNECTED_SERVICE_TEST_TOKEN;
 });
 
 describe('runBackendSessionCliCommand', () => {
@@ -84,6 +85,69 @@ describe('runBackendSessionCliCommand', () => {
       }),
     );
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ credentials }));
+  });
+
+  it('materializes the configured Connected Services default for a direct backend launch', async () => {
+    const credentials = { token: 'x' } as any;
+    vi.spyOn(persistenceModule, 'readCredentials').mockResolvedValue(credentials);
+    vi.spyOn(persistenceModule, 'readSettings').mockResolvedValue({ machineId: 'machine-1' } as any);
+    vi.spyOn(accountSettingsModule, 'bootstrapAccountSettingsContext').mockResolvedValue({
+      source: 'cache',
+      settings: {
+        connectedServicesDefaultAuthByAgentIdV1: {
+          v: 1,
+          bindingsByAgentId: {
+            codex: {
+              v: 1,
+              bindingsByServiceId: {
+                'openai-codex': {
+                  source: 'connected',
+                  selection: 'group',
+                  groupId: 'team',
+                },
+              },
+            },
+          },
+        },
+      },
+      settingsVersion: 1,
+      loadedAtMs: Date.now(),
+      whenRefreshed: null,
+    } as any);
+    const cleanup = vi.fn();
+    const materialize = vi.fn(async ({ connectedServices }: any) => ({
+      env: { CONNECTED_SERVICE_TEST_TOKEN: 'selected' },
+      cleanupOnFailure: cleanup,
+      cleanupOnExit: cleanup,
+      connectedServices,
+    }));
+    const run = vi.fn(async () => {
+      expect(process.env.CONNECTED_SERVICE_TEST_TOKEN).toBe('selected');
+    });
+
+    await runBackendSessionCliCommand({
+      context: { args: ['codex'], terminalRuntime: null } as any,
+      loadRun: async () => run,
+      agentIdForAccountSettings: 'codex' as any,
+      resolveDirectConnectedServiceEnvironmentFn: materialize,
+    });
+
+    expect(materialize).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 'codex',
+      connectedServices: {
+        v: 1,
+        bindingsByServiceId: {
+          openai: { source: 'native' },
+          'openai-codex': {
+            source: 'connected',
+            selection: 'group',
+            groupId: 'team',
+          },
+        },
+      },
+    }));
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(process.env.CONNECTED_SERVICE_TEST_TOKEN).toBeUndefined();
   });
 
   it('uses the cached fast account settings snapshot without waiting for refresh', async () => {

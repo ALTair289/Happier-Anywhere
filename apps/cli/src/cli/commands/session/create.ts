@@ -1,4 +1,7 @@
 import chalk from 'chalk';
+import { randomUUID } from 'node:crypto';
+import { AGENTS_CORE, resolveAgentIdFromFlavor, type AgentId } from '@happier-dev/agents';
+import { parseBackendTargetKey } from '@happier-dev/protocol';
 
 import { hasFlag } from '@/cli/commands/shared/argvFlags';
 import { wantsJson, printJsonEnvelope } from '@/cli/output/jsonEnvelope';
@@ -8,6 +11,54 @@ import { createCliActionExecutorFromCredentials } from '@/session/actions/create
 import { normalizeActionExecuteResult } from '@/cli/commands/session/shared/normalizeActionExecuteResult';
 import { tryHandleApprovalRequestCreated } from '@/cli/commands/session/shared/tryHandleApprovalRequestCreated';
 import { parseSessionCreateSpawnOptions, SESSION_CREATE_USAGE } from './create/parseSessionCreateSpawnOptions';
+import { resolveConnectedServicesLaunchAuthWithInventory } from '@/cli/connectedServicesLaunchAuth';
+
+function hasSpawnNonce(details: unknown): boolean {
+  return Boolean(details && typeof details === 'object'
+    && (details as { accepted?: unknown }).accepted === true
+    && typeof (details as { spawnNonce?: unknown }).spawnNonce === 'string'
+    && (details as { spawnNonce: string }).spawnNonce.trim());
+}
+
+async function resolveSessionCreateConnectedServices(params: Readonly<{
+  executor: ReturnType<typeof createCliActionExecutorFromCredentials>;
+  parsedOptions: ReturnType<typeof parseSessionCreateSpawnOptions>;
+}>): Promise<Record<string, unknown>> {
+  const intent = params.parsedOptions.connectedServicesAuthIntent;
+  if (!intent || intent.kind === 'default') return params.parsedOptions.actionInput;
+
+  const targetAgentId = params.parsedOptions.backendTargetKey
+    ? (() => {
+        const target = parseBackendTargetKey(params.parsedOptions.backendTargetKey!);
+        return target.kind === 'builtInAgent' ? target.agentId : null;
+      })()
+    : null;
+  const agentId = resolveAgentIdFromFlavor(
+    params.parsedOptions.actionInput.agentId
+      ?? targetAgentId
+      ?? params.parsedOptions.backendRaw,
+  ) as AgentId | null;
+  if (!agentId) throw new Error('connected_service_auth_unsupported');
+  const supportedServiceIds = AGENTS_CORE[agentId].connectedServices?.supportedServiceIds ?? [];
+  const connectedServices = await resolveConnectedServicesLaunchAuthWithInventory({
+    intent,
+    supportedServiceIds,
+    listInventory: async () => {
+      const inventoryResult = normalizeActionExecuteResult(await params.executor.execute(
+        'sessions.spawn.connected_services.list',
+        { agentId, includeUnavailable: false },
+        { surface: 'cli', defaultSessionId: null },
+      ));
+      if (!inventoryResult.ok) {
+        throw new Error(inventoryResult.errorMessage ?? inventoryResult.errorCode);
+      }
+      return inventoryResult.data ?? null;
+    },
+  });
+  return connectedServices
+    ? { ...params.parsedOptions.actionInput, connectedServices }
+    : params.parsedOptions.actionInput;
+}
 
 export async function cmdSessionCreate(
   argv: string[],
@@ -15,6 +66,7 @@ export async function cmdSessionCreate(
 ): Promise<void> {
   const json = wantsJson(argv);
   const parsedOptions = parseSessionCreateSpawnOptions(argv);
+  const spawnAttemptId = parsedOptions.spawnAttemptId ?? randomUUID();
   if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
     throw new Error(`Usage: ${SESSION_CREATE_USAGE}`);
   }
@@ -36,10 +88,19 @@ export async function cmdSessionCreate(
   const executor = createCliActionExecutorFromCredentials({ credentials });
   let actionRes;
   try {
+    const actionInput = await resolveSessionCreateConnectedServices({
+      executor,
+      parsedOptions,
+    });
     actionRes = await executor.execute(
       'session.spawn_new',
-      parsedOptions.actionInput,
-      { surface: 'cli', defaultSessionId: null },
+      actionInput,
+      {
+        surface: 'cli',
+        defaultSessionId: null,
+        actionRequestId: spawnAttemptId,
+        ...(parsedOptions.resumeSpawnAttempt ? { resumeActionRequest: true } : {}),
+      },
     );
   } catch (error) {
     const mapped = mapUnknownErrorToControlError(error);
@@ -62,6 +123,7 @@ export async function cmdSessionCreate(
 
   const result = normalizeActionExecuteResult(actionRes);
   if (!result.ok) {
+    const isAmbiguousSpawn = hasSpawnNonce(result.details);
     if (json) {
       printJsonEnvelope({
         ok: false,
@@ -70,11 +132,19 @@ export async function cmdSessionCreate(
           code: result.errorCode,
           ...(result.errorMessage ? { message: result.errorMessage } : {}),
           ...(result.candidates ? { candidates: result.candidates } : {}),
+          ...(result.details !== undefined ? { details: result.details } : {}),
+          ...(isAmbiguousSpawn ? { spawnAttemptId } : {}),
         },
       });
       return;
     }
-    throw Object.assign(new Error(result.errorMessage ?? result.errorCode), { code: result.errorCode });
+    const retryHint = isAmbiguousSpawn
+      ? ` Retry with --spawn-attempt-id ${spawnAttemptId} --resume-spawn-attempt.`
+      : '';
+    throw Object.assign(new Error(`${result.errorMessage ?? result.errorCode}${retryHint}`), {
+      code: result.errorCode,
+      ...(result.details !== undefined ? { details: result.details } : {}),
+    });
   }
   const created = result.data as any;
   if (tryHandleApprovalRequestCreated({ envelopeKind: 'session_create', json, result: created })) {

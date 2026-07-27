@@ -5,21 +5,29 @@ import {
   SessionMcpSelectionV1Schema,
   type SpawnConfigOptionValue,
 } from '@happier-dev/protocol';
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 
 import { DEFAULT_CATALOG_AGENT_ID } from '@/backends/types';
 import { readFlagValue, hasFlag } from '@/cli/commands/shared/argvFlags';
 import { normalizeBackendTargetKeysFromCsv } from '@/cli/commands/session/shared/normalizeBackendTargetKeys';
 import { resolveRequestedSessionDirectory } from '@/agent/runtime/resolveRequestedSessionDirectory';
+import {
+  parseConnectedServicesLaunchAuth,
+  type ConnectedServicesLaunchAuthIntent,
+} from '@/cli/connectedServicesLaunchAuth';
 
 export type SessionCreateSpawnActionInput = Record<string, unknown>;
 
 export type ParsedSessionCreateSpawnOptions = Readonly<{
   backendRaw: string;
   backendTargetKey: string | null;
+  spawnAttemptId: string | null;
+  resumeSpawnAttempt: boolean;
+  connectedServicesAuthIntent?: ConnectedServicesLaunchAuthIntent;
   actionInput: SessionCreateSpawnActionInput;
 }>;
 
-export const SESSION_CREATE_USAGE = 'happier session create [--path <path>] [--backend <backend-target>] [--title <title>] [--tag <tag>] [--prompt <text>|--message <text>] [--model <model-id>] [--permission-mode <mode>] [--mode <agent-mode-id>] [--config-option <id=value>] [--reasoning-effort <value>] [--ultracode] [--config-overrides-json <json>] [--profile <profile-id>] [--env <KEY=VALUE>] [--connected-services-json <json>] [--mcp-selection-json <json>] [--transcript-storage <persisted|direct>] [--terminal-json <json>] [--codex-backend-mode <mcp|acp|appServer>] [--runtime-descriptor-json <json>|--agent-runtime-descriptor-json <json>] [--host <host>] [--machine-id <machineId>] [--json]';
+export const SESSION_CREATE_USAGE = 'happier session create [--path <path>] [--backend <backend-target>] [--title <title>] [--tag <tag>] [--prompt <text>|--message <text>] [--model <model-id>] [--permission-mode <mode>] [--mode <agent-mode-id>] [--config-option <id=value>] [--reasoning-effort <value>] [--ultracode] [--config-overrides-json <json>] [--launch-profile <profile-id>] [--env <KEY=VALUE>] [--auth <default|native|cs:<id>>|--connected-services <selector>|--auth-json <json>] [--mcp-selection-json <json>] [--transcript-storage <persisted|direct>] [--terminal-json <json>] [--codex-backend-mode <mcp|acp|appServer>] [--runtime-descriptor-json <json>|--agent-runtime-descriptor-json <json>] [--host <host>] [--machine-id <machineId>] [--spawn-attempt-id <id>] [--resume-spawn-attempt] [--json]';
 
 function readRepeatedFlagValues(argv: readonly string[], flag: string): string[] {
   const values: string[] = [];
@@ -33,16 +41,32 @@ function readRepeatedFlagValues(argv: readonly string[], flag: string): string[]
   return values;
 }
 
+function readRepeatedOpaqueFlagValues(argv: readonly string[], flag: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] !== flag) continue;
+    const raw = argv[index + 1];
+    if (typeof raw === 'string' && raw.trim().length > 0) values.push(raw);
+  }
+  return values;
+}
+
+function readOpaqueFlagValue(argv: readonly string[], flag: string): string | null {
+  const index = argv.findIndex((value) => value === flag);
+  if (index < 0) return null;
+  const raw = argv[index + 1];
+  return readNonBlankSessionControlIdentifier(raw);
+}
+
 function parseConfigOptionValue(raw: string): SpawnConfigOptionValue {
-  const trimmed = raw.trim();
-  if (trimmed === 'true') return true;
-  if (trimmed === 'false') return false;
-  if (trimmed === 'null') return null;
-  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
-    const parsed = Number(trimmed);
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (raw === 'null') return null;
+  if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
+    const parsed = Number(raw);
     if (Number.isFinite(parsed)) return parsed;
   }
-  return trimmed;
+  return raw;
 }
 
 function parseConfigOptionFlag(raw: string): Readonly<{ id: string; value: SpawnConfigOptionValue }> {
@@ -50,8 +74,8 @@ function parseConfigOptionFlag(raw: string): Readonly<{ id: string; value: Spawn
   if (separatorIndex <= 0) {
     throw new Error('Invalid --config-option. Expected <id=value>.');
   }
-  const id = raw.slice(0, separatorIndex).trim();
-  if (!id) {
+  const id = raw.slice(0, separatorIndex);
+  if (!readNonBlankSessionControlIdentifier(id)) {
     throw new Error('Invalid --config-option. Expected <id=value>.');
   }
   return {
@@ -121,14 +145,14 @@ function parseCodexBackendMode(raw: string): 'mcp' | 'acp' | 'appServer' {
 
 function parseConfigOptions(argv: readonly string[]): Record<string, SpawnConfigOptionValue> | null {
   const configOptions: Record<string, SpawnConfigOptionValue> = {};
-  for (const raw of readRepeatedFlagValues(argv, '--config-option')) {
+  for (const raw of readRepeatedOpaqueFlagValues(argv, '--config-option')) {
     const parsed = parseConfigOptionFlag(raw);
     configOptions[parsed.id] = parsed.value;
   }
 
-  const reasoningEffort = readFlagValue(argv, '--reasoning-effort');
-  if (reasoningEffort) {
-    configOptions.reasoning_effort = reasoningEffort.trim();
+  const reasoningEffort = readOpaqueFlagValue(argv, '--reasoning-effort');
+  if (reasoningEffort !== null) {
+    configOptions.reasoning_effort = reasoningEffort;
   }
 
   if (hasFlag(argv, '--ultracode')) {
@@ -148,12 +172,25 @@ export function parseSessionCreateSpawnOptions(argv: readonly string[]): ParsedS
   const backendRaw = (readFlagValue(argv, '--backend') ?? readFlagValue(argv, '--agent') ?? '').trim();
   const backendTargetKeys = normalizeBackendTargetKeysFromCsv(backendRaw);
   const backendTargetKey = backendTargetKeys.length === 1 ? backendTargetKeys[0] : null;
-  const modelId = (readFlagValue(argv, '--model') ?? '').trim();
+  const modelId = readOpaqueFlagValue(argv, '--model') ?? '';
   const permissionMode = (readFlagValue(argv, '--permission-mode') ?? '').trim();
-  const agentModeId = (readFlagValue(argv, '--mode') ?? '').trim();
-  const profileId = (readFlagValue(argv, '--profile') ?? '').trim();
+  const agentModeId = readOpaqueFlagValue(argv, '--mode') ?? '';
+  const launchProfileId = readFlagValue(argv, '--launch-profile');
+  const legacyProfileId = readFlagValue(argv, '--profile');
+  if (launchProfileId !== null && legacyProfileId !== null) {
+    throw new Error('Choose only one of --launch-profile or --profile.');
+  }
+  const profileId = (launchProfileId ?? legacyProfileId ?? '').trim();
   const host = (readFlagValue(argv, '--host') ?? '').trim();
   const machineId = (readFlagValue(argv, '--machine-id') ?? '').trim();
+  const spawnAttemptId = (readFlagValue(argv, '--spawn-attempt-id') ?? '').trim() || null;
+  if (spawnAttemptId && (spawnAttemptId.length > 200 || !/^[A-Za-z0-9._:-]+$/.test(spawnAttemptId))) {
+    throw new Error('Invalid --spawn-attempt-id.');
+  }
+  const resumeSpawnAttempt = hasFlag(argv, '--resume-spawn-attempt');
+  if (resumeSpawnAttempt && !spawnAttemptId) {
+    throw new Error('Invalid --resume-spawn-attempt without --spawn-attempt-id.');
+  }
   const transcriptStorageRaw = (readFlagValue(argv, '--transcript-storage') ?? '').trim();
   const codexBackendModeRaw = (readFlagValue(argv, '--codex-backend-mode') ?? '').trim();
   const sessionConfigOptionOverrides = readParsedJsonFlag(
@@ -163,11 +200,30 @@ export function parseSessionCreateSpawnOptions(argv: readonly string[]): ParsedS
   );
   const configOptions = parseConfigOptions(argv);
   const environmentVariables = parseEnvironmentVariables(argv);
-  const connectedServices = readParsedJsonFlag(
-    argv,
-    '--connected-services-json',
-    (value) => ConnectedServiceBindingsV1Schema.parse(value),
-  );
+  const authRaw = readFlagValue(argv, '--auth');
+  const connectedServicesAliasRaw = readFlagValue(argv, '--connected-services');
+  const authJsonRaw = readFlagValue(argv, '--auth-json');
+  const connectedServicesJsonRaw = readFlagValue(argv, '--connected-services-json');
+  if ((authRaw && connectedServicesAliasRaw) || (authJsonRaw && connectedServicesJsonRaw)) {
+    throw new Error('Choose only one connected-services auth option.');
+  }
+  const connectedServicesAuthRaw = authRaw ?? connectedServicesAliasRaw;
+  const connectedServicesRaw = authJsonRaw ?? connectedServicesJsonRaw;
+  if (connectedServicesAuthRaw && connectedServicesRaw) {
+    throw new Error('Choose only one connected-services auth option.');
+  }
+  const connectedServices = connectedServicesRaw ? (() => {
+    const flag = authJsonRaw ? '--auth-json' : '--connected-services-json';
+    const parsed = parseJsonFlagValue(connectedServicesRaw, flag);
+    try {
+      return ConnectedServiceBindingsV1Schema.parse(parsed);
+    } catch {
+      throw new Error(`Invalid ${flag}.`);
+    }
+  })() : null;
+  const connectedServicesAuthIntent = connectedServicesAuthRaw
+    ? parseConnectedServicesLaunchAuth(connectedServicesAuthRaw)
+    : undefined;
   const mcpSelection = readParsedJsonFlag(
     argv,
     '--mcp-selection-json',
@@ -187,6 +243,9 @@ export function parseSessionCreateSpawnOptions(argv: readonly string[]): ParsedS
   return {
     backendRaw,
     backendTargetKey,
+    spawnAttemptId,
+    resumeSpawnAttempt,
+    ...(connectedServicesAuthIntent ? { connectedServicesAuthIntent } : {}),
     actionInput: {
       path,
       ...(backendTargetKey ? { backendTargetKey } : { agentId: DEFAULT_CATALOG_AGENT_ID }),

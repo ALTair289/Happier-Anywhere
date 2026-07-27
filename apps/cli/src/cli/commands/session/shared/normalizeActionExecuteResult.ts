@@ -10,6 +10,7 @@ export type NormalizedCliActionExecuteResult =
     errorCode: string;
     errorMessage?: string;
     candidates?: readonly string[];
+    details?: unknown;
   }>;
 
 function normalizeErrorCode(value: unknown): string | null {
@@ -28,6 +29,7 @@ export function normalizeActionExecuteResult(result: ActionExecuteResult): Norma
       ok: false,
       errorCode: result.errorCode,
       ...(result.error ? { errorMessage: result.error } : {}),
+      ...(result.details !== undefined ? { details: result.details } : {}),
     };
   }
 
@@ -40,11 +42,13 @@ export function normalizeActionExecuteResult(result: ActionExecuteResult): Norma
       ?? normalizeErrorMessage(dataObj.message)
       ?? undefined;
     const candidates = Array.isArray(dataObj.candidates) ? (dataObj.candidates.map((v) => String(v)) as string[]) : undefined;
+    const details = dataObj.details;
     return {
       ok: false,
       errorCode,
       ...(errorMessage ? { errorMessage } : {}),
       ...(candidates && candidates.length > 0 ? { candidates } : {}),
+      ...(details !== undefined ? { details } : {}),
     };
   }
 

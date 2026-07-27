@@ -11,6 +11,14 @@ export function agentSupportsSpawnConnectedServicesDefaults(agentId: AgentId): b
   return (AGENTS_CORE[agentId].connectedServices?.supportedServiceIds.length ?? 0) > 0;
 }
 
+export type SpawnConnectedServicesDefaultDisposition =
+  | Readonly<{ kind: 'connected'; bindings: ConnectedServiceBindingsV1 }>
+  | Readonly<{ kind: 'native' }>
+  | Readonly<{
+      kind: 'unavailable';
+      reason: 'connected_services_default_settings_invalid';
+    }>;
+
 function normalizeBindingForSpawn(
   binding: ConnectedServiceBindingSelectionV1 | undefined,
 ): ConnectedServiceBindingSelectionV1 {
@@ -42,25 +50,33 @@ function normalizeBindingForSpawn(
  * stored default only, WITHOUT broadening to every service the agent supports. Omit it to resolve the
  * whole supported set (the spawn/run account-default behavior).
  */
-export function resolveSpawnConnectedServicesDefaults(params: Readonly<{
+export function resolveSpawnConnectedServicesDefaultDisposition(params: Readonly<{
   accountSettings: unknown;
   agentId: AgentId;
   serviceIds?: readonly ConnectedServiceId[];
-}>): ConnectedServiceBindingsV1 | null {
+}>): SpawnConnectedServicesDefaultDisposition {
   const supportedServiceIds = AGENTS_CORE[params.agentId].connectedServices?.supportedServiceIds ?? [];
-  if (supportedServiceIds.length === 0) return null;
+  if (supportedServiceIds.length === 0) return { kind: 'native' };
   const targetServiceIds = params.serviceIds
     ? supportedServiceIds.filter((serviceId) => params.serviceIds!.includes(serviceId))
     : supportedServiceIds;
-  if (targetServiceIds.length === 0) return null;
+  if (targetServiceIds.length === 0) return { kind: 'native' };
 
   const settingsRecord = params.accountSettings && typeof params.accountSettings === 'object' && !Array.isArray(params.accountSettings)
     ? params.accountSettings as { connectedServicesDefaultAuthByAgentIdV1?: unknown }
     : {};
+  if (!Object.prototype.hasOwnProperty.call(settingsRecord, 'connectedServicesDefaultAuthByAgentIdV1')) {
+    return { kind: 'native' };
+  }
   const parsedDefaults = ConnectedServicesDefaultAuthByAgentIdV1Schema.safeParse(
     settingsRecord.connectedServicesDefaultAuthByAgentIdV1,
   );
-  if (!parsedDefaults.success) return null;
+  if (!parsedDefaults.success) {
+    return {
+      kind: 'unavailable',
+      reason: 'connected_services_default_settings_invalid',
+    };
+  }
 
   const configuredBindings = parsedDefaults.data.bindingsByAgentId[params.agentId]?.bindingsByServiceId ?? {};
   const bindingsByServiceId: Record<string, ConnectedServiceBindingSelectionV1> = {};
@@ -74,9 +90,21 @@ export function resolveSpawnConnectedServicesDefaults(params: Readonly<{
     }
   }
 
-  if (!hasConnectedBinding) return null;
-  return ConnectedServiceBindingsV1Schema.parse({
-    v: 1,
-    bindingsByServiceId,
-  });
+  if (!hasConnectedBinding) return { kind: 'native' };
+  return {
+    kind: 'connected',
+    bindings: ConnectedServiceBindingsV1Schema.parse({
+      v: 1,
+      bindingsByServiceId,
+    }),
+  };
+}
+
+export function resolveSpawnConnectedServicesDefaults(params: Readonly<{
+  accountSettings: unknown;
+  agentId: AgentId;
+  serviceIds?: readonly ConnectedServiceId[];
+}>): ConnectedServiceBindingsV1 | null {
+  const disposition = resolveSpawnConnectedServicesDefaultDisposition(params);
+  return disposition.kind === 'connected' ? disposition.bindings : null;
 }

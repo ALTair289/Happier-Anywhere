@@ -3,6 +3,30 @@ import { describe, expect, it } from 'vitest';
 import { parseSessionCreateSpawnOptions } from './parseSessionCreateSpawnOptions';
 
 describe('parseSessionCreateSpawnOptions', () => {
+  it('preserves exact nonblank opaque model and mode flag values', () => {
+    const parsed = parseSessionCreateSpawnOptions([
+      '--model', ' model-a\t',
+      '--mode', ' plan\t',
+    ]);
+
+    expect(parsed.actionInput).toEqual(expect.objectContaining({
+      modelId: ' model-a\t',
+      agentModeId: ' plan\t',
+    }));
+  });
+
+  it('preserves exact nonblank opaque config option ids and string values', () => {
+    const parsed = parseSessionCreateSpawnOptions([
+      '--config-option', ' effort = high ',
+      '--reasoning-effort', ' xhigh\t',
+    ]);
+
+    expect(parsed.actionInput.configOptions).toEqual({
+      ' effort ': ' high ',
+      reasoning_effort: ' xhigh\t',
+    });
+  });
+
   it('normalizes rich create flags into generic spawn action input', () => {
     const parsed = parseSessionCreateSpawnOptions(
       [
@@ -75,6 +99,8 @@ describe('parseSessionCreateSpawnOptions', () => {
     expect(parsed).toEqual({
       backendRaw: 'agent:claude',
       backendTargetKey: 'agent:claude',
+      spawnAttemptId: null,
+      resumeSpawnAttempt: false,
       actionInput: {
         path: '/repo',
         backendTargetKey: 'agent:claude',
@@ -126,6 +152,21 @@ describe('parseSessionCreateSpawnOptions', () => {
     });
   });
 
+  it('requires and preserves a stable attempt id for resolve-only retries', () => {
+    expect(() => parseSessionCreateSpawnOptions(['--spawn-attempt-id', 'attempt\n2']))
+      .toThrow('Invalid --spawn-attempt-id.');
+    expect(() => parseSessionCreateSpawnOptions(['--resume-spawn-attempt']))
+      .toThrow('Invalid --resume-spawn-attempt without --spawn-attempt-id.');
+
+    expect(parseSessionCreateSpawnOptions([
+      '--spawn-attempt-id', 'attempt-1',
+      '--resume-spawn-attempt',
+    ])).toMatchObject({
+      spawnAttemptId: 'attempt-1',
+      resumeSpawnAttempt: true,
+    });
+  });
+
   it('keeps canonical --config-overrides-json separate from convenience config flags', () => {
     const parsed = parseSessionCreateSpawnOptions(
       [
@@ -169,5 +210,38 @@ describe('parseSessionCreateSpawnOptions', () => {
     expect(() => parseSessionCreateSpawnOptions(
       ['--connected-services-json', '{"token":"do-not-print"'],
     )).toThrow('Invalid --connected-services-json');
+  });
+
+  it('parses the concise auth selector and keeps it out of the spawn wire shape', () => {
+    const parsed = parseSessionCreateSpawnOptions([
+      '--backend', 'agent:codex',
+      '--auth', 'cs:group:happier',
+    ]);
+
+    expect(parsed.connectedServicesAuthIntent).toEqual({
+      kind: 'connected',
+      serviceId: null,
+      selection: 'group',
+      id: 'happier',
+    });
+    expect(parsed.actionInput).not.toHaveProperty('connectedServices');
+  });
+
+  it('accepts the readable alias and rejects competing auth inputs', () => {
+    expect(parseSessionCreateSpawnOptions([
+      '--connected-services', 'native',
+    ]).connectedServicesAuthIntent).toEqual({ kind: 'native' });
+
+    expect(() => parseSessionCreateSpawnOptions([
+      '--auth', 'native',
+      '--connected-services-json', '{"v":1,"bindingsByServiceId":{}}',
+    ])).toThrow('Choose only one connected-services auth option');
+  });
+
+  it('accepts --launch-profile as the canonical launch-profile spelling', () => {
+    expect(parseSessionCreateSpawnOptions([
+      '--backend', 'agent:codex',
+      '--launch-profile', 'work',
+    ]).actionInput).toMatchObject({ profileId: 'work' });
   });
 });

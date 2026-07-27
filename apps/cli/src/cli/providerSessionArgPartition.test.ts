@@ -139,4 +139,33 @@ describe('partitionProviderSessionArgs', () => {
 
     expect(result.providerArgs).toEqual(['exec', '--json']);
   });
+
+  it('separates launch profile and auth selection from provider-native arguments', () => {
+    const result = partitionProviderSessionArgs({
+      args: [
+        'codex',
+        '--launch-profile', 'work',
+        '--auth', 'cs:group:happier',
+        'exec',
+      ],
+      providerSubcommand: 'codex',
+    });
+
+    expect(result).toMatchObject({
+      profileQuery: 'work',
+      connectedServicesAuthRaw: 'cs:group:happier',
+      providerArgs: ['exec'],
+    });
+  });
+
+  it('rejects competing auth shorthand and JSON power inputs', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null): never => {
+      throw new Error(`exit:${code ?? 0}`);
+    });
+    expect(() => partitionProviderSessionArgs({
+      args: ['codex', '--auth', 'native', '--auth-json', '{"v":1,"bindingsByServiceId":{}}'],
+      providerSubcommand: 'codex',
+    })).toThrow('exit:1');
+  });
 });

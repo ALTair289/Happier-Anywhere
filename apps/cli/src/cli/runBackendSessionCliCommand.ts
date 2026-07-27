@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { randomUUID } from 'node:crypto';
 
 import type { AgentId, CodexBackendMode, KimiAcpPythonSelector } from '@happier-dev/agents';
 
@@ -29,6 +30,12 @@ import { isInteractiveTerminal } from '@/terminal/prompts/promptInput';
 import { promptSecret } from '@/terminal/prompts/promptSecret';
 import { maybePassthroughProviderCliInfoRequest, passthroughProviderCliArgs } from '@/cli/providerCliPassthrough';
 import { selfMigrateDaemonSpawnedSessionProcessOutOfDaemonServiceCgroup } from '@/daemon/platform/linux/daemonSpawnedSessionCgroupSelfMigration';
+import {
+  overlayDirectConnectedServiceEnvironment,
+  resolveDirectConnectedServiceEnvironment,
+} from '@/cli/connectedServices/resolveDirectConnectedServiceEnvironment';
+import { resolveDirectCliConnectedServiceBindings } from '@/cli/connectedServices/resolveDirectCliConnectedServiceBindings';
+import { HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY } from '@/agent/runtime/sessionConnectedServicesBindingsEnv';
 
 type CommonBackendRunOptions = ParsedSessionStartArgs & {
   credentials: Credentials;
@@ -112,6 +119,7 @@ export async function runBackendSessionCliCommand<Extra extends Record<string, u
   forwardModelFlag?: boolean;
   versionFlags?: readonly string[];
   resolveExtraOptions?: (args: string[], parsed: ProviderSessionArgPartitionResult) => Extra;
+  resolveDirectConnectedServiceEnvironmentFn?: typeof resolveDirectConnectedServiceEnvironment;
 }): Promise<void> {
   let releaseSessionRunnerLock: (() => Promise<void>) | null = null;
 
@@ -259,23 +267,72 @@ ${chalk.bold.cyan(`${agentId} CLI Options (from \`${providerHelpCommand}\`):`)}
         }))
         : {};
 
-    await run({
-      credentials,
-      terminalRuntime: params.context.terminalRuntime,
-      startedBy,
-      permissionMode,
-      permissionModeUpdatedAt,
-      agentModeId: resolved.agentModeId,
-      agentModeUpdatedAt: resolved.agentModeUpdatedAt,
-      modelId: resolved.modelId,
-      modelUpdatedAt: resolved.modelUpdatedAt,
-      existingSessionId: normalizedExistingSessionId || undefined,
-      resume,
-      providerArgs: parsed.providerArgs,
-      accountSettingsContext,
-      ...providerSpawnExtras,
-      ...extraOptions,
-    });
+    let directConnectedServiceEnvironment: Awaited<
+      ReturnType<typeof resolveDirectConnectedServiceEnvironment>
+    > = null;
+    let restoreDirectConnectedServiceEnvironment: (() => void) | null = null;
+    let runCompleted = false;
+    try {
+      const shouldResolveDirectConnectedServices =
+        startedBy !== 'daemon'
+        && agentIdForProfiles !== undefined
+        && accountSettingsContext !== null
+        && !process.env[HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY];
+      if (shouldResolveDirectConnectedServices) {
+        if (!accountSettingsContext) {
+          throw new Error('connected_service_auth_unsupported');
+        }
+        const directAccountSettings = accountSettingsContext.settings;
+        const connectedServices = await resolveDirectCliConnectedServiceBindings({
+          agentId: agentIdForProfiles,
+          credentials,
+          accountSettings: directAccountSettings,
+          authRaw: parsed.connectedServicesAuthRaw,
+          authJsonRaw: parsed.connectedServicesAuthJsonRaw,
+        });
+        if (connectedServices) {
+          directConnectedServiceEnvironment = await (
+            params.resolveDirectConnectedServiceEnvironmentFn
+            ?? resolveDirectConnectedServiceEnvironment
+          )({
+            agentId: agentIdForProfiles,
+            credentials,
+            accountSettings: directAccountSettings,
+            directory: parsed.directory ?? process.cwd(),
+            sessionId: normalizedExistingSessionId || `direct-${randomUUID()}`,
+            connectedServices,
+          });
+          if (directConnectedServiceEnvironment) {
+            restoreDirectConnectedServiceEnvironment = overlayDirectConnectedServiceEnvironment(
+              directConnectedServiceEnvironment.env,
+            );
+          }
+        }
+      }
+
+      await run({
+        credentials,
+        terminalRuntime: params.context.terminalRuntime,
+        startedBy,
+        permissionMode,
+        permissionModeUpdatedAt,
+        agentModeId: resolved.agentModeId,
+        agentModeUpdatedAt: resolved.agentModeUpdatedAt,
+        modelId: resolved.modelId,
+        modelUpdatedAt: resolved.modelUpdatedAt,
+        existingSessionId: normalizedExistingSessionId || undefined,
+        resume,
+        providerArgs: parsed.providerArgs,
+        accountSettingsContext,
+        ...providerSpawnExtras,
+        ...extraOptions,
+      });
+      runCompleted = true;
+    } finally {
+      restoreDirectConnectedServiceEnvironment?.();
+      if (runCompleted) directConnectedServiceEnvironment?.cleanupOnExit?.();
+      else directConnectedServiceEnvironment?.cleanupOnFailure?.();
+    }
   } catch (error) {
     console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
     if (process.env.DEBUG) {

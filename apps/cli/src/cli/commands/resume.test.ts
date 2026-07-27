@@ -394,6 +394,7 @@ describe('happier resume', () => {
             kind: 'profile',
             serviceId: 'openai-codex',
             profileId: 'work',
+            credentialRevision: null,
           },
         ]);
         expect(JSON.parse(process.env.HAPPIER_CONNECTED_SERVICE_MATERIALIZED_ENV_KEYS_JSON ?? '[]')).toEqual([
@@ -410,6 +411,21 @@ describe('happier resume', () => {
         readAccountSettingsFn: async () => accountSettingsParse({
           schemaVersion: 6,
           codexBackendMode: 'appServer',
+          connectedServicesDefaultAuthByAgentIdV1: {
+            v: 1,
+            bindingsByAgentId: {
+              codex: {
+                v: 1,
+                bindingsByServiceId: {
+                  'openai-codex': {
+                    source: 'connected',
+                    selection: 'profile',
+                    profileId: 'different-current-default',
+                  },
+                },
+              },
+            },
+          },
           connectedServicesProviderStateSharingSettingsV1: {
             defaults: { configMode: 'linked', stateMode: 'isolated' },
             byAgentId: {

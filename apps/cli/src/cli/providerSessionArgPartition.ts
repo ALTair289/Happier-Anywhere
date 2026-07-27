@@ -19,6 +19,8 @@ export interface ProviderSessionArgPartitionResult {
   readonly startedBy?: 'daemon' | 'terminal';
   readonly refreshSettings: boolean;
   readonly profileQuery?: string;
+  readonly connectedServicesAuthRaw?: string;
+  readonly connectedServicesAuthJsonRaw?: string;
   readonly permissionMode?: PermissionMode;
   readonly permissionModeUpdatedAt?: number;
   readonly agentModeId?: string;
@@ -92,6 +94,8 @@ export function partitionProviderSessionArgs(options: ProviderSessionArgPartitio
   let startedBy: 'daemon' | 'terminal' | undefined;
   let refreshSettings = false;
   let profileQuery: string | undefined;
+  let connectedServicesAuthRaw: string | undefined;
+  let connectedServicesAuthJsonRaw: string | undefined;
   let permissionMode: PermissionMode | undefined;
   let permissionModeUpdatedAt: number | undefined;
   let agentModeId: string | undefined;
@@ -125,18 +129,51 @@ export function partitionProviderSessionArgs(options: ProviderSessionArgPartitio
       refreshSettings = true;
       continue;
     }
-    if (arg === '--profile') {
-      const raw = readRequiredValue(args, i, '--profile (expected: profile id or name)');
+    if (arg === '--profile' || arg === '--launch-profile') {
+      const raw = readRequiredValue(args, i, `${arg} (expected: profile id or name)`);
       const normalized = raw.trim();
-      if (!normalized) fail('Invalid --profile value: empty');
+      if (!normalized) fail(`Invalid ${arg} value: empty`);
       profileQuery = normalized;
       i += 1;
       continue;
     }
-    if (arg.startsWith('--profile=')) {
-      const normalized = arg.slice('--profile='.length).trim();
-      if (!normalized) fail('Invalid --profile value: empty');
+    if (arg.startsWith('--profile=') || arg.startsWith('--launch-profile=')) {
+      const flag = arg.slice(0, arg.indexOf('='));
+      const normalized = arg.slice(arg.indexOf('=') + 1).trim();
+      if (!normalized) fail(`Invalid ${flag} value: empty`);
       profileQuery = normalized;
+      continue;
+    }
+    if (arg === '--auth' || arg === '--connected-services') {
+      if (connectedServicesAuthRaw !== undefined) {
+        fail('Choose only one of --auth or --connected-services.');
+      }
+      connectedServicesAuthRaw = readRequiredValue(args, i, `${arg} (expected: default|native|cs:<id>)`);
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--auth=') || arg.startsWith('--connected-services=')) {
+      if (connectedServicesAuthRaw !== undefined) {
+        fail('Choose only one of --auth or --connected-services.');
+      }
+      connectedServicesAuthRaw = arg.slice(arg.indexOf('=') + 1).trim();
+      if (!connectedServicesAuthRaw) fail(`Missing value for ${arg.slice(0, arg.indexOf('='))}`);
+      continue;
+    }
+    if (arg === '--auth-json' || arg === '--connected-services-json') {
+      if (connectedServicesAuthJsonRaw !== undefined) {
+        fail('Choose only one of --auth-json or --connected-services-json.');
+      }
+      connectedServicesAuthJsonRaw = readRequiredValue(args, i, `${arg} (expected: ConnectedServiceBindingsV1 JSON)`);
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--auth-json=') || arg.startsWith('--connected-services-json=')) {
+      if (connectedServicesAuthJsonRaw !== undefined) {
+        fail('Choose only one of --auth-json or --connected-services-json.');
+      }
+      connectedServicesAuthJsonRaw = arg.slice(arg.indexOf('=') + 1).trim();
+      if (!connectedServicesAuthJsonRaw) fail(`Missing value for ${arg.slice(0, arg.indexOf('='))}`);
       continue;
     }
     if (arg === '--happy-starting-mode') {
@@ -279,10 +316,16 @@ export function partitionProviderSessionArgs(options: ProviderSessionArgPartitio
     providerArgs.push(arg);
   }
 
+  if (connectedServicesAuthRaw !== undefined && connectedServicesAuthJsonRaw !== undefined) {
+    fail('Choose only one connected-services auth option.');
+  }
+
   return {
     ...(startedBy ? { startedBy } : {}),
     refreshSettings,
     ...(profileQuery ? { profileQuery } : {}),
+    ...(connectedServicesAuthRaw ? { connectedServicesAuthRaw } : {}),
+    ...(connectedServicesAuthJsonRaw ? { connectedServicesAuthJsonRaw } : {}),
     ...(permissionMode ? { permissionMode } : {}),
     ...(typeof permissionModeUpdatedAt === 'number' ? { permissionModeUpdatedAt } : {}),
     ...(agentModeId ? { agentModeId } : {}),
