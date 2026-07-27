@@ -53,7 +53,7 @@ describe('computeSessionConfigOptionControls', () => {
         expect(res?.[0]).toMatchObject({
             option: { id: 'telemetry', currentValue: 'false' },
             requestedValue: 'true',
-            effectiveValue: 'false',
+            effectiveValue: 'true',
             isPending: true,
         });
     });
@@ -119,8 +119,46 @@ describe('computeSessionConfigOptionControls', () => {
         const res = computeSessionConfigOptionControls({ agentId: 'opencode', metadata });
         expect(res?.[0]).toMatchObject({
             requestedValue: 'high',
-            effectiveValue: 'medium',
+            effectiveValue: 'high',
             isPending: true,
+        });
+    });
+
+    it('preserves exact nonblank config and option identifiers through metadata controls', () => {
+        const metadata = createMetadata({
+            sessionConfigOptionsV1: {
+                v: 1,
+                provider: 'cursor',
+                updatedAt: 1,
+                configOptions: [{
+                    id: ' effort ',
+                    name: 'Effort',
+                    type: 'select',
+                    currentValue: ' high ',
+                    options: [
+                        { value: ' high ', name: 'High exact' },
+                        { value: 'high', name: 'High distinct' },
+                    ],
+                }],
+            },
+            sessionConfigOptionOverridesV1: {
+                v: 1,
+                updatedAt: 2,
+                overrides: { ' effort ': { updatedAt: 2, value: ' high ' } },
+            },
+        });
+
+        expect(computeSessionConfigOptionControls({ agentId: 'cursor', metadata })?.[0]).toMatchObject({
+            option: {
+                id: ' effort ',
+                currentValue: ' high ',
+                options: [
+                    { value: ' high ', name: 'High exact' },
+                    { value: 'high', name: 'High distinct' },
+                ],
+            },
+            requestedValue: ' high ',
+            effectiveValue: ' high ',
         });
     });
 
@@ -309,13 +347,13 @@ describe('computeSessionConfigOptionControls', () => {
             expect.objectContaining({
                 option: expect.objectContaining({ id: 'booleanFlag', currentValue: 'false' }),
                 requestedValue: 'true',
-                effectiveValue: 'false',
+                effectiveValue: 'true',
                 isPending: true,
             }),
             expect.objectContaining({
                 option: expect.objectContaining({ id: 'maxRetries', currentValue: '3' }),
                 requestedValue: '5',
-                effectiveValue: '3',
+                effectiveValue: '5',
                 isPending: true,
             }),
         ]);
@@ -337,29 +375,40 @@ describe('computeSessionConfigOptionControls', () => {
         });
 
         const res = computeSessionConfigOptionControls({ agentId: 'opencode', metadata });
-        expect(res?.[0]?.effectiveValue).toBe('false');
+        expect(res?.[0]?.effectiveValue).toBe('true');
     });
 
-    it('uses newer valid legacy config state and commands over older canonical aliases', () => {
+    it('uses the newest valid aliases throughout the composed config control', () => {
         const metadata = createMetadata({
             sessionConfigOptionsV1: {
-                v: 1, provider: 'opencode', updatedAt: 1,
+                v: 1,
+                provider: 'opencode',
+                updatedAt: 10,
                 configOptions: [{ id: 'telemetry', name: 'Telemetry', type: 'boolean', currentValue: 'false' }],
             },
             acpConfigOptionsV1: {
-                v: 1, provider: 'opencode', updatedAt: 2,
+                v: 1,
+                provider: 'opencode',
+                updatedAt: 20,
                 configOptions: [{ id: 'telemetry', name: 'Telemetry', type: 'boolean', currentValue: 'true' }],
             },
             sessionConfigOptionOverridesV1: {
-                v: 1, updatedAt: 3, overrides: { telemetry: { updatedAt: 3, value: 'false' } },
+                v: 1,
+                updatedAt: Number.NaN,
+                overrides: { telemetry: { updatedAt: 30, value: 'false' } },
             },
             acpConfigOptionOverridesV1: {
-                v: 1, updatedAt: 4, overrides: { telemetry: { updatedAt: 4, value: 'true' } },
+                v: 1,
+                updatedAt: 40,
+                overrides: { telemetry: { updatedAt: 40, value: 'false' } },
             },
         });
-        const res = computeSessionConfigOptionControls({ agentId: 'opencode', metadata });
-        expect(res?.[0]).toMatchObject({
-            option: { currentValue: 'true' }, requestedValue: 'true', effectiveValue: 'true', isPending: false,
+
+        expect(computeSessionConfigOptionControls({ agentId: 'opencode', metadata })?.[0]).toMatchObject({
+            option: { currentValue: 'true' },
+            requestedValue: 'false',
+            effectiveValue: 'false',
+            isPending: true,
         });
     });
 });
@@ -379,29 +428,17 @@ describe('ultracode override of the reasoning effort control', () => {
         { id: 'ultracode', name: 'Ultracode', type: 'boolean', currentValue: 'false' },
     ];
 
-    it('keeps reasoning effort enabled while an ultracode request is pending provider confirmation', () => {
+    it('marks the reasoning effort control disabled while ultracode is effectively on', () => {
         const controls = computeSessionConfigOptionControlsForProvider({
             providerId: 'claude',
             configOptions,
             overrides: { ultracode: { value: 'true' } },
         });
         const effort = controls?.find((control) => control.option.id === 'reasoning_effort');
-        expect(effort?.disabled).not.toBe(true);
-        expect(effort?.disabledByOptionName).toBeUndefined();
-        const ultracode = controls?.find((control) => control.option.id === 'ultracode');
-        expect(ultracode?.disabled).not.toBe(true);
-    });
-
-    it('disables reasoning effort after the provider confirms ultracode', () => {
-        const controls = computeSessionConfigOptionControlsForProvider({
-            providerId: 'claude',
-            configOptions: configOptions.map((option) => option.id === 'ultracode'
-                ? { ...option, currentValue: 'true' }
-                : option),
-        });
-        const effort = controls?.find((control) => control.option.id === 'reasoning_effort');
         expect(effort?.disabled).toBe(true);
         expect(effort?.disabledByOptionName).toBe('Ultracode');
+        const ultracode = controls?.find((control) => control.option.id === 'ultracode');
+        expect(ultracode?.disabled).not.toBe(true);
     });
 
     it('keeps the reasoning effort control enabled while ultracode is off', () => {

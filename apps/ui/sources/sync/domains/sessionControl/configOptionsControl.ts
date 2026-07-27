@@ -1,35 +1,21 @@
 import type { AgentId } from '@/agents/catalog/catalog';
 import type { Metadata } from '@/sync/domains/state/storageTypes';
-import {
-    LEGACY_ACP_CONFIG_OPTIONS_STATE_KEY,
-    LEGACY_ACP_CONFIG_OPTION_OVERRIDES_KEY,
-    LEGACY_ACP_SESSION_MODELS_STATE_KEY,
-    LEGACY_ACP_SESSION_MODES_STATE_KEY,
-    readMetadataAliasValue,
-    readNewestMetadataAliasValue,
-    SESSION_CONFIG_OPTIONS_STATE_KEY,
-    SESSION_CONFIG_OPTION_OVERRIDES_KEY,
-    SESSION_MODELS_STATE_KEY,
-    SESSION_MODES_STATE_KEY,
-} from '@happier-dev/agents';
 
 import {
-    parseSessionConfigOptionsState,
-    parseSessionConfigOptionOverridesState,
-    parseSessionModelsState,
-    parseSessionModesState,
-} from './schema';
+    readSessionConfigOptionOverridesState,
+    readSessionConfigOptionsState,
+    readSessionModelsState,
+    readSessionModesState,
+} from './readSessionControlMetadata';
+import {
+    readNonBlankSessionControlIdentifier,
+    readSessionControlValueId,
+} from './opaqueIdentifiers';
 
 export type SessionConfigOptionValueId = string;
 
 function normalizeValueId(raw: unknown): SessionConfigOptionValueId | null {
-    if (typeof raw === 'string') {
-        const trimmed = raw.trim();
-        return trimmed.length > 0 ? trimmed : null;
-    }
-    if (typeof raw === 'boolean') return raw ? 'true' : 'false';
-    if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw);
-    return null;
+    return readSessionControlValueId(raw);
 }
 
 function normalizeConfigOptionChoiceDisplayName(params: Readonly<{
@@ -73,34 +59,6 @@ export type SessionConfigOptionControl = Readonly<{
     disabledByOptionName?: string;
 }>;
 
-export function normalizeSessionConfigOptionsArray(raw: unknown): SessionConfigOption[] | null {
-    if (!Array.isArray(raw) || raw.length === 0) return null;
-    const parsed = raw.map((entry): SessionConfigOption | null => {
-        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
-        const rec = entry as Record<string, unknown>;
-        const id = typeof rec.id === 'string' ? rec.id.trim() : '';
-        const name = typeof rec.name === 'string' ? rec.name.trim() : '';
-        const type = typeof rec.type === 'string' ? rec.type.trim() : '';
-        const currentValue = normalizeValueId(rec.currentValue);
-        if (!id || !name || !type || !currentValue) return null;
-        const options = Array.isArray(rec.options)
-            ? rec.options.map((rawOption): SessionConfigOptionSelectOption | null => {
-                if (!rawOption || typeof rawOption !== 'object' || Array.isArray(rawOption)) return null;
-                const option = rawOption as Record<string, unknown>;
-                const value = normalizeValueId(option.value);
-                const optionName = typeof option.name === 'string' ? option.name.trim() : '';
-                if (!value || !optionName) return null;
-                const description = typeof option.description === 'string' ? option.description.trim() : '';
-                return { value, name: normalizeConfigOptionChoiceDisplayName({ optionId: id, value, name: optionName }), ...(description ? { description } : {}) };
-            }).filter((option): option is SessionConfigOptionSelectOption => option !== null)
-            : [];
-        const description = typeof rec.description === 'string' ? rec.description.trim() : '';
-        const category = typeof rec.category === 'string' ? rec.category.trim() : '';
-        return { id, name, type, currentValue, ...(description ? { description } : {}), ...(category ? { category } : {}), ...(options.length ? { options } : {}) };
-    }).filter((option): option is SessionConfigOption => option !== null);
-    return parsed.length ? parsed : null;
-}
-
 /**
  * Boolean options that, while ON, override another option's value (renderers dim/disable
  * the overridden control). Keyed by generic config option id — e.g. Claude's session-only
@@ -138,6 +96,60 @@ function resolveRequestedValue(
             : undefined;
     }
     return requestedValue;
+}
+
+export function normalizeSessionConfigOptionsArray(raw: unknown): SessionConfigOption[] | null {
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+
+    const parsed: SessionConfigOption[] = [];
+    type RawConfigOptionChoice = Record<string, unknown>;
+    for (const entry of raw) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+        const rec = entry as Record<string, unknown>;
+        const id = readNonBlankSessionControlIdentifier(rec.id) ?? '';
+        const name = typeof rec.name === 'string' ? rec.name.trim() : '';
+        const type = typeof rec.type === 'string' ? rec.type.trim() : '';
+        if (!id || !name || !type) continue;
+
+        const currentValue = normalizeValueId(rec.currentValue);
+        if (!currentValue) continue;
+
+        const options = Array.isArray(rec.options)
+            ? rec.options
+                .filter((option: unknown): option is RawConfigOptionChoice =>
+                    Boolean(option && typeof option === 'object' && !Array.isArray(option))
+                )
+                .map((option: RawConfigOptionChoice) => {
+                    const value = normalizeValueId(option.value);
+                    const optionName = typeof option.name === 'string' ? option.name.trim() : '';
+                    if (!value || !optionName) return null;
+                    const description = typeof option.description === 'string' ? option.description.trim() : '';
+                    return {
+                        value,
+                        name: normalizeConfigOptionChoiceDisplayName({ optionId: id, value, name: optionName }),
+                        ...(description ? { description } : {}),
+                    };
+                })
+                .filter(
+                    (option: NonNullable<SessionConfigOption['options']>[number] | null): option is NonNullable<SessionConfigOption['options']>[number] =>
+                        option !== null
+                )
+            : undefined;
+
+        const description = typeof rec.description === 'string' ? rec.description.trim() : '';
+        const category = typeof rec.category === 'string' ? rec.category.trim() : '';
+        parsed.push({
+            id,
+            name,
+            type,
+            currentValue,
+            ...(description ? { description } : {}),
+            ...(category ? { category } : {}),
+            ...(options && options.length > 0 ? { options } : {}),
+        } satisfies SessionConfigOption);
+    }
+
+    return parsed.length > 0 ? parsed : null;
 }
 
 export function isBooleanConfigOptionType(type: string): boolean {
@@ -212,7 +224,7 @@ function buildSessionConfigOptionControls(params: Readonly<{
     const controls: SessionConfigOptionControl[] = [];
 
     for (const entry of params.configOptions) {
-        const id = entry.id.trim();
+        const id = readNonBlankSessionControlIdentifier(entry.id) ?? '';
         const name = entry.name.trim();
         const type = entry.type.trim();
         if (!id || !name || !type) continue;
@@ -249,7 +261,7 @@ function buildSessionConfigOptionControls(params: Readonly<{
         };
 
         const requestedValue = resolveRequestedValue(option, params.overrides?.[id]?.value);
-        const effectiveValue = currentValue;
+        const effectiveValue = requestedValue ?? currentValue;
         const isPending = requestedValue !== undefined && requestedValue !== currentValue;
 
         controls.push({
@@ -267,39 +279,19 @@ export function computeSessionConfigOptionControls(params: {
     agentId: AgentId;
     metadata: Metadata | null | undefined;
 }): SessionConfigOptionControl[] | null {
-    const state = parseSessionConfigOptionsState(
-        readNewestMetadataAliasValue({
-            metadata: (params.metadata as any) ?? {},
-            keys: [SESSION_CONFIG_OPTIONS_STATE_KEY, LEGACY_ACP_CONFIG_OPTIONS_STATE_KEY],
-            parse: parseSessionConfigOptionsState,
-        }),
-    );
+    const state = readSessionConfigOptionsState(params.metadata);
     if (!state) return null;
     if (state.provider !== params.agentId) return null;
     if (state.configOptions.length === 0) return null;
 
-    const sessionModes = parseSessionModesState(
-        readMetadataAliasValue((params.metadata as any) ?? {}, SESSION_MODES_STATE_KEY, LEGACY_ACP_SESSION_MODES_STATE_KEY),
-    );
+    const sessionModes = readSessionModesState(params.metadata);
     const hasDedicatedModeControl = sessionModes?.provider === params.agentId && sessionModes.availableModes.length > 0;
 
-    const sessionModels = parseSessionModelsState(
-        readNewestMetadataAliasValue({
-            metadata: (params.metadata as any) ?? {},
-            keys: [SESSION_MODELS_STATE_KEY, LEGACY_ACP_SESSION_MODELS_STATE_KEY],
-            parse: parseSessionModelsState,
-        }),
-    );
+    const sessionModels = readSessionModelsState(params.metadata);
     const hasDedicatedModelControl =
         sessionModels?.provider === params.agentId && sessionModels.availableModels.length > 0;
 
-    const overrides = parseSessionConfigOptionOverridesState(
-        readNewestMetadataAliasValue({
-            metadata: (params.metadata as any) ?? {},
-            keys: [SESSION_CONFIG_OPTION_OVERRIDES_KEY, LEGACY_ACP_CONFIG_OPTION_OVERRIDES_KEY],
-            parse: parseSessionConfigOptionOverridesState,
-        }),
-    );
+    const overrides = readSessionConfigOptionOverridesState(params.metadata);
     return buildSessionConfigOptionControls({
         providerId: params.agentId,
         provider: state.provider,
@@ -339,13 +331,3 @@ export function computeSessionConfigOptionControlsFromOverride(params: Readonly<
         overrides: params.overrides ?? null,
     });
 }
-
-// Compatibility names for the former ACP-local owner. All decisions delegate here.
-export type AcpConfigOptionValueId = SessionConfigOptionValueId;
-export type AcpConfigOptionSelectOption = SessionConfigOptionSelectOption;
-export type AcpConfigOption = SessionConfigOption;
-export type AcpConfigOptionControl = SessionConfigOptionControl;
-export const normalizeAcpConfigOptionsArray = normalizeSessionConfigOptionsArray;
-export const computeAcpConfigOptionControls = computeSessionConfigOptionControls;
-export const computeAcpConfigOptionControlsForProvider = computeSessionConfigOptionControlsForProvider;
-export const computeAcpConfigOptionControlsFromOverride = computeSessionConfigOptionControlsFromOverride;
