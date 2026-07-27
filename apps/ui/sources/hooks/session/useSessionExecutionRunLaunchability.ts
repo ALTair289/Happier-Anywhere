@@ -47,9 +47,10 @@ export function useSessionExecutionRunLaunchability(
     });
     const allowWhileInactive = React.useMemo(() => {
         if (session?.active !== false) return false;
+        if (session.resumingAt != null) return false;
         if (!machineReachable) return false;
         return canResumeSessionWithOptions(session?.metadata, resumeCapabilityOptions);
-    }, [machineReachable, resumeCapabilityOptions, session?.active, session?.metadata]);
+    }, [machineReachable, resumeCapabilityOptions, session?.active, session?.metadata, session?.resumingAt]);
 
     const canShowExecutionRunLauncher = React.useMemo(() => {
         if (executionRunsEnabled !== true) {

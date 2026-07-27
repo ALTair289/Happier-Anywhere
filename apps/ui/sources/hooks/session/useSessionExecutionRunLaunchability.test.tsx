@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { renderHook, standardCleanup } from '@/dev/testkit';
+import { createSessionFixture, renderHook, standardCleanup } from '@/dev/testkit';
 import { createStorageModuleStub } from '@/dev/testkit/mocks/storage';
 
 const resumeCapabilityOptionsSpy = vi.hoisted(() =>
@@ -52,10 +52,6 @@ vi.mock('@/agents/runtime/resumeCapabilities', () => ({
     canResumeSessionWithOptions: () => true,
 }));
 
-vi.mock('@/sync/domains/executionRuns/canLaunchExecutionRunsForSession', () => ({
-    canLaunchExecutionRunsForSession: () => true,
-}));
-
 describe('useSessionExecutionRunLaunchability', () => {
     afterEach(() => {
         standardCleanup();
@@ -84,6 +80,28 @@ describe('useSessionExecutionRunLaunchability', () => {
             enabled: true,
         }));
         expect(hook.getCurrent().canShowExecutionRunLauncher).toBe(true);
+
+        await hook.unmount();
+    });
+
+    it('does not offer an execution-run launch while an inactive session is already resuming', async () => {
+        const session = createSessionFixture({
+            id: 'session-1',
+            active: false,
+            resumingAt: Date.now(),
+            metadata: {
+                flavor: 'claude',
+                host: 'machine-reachable',
+                machineId: 'machine-reachable',
+                path: '/tmp/reachable',
+            },
+        });
+
+        const { useSessionExecutionRunLaunchability } = await import('./useSessionExecutionRunLaunchability');
+        const hook = await renderHook(() => useSessionExecutionRunLaunchability('session-1', session));
+
+        expect(hook.getCurrent().canShowExecutionRunLauncher).toBe(false);
+        expect(hook.getCurrent().canLaunchExecutionRuns).toBe(false);
 
         await hook.unmount();
     });
