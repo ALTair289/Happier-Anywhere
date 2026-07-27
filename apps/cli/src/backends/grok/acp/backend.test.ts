@@ -129,24 +129,29 @@ describe('Grok ACP backend options', () => {
     expect(JSON.stringify({ presence, authentication })).not.toContain('secret');
   });
 
-  it('wires both xAI request methods only when the shared permission owner is present', () => {
+  it('owns xAI prompt completion for every Grok session and questions only when the permission owner is present', () => {
     const permissionHandler = {
       handleToolCall: async () => ({ decision: 'approved' as const }),
     };
     const withPermissionOwner = buildGrokAcpBackendOptions({ cwd: root, permissionHandler });
-    expect(Object.keys(withPermissionOwner.extensionHandlers?.requests ?? {}).sort()).toEqual([
-      '_x.ai/ask_user_question',
-      'x.ai/ask_user_question',
+    expect(withPermissionOwner.extensionHandlers?.map(({ kind, method }) => `${kind}:${method}`).sort()).toEqual([
+      'notification:_x.ai/mcp/servers_updated',
+      'notification:_x.ai/session/prompt_complete',
+      'notification:x.ai/session/prompt_complete',
+      'request:_x.ai/ask_user_question',
+      'request:x.ai/ask_user_question',
     ]);
+    expect(withPermissionOwner.promptCompletion?.buildRequestMeta({ correlationId: 'prompt-1' })).toEqual({
+      promptId: 'prompt-1',
+      requestId: 'prompt-1',
+    });
     expect(withPermissionOwner.permissionHandler).toBe(permissionHandler);
-    expect(Object.keys(withPermissionOwner.extensionHandlers?.notifications ?? {})).toEqual([
-      '_x.ai/mcp/servers_updated',
-    ]);
 
     const withoutPermissionOwner = buildGrokAcpBackendOptions({ cwd: root });
-    expect(withoutPermissionOwner.extensionHandlers?.requests).toBeUndefined();
-    expect(Object.keys(withoutPermissionOwner.extensionHandlers?.notifications ?? {})).toEqual([
-      '_x.ai/mcp/servers_updated',
+    expect(withoutPermissionOwner.extensionHandlers?.map(({ kind, method }) => `${kind}:${method}`).sort()).toEqual([
+      'notification:_x.ai/mcp/servers_updated',
+      'notification:_x.ai/session/prompt_complete',
+      'notification:x.ai/session/prompt_complete',
     ]);
   });
 
@@ -158,12 +163,13 @@ describe('Grok ACP backend options', () => {
       rawModel: {
         id: 'grok-4.5',
         name: 'Grok 4.5',
-        meta: {
+        _meta: {
           supportsReasoningEffort: true,
           reasoningEffort: 'high',
           reasoningEfforts: [
-            { id: 'fast', value: 'low', label: 'Fast' },
-            { id: 'deep', value: 'high', label: 'Deep', description: 'More reasoning' },
+            { id: 'low', value: 'low', label: 'Low Effort' },
+            { id: 'medium', value: 'medium', label: 'Medium Effort' },
+            { id: 'high', value: 'high', label: 'High Effort', description: 'More reasoning' },
             { value: 'max' },
           ],
         },
@@ -175,8 +181,9 @@ describe('Grok ACP backend options', () => {
       type: 'select',
       currentValue: 'high',
       options: [
-        { value: 'low', name: 'Fast' },
-        { value: 'high', name: 'Deep', description: 'More reasoning' },
+        { value: 'low', name: 'Low' },
+        { value: 'medium', name: 'Medium' },
+        { value: 'high', name: 'High', description: 'More reasoning' },
         { value: 'max', name: 'Max' },
       ],
     }]);

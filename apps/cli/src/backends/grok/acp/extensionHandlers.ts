@@ -7,6 +7,10 @@ import type {
   AcpPermissionHandler,
 } from '@/agent/acp/AcpBackend';
 import {
+  defineAcpExtensionNotification,
+  defineAcpExtensionRequest,
+} from '@/agent/acp/connection/types';
+import {
   STRUCTURED_QUESTION_LIMITS,
   type StructuredQuestionAnswersV1,
 } from '@happier-dev/protocol';
@@ -18,6 +22,7 @@ import {
   GROK_MCP_SERVERS_UPDATED_METHOD,
   handleGrokMcpServersUpdatedNotification,
 } from './mcpServersUpdatedNotification';
+import { buildGrokPromptCompletionHandlers } from './promptCompletion';
 
 export const GROK_ASK_USER_QUESTION_METHODS = [
   'x.ai/ask_user_question',
@@ -374,12 +379,18 @@ export function buildGrokExtensionHandlers(params: Readonly<{
   permissionHandler?: AcpPermissionHandler;
 }>): AcpExtensionHandlers {
   const permissionHandler = params.permissionHandler;
-  const notifications = {
-    [GROK_MCP_SERVERS_UPDATED_METHOD]: handleGrokMcpServersUpdatedNotification,
-  };
+  const recordParams = z.record(z.string(), z.unknown());
+  const notifications = [
+    ...buildGrokPromptCompletionHandlers(),
+    defineAcpExtensionNotification({
+      method: GROK_MCP_SERVERS_UPDATED_METHOD,
+      params: recordParams,
+      handler: handleGrokMcpServersUpdatedNotification,
+    }),
+  ];
 
   if (!permissionHandler) {
-    return { notifications };
+    return notifications;
   }
 
   const handleAskUserQuestion = async (
@@ -387,6 +398,10 @@ export function buildGrokExtensionHandlers(params: Readonly<{
     context: AcpExtensionHandlerContext,
   ): Promise<Record<string, unknown>> => {
     const parsed = parseGrokAskUserQuestionRequest(rawParams, context);
+    context.toolCalls?.enrich(parsed.toolCallId, {
+      toolName: 'AskUserQuestion',
+      rawInput: parsed.askUserQuestionInput,
+    });
     const decision = await awaitPermissionDecision(
       permissionHandler.handleToolCall(
         parsed.toolCallId,
@@ -405,11 +420,12 @@ export function buildGrokExtensionHandlers(params: Readonly<{
     return buildGrokAskUserQuestionAcceptedResponse(parsed, decision.answers);
   };
 
-  return {
-    requests: {
-      'x.ai/ask_user_question': handleAskUserQuestion,
-      '_x.ai/ask_user_question': handleAskUserQuestion,
-    },
-    notifications,
-  };
+  return [
+    ...GROK_ASK_USER_QUESTION_METHODS.map((method) => defineAcpExtensionRequest({
+      method,
+      params: recordParams,
+      handler: handleAskUserQuestion,
+    })),
+    ...notifications,
+  ];
 }

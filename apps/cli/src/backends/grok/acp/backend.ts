@@ -11,6 +11,7 @@ import { buildGrokExtensionHandlers } from './extensionHandlers';
 import { GROK_ACP_ARGS } from './launch';
 import { grokSessionModelAdapter } from './modelControls';
 import { grokTransport } from './transport';
+import { buildGrokPromptCompletionRequestMeta } from './promptCompletion';
 
 export interface GrokBackendOptions extends AgentFactoryOptions {
   mcpServers?: Record<string, McpServerConfig>;
@@ -83,6 +84,7 @@ export function buildGrokAcpBackendOptions(options: GrokBackendOptions): AcpBack
     transportHandler: grokTransport,
     authentication: createGrokAcpAuthentication({ hasXaiApiKey: xaiApiKeyPresence.hasXaiApiKey }),
     extensionHandlers: buildGrokExtensionHandlers({ permissionHandler: options.permissionHandler }),
+    promptCompletion: { buildRequestMeta: buildGrokPromptCompletionRequestMeta },
     sessionModelAdapter: grokSessionModelAdapter,
   };
 }

@@ -21,8 +21,17 @@ function formatEffortLabel(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+function normalizeEffortLabel(label: string, value: string): string {
+  const withoutRedundantSuffix = label.replace(/\s+effort$/i, '').trim();
+  return withoutRedundantSuffix || formatEffortLabel(value);
+}
+
 function projectGrokReasoningEffortOption(rawModel: Readonly<Record<string, unknown>>): SessionConfigOption | null {
-  const meta = asRecord(rawModel.meta);
+  const meta = asRecord(
+    Object.prototype.hasOwnProperty.call(rawModel, '_meta')
+      ? rawModel._meta
+      : rawModel.meta,
+  );
   if (meta?.supportsReasoningEffort !== true) return null;
 
   const currentValue = readNonBlankString(meta.reasoningEffort);
@@ -36,7 +45,12 @@ function projectGrokReasoningEffortOption(rawModel: Readonly<Record<string, unkn
     const value = readNonBlankString(option.value);
     if (!value || seen.has(value)) return null;
     const rawLabel = option.label;
-    const label = rawLabel === undefined ? formatEffortLabel(value) : readNonBlankString(rawLabel);
+    const providerLabel = rawLabel === undefined ? null : readNonBlankString(rawLabel);
+    const label = rawLabel === undefined
+      ? formatEffortLabel(value)
+      : providerLabel
+        ? normalizeEffortLabel(providerLabel, value)
+        : null;
     if (!label) return null;
     const rawDescription = option.description;
     const description = rawDescription === undefined ? null : readNonBlankString(rawDescription);

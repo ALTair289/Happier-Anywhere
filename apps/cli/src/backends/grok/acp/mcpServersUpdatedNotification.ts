@@ -2,7 +2,6 @@ import { z } from 'zod';
 
 import type {
   AcpExtensionHandlerContext,
-  AcpExtensionNotificationHandler,
 } from '@/agent/acp/AcpBackend';
 
 export const GROK_MCP_SERVERS_UPDATED_METHOD = '_x.ai/mcp/servers_updated' as const;
@@ -37,7 +36,7 @@ export class GrokMcpServersUpdatedNotificationError extends Error {
   readonly code = 'GROK_MCP_SERVERS_UPDATED_INVALID';
 }
 
-export const handleGrokMcpServersUpdatedNotification: AcpExtensionNotificationHandler = (
+export const handleGrokMcpServersUpdatedNotification = (
   rawParams: Record<string, unknown>,
   context: AcpExtensionHandlerContext,
 ): void => {
