@@ -33,7 +33,6 @@ export function resolveSessionRowAttentionIndicatorColor(input: Readonly<{
 function resolveSessionRowAttentionStateColorRole(attentionState: SessionRowAttentionState): SessionRowAttentionColorRole {
     switch (attentionState) {
         case 'working':
-        case 'backgroundActive':
             return 'working';
         case 'ready':
             return 'success';
@@ -61,8 +60,6 @@ function resolveSessionRowAttentionIndicatorColorRole(input: Readonly<{
             if (input.workingMode !== 'pulse' && input.workingSpinnerTone === 'neutral') {
                 return 'tertiary';
             }
-            return 'working';
-        case 'background':
             return 'working';
         case 'ready':
             return 'success';

@@ -50,6 +50,10 @@ function createSession(id: string): Session {
         thinking: false,
         thinkingAt: 0,
         presence: 'online',
+        runtimeActivityState: 'idle',
+        runtimeActivityActiveCount: 0,
+        runtimeActivityObservedAt: null,
+        runtimeActivityRevision: 0,
     };
 }
 
@@ -67,6 +71,10 @@ function createRenderable(id: string): SessionListRenderableSession {
         thinking: false,
         thinkingAt: 0,
         presence: 'online',
+        runtimeActivityState: 'idle',
+        runtimeActivityActiveCount: 0,
+        runtimeActivityObservedAt: null,
+        runtimeActivityRevision: 0,
     };
 }
 
@@ -235,112 +243,6 @@ describe('selectSessionListRowStateSnapshot', () => {
 
         expect(third).not.toBe(first);
         expect(third.sessionListRenderables?.s1).toBe(laterProgressRenderable);
-    });
-
-    it('keeps focused row store state stable for runtime activity lease-only renewals', () => {
-        vi.useFakeTimers();
-        vi.setSystemTime(new Date('2026-05-30T12:00:00.000Z'));
-        const nowMs = Date.now();
-        const firstRenderable = {
-            ...createRenderable('s1'),
-            active: true,
-            activeAt: nowMs - 5_000,
-            presence: 'online' as const,
-            latestTurnStatus: 'completed' as const,
-            latestTurnStatusObservedAt: nowMs - 10_000,
-            runtimeActivityActiveCount: 1,
-            runtimeActivityObservedAt: nowMs - 1_000,
-            runtimeActivityExpiresAt: nowMs + 60_000,
-            runtimeActivitySourceClass: 'provider_detached_task' as const,
-        } satisfies SessionListRenderableSession;
-        const selector = createSessionListRowStoreStateSelector([{
-            sessionId: 's1',
-            serverId: 'server-a',
-        }], 'server-a');
-
-        const first = selector({
-            sessions: {},
-            sessionListRenderables: { s1: firstRenderable },
-            sessionMessages: {},
-            sessionPending: { s1: pending },
-        });
-        const renewedRenderable = {
-            ...firstRenderable,
-            runtimeActivityObservedAt: nowMs + 10_000,
-            runtimeActivityExpiresAt: nowMs + 70_000,
-        } satisfies SessionListRenderableSession;
-        const second = selector({
-            sessions: {},
-            sessionListRenderables: { s1: renewedRenderable },
-            sessionMessages: {},
-            sessionPending: { s1: pending },
-        });
-
-        expect(second).toBe(first);
-        expect(second.sessionListRenderables?.s1).toBe(firstRenderable);
-
-        const clearedRenderable = {
-            ...renewedRenderable,
-            runtimeActivityActiveCount: 0,
-            runtimeActivityObservedAt: null,
-            runtimeActivityExpiresAt: null,
-            runtimeActivitySourceClass: null,
-        } satisfies SessionListRenderableSession;
-        const third = selector({
-            sessions: {},
-            sessionListRenderables: { s1: clearedRenderable },
-            sessionMessages: {},
-            sessionPending: { s1: pending },
-        });
-
-        expect(third).not.toBe(first);
-        expect(third.sessionListRenderables?.s1).toBe(clearedRenderable);
-    });
-
-    it('publishes lease-only renewals when the previous lease is close to expiry', () => {
-        vi.useFakeTimers();
-        vi.setSystemTime(new Date('2026-05-30T12:00:00.000Z'));
-        const nowMs = Date.now();
-        const firstRenderable = {
-            ...createRenderable('s1'),
-            active: true,
-            activeAt: nowMs - 5_000,
-            presence: 'online' as const,
-            latestTurnStatus: 'completed' as const,
-            latestTurnStatusObservedAt: nowMs - 10_000,
-            runtimeActivityActiveCount: 1,
-            runtimeActivityObservedAt: nowMs - 1_000,
-            // Old lease expires in 10s — reusing the stale renderable past
-            // this horizon would drop the row's working indicator while the
-            // committed view data already carries the extended lease.
-            runtimeActivityExpiresAt: nowMs + 10_000,
-            runtimeActivitySourceClass: 'provider_detached_task' as const,
-        } satisfies SessionListRenderableSession;
-        const selector = createSessionListRowStoreStateSelector([{
-            sessionId: 's1',
-            serverId: 'server-a',
-        }], 'server-a');
-
-        const first = selector({
-            sessions: {},
-            sessionListRenderables: { s1: firstRenderable },
-            sessionMessages: {},
-            sessionPending: { s1: pending },
-        });
-        const renewedRenderable = {
-            ...firstRenderable,
-            runtimeActivityObservedAt: nowMs + 5_000,
-            runtimeActivityExpiresAt: nowMs + 70_000,
-        } satisfies SessionListRenderableSession;
-        const second = selector({
-            sessions: {},
-            sessionListRenderables: { s1: renewedRenderable },
-            sessionMessages: {},
-            sessionPending: { s1: pending },
-        });
-
-        expect(second).not.toBe(first);
-        expect(second.sessionListRenderables?.s1).toBe(renewedRenderable);
     });
 
     it('keeps focused row store state stable when fresh progress also advances active heartbeat', () => {
@@ -593,7 +495,7 @@ describe('selectSessionListRowStateSnapshot', () => {
         expect(stillActionRequired).toBe(actionRequired);
     });
 
-    it('tracks runtime-priority scopes from provider runtime activity through presentation state', () => {
+    it('tracks background activity transitions as runtime-priority scopes without an observedAt lease', () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date('2026-05-30T12:00:00.000Z'));
         const nowMs = Date.now();
@@ -614,14 +516,30 @@ describe('selectSessionListRowStateSnapshot', () => {
                     presence: 'online',
                     latestTurnStatus: 'completed',
                     latestTurnStatusObservedAt: nowMs - 5_000,
+                    runtimeActivityState: 'active',
                     runtimeActivityActiveCount: 1,
                     runtimeActivityObservedAt: nowMs - 1_000,
-                    runtimeActivityExpiresAt: nowMs + 60_000,
-                    runtimeActivitySourceClass: 'provider_detached_task',
+                    runtimeActivityRevision: 1,
                 },
             },
         });
-        const liveExpiredRuntimeActivity = selector({
+        const longRunningRuntimeActivity = selector({
+            sessionListRenderables: {
+                s1: {
+                    ...s1,
+                    active: true,
+                    activeAt: nowMs - 10_000,
+                    presence: 'online',
+                    latestTurnStatus: 'completed',
+                    latestTurnStatusObservedAt: nowMs - 5_000,
+                    runtimeActivityState: 'active',
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: nowMs - 10_000,
+                    runtimeActivityRevision: 1,
+                },
+            },
+        });
+        const runtimeIdleAgain = selector({
             sessionListRenderables: {
                 s1: {
                     ...s1,
@@ -630,37 +548,44 @@ describe('selectSessionListRowStateSnapshot', () => {
                     presence: 0,
                     latestTurnStatus: 'completed',
                     latestTurnStatusObservedAt: nowMs - 5_000,
-                    runtimeActivityActiveCount: 1,
+                    runtimeActivityState: 'idle',
+                    runtimeActivityActiveCount: 0,
                     runtimeActivityObservedAt: nowMs - 10_000,
-                    runtimeActivityExpiresAt: nowMs - 1,
-                    runtimeActivitySourceClass: 'provider_detached_task',
-                },
-            },
-        });
-        const staleUntrustedRuntimeActivity = selector({
-            sessionListRenderables: {
-                s1: {
-                    ...s1,
-                    active: false,
-                    activeAt: nowMs - 10_000,
-                    presence: 0,
-                    latestTurnStatus: 'completed',
-                    latestTurnStatusObservedAt: nowMs - 5_000,
-                    runtimeActivityActiveCount: 1,
-                    runtimeActivityObservedAt: nowMs - 10_000,
-                    runtimeActivityExpiresAt: nowMs - 1,
-                    runtimeActivitySourceClass: 'provider_detached_task',
+                    runtimeActivityRevision: 2,
                 },
             },
         });
 
         expect(idle).toEqual([]);
         expect(runtimeWorking).toEqual([{ sessionId: 's1', serverId: 'server-a' }]);
-        expect(liveExpiredRuntimeActivity).toBe(idle);
-        expect(staleUntrustedRuntimeActivity).toBe(idle);
+        expect(longRunningRuntimeActivity).toBe(runtimeWorking);
+        expect(runtimeIdleAgain).toBe(idle);
     });
 
-    it('uses the selector server clock when tracking runtime-priority scopes', () => {
+    it.each([
+        ['offline', { active: false, presence: 0, archivedAt: null }],
+        ['archived', { active: true, presence: 'online' as const, archivedAt: 123 }],
+    ])('does not add Activity-only runtime priority for %s rows', (_label, lifecycle) => {
+        const s1 = createRenderable('s1');
+        const selector = createSessionListRuntimePriorityRowScopeSelector([
+            { sessionId: 's1', serverId: 'server-a' },
+        ], 'server-a');
+
+        expect(selector({
+            sessionListRenderables: {
+                s1: {
+                    ...s1,
+                    ...lifecycle,
+                    runtimeActivityState: 'active',
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: 100,
+                    runtimeActivityRevision: 1,
+                },
+            },
+        })).toEqual([]);
+    });
+
+    it('keeps background activity priority independent of the selector clock', () => {
         vi.useFakeTimers();
         vi.setSystemTime(2_000_000);
         runtimeClockMockState.nowServerMs = 1_000_000;
@@ -678,10 +603,10 @@ describe('selectSessionListRowStateSnapshot', () => {
                     presence: 'online',
                     latestTurnStatus: 'completed',
                     latestTurnStatusObservedAt: 995_000,
+                    runtimeActivityState: 'active',
                     runtimeActivityActiveCount: 1,
                     runtimeActivityObservedAt: 999_000,
-                    runtimeActivityExpiresAt: 1_060_000,
-                    runtimeActivitySourceClass: 'provider_detached_task',
+                    runtimeActivityRevision: 1,
                 },
             },
         });

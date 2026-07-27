@@ -401,20 +401,22 @@ describe('buildSessionListRowModel', () => {
         expect(model.workingIndicatorPaused).toBe(false);
     });
 
-    it('presents detached-only provider runtime activity with a background indicator, not foreground working', () => {
+    it('presents background activity with the normal working indicator and precise neutral secondary copy', () => {
         const model = buildSessionListRowModel({
             item: createSessionItem(createRenderable('s1', {
                 active: true,
                 activeAt: NOW_MS - 10_000,
                 thinking: false,
                 thinkingAt: 0,
-                latestTurnStatus: 'completed',
-                latestTurnStatusObservedAt: NOW_MS - 5_000,
-                lastViewedSessionSeq: 10,
+                latestTurnStatus: null,
+                latestTurnStatusObservedAt: null,
+                lastViewedSessionSeq: 9,
+                hasUnreadMessages: true,
+                pendingCount: 2,
+                runtimeActivityState: 'active',
                 runtimeActivityActiveCount: 1,
                 runtimeActivityObservedAt: NOW_MS - 1_000,
-                runtimeActivityExpiresAt: NOW_MS + 60_000,
-                runtimeActivitySourceClass: 'provider_detached_task',
+                runtimeActivityRevision: 1,
             }), { groupKind: 'date' }),
             state: {},
             dataIndex: 0,
@@ -425,13 +427,91 @@ describe('buildSessionListRowModel', () => {
         });
 
         expect(model.status.state).toBe('background_active');
-        expect(model.status.statusColor).toBe('connecting-token');
-        expect(model.status.statusDotColor).toBe('connecting-token');
-        expect(model.attention.rowState).toBe('backgroundActive');
-        expect(model.presentation.attentionIndicator).toBe('background');
+        expect(model.status.statusColor).toBe('default-token');
+        expect(model.status.statusDotColor).toBe('default-token');
+        expect(model.attention.listState).toBe('pending');
+        expect(model.attention.rowState).toBe('pending');
+        expect(model.hasUnreadMessages).toBe(true);
+        expect(model.pendingCount).toBe(2);
+        expect(model.presentation.attentionIndicator).toBe('working');
         expect(model.presentation.secondaryLine).toBe('status');
         expect(model.presentation.statusTextKey).toBe('status.backgroundActive');
         expect(model.workingIndicatorPaused).toBe(false);
+    });
+
+    it('keeps disconnected row presentation ahead of background activity', () => {
+        const model = buildSessionListRowModel({
+            item: createSessionItem(createRenderable('s1', {
+                active: false,
+                presence: 0,
+                thinking: false,
+                latestTurnStatus: 'completed',
+                latestTurnStatusObservedAt: NOW_MS - 5_000,
+                lastViewedSessionSeq: 10,
+                runtimeActivityState: 'active',
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: NOW_MS - 1_000,
+                runtimeActivityRevision: 1,
+            }), { groupKind: 'date' }),
+            state: {},
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings({ runtimeNowMs: NOW_MS }),
+        });
+
+        expect(model.status.state).toBe('disconnected');
+        expect(model.presentation.statusTextKey).not.toBe('status.backgroundActive');
+    });
+
+    it('keeps explicit unknown activity quiet', () => {
+        const model = buildSessionListRowModel({
+            item: createSessionItem(createRenderable('s1', {
+                active: false,
+                thinking: false,
+                latestTurnStatus: 'completed',
+                latestTurnStatusObservedAt: NOW_MS - 5_000,
+                lastViewedSessionSeq: 10,
+                runtimeActivityState: 'unknown',
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: NOW_MS - 1_000,
+                runtimeActivityRevision: 9,
+            }), { groupKind: 'date' }),
+            state: {},
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings({ runtimeNowMs: NOW_MS }),
+        });
+
+        expect(model.attention.rowState).toBe('quiet');
+        expect(model.presentation.attentionIndicator).toBe('none');
+        expect(model.presentation.titleTone).toBe('quiet');
+        expect(model.presentation.secondaryLine).toBe('path');
+        expect(model.presentation.statusTextKey).toBeUndefined();
+        expect(model.workingIndicatorPaused).toBe(false);
+    });
+
+    it('does not schedule a clock refresh for detached activity', () => {
+        const model = buildSessionListRowModel({
+            item: createSessionItem(createRenderable('s1', {
+                active: true,
+                runtimeActivityState: 'active',
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: NOW_MS - 1_000,
+                runtimeActivityRevision: 4,
+            }), { groupKind: 'date' }),
+            state: {},
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings({ runtimeNowMs: NOW_MS }),
+        });
+
+        expect(model.nextRuntimeFreshnessAtMs).toBeNull();
     });
 
     it('keeps foreground working presentation when detached runtime activity overlaps an active turn', () => {
@@ -443,10 +523,10 @@ describe('buildSessionListRowModel', () => {
                 thinkingAt: 0,
                 latestTurnStatus: 'in_progress',
                 latestTurnStatusObservedAt: NOW_MS - 2_000,
+                runtimeActivityState: 'active',
                 runtimeActivityActiveCount: 1,
                 runtimeActivityObservedAt: NOW_MS - 1_000,
-                runtimeActivityExpiresAt: NOW_MS + 60_000,
-                runtimeActivitySourceClass: 'provider_detached_task',
+                runtimeActivityRevision: 1,
             }), { groupKind: 'date' }),
             state: {},
             dataIndex: 0,
@@ -471,10 +551,10 @@ describe('buildSessionListRowModel', () => {
                 latestTurnStatus: 'completed',
                 latestTurnStatusObservedAt: NOW_MS - 5_000,
                 lastViewedSessionSeq: 10,
+                runtimeActivityState: 'idle',
                 runtimeActivityActiveCount: 0,
                 runtimeActivityObservedAt: NOW_MS - 1_000,
-                runtimeActivityExpiresAt: NOW_MS + 60_000,
-                runtimeActivitySourceClass: 'provider_detached_task',
+                runtimeActivityRevision: 1,
             }), { groupKind: 'date' }),
             state: {},
             dataIndex: 0,

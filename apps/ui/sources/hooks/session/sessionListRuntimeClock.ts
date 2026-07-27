@@ -17,25 +17,42 @@ import React from 'react';
  */
 export type SessionListRuntimeClock = Readonly<{
     getNowMs: () => number;
+    getRelativeTimeNowMs: () => number;
     subscribe: (listener: () => void) => () => void;
+    subscribeRelativeTime: (listener: () => void) => () => void;
     requestWake: (token: object, wakeAtMs: number) => void;
     clearWake: (token: object) => void;
 }>;
 
+const SESSION_LIST_RELATIVE_TIME_INTERVAL_MS = 60_000;
+
 export function createSessionListRuntimeClock(): SessionListRuntimeClock {
     let nowMs = Date.now();
+    let relativeTimeNowMs = nowMs;
     let needsIdleRefresh = true;
+    let needsRelativeTimeIdleRefresh = true;
     const listeners = new Set<() => void>();
+    const relativeTimeListeners = new Set<() => void>();
     const wakeAtMsByToken = new Map<object, number>();
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     let scheduledWakeAtMs: number | null = null;
+    let relativeTimeWakeAtMs: number | null = null;
 
     function resolveEarliestWakeAtMs(): number | null {
         let earliest: number | null = null;
         for (const wakeAtMs of wakeAtMsByToken.values()) {
             earliest = earliest === null ? wakeAtMs : Math.min(earliest, wakeAtMs);
         }
+        if (relativeTimeWakeAtMs !== null) {
+            earliest = earliest === null ? relativeTimeWakeAtMs : Math.min(earliest, relativeTimeWakeAtMs);
+        }
         return earliest;
+    }
+
+    function refreshRelativeTimeWake(): void {
+        relativeTimeWakeAtMs = relativeTimeListeners.size === 0
+            ? null
+            : relativeTimeNowMs + SESSION_LIST_RELATIVE_TIME_INTERVAL_MS;
     }
 
     function fire(): void {
@@ -48,8 +65,18 @@ export function createSessionListRuntimeClock(): SessionListRuntimeClock {
         for (const [token, wakeAtMs] of wakeAtMsByToken) {
             if (wakeAtMs <= nowMs) wakeAtMsByToken.delete(token);
         }
+        const shouldNotifyRelativeTime = relativeTimeWakeAtMs !== null && relativeTimeWakeAtMs <= nowMs;
+        if (shouldNotifyRelativeTime) {
+            relativeTimeNowMs = nowMs;
+            refreshRelativeTimeWake();
+        }
         for (const listener of [...listeners]) {
             listener();
+        }
+        if (shouldNotifyRelativeTime) {
+            for (const listener of [...relativeTimeListeners]) {
+                listener();
+            }
         }
         reschedule();
     }
@@ -63,7 +90,7 @@ export function createSessionListRuntimeClock(): SessionListRuntimeClock {
         }
         scheduledWakeAtMs = earliest;
         if (earliest === null) return;
-        const delayMs = Math.max(0, earliest - Date.now() + 1);
+        const delayMs = Math.max(0, earliest - Date.now());
         timeoutId = setTimeout(fire, delayMs);
     }
 
@@ -81,6 +108,13 @@ export function createSessionListRuntimeClock(): SessionListRuntimeClock {
                 needsIdleRefresh = false;
             }
             return nowMs;
+        },
+        getRelativeTimeNowMs: () => {
+            if (needsRelativeTimeIdleRefresh && relativeTimeListeners.size === 0) {
+                relativeTimeNowMs = Date.now();
+                needsRelativeTimeIdleRefresh = false;
+            }
+            return relativeTimeNowMs;
         },
         subscribe: (listener: () => void) => {
             if (listeners.size === 0) {
@@ -100,6 +134,25 @@ export function createSessionListRuntimeClock(): SessionListRuntimeClock {
                 listeners.delete(listener);
                 if (listeners.size === 0) {
                     needsIdleRefresh = true;
+                }
+            };
+        },
+        subscribeRelativeTime: (listener: () => void) => {
+            const wasIdle = relativeTimeListeners.size === 0;
+            relativeTimeListeners.add(listener);
+            if (wasIdle) {
+                relativeTimeNowMs = Date.now();
+                needsRelativeTimeIdleRefresh = false;
+                refreshRelativeTimeWake();
+                reschedule();
+                listener();
+            }
+            return () => {
+                relativeTimeListeners.delete(listener);
+                if (relativeTimeListeners.size === 0) {
+                    needsRelativeTimeIdleRefresh = true;
+                    relativeTimeWakeAtMs = null;
+                    reschedule();
                 }
             };
         },
@@ -135,6 +188,24 @@ export function useSessionListRuntimeNowMs(
         [clock, enabled],
     );
     return React.useSyncExternalStore(subscribe, clock.getNowMs, clock.getNowMs);
+}
+
+/**
+ * Read the shared coarse timestamp used for relative-time labels.
+ *
+ * This channel advances every 60 seconds while at least one active surface is
+ * subscribed, but it shares the runtime clock's single scheduler so rows do not
+ * each own an interval.
+ */
+export function useSessionListRelativeTimeNowMs(
+    enabled = true,
+    clock: SessionListRuntimeClock = sessionListRuntimeClock,
+): number {
+    const subscribe = React.useCallback(
+        (listener: () => void) => (enabled ? clock.subscribeRelativeTime(listener) : noopSubscribe()),
+        [clock, enabled],
+    );
+    return React.useSyncExternalStore(subscribe, clock.getRelativeTimeNowMs, clock.getRelativeTimeNowMs);
 }
 
 /**

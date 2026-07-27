@@ -516,6 +516,47 @@ describe('SessionItem activity time', () => {
         expect(useSettingSpy).not.toHaveBeenCalled();
     });
 
+    it('renders background activity with the normal working spinner while retaining pending and unread row facts', async () => {
+        const { SessionItem } = await importSessionItemForTest();
+        const rowModel = createSessionRowModel({
+            status: {
+                state: 'background_active',
+                isConnected: true,
+                statusText: 'background activity',
+                shouldShowStatus: true,
+                statusColor: '#07f',
+                statusDotColor: '#0f0',
+                isPulsing: false,
+            },
+            attention: {
+                listState: 'pending',
+                rowState: 'pending',
+            },
+            presentation: resolveSessionRowPresentation({
+                attentionState: 'pending',
+                backgroundActive: true,
+                density: 'default',
+                requestedSecondaryLineMode: 'status',
+                hasPathSubtitle: true,
+            }),
+            hasUnreadMessages: true,
+            pendingCount: 2,
+            workingIndicatorPaused: false,
+        });
+
+        const screen = await renderScreen(
+            <SessionItem rowModel={rowModel} session={rowModel.session} />,
+        );
+
+        expect(rowModel.attention).toEqual({ listState: 'pending', rowState: 'pending' });
+        expect(rowModel.hasUnreadMessages).toBe(true);
+        expect(screen.findByTestId('session-list-status-subtitle-sess_row_model-pending')).toBeTruthy();
+        expect(screen.findByTestId('session-row-attention-indicator-spinner-sess_row_model-secondary')).toBeTruthy();
+        expect(screen.findByTestId('session-list-status-subtitle-text-sess_row_model-pending')?.props.children)
+            .toBe('status.backgroundActive');
+        expect(screen.getTextContent()).toContain('2');
+    });
+
     it('renders the pending badge from the computed row-model pendingCount instead of the stale session value', async () => {
         const { SessionItem } = await importSessionItemForTest();
         const rowModel = createSessionRowModel({

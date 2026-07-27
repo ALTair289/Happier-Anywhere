@@ -996,7 +996,9 @@ const SessionItemContent = React.memo(
         const rowDensity = isMinimal ? 'minimal' : compact ? 'compact' : 'default';
         const effectiveSecondaryLineMode = rowPresentation.secondaryLine === 'path' ? 'path' : 'status';
         const statusLineText = rowPresentation.statusTextKey ? t(rowPresentation.statusTextKey) : sessionStatus.statusText;
-        const rowStatusColor = resolveSessionRowAttentionStateColor(rowAttentionState, theme);
+        const rowStatusColor = rowPresentation.statusTextKey === 'status.backgroundActive'
+            ? theme.colors.text.secondary
+            : resolveSessionRowAttentionStateColor(rowAttentionState, theme);
         const rowAttentionAccessibilityLabel =
             rowAttentionState === 'failed'
                 ? t('status.error')
@@ -1004,7 +1006,7 @@ const SessionItemContent = React.memo(
                 || rowPresentation.attentionIndicator === 'permission'
                 || rowPresentation.attentionIndicator === 'action'
                 ? statusLineText
-                : rowPresentation.statusTextKey
+                : rowPresentation.statusTextKey && rowPresentation.statusTextKey !== 'status.backgroundActive'
                     ? statusLineText
                     : undefined;
         const shouldShowStatusSecondaryLine = rowPresentation.secondaryLine === 'status' && statusLineText.trim().length > 0;

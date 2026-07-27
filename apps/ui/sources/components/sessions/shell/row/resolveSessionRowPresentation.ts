@@ -10,14 +10,13 @@ export type SessionRowAttentionState =
     | 'unread'
     | 'pending'
     | 'working'
-    | 'backgroundActive'
     | 'ready'
     | 'failed'
     | 'permission_required'
     | 'action_required';
 
 export type SessionRowDensity = 'default' | 'compact' | 'minimal';
-export type SessionRowAttentionIndicator = 'none' | 'working' | 'background' | 'ready' | 'failed' | 'unread' | 'pending' | 'permission' | 'action';
+export type SessionRowAttentionIndicator = 'none' | 'working' | 'ready' | 'failed' | 'unread' | 'pending' | 'permission' | 'action';
 export type SessionRowTitleTone = 'quiet' | 'normal' | 'emphasized';
 export type SessionRowSecondaryLine = 'none' | 'path' | 'status';
 
@@ -49,6 +48,7 @@ export function resolveSessionRowPresentation(input: Readonly<{
     density: SessionRowDensity;
     requestedSecondaryLineMode: SessionListSecondaryLineMode;
     hasPathSubtitle: boolean;
+    backgroundActive?: boolean;
     /**
      * Retained working placement: the session is held in the working group
      * while its live signals are stale, so the status line must not imply
@@ -56,37 +56,26 @@ export function resolveSessionRowPresentation(input: Readonly<{
      */
     workingRetained?: boolean;
 }>): SessionRowPresentation {
-    const attentionIndicator = resolveAttentionIndicator(input.attentionState);
+    const backgroundActiveUsesWorkingIndicator = input.backgroundActive === true
+        && input.attentionState !== 'working'
+        && input.attentionState !== 'failed'
+        && input.attentionState !== 'permission_required'
+        && input.attentionState !== 'action_required';
+    const attentionIndicator = backgroundActiveUsesWorkingIndicator
+        ? 'working'
+        : resolveAttentionIndicator(input.attentionState);
     const titleTone = input.attentionState === 'quiet'
         ? 'quiet'
-        : input.attentionState === 'backgroundActive'
+        : attentionIndicator === 'none'
             ? 'normal'
-            : attentionIndicator === 'none'
-                ? 'normal'
-                : 'emphasized';
+            : 'emphasized';
 
     if (input.density === 'minimal') {
         return { attentionIndicator, titleTone, secondaryLine: 'none' };
     }
 
-    if (input.attentionState === 'ready') {
-        return { attentionIndicator, titleTone, secondaryLine: 'status', statusTextKey: 'status.readyForReview' };
-    }
-
     if (input.attentionState === 'failed') {
         return { attentionIndicator, titleTone, secondaryLine: 'status', statusTextKey: 'status.error' };
-    }
-
-    if (input.attentionState === 'quiet') {
-        return {
-            attentionIndicator,
-            titleTone,
-            secondaryLine: input.requestedSecondaryLineMode === 'path' && input.hasPathSubtitle ? 'path' : 'none',
-        };
-    }
-
-    if (input.attentionState === 'backgroundActive') {
-        return { attentionIndicator, titleTone, secondaryLine: 'status', statusTextKey: 'status.backgroundActive' };
     }
 
     if (input.attentionState === 'working' && input.workingRetained === true) {
@@ -99,6 +88,14 @@ export function resolveSessionRowPresentation(input: Readonly<{
         || input.attentionState === 'action_required'
     ) {
         return { attentionIndicator, titleTone, secondaryLine: 'status' };
+    }
+
+    if (input.backgroundActive === true) {
+        return { attentionIndicator, titleTone, secondaryLine: 'status', statusTextKey: 'status.backgroundActive' };
+    }
+
+    if (input.attentionState === 'ready') {
+        return { attentionIndicator, titleTone, secondaryLine: 'status', statusTextKey: 'status.readyForReview' };
     }
 
     if (input.requestedSecondaryLineMode === 'path' && input.hasPathSubtitle) {
@@ -124,8 +121,6 @@ function resolveAttentionIndicator(attentionState: SessionRowAttentionState): Se
     switch (attentionState) {
         case 'working':
             return 'working';
-        case 'backgroundActive':
-            return 'background';
         case 'ready':
             return 'ready';
         case 'failed':

@@ -4,7 +4,6 @@ import type {
 } from '@/components/sessions/shell/row/sessionListRowModelTypes';
 import { areServerProfileIdentifiersEquivalent } from '@/sync/domains/server/serverProfiles';
 import {
-    isSessionListRenderableRuntimeActivityLeaseOnlyChange,
     isSessionListRenderableWarmCacheProgressOnlyChange,
     type SessionListRenderableSession,
 } from '@/sync/domains/session/listing/sessionListRenderable';
@@ -167,19 +166,6 @@ function hasSameRelativeProgressLabels(
     return true;
 }
 
-function canReuseRuntimeActivityLeaseRenewal(
-    previous: SessionListRenderableSession,
-    nowMs: number,
-): boolean {
-    // Reusing a stale renderable past its own lease horizon would drop the
-    // row's working derivation at the OLD expiry even though the lease was
-    // extended — mirror the heartbeat rule and only suppress renewals whose
-    // previous lease still has comfortable margin.
-    const previousExpiresAt = finiteTimestamp(previous.runtimeActivityExpiresAt);
-    if (previousExpiresAt === null) return false;
-    return previousExpiresAt - nowMs > ROW_PROGRESS_RENDERABLE_MIN_UPDATE_INTERVAL_MS;
-}
-
 function shouldReusePreviousProgressRenderable(input: Readonly<{
     previous: SessionListRenderableSession | undefined;
     next: SessionListRenderableSession | undefined;
@@ -187,9 +173,6 @@ function shouldReusePreviousProgressRenderable(input: Readonly<{
 }>): input is Readonly<{ previous: SessionListRenderableSession; next: SessionListRenderableSession; nowMs: number }> {
     const { previous, next, nowMs } = input;
     if (!previous || !next || previous === next) return false;
-    if (isSessionListRenderableRuntimeActivityLeaseOnlyChange({ previous, next, nowMs })) {
-        return canReuseRuntimeActivityLeaseRenewal(previous, nowMs);
-    }
     if (!isSessionListRenderableWarmCacheProgressOnlyChange(previous, next)) return false;
     if (!canReuseActiveHeartbeatAdvance({ previous, next, nowMs })) return false;
 
@@ -209,7 +192,7 @@ function isRuntimePriorityRenderable(
     if (!renderable) return false;
     const runtimeStatus = deriveSessionRuntimePresentationState(renderable, nowMs);
     return runtimeStatus.working
-        || runtimeStatus.backgroundActive
+        || (runtimeStatus.isOnline && runtimeStatus.backgroundActive)
         || runtimeStatus.freshPermissionRequired
         || runtimeStatus.freshActionRequired
         || renderable.hasPendingPermissionRequests === true
@@ -283,8 +266,8 @@ export function createSessionListRowStoreStateSelector(
 
         let suppressedProgressRenderableUpdates = 0;
         // Server-adjusted clock: the reuse/suppression rules below compare
-        // against server-clock renderable timestamps (lease expiries,
-        // heartbeat anchors), matching the plan-path lease classifiers.
+        // foreground progress and heartbeat anchors against server-clock
+        // renderable timestamps.
         const nowMs = nowServerMs();
         for (let index = 0; index < normalizedScopes.length; index += 1) {
             const scope = normalizedScopes[index];

@@ -15,7 +15,6 @@ import {
     getSessionSubtitle,
 } from '@/utils/sessions/sessionUtils';
 import {
-    deriveSessionRuntimePresentationState,
     resolveNextSessionRuntimePresentationFreshnessAtMs,
 } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
 import { formatShortRelativeTimeAt } from '@/utils/time/formatShortRelativeTime';
@@ -203,10 +202,10 @@ function resolveNextRuntimeFreshnessAtMs(session: SessionStatusSource, nowMs: nu
         thinkingAt: session.thinkingAt,
         latestTurnStatus: session.latestTurnStatus,
         latestTurnStatusObservedAt: session.latestTurnStatusObservedAt,
+        runtimeActivityState: session.runtimeActivityState,
         runtimeActivityActiveCount: session.runtimeActivityActiveCount,
         runtimeActivityObservedAt: session.runtimeActivityObservedAt,
-        runtimeActivityExpiresAt: session.runtimeActivityExpiresAt,
-        runtimeActivitySourceClass: session.runtimeActivitySourceClass,
+        runtimeActivityRevision: session.runtimeActivityRevision,
         hasPendingPermissionRequests: (session as SessionListRenderableSession).hasPendingPermissionRequests === true,
         hasPendingUserActionRequests: (session as SessionListRenderableSession).hasPendingUserActionRequests === true,
         pendingRequestObservedAt: (session as SessionListRenderableSession).pendingRequestObservedAt ?? null,
@@ -281,7 +280,6 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
         workingTextMode: settings.workingTextMode,
         statusColors: settings.statusColors,
     });
-    const runtimePresentationState = deriveSessionRuntimePresentationState(resolvedSession, settings.runtimeNowMs);
     const pendingCount = readPendingCount(input.state ?? {}, resolvedSession);
     const pendingBlockedCount = readPendingBlockedCount(input.state ?? {}, resolvedSession);
     const hasUnreadMessages = resolveHasUnreadMessages(input.state ?? {}, resolvedSession);
@@ -319,17 +317,9 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
             || derivedRowAttentionState === 'unread'
             || derivedRowAttentionState === 'pending'
         );
-    const presentsBackgroundActive = runtimePresentationState.activityState === 'backgroundActive'
-        && (
-            derivedRowAttentionState === 'quiet'
-            || derivedRowAttentionState === 'unread'
-            || derivedRowAttentionState === 'pending'
-        );
     const rowAttentionState = presentsRetainedWorking
         ? 'working'
-        : presentsBackgroundActive
-            ? 'backgroundActive'
-            : derivedRowAttentionState;
+        : derivedRowAttentionState;
     const secondaryLineGroupKind = item.groupKind === 'folder' ? 'project' : item.groupKind;
     const secondaryLineMode = resolveSessionListSecondaryLineMode({ groupKind: secondaryLineGroupKind });
     const { subtitle, subtitleEllipsizeMode } = resolveRowSubtitle({
@@ -343,6 +333,7 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
         requestedSecondaryLineMode: secondaryLineMode,
         hasPathSubtitle: subtitle.trim().length > 0,
         workingRetained: presentsRetainedWorking,
+        backgroundActive: status.state === 'background_active',
     });
     const nextRuntimeFreshnessAtMs = resolveNextRuntimeFreshnessAtMs(resolvedSession, settings.runtimeNowMs);
     const isArchived = resolvedSession.archivedAt != null;

@@ -19,8 +19,11 @@ import type {
     UseSessionInlineDragResolveDropResultEvent,
     UseSessionInlineDragResolvedDrop,
 } from '../useSessionInlineDrag';
-import { useSessionListRuntimeNowMs, useSessionListRuntimeWake } from '@/hooks/session/sessionListRuntimeClock';
-import { useSessionListRelativeTimeClock } from './useSessionListRelativeTimeClock';
+import {
+    useSessionListRelativeTimeNowMs,
+    useSessionListRuntimeNowMs,
+    useSessionListRuntimeWake,
+} from '@/hooks/session/sessionListRuntimeClock';
 import {
     buildCachedSessionListRowModel,
     createSessionListRowModelsCache,
@@ -129,7 +132,7 @@ type SessionListRowModelBoundaryContentProps = SessionListRowModelBoundaryProps 
 const SessionListRowModelBoundaryContent = React.memo(function SessionListRowModelBoundaryContent(
     props: SessionListRowModelBoundaryContentProps,
 ) {
-    const relativeNowMs = useSessionListRelativeTimeClock(props.dataActive);
+    const relativeNowMs = useSessionListRelativeTimeNowMs(props.dataActive);
     // The row reads the SAME shared runtime clock as group placement
     // (useVisibleSessionListRuntimeNowMs), so the working indicator and the
     // session's group can never cross a freshness boundary in different
