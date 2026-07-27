@@ -159,22 +159,37 @@ export async function startDevDaemon({
   cliIdentity = 'default',
 }, {
   startLocalDaemonWithAuthImpl = startLocalDaemonWithAuth,
+  logger = console,
 } = {}) {
-  if (!startDaemon) return;
+  if (!startDaemon) return { started: false, reason: 'daemon-disabled' };
 
-  await startLocalDaemonWithAuthImpl({
-    cliBin,
-    cliHomeDir,
-    internalServerUrl,
-    publicServerUrl,
-    runtimeStatePath,
-    isShuttingDown,
-    forceRestart: Boolean(restart),
-    admitPriorDistImmediately: Boolean(startLastGreen),
-    env,
-    stackName,
-    cliIdentity,
-  });
+  try {
+    await startLocalDaemonWithAuthImpl({
+      cliBin,
+      cliHomeDir,
+      internalServerUrl,
+      publicServerUrl,
+      runtimeStatePath,
+      isShuttingDown,
+      forceRestart: Boolean(restart),
+      admitPriorDistImmediately: Boolean(startLastGreen),
+      env,
+      stackName,
+      cliIdentity,
+    });
+    return { started: true };
+  } catch (error) {
+    if (!startLastGreen) throw error;
+    logger.warn(
+      '[local] daemon: the last-green CLI publication could not start; ' +
+        'continuing startup so the watch coordinator can repair it with a background rebuild. ' +
+        `(${error instanceof Error ? error.message : String(error)})`,
+    );
+    return {
+      started: false,
+      reason: 'prior-dist-start-failed',
+    };
+  }
 }
 
 export function createHappyCliReloadExecutor({

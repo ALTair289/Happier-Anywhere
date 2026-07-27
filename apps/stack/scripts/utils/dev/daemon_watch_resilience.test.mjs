@@ -216,6 +216,64 @@ test('startDevDaemon forwards stack context to daemon startup', async () => {
   assert.equal(capturedArgs.env?.TEST_ENV, '1');
 });
 
+test('startDevDaemon defers a failed last-green launch to the watch reload coordinator', async () => {
+  const warnings = [];
+  const result = await startDevDaemon(
+    {
+      startDaemon: true,
+      cliBin: '/tmp/happy-cli/bin/happier.mjs',
+      cliHomeDir: '/tmp/happy-cli-home',
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      restart: false,
+      startLastGreen: true,
+      isShuttingDown: () => false,
+      stackName: 'remote-dev',
+    },
+    {
+      startLocalDaemonWithAuthImpl: async () => {
+        throw new Error('prior publication cannot start');
+      },
+      logger: {
+        warn(message) {
+          warnings.push(message);
+        },
+      },
+    },
+  );
+
+  assert.deepEqual(result, {
+    started: false,
+    reason: 'prior-dist-start-failed',
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /background rebuild/i);
+});
+
+test('startDevDaemon preserves a failed non-watch launch as a startup error', async () => {
+  await assert.rejects(
+    () => startDevDaemon(
+      {
+        startDaemon: true,
+        cliBin: '/tmp/happy-cli/bin/happier.mjs',
+        cliHomeDir: '/tmp/happy-cli-home',
+        internalServerUrl: 'http://127.0.0.1:3009',
+        publicServerUrl: 'http://localhost:3009',
+        restart: false,
+        startLastGreen: false,
+        isShuttingDown: () => false,
+        stackName: 'remote-dev',
+      },
+      {
+        startLocalDaemonWithAuthImpl: async () => {
+          throw new Error('current publication cannot start');
+        },
+      },
+    ),
+    /current publication cannot start/,
+  );
+});
+
 test('reload executor rejects bare dist entrypoint without build manifest', async () => {
   const cliDir = '/tmp/repo/apps/cli';
   const executor = createHappyCliReloadExecutor(
