@@ -6,6 +6,7 @@ import url from 'node:url';
 import { resolveUiPostinstallTasks } from './resolveUiPostinstallTasks.mjs';
 import { ensureNohoistPeerLinks } from './ensureNohoistPeerLinks.mjs';
 import { runCommandBestEffort, runCommandOrExit } from './postinstall/runCommand.mjs';
+import { verifyNativePatchCompilation } from './postinstall/verifyNativePatchCompilation.mjs';
 
 // Yarn workspaces can execute this script via a symlinked path (e.g. repoRoot/node_modules/happy/...).
 // Resolve symlinks so repoRootDir/expoAppDir are computed from the real filesystem location.
@@ -151,6 +152,17 @@ if (wants('patch-package')) {
     }
 }
 
+if (wants('verify-native-patch-compilation')) {
+    const { ok, errors, warnings } = verifyNativePatchCompilation({ uiDir: expoAppDir });
+    for (const warning of warnings) {
+        console.warn(`\n[native-patch-compilation] ${warning}\n`);
+    }
+    if (!ok) {
+        console.error(`\n${errors.join('\n\n')}\n`);
+        process.exit(1);
+    }
+}
+
 if (wants('install-react-native-enriched-markdown-web-wasm')) {
     const packageDirs = findReactNativeEnrichedMarkdownPackageDirs();
     const vendoredWasmModulePath = path.resolve(
@@ -228,10 +240,14 @@ if (wants('verify-react-native-enriched-markdown-web-streaming-patch')) {
             || !enrichedMarkdownTextContents.includes('streamingAnimation')
             || !enrichedMarkdownTextContents.includes('updateStreamingRevealRanges')
             || !parseMarkdownContents.includes('preloadMarkdownRuntime')
+            || !parseMarkdownContents.includes("import createMd4cModule from './wasm/md4c.js'")
+            || parseMarkdownContents.includes("import('./wasm/md4c")
             || !parseMarkdownContents.includes("['number', 'number', 'number']")
             || !parseMarkdownContents.includes('stringToUTF8(markdown')
             || !parseMarkdownContents.includes('parseCache.clear()')
             || !parseMarkdownSourceContents.includes('lengthBytesUTF8(markdown)')
+            || !parseMarkdownSourceContents.includes("import createMd4cModule from './wasm/md4c.js'")
+            || parseMarkdownSourceContents.includes("import('./wasm/md4c")
             || !parseMarkdownSourceContents.includes('parserPromise = null')
             || !enrichedMarkdownTextSourceContents.includes('lastChildStyles.paragraph')
             || enrichedMarkdownTextSourceContents.includes('<pre')

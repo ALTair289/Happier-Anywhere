@@ -9,6 +9,7 @@ function parseOptionalBoolean(raw) {
 export function resolveUiPostinstallTasks({ env }) {
     const tasks = [
         'patch-package',
+        'verify-native-patch-compilation',
         'verify-expo-router-web-modal-patch',
         'verify-sentry-react-native-replay-post-init-patch',
         'install-react-native-enriched-markdown-web-wasm',
