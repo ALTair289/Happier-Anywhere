@@ -8,7 +8,6 @@ import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { setClipboardStringSafe } from '@/utils/ui/clipboard';
-import { useInitialPresentationProducer } from '@/components/ui/presentation/InitialPresentationReadinessContext';
 import { sanitizeRenderedMermaidSvg } from './mermaidSanitize';
 
 const webStyle: React.CSSProperties = {
@@ -39,10 +38,6 @@ export const MermaidRenderer = React.memo((props: {
     const currentRenderState = renderState.content === props.content
         ? renderState
         : { content: props.content, status: 'pending' as const, svg: null };
-    useInitialPresentationProducer({
-        producerKey: `mermaid:${props.content}`,
-        terminal: currentRenderState.status !== 'pending',
-    });
 
     const copyMermaid = React.useCallback(async () => {
         const copied = await setClipboardStringSafe(props.content);

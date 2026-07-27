@@ -26,10 +26,7 @@ import {
     REVIEW_COMMENT_LINE_AFFORDANCE_ICON_TEST_ID,
     REVIEW_COMMENT_LINE_AFFORDANCE_TEST_ID,
 } from '@/components/ui/code/diff/reviewComments/ReviewCommentLineAffordance';
-import {
-    buildPierreInitialPresentationCacheKey,
-    usePierreInitialPresentation,
-} from './pierreInitialPresentation.web';
+import { buildPierreInitialPresentationCacheKey } from './pierreInitialPresentation.web';
 
 const PIERRE_REVIEW_COMMENT_HOVER_SLOT_UNSAFE_CSS = `
 [data-column-number] {
@@ -575,19 +572,6 @@ export const PierreDiffViewer = React.memo<DiffViewerProps>((props) => {
             }),
         };
     }, [parsedPatch, props.filePath, sanitizedPatch]);
-    const initialPresentationForceFallback = usePierreInitialPresentation({
-        cacheKey: fileDiff.cacheKey ?? buildPierreInitialPresentationCacheKey({
-            fileName: typeof fileDiff.name === 'string' ? fileDiff.name : 'diff',
-            language: typeof fileDiff.lang === 'string' ? fileDiff.lang : null,
-            patch: sanitizedPatch,
-        }),
-        containerRef,
-        fileDiff,
-        parsedPatch,
-        pool,
-        virtualized: props.virtualized === true,
-    });
-
     const baseOptions = React.useMemo<FileDiffOptions<React.ReactNode>>(() => {
         return buildPierreDiffOptionsBase({
             isDark,
@@ -864,19 +848,6 @@ export const PierreDiffViewer = React.memo<DiffViewerProps>((props) => {
     const wrapperStyle = props.virtualized
         ? ({ ...typographyStyle, ...selectionStyle, maxHeight: 'inherit' } as React.CSSProperties)
         : ({ ...typographyStyle, ...selectionStyle } as React.CSSProperties);
-
-    if (initialPresentationForceFallback) {
-        return (
-            <div
-                ref={containerRef}
-                data-testid="pierre-diff-viewer"
-                className="happier-pierre-diff-wrapper"
-                style={wrapperStyle}
-            >
-                {fallbackNode}
-            </div>
-        );
-    }
 
     return (
         <div
