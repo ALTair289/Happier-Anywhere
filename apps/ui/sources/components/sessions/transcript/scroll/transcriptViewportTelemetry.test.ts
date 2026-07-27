@@ -65,6 +65,27 @@ describe('transcript viewport telemetry', () => {
         vi.unstubAllGlobals();
     });
 
+    it('labels the active transcript renderer and native command orientation truthfully', async () => {
+        const module = await loadTelemetryModule();
+        const resolveRendererFacts = requireFunction(
+            module,
+            'resolveTranscriptViewportTelemetryRendererFacts',
+        );
+
+        expect(resolveRendererFacts({ rendererKind: 'legendList', platformOS: 'ios' })).toEqual({
+            listImplementation: 'legend',
+            orientation: 'standard',
+        });
+        expect(resolveRendererFacts({ rendererKind: 'flashList', platformOS: 'ios' })).toEqual({
+            listImplementation: 'flash_v2',
+            orientation: 'inverted',
+        });
+        expect(resolveRendererFacts({ rendererKind: 'flashList', platformOS: 'web' })).toEqual({
+            listImplementation: 'flash_v2',
+            orientation: 'standard',
+        });
+    });
+
     it('records nothing when disabled', async () => {
         const module = await loadTelemetryModule();
         const createTranscriptViewportTelemetry = requireFunction(module, 'createTranscriptViewportTelemetry');

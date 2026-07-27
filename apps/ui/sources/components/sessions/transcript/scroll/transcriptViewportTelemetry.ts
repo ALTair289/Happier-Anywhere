@@ -7,7 +7,7 @@ import type {
 
 export type { TranscriptViewportMode };
 export type TranscriptViewportTelemetryPlatform = TranscriptViewportPlatform;
-export type TranscriptViewportTelemetryListImplementation = 'flash_v2' | 'flatlist_legacy' | 'web-fallback';
+export type TranscriptViewportTelemetryListImplementation = 'legend' | 'flash_v2' | 'flatlist_legacy' | 'web-fallback';
 export type TranscriptViewportTelemetryOwner = TranscriptViewportOwner;
 
 export type TranscriptViewportTelemetryScrollWriter =
@@ -79,6 +79,25 @@ export type TranscriptViewportTelemetryRowMeasurePhase = 'first' | 'remeasure';
 export type TranscriptViewportTelemetryRowViewportRelation = 'above' | 'inside' | 'below' | 'unknown';
 
 export type TranscriptViewportTelemetryListOrientation = 'standard' | 'inverted';
+
+export function resolveTranscriptViewportTelemetryRendererFacts(params: Readonly<{
+    platformOS: string;
+    rendererKind: 'flashList' | 'legendList';
+}>): Readonly<{
+    listImplementation: TranscriptViewportTelemetryListImplementation;
+    orientation: TranscriptViewportTelemetryListOrientation;
+}> {
+    if (params.rendererKind === 'legendList') {
+        return {
+            listImplementation: 'legend',
+            orientation: 'standard',
+        };
+    }
+    return {
+        listImplementation: 'flash_v2',
+        orientation: params.platformOS === 'web' ? 'standard' : 'inverted',
+    };
+}
 
 export type TranscriptViewportTelemetryBottomFollowMode = 'following' | 'escaping' | 'released';
 
@@ -158,7 +177,13 @@ export type TranscriptViewportTelemetryLiveTailCarveDiagnostics = Readonly<{
     nativeCarvePinIssued?: boolean;
 }>;
 
-export type TranscriptViewportTelemetryWebTrigger = 'scroll' | 'edge-reached' | 'restore' | 'prepend-restore' | 'jump';
+export type TranscriptViewportTelemetryWebTrigger =
+    | 'scroll'
+    | 'edge-reached'
+    | 'layout-committed'
+    | 'restore'
+    | 'prepend-restore'
+    | 'jump';
 
 export type TranscriptViewportTelemetryPaginationPhase = 'idle' | 'armed' | 'loading' | 'cooldown';
 
@@ -358,6 +383,8 @@ export type TranscriptViewportTelemetryEvent =
         distanceFromBottom?: number;
         anchorIndex?: number;
         anchorItemOffsetPx?: number;
+        /** Machine-readable cause when an anchor-capture came back empty. */
+        captureFailureStatus?: string;
         anchorObservedItemOffsetPx?: number;
         anchorDeltaPx?: number;
         anchorCorrectionAttempt?: number;
@@ -661,6 +688,7 @@ const PLATFORMS = new Set<TranscriptViewportTelemetryPlatform>([
 ]);
 
 const LIST_IMPLEMENTATIONS = new Set<TranscriptViewportTelemetryListImplementation>([
+    'legend',
     'flash_v2',
     'flatlist_legacy',
     'web-fallback',
@@ -950,6 +978,9 @@ function sanitizeTelemetryEvent(
                 distanceFromBottom: readNumber(source.distanceFromBottom),
                 anchorIndex: readNumber(source.anchorIndex),
                 anchorItemOffsetPx: readNumber(source.anchorItemOffsetPx),
+                ...(typeof source.captureFailureStatus === 'string' && source.captureFailureStatus.length > 0
+                    ? { captureFailureStatus: source.captureFailureStatus.slice(0, 64) }
+                    : {}),
                 anchorObservedItemOffsetPx: readNumber(source.anchorObservedItemOffsetPx),
                 anchorDeltaPx: readNumber(source.anchorDeltaPx),
                 anchorCorrectionAttempt: readNumber(source.anchorCorrectionAttempt),
