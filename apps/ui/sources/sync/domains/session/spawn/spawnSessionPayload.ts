@@ -14,6 +14,7 @@ import type {
 } from '@happier-dev/protocol';
 
 import { buildCodexBackendTransportFields, type CodexBackendTransportFields } from '../codexBackendTransport';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 // Options for spawning a session
 export interface SpawnSessionOptions {
@@ -37,6 +38,12 @@ export interface SpawnSessionOptions {
     environmentVariables?: Record<string, string>;
     resume?: string;
     spawnNonce?: string;
+    /** Opaque UI-local identity for one explicit user launch attempt. */
+    userAttemptId?: string;
+    /** Fixed first-turn identity retained with spawn custody until follow-up settles. */
+    firstTurnLocalId?: string;
+    /** Fixed attachment follow-up identity retained with spawn custody until follow-up settles. */
+    attachmentMessageLocalId?: string;
     permissionMode?: PermissionMode;
     permissionModeUpdatedAt?: number;
     agentModeId?: string;
@@ -215,7 +222,7 @@ export function buildSpawnHappySessionRpcParams(options: SpawnSessionOptions): S
         accountSettingsVersionHint,
     } = options;
 
-    const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+    const normalizedModelId = readNonBlankSessionControlIdentifier(modelId) ?? '';
     const includeModelOverride =
         normalizedModelId.length > 0 &&
         normalizedModelId !== 'default' &&
@@ -234,13 +241,13 @@ export function buildSpawnHappySessionRpcParams(options: SpawnSessionOptions): S
         environmentVariables,
         resume,
         ...(typeof spawnNonce === 'string' && spawnNonce.trim().length > 0
-            ? { spawnNonce: spawnNonce.trim() }
+            ? { spawnNonce }
             : {}),
         permissionMode,
         permissionModeUpdatedAt,
-        ...(typeof agentModeId === 'string' && agentModeId.trim().length > 0
+        ...(readNonBlankSessionControlIdentifier(agentModeId)
             ? {
-                agentModeId: agentModeId.trim(),
+                agentModeId: agentModeId!,
                 ...(typeof agentModeUpdatedAt === 'number' && Number.isFinite(agentModeUpdatedAt)
                     ? { agentModeUpdatedAt }
                     : {}),

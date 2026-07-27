@@ -3,6 +3,26 @@ import { describe, expect, it } from 'vitest';
 import { buildSpawnHappySessionRpcParams } from './spawnSessionPayload';
 
 describe('buildSpawnHappySessionRpcParams', () => {
+    it('preserves exact nonblank opaque model identifiers', () => {
+        expect(buildSpawnHappySessionRpcParams({
+            machineId: 'machine-1',
+            directory: '/tmp/workspace',
+            backendTarget: { kind: 'builtInAgent', agentId: 'cursor' },
+            modelId: ' model-a ',
+            modelUpdatedAt: 123,
+        } as any)).toEqual(expect.objectContaining({ modelId: ' model-a ', modelUpdatedAt: 123 }));
+    });
+
+    it('preserves exact nonblank opaque agent mode identifiers', () => {
+        expect(buildSpawnHappySessionRpcParams({
+            machineId: 'machine-1',
+            directory: '/tmp/workspace',
+            backendTarget: { kind: 'builtInAgent', agentId: 'cursor' },
+            agentModeId: ' plan\t',
+            agentModeUpdatedAt: 123,
+        } as any)).toEqual(expect.objectContaining({ agentModeId: ' plan\t', agentModeUpdatedAt: 123 }));
+    });
+
     it('includes configured ACP backend targets and omits removed workspace linkage fields', () => {
         const params = buildSpawnHappySessionRpcParams({
             machineId: 'machine-1',
@@ -140,5 +160,26 @@ describe('buildSpawnHappySessionRpcParams', () => {
         expect(params).toEqual(expect.objectContaining({
             accountSettingsVersionHint: 12,
         }));
+    });
+
+    it('keeps first-input authority out of the daemon spawn wire', () => {
+        const compatibilityInput = {
+            machineId: 'machine-1',
+            directory: '/tmp/workspace',
+            backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+            initialPrompt: '  preserve this exact prompt  ',
+            spawnNonce: ' spawn-nonce-opaque ',
+            executionAuthorization: {
+                provenance: 'user_request',
+                requestId: ' first-turn-123 ',
+            },
+        } as unknown as Parameters<typeof buildSpawnHappySessionRpcParams>[0];
+        const params = buildSpawnHappySessionRpcParams(compatibilityInput);
+
+        expect(params).toEqual(expect.objectContaining({
+            spawnNonce: ' spawn-nonce-opaque ',
+        }));
+        expect(params).not.toHaveProperty('initialPrompt');
+        expect(params).not.toHaveProperty('executionAuthorization');
     });
 });
