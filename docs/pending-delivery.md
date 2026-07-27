@@ -1,122 +1,83 @@
 # Pending delivery architecture
 
-This document is the tracked architecture contract for durable user-input delivery. It distinguishes the released Pending Queue V2 storage/materialization contract from Pending Delivery Attempt V1 (`attempt_v1`). The attempt controls are off by default; this document does not authorize admission, migration, promotion, runtime refresh, or release.
+> **Superseded attempt-design record (2026-07-14).** Queue V2 is the only active pending-delivery system. `attempt_v1` will not be activated: its runtime/protocol branches are removed after the live exact-selector contract is extracted, and its schema/migrations are squashed or forward-contracted from bounded persistence evidence. Current authority and markers: `.project/plans/pending-delivery-attempt-v1-and-session-lifecycle-reliability-unification.md`. Everything below this notice is historical design evidence, not implementation or cutover instruction.
 
-## Frozen vocabulary
+## Historical attempt design
 
-- A **pending row** is the exact durable user envelope, stable local id, role, and order owned by the server pending aggregate.
-- The sole session contract is derived from `pendingDeliveryProtocolFloor`: floor 1 is `tag_queue_v2`; floor 2 is `attempt_v1`. Rows never select or persist their own contract.
-- An **attempt** is one authorized effort to dispatch the FIFO head. Its public attempt id is correlation, never authority.
-- `reserved` is positively pre-write. `write_authorized` means the host CAS succeeded and bytes may have been written after its acknowledgement.
-- Reserved expiry has one no-write outcome literal: `expired_pre_write` with `no_provider_write`.
-- **Terminal custody** means the provider/TUI surface visibly owns the prompt. It is not provider acceptance and cannot satisfy `runtime_handoff`.
-- **Exact acceptance** is attempt-bound evidence under an adopted provider-session, attachment, cursor, and receipt scope.
-- **Ambiguous after write** means a write may have occurred. Automatic resend is forbidden.
-- `runtime_handoff` is legal only when a non-TUI provider-submission boundary returns a positive synchronous acknowledgement stronger than injection or custody.
-- `attempt_evidence` requires exact, replay-safe provider evidence. Missing evidence ownership, uniqueness, or replay-horizon facts make the runtime `unsupported`.
-- Runtime-input handoff and provider-delivery mode are separate declarations. Durable floor-1 input ownership does not imply provider delivery or promotion eligibility.
-- Claim credentials, runtime authority, human requests, and server transitions are distinct authority domains.
+Pending Queue V2 remains the released durable payload and ordering owner. The following describes the abandoned admission-off attempt proposal.
 
-## Canonical owners
+## Canonical ownership
 
-| Concern | Owner |
-|---|---|
-| Feature ids and dependency graph | `packages/protocol/src/features/catalog.ts` |
-| Public attempt vocabulary and runtime declaration validation | `packages/protocol/src/sessionMessages/pendingDeliveryAttemptV1.ts` |
-| Server feature environment | `apps/server/sources/app/features/catalog/readFeatureEnv.ts` |
-| Sharing payload assembly | `apps/server/sources/app/features/sharingFeature.ts` |
-| Dependency closure and route gate decisions | server feature payload/gate helpers |
-| Contract, promotion, claim admission decisions | `pendingDeliveryAttemptAdmissionPolicy.ts` |
-| Human action requirements | `pendingDeliveryAttemptAuthorization.ts` |
-| Durable rows, attempts, barriers, outcomes, receipts, FIFO and transitions | the server pending aggregate introduced by D1 |
-| Runtime election and runtime authority | the current-runtime owner introduced by R0 |
-| Provider evidence | provider-owned adapters behind the provider-neutral attempt interface |
-| Pending-to-transcript projection and ready/attention effects | the O1b transaction owner |
+- `SessionPendingMessage` owns the exact encrypted/plain envelope, stable `localId`, role, position, and retained row disposition.
+- Enqueue selects `tag_queue_v2` or `attempt_v1` once. A retry reuses the persisted selection and cannot change it.
+- `packages/protocol/src/sessionMessages/pendingDeliveryAttemptV1.ts` owns only bounded attempt identity, claim selectors, the pure transition table, exact-coordinate release, and derived presentation.
+- `pendingDeliveryAttemptAdmission.ts` owns the single fail-closed server admission decision. Feature advertisement, enqueue selection, and the dormant claim registrar all consume that same decision; it remains hard-disabled until the cutover gates pass.
+- `pendingDeliveryAttemptEnqueueSelection.ts` translates that admission decision into the immutable protocol selected by the enqueue transaction. It is not a second gate.
+- `pendingDeliveryAttemptAuthorization.ts` maps bounded human actions to the existing session access levels. Runtime claim authority remains a separate R0 concern.
+- D1 will own the sole durable aggregate transaction service. Routes, sockets, workers, runtimes, providers, and UI must not write attempt or row lifecycle state directly.
+- Runtime Activity remains externally owned. Pending will later consume only its typed decision and exact revision; it does not infer, time out, or write Activity truth.
 
-Protocol schemas validate boundary shapes. They do not implement a durable transition kernel. Routes, runtimes, providers, UI code, migrations, and test harnesses must call the canonical owners rather than reproduce their decisions.
+## Admission boundary
 
-## Receipt identity boundary
+There is one server-owned admission decision. It drives the advertised `sharing.pendingDeliveryAttempts` bit, immutable protocol selection at enqueue, and registration of the dormant claim transport. The decision is currently hard false; missing, malformed, or non-true advertised values therefore select the released queue contract.
 
-The public protocol exposes only the `provider_session_epoch | global_unique` receipt-scope schema and inferred type as a runtime capability fact. Receipt namespace, scope id, aliases, registry and authority revisions, digest, key version, raw receipt, and acceptance internals remain private server facts; API, socket, UI, log, metric, and shared-QA projection of those facts is forbidden.
+The decision only makes the attempt corridor reachable; it does not authorize an individual claim. Claim authorization belongs to the D1/R0 aggregate transaction and must prove the persisted attempt contract, session active-attempt coordinate, current authenticated runtime authority, exact attempt identity, expected revision, and scoped unlogged idempotency key.
 
-`provider_session_epoch` is selected from a private server-owned epoch bound to one Happier session and the adopted provider-session, attachment, and cursor origin. Its private receipt identity commits the Happier session. `global_unique` instead proves uniqueness across Happier sessions inside one server-owned collision domain: Happier `sessionId` is attribution only and cannot partition the collision identity.
+Disabling the gate must never prevent exact completion, cancellation, ambiguity resolution, or recovery of already persisted attempt work.
 
-One allowlisted private registry owns the collision namespace and compatibility-stable canonical global scope. Compatible scope-id renames are lookup-only aliases, and delayed predecessor evidence cannot be relabeled as current. One private aggregate-owned receipt-write authority serializes acceptance with key and registry rotation; the keyring remains the sole crypto and key-version owner, while D1a remains the future HMAC, database, and acceptance implementation owner.
+## Attempt kernel
 
-Retained keys, authority epochs, canonical and alias scopes, receipts, outcomes, and replay tombstones cannot be retired while referenced or while provider evidence remains replayable. An unknown replay horizon makes `attempt_evidence` unsupported.
+One public attempt id identifies an attempt but grants no authority. The pure kernel recognizes:
 
-## Feature and admission contract
+`reserved → write_authorized → custody_observed → accepted`
 
-Two server-represented features fail closed:
+Only exact attempt identity and expected revision can advance a state. Custody is nonterminal and never acceptance. Weaker synchronous provider submission terminates as `handoff_acknowledged`, which remains observably distinct from `accepted`.
 
-- `sharing.pendingDeliveryAttempts` depends on `sharing.pendingQueueV2` and controls floor-2 new-session creation and owner-approved promotion.
-- `sharing.pendingDeliveryAttemptClaims` depends on `sharing.pendingDeliveryAttempts` and controls new claims.
+Pre-write terminal outcomes are `retryable`, `blocked`, `cancelled`, and `dead_letter`. Post-authorization uncertainty terminates as `ambiguous`; it is never automatically retried. Owner resolution is explicit.
 
-Both server environment controls default to disabled. Disabling admission never disables exact completion, cancellation, or owner-authorized manual recovery of already admitted work.
+The session active-attempt coordinate is released only when it still equals the exact terminal attempt id. A stale terminal completion cannot clear a successor.
 
-The admission policy has three independent decisions:
+Head and owner-authorized exact-target dispatch share one selector contract. Exact-target dispatch identifies the stable `localId` and the deliberate `send_now | steer` override; it cannot request reorder or substitute another row.
 
-1. An authorized, approved new-session creator may create floor 2 and its exact initial row atomically before provider launch. No current runtime is required; the row parks until a capable runtime binds.
-2. Existing-session promotion is owner-only. It requires the contract gate, approved cohort, capable current runtime, a generation/epoch-fenced legacy-input drain, and separate closure of every provider-delivery lineage.
-3. A new claim requires the claim gate, an existing floor-2 session, a capable elected runtime, and valid runtime authority.
+## Derived presentation
 
-The July `sharing.pendingDeliveryState` feature is compatibility-only. It is not attempt admission or claim authority.
+Coarse presentation is a pure derivation from retained row disposition plus the current/latest attempt facts. No writable queued/delivering/custody/accepted twin is permitted.
 
-## Transition contract
+- no attempt projects queued;
+- reserved/write-authorized project delivering;
+- custody-observed projects custody;
+- terminal outcomes retain their exact names, including `handoff_acknowledged` and `ambiguous`.
 
-| From | To/result | Required evidence | Forbidden inference |
-|---|---|---|---|
-| no attempt | `reserved` | FIFO head, claim admission, capable current runtime, runtime authority | account/session ownership alone |
-| `reserved` | `write_authorized` | provider `ready_to_write` followed by host phase CAS | composer emptiness, presence, time |
-| `reserved` | `expired_pre_write` or another pre-write terminal result | locked server-time expiry or other positive `no_provider_write` proof | timeout after authorization |
-| `write_authorized` | `terminal_custody` | bounded custody observation | acceptance or later-row credit |
-| authorized/custody | exact accepted/rejected result | matching attempt evidence or eligible provider-submission acknowledgement | text equality, banner, output, heartbeat |
-| authorized/custody | `ambiguous_after_write` | lost/uncertain post-write result | automatic retry |
-| any active phase | `cancel_requested` or terminal cancellation | phase-aware canonical transition | physical row deletion |
+The public shape may contain bounded row/attempt correlation, phase, outcome, reason, and revision. It must never contain the scoped idempotency key, provider secrets, raw evidence, content, or private runtime authority.
 
-Lease expiry never manufactures provider acceptance or rejection. Reserved expiry closes as `expired_pre_write` with `no_provider_write`, and a later attempt receives a new id and credential. Expiry after authorization is an ordering barrier. A duplicate-risk resend is a separate owner-authorized operation with a new stable local id.
+## Human actions
 
-## Human authorization
+Viewers may inspect derived state. Editors may enqueue, edit/reorder/discard/restore safe pending rows, cancel before write, and request ordinary dispatch/steer/interrupt actions. Provider cancellation, hide/mark-handled, ambiguity resolution, and duplicate-risk resend are owner-only and remain distinct operations.
 
-- Authorized viewers may list derived pending state.
-- Editors and owners may enqueue and perform ordinary pre-write edit, reorder, discard, restore, dispatch, steer, and separately receipted interrupt requests.
-- `cancel` is a distinct editor-or-owner action. D1a/D1b enforce phase behavior: pre-write cancellation may close no-write; post-write cancellation only requests provider cancellation and preserves possible-write ambiguity until exact closure.
-- Only the session owner may promote an existing session, resolve possible-write/input ambiguity, or authorize duplicate-risk resend.
-- Human authority never substitutes for runtime credentials or provider evidence. Runtime credentials never grant edit/share authority.
+Human ownership never substitutes for authenticated current-runtime authority, the scoped claim idempotency key, expected-revision CAS, or exact provider evidence. UI removal is not provider cancellation and cannot delete replay fences.
 
-The policy maps actions to canonical access requirements; route/service integration must continue using the existing session access helpers so forbidden/not-found privacy behavior is preserved.
+## Physical compatibility fence
 
-## Mode B compatibility boundary
+D1 persists attempt-retained rows with `status='attempt_queued'`. The released June materializer selects only `status='queued'`, so it cannot select those rows. Public projection maps `attempt_queued` to queued without creating a writable lifecycle shadow.
 
-Bounded coexistence is mandatory while deployment, database, or runner facts remain unknown. Floor-1 and floor-2 adapters stay physically separate but converge on one pending aggregate action router.
+The fence, aggregate kernel, and admission-off schema exist in Remote and Dev. They remain unreachable from production enqueue because the single admission decision is hard false; cutover remains blocked until a real provider claim/evidence/mutation consumer is proven.
 
-Promotion snapshots an immutable cutoff and closes new legacy admissions. Runtime-input retirement accounts for every HTTP, socket, and in-process range/ordinal plus the elected input owner's authenticated cutoff acknowledgement. Provider-delivery retirement separately requires an exact attempt receipt, an exact eligible `runtime_handoff` outcome, or session-owner resolution for every lineage. Transcript presence, input handoff, custody, assistant output, queue emptiness, liveness, and time cannot close provider delivery.
+## Deferred work
 
-If either retirement proof is missing, the session remains floor 1 with a typed blocker and the compatibility adapter remains live. A feature marker or row marker cannot fence a genuinely old server binary. After floor-2 state exists, rollback is forward-fix to an attempt-aware build with new admission off unless a complete tested back-migration runs under quiescence.
+Exact provider evidence history is deferred. A future evidence phase may add bounded, crash-safe attempt-bound receipts after provider capabilities and retention requirements are proven. D0 defines no receipt-scope registry, receipt key history, evidence capability catalog, provider declaration, or provider-specific branch.
 
-## User-visible guarantees
+Provider cancellation transport, consumed provider evidence adapters, owner resolution UI, cutover migration, and live ship proof remain downstream corridors. A separate runner incarnation or cryptographic claim-verifier layer must not be added unless a discriminating executable failure proves the existing authenticated channel, revision CAS, and scoped idempotency key insufficient.
 
-- The exact original envelope is durable before dispatch or provider launch.
-- A queued row remains visible and ordered until a canonical transition resolves it.
-- Custody/possible-write states are attention-worthy and never silently resent.
-- Accepted input projects pending-to-transcript once; provider acceptance, output durability, participant readiness, and notification remain distinct facts.
-- Unknown runtime declarations and future states fail closed as upgrade-required/unsupported rather than falling back to direct text delivery.
-- Delivery failure never authorizes host destruction or automatic runner refresh.
+## Deletion gate
 
-## Privacy bounds
+Before production cutover, searches must show no active alternate owner for:
 
-Public API/socket/UI presentation may include session/local/public-attempt correlation, bounded phase/reason/action, and CAS versions. It must not contain raw or digested runtime/claim/recovery credentials, receipt namespace/scope/digest, provider session ids, raw receipt/hook/screen evidence, or prompt fingerprints.
-
-Raw credentials and provider receipts are transient within their authenticated runtime/server request boundary. Server storage retains only the contract-approved keyed verifier/outcome/receipt material. Logs, metrics, telemetry, snapshots, and QA evidence follow the sink-specific allowlist in `docs/encryption.md` and the living reliability plan; content and secrets are never copied for diagnostics.
-
-## Supersession and deletion ledger
-
-The following are bounded compatibility surfaces, not alternate attempt owners:
-
-- `sharing.pendingDeliveryState` and `PendingDeliveryStatusV1` describe July/tag-era behavior only.
-- Tag-era materialization and watermark/catch-up remain only behind the floor-1 adapter.
-- Local-id-only accept/block/retry/handled routes, custody-as-acceptance callbacks, provider-local conversation FIFO, and caller-selected materialize/claim branches must be fenced and removed by their owning implementation corridors.
-- Runtime-input cursors must never be relabeled as provider-acceptance cursors.
-- Testkits may parse raw responses and compose real HTTP/session-RPC owners, but may not define attempt phases, outcomes, a queue, an aggregate, or transition decisions.
-
-Compatibility code is deleted only after supported floor-1 sessions/runtimes are absent, every input admission is accounted for, every provider-delivery lineage is closed, and the zero-bypass searches pass. Until then it remains narrow, boundary-owned, and unreachable for floor-2 input.
+- numeric protocol floors or floor-to-contract mapping;
+- per-session protocol promotion or cohort admission;
+- a separate claim feature gate;
+- receipt-scope/evidence-history capability scaffolding;
+- provider/catalog pending-attempt capability constructors;
+- direct durable transition writers outside the future aggregate;
+- mutable coarse attempt presentation state;
+- automatic retry after possible provider write;
+- provider or Runtime Activity branching in the shared kernel.
