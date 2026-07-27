@@ -3,6 +3,7 @@ import {
     readRollbackEligibleTurnStarts,
     type SessionListRenderableSession,
 } from '@/sync/domains/session/listing/sessionListRenderable';
+import { parseSessionRuntimeActivityProjectionFields } from '@happier-dev/protocol';
 
 import type {
     MachineDisplayCacheEntryV1,
@@ -14,8 +15,8 @@ const EMPTY_SESSION_LIST_CACHE_ENTRIES = EMPTY_WARM_CACHE_ENTRIES as Record<stri
 const EMPTY_MACHINE_DISPLAY_CACHE_ENTRIES = EMPTY_WARM_CACHE_ENTRIES as Record<string, MachineDisplayCacheEntryV1>;
 
 function normalizeNonNegativeInteger(value: number | null | undefined): number | null {
-    return typeof value === 'number' && Number.isFinite(value)
-        ? Math.max(0, Math.trunc(value))
+    return typeof value === 'number' && Number.isSafeInteger(value)
+        ? Math.max(0, value)
         : null;
 }
 
@@ -41,6 +42,25 @@ function toMutableNumberArray(value: readonly number[] | null): number[] | null 
 
 function hasNonEmptyString(value: string | null | undefined): boolean {
     return typeof value === 'string' && value.trim().length > 0;
+}
+
+function readRuntimeActivityProjectionFields(
+    value: unknown,
+): Pick<
+    SessionListRenderableSession,
+    | 'runtimeActivityState'
+    | 'runtimeActivityActiveCount'
+    | 'runtimeActivityObservedAt'
+    | 'runtimeActivityRevision'
+> {
+    const parsed = parseSessionRuntimeActivityProjectionFields(value);
+    if (parsed.kind !== 'valid') return {};
+    return {
+        runtimeActivityState: parsed.projection.state,
+        runtimeActivityActiveCount: parsed.projection.activeCount,
+        runtimeActivityObservedAt: parsed.projection.observedAt,
+        runtimeActivityRevision: parsed.projection.revision,
+    };
 }
 
 export function isSessionListCacheEntryMetadataUsable(entry: SessionListCacheEntryV1 | undefined): entry is SessionListCacheEntryV1 {
@@ -85,10 +105,10 @@ function areSessionListCacheEntriesEqual(
         && (nextEntry.latestTurnStatus ?? null) === (previousEntry.latestTurnStatus ?? null)
         && (nextEntry.latestTurnStatusObservedAt ?? null) === (previousEntry.latestTurnStatusObservedAt ?? null)
         && areCacheJsonValuesEqual(nextEntry.lastRuntimeIssue ?? null, previousEntry.lastRuntimeIssue ?? null)
+        && (nextEntry.runtimeActivityState ?? null) === (previousEntry.runtimeActivityState ?? null)
         && (nextEntry.runtimeActivityActiveCount ?? null) === (previousEntry.runtimeActivityActiveCount ?? null)
         && (nextEntry.runtimeActivityObservedAt ?? null) === (previousEntry.runtimeActivityObservedAt ?? null)
-        && (nextEntry.runtimeActivityExpiresAt ?? null) === (previousEntry.runtimeActivityExpiresAt ?? null)
-        && (nextEntry.runtimeActivitySourceClass ?? null) === (previousEntry.runtimeActivitySourceClass ?? null)
+        && (nextEntry.runtimeActivityRevision ?? null) === (previousEntry.runtimeActivityRevision ?? null)
         && areCacheJsonValuesEqual(nextEntry.rollbackEligibleTurnStarts ?? null, previousEntry.rollbackEligibleTurnStarts ?? null)
         && (nextEntry.latestReadyEventSeq ?? null) === (previousEntry.latestReadyEventSeq ?? null)
         && (nextEntry.latestReadyEventAt ?? null) === (previousEntry.latestReadyEventAt ?? null)
@@ -173,10 +193,7 @@ export function buildSessionListRenderableFromCacheEntry(entry: SessionListCache
         latestTurnStatus: entry.latestTurnStatus ?? null,
         latestTurnStatusObservedAt: normalizeNonNegativeNumber(entry.latestTurnStatusObservedAt),
         lastRuntimeIssue: entry.lastRuntimeIssue ?? null,
-        runtimeActivityActiveCount: normalizeNonNegativeInteger(entry.runtimeActivityActiveCount) ?? undefined,
-        runtimeActivityObservedAt: normalizeNonNegativeNumber(entry.runtimeActivityObservedAt),
-        runtimeActivityExpiresAt: normalizeNonNegativeNumber(entry.runtimeActivityExpiresAt),
-        runtimeActivitySourceClass: entry.runtimeActivitySourceClass ?? null,
+        ...readRuntimeActivityProjectionFields(entry),
         rollbackEligibleTurnStarts: readRollbackEligibleTurnStarts(entry.rollbackEligibleTurnStarts),
         latestReadyEventSeq: normalizeNonNegativeInteger(entry.latestReadyEventSeq),
         latestReadyEventAt: normalizeNonNegativeNumber(entry.latestReadyEventAt),
@@ -251,10 +268,7 @@ export function buildSessionListCacheEntryFromRenderable(
         latestTurnStatus: session.latestTurnStatus ?? null,
         latestTurnStatusObservedAt: normalizeNonNegativeNumber(session.latestTurnStatusObservedAt),
         lastRuntimeIssue: session.lastRuntimeIssue ?? null,
-        runtimeActivityActiveCount: normalizeNonNegativeInteger(session.runtimeActivityActiveCount),
-        runtimeActivityObservedAt: normalizeNonNegativeNumber(session.runtimeActivityObservedAt),
-        runtimeActivityExpiresAt: normalizeNonNegativeNumber(session.runtimeActivityExpiresAt),
-        runtimeActivitySourceClass: session.runtimeActivitySourceClass ?? null,
+        ...readRuntimeActivityProjectionFields(session),
         rollbackEligibleTurnStarts: toMutableNumberArray(readRollbackEligibleTurnStarts(session.rollbackEligibleTurnStarts)),
         latestReadyEventSeq: normalizeNonNegativeInteger(session.latestReadyEventSeq),
         latestReadyEventAt: normalizeNonNegativeNumber(session.latestReadyEventAt),

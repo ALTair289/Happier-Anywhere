@@ -91,6 +91,76 @@ describe('warmCachePersistence', () => {
         expect(loadMachineDisplayWarmCacheEntries('server-a', 'account-a')).toEqual({});
     });
 
+    it('rejects an unsafe activity revision instead of corrupting ordering', () => {
+        store.set(
+            'session-list-warm-cache-v1:server-a:account-a',
+            JSON.stringify({
+                s1: {
+                    sessionId: 's1',
+                    seq: 1,
+                    metadataVersion: 0,
+                    agentStateVersion: 0,
+                    updatedAt: 1,
+                    createdAt: 1,
+                    active: true,
+                    activeAt: 1,
+                    archivedAt: null,
+                    path: '',
+                    runtimeActivityState: 'active',
+                    runtimeActivityRevision: Number.MAX_SAFE_INTEGER + 1,
+                },
+            }),
+        );
+
+        expect(loadSessionListWarmCacheEntries('server-a', 'account-a')).toEqual({});
+    });
+
+    it('persists Runtime Activity only as an absent or complete validated tuple', () => {
+        const baseEntry = {
+            sessionId: 's1',
+            seq: 1,
+            metadataVersion: 0,
+            agentStateVersion: 0,
+            updatedAt: 1,
+            createdAt: 1,
+            active: true,
+            activeAt: 1,
+            archivedAt: null,
+            path: '',
+        };
+
+        store.set(
+            'session-list-warm-cache-v1:server-a:account-a',
+            JSON.stringify({
+                s1: {
+                    ...baseEntry,
+                    runtimeActivityState: 'active',
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: 1_250,
+                    runtimeActivityRevision: 17,
+                },
+            }),
+        );
+        expect(loadSessionListWarmCacheEntries('server-a', 'account-a').s1).toEqual(expect.objectContaining({
+            runtimeActivityState: 'active',
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 1_250,
+            runtimeActivityRevision: 17,
+        }));
+
+        store.set(
+            'session-list-warm-cache-v1:server-a:account-a',
+            JSON.stringify({
+                s1: {
+                    ...baseEntry,
+                    runtimeActivityState: 'active',
+                    runtimeActivityRevision: 18,
+                },
+            }),
+        );
+        expect(loadSessionListWarmCacheEntries('server-a', 'account-a')).toEqual({});
+    });
+
     it('roundtrips machine display entries by server and account scope', () => {
         saveMachineDisplayWarmCacheEntries('server-a', 'account-a', {
             m1: {

@@ -1,7 +1,8 @@
 import { MMKV } from 'react-native-mmkv';
 import {
+    parseSessionRuntimeActivityProjectionFields,
     PrimaryTurnStatusV1Schema,
-    SessionRuntimeActivitySourceClassV1Schema,
+    SessionRuntimeActivityStateSchema,
     SessionRuntimeIssueV1Schema,
 } from '@happier-dev/protocol';
 import { z } from 'zod';
@@ -42,10 +43,11 @@ export const SessionListCacheEntryV1Schema = z.object({
     latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
     latestTurnStatusObservedAt: z.number().int().nonnegative().nullable().optional(),
     lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
+    runtimeActivityState: SessionRuntimeActivityStateSchema.nullable().optional(),
     runtimeActivityActiveCount: z.number().int().nonnegative().nullable().optional(),
     runtimeActivityObservedAt: z.number().int().nonnegative().nullable().optional(),
-    runtimeActivityExpiresAt: z.number().int().nonnegative().nullable().optional(),
-    runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1Schema.nullable().optional(),
+    runtimeActivitySourceClass: z.never().optional(),
+    runtimeActivityRevision: z.number().int().nonnegative().safe().nullable().optional(),
     rollbackEligibleTurnStarts: z.array(z.number().int().nonnegative()).nullable().optional(),
     latestReadyEventSeq: z.number().int().nonnegative().nullable().optional(),
     latestReadyEventAt: z.number().int().nonnegative().nullable().optional(),
@@ -68,6 +70,13 @@ export const SessionListCacheEntryV1Schema = z.object({
     hasPendingPermissionRequests: z.boolean().optional(),
     hasPendingUserActionRequests: z.boolean().optional(),
     hasUnreadMessages: z.boolean().optional(),
+}).superRefine((entry, context) => {
+    if (parseSessionRuntimeActivityProjectionFields(entry).kind === 'invalid') {
+        context.addIssue({
+            code: 'custom',
+            message: 'Runtime Activity must be absent or a complete validated tuple',
+        });
+    }
 });
 
 export type SessionListCacheEntryV1 = z.infer<typeof SessionListCacheEntryV1Schema>;
