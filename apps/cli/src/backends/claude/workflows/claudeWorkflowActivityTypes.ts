@@ -1,3 +1,5 @@
+import type { ClaudeProviderTaskActivity } from '../providerActivity/createClaudeProviderActivityLedger';
+
 /**
  * Claude-owned workflow normalizer constants + the per-event change observation (CWF2).
  *
@@ -30,4 +32,9 @@ export type WorkflowActivityObservation = Readonly<{
   startedRunIds: readonly string[];
   terminalRunIds: readonly string[];
   statusChangedRunIds: readonly string[];
+  /**
+   * Exact provider-task membership transitions proven while correlating this Workflow event.
+   * Consumed only by Claude's existing Runtime Activity adapter; never by the workflow publisher.
+   */
+  providerTaskActivities?: readonly ClaudeProviderTaskActivity[];
 }>;

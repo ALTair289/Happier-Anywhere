@@ -9,7 +9,6 @@ import {
 
 import type { Metadata } from '@/api/types';
 import { updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
-import type { ClaudeProviderRuntimeActivityPublisher } from '../providerActivity/createClaudeProviderActivityLedger';
 import {
   ACTIVITY_SYSTEM_RECORD_NAMESPACE,
   buildWorkflowRunSystemRecordLocalId,
@@ -20,6 +19,8 @@ import type {
   SessionEncryptionContext,
   SessionStoredContentEncryptionMode,
 } from '@/session/transport/encryption/sessionEncryptionContext';
+import { logger } from '@/ui/logger';
+import type { ClaudeProviderTaskActivity } from '../providerActivity/createClaudeProviderActivityLedger';
 
 import {
   createClaudeWorkflowActivitySource,
@@ -68,8 +69,11 @@ export type ClaudeWorkflowActivitySessionBinding = Readonly<{
   resolveEncryption: () => Promise<Readonly<{ mode: SessionStoredContentEncryptionMode; ctx?: SessionEncryptionContext }>>;
   /** The Claude transcript session id guard (NOT the Happier session id). Null until learned. */
   getCurrentClaudeSessionId: () => string | null;
-  /** Canonical runtime-activity projection publisher for live workflow liveness. */
-  runtimeActivityPublisher?: ClaudeProviderRuntimeActivityPublisher | null;
+}>;
+
+export type WiredClaudeWorkflowActivitySource = ClaudeWorkflowActivitySource & Readonly<{
+  /** Start the one-shot startup-absence grace window after the live observer is installed. */
+  armStartupReconciliation(): void;
 }>;
 
 export function wireClaudeWorkflowActivitySource(params: Readonly<{
@@ -78,9 +82,10 @@ export function wireClaudeWorkflowActivitySource(params: Readonly<{
   binding: ClaudeWorkflowActivitySessionBinding;
   debounceMs?: number;
   logPrefix?: string;
-  /** Grace period before startup reconciliation terminates a still-unobserved stale run (W-1). */
   startupReconcileGraceMs?: number;
-}>): ClaudeWorkflowActivitySource {
+  /** Exact live provider-task facts forwarded to Claude's single Runtime Activity adapter. */
+  onProviderTaskActivity?: (activity: ClaudeProviderTaskActivity) => Promise<void> | void;
+}>): WiredClaudeWorkflowActivitySource {
   const { binding } = params;
 
   // Memoize the encryption resolution. `binding.resolveEncryption` may perform a session fetch to
@@ -134,7 +139,10 @@ export function wireClaudeWorkflowActivitySource(params: Readonly<{
   };
 
   const currentMetadata = binding.metadataWriter.getMetadataSnapshot?.();
-  if (hasLegacyClaudeAsyncAgentWorkflowGhosts(currentMetadata)) {
+  const startupMetadata = currentMetadata && hasLegacyClaudeAsyncAgentWorkflowGhosts(currentMetadata)
+    ? pruneLegacyClaudeAsyncAgentWorkflowGhostsFromMetadata(currentMetadata)
+    : currentMetadata;
+  if (startupMetadata !== currentMetadata) {
     updateMetadataBestEffort(
       binding.metadataWriter,
       (metadata) => pruneLegacyClaudeAsyncAgentWorkflowGhostsFromMetadata(metadata),
@@ -150,33 +158,46 @@ export function wireClaudeWorkflowActivitySource(params: Readonly<{
     commitRecord,
     ...(readCommittedRunSnapshot ? { readCommittedRunSnapshot } : {}),
     writeHeadline,
-    runtimeActivityPublisher: binding.runtimeActivityPublisher ?? null,
+    ...(params.onProviderTaskActivity
+      ? { onProviderTaskActivity: params.onProviderTaskActivity }
+      : {}),
     ...(params.debounceMs !== undefined ? { debounceMs: params.debounceMs } : {}),
     ...(params.logPrefix ? { logPrefix: params.logPrefix } : {}),
   });
 
-  // W-1 startup reconciliation: a fresh tracker has no memory of runs left `active` by a prior
-  // crashed process. Read the persisted headline; after a grace period, synthetically terminate any
-  // of those stale runs that were NOT re-observed live (a genuinely-resumed run re-enters the
-  // tracker within the grace window and is skipped). Flows through the source's one-writer path.
   const parsedHeadline = SessionWorkflowActivityHeadlineV1Schema.safeParse(
-    currentMetadata?.sessionWorkflowActivityHeadlineV1,
+    startupMetadata?.sessionWorkflowActivityHeadlineV1,
   );
   const reconcileCandidates = parsedHeadline.success
     ? collectStartupReconcileCandidates(parsedHeadline.data)
     : [];
-  if (reconcileCandidates.length === 0) return source;
-
   const graceMs = params.startupReconcileGraceMs ?? WORKFLOW_ACTIVITY_STARTUP_RECONCILE_GRACE_MS;
-  const reconcileTimer = setTimeout(() => {
-    void source.reconcileStartupInterruptedRuns(reconcileCandidates);
-  }, graceMs);
-  reconcileTimer.unref?.();
+  let reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconciliationArmed = false;
+  let disposed = false;
 
   return {
     ...source,
+    armStartupReconciliation() {
+      if (disposed || reconciliationArmed || reconcileCandidates.length === 0) return;
+      reconciliationArmed = true;
+      reconcileTimer = setTimeout(() => {
+        reconcileTimer = null;
+        void source.reconcileStartupInterruptedRuns(reconcileCandidates).catch((error) => {
+          logger.debug(
+            `${params.logPrefix ?? '[claude-workflow-source]'}: startup workflow reconciliation failed (non-fatal; will retry)`,
+            error,
+          );
+        });
+      }, graceMs);
+      reconcileTimer.unref?.();
+    },
     dispose() {
-      clearTimeout(reconcileTimer);
+      disposed = true;
+      if (reconcileTimer) {
+        clearTimeout(reconcileTimer);
+        reconcileTimer = null;
+      }
       source.dispose();
     },
   };

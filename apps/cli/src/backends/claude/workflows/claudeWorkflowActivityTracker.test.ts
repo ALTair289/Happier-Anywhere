@@ -102,6 +102,55 @@ function taskUpdatedCompleted(params: Readonly<{ taskId?: string; sessionId?: st
   };
 }
 
+function workflowLaunch(params: Readonly<{
+  toolUseId: string;
+  taskId: string;
+  providerRunId: string;
+  sessionId?: string;
+}>) {
+  return {
+    type: 'user',
+    session_id: params.sessionId ?? 'claude-session-1',
+    uuid: `uuid-launch-${params.toolUseId}`,
+    message: {
+      content: [{
+        type: 'tool_result',
+        tool_use_id: params.toolUseId,
+        is_error: false,
+        content: `Workflow launched in background. Task ID: ${params.taskId}\nRun ID: ${params.providerRunId}`,
+      }],
+    },
+    toolUseResult: {
+      status: 'async_launched',
+      taskId: params.taskId,
+      taskType: 'local_workflow',
+      workflowName: 'workflow-name',
+      runId: params.providerRunId,
+    },
+  };
+}
+
+function successfulWorkflowTaskStop(taskId: string, sessionId = 'claude-session-1') {
+  return {
+    type: 'user',
+    session_id: sessionId,
+    uuid: `uuid-stop-${taskId}`,
+    message: {
+      content: [{
+        type: 'tool_result',
+        tool_use_id: `toolu-stop-${taskId}`,
+        is_error: false,
+        content: `{"message":"Successfully stopped task: ${taskId}","task_id":"${taskId}","task_type":"local_workflow"}`,
+      }],
+    },
+    toolUseResult: {
+      message: `Successfully stopped task: ${taskId} (Workflow title)`,
+      task_id: taskId,
+      task_type: 'local_workflow',
+    },
+  };
+}
+
 function workflowJournal(params: Readonly<{
   workflowToolUseId: string;
   type: 'started' | 'result';
@@ -165,6 +214,65 @@ function subagentTask(params: Readonly<{ id: string; description: string; parent
 }
 
 describe('createClaudeWorkflowActivityTracker', () => {
+  it('reconciles a crash-residue run while leaving a live re-observed run untouched', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+    tracker.observe(workflowToolUse({ id: 'wf_resumed', name: 'resumed' }), { updatedAt: 900 });
+    expect(tracker.reconcileInterruptedRunFromHeadline({
+      runId: 'wf_resumed',
+      title: 'resumed',
+      totalAgents: 1,
+      completedAgents: 0,
+    }, { updatedAt: 1_000 }).changedRunIds).toEqual([]);
+
+    expect(tracker.reconcileInterruptedRunFromHeadline({
+      runId: 'wf_crashed',
+      title: 'crashed',
+      workflowToolUseId: 'toolu_crashed',
+      totalAgents: 4,
+      completedAgents: 2,
+    }, { updatedAt: 1_000 }).terminalRunIds).toEqual(['wf_crashed']);
+    expect(tracker.getRunSnapshot('wf_crashed')).toMatchObject({
+      status: 'stopped',
+      statusReason: 'interrupted',
+      totalAgents: 4,
+      completedAgents: 2,
+    });
+  });
+
+  it('republishes an exact historically reconstructed terminal run during stale-headline reconciliation', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+    tracker.observe(workflowToolUse({ id: 'toolu_wf', name: 'workflow-name' }), {
+      updatedAt: 1_000,
+      live: false,
+    });
+    tracker.observe(workflowLaunch({
+      toolUseId: 'toolu_wf',
+      taskId: 'workflow-task-1',
+      providerRunId: 'wf-provider-run',
+    }), {
+      updatedAt: 1_100,
+      live: false,
+    });
+    tracker.observe(successfulWorkflowTaskStop('workflow-task-1'), {
+      updatedAt: 1_200,
+      live: false,
+    });
+
+    expect(tracker.reconcileInterruptedRunFromHeadline({
+      runId: 'toolu_wf',
+      title: 'workflow-name',
+      workflowToolUseId: 'toolu_wf',
+      totalAgents: 9,
+      completedAgents: 0,
+    }, { updatedAt: 2_000 })).toEqual({
+      changedRunIds: ['toolu_wf'],
+      startedRunIds: [],
+      terminalRunIds: ['toolu_wf'],
+      statusChangedRunIds: ['toolu_wf'],
+    });
+    expect(tracker.getRunSnapshot('toolu_wf')?.status).toBe('cancelled');
+  });
+
   it('starts an explicit workflow run from a Workflow tool-use and reports it started', () => {
     const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude', agentId: 'claude' });
     const obs = tracker.observe(workflowToolUse({ id: 'toolu_wf', name: 'ship-feature' }), { updatedAt: 1000 });
@@ -178,6 +286,106 @@ describe('createClaudeWorkflowActivityTracker', () => {
     expect(snapshot?.title).toBe('ship-feature');
     expect(snapshot?.status).toBe('active');
     expect(snapshot?.backendId).toBe('claude');
+  });
+
+  it('keeps one workflow run when Claude reattaches the same provider run through a new tool/task identity', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+
+    tracker.observe(workflowToolUse({ id: 'toolu_initial', name: 'workflow-name' }), { updatedAt: 1_000 });
+    tracker.observe(workflowLaunch({
+      toolUseId: 'toolu_initial',
+      taskId: 'task-initial',
+      providerRunId: 'wf-provider-run',
+    }), { updatedAt: 1_100 });
+
+    tracker.observe(workflowToolUse({ id: 'toolu_resume', name: 'workflow-name' }), { updatedAt: 2_000 });
+    const reattached = tracker.observe(workflowLaunch({
+      toolUseId: 'toolu_resume',
+      taskId: 'task-resume',
+      providerRunId: 'wf-provider-run',
+    }), { updatedAt: 2_100 });
+
+    expect([...tracker.getRunSnapshotMap().keys()]).toEqual(['toolu_initial']);
+    expect(reattached.changedRunIds).toEqual(['toolu_resume']);
+    expect(reattached.providerTaskActivities).toContainEqual({
+      type: 'terminal',
+      sessionId: 'claude-session-1',
+      taskId: 'task-initial',
+      rememberIfUnknown: true,
+    });
+
+    tracker.observe(workflowToolUse({ id: 'toolu_resume', name: 'workflow-name' }), { updatedAt: 2_200 });
+    expect([...tracker.getRunSnapshotMap().keys()]).toEqual(['toolu_initial']);
+
+    const terminal = tracker.observe(taskNotification({
+      toolUseId: 'toolu_resume',
+      taskId: 'task-resume',
+    }), { updatedAt: 3_000 });
+    expect(terminal.terminalRunIds).toEqual(['toolu_initial']);
+    expect(tracker.getRunSnapshot('toolu_initial')?.status).toBe('complete');
+  });
+
+  it('drops a stale headline candidate whose tool identity is an alias of the same provider run', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+    tracker.observe(workflowToolUse({ id: 'toolu_initial', name: 'workflow-name' }), {
+      updatedAt: 1_000,
+      live: false,
+    });
+    tracker.observe(workflowLaunch({
+      toolUseId: 'toolu_initial',
+      taskId: 'task-initial',
+      providerRunId: 'wf-provider-run',
+    }), {
+      updatedAt: 1_100,
+      live: false,
+    });
+    tracker.observe(workflowToolUse({ id: 'toolu_resume', name: 'workflow-name' }), {
+      updatedAt: 2_000,
+      live: false,
+    });
+    tracker.observe(workflowLaunch({
+      toolUseId: 'toolu_resume',
+      taskId: 'task-resume',
+      providerRunId: 'wf-provider-run',
+    }), {
+      updatedAt: 2_100,
+      live: false,
+    });
+
+    expect(tracker.reconcileInterruptedRunFromHeadline({
+      runId: 'toolu_resume',
+      title: 'workflow-name',
+      workflowToolUseId: 'toolu_resume',
+      totalAgents: 0,
+      completedAgents: 0,
+    }, { updatedAt: 3_000 })).toEqual({
+      changedRunIds: ['toolu_resume'],
+      startedRunIds: [],
+      terminalRunIds: [],
+      statusChangedRunIds: [],
+    });
+    expect(tracker.getRunSnapshotMap().has('toolu_resume')).toBe(false);
+  });
+
+  it('terminalizes the exact correlated workflow task after a successful native TaskStop result', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+    tracker.observe(workflowToolUse({ id: 'toolu_wf', name: 'workflow-name' }), { updatedAt: 1_000 });
+    tracker.observe(workflowLaunch({
+      toolUseId: 'toolu_wf',
+      taskId: 'workflow-task-1',
+      providerRunId: 'wf-provider-run',
+    }), { updatedAt: 1_100 });
+
+    const stopped = tracker.observe(successfulWorkflowTaskStop('workflow-task-1'), { updatedAt: 2_000 });
+
+    expect(stopped.terminalRunIds).toEqual(['toolu_wf']);
+    expect(stopped.providerTaskActivities).toContainEqual({
+      type: 'terminal',
+      terminalStatus: 'stopped',
+      sessionId: 'claude-session-1',
+      taskId: 'workflow-task-1',
+    });
+    expect(tracker.getRunSnapshot('toolu_wf')?.status).toBe('cancelled');
   });
 
   it('builds ordered phases and phase-membered agents from workflow_progress, including a failed agent', () => {
@@ -699,47 +907,6 @@ await parallel([
     expect(tracker.getRunSnapshot('toolu_wf')?.agents.map((a) => a.title)).toEqual(['Workflow agent 1', 'Workflow agent 2']);
   });
 
-  it('reconciles a crash-residue run to stopped/interrupted, preserving headline counts (W-1)', () => {
-    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
-    const observation = tracker.reconcileInterruptedRunFromHeadline({
-      runId: 'wf_stale',
-      title: 'Big workflow',
-      workflowToolUseId: 'toolu_stale',
-      totalAgents: 17,
-      completedAgents: 3,
-      blockedAgents: 1,
-    }, { updatedAt: 5000 });
-
-    expect(observation.terminalRunIds).toEqual(['wf_stale']);
-    expect(observation.startedRunIds).toEqual([]);
-    const snapshot = tracker.getRunSnapshot('wf_stale');
-    expect(snapshot).toMatchObject({
-      runId: 'wf_stale',
-      status: 'stopped',
-      statusReason: 'interrupted',
-      totalAgents: 17,
-      completedAgents: 3,
-      blockedAgents: 1,
-      workflowToolUseId: 'toolu_stale',
-    });
-  });
-
-  it('does NOT reconcile a run the fresh tracker already observed (resumed) (W-1)', () => {
-    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
-    tracker.observe(workflowToolUse({ id: 'toolu_live', name: 'live' }), { updatedAt: 1000 });
-
-    const observation = tracker.reconcileInterruptedRunFromHeadline({
-      runId: 'toolu_live',
-      title: 'live',
-      totalAgents: 2,
-      completedAgents: 0,
-    }, { updatedAt: 5000 });
-
-    expect(observation.changedRunIds).toEqual([]);
-    expect(tracker.getRunSnapshot('toolu_live')?.status).toBe('active');
-    expect(tracker.getRunSnapshot('toolu_live')?.statusReason).toBeUndefined();
-  });
-
   it('rejects events from a foreign Claude source session', () => {
     const tracker = createClaudeWorkflowActivityTracker({
       backendId: 'claude',
@@ -809,7 +976,7 @@ await parallel([
     expect(tracker.getRunSnapshotMap().size).toBe(0);
   });
 
-  it('does not re-bump recordRevision when a duplicate progress event normalizes to the same snapshot', () => {
+  it('does not report a duplicate normalized progress snapshot as changed', () => {
     const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
     tracker.observe(workflowToolUse({ id: 'toolu_wf', name: 'wf' }), { updatedAt: 1000 });
     const progress = () => taskProgress({
@@ -820,10 +987,7 @@ await parallel([
       ],
     });
     tracker.observe(progress(), { updatedAt: 2000 });
-    const rev1 = tracker.getRunSnapshot('toolu_wf')?.recordRevision;
     const obs = tracker.observe(progress(), { updatedAt: 2500 });
-    const rev2 = tracker.getRunSnapshot('toolu_wf')?.recordRevision;
-    expect(rev1).toBe(rev2);
     expect(obs.changedRunIds).toEqual([]);
   });
 });

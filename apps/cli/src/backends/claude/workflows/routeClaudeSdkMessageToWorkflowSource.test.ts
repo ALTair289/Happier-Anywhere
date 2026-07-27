@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { SessionWorkflowRunSnapshotV1 } from '@happier-dev/protocol';
 
-import { createClaudeWorkflowActivitySource } from './claudeWorkflowActivitySource';
+import { createClaudeWorkflowActivitySource as createProductionClaudeWorkflowActivitySource } from './claudeWorkflowActivitySource';
+function createClaudeWorkflowActivitySource(params: Parameters<typeof createProductionClaudeWorkflowActivitySource>[0]) {
+  return createProductionClaudeWorkflowActivitySource(params);
+}
 import { routeClaudeSdkMessageToWorkflowSource } from './routeClaudeSdkMessageToWorkflowSource';
 
 /**
@@ -108,6 +111,7 @@ describe('routeClaudeSdkMessageToWorkflowSource', () => {
     expect(progressSnapshot?.phases.map((phase) => phase.title)).toEqual(['Research', 'Implementation']);
     expect(progressSnapshot?.agents.map((agent) => agent.id).sort()).toEqual(['agent_1', 'agent_2']);
     expect(progressSnapshot?.status).toBe('active');
+    expect(source.isWorkflowOwnedProviderTaskId('w1')).toBe(true);
 
     committed.length = 0;
     route(taskNotificationCompleted());

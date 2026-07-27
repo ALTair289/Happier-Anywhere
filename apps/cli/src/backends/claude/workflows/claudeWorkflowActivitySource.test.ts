@@ -4,21 +4,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import type { SessionWorkflowActivityHeadlineV1, SessionWorkflowRunSnapshotV1 } from '@happier-dev/protocol';
-import {
-  createSessionRuntimeActivityPublisher,
-  type RuntimeActivityProjectionWriter,
-  type SessionRuntimeActivityPublisher,
-} from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
-import { createClaudeWorkflowActivitySource } from './claudeWorkflowActivitySource';
-
-function createRuntimeActivityPublisherHarness() {
-  const publisher: Pick<SessionRuntimeActivityPublisher, 'setSourceActive' | 'observeSource' | 'clearSource' | 'clearProviderSources'> = {
-    setSourceActive: vi.fn(async () => {}),
-    observeSource: vi.fn(async () => {}),
-    clearSource: vi.fn(async () => {}),
-    clearProviderSources: vi.fn(async () => {}),
-  };
-  return { publisher };
+import { createClaudeWorkflowActivitySource as createProductionClaudeWorkflowActivitySource } from './claudeWorkflowActivitySource';
+function createClaudeWorkflowActivitySource(
+  params: Parameters<typeof createProductionClaudeWorkflowActivitySource>[0],
+) {
+  return createProductionClaudeWorkflowActivitySource(params);
 }
 
 function workflowToolUse(id: string, name: string, sessionId = 'claude-session-1') {
@@ -61,6 +51,55 @@ function workflowLaunchResult(toolUseId: string, transcriptDir: string, sessionI
       workflowName: 'sidecar-wf',
       runId: 'wf_sidecar',
       transcriptDir,
+    },
+  };
+}
+
+function workflowLaunchWithIdentity(params: Readonly<{
+  toolUseId: string;
+  taskId: string;
+  providerRunId: string;
+  sessionId?: string;
+}>) {
+  return {
+    type: 'user',
+    session_id: params.sessionId ?? 'claude-session-1',
+    uuid: `uuid-launch-${params.toolUseId}`,
+    message: {
+      content: [{
+        type: 'tool_result',
+        tool_use_id: params.toolUseId,
+        content: `Workflow launched in background. Task ID: ${params.taskId}\nRun ID: ${params.providerRunId}`,
+        is_error: false,
+      }],
+    },
+    toolUseResult: {
+      status: 'async_launched',
+      taskId: params.taskId,
+      taskType: 'local_workflow',
+      workflowName: 'sidecar-wf',
+      runId: params.providerRunId,
+    },
+  };
+}
+
+function successfulWorkflowTaskStop(taskId: string, sessionId = 'claude-session-1') {
+  return {
+    type: 'user',
+    session_id: sessionId,
+    uuid: `uuid-stop-${taskId}`,
+    message: {
+      content: [{
+        type: 'tool_result',
+        tool_use_id: `toolu-stop-${taskId}`,
+        content: `{"message":"Successfully stopped task: ${taskId}","task_id":"${taskId}","task_type":"local_workflow"}`,
+        is_error: false,
+      }],
+    },
+    toolUseResult: {
+      message: `Successfully stopped task: ${taskId} (Workflow title)`,
+      task_id: taskId,
+      task_type: 'local_workflow',
     },
   };
 }
@@ -178,6 +217,92 @@ describe('createClaudeWorkflowActivitySource', () => {
     expect(committed).toContain('toolu_wf');
   });
 
+  it('keeps one durable workflow card across provider-run reattachment and publishes exact provider-task terminals', async () => {
+    const headlines: SessionWorkflowActivityHeadlineV1[] = [];
+    const providerTaskActivities: unknown[] = [];
+    const source = createClaudeWorkflowActivitySource({
+      backendId: 'claude',
+      agentId: 'claude',
+      getCurrentClaudeSessionId: () => 'claude-session-1',
+      commitRecord: async () => {},
+      writeHeadline: (headline) => { headlines.push(headline); },
+      onProviderTaskActivity: async (activity) => { providerTaskActivities.push(activity); },
+      debounceMs: 0,
+    });
+
+    source.observeTranscriptMessage(workflowToolUse('toolu_initial', 'sidecar-wf'));
+    source.observeTranscriptMessage(workflowLaunchWithIdentity({
+      toolUseId: 'toolu_initial',
+      taskId: 'task-initial',
+      providerRunId: 'wf-provider-run',
+    }));
+    await source.flush();
+
+    source.observeTranscriptMessage(workflowToolUse('toolu_resume', 'sidecar-wf'));
+    source.observeTranscriptMessage(workflowLaunchWithIdentity({
+      toolUseId: 'toolu_resume',
+      taskId: 'task-resume',
+      providerRunId: 'wf-provider-run',
+    }));
+    await source.flush();
+
+    expect(headlines.at(-1)?.activeRuns).toHaveLength(1);
+    expect(headlines.at(-1)?.activeRuns[0]?.runId).toBe('toolu_initial');
+    expect(providerTaskActivities).toContainEqual({
+      type: 'terminal',
+      sessionId: 'claude-session-1',
+      taskId: 'task-initial',
+      rememberIfUnknown: true,
+    });
+
+    source.observeTranscriptMessage(successfulWorkflowTaskStop('task-resume'));
+    await source.flush();
+    expect(headlines.at(-1)?.activeRuns).toEqual([]);
+    expect(headlines.at(-1)?.recentRuns?.[0]?.status).toBe('cancelled');
+    expect(providerTaskActivities).toContainEqual({
+      type: 'terminal',
+      terminalStatus: 'stopped',
+      sessionId: 'claude-session-1',
+      taskId: 'task-resume',
+    });
+
+    source.dispose();
+  });
+
+  it('does not publish provider-task activity from historical workflow replay', async () => {
+    const providerTaskActivities: unknown[] = [];
+    const source = createClaudeWorkflowActivitySource({
+      backendId: 'claude',
+      agentId: 'claude',
+      getCurrentClaudeSessionId: () => 'claude-session-1',
+      commitRecord: async () => {},
+      writeHeadline: () => {},
+      onProviderTaskActivity: async (activity) => { providerTaskActivities.push(activity); },
+      debounceMs: 0,
+    });
+
+    source.observeTranscriptMessage(
+      workflowToolUse('toolu_wf', 'sidecar-wf'),
+      { historicalReplay: true },
+    );
+    source.observeTranscriptMessage(
+      workflowLaunchWithIdentity({
+        toolUseId: 'toolu_wf',
+        taskId: 'task-1',
+        providerRunId: 'wf-provider-run',
+      }),
+      { historicalReplay: true },
+    );
+    source.observeTranscriptMessage(
+      successfulWorkflowTaskStop('task-1'),
+      { historicalReplay: true },
+    );
+    await source.flush();
+
+    expect(providerTaskActivities).toEqual([]);
+    source.dispose();
+  });
+
   it('terminalizes a failed Workflow tool result so it leaves active workflow headlines', async () => {
     const committed: SessionWorkflowRunSnapshotV1[] = [];
     const headlines: SessionWorkflowActivityHeadlineV1[] = [];
@@ -207,73 +332,6 @@ describe('createClaudeWorkflowActivitySource', () => {
     source.dispose();
   });
 
-  it('renews the runtime-activity lease on every durable commit, not only changed observations (W-4)', async () => {
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const source = createClaudeWorkflowActivitySource({
-      backendId: 'claude',
-      agentId: 'claude',
-      getCurrentClaudeSessionId: () => 'claude-session-1',
-      commitRecord: async () => {},
-      writeHeadline: () => {},
-      runtimeActivityPublisher: runtimeActivity.publisher,
-      debounceMs: 300,
-    });
-
-    source.observeTranscriptMessage(workflowToolUse('toolu_wf', 'wf'));
-    await vi.advanceTimersByTimeAsync(0);
-    // A progress-only (non-status-changing) update: this commits durably on the debounce, and the
-    // lease must be renewed off that commit even though it is not a started/terminal transition.
-    source.observeTranscriptMessage({
-      type: 'system',
-      subtype: 'task_progress',
-      task_id: 'w1',
-      tool_use_id: 'toolu_wf',
-      task_type: 'local_workflow',
-      session_id: 'claude-session-1',
-      usage: { total_tokens: 50 },
-      uuid: 'uuid-progress-heartbeat',
-    });
-    await vi.advanceTimersByTimeAsync(300);
-
-    expect(runtimeActivity.publisher.observeSource).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: 'claude_workflow_durable_commit' }),
-    );
-
-    source.dispose();
-  });
-
-  it('reconciles unobserved startup runs to stopped/interrupted through the one-writer path (W-1)', async () => {
-    const committed: SessionWorkflowRunSnapshotV1[] = [];
-    const headlines: SessionWorkflowActivityHeadlineV1[] = [];
-    const source = createClaudeWorkflowActivitySource({
-      backendId: 'claude',
-      agentId: 'claude',
-      getCurrentClaudeSessionId: () => 'claude-session-1',
-      commitRecord: async (snapshot) => { committed.push(snapshot); },
-      writeHeadline: (headline) => { headlines.push(headline); },
-      debounceMs: 300,
-    });
-
-    // A run genuinely resumed live since startup must be excluded from reconciliation.
-    source.observeTranscriptMessage(workflowToolUse('toolu_resumed', 'resumed'));
-    await vi.advanceTimersByTimeAsync(0);
-    committed.length = 0;
-    headlines.length = 0;
-
-    await source.reconcileStartupInterruptedRuns([
-      { runId: 'toolu_resumed', title: 'resumed', totalAgents: 1, completedAgents: 0 },
-      { runId: 'wf_crashed', title: 'Crashed workflow', workflowToolUseId: 'toolu_crashed', totalAgents: 4, completedAgents: 2 },
-    ]);
-
-    expect(committed.map((s) => s.runId)).toEqual(['wf_crashed']);
-    expect(committed[0]).toMatchObject({ status: 'stopped', statusReason: 'interrupted', totalAgents: 4, completedAgents: 2 });
-    const lastHeadline = headlines.at(-1);
-    expect(lastHeadline?.activeRuns.map((r) => r.runId)).not.toContain('wf_crashed');
-    expect(lastHeadline?.recentRuns?.find((r) => r.runId === 'wf_crashed')?.statusReason).toBe('interrupted');
-
-    source.dispose();
-  });
-
   it('does not publish workflow records or headlines for async Agent launches', async () => {
     const { committed, headlines, source } = setup();
     source.observeTranscriptMessage(agentAsyncLaunchResult('toolu_agent'));
@@ -283,236 +341,6 @@ describe('createClaudeWorkflowActivitySource', () => {
     expect(headlines).toEqual([]);
 
     source.dispose();
-  });
-
-  it('publishes and clears canonical runtime activity for workflow lifecycle changes', async () => {
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const source = createClaudeWorkflowActivitySource({
-      backendId: 'claude',
-      agentId: 'claude',
-      getCurrentClaudeSessionId: () => 'claude-session-1',
-      commitRecord: async () => {},
-      writeHeadline: () => {},
-      runtimeActivityPublisher: runtimeActivity.publisher,
-      debounceMs: 300,
-    });
-
-    source.observeTranscriptMessage(workflowToolUse('toolu_wf', 'wf'));
-    source.observeTranscriptMessage({
-      type: 'system',
-      subtype: 'task_progress',
-      task_id: 'w1',
-      tool_use_id: 'toolu_wf',
-      task_type: 'local_workflow',
-      session_id: 'claude-session-1',
-      workflow_progress: [
-        { type: 'workflow_phase', index: 1, title: 'Verify' },
-        { type: 'workflow_agent', agentId: 'agent_1', label: 'first', phaseIndex: 1, state: 'running' },
-      ],
-      uuid: 'uuid-progress',
-    });
-    source.observeTranscriptMessage({
-      type: 'system',
-      subtype: 'task_progress',
-      task_id: 'w1',
-      tool_use_id: 'toolu_wf',
-      task_type: 'local_workflow',
-      session_id: 'claude-session-1',
-      usage: { total_tokens: 50 },
-      uuid: 'uuid-progress-2',
-    });
-    source.observeTranscriptMessage(terminalUpdate());
-
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.setSourceActive).toHaveBeenCalledWith({
-        id: 'claude:provider-task:toolu_wf',
-        sourceClass: 'provider_detached_task',
-        providerId: 'claude',
-      });
-      expect(runtimeActivity.publisher.clearSource).toHaveBeenCalledWith(
-        'claude:provider-task:toolu_wf',
-        'claude_workflow_runtime_source_rekeyed',
-      );
-      expect(runtimeActivity.publisher.setSourceActive).toHaveBeenCalledWith({
-        id: 'claude:provider-task:w1',
-        sourceClass: 'provider_detached_task',
-        providerId: 'claude',
-      });
-      expect(runtimeActivity.publisher.observeSource).toHaveBeenCalledWith({
-        id: 'claude:provider-task:w1',
-        reason: 'claude_workflow_activity_changed',
-      });
-      expect(runtimeActivity.publisher.clearSource).toHaveBeenCalledWith(
-        'claude:provider-task:w1',
-        'claude_workflow_terminal',
-      );
-    });
-
-    source.dispose();
-  });
-
-  it('clears the initial workflow runtime source when the provider task id is only learned at terminal', async () => {
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const source = createClaudeWorkflowActivitySource({
-      backendId: 'claude',
-      agentId: 'claude',
-      getCurrentClaudeSessionId: () => 'claude-session-1',
-      commitRecord: async () => {},
-      writeHeadline: () => {},
-      runtimeActivityPublisher: runtimeActivity.publisher,
-      debounceMs: 300,
-    });
-
-    source.observeTranscriptMessage(workflowToolUse('toolu_wf', 'wf'));
-    source.observeTranscriptMessage(taskStarted('toolu_wf', 'w1'));
-    source.observeTranscriptMessage(terminalUpdate('w1'));
-
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.clearSource).toHaveBeenCalledWith(
-        'claude:provider-task:toolu_wf',
-        'claude_workflow_terminal',
-      );
-      expect(runtimeActivity.publisher.clearSource).toHaveBeenCalledWith(
-        'claude:provider-task:w1',
-        'claude_workflow_terminal',
-      );
-    });
-
-    source.dispose();
-  });
-
-  it('rekeys workflow runtime activity from the real launch result provider task id', async () => {
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const transcriptDir = await mkdtemp(join(tmpdir(), 'happier-workflow-launch-'));
-    tempDirs.push(transcriptDir);
-    const source = createClaudeWorkflowActivitySource({
-      backendId: 'claude',
-      agentId: 'claude',
-      getCurrentClaudeSessionId: () => 'claude-session-1',
-      commitRecord: async () => {},
-      writeHeadline: () => {},
-      runtimeActivityPublisher: runtimeActivity.publisher,
-      debounceMs: 300,
-    });
-
-    source.observeTranscriptMessage(workflowToolUse('toolu_wf', 'wf'));
-    source.observeTranscriptMessage(workflowLaunchResult('toolu_wf', transcriptDir));
-
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.clearSource).toHaveBeenCalledWith(
-        'claude:provider-task:toolu_wf',
-        'claude_workflow_runtime_source_rekeyed',
-      );
-      expect(runtimeActivity.publisher.setSourceActive).toHaveBeenCalledWith({
-        id: 'claude:provider-task:workflow-task-1',
-        sourceClass: 'provider_detached_task',
-        providerId: 'claude',
-      });
-    });
-
-    source.dispose();
-  });
-
-  it('recovers workflow runtime projection when the first launch projection write fails', async () => {
-    let attempts = 0;
-    const writes: Parameters<RuntimeActivityProjectionWriter>[0][] = [];
-    const runtimeActivityPublisher = createSessionRuntimeActivityPublisher({
-      nowMs: () => 1_000,
-      leaseDurationMs: 5_000,
-      projectionRetryDelayMs: 250,
-      updateRuntimeActivityProjection: async (projection) => {
-        attempts += 1;
-        if (attempts === 1) {
-          throw new Error('socket temporarily unavailable');
-        }
-        writes.push(projection);
-      },
-    });
-    const transcriptDir = await mkdtemp(join(tmpdir(), 'happier-workflow-retry-'));
-    tempDirs.push(transcriptDir);
-    const source = createClaudeWorkflowActivitySource({
-      backendId: 'claude',
-      agentId: 'claude',
-      getCurrentClaudeSessionId: () => 'claude-session-1',
-      commitRecord: async () => {},
-      writeHeadline: () => {},
-      runtimeActivityPublisher,
-      debounceMs: 300,
-    });
-
-    source.observeTranscriptMessage(workflowToolUse('toolu_wf', 'wf'));
-    source.observeTranscriptMessage(workflowLaunchResult('toolu_wf', transcriptDir));
-
-    await vi.advanceTimersByTimeAsync(250);
-
-    await vi.waitFor(() => {
-      expect(writes.at(-1)).toEqual({
-        runtimeActivityActiveCount: 1,
-        runtimeActivityObservedAt: 1_000,
-        runtimeActivityExpiresAt: 6_000,
-        runtimeActivitySourceClass: 'provider_detached_task',
-      });
-    });
-
-    source.dispose();
-  });
-
-  it('clears workflow runtime activity when Agent SDK terminal status aliases arrive', async () => {
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const source = createClaudeWorkflowActivitySource({
-      backendId: 'claude',
-      agentId: 'claude',
-      getCurrentClaudeSessionId: () => 'claude-session-1',
-      commitRecord: async () => {},
-      writeHeadline: () => {},
-      runtimeActivityPublisher: runtimeActivity.publisher,
-      debounceMs: 300,
-    });
-
-    source.observeTranscriptMessage(workflowToolUse('toolu_wf', 'wf'));
-    source.observeTranscriptMessage(taskStarted('toolu_wf', 'w1'));
-    source.observeTranscriptMessage(terminalUpdate('w1', 'claude-session-1', 'succeeded'));
-
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.clearSource).toHaveBeenCalledWith(
-        'claude:provider-task:w1',
-        'claude_workflow_terminal',
-      );
-    });
-
-    source.dispose();
-  });
-
-  it('clears active workflow runtime sources during source disposal', async () => {
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const source = createClaudeWorkflowActivitySource({
-      backendId: 'claude',
-      agentId: 'claude',
-      getCurrentClaudeSessionId: () => 'claude-session-1',
-      commitRecord: async () => {},
-      writeHeadline: () => {},
-      runtimeActivityPublisher: runtimeActivity.publisher,
-      debounceMs: 300,
-    });
-
-    source.observeTranscriptMessage(workflowToolUse('toolu_wf', 'wf'));
-    source.observeTranscriptMessage(taskStarted('toolu_wf', 'w1'));
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.setSourceActive).toHaveBeenCalledWith({
-        id: 'claude:provider-task:toolu_wf',
-        sourceClass: 'provider_detached_task',
-        providerId: 'claude',
-      });
-    });
-
-    source.dispose();
-
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.clearSource).toHaveBeenCalledWith(
-        'claude:provider-task:toolu_wf',
-        'claude_workflow_source_disposed',
-      );
-    });
   });
 
   it('ignores non-workflow transcript noise', async () => {
@@ -546,6 +374,9 @@ describe('createClaudeWorkflowActivitySource', () => {
       uuid: 'uuid-prog',
     });
     expect(source.getWorkflowOwnedAgentToolUseIds().has('agent_1')).toBe(true);
+    expect(source.isWorkflowOwnedTaskReference({ toolUseId: 'toolu_wf' })).toBe(true);
+    expect(source.isWorkflowOwnedTaskReference({ taskId: 'w1' })).toBe(true);
+    expect(source.isWorkflowOwnedTaskReference({ taskId: 'plain-task' })).toBe(false);
   });
 
   it('flush() drains pending progress writes', async () => {

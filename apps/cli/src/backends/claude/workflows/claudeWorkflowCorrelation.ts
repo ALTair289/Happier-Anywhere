@@ -64,6 +64,8 @@ export type WorkflowLaunchFact = Readonly<{
    */
   confirmedLocalWorkflow?: true;
   taskId?: string;
+  /** Claude-native Workflow run identity, stable across edit-and-resume tool invocations. */
+  providerRunId?: string;
   title?: string;
   summary?: string;
   transcriptDir?: string;
@@ -379,11 +381,13 @@ function parseWorkflowLaunchResult(message: Record<string, unknown>): WorkflowLa
     const title = readString(toolUseResult?.workflowName) ?? readString(toolUseResult?.workflow_name);
     const summary = normalizeSummary(toolUseResult?.summary);
     const taskId = readString(toolUseResult?.taskId) ?? readString(toolUseResult?.task_id);
+    const providerRunId = readString(toolUseResult?.runId) ?? readString(toolUseResult?.run_id);
     return {
       kind: 'workflow-launch',
       workflowToolUseId,
       ...(confirmedLocalWorkflow ? { confirmedLocalWorkflow: true } : {}),
       ...(taskId ? { taskId } : {}),
+      ...(providerRunId ? { providerRunId } : {}),
       ...(title ? { title } : {}),
       ...(summary ? { summary } : {}),
       ...(transcriptDir ? { transcriptDir } : {}),
@@ -392,6 +396,34 @@ function parseWorkflowLaunchResult(message: Record<string, unknown>): WorkflowLa
     };
   }
   return null;
+}
+
+function parseSuccessfulWorkflowTaskStopResult(message: Record<string, unknown>): TaskLifecycleFact | null {
+  if (message.type !== 'user') return null;
+  const toolUseResult = readRecord(message.toolUseResult) ?? readRecord(message.tool_use_result);
+  const taskType = readString(toolUseResult?.taskType) ?? readString(toolUseResult?.task_type);
+  const taskId = readString(toolUseResult?.taskId) ?? readString(toolUseResult?.task_id);
+  const resultMessage = readString(toolUseResult?.message);
+  if (
+    taskType !== 'local_workflow'
+    || !taskId
+    || !resultMessage?.startsWith(`Successfully stopped task: ${taskId}`)
+  ) {
+    return null;
+  }
+
+  const sourceSessionId = readSourceSessionId(message);
+  const uuid = readString(message.uuid) ?? undefined;
+  return {
+    kind: 'task-lifecycle',
+    subtype: 'workflow_task_stopped',
+    taskId,
+    taskType,
+    status: 'cancelled',
+    usage: {},
+    ...(sourceSessionId ? { sourceSessionId } : {}),
+    ...(uuid ? { uuid } : {}),
+  };
 }
 
 function parseSubagentToolUse(message: Record<string, unknown>): SubagentStartFact | null {
@@ -572,6 +604,7 @@ export function parseClaudeWorkflowFact(value: unknown): ClaudeWorkflowFact | nu
     parseTaskNotificationMessage(message)
     ?? parseWorkflowJournalFact(message)
     ?? parseFailedWorkflowToolResult(message)
+    ?? parseSuccessfulWorkflowTaskStopResult(message)
     ?? parseWorkflowLaunchResult(message)
     ?? parseWorkflowToolUse(message)
     ?? parseTaskLifecycle(message)

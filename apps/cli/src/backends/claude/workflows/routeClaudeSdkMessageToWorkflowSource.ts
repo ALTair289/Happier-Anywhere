@@ -12,11 +12,11 @@ import type { ClaudeWorkflowActivitySource } from './claudeWorkflowActivitySourc
  * `system` messages, all of which the workflow correlation parser already understands.
  *
  * The unified-terminal runner instead feeds the SAME source through the RAW transcript channel
- * (`onRawTranscriptValue`), and it is the ONLY runner that uses that channel — so it never reports a
- * runner kind (the dispatcher calls `onRunnerSelected` for `agentSdk`/`legacy` only). Gating on the
- * runner kind therefore prevents the unified runner's visible-transcript `onMessage` — which still
- * carries the assistant `Workflow` tool-use anchor — from DOUBLE-feeding a source already driven by
- * its raw channel. A `null` kind (unified, or before any runner was selected) is never fed here.
+ * (`onRawTranscriptValue`), and it is the ONLY runner that uses that channel — so the dispatcher
+ * explicitly reports a null runner kind for Unified. Gating on the runner kind therefore prevents
+ * the unified runner's visible-transcript `onMessage` — which still carries the assistant `Workflow`
+ * tool-use anchor — from DOUBLE-feeding a source already driven by its raw channel. A `null` kind
+ * (Unified, or before any runner was selected) is never fed here.
  */
 export function routeClaudeSdkMessageToWorkflowSource(params: Readonly<{
   message: unknown;

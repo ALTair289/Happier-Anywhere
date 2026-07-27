@@ -5,8 +5,10 @@ import {
 import { logger } from '@/ui/logger';
 
 import type { Session } from '../session';
-import { wireClaudeWorkflowActivitySource } from './wireClaudeWorkflowActivitySource';
-import type { ClaudeWorkflowActivitySource } from './claudeWorkflowActivitySource';
+import {
+  wireClaudeWorkflowActivitySource,
+  type WiredClaudeWorkflowActivitySource,
+} from './wireClaudeWorkflowActivitySource';
 
 /**
  * Launcher-level composition that binds the provider-clean Claude workflow ACTIVITY source to a LIVE
@@ -23,7 +25,7 @@ export async function createClaudeWorkflowActivitySourceForSession(params: Reado
   session: Session;
   logPrefix: string;
   getCurrentClaudeSessionId: () => string | null;
-}>): Promise<ClaudeWorkflowActivitySource | null> {
+}>): Promise<WiredClaudeWorkflowActivitySource | null> {
   const sessionId = params.session.sessionId ?? params.session.client.sessionId;
   if (!sessionId) {
     logger.debug(`${params.logPrefix}: no session id yet; Claude workflow activity source not wired`);
@@ -46,7 +48,8 @@ export async function createClaudeWorkflowActivitySourceForSession(params: Reado
     return resolved;
   };
 
-  return wireClaudeWorkflowActivitySource({
+  const runtimeActivityAdapter = params.session.getProviderTaskRuntimeActivityAdapter?.() ?? null;
+  const source = wireClaudeWorkflowActivitySource({
     backendId: 'claude',
     agentId: 'claude',
     binding: {
@@ -56,8 +59,18 @@ export async function createClaudeWorkflowActivitySourceForSession(params: Reado
       ...(fetchSystemRecord ? { fetchSystemRecord } : {}),
       resolveEncryption,
       getCurrentClaudeSessionId: params.getCurrentClaudeSessionId,
-      runtimeActivityPublisher: params.session.runtimeActivityPublisher,
     },
+    ...(runtimeActivityAdapter
+      ? {
+        onProviderTaskActivity: (activity) => (
+          runtimeActivityAdapter.observeActivity({
+            activity,
+            evidence: 'live',
+          })
+        ),
+      }
+      : {}),
     logPrefix: params.logPrefix,
   });
+  return source;
 }

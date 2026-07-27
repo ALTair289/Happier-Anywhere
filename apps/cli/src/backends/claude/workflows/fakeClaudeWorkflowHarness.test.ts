@@ -14,7 +14,10 @@ const { buildWorkflowSpec, LONG_PREVIEW } = require('../../../../../../packages/
 };
 
 import { createClaudeWorkflowActivityTracker } from './claudeWorkflowActivityTracker';
-import { createClaudeWorkflowActivitySource } from './claudeWorkflowActivitySource';
+import { createClaudeWorkflowActivitySource as createProductionClaudeWorkflowActivitySource } from './claudeWorkflowActivitySource';
+function createClaudeWorkflowActivitySource(params: Parameters<typeof createProductionClaudeWorkflowActivitySource>[0]) {
+  return createProductionClaudeWorkflowActivitySource(params);
+}
 
 const SESSION_ID = 'fake-claude-session-1';
 

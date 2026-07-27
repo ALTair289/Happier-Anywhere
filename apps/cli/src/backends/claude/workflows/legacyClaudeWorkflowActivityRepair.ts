@@ -8,13 +8,9 @@ import {
 import type { Metadata } from '@/api/types';
 
 /**
- * TECH DEBT (Claude-specific, W-6): this narrow metadata-scrub for legacy async-agent workflow
- * ghosts predates the general startup reconciliation added for W-1
- * (`workflowActivityStartupReconcile.ts` + `wireClaudeWorkflowActivitySource`). Startup
- * reconciliation now terminates ANY stale non-terminal run — a strict superset of these ghosts —
- * by synthesizing a `stopped`/`interrupted` transition through the one-writer tracker path. Keep
- * this repair only until reconciliation has soaked in production, then delete it (it is the sole
- * remaining provider-name branch — `backendId !== 'claude'` — in the shared workflow pipeline).
+ * Narrow migration repair for a historical Claude-only encoding bug that wrote async Agent rows as
+ * empty workflow headlines. This predicate is shape-specific and never uses elapsed time; ordinary
+ * non-terminal workflows are preserved until explicit lifecycle or authoritative inventory evidence.
  */
 const LEGACY_AGENT_WORKFLOW_GHOST_MIN_COUNT = 2;
 const LEGACY_AGENT_WORKFLOW_GHOST_TITLE = 'Workflow';

@@ -263,6 +263,7 @@ await parallel([
         taskType: 'local_workflow',
         taskId: 'workflow-task-1',
         workflowName: 'workflow-name',
+        runId: 'wf-provider-run-1',
       },
     });
 
@@ -270,10 +271,75 @@ await parallel([
       kind: 'workflow-launch',
       workflowToolUseId: 'toolu_wf',
       taskId: 'workflow-task-1',
+      providerRunId: 'wf-provider-run-1',
       title: 'workflow-name',
       sourceSessionId: 'claude-session-1',
       uuid: 'event-workflow-launch',
     });
+  });
+
+  it('extracts an exact successful local Workflow TaskStop result as a terminal fact', () => {
+    const fact = parseClaudeWorkflowFact({
+      type: 'user',
+      session_id: 'claude-session-1',
+      uuid: 'event-workflow-stopped',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_task_stop',
+          is_error: false,
+          content: '{"message":"Successfully stopped task: workflow-task-1","task_id":"workflow-task-1","task_type":"local_workflow"}',
+        }],
+      },
+      toolUseResult: {
+        message: 'Successfully stopped task: workflow-task-1 (Workflow title)',
+        task_id: 'workflow-task-1',
+        task_type: 'local_workflow',
+      },
+    });
+
+    expect(fact).toMatchObject({
+      kind: 'task-lifecycle',
+      subtype: 'workflow_task_stopped',
+      taskId: 'workflow-task-1',
+      taskType: 'local_workflow',
+      status: 'cancelled',
+      sourceSessionId: 'claude-session-1',
+      uuid: 'event-workflow-stopped',
+    });
+  });
+
+  it('does not treat an unstructured or non-workflow TaskStop-like result as workflow termination', () => {
+    expect(parseClaudeWorkflowFact({
+      type: 'user',
+      session_id: 'claude-session-1',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_other',
+          is_error: false,
+          content: 'Successfully stopped task: workflow-task-1',
+        }],
+      },
+    })).toBeNull();
+
+    expect(parseClaudeWorkflowFact({
+      type: 'user',
+      session_id: 'claude-session-1',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_agent_stop',
+          is_error: false,
+          content: 'Successfully stopped task: agent-task-1',
+        }],
+      },
+      toolUseResult: {
+        message: 'Successfully stopped task: agent-task-1',
+        task_id: 'agent-task-1',
+        task_type: 'subagent',
+      },
+    })).toBeNull();
   });
 
   it('extracts a task_notification when user message content is a plain string', () => {
