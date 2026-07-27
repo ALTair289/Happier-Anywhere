@@ -11,6 +11,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { renderHook } from '@/dev/testkit';
 
+import { TranscriptRowShell } from '@/components/sessions/transcript/ChatListRows';
+import { TranscriptWindowGapRow } from '@/components/sessions/transcript/viewport/window/TranscriptWindowGapRow';
+import { TranscriptLiveMessagesRowShell } from './TranscriptLiveMessagesRowShell';
 import { useTranscriptItemRenderer, type TranscriptItemRendererDeps } from './useTranscriptRowHost';
 
 function createRef<T>(current: T): { current: T } {
@@ -52,7 +55,7 @@ function createRendererDeps(props: TranscriptItemRendererDeps['props']): Transcr
         handleRowLayoutMutation: vi.fn(),
         handleRowShellMeasured: vi.fn(),
         itemsRef: createRef(items),
-        listDataRef: createRef(items),
+        listData: items,
         listOrientation: 'top-down' as never,
         measurementReconciler: {} as never,
         props,
@@ -64,7 +67,7 @@ function createRendererDeps(props: TranscriptItemRendererDeps['props']): Transcr
         setThinkingExpanded: vi.fn(),
         setToolCallsGroupExpanded: vi.fn(),
         toolTimelineChromeMode: 'cards',
-        toolRouteCommonRef: createRef(undefined as never),
+        toolRouteCommon: undefined as never,
     };
 }
 
@@ -102,5 +105,56 @@ describe('useTranscriptItemRenderer identity stability', () => {
         const second = hook.getCurrent().renderItem;
 
         expect(second).not.toBe(first);
+    });
+
+    it('keeps a synthetic gap in recycler geometry without publishing a viewport-anchor shell', async () => {
+        const deps = createRendererDeps(createRendererProps());
+        const hook = await renderHook(() => useTranscriptItemRenderer(deps));
+
+        const row = hook.getCurrent().renderItem({
+            item: {
+                direction: 'older',
+                id: 'transcript-window-gap:window-1:older',
+                kind: 'transcript-window-gap',
+            },
+            index: 0,
+        }) as { type: unknown; props: { gap?: unknown } };
+
+        expect(row.type).toBe(TranscriptWindowGapRow);
+        expect(row.type).not.toBe(TranscriptRowShell);
+        expect(row.props.gap).toMatchObject({
+            direction: 'older',
+            id: 'transcript-window-gap:window-1:older',
+        });
+    });
+
+    it('routes a forked tool group row subscription to each message origin session', async () => {
+        const props = createRendererProps({ forkedTranscriptEnabled: true });
+        const deps: TranscriptItemRendererDeps = {
+            ...createRendererDeps(props),
+            getMessageOrigin: (messageId) => ({
+                sessionId: messageId === 'tool-a' ? 'origin-a' : 'origin-b',
+                isReadOnlyContext: true,
+            }),
+        };
+        const hook = await renderHook(() => useTranscriptItemRenderer(deps));
+        const row = hook.getCurrent().renderItem({
+            item: {
+                kind: 'tool-group-header',
+                id: 'group-1#header',
+                groupId: 'group-1',
+                toolMessageIds: ['tool-a', 'tool-b'],
+                expanded: false,
+                hiddenCount: 0,
+                createdAt: 1,
+            },
+            index: 0,
+        }) as { type: unknown; props: { messageRefs: unknown } };
+
+        expect(row.type).toBe(TranscriptLiveMessagesRowShell);
+        expect(row.props.messageRefs).toEqual([
+            { sessionId: 'origin-a', messageId: 'tool-a' },
+            { sessionId: 'origin-b', messageId: 'tool-b' },
+        ]);
     });
 });

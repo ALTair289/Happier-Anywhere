@@ -21,6 +21,7 @@ import { ToolCallsGroupUnitHeaderRowWithSessionCommon } from '@/components/sessi
 import { ToolCallsGroupUnitExpandRowWithSessionCommon } from '@/components/sessions/transcript/toolCalls/units/ToolCallsGroupUnitExpandRow';
 import { ToolCallsGroupUnitToolRowWithSessionCommon } from '@/components/sessions/transcript/toolCalls/units/ToolCallsGroupUnitToolRow';
 import { ToolCallsGroupUnitFooterRowWithSessionCommon } from '@/components/sessions/transcript/toolCalls/units/ToolCallsGroupUnitFooterRow';
+import { TranscriptLiveMessagesRowShell } from '@/components/sessions/transcript/rowHost/TranscriptLiveMessagesRowShell';
 import { TranscriptEnterWrapper } from '@/components/sessions/transcript/motion/TranscriptEnterWrapper';
 import { TranscriptHotTail } from '@/components/sessions/transcript/segments/TranscriptHotTail';
 import { WebTranscriptSplitFooter } from '@/components/sessions/transcript/web/WebTranscriptSplitFooter';
@@ -35,6 +36,7 @@ import type { TranscriptItemHeightValiditySignature } from '@/components/session
 import type { TranscriptRowLayoutMutation } from '@/components/sessions/transcript/measurement/TranscriptRowLayoutMutationContext';
 import type { TranscriptRollbackAction } from '@/sync/domains/sessionRollback/rollbackUiSupport';
 import type { TranscriptRenderWindowProjection } from '@/components/sessions/transcript/viewport/window/resolveTranscriptRenderWindowProjection';
+import { TranscriptWindowGapRow } from '@/components/sessions/transcript/viewport/window/TranscriptWindowGapRow';
 
 type Ref<T> = { current: T };
 
@@ -53,7 +55,7 @@ export type TranscriptItemRendererDeps = Readonly<{
     handleRowLayoutMutation: (params: Readonly<{ itemId: string; mutation: TranscriptRowLayoutMutation; rowKind: string }>) => void;
     handleRowShellMeasured: (params: Readonly<{ itemId: string; rowKind: string; heightPx: number }>) => void;
     itemsRef: Ref<readonly ChatTranscriptListItem[]>;
-    listDataRef: Ref<readonly ChatTranscriptListItem[]>;
+    listData: readonly ChatTranscriptListItem[];
     listOrientation: TranscriptListOrientation;
     measurementReconciler: TranscriptMeasurementReconciler;
     props: ChatListInternalProps;
@@ -65,7 +67,7 @@ export type TranscriptItemRendererDeps = Readonly<{
     setThinkingExpanded: (messageId: string, expanded: boolean) => void;
     setToolCallsGroupExpanded: (request: ToolCallsGroupExpansionRequest) => void;
     toolTimelineChromeMode: unknown;
-    toolRouteCommonRef: Ref<ChatListInternalProps['toolRouteCommon']>;
+    toolRouteCommon: ChatListInternalProps['toolRouteCommon'];
 }>;
 
 export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
@@ -78,7 +80,7 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
         handleRowLayoutMutation,
         handleRowShellMeasured,
         itemsRef,
-        listDataRef,
+        listData,
         listOrientation,
         measurementReconciler,
         resolveCreatedAtForMessageId,
@@ -88,7 +90,7 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
         resolveToolCallMessagesForIds,
         setThinkingExpanded,
         setToolCallsGroupExpanded,
-        toolRouteCommonRef,
+        toolRouteCommon,
         toolTimelineChromeMode,
     } = deps;
     // renderItem identity gates FlashList view-holder bailout (ViewHolder memo compares it
@@ -128,6 +130,12 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
     }, [buildRowShellSignature, handleRowLayoutMutation, handleRowShellMeasured, measurementReconciler]);
 
     const renderItem = React.useCallback(({ item, index }: { item: ChatTranscriptListItem; index: number }) => {
+        if (item.kind === 'transcript-window-gap') {
+            // Pagination gaps are in-flow recycler geometry only. Publishing a
+            // `transcript-item-*` shell would let web/native visible-anchor owners
+            // select a synthetic identity that disappears as soon as the gap closes.
+            return <TranscriptWindowGapRow gap={item} />;
+        }
         if (item.kind === 'action-draft') {
             return wrapTranscriptItemForAnchor(item, <SessionActionDraftCard sessionId={sessionId} draft={item.draft} />);
         }
@@ -192,7 +200,7 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
                     forkCommon={forkCommon}
                     messageDisplayCommon={messageDisplayCommon}
                     toolChromeCommon={toolChromeCommon}
-                    toolRouteCommon={toolRouteCommonRef.current}
+                    toolRouteCommon={toolRouteCommon}
                 />
             ));
         }
@@ -200,25 +208,42 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
             const interaction = deriveReadOnlyTranscriptInteraction(transcriptInteraction, item.isReadOnlyContext === true);
             const headerToolMessageIds = item.toolMessageIds;
             const headerGroupId = item.groupId;
-            return wrapTranscriptItemForAnchor(item, (
-                <ToolCallsGroupUnitHeaderRowWithSessionCommon
-                    sessionId={sessionId}
-                    groupId={item.groupId}
-                    metadata={metadata}
-                    interaction={interaction}
-                    toolMessages={resolveToolCallMessagesForIds(item.toolMessageIds)}
-                    expanded={item.expanded}
-                    setExpanded={(expanded: boolean) => setToolCallsGroupExpanded({
-                        toolCallsGroupId: headerGroupId,
-                        toolMessageIds: headerToolMessageIds,
-                        expanded,
-                    })}
-                    forkCommon={forkCommon}
-                    messageDisplayCommon={messageDisplayCommon}
-                    toolChromeCommon={toolChromeCommon}
-                    toolRouteCommon={toolRouteCommonRef.current}
-                />
-            ));
+            const initialToolMessages = resolveToolCallMessagesForIds(item.toolMessageIds);
+            const messageRefs = item.toolMessageIds.map((messageId) => ({
+                sessionId: getMessageOrigin?.(messageId)?.sessionId ?? sessionId,
+                messageId,
+            }));
+            return (
+                <TranscriptLiveMessagesRowShell
+                    item={item}
+                    messageRefs={messageRefs}
+                    initialMessages={initialToolMessages}
+                    buildRowShellSignature={buildRowShellSignature}
+                    measurementReconciler={measurementReconciler}
+                    onRowLayoutMutation={handleRowLayoutMutation}
+                    onRowMeasured={handleRowShellMeasured}
+                >
+                    {(messages) => (
+                        <ToolCallsGroupUnitHeaderRowWithSessionCommon
+                            sessionId={sessionId}
+                            groupId={item.groupId}
+                            metadata={metadata}
+                            interaction={interaction}
+                            toolMessages={messages.filter((message): message is ToolCallMessage => message.kind === 'tool-call')}
+                            expanded={item.expanded}
+                            setExpanded={(expanded: boolean) => setToolCallsGroupExpanded({
+                                toolCallsGroupId: headerGroupId,
+                                toolMessageIds: headerToolMessageIds,
+                                expanded,
+                            })}
+                            forkCommon={forkCommon}
+                            messageDisplayCommon={messageDisplayCommon}
+                            toolChromeCommon={toolChromeCommon}
+                            toolRouteCommon={toolRouteCommon}
+                        />
+                    )}
+                </TranscriptLiveMessagesRowShell>
+            );
         }
         if (item.kind === 'tool-group-expand') {
             const interaction = deriveReadOnlyTranscriptInteraction(transcriptInteraction, item.isReadOnlyContext === true);
@@ -239,30 +264,49 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
                     forkCommon={forkCommon}
                     messageDisplayCommon={messageDisplayCommon}
                     toolChromeCommon={toolChromeCommon}
-                    toolRouteCommon={toolRouteCommonRef.current}
+                    toolRouteCommon={toolRouteCommon}
                 />
             ));
         }
         if (item.kind === 'tool-group-tool') {
             const interaction = deriveReadOnlyTranscriptInteraction(transcriptInteraction, item.isReadOnlyContext === true);
             const toolMessage = getMessageById(item.toolMessageId);
-            return wrapTranscriptItemForAnchor(item, toolMessage?.kind === 'tool-call' ? (
-                <ToolCallsGroupUnitToolRowWithSessionCommon
-                    sessionId={sessionId}
-                    groupId={item.groupId}
-                    metadata={metadata}
-                    interaction={interaction}
-                    message={toolMessage}
-                    expanded={item.expanded}
-                    approvalRequests={approvalRequests}
-                    messagePins={messagePins}
-                    onToggleToolPin={onToggleMessagePin}
-                    forkCommon={forkCommon}
-                    messageDisplayCommon={messageDisplayCommon}
-                    toolChromeCommon={toolChromeCommon}
-                    toolRouteCommon={toolRouteCommonRef.current}
-                />
-            ) : null);
+            const messageRefs = [{
+                sessionId: getMessageOrigin?.(item.toolMessageId)?.sessionId ?? item.originSessionId ?? sessionId,
+                messageId: item.toolMessageId,
+            }];
+            return (
+                <TranscriptLiveMessagesRowShell
+                    item={item}
+                    messageRefs={messageRefs}
+                    initialMessages={toolMessage ? [toolMessage] : []}
+                    buildRowShellSignature={buildRowShellSignature}
+                    measurementReconciler={measurementReconciler}
+                    onRowLayoutMutation={handleRowLayoutMutation}
+                    onRowMeasured={handleRowShellMeasured}
+                >
+                    {(messages) => {
+                        const message = messages[0];
+                        return message?.kind === 'tool-call' ? (
+                            <ToolCallsGroupUnitToolRowWithSessionCommon
+                                sessionId={sessionId}
+                                groupId={item.groupId}
+                                metadata={metadata}
+                                interaction={interaction}
+                                message={message}
+                                expanded={item.expanded}
+                                approvalRequests={approvalRequests}
+                                messagePins={messagePins}
+                                onToggleToolPin={onToggleMessagePin}
+                                forkCommon={forkCommon}
+                                messageDisplayCommon={messageDisplayCommon}
+                                toolChromeCommon={toolChromeCommon}
+                                toolRouteCommon={toolRouteCommon}
+                            />
+                        ) : null;
+                    }}
+                </TranscriptLiveMessagesRowShell>
+            );
         }
         if (item.kind === 'tool-group-footer') {
             const interaction = deriveReadOnlyTranscriptInteraction(transcriptInteraction, item.isReadOnlyContext === true);
@@ -275,7 +319,7 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
                     forkCommon={forkCommon}
                     messageDisplayCommon={messageDisplayCommon}
                     toolChromeCommon={toolChromeCommon}
-                    toolRouteCommon={toolRouteCommonRef.current}
+                    toolRouteCommon={toolRouteCommon}
                 />
             ));
         }
@@ -315,7 +359,7 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
                         forkCommon={forkCommon}
                         messageDisplayCommon={messageDisplayCommon}
                         toolChromeCommon={toolChromeCommon}
-                        toolRouteCommon={toolRouteCommonRef.current}
+                        toolRouteCommon={toolRouteCommon}
                     />
                 </TranscriptEnterWrapper>
             ));
@@ -323,8 +367,8 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
         if (item.kind === 'message') {
             const rowActiveThinkingMessageId = resolveTranscriptItemActiveThinkingMessageId(item, activeThinkingMessageId);
             const toolChromeMode = toolTimelineChromeMode === 'activity_feed' ? 'activity_feed' : 'cards';
-            const neighborItems = listDataRef.current[index]?.id === item.id
-                ? listDataRef.current
+            const neighborItems = listData[index]?.id === item.id
+                ? listData
                 : itemsRef.current;
             const olderNeighborIndex = resolveOlderNeighborRenderedIndex(
                 index,
@@ -364,7 +408,7 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
                             forkCommon={forkCommon}
                             messageDisplayCommon={messageDisplayCommon}
                             toolChromeCommon={toolChromeCommon}
-                            toolRouteCommon={toolRouteCommonRef.current}
+                            toolRouteCommon={toolRouteCommon}
                         />
                     </View>
                 </TranscriptEnterWrapper>
@@ -377,7 +421,7 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
         getMessageOrigin,
         getMessageRevisionById,
         itemsRef,
-        listDataRef,
+        listData,
         listOrientation,
         activeThinkingMessageId,
         approvalRequests,
@@ -402,7 +446,7 @@ export function useTranscriptItemRenderer(deps: TranscriptItemRendererDeps) {
         resolveToolCallMessagesForIds,
         setThinkingExpanded,
         setToolCallsGroupExpanded,
-        toolRouteCommonRef,
+        toolRouteCommon,
         toolTimelineChromeMode,
         wrapTranscriptItemForAnchor,
     ]);
