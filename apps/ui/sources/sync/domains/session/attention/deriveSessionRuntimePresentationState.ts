@@ -1,9 +1,6 @@
 import type {
     PrimaryTurnStatusV1,
-    SessionRuntimeActivitySourceClassV1,
-} from '@happier-dev/protocol';
-import {
-    isSessionRuntimeActivityProjectionIdleForPendingDrain,
+    SessionRuntimeActivityState,
 } from '@happier-dev/protocol';
 
 export const SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS = 120_000;
@@ -38,16 +35,17 @@ export type SessionRuntimePresentationState = Readonly<{
 export type DeriveSessionRuntimePresentationStateInput = Readonly<{
     active?: boolean | null;
     activeAt?: number | null;
+    archivedAt?: number | null;
     presence?: unknown;
     thinking?: boolean | null;
     thinkingAt?: number | null;
     latestTurnStatus?: PrimaryTurnStatusV1 | null;
     latestTurnStatusObservedAt?: number | null;
     latestReadyEventAt?: number | null;
+    runtimeActivityState?: SessionRuntimeActivityState | null;
     runtimeActivityActiveCount?: number | null;
     runtimeActivityObservedAt?: number | null;
-    runtimeActivityExpiresAt?: number | null;
-    runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
+    runtimeActivityRevision?: number | null;
     meaningfulActivityAt?: number | null;
     hasPendingPermissionRequests?: boolean | null;
     hasPendingUserActionRequests?: boolean | null;
@@ -75,23 +73,24 @@ export function deriveSessionRuntimePresentationState(
     nowMs: number,
 ): SessionRuntimePresentationState {
     const latestTurnStatus = input.latestTurnStatus ?? null;
-    const freshInProgressSignals = readFreshInProgressRuntimeSignalTimestamps(input, nowMs);
+    const isArchived = typeof input.archivedAt === 'number' && Number.isFinite(input.archivedAt);
+    const freshInProgressSignals = isArchived ? [] : readFreshInProgressRuntimeSignalTimestamps(input, nowMs);
     const thinkingAt = normalizeRuntimeStatusTimestamp(input.thinkingAt);
     const isOnline = input.presence === 'online';
     const isActive = input.active === true;
-    const isLiveRuntime = isActive && isOnline;
+    const isLiveRuntime = !isArchived && isActive && isOnline;
     const hasTerminalMaterializedTurnStatus = isTerminalPrimaryTurnStatus(latestTurnStatus);
     const blocksLegacyThinking = isLegacyThinkingBlockedByTurnProjection(latestTurnStatus);
     const freshThinking =
-        input.thinking === true
+        !isArchived
+        && input.thinking === true
         && isLiveRuntime
         && isFreshTimestamp(thinkingAt, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS)
         && !blocksLegacyThinking;
     const freshInProgress = freshInProgressSignals.length > 0;
-    const freshProviderRuntimeActivity = hasFreshProviderRuntimeActivity(input, nowMs);
-    const freshForegroundProviderRuntimeActivity =
-        freshProviderRuntimeActivity && isForegroundProviderRuntimeActivity(input, latestTurnStatus);
-    const working = freshInProgress || freshThinking || freshForegroundProviderRuntimeActivity;
+    const runtimeActivityState = isArchived ? 'idle' : readRuntimeActivityPresentationState(input);
+    const freshProviderRuntimeActivity = runtimeActivityState === 'active';
+    const working = freshInProgress || freshThinking;
     const backgroundActive = !working && freshProviderRuntimeActivity;
     const pendingRequestObservedAt = normalizeRuntimeStatusTimestamp(input.pendingRequestObservedAt);
     const hasFreshPendingRequest =
@@ -168,12 +167,6 @@ export function readSessionRuntimePresentationFreshnessTimestamps(
         const pendingRequestObservedAt = normalizeRuntimeStatusTimestamp(input.pendingRequestObservedAt);
         if (pendingRequestObservedAt !== null) timestamps.push(pendingRequestObservedAt);
     }
-    if (runtimeStatus.freshProviderRuntimeActivity) {
-        const runtimeActivityExpiresAt = normalizeRuntimeStatusTimestamp(input.runtimeActivityExpiresAt);
-        if (runtimeActivityExpiresAt !== null && !isLiveRuntimeOwner(input)) {
-            timestamps.push(Math.max(1, runtimeActivityExpiresAt - SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS));
-        }
-    }
     return timestamps;
 }
 
@@ -222,32 +215,18 @@ function normalizeRuntimeStatusTimestamp(value: number | null | undefined): numb
         : null;
 }
 
-function normalizeRuntimeActivityActiveCount(value: number | null | undefined): number {
-    return typeof value === 'number' && Number.isFinite(value)
-        ? Math.max(0, Math.trunc(value))
-        : 0;
-}
-
-function hasFreshProviderRuntimeActivity(
+function readRuntimeActivityPresentationState(
     input: DeriveSessionRuntimePresentationStateInput,
-    nowMs: number,
-): boolean {
-    if (normalizeRuntimeActivityActiveCount(input.runtimeActivityActiveCount) <= 0) return false;
-    return !isSessionRuntimeActivityProjectionIdleForPendingDrain(input, nowMs, {
-        ownerLive: isLiveRuntimeOwner(input),
-    });
-}
-
-function isLiveRuntimeOwner(input: DeriveSessionRuntimePresentationStateInput): boolean {
-    return input.active === true && input.presence === 'online';
-}
-
-function isForegroundProviderRuntimeActivity(
-    input: DeriveSessionRuntimePresentationStateInput,
-    latestTurnStatus: PrimaryTurnStatusV1 | null,
-): boolean {
-    return !(
-        input.runtimeActivitySourceClass === 'provider_detached_task'
-        && isTerminalPrimaryTurnStatus(latestTurnStatus)
-    );
+): SessionRuntimeActivityState {
+    if (
+        input.runtimeActivityState === 'active'
+        && typeof input.runtimeActivityActiveCount === 'number'
+        && Number.isFinite(input.runtimeActivityActiveCount)
+        && input.runtimeActivityActiveCount > 0
+    ) return 'active';
+    if (
+        input.runtimeActivityState === 'idle'
+        && input.runtimeActivityActiveCount === 0
+    ) return 'idle';
+    return 'unknown';
 }
