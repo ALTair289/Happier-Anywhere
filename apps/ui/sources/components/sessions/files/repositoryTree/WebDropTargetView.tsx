@@ -18,11 +18,6 @@ export function WebDropTargetView(props: WebDropTargetViewProps): React.ReactEle
         onDragOver,
         onDrop,
     });
-    const [hostElement, setHostElement] = React.useState<HTMLElement | null>(null);
-    const setHostRef = React.useCallback((node: unknown) => {
-        const next = (node as HTMLElement | null) ?? null;
-        setHostElement((prev) => (prev === next ? prev : next));
-    }, []);
 
     handlersRef.current = {
         onDragEnter,
@@ -30,9 +25,22 @@ export function WebDropTargetView(props: WebDropTargetViewProps): React.ReactEle
         onDragOver,
         onDrop,
     };
+    const attachedHostRef = React.useRef<HTMLElement | null>(null);
+    const detachHostListenersRef = React.useRef<(() => void) | null>(null);
 
-    React.useEffect(() => {
+    const detachHostListeners = React.useCallback(() => {
+        detachHostListenersRef.current?.();
+        detachHostListenersRef.current = null;
+        attachedHostRef.current = null;
+    }, []);
+
+    const setHostRef = React.useCallback((node: unknown) => {
         if (Platform.OS !== 'web') return;
+
+        const hostElement = (node as HTMLElement | null) ?? null;
+        if (hostElement === attachedHostRef.current) return;
+
+        detachHostListeners();
         if (!hostElement) return;
 
         const listeners: ReadonlyArray<readonly [keyof GlobalEventHandlersEventMap, EventListener]> = [
@@ -46,12 +54,15 @@ export function WebDropTargetView(props: WebDropTargetViewProps): React.ReactEle
             hostElement.addEventListener(type, listener);
         }
 
-        return () => {
+        attachedHostRef.current = hostElement;
+        detachHostListenersRef.current = () => {
             for (const [type, listener] of listeners) {
                 hostElement.removeEventListener(type, listener);
             }
         };
-    }, [hostElement]);
+    }, [detachHostListeners]);
+
+    React.useEffect(() => detachHostListeners, [detachHostListeners]);
 
     return (
         <View

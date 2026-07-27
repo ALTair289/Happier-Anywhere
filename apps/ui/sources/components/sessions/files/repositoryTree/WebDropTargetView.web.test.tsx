@@ -9,6 +9,8 @@ import { installRepositoryTreeCommonModuleMocks } from './repositoryTreeTestHelp
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
+const viewRenderSpy = vi.hoisted(() => vi.fn());
+
 function flattenStyle(style: any): React.CSSProperties | undefined {
     if (style == null) return undefined;
     if (Array.isArray(style)) {
@@ -26,6 +28,7 @@ installRepositoryTreeCommonModuleMocks({
                 select: (value: any) => value?.web ?? value?.default ?? null,
             },
             View: React.forwardRef<HTMLDivElement, any>(function View(props, ref) {
+                viewRenderSpy();
                 const { children, style, testID, onDragEnter, onDragLeave, onDragOver, onDrop, ...rest } = props;
                 void onDragEnter;
                 void onDragLeave;
@@ -61,6 +64,27 @@ function createFileDragEvent(type: string): Event {
 }
 
 describe('WebDropTargetView.web', () => {
+    it('does not trigger an extra render pass when the host ref attaches on mount', async () => {
+        viewRenderSpy.mockClear();
+        const { WebDropTargetView } = await webDropTargetViewModule;
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+
+        try {
+            await act(async () => {
+                root.render(<WebDropTargetView testID="drop-target">child</WebDropTargetView>);
+            });
+
+            expect(viewRenderSpy).toHaveBeenCalledTimes(1);
+        } finally {
+            await act(async () => {
+                root.unmount();
+            });
+            container.remove();
+        }
+    });
+
     it('bridges native drag and drop events to callbacks even when View does not forward drag props', async () => {
         const { WebDropTargetView } = await webDropTargetViewModule;
         const onDragEnter = vi.fn();
@@ -98,6 +122,39 @@ describe('WebDropTargetView.web', () => {
             await act(async () => {
                 root.unmount();
             });
+            container.remove();
+        }
+    });
+
+    it('removes native drag listeners when the host unmounts', async () => {
+        const { WebDropTargetView } = await webDropTargetViewModule;
+        const onDrop = vi.fn();
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+
+        try {
+            await act(async () => {
+                root.render(
+                    <WebDropTargetView
+                        testID="drop-target"
+                        onDrop={onDrop}
+                    >
+                        child
+                    </WebDropTargetView>,
+                );
+            });
+
+            const element = container.firstElementChild as HTMLElement | null;
+            expect(element).not.toBeNull();
+
+            await act(async () => {
+                root.unmount();
+            });
+
+            element!.dispatchEvent(createFileDragEvent('drop'));
+            expect(onDrop).not.toHaveBeenCalled();
+        } finally {
             container.remove();
         }
     });
