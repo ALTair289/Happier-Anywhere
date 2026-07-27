@@ -62,6 +62,24 @@ Keep feature/capability decisions fail-closed and canonical. Do not add dual wri
 
 For `remote-dev` → `dev`, port the proven observable contract after its source vertical has passed the required automated and live gates. Re-derive ownership and surrounding assumptions in `dev`; port intent and fixtures, not dirty-tree topology, dormant scaffolding, or unreleased intermediate migrations.
 
+### Migration authoring
+
+Classify every affected migration before changing it:
+
+- `local-only`: the migration has not shipped in a supported stable or preview artifact;
+- `development-exposed`: the migration appeared on a shared development branch or `*-dev.*` artifact but still has no supported release obligation;
+- `released`: the migration shipped in an active stable/preview artifact.
+
+Local-only and development-exposed migrations may be consolidated in place before the next supported release. A development-exposed revision requires an explicit reconciliation path for retained development databases, not a permanent product adapter. Prefer one clear transition from the released schema to the intended final schema over retaining draft add/rename/contract/drop history. Multiple unreleased migrations remain justified only by a real rollout, backfill, transaction, provider, or mixed-version requirement.
+
+Published and released migrations are append-only: never modify their name or bytes. If a published migration is wrong, preserve it and design the smallest forward correction that works from the published state. If the published migration cannot run at all for a supported provider, stop and resolve the release/deployment contract explicitly instead of silently rewriting history.
+
+A local database that applied an unpublished draft does not justify product compatibility code. Reconcile that database explicitly, with backup, schema/ledger inspection, a reviewable provider-specific procedure, and approval before mutating retained data. Do not add checksum allowlists, migration aliases, duplicate identities, no-op bridge migrations, or automatic ledger rewriting solely for local development history.
+
+Treat the migration edit and retained-development reconciliation as one work unit. After the final migration edit and before handoff, compare complete physical schema—including indexes, constraints, and foreign keys—and prove the procedure on a current backup or clone; any later migration edit invalidates earlier checksum/ledger reconciliation evidence.
+
+Use the canonical integration remote and immutable release tags/artifacts to establish the frontier. Verify all affected providers and test a clean upgrade from the published baseline before handoff.
+
 ## 6. Test proportionately
 
 - Start with one discriminating contract or golden-vector test per material direction.
