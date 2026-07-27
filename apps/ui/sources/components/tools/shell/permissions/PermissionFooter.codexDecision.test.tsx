@@ -1,5 +1,5 @@
 import React from 'react';
-import type { ReactTestInstance } from 'react-test-renderer';
+import { act, type ReactTestInstance } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 import { findTestInstanceByTypeContainingText, pressTestInstanceAsync, renderScreen } from '@/dev/testkit';
 import { lightTheme } from '@/theme';
@@ -139,5 +139,26 @@ describe('PermissionFooter (codexDecision)', () => {
             'approved_execpolicy_amendment',
             { command: ['allow', 'read'] },
         );
+    });
+
+    it('dispatches one approval when the same control is activated twice before React commits', async () => {
+        const { PermissionFooter } = await import('../permissions/PermissionFooter');
+        const { sessionAllow } = await import('@/sync/ops');
+        vi.mocked(sessionAllow).mockClear();
+
+        const screen = await renderScreen(React.createElement(PermissionFooter, {
+            permission: { id: 'p-double-allow', status: 'pending' },
+            sessionId: 's1',
+            toolName: 'execute',
+            toolInput: { command: 'pwd' },
+            metadata: { flavor: 'codex' },
+        }));
+        const allow = screen.findByProps({ testID: 'permission-footer.allow' });
+
+        await act(async () => {
+            await Promise.all([allow.props.onPress(), allow.props.onPress()]);
+        });
+
+        expect(sessionAllow).toHaveBeenCalledTimes(1);
     });
 });

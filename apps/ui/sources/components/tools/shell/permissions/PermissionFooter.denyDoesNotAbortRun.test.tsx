@@ -131,4 +131,27 @@ describe('PermissionFooter deny action', () => {
         expect(ops.sessionAbort).not.toHaveBeenCalled();
         expect(sessionStore.updateSessionPermissionMode).not.toHaveBeenCalled();
     });
+
+    it('dispatches one denial when the same control is activated twice before React commits', async () => {
+        runtime.setProtocol('codexDecision', 'opencode');
+        ops.sessionDeny.mockClear();
+        ops.sessionAbort.mockClear();
+
+        const { PermissionFooter } = await import('../permissions/PermissionFooter');
+        const screen = await renderScreen(React.createElement(PermissionFooter, {
+            permission: { id: 'p-double-deny', status: 'pending' },
+            sessionId: 's1',
+            toolName: 'execute',
+            toolInput: { command: 'touch /tmp/permission-deny-test' },
+            metadata: { flavor: 'opencode' },
+        }));
+        const deny = screen.findByProps({ testID: 'permission-footer.deny' });
+
+        await act(async () => {
+            await Promise.all([deny.props.onPress(), deny.props.onPress()]);
+        });
+
+        expect(ops.sessionDeny).toHaveBeenCalledTimes(1);
+        expect(ops.sessionAbort).not.toHaveBeenCalled();
+    });
 });

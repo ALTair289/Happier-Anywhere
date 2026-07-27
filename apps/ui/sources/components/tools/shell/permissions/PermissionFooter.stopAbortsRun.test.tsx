@@ -1,4 +1,5 @@
 import React from 'react';
+import { act } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 import { pressTestInstanceAsync, renderScreen } from '@/dev/testkit';
 import { installPermissionShellCommonModuleMocks } from './permissionShellTestHelpers';
@@ -169,5 +170,28 @@ describe('PermissionFooter stop action', () => {
         } else {
             expect(syncMock.sendMessage).not.toHaveBeenCalled();
         }
+    });
+
+    it('dispatches one denial and one abort when Stop is activated twice before React commits', async () => {
+        runtime.setProtocol('codexDecision', 'opencode');
+        ops.sessionDeny.mockClear();
+        ops.sessionAbort.mockClear();
+
+        const { PermissionFooter } = await import('../permissions/PermissionFooter');
+        const screen = await renderScreen(React.createElement(PermissionFooter, {
+            permission: { id: 'p-double-stop', status: 'pending' },
+            sessionId: 's1',
+            toolName: 'execute',
+            toolInput: { command: 'touch /tmp/permission-stop-test' },
+            metadata: { flavor: 'opencode' },
+        }));
+        const stop = screen.findByProps({ testID: 'permission-footer.stop' });
+
+        await act(async () => {
+            await Promise.all([stop.props.onPress(), stop.props.onPress()]);
+        });
+
+        expect(ops.sessionDeny).toHaveBeenCalledTimes(1);
+        expect(ops.sessionAbort).toHaveBeenCalledTimes(1);
     });
 });
