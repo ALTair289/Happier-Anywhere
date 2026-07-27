@@ -2,10 +2,12 @@ import * as React from 'react';
 import { Platform, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 
 import { sync } from '@/sync/sync';
+import { resolveDetachedInputAnchorCaptureState } from '@/components/sessions/transcript/viewport/prepend/host/useTranscriptViewportAnchorCaptureHost';
 import {
     type TranscriptViewportTelemetryObservationReason,
     type TranscriptViewportTelemetryEvent,
     type TranscriptViewportTelemetryScrollReason,
+    type TranscriptViewportTelemetryWebTrigger,
 } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
 import type {
     ChatTranscriptListItem,
@@ -17,6 +19,8 @@ import {
     type WebTranscriptScrollMetrics,
 } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 import type { TranscriptListShellPlatformInteractionProps } from '@/components/sessions/transcript/viewport/shell/TranscriptListShell';
+import type { WebDomScrollObservation } from '@/components/sessions/transcript/viewport/driver/webDomObservation';
+import type { WebScrollMovementFact } from '@/components/sessions/transcript/scroll/resolveWebGenuineScrollMovement';
 import {
     applyTranscriptLifecycleScrollObservationPlan,
     type TranscriptLifecycleScrollObservationPlanContinuationInput,
@@ -26,6 +30,7 @@ import {
     type TranscriptScrollIngressCallbacks,
     type TranscriptScrollIngressPlatform,
 } from '@/components/sessions/transcript/viewport/lifecycle/scrollIngressObservation';
+import { useCommittedTranscriptRef } from '@/components/sessions/transcript/viewport/lifecycle/host/useCommittedTranscriptRef';
 import {
     applyTranscriptContentSizeObservation,
     applyTranscriptLayoutObservation,
@@ -97,11 +102,19 @@ import type { TranscriptBottomFollowModeState, TranscriptScrollPinEvent, Transcr
 import type { TranscriptViewportMode, TranscriptViewportOwner } from '@/components/sessions/transcript/viewport/transcriptViewportTypes';
 import type { EntryRestoreOwner, EntryRestoreOwnerEffect } from '@/components/sessions/transcript/viewport/entryRestore/entryRestoreOwner';
 import type { TranscriptPrependHost } from '@/components/sessions/transcript/viewport/prepend/host/useTranscriptPrependHost';
-import type { TranscriptOlderPaginationSnapshot } from '@/components/sessions/transcript/pagination/useTranscriptOlderPagination';
+import type {
+    TranscriptOlderPaginationScrollMetrics,
+    TranscriptOlderPaginationSnapshot,
+} from '@/components/sessions/transcript/pagination/useTranscriptOlderPagination';
 import type { TranscriptMeasurementHost } from '@/components/sessions/transcript/measurement/transcriptMeasurementHost';
 import type { TranscriptJumpTarget } from '@/components/sessions/transcript/viewport/jump/transcriptJumpTargetTypes';
+import type { TranscriptTargetWindowState } from '@/components/sessions/transcript/viewport/window/transcriptTargetWindowTypes';
 import type { TranscriptBlankRecoveryEffect } from '@/components/sessions/transcript/viewport/visibility/blankRecoveryOwner';
 import type { ScrollObservedTelemetryParams } from '@/components/sessions/transcript/viewport/telemetryHost/viewportEvents';
+import {
+    registerWebTranscriptKeyboardOwner,
+    type WebTranscriptKeyboardVerticalDirection,
+} from '@/components/sessions/transcript/viewport/lifecycle/webTranscriptKeyboardOwner';
 
 type MutableRef<T> = { current: T };
 type ScrollObservationPlan = TranscriptLifecycleHostScrollObservationPlan;
@@ -113,6 +126,7 @@ type GenericScrollObservationSuppressionEffect = Extract<TranscriptViewportLifec
 type GenericScrollObservationAnchorCaptureCancellationEffect = Extract<TranscriptViewportLifecycleEffect, { type: 'cancel-scheduled-viewport-anchor-capture' }>;
 type NativeOffsetReleaseLiveTailStateEffect = TranscriptLifecycleHostNativeOffsetEscapeReleasePlan['nativeOffsetReleaseLiveTailStateEffects'][number];
 type NativeGestureTakeoverPlan = TranscriptLifecycleHostNativeGestureTakeoverPlan;
+
 type NativeTouchIntentApplyEffect = TranscriptLifecycleHostNativeTouchIntentPlan['nativeTouchIntentEffects'][number];
 type NativeTouchReleaseLiveTailStateEffect = TranscriptLifecycleHostNativeTouchReleasePlan['nativeTouchReleaseStateEffects'][number];
 type LocalTranscriptInteractionAutoPinDeferralApplyEffect = TranscriptLifecycleHostLocalInteractionPlan['localInteractionAutoPinDeferralEffects'][number];
@@ -125,7 +139,7 @@ type WebViewportTelemetryDiagnosticsInput = Readonly<{
     paginationSuspendedReasons?: TranscriptOlderPaginationSnapshot['suspendedReasons'];
     programmaticWebWrite: boolean;
     scrollable?: boolean;
-    trigger: 'scroll' | 'edge-reached' | 'restore' | 'prepend-restore' | 'jump';
+    trigger: TranscriptViewportTelemetryWebTrigger;
 }>;
 
 export type TranscriptScrollObservationHostDeps = Readonly<{
@@ -156,6 +170,8 @@ export type TranscriptScrollObservationHostDeps = Readonly<{
     hasNativeInitialViewportAppliedForCurrentSession: () => boolean;
     isLoaded: boolean;
     isWarmKeepAliveInstance: boolean;
+    /** Re-debounces (never destroys) a pending viewport anchor capture on external movement. */
+    deferViewportAnchorCapture: () => void;
     invalidateViewportAnchorCapture: () => void;
     lastExplicitWebScrollIntentAtMsRef: MutableRef<number>;
     lastNativePinOffsetRef: MutableRef<number | null>;
@@ -189,10 +205,18 @@ export type TranscriptScrollObservationHostDeps = Readonly<{
     observeWebTranscriptNavigationVisibilityForSession: TranscriptScrollIngressCallbacks['observeWebTranscriptNavigationVisibility'];
     olderPagination: Readonly<{
         getSnapshot(): TranscriptOlderPaginationSnapshot;
+        isReadyForLoad(): boolean;
+        isNearOlderEdge(input: Readonly<{
+            offsetY: number;
+            scrollable: boolean;
+            trigger?: TranscriptOlderPaginationScrollMetrics['trigger'];
+            itemsToOlderEdge?: number | null;
+        }>): boolean;
         onScrollObservation(input: Readonly<{
             offsetY: number;
             scrollable: boolean;
-            trigger?: 'scroll' | 'edge-reached';
+            trigger?: TranscriptOlderPaginationScrollMetrics['trigger'];
+            itemsToOlderEdge?: number | null;
         }>): void;
     }>;
     pendingJumpSeqViewportPromotionRef: MutableRef<unknown | null>;
@@ -225,11 +249,20 @@ export type TranscriptScrollObservationHostDeps = Readonly<{
     ) => void;
     resolveEffectiveListPaintMetrics: () => { contentHeight: number; distanceFromBottom: number; layoutHeight: number } | null;
     resolveNativeObservedScrollOffset: (rawOffsetY: number, metrics: Readonly<{ contentHeight: number; layoutHeight: number }>) => { canonicalOffsetY: number; distanceFromLiveTailPx: number } | null;
+    /**
+     * Estimate-immune item-space edge proximity for the older-pagination machine
+     * (`resolveItemsToOlderEdge` over the driver fact seam's visible source range).
+     * Native only; undefined/null on web or when the list cannot report a reliable
+     * genuine-subset visible range yet.
+     */
+    readItemsToOlderEdge?: () => number | null;
+    readItemsToNewerEdge?: () => number | null;
     resolveTranscriptMountSettleBottomDistanceNoiseFloorPx: () => number | null;
     resolveViewportReachedEdge: (edge: 'start' | 'end') => 'older' | 'newer';
     resolveViewportTelemetryMode: (mode?: TranscriptViewportMode) => TranscriptViewportMode;
     resolveWebScrollMetrics: () => WebTranscriptScrollMetrics | null;
     resolveWebViewportTelemetryDiagnostics: (params: WebViewportTelemetryDiagnosticsInput) => Record<string, unknown>;
+    webDomObservation: WebDomScrollObservation;
     sessionActive: boolean;
     sessionEntryViewportRef: MutableRef<{ sessionId: string; shouldFollowBottom: boolean } | null>;
     sessionId: string;
@@ -238,13 +271,9 @@ export type TranscriptScrollObservationHostDeps = Readonly<{
     shouldSuppressGenericViewportStateForProtectedJumpSeq: () => boolean;
     showFirstPaintPlaceholder: boolean;
     targetWindowActiveRef: MutableRef<boolean>;
-    targetWindowEdgeLoadInFlightRef: MutableRef<{ newer: boolean; older: boolean }>;
+    targetWindowEdgeLoadInFlightRef: MutableRef<'newer' | 'older' | null>;
     targetWindowHostFacts: Readonly<{
-        activeWindowState: null | Readonly<{
-            hasMoreNewer: boolean | null;
-            hasMoreOlder: boolean | null;
-            targetSeq: number | null;
-        }>;
+        activeWindowState: TranscriptTargetWindowState | null;
     }>;
     updateNativeInitialViewportPendingObservation: (value: boolean) => void;
     updateNativeViewportPaintObserved: (value: boolean) => void;
@@ -273,12 +302,16 @@ export type TranscriptScrollObservationHost = Readonly<{
     deferAutoPinAfterLocalTranscriptInteraction: () => void;
     nativeFlashListScrollOverrideProps: Record<string, unknown> | undefined;
     observeNativeStreamAppendOffsetEscape: (params: { contentHeight: number; layoutHeight: number }) => boolean;
+    observeCommittedProjectionLayout: () => void;
     onContentSizeChange: (_: number, h: number) => void;
     onEndReached: () => void;
     onLayout: (e: LayoutChangeEvent) => void;
     onMomentumScrollBegin: () => void;
     onMomentumScrollEnd: () => void;
-    onScroll: (e: NativeSyntheticEvent<NativeScrollEvent>) => void;
+    onScroll: (
+        e: NativeSyntheticEvent<NativeScrollEvent>,
+        webMovementFact?: WebScrollMovementFact,
+    ) => void;
     onScrollBeginDrag: () => void;
     onScrollEndDrag: () => void;
     onStartReached: () => void;
@@ -466,10 +499,29 @@ export function useTranscriptScrollObservationHost(
         deps.sessionId,
     ]);
 
+    const scheduleDetachedInputAnchorCapture = React.useCallback(() => {
+        // Unforgeable input while measurably detached schedules the debounced anchor capture
+        // directly and corrects a stale want-pin bit: the generic observation effect that
+        // maintains both can starve for a whole detach when giant-row layout churn defeats
+        // scroll-frame genuineness classification (live A->B->A RED 2026-07-11).
+        const captureState = resolveDetachedInputAnchorCaptureState(
+            deps.resolveWebScrollMetrics(),
+            deps.pinThresholdPxRef.current,
+        );
+        if (!captureState) return;
+        deps.wantsPinnedRef.current = false;
+        deps.scheduleViewportAnchorCaptureRef.current(captureState);
+    }, [
+        deps.pinThresholdPxRef,
+        deps.resolveWebScrollMetrics,
+        deps.scheduleViewportAnchorCaptureRef,
+        deps.wantsPinnedRef,
+    ]);
     const stopScrollEventPropagationOnWeb = React.useCallback((event: unknown) => {
         if (deps.platformOS !== 'web') return;
         const nowMs = Date.now();
         deps.lastExplicitWebScrollIntentAtMsRef.current = nowMs;
+        scheduleDetachedInputAnchorCapture();
         const transition = deps.dispatchViewportLifecycleEvent({
             sessionId: deps.sessionId,
             type: 'web-user-scroll-takeover',
@@ -497,11 +549,13 @@ export function useTranscriptScrollObservationHost(
         deps.platformOS,
         deps.sessionId,
         releaseLiveTailForImmediateWebUserIntent,
+        scheduleDetachedInputAnchorCapture,
     ]);
     const markUserScrollIntentOnWeb = React.useCallback(() => {
         if (deps.platformOS !== 'web') return;
         const nowMs = Date.now();
         deps.lastExplicitWebScrollIntentAtMsRef.current = nowMs;
+        scheduleDetachedInputAnchorCapture();
         const transition = deps.dispatchViewportLifecycleEvent({
             sessionId: deps.sessionId,
             type: 'web-user-scroll-takeover',
@@ -520,6 +574,28 @@ export function useTranscriptScrollObservationHost(
         deps.lastExplicitWebScrollIntentAtMsRef,
         deps.platformOS,
         deps.sessionId,
+        scheduleDetachedInputAnchorCapture,
+    ]);
+    const recordWebKeyboardViewportInput = React.useCallback((
+        verticalDirection: WebTranscriptKeyboardVerticalDirection,
+    ): void => {
+        if (deps.platformOS !== 'web') return;
+        // Keyboard is first-class movement evidence. Record it before browser default
+        // scrolling; the renderer preserves only follow-affirming movement toward a held end.
+        markUserScrollIntentOnWeb();
+        deps.listRef.current?.notifyViewportInput?.({ kind: 'keyboard', verticalDirection });
+    }, [deps.listRef, deps.platformOS, markUserScrollIntentOnWeb]);
+    React.useEffect(() => {
+        if (deps.platformOS !== 'web' || typeof document === 'undefined') return;
+        return registerWebTranscriptKeyboardOwner({
+            document,
+            onViewportKeyboardInput: recordWebKeyboardViewportInput,
+            resolveScroller: () => deps.resolveWebScrollMetrics()?.element ?? null,
+        });
+    }, [
+        deps.platformOS,
+        deps.resolveWebScrollMetrics,
+        recordWebKeyboardViewportInput,
     ]);
     const applyNativeGestureTakeoverPlan = React.useCallback((plan: NativeGestureTakeoverPlan) => {
         if (deps.platformOS === 'web') return;
@@ -982,9 +1058,15 @@ export function useTranscriptScrollObservationHost(
             effect.sessionId === deps.sessionId &&
             effect.type === 'cancel-scheduled-viewport-anchor-capture'
         ));
-        if (applied) deps.invalidateViewportAnchorCapture();
+        // Untrusted/passive movement must re-debounce the pending capture, not destroy it:
+        // hard invalidation here let a trailing Legend estimate-correction scroll inside the
+        // debounce window permanently drop shallow-detach anchor persistence, so re-entry
+        // restored the live tail instead of the detached position (live A->B->A RED
+        // 2026-07-11). The capture reads fresh geometry at fire time, so deferring until
+        // movement quiesces captures the settled truth.
+        if (applied) deps.deferViewportAnchorCapture();
         return applied;
-    }, [deps.invalidateViewportAnchorCapture, deps.sessionId]);
+    }, [deps.deferViewportAnchorCapture, deps.sessionId]);
     const applyNativeMomentumSettleAwayReleaseStateEffects = React.useCallback((
         effects: readonly NativeMomentumSettleAwayReleaseStateEffect[],
     ): boolean => {
@@ -1217,13 +1299,259 @@ export function useTranscriptScrollObservationHost(
         deps.markNativeInitialViewportAppliedForCurrentSession,
     ]);
 
+    const resolveActiveTargetWindowContinuationTarget = React.useCallback((): TranscriptJumpTarget | null => {
+        const activeWindowState = deps.targetWindowHostFacts.activeWindowState;
+        const targetSeq = activeWindowState?.targetSeq;
+        if (typeof targetSeq !== 'number' || !Number.isFinite(targetSeq)) return null;
+        const normalizedTargetSeq = Math.trunc(targetSeq);
+        const rememberedTarget = deps.activeTargetWindowTargetRef.current;
+        const rememberedTargetSeq = rememberedTarget?.kind === 'seq'
+            ? rememberedTarget.seq
+            : rememberedTarget?.seqHint;
+        if (
+            typeof rememberedTargetSeq === 'number' &&
+            Number.isFinite(rememberedTargetSeq) &&
+            Math.trunc(rememberedTargetSeq) === normalizedTargetSeq
+        ) {
+            return rememberedTarget;
+        }
+        return { kind: 'seq', seq: normalizedTargetSeq };
+    }, [deps.activeTargetWindowTargetRef, deps.targetWindowHostFacts.activeWindowState]);
+    const targetWindowNearEdgeRef = React.useRef<Record<'older' | 'newer', boolean>>({
+        newer: false,
+        older: false,
+    });
+    const targetWindowAttemptKeyRef = React.useRef<Record<'older' | 'newer', string | null>>({
+        newer: null,
+        older: null,
+    });
+    const targetWindowRetryTimeoutRef = React.useRef<Record<
+        'older' | 'newer',
+        ReturnType<typeof setTimeout> | null
+    >>({
+        newer: null,
+        older: null,
+    });
+    const targetWindowObservedIdRef = React.useRef<string | null>(null);
+    const targetWindowContinuationMountedRef = React.useRef(true);
+    const clearTargetWindowRetryTimeout = React.useCallback((direction: 'older' | 'newer') => {
+        const timeout = targetWindowRetryTimeoutRef.current[direction];
+        if (timeout == null) return;
+        clearTimeout(timeout);
+        targetWindowRetryTimeoutRef.current[direction] = null;
+    }, []);
+    React.useEffect(() => {
+        targetWindowContinuationMountedRef.current = true;
+        return () => {
+            targetWindowContinuationMountedRef.current = false;
+            clearTargetWindowRetryTimeout('older');
+            clearTargetWindowRetryTimeout('newer');
+        };
+    }, [clearTargetWindowRetryTimeout]);
+    const currentTargetWindowOwnerRef = React.useRef({
+        activeTargetWindowTargetRef: deps.activeTargetWindowTargetRef,
+        activeWindowState: deps.targetWindowHostFacts.activeWindowState,
+        sessionId: deps.sessionId,
+    });
+    useCommittedTranscriptRef(currentTargetWindowOwnerRef, {
+        activeTargetWindowTargetRef: deps.activeTargetWindowTargetRef,
+        activeWindowState: deps.targetWindowHostFacts.activeWindowState,
+        sessionId: deps.sessionId,
+    });
+    const drainTargetWindowContinuationsRef = React.useRef<() => void>(() => {});
+    const observeTargetWindowIdentity = React.useCallback((windowId: string | null | undefined): boolean => {
+        const normalizedWindowId = typeof windowId === 'string' && windowId.length > 0
+            ? windowId
+            : null;
+        if (targetWindowObservedIdRef.current === normalizedWindowId) return normalizedWindowId !== null;
+        targetWindowObservedIdRef.current = normalizedWindowId;
+        clearTargetWindowRetryTimeout('older');
+        clearTargetWindowRetryTimeout('newer');
+        targetWindowNearEdgeRef.current = { newer: false, older: false };
+        targetWindowAttemptKeyRef.current = { newer: null, older: null };
+        return normalizedWindowId !== null;
+    }, [clearTargetWindowRetryTimeout]);
+    const drainTargetWindowContinuations: () => void = React.useCallback(() => {
+        const activeWindowState = deps.targetWindowHostFacts.activeWindowState;
+        if (
+            !targetWindowContinuationMountedRef.current ||
+            !activeWindowState ||
+            !deps.sessionId ||
+            !deps.sessionActive ||
+            deps.isWarmKeepAliveInstance
+        ) return;
+        if (targetWindowObservedIdRef.current !== activeWindowState.windowId) return;
+        if (!deps.olderPagination.isReadyForLoad()) return;
+        if (deps.targetWindowEdgeLoadInFlightRef.current !== null) return;
+        const windowId = activeWindowState.windowId;
+        if (typeof windowId !== 'string' || windowId.length === 0) return;
+        const direction = (['older', 'newer'] as const).find((candidate) => {
+            if (!targetWindowNearEdgeRef.current[candidate]) return false;
+            const hasMore = candidate === 'older'
+                ? activeWindowState.hasMoreOlder
+                : activeWindowState.hasMoreNewer;
+            if (hasMore !== true) return false;
+            const cursor = candidate === 'older'
+                ? activeWindowState.olderCursor
+                : activeWindowState.newerCursor;
+            const attemptKey = `${windowId}:${candidate}:${cursor == null ? 'null' : Math.trunc(cursor)}`;
+            return targetWindowAttemptKeyRef.current[candidate] !== attemptKey;
+        });
+        if (!direction) return;
+        const target = resolveActiveTargetWindowContinuationTarget();
+        if (!target) return;
+        const cursor = direction === 'older'
+            ? activeWindowState.olderCursor
+            : activeWindowState.newerCursor;
+        const attemptKey = `${windowId}:${direction}:${cursor == null ? 'null' : Math.trunc(cursor)}`;
+        // Consume the cursor attempt only after all readiness/ownership guards pass.
+        // Persistent not-ready and same-cursor results stay consumed. A classified
+        // transport failure is explicitly rearmed after the ordinary pager cooldown.
+        targetWindowAttemptKeyRef.current[direction] = attemptKey;
+        deps.targetWindowEdgeLoadInFlightRef.current = direction;
+        void (async () => {
+            try {
+                const routeSeqHint =
+                    target.kind === 'route-message-id' &&
+                    typeof target.seqHint === 'number' &&
+                    Number.isFinite(target.seqHint)
+                        ? Math.trunc(target.seqHint)
+                        : null;
+                const loadTarget = target.kind === 'seq'
+                    ? { kind: 'seq' as const, seq: Math.trunc(target.seq) }
+                    : routeSeqHint != null
+                        ? {
+                            kind: 'route-message-id' as const,
+                            routeMessageId: target.routeMessageId,
+                            seqHint: routeSeqHint,
+                        }
+                        : null;
+                if (!loadTarget) return;
+                const result = await sync.loadTargetWindowMessages(
+                    deps.sessionId,
+                    loadTarget,
+                    { direction },
+                );
+                if (
+                    result?.status === 'retryable_error' &&
+                    targetWindowContinuationMountedRef.current &&
+                    targetWindowObservedIdRef.current === windowId &&
+                    targetWindowNearEdgeRef.current[direction] &&
+                    targetWindowAttemptKeyRef.current[direction] === attemptKey
+                ) {
+                    clearTargetWindowRetryTimeout(direction);
+                    const configuredCooldownMs = sync.getSyncTuning().transcriptOlderLoadCooldownMs;
+                    const cooldownMs = Number.isFinite(configuredCooldownMs)
+                        ? Math.max(0, Math.trunc(configuredCooldownMs))
+                        : 0;
+                    targetWindowRetryTimeoutRef.current[direction] = setTimeout(() => {
+                        targetWindowRetryTimeoutRef.current[direction] = null;
+                        if (
+                            !targetWindowContinuationMountedRef.current ||
+                            targetWindowObservedIdRef.current !== windowId ||
+                            !targetWindowNearEdgeRef.current[direction] ||
+                            targetWindowAttemptKeyRef.current[direction] !== attemptKey
+                        ) return;
+                        targetWindowAttemptKeyRef.current[direction] = null;
+                        drainTargetWindowContinuationsRef.current();
+                    }, cooldownMs);
+                }
+                const currentOwner = currentTargetWindowOwnerRef.current;
+                if (
+                    targetWindowContinuationMountedRef.current &&
+                    result?.status === 'loaded' &&
+                    result.targetPresent &&
+                    currentOwner.sessionId === deps.sessionId &&
+                    currentOwner.activeWindowState?.windowId === windowId
+                ) {
+                    currentOwner.activeTargetWindowTargetRef.current = target;
+                }
+            } finally {
+                if (deps.targetWindowEdgeLoadInFlightRef.current === direction) {
+                    deps.targetWindowEdgeLoadInFlightRef.current = null;
+                }
+                // The opposite near edge may have been waiting behind this request
+                // (especially an underfilled target window). Drain synchronously after
+                // ownership is released; no unrelated gesture or timer is required.
+                drainTargetWindowContinuationsRef.current();
+            }
+        })();
+    }, [
+        deps.activeTargetWindowTargetRef,
+        deps.isWarmKeepAliveInstance,
+        deps.olderPagination,
+        deps.sessionActive,
+        deps.sessionId,
+        deps.targetWindowEdgeLoadInFlightRef,
+        deps.targetWindowHostFacts.activeWindowState,
+        clearTargetWindowRetryTimeout,
+        resolveActiveTargetWindowContinuationTarget,
+    ]);
+    useCommittedTranscriptRef(
+        drainTargetWindowContinuationsRef,
+        drainTargetWindowContinuations,
+    );
+    const targetWindowReadinessOpen = deps.olderPagination.isReadyForLoad();
+    React.useEffect(() => {
+        if (!observeTargetWindowIdentity(deps.targetWindowHostFacts.activeWindowState?.windowId)) return;
+        if (targetWindowReadinessOpen) drainTargetWindowContinuationsRef.current();
+    }, [
+        deps.targetWindowHostFacts.activeWindowState?.hasMoreNewer,
+        deps.targetWindowHostFacts.activeWindowState?.hasMoreOlder,
+        deps.targetWindowHostFacts.activeWindowState?.newerCursor,
+        deps.targetWindowHostFacts.activeWindowState?.olderCursor,
+        deps.targetWindowHostFacts.activeWindowState?.targetSeq,
+        deps.targetWindowHostFacts.activeWindowState?.windowId,
+        observeTargetWindowIdentity,
+        targetWindowReadinessOpen,
+    ]);
+    const observeTargetWindowProximity = React.useCallback((near: Readonly<{
+        newer: boolean;
+        older: boolean;
+    }>) => {
+        if (!observeTargetWindowIdentity(deps.targetWindowHostFacts.activeWindowState?.windowId)) return;
+        for (const direction of ['older', 'newer'] as const) {
+            const wasNear = targetWindowNearEdgeRef.current[direction];
+            const isNear = near[direction];
+            targetWindowNearEdgeRef.current[direction] = isNear;
+            if (wasNear && !isNear) {
+                clearTargetWindowRetryTimeout(direction);
+                targetWindowAttemptKeyRef.current[direction] = null;
+            }
+        }
+        drainTargetWindowContinuations();
+    }, [
+        clearTargetWindowRetryTimeout,
+        deps.targetWindowHostFacts.activeWindowState,
+        drainTargetWindowContinuations,
+        observeTargetWindowIdentity,
+    ]);
+    const observeTargetWindowReachedEdge = React.useCallback((direction: 'older' | 'newer') => {
+        const activeWindowState = deps.targetWindowHostFacts.activeWindowState;
+        if (!observeTargetWindowIdentity(activeWindowState?.windowId)) return;
+        targetWindowNearEdgeRef.current[direction] = true;
+        if (direction === 'newer' && activeWindowState?.hasMoreNewer === false) {
+            sync.markSessionLiveTailIntent(deps.sessionId);
+            deps.activeTargetWindowTargetRef.current = null;
+            return;
+        }
+        drainTargetWindowContinuations();
+    }, [
+        deps.activeTargetWindowTargetRef,
+        deps.sessionId,
+        deps.targetWindowHostFacts.activeWindowState,
+        drainTargetWindowContinuations,
+        observeTargetWindowIdentity,
+    ]);
+
     const observeOlderPaginationScroll = React.useCallback((params: Readonly<{
         offsetY: number;
         layoutHeight: number;
         contentHeight: number;
         distanceFromBottom: number;
+        itemsToOlderEdgeOverride?: number;
         webMetrics?: WebTranscriptScrollMetrics | null;
-        trigger?: 'scroll' | 'edge-reached';
+        trigger?: TranscriptOlderPaginationScrollMetrics['trigger'];
     }>) => {
         const usesWebDomMetrics = deps.platformOS === 'web' && params.webMetrics != null;
         const layoutHeight = usesWebDomMetrics ? params.webMetrics!.clientHeight : params.layoutHeight;
@@ -1238,11 +1566,42 @@ export function useTranscriptScrollObservationHost(
         const followGateOpen = deps.platformOS === 'web'
             ? !(deps.wantsPinnedRef.current && distanceFromBottom <= deps.pinThresholdPx)
             : deps.bottomFollowModeStateRef.current.mode !== 'following' && !deps.wantsPinnedRef.current;
-        deps.olderPagination.onScrollObservation({
+        // Native px offsets above are estimate-derived; attach the estimate-immune
+        // item-space proximity from the driver fact seam so the pagination machine can
+        // arm before the literal top (single attach point for scroll + edge-reached).
+        const itemsToOlderEdge = deps.platformOS === 'web'
+            ? null
+            : params.itemsToOlderEdgeOverride ?? deps.readItemsToOlderEdge?.() ?? null;
+        const itemsToNewerEdge = deps.platformOS === 'web'
+            ? null
+            : deps.readItemsToNewerEdge?.() ?? null;
+        const paginationObservation = {
             offsetY,
             scrollable: scrollable && followGateOpen,
             trigger: params.trigger,
-        });
+            itemsToOlderEdge,
+        };
+        // Active target windows own their directional cursors. Route the same
+        // canonical proximity fact to that owner before touching the ordinary
+        // tail machine, so a far-jump window can prefetch before its marker is
+        // visible without consuming a hidden tail cursor.
+        if (deps.targetWindowActiveRef.current) {
+            const underfilled = layoutHeight > 0 && contentHeight <= layoutHeight + 16;
+            observeTargetWindowProximity({
+                older: underfilled || deps.olderPagination.isNearOlderEdge({
+                    ...paginationObservation,
+                    scrollable,
+                }),
+                newer: underfilled || deps.olderPagination.isNearOlderEdge({
+                    itemsToOlderEdge: itemsToNewerEdge,
+                    offsetY: distanceFromBottom,
+                    scrollable,
+                    trigger: params.trigger,
+                }),
+            });
+            return deps.targetWindowEdgeLoadInFlightRef.current !== null;
+        }
+        deps.olderPagination.onScrollObservation(paginationObservation);
         const loadOlderInFlightAfterObservation = deps.loadOlderInFlightRef.current;
         if (deps.platformOS === 'web') {
             const snapshot = deps.olderPagination.getSnapshot();
@@ -1277,72 +1636,16 @@ export function useTranscriptScrollObservationHost(
         deps.resolveViewportTelemetryMode,
         deps.resolveWebViewportTelemetryDiagnostics,
         deps.wantsPinnedRef,
+        deps.readItemsToOlderEdge,
+        deps.readItemsToNewerEdge,
+        deps.targetWindowActiveRef,
+        deps.targetWindowEdgeLoadInFlightRef,
+        observeTargetWindowProximity,
     ]);
 
-    const resolveActiveTargetWindowContinuationTarget = React.useCallback((): TranscriptJumpTarget | null => {
-        const activeWindowState = deps.targetWindowHostFacts.activeWindowState;
-        const targetSeq = activeWindowState?.targetSeq;
-        if (typeof targetSeq !== 'number' || !Number.isFinite(targetSeq)) return null;
-        const normalizedTargetSeq = Math.trunc(targetSeq);
-        const rememberedTarget = deps.activeTargetWindowTargetRef.current;
-        const rememberedTargetSeq = rememberedTarget?.kind === 'seq'
-            ? rememberedTarget.seq
-            : rememberedTarget?.seqHint;
-        if (
-            typeof rememberedTargetSeq === 'number' &&
-            Number.isFinite(rememberedTargetSeq) &&
-            Math.trunc(rememberedTargetSeq) === normalizedTargetSeq
-        ) {
-            return rememberedTarget;
-        }
-        return { kind: 'seq', seq: normalizedTargetSeq };
-    }, [deps.activeTargetWindowTargetRef, deps.targetWindowHostFacts.activeWindowState]);
-    const loadTargetWindowPageAtEdge = React.useCallback(async (direction: 'older' | 'newer') => {
-        const activeWindowState = deps.targetWindowHostFacts.activeWindowState;
-        if (!activeWindowState || !deps.sessionId) return;
-        if (direction === 'older' && activeWindowState.hasMoreOlder !== true) return;
-        if (direction === 'newer' && activeWindowState.hasMoreNewer !== true) {
-            if (activeWindowState.hasMoreNewer === false) {
-                sync.markSessionLiveTailIntent(deps.sessionId);
-                deps.activeTargetWindowTargetRef.current = null;
-            }
-            return;
-        }
-        if (deps.targetWindowEdgeLoadInFlightRef.current[direction]) return;
-        const target = resolveActiveTargetWindowContinuationTarget();
-        if (!target) return;
-        deps.targetWindowEdgeLoadInFlightRef.current[direction] = true;
-        try {
-            const routeSeqHint = target.kind === 'route-message-id' && typeof target.seqHint === 'number' && Number.isFinite(target.seqHint)
-                ? Math.trunc(target.seqHint)
-                : null;
-            const loadTarget = target.kind === 'seq'
-                ? { kind: 'seq' as const, seq: Math.trunc(target.seq) }
-                : routeSeqHint != null
-                    ? {
-                        kind: 'route-message-id' as const,
-                        routeMessageId: target.routeMessageId,
-                        seqHint: routeSeqHint,
-                    }
-                    : null;
-            if (!loadTarget) return;
-            const result = await sync.loadTargetWindowMessages(deps.sessionId, loadTarget, { direction });
-            if (result?.status === 'loaded' && result.targetPresent) {
-                deps.activeTargetWindowTargetRef.current = target;
-            }
-        } finally {
-            deps.targetWindowEdgeLoadInFlightRef.current[direction] = false;
-        }
-    }, [
-        deps.activeTargetWindowTargetRef,
-        deps.sessionId,
-        deps.targetWindowEdgeLoadInFlightRef,
-        deps.targetWindowHostFacts.activeWindowState,
-        resolveActiveTargetWindowContinuationTarget,
-    ]);
     const observePaginationEdgeReachedNudge = React.useCallback((visualEdge: 'older' | 'newer') => {
         if (deps.targetWindowActiveRef.current) {
-            void loadTargetWindowPageAtEdge(visualEdge);
+            observeTargetWindowReachedEdge(visualEdge);
             return;
         }
         if (visualEdge !== 'older') return;
@@ -1376,7 +1679,74 @@ export function useTranscriptScrollObservationHost(
         deps.resolveNativeObservedScrollOffset,
         deps.resolveWebScrollMetrics,
         deps.targetWindowActiveRef,
-        loadTargetWindowPageAtEdge,
+        observeTargetWindowReachedEdge,
+        observeOlderPaginationScroll,
+    ]);
+    const observeCommittedProjectionLayout = React.useCallback(() => {
+        if (!deps.sessionActive || deps.isWarmKeepAliveInstance) return;
+        const liveWebMetrics = deps.platformOS === 'web' ? deps.resolveWebScrollMetrics() : null;
+        const layoutHeight = liveWebMetrics?.clientHeight ?? deps.listLayoutHeightRef.current;
+        const contentHeight = liveWebMetrics?.scrollHeight ?? deps.listContentHeightRef.current;
+        const rawOffsetY = liveWebMetrics
+            ? liveWebMetrics.scrollTop
+            : readNativeAbsoluteScrollOffset(deps.listRef.current);
+        const nativeObservedOffset = liveWebMetrics || typeof rawOffsetY !== 'number'
+            ? null
+            : deps.resolveNativeObservedScrollOffset(rawOffsetY, {
+                contentHeight,
+                layoutHeight,
+            });
+        if (!deps.targetWindowActiveRef.current) {
+            const committedItemsToOlderEdge = deps.platformOS === 'web'
+                ? null
+                : deps.readItemsToOlderEdge?.() ?? null;
+            // A missing native visible-range subset is unknown, not evidence that
+            // a committed layout stayed at or left the edge.
+            if (deps.platformOS !== 'web' && committedItemsToOlderEdge == null) return;
+            // Feed every committed list layout to the existing pagination owner.
+            // An exact-edge commit during a load may authorize one continuation;
+            // a commit away from the edge clears that latch. Physical `start`
+            // orientation never participates in this canonical-space observation.
+            observeOlderPaginationScroll({
+                contentHeight,
+                distanceFromBottom: liveWebMetrics
+                    ? getWebTranscriptDistanceFromBottom(liveWebMetrics)
+                    : nativeObservedOffset?.distanceFromLiveTailPx ?? Number.MAX_SAFE_INTEGER,
+                itemsToOlderEdgeOverride: committedItemsToOlderEdge ?? undefined,
+                layoutHeight,
+                offsetY: liveWebMetrics
+                    ? liveWebMetrics.scrollTop
+                    : nativeObservedOffset?.canonicalOffsetY ?? Number.MAX_SAFE_INTEGER,
+                trigger: 'layout-committed',
+                webMetrics: liveWebMetrics,
+            });
+            return;
+        }
+
+        observeOlderPaginationScroll({
+            contentHeight,
+            distanceFromBottom: liveWebMetrics
+                ? getWebTranscriptDistanceFromBottom(liveWebMetrics)
+                : nativeObservedOffset?.distanceFromLiveTailPx ?? Number.MAX_SAFE_INTEGER,
+            layoutHeight,
+            offsetY: liveWebMetrics
+                ? liveWebMetrics.scrollTop
+                : nativeObservedOffset?.canonicalOffsetY ?? Number.MAX_SAFE_INTEGER,
+            trigger: 'scroll',
+            webMetrics: liveWebMetrics,
+        });
+    }, [
+        deps.isWarmKeepAliveInstance,
+        deps.listContentHeightRef,
+        deps.listLayoutHeightRef,
+        deps.listRef,
+        deps.platformOS,
+        deps.readItemsToNewerEdge,
+        deps.readItemsToOlderEdge,
+        deps.resolveNativeObservedScrollOffset,
+        deps.resolveWebScrollMetrics,
+        deps.sessionActive,
+        deps.targetWindowActiveRef,
         observeOlderPaginationScroll,
     ]);
 
@@ -1587,12 +1957,9 @@ export function useTranscriptScrollObservationHost(
     ]);
     const lastWebViewportResizeMetricsRef = React.useRef<WebTranscriptScrollMetrics | null>(null);
     React.useEffect(() => {
+        if (deps.platformOS !== 'web' || continuousFollowOwner === 'renderer') return;
         const resizeObserverCtor = (globalThis as Readonly<{ ResizeObserver?: typeof ResizeObserver }>).ResizeObserver;
         if (typeof resizeObserverCtor !== 'function') return;
-        let disposed = false;
-        let retryId: ReturnType<typeof setTimeout> | null = null;
-        let pollId: ReturnType<typeof setInterval> | null = null;
-        let observer: ResizeObserver | null = null;
         const readObservedMetrics = (element: HTMLElement): WebTranscriptScrollMetrics => ({
             clientHeight: element.clientHeight,
             element,
@@ -1606,35 +1973,19 @@ export function useTranscriptScrollObservationHost(
             const previousDistanceFromBottom = previousMetrics
                 ? getWebTranscriptDistanceFromBottom(previousMetrics)
                 : Number.POSITIVE_INFINITY;
-            const nextDistanceFromBottom = getWebTranscriptDistanceFromBottom(nextMetrics);
             const observation = resolveWebViewportResizeObservation({
                 nextMetrics,
                 previousMetrics,
             });
-            if (continuousFollowOwner === 'renderer') return;
-            if (!observation) {
-                const activeElement = typeof document === 'undefined' ? null : document.activeElement;
-                const textInputFocused =
-                    activeElement instanceof HTMLElement &&
-                    (
-                        activeElement.matches('textarea, [contenteditable="true"], [role="textbox"]') ||
-                        activeElement.closest('textarea, [contenteditable="true"], [role="textbox"]') !== null
-                    );
-                if (
-                    textInputFocused &&
-                    deps.wantsPinnedRef.current &&
-                    previousDistanceFromBottom <= deps.pinThresholdPx &&
-                    nextDistanceFromBottom > 0
-                ) {
-                    nextMetrics.element.scrollTop = nextMetrics.element.scrollHeight;
-                }
-                return;
-            }
+            if (!observation) return;
             if (
                 deps.wantsPinnedRef.current &&
                 previousDistanceFromBottom <= deps.pinThresholdPx
             ) {
-                observation.previousWebMetrics.element.scrollTop = observation.previousWebMetrics.element.scrollHeight;
+                deps.webDomObservation.recordProgrammaticScrollTopWrite({
+                    element: observation.previousWebMetrics.element,
+                    targetScrollTop: observation.previousWebMetrics.element.scrollHeight,
+                });
             }
             deps.requestAutomaticLiveTailPin(
                 observation.previousWebMetrics,
@@ -1642,34 +1993,21 @@ export function useTranscriptScrollObservationHost(
                 false,
             );
         };
-        const attach = () => {
-            if (disposed) return;
-            const initialMetrics = deps.resolveWebScrollMetrics();
-            lastWebViewportResizeMetricsRef.current = initialMetrics;
-            const element = initialMetrics?.element;
-            if (!element) {
-                retryId = setTimeout(attach, 100);
-                return;
-            }
-            lastWebViewportResizeMetricsRef.current = readObservedMetrics(element);
-            observer = new resizeObserverCtor(() => observeResize(element));
-            observer.observe(element);
-            pollId = setInterval(() => observeResize(element), 250);
-        };
-        attach();
+        const initialMetrics = deps.resolveWebScrollMetrics();
+        lastWebViewportResizeMetricsRef.current = initialMetrics;
+        const element = initialMetrics?.element;
+        if (!element) return;
+        lastWebViewportResizeMetricsRef.current = readObservedMetrics(element);
+        const observer = new resizeObserverCtor(() => observeResize(element));
+        observer.observe(element);
         return () => {
-            disposed = true;
-            if (retryId !== null) {
-                clearTimeout(retryId);
-            }
-            if (pollId !== null) {
-                clearInterval(pollId);
-            }
-            observer?.disconnect();
+            observer.disconnect();
         };
     }, [
         deps.requestAutomaticLiveTailPin,
         continuousFollowOwner,
+        deps.platformOS,
+        deps.webDomObservation,
         deps.resolveWebScrollMetrics,
         deps.sessionId,
     ]);
@@ -1725,11 +2063,15 @@ export function useTranscriptScrollObservationHost(
         deps.sessionId,
         contentSizeObservationApplierEffects,
     ]);
-    const onScroll = React.useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const onScroll = React.useCallback((
+        e: NativeSyntheticEvent<NativeScrollEvent>,
+        webMovementFact?: WebScrollMovementFact,
+    ) => {
         observeTranscriptScrollIngress({
             bottomFollowModeState: deps.bottomFollowModeStateRef.current,
             configuredBottomDistanceNoiseFloorPx:
                 deps.resolveTranscriptMountSettleBottomDistanceNoiseFloorPx(),
+            continuousFollowOwner,
             eventNativeEvent: e?.nativeEvent,
             hasNativeContentMeasurement: deps.hasNativeContentMeasurementForCurrentSession(),
             hasNativeInitialViewportApplied: deps.hasNativeInitialViewportAppliedForCurrentSession(),
@@ -1764,9 +2106,11 @@ export function useTranscriptScrollObservationHost(
             userIntentRecentMs: deps.userIntentRecentMs,
             usesNativeFlashListBottomMaintenance: deps.usesNativeFlashListBottomMaintenance,
             wantsPinned: deps.wantsPinnedRef.current,
+            ...(webMovementFact ? { webMovementFact } : {}),
         }, transcriptScrollIngressCallbacks);
     }, [
         deps.bottomFollowModeStateRef,
+        continuousFollowOwner,
         deps.hasNativeContentMeasurementForCurrentSession,
         deps.hasNativeInitialViewportAppliedForCurrentSession,
         deps.isLoaded,
@@ -1806,6 +2150,7 @@ export function useTranscriptScrollObservationHost(
         deferAutoPinAfterLocalTranscriptInteraction,
         nativeFlashListScrollOverrideProps,
         observeNativeStreamAppendOffsetEscape,
+        observeCommittedProjectionLayout,
         onContentSizeChange,
         onEndReached,
         onLayout,
@@ -1821,6 +2166,7 @@ export function useTranscriptScrollObservationHost(
         deferAutoPinAfterLocalTranscriptInteraction,
         nativeFlashListScrollOverrideProps,
         observeNativeStreamAppendOffsetEscape,
+        observeCommittedProjectionLayout,
         onContentSizeChange,
         onEndReached,
         onLayout,

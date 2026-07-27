@@ -300,6 +300,7 @@ type TranscriptLifecycleHostScrollObservationCommonInput = Readonly<{
 
 export type TranscriptLifecycleHostWebScrollObservationInput =
     TranscriptLifecycleHostScrollObservationCommonInput & Readonly<{
+        continuousFollowOwner?: 'app' | 'renderer';
         hasLiveWebMetrics?: boolean;
         platform: 'web';
         recentUserIntent?: boolean;
@@ -1127,7 +1128,11 @@ function planWebScrollObservation(
         // once content growth fires. The DOM observation records every write's
         // landed value; its `webMovedSinceLastObservation: false` positively
         // identifies such echo frames, so they never count as a trusted return.
+        // This raw trusted-return compatibility belongs only to app-owned follow
+        // (Flash). Renderer-owned Legend receives its semantic movement fact from
+        // scroll ingress and must not become a second arrival classifier here.
         const shouldObserveTrustedReturnToLiveTailFacts =
+            input.continuousFollowOwner !== 'renderer' &&
             input.isTrusted === true &&
             input.movedTowardLiveTail &&
             input.webMovedSinceLastObservation !== false &&

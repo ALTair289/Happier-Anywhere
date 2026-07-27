@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 import { createTranscriptLifecycleHost } from './lifecycleHost';
@@ -125,6 +125,87 @@ function scrollIngressCallbacks(
 }
 
 describe('observeTranscriptScrollIngress', () => {
+    it('still observes exact-top pagination when jump promotion consumes generic viewport publication', () => {
+        const observeOlderPaginationScroll = vi.fn();
+        const applyScrollObservationPlan = vi.fn(() => false);
+        const observeWebGenuineScrollMovement = vi.fn(() => ({
+            webMovedSinceLastObservation: true,
+            webObservedUpwardIntent: true,
+            webObservedUserScrollMovement: true,
+        }));
+
+        observeTranscriptScrollIngress(webScrollIngressInput(), scrollIngressCallbacks({
+            applyScrollObservationPlan,
+            observeOlderPaginationScroll,
+            observeWebGenuineScrollMovement,
+            promotePendingJumpSeqViewportSnapshot: () => true,
+            resolveWebScrollMetrics: () => webMetrics({
+                clientHeight: 500,
+                scrollHeight: 2000,
+                scrollTop: 0,
+            }),
+        }));
+
+        expect(observeOlderPaginationScroll).toHaveBeenCalledOnce();
+        expect(observeOlderPaginationScroll).toHaveBeenCalledWith({
+            contentHeight: 1200,
+            distanceFromBottom: 1500,
+            layoutHeight: 400,
+            offsetY: 0,
+            trigger: 'edge-reached',
+            webMetrics: expect.objectContaining({
+                clientHeight: 500,
+                scrollHeight: 2000,
+                scrollTop: 0,
+            }),
+        });
+        expect(observeWebGenuineScrollMovement).not.toHaveBeenCalled();
+        expect(applyScrollObservationPlan).not.toHaveBeenCalled();
+    });
+
+    it('consumes the renderer movement fact without independently reclassifying the same Legend event', () => {
+        const lifecycleHost = createTranscriptLifecycleHost();
+        lifecycleHost.enterSession({
+            platform: 'web',
+            sessionId: 'session-a',
+            shouldFollowLiveTail: false,
+        });
+        const observeWebGenuineScrollMovement = vi.fn();
+        const preemptEntryRestoreTransaction = vi.fn();
+        const recordWebRouteJumpProtectionClearingMovement = vi.fn();
+        const verifyWebEntryRestoreTransaction = vi.fn();
+
+        observeTranscriptScrollIngress(webScrollIngressInput({
+            continuousFollowOwner: 'renderer',
+            lastScrollOffsetForIntent: 400,
+            webMovementFact: {
+                atEndPublicationCause: 'layout',
+                direction: 1,
+                downwardIntent: false,
+                isGenuineUserMovement: false,
+                movedSinceLastObservation: true,
+                upwardIntent: false,
+            },
+        }), scrollIngressCallbacks({
+            lifecycleHost,
+            observeWebGenuineScrollMovement,
+            preemptEntryRestoreTransaction,
+            recordWebRouteJumpProtectionClearingMovement,
+            resolveWebScrollMetrics: () => webMetrics({
+                clientHeight: 400,
+                scrollHeight: 1200,
+                scrollTop: 800,
+            }),
+            verifyWebEntryRestoreTransaction,
+        }));
+
+        expect(observeWebGenuineScrollMovement).not.toHaveBeenCalled();
+        expect(preemptEntryRestoreTransaction).not.toHaveBeenCalled();
+        expect(recordWebRouteJumpProtectionClearingMovement).not.toHaveBeenCalled();
+        expect(verifyWebEntryRestoreTransaction).toHaveBeenCalledOnce();
+        expect(lifecycleHost.getState().bottomFollowState.mode).toBe('released');
+    });
+
     it('routes invalid native offsets to blank recovery outside telemetry recording', () => {
         const log: string[] = [];
 
@@ -179,5 +260,39 @@ describe('observeTranscriptScrollIngress', () => {
             'older:edge-reached',
             'refresh:true',
         ]);
+    });
+
+    it.each([
+        { continuousFollowOwner: 'app' as const, expectedMode: 'following' as const },
+        { continuousFollowOwner: 'renderer' as const, expectedMode: 'released' as const },
+    ])('threads $continuousFollowOwner follow ownership into raw trusted web arrival compatibility', ({
+        continuousFollowOwner,
+        expectedMode,
+    }) => {
+        const lifecycleHost = createTranscriptLifecycleHost();
+        lifecycleHost.enterSession({
+            platform: 'web',
+            sessionId: 'session-a',
+            shouldFollowLiveTail: false,
+        });
+
+        observeTranscriptScrollIngress(webScrollIngressInput({
+            continuousFollowOwner,
+            lastScrollOffsetForIntent: 400,
+        }), scrollIngressCallbacks({
+            lifecycleHost,
+            observeWebGenuineScrollMovement: () => ({
+                webMovedSinceLastObservation: true,
+                webObservedUpwardIntent: false,
+                webObservedUserScrollMovement: false,
+            }),
+            resolveWebScrollMetrics: () => webMetrics({
+                clientHeight: 400,
+                scrollHeight: 1200,
+                scrollTop: 800,
+            }),
+        }));
+
+        expect(lifecycleHost.getState().bottomFollowState.mode).toBe(expectedMode);
     });
 });

@@ -644,6 +644,7 @@ describe('transcript lifecycle host', () => {
         // observation attests the frame did NOT move since the recorded landed
         // value (`webMovedSinceLastObservation: false`). It must not re-arm.
         const echoPlan = host.observeScroll({
+            continuousFollowOwner: 'renderer',
             distanceFromLiveTailPx: 0,
             isTrusted: true,
             movedAwayFromLiveTail: false,
@@ -661,8 +662,10 @@ describe('transcript lifecycle host', () => {
         });
         expect(echoPlan.state.bottomFollowState.mode).not.toBe('following');
 
-        // A genuinely-attested trusted return to the live tail still re-arms.
-        const genuineReturnPlan = host.observeScroll({
+        // Raw trusted movement is still not semantic user movement. The ingress
+        // classifier is the only owner allowed to attest a genuine web return.
+        const rawTrustedMovementPlan = host.observeScroll({
+            continuousFollowOwner: 'renderer',
             distanceFromLiveTailPx: 0,
             isTrusted: true,
             movedAwayFromLiveTail: false,
@@ -678,7 +681,29 @@ describe('transcript lifecycle host', () => {
             webMovedSinceLastObservation: true,
             webObservedUserScrollMovement: false,
         });
-        expect(genuineReturnPlan.state.bottomFollowState.mode).toBe('following');
+        expect(rawTrustedMovementPlan.state.bottomFollowState.mode).not.toBe('following');
+
+        // Flash retains app-owned continuous follow. Its compatibility path does not
+        // delegate tail arrival to a renderer publication, even when DOM metrics exist.
+        const appOwnedReturnPlan = host.observeScroll({
+            continuousFollowOwner: 'app',
+            distanceFromLiveTailPx: 0,
+            hasLiveWebMetrics: true,
+            isTrusted: true,
+            movedAwayFromLiveTail: false,
+            movedTowardLiveTail: true,
+            nowMs: 3000,
+            pinEnabled: true,
+            pinThresholdPx: 72,
+            platform: 'web',
+            previousScrollOffsetPx: 4000,
+            scrollOffsetPx: 4283,
+            sessionId: 'session-a',
+            wantsPinned: false,
+            webMovedSinceLastObservation: true,
+            webObservedUserScrollMovement: false,
+        });
+        expect(appOwnedReturnPlan.state.bottomFollowState.mode).toBe('following');
     });
 
     it('groups session-entry lifecycle reset and viewport plans', () => {
