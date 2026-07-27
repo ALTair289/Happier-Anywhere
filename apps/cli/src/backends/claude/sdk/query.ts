@@ -23,6 +23,7 @@ import {
     AbortError
 } from './types'
 import { getDefaultClaudeCodePath, getCleanEnv, logDebug, streamToStdin } from './utils'
+import type { ClaudeStdinRecordTransportOutcome } from './utils'
 import type { Writable } from 'node:stream'
 import { logger } from '@/ui/logger'
 import { createManagedChildProcess } from '@/subprocess/supervision/managedChildProcess'
@@ -289,6 +290,10 @@ export function query(config: {
     prompt: QueryPrompt
     options?: QueryOptions
     onMessageReceived?: (message: SDKMessage) => void
+    onPromptTransportOutcome?: (
+        message: unknown,
+        outcome: ClaudeStdinRecordTransportOutcome,
+    ) => void
 }): Query {
 	    const {
 	        prompt,
@@ -308,6 +313,7 @@ export function query(config: {
 	            model,
 	            fallbackModel,
 	            strictMcpConfig,
+	            includeHookEvents,
 	            canCallTool,
 	            settingsPath,
 	            extraArgs,
@@ -334,6 +340,7 @@ export function query(config: {
 	    if (continueConversation) args.push('--continue')
 	    if (resume) args.push('--resume', resume)
 	    if (strictMcpConfig) args.push('--strict-mcp-config')
+	    if (includeHookEvents) args.push('--include-hook-events')
 	    // Omit `--permission-mode default` so the Claude CLI honors the user's
 	    // `permissions.defaultMode` from `.claude/settings.json` (user/project/local).
 	    // Any non-'default' mode still wins, overriding settings.json as before.
@@ -427,7 +434,6 @@ export function query(config: {
     if (typeof prompt === 'string') {
         child.stdin.end()
     } else {
-        streamToStdin(prompt, child.stdin, config.options?.abort)
         childStdin = child.stdin
     }
 
@@ -526,6 +532,20 @@ export function query(config: {
 
     // Create query instance
     const query = new Query(childStdin, child.stdout, processExitPromise, canCallTool, config.onMessageReceived)
+
+    // Keep the stdin pump inside the Query failure lifecycle. A rejected transport must surface
+    // through the returned AsyncIterable instead of becoming an unobserved fire-and-forget task.
+    if (typeof prompt !== 'string') {
+        void streamToStdin(
+            prompt,
+            child.stdin,
+            config.options?.abort,
+            config.onPromptTransportOutcome,
+        ).catch((error: unknown) => {
+            query.setError(error instanceof Error ? error : new Error(String(error)))
+            cleanup()
+        })
+    }
 
     // Handle process errors
     child.on('error', (error) => {

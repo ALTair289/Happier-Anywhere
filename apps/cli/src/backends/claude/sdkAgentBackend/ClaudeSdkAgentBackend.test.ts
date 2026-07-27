@@ -247,6 +247,50 @@ describe('ClaudeSdkAgentBackend', () => {
     }
   });
 
+  it('holds provider membership until the exact typed session/task terminal and ignores tool-result inference', async () => {
+    const { ClaudeSdkAgentBackend } = await import('./ClaudeSdkAgentBackend');
+    const backend = new ClaudeSdkAgentBackend({
+      cwd: process.cwd(),
+      modelId: 'chat-model',
+      permissionPolicy: 'no_tools',
+    });
+    const statuses: string[] = [];
+    backend.onMessage((message) => {
+      if (message.type === 'status') statuses.push(message.status);
+    });
+
+    (backend as any).handleSdkMessage({
+      type: 'system',
+      subtype: 'task_started',
+      session_id: 'session-a',
+      task_id: 'task-1',
+    });
+    (backend as any).handleSdkMessage({
+      type: 'user',
+      toolUseResult: { backgroundTaskId: 'task-1', status: 'completed' },
+      message: { role: 'user', content: [] },
+    });
+    (backend as any).handleSdkMessage({
+      type: 'system',
+      subtype: 'task_notification',
+      session_id: 'session-b',
+      task_id: 'task-1',
+      status: 'completed',
+    });
+
+    expect(statuses).not.toContain('idle');
+
+    (backend as any).handleSdkMessage({
+      type: 'system',
+      subtype: 'task_notification',
+      session_id: 'session-a',
+      task_id: 'task-1',
+      status: 'completed',
+    });
+
+    expect(statuses.filter((status) => status === 'idle')).toHaveLength(1);
+  });
+
   it('emits cumulative model-output fullText when Claude returns multiple assistant messages in a single turn', async () => {
     delete process.env.DEBUG;
 

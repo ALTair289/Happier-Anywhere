@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { RawJSONLinesSchema, type RawJSONLines } from '../types';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 export const CLAUDE_JSONL_LOCAL_ID_PREFIX = 'claude-jsonl:';
 
@@ -17,21 +18,17 @@ export type CommittedClaudeJsonlMessageBaseline = Readonly<{
   oldestCoveredAtMs: number | null;
 }>;
 
-function readTrimmedString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
-}
-
 function readClaudeJsonlRawId(body: RawJSONLines): string | null {
   if (body.type === 'summary') {
-    return readTrimmedString((body as Record<string, unknown>).leafUuid);
+    return readNonBlankOpaqueIdentifier((body as Record<string, unknown>).leafUuid);
   }
-  return readTrimmedString((body as Record<string, unknown>).uuid);
+  return readNonBlankOpaqueIdentifier((body as Record<string, unknown>).uuid);
 }
 
 export function buildClaudeJsonlMessageKey(body: RawJSONLines): string | null {
   const rawId = readClaudeJsonlRawId(body);
   if (!rawId) return null;
-  const sidechainId = readTrimmedString((body as Record<string, unknown>).sidechainId);
+  const sidechainId = readNonBlankOpaqueIdentifier((body as Record<string, unknown>).sidechainId);
   return `${sidechainId ?? 'main'}:${body.type}:${rawId}`;
 }
 
@@ -45,9 +42,9 @@ export function buildClaudeJsonlLocalIdFromMessageKey(key: string): string {
 }
 
 export function extractClaudeJsonlMessageKeyFromLocalId(localId: string | null | undefined): string | null {
-  const trimmed = readTrimmedString(localId);
-  if (!trimmed?.startsWith(CLAUDE_JSONL_LOCAL_ID_PREFIX)) return null;
-  const key = trimmed.slice(CLAUDE_JSONL_LOCAL_ID_PREFIX.length);
+  const exactLocalId = readNonBlankOpaqueIdentifier(localId);
+  if (!exactLocalId?.startsWith(CLAUDE_JSONL_LOCAL_ID_PREFIX)) return null;
+  const key = exactLocalId.slice(CLAUDE_JSONL_LOCAL_ID_PREFIX.length);
   return key.length > 0 ? key : null;
 }
 

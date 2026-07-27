@@ -17,6 +17,7 @@ import type { PermissionMode } from '@/api/types'
 import { normalizeClaudeToolUseNamesInSdkMessage } from './normalizeClaudeToolUseNames'
 import { INTERNAL_CLAUDE_EVENT_TYPES } from './internalClaudeEventTypes'
 import { buildClaudeSdkResultUsageTelemetry } from './sdkResultUsageTelemetry'
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers'
 
 /**
  * Context for converting SDK messages to log format
@@ -118,8 +119,7 @@ export class SDKToLogConverter {
             return null;
         }
 
-        const sdkUuidRaw = (sdkMessage as any)?.uuid;
-        const sdkUuid = typeof sdkUuidRaw === 'string' && sdkUuidRaw.trim().length > 0 ? sdkUuidRaw.trim() : null;
+        const sdkUuid = readNonBlankOpaqueIdentifier((sdkMessage as any)?.uuid);
         const uuid = sdkUuid ?? randomUUID()
         const timestamp = new Date().toISOString()
         let parentUuid = this.lastMainUuid;

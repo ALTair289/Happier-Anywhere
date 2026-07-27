@@ -12,7 +12,7 @@ import { isClaudeExplicitDiffToolInput } from '../utils/isClaudeExplicitDiffTool
 import { isReadOnlyClaudeSdkToolAllowed } from './isReadOnlyClaudeSdkToolAllowed';
 import {
   createClaudeProviderActivityLedger,
-  readClaudeProviderTaskActivity,
+  normalizeClaudeProviderTaskEvent,
 } from '@/backends/claude/providerActivity/createClaudeProviderActivityLedger';
 
 export type ClaudeSdkPermissionPolicy = 'no_tools' | 'read_only' | 'workspace_write';
@@ -26,13 +26,10 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
   private readonly toolNameByCallId = new Map<string, string>();
   private readonly suppressedExplicitDiffCallIds = new Set<string>();
   private readonly turnChangeTracker = new ClaudeTurnChangeTracker();
-  // W-3: when a provider task's TTL expires with no further events, re-check idle emission — a fully
-  // silent session has no other trigger to release the "working" state.
-  private readonly providerActivityLedger = createClaudeProviderActivityLedger({
-    onActiveTasksExpired: () => this.emitIdleIfProviderBackgroundWorkComplete(),
-  });
+  private readonly providerActivityLedger = createClaudeProviderActivityLedger();
   private query: ReturnType<typeof query> | null = null;
   private activeTaskId: string | null = null;
+  private activeTaskSessionId: string | null = null;
 
   private readonly localSessionId: SessionId = `voice-agent-claude-${randomUUID()}`;
   private readonly acceptedSessionIds = new Set<SessionId>();
@@ -112,7 +109,7 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
     if (this.started) return;
     this.started = true;
     this.activeTaskId = null;
-    this.providerActivityLedger.clearProviderTasks();
+    this.activeTaskSessionId = null;
 
     const model = this.normalizeModelId(this.opts.modelId);
     const canCallTool = this.buildCanCallTool();
@@ -242,7 +239,6 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
       const pending = this.pendingTurn;
       this.pendingTurn = null;
       this.pendingTurnCompletion = null;
-      this.providerActivityLedger.clearProviderTasks();
       this.settledTurnOrdinal = this.currentTurnOrdinal;
       this.turnChangeTracker.resetTurn();
       pending?.reject(new Error('Turn cancelled'));
@@ -292,7 +288,6 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
     if (pending) {
       this.pendingTurn = null;
       this.pendingTurnCompletion = null;
-      this.providerActivityLedger.clearProviderTasks();
       this.suppressedExplicitDiffCallIds.clear();
       this.settledTurnOrdinal = this.currentTurnOrdinal;
       pending.reject(new Error('Agent disposed'));
@@ -356,7 +351,6 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
       if (pending) {
         this.pendingTurn = null;
         this.pendingTurnCompletion = null;
-        this.providerActivityLedger.clearProviderTasks();
         this.turnChangeTracker.resetTurn();
         this.suppressedExplicitDiffCallIds.clear();
         pending.reject(fatal);
@@ -370,8 +364,9 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
 
   private emitIdleIfProviderBackgroundWorkComplete(): void {
     if (this.pendingTurn || this.providerActivityLedger.hasActiveProviderTasks()) return;
-    this.activeTaskId = null;
-    this.providerActivityLedger.clearProviderTasks();
+    // The execution/cancellation target is deliberately broader than Activity membership:
+    // typed task starts remain actionable even when they do not prove background work.
+    if (this.activeTaskId) return;
     this.emit({ type: 'status', status: 'idle' });
   }
 
@@ -416,29 +411,45 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
   private handleSdkMessage(msg: SDKMessage): void {
     if (!msg || typeof msg !== 'object') return;
     const type = msg.type;
+    const taskFacts = normalizeClaudeProviderTaskEvent(msg);
+    const taskActivity = taskFacts.activity;
+    if (taskActivity) this.providerActivityLedger.apply(taskActivity);
+    if (taskFacts.interruptTarget?.type === 'active') {
+      const startsNewTarget = (
+        type === 'user'
+        || (type === 'system' && (msg as SDKSystemMessage).subtype === 'task_started')
+      );
+      if (startsNewTarget || !this.activeTaskId) {
+        this.activeTaskId = taskFacts.interruptTarget.taskId;
+        this.activeTaskSessionId = taskActivity?.sessionId ?? null;
+      }
+    } else if (
+      taskFacts.interruptTarget?.type === 'terminal'
+      && taskFacts.interruptTarget.taskId === this.activeTaskId
+      && taskActivity?.type === 'terminal'
+      && (
+        this.activeTaskSessionId === null
+        || taskActivity.sessionId === this.activeTaskSessionId
+      )
+    ) {
+      const terminalTaskId = taskFacts.interruptTarget.taskId;
+      const activeBlockers = this.providerActivityLedger
+        .getActiveProviderTaskBlockers()
+        .filter((blocker) => blocker.taskId !== terminalTaskId);
+      const fallbackBlocker = activeBlockers.at(-1) ?? null;
+      this.activeTaskId = fallbackBlocker?.taskId ?? null;
+      this.activeTaskSessionId = fallbackBlocker?.sessionId ?? null;
+    }
+
     if (type === 'system') {
       const system = msg as SDKSystemMessage;
-      const taskActivity = readClaudeProviderTaskActivity(system);
-      if (taskActivity?.type === 'started') {
-        this.activeTaskId = taskActivity.taskId;
-        this.providerActivityLedger.noteProviderTaskStarted(taskActivity.taskId);
-      } else if (taskActivity?.type === 'progress') {
-        if (!this.activeTaskId) {
-          this.activeTaskId = taskActivity.taskId;
-        }
-        this.providerActivityLedger.noteProviderTaskProgress(taskActivity.taskId);
-      } else if (taskActivity?.type === 'terminal') {
-        if (taskActivity.taskId === this.activeTaskId) {
-          this.activeTaskId = null;
-        }
-        this.providerActivityLedger.noteProviderTaskFinished(taskActivity.taskId);
-      }
       this.emitIdleIfProviderBackgroundWorkComplete();
 
       if (system.subtype === 'init') {
         const previousVendorSessionId = this.vendorSessionId;
         this.noteVendorSessionId(system.session_id);
         this.activeTaskId = null;
+        this.activeTaskSessionId = null;
         this.emit({ type: 'status', status: 'running' });
         const pending = this.pendingTurn;
         const isSessionBoundary = Boolean(
@@ -458,13 +469,6 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
     if (type === 'user') {
       // Tool results are emitted as user-content blocks in the Claude SDK stream.
       const user = msg as any;
-      const taskActivity = readClaudeProviderTaskActivity(user);
-      if (taskActivity?.type === 'background') {
-        const backgroundTaskId = this.providerActivityLedger.noteBackgroundProviderTask(taskActivity.taskId);
-        if (backgroundTaskId && !this.activeTaskId) {
-          this.activeTaskId = backgroundTaskId;
-        }
-      }
       const content = user?.message?.content;
       if (Array.isArray(content)) {
         for (const block of content) {
@@ -560,7 +564,6 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
       if (pending) {
         this.pendingTurn = null;
         this.pendingTurnCompletion = null;
-        this.providerActivityLedger.clearProviderTasks();
         this.turnChangeTracker.resetTurn();
         this.suppressedExplicitDiffCallIds.clear();
         pending.reject(new Error(`Claude SDK error: ${result.subtype}`));

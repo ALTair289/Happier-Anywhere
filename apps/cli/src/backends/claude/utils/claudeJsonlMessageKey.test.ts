@@ -11,10 +11,13 @@ describe('claudeJsonlMessageKey', () => {
   it('builds deterministic local ids from Claude JSONL ids and sidechain ids', () => {
     expect(buildClaudeJsonlLocalId({
       type: 'assistant',
-      uuid: 'assistant-1',
-      sidechainId: 'toolu_1',
+      uuid: ' assistant-1\n',
+      sidechainId: ' toolu_1\n',
       message: { role: 'assistant', content: [] },
-    } as RawJSONLines)).toBe('claude-jsonl:toolu_1:assistant:assistant-1');
+    } as RawJSONLines)).toBe('claude-jsonl: toolu_1\n:assistant: assistant-1\n');
+
+    expect(extractClaudeJsonlMessageKeyFromLocalId('claude-jsonl: toolu_1\n:assistant: assistant-1\n'))
+      .toBe(' toolu_1\n:assistant: assistant-1\n');
   });
 
   it('extracts committed keys from deterministic local ids and stored raw output content', () => {

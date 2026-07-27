@@ -113,6 +113,168 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
     }
   });
 
+  it('uses no-session operational task evidence as the exact cancellation target', async () => {
+    const taskStartedProcessed = createDeferred<void>();
+    const stopTask = vi.fn(async (_taskId: string) => {});
+    const interrupt = vi.fn(async () => {});
+
+    queryMock.mockImplementation((params: any) => {
+      const signal: AbortSignal | undefined = params?.options?.abort;
+      const aborted = new Promise<void>((resolve) => {
+        if (!signal) return resolve();
+        if (signal.aborted) return resolve();
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', session_id: 'sess_1' };
+          yield { type: 'system', subtype: 'task_started', task_id: 'task_without_session' };
+          taskStartedProcessed.resolve();
+          await aborted;
+          yield { type: 'result', subtype: 'error_during_execution', session_id: 'sess_1' };
+        },
+        stopTask,
+        interrupt,
+      };
+    });
+
+    const { ClaudeSdkAgentBackend } = await import('./ClaudeSdkAgentBackend');
+    const backend = new ClaudeSdkAgentBackend({
+      cwd: '/tmp',
+      modelId: 'default',
+      permissionPolicy: 'no_tools',
+    });
+
+    try {
+      const { sessionId } = await backend.startSession();
+      await taskStartedProcessed.promise;
+      await backend.sendPrompt(sessionId, 'hi');
+      await backend.cancel(sessionId);
+
+      expect(stopTask).toHaveBeenCalledWith('task_without_session');
+      expect(interrupt).not.toHaveBeenCalled();
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('uses operational task evidence from an async launch user event as the exact cancellation target', async () => {
+    const taskLaunchProcessed = createDeferred<void>();
+    const stopTask = vi.fn(async (_taskId: string) => {});
+    const interrupt = vi.fn(async () => {});
+
+    queryMock.mockImplementation((params: any) => {
+      const signal: AbortSignal | undefined = params?.options?.abort;
+      const aborted = new Promise<void>((resolve) => {
+        if (!signal) return resolve();
+        if (signal.aborted) return resolve();
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', session_id: 'sess_1' };
+          yield {
+            type: 'user',
+            tool_use_result: {
+              status: 'async_launched',
+              task_id: 'task_from_user_launch',
+            },
+          };
+          taskLaunchProcessed.resolve();
+          await aborted;
+          yield { type: 'result', subtype: 'error_during_execution', session_id: 'sess_1' };
+        },
+        stopTask,
+        interrupt,
+      };
+    });
+
+    const { ClaudeSdkAgentBackend } = await import('./ClaudeSdkAgentBackend');
+    const backend = new ClaudeSdkAgentBackend({
+      cwd: '/tmp',
+      modelId: 'default',
+      permissionPolicy: 'no_tools',
+    });
+
+    try {
+      const { sessionId } = await backend.startSession();
+      await taskLaunchProcessed.promise;
+      await backend.sendPrompt(sessionId, 'hi');
+      await backend.cancel(sessionId);
+
+      expect(stopTask).toHaveBeenCalledWith('task_from_user_launch');
+      expect(interrupt).not.toHaveBeenCalled();
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('replaces a terminal latest task with another active blocker before cancellation', async () => {
+    const terminalProcessed = createDeferred<void>();
+    const stopTask = vi.fn(async (_taskId: string) => {});
+    const interrupt = vi.fn(async () => {});
+
+    queryMock.mockImplementation((params: any) => {
+      const signal: AbortSignal | undefined = params?.options?.abort;
+      const aborted = new Promise<void>((resolve) => {
+        if (!signal) return resolve();
+        if (signal.aborted) return resolve();
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', session_id: 'sess_1' };
+          yield {
+            type: 'system',
+            subtype: 'task_started',
+            task_id: 'task_1',
+            task_type: 'local_bash',
+            session_id: 'sess_1',
+          };
+          yield {
+            type: 'system',
+            subtype: 'task_started',
+            task_id: 'task_2',
+            task_type: 'local_bash',
+            session_id: 'sess_1',
+          };
+          yield {
+            type: 'system',
+            subtype: 'task_notification',
+            task_id: 'task_2',
+            status: 'completed',
+            session_id: 'sess_1',
+          };
+          terminalProcessed.resolve();
+          await aborted;
+          yield { type: 'result', subtype: 'error_during_execution', session_id: 'sess_1' };
+        },
+        stopTask,
+        interrupt,
+      };
+    });
+
+    const { ClaudeSdkAgentBackend } = await import('./ClaudeSdkAgentBackend');
+    const backend = new ClaudeSdkAgentBackend({
+      cwd: '/tmp',
+      modelId: 'default',
+      permissionPolicy: 'no_tools',
+    });
+
+    try {
+      const { sessionId } = await backend.startSession();
+      await terminalProcessed.promise;
+      await backend.sendPrompt(sessionId, 'hi');
+      await backend.cancel(sessionId);
+
+      expect(stopTask).toHaveBeenCalledWith('task_1');
+      expect(stopTask).not.toHaveBeenCalledWith('task_2');
+      expect(interrupt).not.toHaveBeenCalled();
+    } finally {
+      await backend.dispose();
+    }
+  });
+
   it('keeps the active cancel target when a different task reports a terminal progress status', async () => {
     const interleavedTaskProcessed = createDeferred<void>();
     const stopTask = vi.fn(async (_taskId: string) => {});
@@ -240,7 +402,13 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
           yield { type: 'system', subtype: 'init', session_id: 'sess_1' };
           await promptIterator.next();
           firstPromptAccepted.resolve();
-          yield { type: 'system', subtype: 'task_started', task_id: 'task_1', session_id: 'sess_1' };
+          yield {
+            type: 'system',
+            subtype: 'task_started',
+            task_id: 'task_1',
+            task_type: 'local_bash',
+            session_id: 'sess_1',
+          };
           yield {
             type: 'user',
             session_id: 'sess_1',
@@ -267,9 +435,9 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
           await releaseBackgroundTask.promise;
           yield {
             type: 'system',
-            subtype: 'task_notification',
+            subtype: 'task_updated',
             task_id: 'task_1',
-            status: 'completed',
+            patch: { status: 'killed' },
             session_id: 'sess_1',
           };
           yield {

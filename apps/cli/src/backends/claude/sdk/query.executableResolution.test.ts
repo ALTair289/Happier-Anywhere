@@ -84,6 +84,32 @@ describe('claude sdk query executable resolution', () => {
     expect(spawnMock.mock.calls[0]?.[0]).toBe(process.execPath);
   });
 
+  it('adds the Claude hook-event stream flag only when explicitly requested', async () => {
+    envScope.patch({ DEBUG: undefined });
+    const spawnMock = vi.fn((..._args: any[]) => { throw new Error('spawn invoked'); });
+    vi.doMock('node:child_process', async () => {
+      const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+      return { ...actual, spawn: spawnMock };
+    });
+    vi.doMock('node:fs', async () => {
+      const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+      return { ...actual, existsSync: () => true };
+    });
+    const { query } = (await import('./query')) as typeof import('./query');
+
+    expect(() => query({
+      prompt: 'hi',
+      options: {
+        cwd: '/tmp',
+        pathToClaudeCodeExecutable: '/tmp/fake-claude.cjs',
+        includeHookEvents: true,
+      },
+    })).toThrow(/spawn invoked/);
+
+    const spawnArgs = spawnMock.mock.calls[0]?.[1] as string[];
+    expect(spawnArgs).toContain('--include-hook-events');
+  });
+
   it('treats executable=\"node\" as an alias for process.execPath for JS entrypoints (node runtime)', async () => {
     envScope.patch({ DEBUG: undefined });
 
@@ -325,7 +351,7 @@ describe('claude sdk query executable resolution', () => {
     const spawnCommand = spawnMock.mock.calls[0]?.[0] as unknown;
     const spawnArgs = spawnMock.mock.calls[0]?.[1] as unknown;
     const spawnOpts = spawnMock.mock.calls[0]?.[2] as Record<string, unknown> | undefined;
-    expect(spawnCommand).toBe('cmd.exe');
+    expect(String(spawnCommand).replaceAll('\\', '/').split('/').at(-1)).toBe('cmd.exe');
     expect((spawnArgs as any)?.slice?.(0, 3)).toEqual(['/d', '/s', '/c']);
     expect((spawnArgs as any)?.[3]).toContain('claude.cmd');
     expect(spawnOpts?.shell).not.toBe(true);

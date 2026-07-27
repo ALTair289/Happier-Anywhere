@@ -1,9 +1,11 @@
 import { InvalidateSync } from "@/utils/sync";
 import { RawJSONLines } from "../types";
+import { parseClaudeTaskNotificationXml } from '../taskNotifications/claudeTaskNotificationXml';
 import { dirname, join } from "node:path";
 import { watch, type FSWatcher } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { logger } from "@/ui/logger";
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 import { getProjectPath } from "./path";
 import { ClaudeRemoteSubagentFileCollector } from '../remote/sidechains/claudeRemoteSubagentFileCollector';
 import { resolveClaudeSubagentJsonlPath } from '../remote/sidechains/resolveClaudeSubagentJsonlPath';
@@ -47,7 +49,12 @@ export async function createSessionScanner(opts: {
     claudeConfigDir?: string | null,
     workingDirectory: string
     onMessage: (message: RawJSONLines) => void
-    onRawJsonlValue?: ((value: unknown) => void) | undefined
+    onRawJsonlValue?: ((
+        value: unknown,
+        observation: Readonly<{ historicalReplay: boolean }>,
+    ) => void) | undefined
+    onLiveJsonlValue?: ((input: Readonly<{ sessionId: string; value: unknown }>) => void) | undefined
+    onLiveJsonlObservationLost?: ((input: Readonly<{ sessionId: string; reason: string }>) => void) | undefined
     onTranscriptMissing?: (info: { sessionId: string; filePath: string }) => void
     /** How long to wait (ms) before warning that the transcript file is missing. Set <= 0 to disable. */
     transcriptMissingWarningMs?: number
@@ -90,6 +97,10 @@ export async function createSessionScanner(opts: {
         filePath: string;
         messages: readonly RawJSONLines[];
     }) => SessionScannerUnhookedSessionDisposition | null | undefined) | undefined
+    onDiscoveredMainSession?: ((params: {
+        sessionId: string;
+        filePath: string;
+    }) => void) | undefined
 }) {
     const shapeLogger = createEventShapeLoggerForLog({ logger, scope: 'claude-jsonl' });
 
@@ -160,12 +171,33 @@ export async function createSessionScanner(opts: {
     if (opts.sessionId) trustedRawTranscriptSessionIds.add(opts.sessionId);
     let closed = false;
 
-    function observeRawJsonlValue(value: unknown): void {
+    function observeRawJsonlValue(
+        value: unknown,
+        observation: Readonly<{ historicalReplay: boolean }>,
+    ): void {
         if (!opts.onRawJsonlValue) return;
         try {
-            opts.onRawJsonlValue(value);
+            opts.onRawJsonlValue(value, observation);
         } catch (err) {
             logger.debug('[SESSION_SCANNER] onRawJsonlValue callback threw:', err);
+        }
+    }
+
+    function observeLiveJsonlValue(sessionId: string, value: unknown): void {
+        if (!opts.onLiveJsonlValue) return;
+        try {
+            opts.onLiveJsonlValue({ sessionId, value });
+        } catch (err) {
+            logger.debug('[SESSION_SCANNER] onLiveJsonlValue callback threw:', err);
+        }
+    }
+
+    function observeLiveJsonlObservationLost(sessionId: string, reason: string): void {
+        if (!opts.onLiveJsonlObservationLost) return;
+        try {
+            opts.onLiveJsonlObservationLost({ sessionId, reason });
+        } catch (err) {
+            logger.debug('[SESSION_SCANNER] onLiveJsonlObservationLost callback threw:', err);
         }
     }
 
@@ -173,9 +205,13 @@ export async function createSessionScanner(opts: {
         trustedRawTranscriptSessionIds.add(sessionId);
     }
 
-    function observeRawJsonlValueForTrustedSession(sessionId: string, value: unknown): void {
+    function observeRawJsonlValueForTrustedSession(
+        sessionId: string,
+        value: unknown,
+        observation: Readonly<{ historicalReplay: boolean }>,
+    ): void {
         if (!trustedRawTranscriptSessionIds.has(sessionId)) return;
-        observeRawJsonlValue(value);
+        observeRawJsonlValue(value, observation);
     }
 
     function shouldSuppressReplaySideEffects(
@@ -192,7 +228,7 @@ export async function createSessionScanner(opts: {
         replayOpts?: Readonly<{ suppressBeforeMs?: number | null; suppressSideEffects?: boolean | undefined }>,
     ): void {
         if (shouldSuppressReplaySideEffects(value, replayOpts)) return;
-        observeRawJsonlValueForTrustedSession(sessionId, value);
+        observeRawJsonlValueForTrustedSession(sessionId, value, { historicalReplay: true });
     }
 
     function isMainSessionAllowed(sessionId: string): boolean {
@@ -201,6 +237,11 @@ export async function createSessionScanner(opts: {
 
     function bindMainSession(sessionId: string): void {
         if (!opts.bindToFirstSession || boundSessionId) return;
+        boundSessionId = sessionId;
+    }
+
+    function rebindMainSession(sessionId: string): void {
+        if (!opts.bindToFirstSession) return;
         boundSessionId = sessionId;
     }
 
@@ -258,7 +299,12 @@ export async function createSessionScanner(opts: {
             if (disposition === 'ignore') continue;
             if (disposition === 'main') {
                 bindMainSession(sessionId);
+                // The classifier is caller-provided and may synchronously observe a
+                // trusted SessionStart. Promote only if this candidate actually won
+                // the scanner binding after classification completes.
+                if (!isMainSessionAllowed(sessionId)) continue;
                 trustRawTranscriptSession(sessionId);
+                opts.onDiscoveredMainSession?.({ filePath, sessionId });
             }
             discoveredSessions.add(sessionId);
             sessionIds.push(sessionId);
@@ -325,14 +371,20 @@ export async function createSessionScanner(opts: {
         return /^\s*<task-notification>/i.test(content);
     }
 
-    function extractTaskNotification(payload: string): { taskId: string; status: string | null; result: string } | null {
-        const raw = String(payload ?? '');
-        const taskId = raw.match(/<task-id>\s*([^<\n\r]+?)\s*<\/task-id>/i)?.[1]?.trim() ?? '';
-        if (!taskId) return null;
-        const status = raw.match(/<status>\s*([^<\n\r]+?)\s*<\/status>/i)?.[1]?.trim() ?? null;
-        const result = raw.match(/<result>\s*([\s\S]*?)\s*<\/result>/i)?.[1]?.trim() ?? '';
-        if (!result) return null;
-        return { taskId, status, result };
+    function extractTaskNotification(payload: string): Readonly<{
+        taskId: string;
+        toolUseId: string | null;
+        status: string | null;
+        result: string;
+    }> | null {
+        const parsed = parseClaudeTaskNotificationXml(payload);
+        if (!parsed?.taskId || !parsed.result) return null;
+        return {
+            taskId: parsed.taskId,
+            toolUseId: parsed.toolUseId,
+            status: parsed.status,
+            result: parsed.result,
+        };
     }
 
     function observeTaskToolResultMapping(message: RawJSONLines): void {
@@ -348,7 +400,7 @@ export async function createSessionScanner(opts: {
         for (const item of content) {
             if (!item || typeof item !== 'object') continue;
             if ((item as any).type !== 'tool_result') continue;
-            const toolUseId = typeof (item as any).tool_use_id === 'string' ? String((item as any).tool_use_id).trim() : '';
+            const toolUseId = readNonBlankOpaqueIdentifier((item as any).tool_use_id) ?? '';
             if (!toolUseId) continue;
             taskToolUseIdByAgentId.set(agentId, toolUseId);
         }
@@ -362,7 +414,7 @@ export async function createSessionScanner(opts: {
         const parsed = extractTaskNotification(content);
         if (!parsed) return { type: 'drop' };
 
-        const toolUseId = taskToolUseIdByAgentId.get(parsed.taskId) ?? null;
+        const toolUseId = parsed.toolUseId ?? taskToolUseIdByAgentId.get(parsed.taskId) ?? null;
         if (!toolUseId) {
             // If we can't map the task-id to a Task tool_use, drop it to avoid transcript spam.
             return { type: 'drop' };
@@ -377,6 +429,7 @@ export async function createSessionScanner(opts: {
                     : {}),
                 kind: 'task-notification',
                 taskId: parsed.taskId,
+                toolUseId,
                 ...(parsed.status ? { status: parsed.status } : {}),
             },
             type: 'user',
@@ -531,10 +584,11 @@ export async function createSessionScanner(opts: {
         value: unknown,
         replayOpts?: Readonly<{ suppressBeforeMs?: number | null; suppressSideEffects?: boolean | undefined }>,
     ): Promise<boolean> {
+        if (!isMainSessionAllowed(session)) return false;
         if (shouldSuppressReplaySideEffects(value, replayOpts)) {
             return false;
         }
-        observeRawJsonlValueForTrustedSession(session, value);
+        observeRawJsonlValueForTrustedSession(session, value, { historicalReplay: false });
         const parsed = parseClaudeJsonlValue(value);
         if (!parsed) return false;
         return processSessionMessage(parsed, replayOpts);
@@ -567,6 +621,7 @@ export async function createSessionScanner(opts: {
         let skipped = 0;
         let sent = 0;
         for (const file of sessionMessages) {
+            if (!isMainSessionAllowed(session)) break;
             if (processSessionMessage(normalizeClaudeToolUseNamesInRawJsonLines(file), replayOpts)) sent += 1;
             else skipped += 1;
         }
@@ -593,6 +648,13 @@ export async function createSessionScanner(opts: {
 
         const startOffsetBytes = await processSessionSnapshot(session);
         if (closed) return;
+        let liveJsonlObservationEnabled = true;
+        let controller!: JsonlFollowController;
+        const isCurrentLiveFollower = (): boolean => (
+            !closed
+            && isMainSessionAllowed(session)
+            && sessionFollowers.get(session)?.controller === controller
+        );
         const handleFollowerMetric = (event: JsonlFollowerMetricEvent): void => {
             if (event.type !== 'file_reset') return;
             let suppressor = resetReplaySuppressorBySession.get(session);
@@ -608,14 +670,21 @@ export async function createSessionScanner(opts: {
                 reason: event.reason,
                 suppressBeforeMs,
             });
+            if (liveJsonlObservationEnabled && isCurrentLiveFollower()) {
+                liveJsonlObservationEnabled = false;
+                observeLiveJsonlObservationLost(session, `file_reset:${event.reason}`);
+            }
         };
-        const controller = createJsonlFollowController({
+        controller = createJsonlFollowController({
             filePath: desiredPath,
             startOffsetBytes,
             metrics: { emit: handleFollowerMetric },
             onJson: async (value) => {
                 const suppressor = resetReplaySuppressorBySession.get(session);
                 if (suppressor?.shouldSuppress(value)) return;
+                if (liveJsonlObservationEnabled && isCurrentLiveFollower()) {
+                    observeLiveJsonlValue(session, value);
+                }
                 await processSessionJsonValue(session, value);
             },
             onError: (error) => {
@@ -753,11 +822,11 @@ export async function createSessionScanner(opts: {
             const transcriptPathRaw = typeof arg === 'string' ? null : arg.transcriptPath;
             const transcriptPath = typeof transcriptPathRaw === 'string' && transcriptPathRaw.trim() ? transcriptPathRaw : null;
 
-            if (!isMainSessionAllowed(sessionId)) {
-                logger.debug(`[SESSION_SCANNER] Ignoring unrelated session after binding: ${sessionId}`);
-                return;
-            }
-            bindMainSession(sessionId);
+            // Public onNewSession calls come from Claude's authenticated primary
+            // SessionStart/offline-session boundary. Unlike unhooked directory
+            // discovery, that trusted boundary may legitimately rotate the native
+            // id on resume, fork, or compact and must replace a provisional bind.
+            rebindMainSession(sessionId);
             trustRawTranscriptSession(sessionId);
             cleanupUnallowedSessionFollowers();
 
@@ -794,7 +863,7 @@ export async function createSessionScanner(opts: {
                 else logger.debug(`[SESSION_SCANNER] New session: ${sessionId} is already pending, skipping`);
                 return;
             }
-            if (currentSessionId) {
+            if (currentSessionId && isMainSessionAllowed(currentSessionId)) {
                 pendingSessions.add(currentSessionId);
             }
             logger.debug(`[SESSION_SCANNER] New session: ${sessionId}`)

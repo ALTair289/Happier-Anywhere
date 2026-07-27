@@ -67,6 +67,48 @@ describe('sessionScanner', () => {
       await rm(testDir, { recursive: true, force: true })
     }
   })
+
+  it('fences buffered rows from the prior follower after a trusted main-session rotation', async () => {
+    const firstSessionId = '31313131-3131-4313-8313-313131313131'
+    const rotatedSessionId = '32323232-3232-4323-8323-323232323232'
+    const firstSessionFile = join(projectDir, `${firstSessionId}.jsonl`)
+    const rotatedSessionFile = join(projectDir, `${rotatedSessionId}.jsonl`)
+    await writeFile(firstSessionFile, [
+      JSON.stringify({
+        type: 'user',
+        uuid: 'first-row-before-rotation',
+        sessionId: firstSessionId,
+        message: { role: 'user', content: 'first row' },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        uuid: 'buffered-row-after-rotation',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'stale buffered row' }] },
+      }),
+    ].join('\n') + '\n')
+    await writeFile(rotatedSessionFile, '')
+
+    scanner = await createSessionScanner({
+      sessionId: null,
+      workingDirectory: testDir,
+      bindToFirstSession: true,
+      onMessage: (message) => {
+        collectedMessages.push(message)
+        if (message.uuid === 'first-row-before-rotation') {
+          scanner?.onNewSession({
+            sessionId: rotatedSessionId,
+            transcriptPath: rotatedSessionFile,
+          })
+        }
+      },
+    })
+
+    scanner.onNewSession({ sessionId: firstSessionId, transcriptPath: firstSessionFile })
+    await waitFor(() => collectedMessages.length >= 1)
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    expect(collectedMessages.map((message) => message.uuid)).toEqual(['first-row-before-rotation'])
+  })
   
   it('should process initial session and resumed session correctly', async () => {
     // TEST SCENARIO:
@@ -677,7 +719,7 @@ describe('sessionScanner', () => {
     const sessionFile = join(projectDir, `${sessionId}.jsonl`)
 
     const subagentId = 'a971610'
-    const sidechainId = 'toolu_task_1'
+    const sidechainId = ' toolu_task_1\n'
 
     const subagentsDir = join(projectDir, sessionId, 'subagents')
     await mkdir(subagentsDir, { recursive: true })
@@ -980,11 +1022,13 @@ describe('sessionScanner', () => {
     expect(rewritten.origin).toEqual(expect.objectContaining({
       kind: 'task-notification',
       taskId: subagentId,
+      toolUseId: sidechainId,
       status: 'completed',
     }))
     expect(readClaudeTranscriptProviderActivity(rewritten)).toEqual({
       type: 'task_notification',
       taskId: subagentId,
+      toolUseId: sidechainId,
       terminal: true,
     })
     const toolResult = rewritten.message.content.find((c: any) => c?.type === 'tool_result' && c?.tool_use_id === sidechainId)

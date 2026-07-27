@@ -423,7 +423,7 @@ describe('Claude SDK utils - getDefaultClaudeCodePathForAgentSdk', () => {
 });
 
 describe('Claude SDK utils - streamToStdin', () => {
-  it('treats EPIPE from Claude stdin as benign when the subprocess exits mid-stream', async () => {
+  it('surfaces EPIPE from Claude stdin as an ambiguous attempted handoff', async () => {
     class BrokenPipeWritable extends EventEmitter {
       destroyed = false;
       writableEnded = false;
@@ -445,7 +445,7 @@ describe('Claude SDK utils - streamToStdin', () => {
 
     const stdin = new BrokenPipeWritable();
 
-    await expect(streamToStdin(promptStream(), stdin as unknown as NodeJS.WritableStream)).resolves.toBeUndefined();
+    await expect(streamToStdin(promptStream(), stdin as unknown as NodeJS.WritableStream)).rejects.toMatchObject({ code: 'EPIPE' });
     expect(stdin.endCalled).toBe(false);
   });
 });

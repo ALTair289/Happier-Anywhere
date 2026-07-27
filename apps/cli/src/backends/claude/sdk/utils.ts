@@ -393,57 +393,97 @@ export function logDebug(message: string): void {
     }
 }
 
-function isBenignClaudeStdinWriteError(error: unknown): boolean {
-    const e = error as { code?: unknown; message?: unknown }
-    const code = typeof e?.code === 'string' ? e.code : ''
-    const message = typeof e?.message === 'string' ? e.message : ''
-    return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || /broken pipe|stream.*destroyed/i.test(message)
-}
-
 /**
  * Stream async messages to stdin
  */
+export type ClaudeStdinRecordTransportOutcome =
+    | 'accepted'
+    | 'rejected_before_effect'
+    | 'effect_may_have_occurred'
+
 export async function streamToStdin(
     stream: AsyncIterable<unknown>,
     stdin: NodeJS.WritableStream,
-    abort?: AbortSignal
+    abort?: AbortSignal,
+    onRecordTransportOutcome?: (
+        record: unknown,
+        outcome: ClaudeStdinRecordTransportOutcome,
+    ) => void,
 ): Promise<void> {
     let pendingError: Error | null = null
-    let streamBroken = false
+    let rejectActiveWrite: ((error: Error) => void) | null = null
     const onStdinError = (error: unknown) => {
-        if (isBenignClaudeStdinWriteError(error)) {
-            streamBroken = true
-            return
-        }
-        pendingError = error instanceof Error ? error : new Error(String(error))
+        const normalized = error instanceof Error ? error : new Error(String(error))
+        pendingError = normalized
+        rejectActiveWrite?.(normalized)
     }
 
     stdin.on?.('error', onStdinError)
 
     try {
         for await (const message of stream) {
-            if (abort?.aborted || streamBroken) break
-            if (pendingError) throw pendingError
-            try {
-                stdin.write(JSON.stringify(message) + '\n')
-            } catch (error) {
-                if (isBenignClaudeStdinWriteError(error)) {
-                    streamBroken = true
-                    break
+            const reportOutcome = (outcome: ClaudeStdinRecordTransportOutcome): void => {
+                try {
+                    onRecordTransportOutcome?.(message, outcome)
+                } catch {
+                    // Outcome observation must not change the transport result.
                 }
-                throw error
             }
+            if (abort?.aborted) {
+                reportOutcome('rejected_before_effect')
+                break
+            }
+            if (pendingError) {
+                reportOutcome('rejected_before_effect')
+                throw pendingError
+            }
+            await new Promise<void>((resolve, reject) => {
+                let settled = false
+                let writeCallReturned = false
+                const settleReject = (
+                    error: Error,
+                    outcome: Exclude<ClaudeStdinRecordTransportOutcome, 'accepted'>,
+                ) => {
+                    if (settled) return
+                    settled = true
+                    reportOutcome(outcome)
+                    reject(error)
+                }
+                rejectActiveWrite = (error) => {
+                    settleReject(error, 'effect_may_have_occurred')
+                }
+                try {
+                    const write = stdin.write as unknown as (
+                        chunk: string,
+                        callback: (error?: Error | null) => void,
+                    ) => boolean
+                    write.call(stdin, JSON.stringify(message) + '\n', (error) => {
+                        if (settled) return
+                        settled = true
+                        rejectActiveWrite = null
+                        if (error) {
+                            reportOutcome('effect_may_have_occurred')
+                            reject(error)
+                            return
+                        }
+                        reportOutcome('accepted')
+                        resolve()
+                    })
+                    writeCallReturned = true
+                } catch (error) {
+                    settleReject(
+                        error instanceof Error ? error : new Error(String(error)),
+                        writeCallReturned ? 'effect_may_have_occurred' : 'rejected_before_effect',
+                    )
+                }
+            })
+            rejectActiveWrite = null
         }
 
         if (pendingError) throw pendingError
-        if (streamBroken) return
-
-        try {
-            stdin.end()
-        } catch (error) {
-            if (!isBenignClaudeStdinWriteError(error)) throw error
-        }
+        stdin.end()
     } finally {
+        rejectActiveWrite = null
         stdin.off?.('error', onStdinError)
     }
 }

@@ -198,6 +198,8 @@ export interface QueryOptions {
     model?: string
     fallbackModel?: string
     strictMcpConfig?: boolean
+    /** Include Claude hook lifecycle records in the stream-json output. */
+    includeHookEvents?: boolean
     canCallTool?: CanCallToolCallback
     /** Path to a settings JSON file to pass to Claude via --settings */
     settingsPath?: string
