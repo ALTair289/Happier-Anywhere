@@ -5,6 +5,10 @@ import {
     type BackendTargetRefV1,
 } from '@happier-dev/protocol';
 import { z } from 'zod';
+import {
+    opaqueSessionControlIdentifierSchema,
+    readNonBlankSessionControlIdentifier,
+} from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 export type RememberedEngineSelectionV1 = Readonly<{
     modelId: string | null;
@@ -14,8 +18,8 @@ export type RememberedEngineSelectionV1 = Readonly<{
 }>;
 
 const RememberedEngineSelectionV1Schema = z.object({
-    modelId: z.string().trim().min(1).nullable().default(null),
-    acpSessionModeId: z.string().trim().min(1).nullable().default(null),
+    modelId: opaqueSessionControlIdentifierSchema.nullable().default(null),
+    acpSessionModeId: opaqueSessionControlIdentifierSchema.nullable().default(null),
     sessionConfigOptionOverrides: AcpConfigOptionOverridesV1Schema.nullable().default(null),
     updatedAt: z.number().finite(),
 });
@@ -82,6 +86,6 @@ export function upsertRememberedEngineSelection(params: Readonly<{
 }
 
 function normalizeOptionalString(value: unknown): string | null {
-    const normalized = typeof value === 'string' ? value.trim() : '';
+    const normalized = readNonBlankSessionControlIdentifier(value) ?? '';
     return normalized.length > 0 && normalized !== 'default' ? normalized : null;
 }

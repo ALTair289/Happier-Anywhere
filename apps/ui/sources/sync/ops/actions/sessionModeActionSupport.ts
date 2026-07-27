@@ -5,14 +5,15 @@ import {
   computeSessionModePickerControl,
   resolveRequestedSessionModeIdForMetadata,
   type SessionModePickerControl,
-} from '@/sync/acp/sessionModeControl';
+} from '@/sync/domains/sessionControl/sessionModeControl';
 import { t } from '@/text';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 export function normalizeRequestedSessionModeId(
   control: SessionModePickerControl | null,
   modeId: unknown,
 ): string {
-  const normalized = String(modeId ?? '').trim();
+  const normalized = readNonBlankSessionControlIdentifier(modeId) ?? '';
   return resolveRequestedSessionModeIdForMetadata(control, normalized);
 }
 
@@ -33,7 +34,7 @@ export function isRequestedSessionModeSupported(
   modeId: unknown,
 ): boolean {
   if (!control) return false;
-  const requestedModeId = String(modeId ?? '').trim();
+  const requestedModeId = readNonBlankSessionControlIdentifier(modeId) ?? '';
   const normalizedModeId = normalizeRequestedSessionModeId(control, requestedModeId);
   if (requestedModeId === 'default') {
     return normalizedModeId === '' || normalizedModeId === 'default';

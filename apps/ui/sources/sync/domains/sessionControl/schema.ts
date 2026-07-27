@@ -1,16 +1,17 @@
 import { z } from 'zod';
+import { opaqueSessionControlIdentifierSchema } from './opaqueIdentifiers';
 
 const SessionModeOptionSchema = z.object({
-    id: z.string().trim().min(1),
+    id: opaqueSessionControlIdentifierSchema,
     name: z.string().trim().min(1),
     description: z.string().trim().min(1).optional(),
 });
 
 const SessionModesStateSchema = z.object({
     v: z.literal(1),
-    provider: z.string().trim().min(1),
+    provider: opaqueSessionControlIdentifierSchema,
     updatedAt: z.number(),
-    currentModeId: z.string().trim().min(1),
+    currentModeId: opaqueSessionControlIdentifierSchema,
     availableModes: z.array(SessionModeOptionSchema).default([]),
 });
 
@@ -21,7 +22,7 @@ const SessionModelOptionChoiceSchema = z.object({
 });
 
 const SessionModelOptionSchema = z.object({
-    id: z.string().trim().min(1),
+    id: opaqueSessionControlIdentifierSchema,
     name: z.string().trim().min(1),
     description: z.string().trim().min(1).optional(),
     category: z.string().trim().min(1).optional(),
@@ -31,7 +32,7 @@ const SessionModelOptionSchema = z.object({
 });
 
 const SessionModelSchema = z.object({
-    id: z.string().trim().min(1),
+    id: opaqueSessionControlIdentifierSchema,
     name: z.string().trim().min(1),
     description: z.string().trim().min(1).optional(),
     contextWindowTokens: z.number().int().positive().optional(),
@@ -40,9 +41,9 @@ const SessionModelSchema = z.object({
 
 const SessionModelsStateSchema = z.object({
     v: z.literal(1),
-    provider: z.string().trim().min(1),
+    provider: opaqueSessionControlIdentifierSchema,
     updatedAt: z.number(),
-    currentModelId: z.string().trim().min(1),
+    currentModelId: opaqueSessionControlIdentifierSchema,
     availableModels: z.array(SessionModelSchema).default([]),
 });
 
@@ -53,7 +54,7 @@ const SessionConfigOptionSelectOptionSchema = z.object({
 });
 
 const SessionConfigOptionSchema = z.object({
-    id: z.string().trim().min(1),
+    id: opaqueSessionControlIdentifierSchema,
     name: z.string().trim().min(1),
     description: z.string().trim().min(1).optional(),
     category: z.string().trim().min(1).optional(),
@@ -64,7 +65,7 @@ const SessionConfigOptionSchema = z.object({
 
 const SessionConfigOptionsStateSchema = z.object({
     v: z.literal(1),
-    provider: z.string().trim().min(1),
+    provider: opaqueSessionControlIdentifierSchema,
     updatedAt: z.number(),
     configOptions: z.array(SessionConfigOptionSchema).default([]),
 });
@@ -84,7 +85,7 @@ const SessionConfigOptionOverridesSchema = z.object({
 const SessionModeOverrideSchema = z.object({
     v: z.literal(1),
     updatedAt: z.number(),
-    modeId: z.string().trim().min(1),
+    modeId: opaqueSessionControlIdentifierSchema,
 });
 
 export type SessionModesState = z.infer<typeof SessionModesStateSchema>;

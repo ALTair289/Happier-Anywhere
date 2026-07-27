@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import type { ModelOption, PreflightModelList } from '@/sync/domains/models/modelOptions';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 export const FavoriteModelSelectionV1Schema = z.object({
     backendTargetKey: z.string(),
@@ -37,7 +38,7 @@ function normalizeOptionalString(value: string | null | undefined): string | nul
 }
 
 export function normalizeFavoriteModelId(value: string | null | undefined): string {
-    return normalizeOptionalString(value) ?? '';
+    return readNonBlankSessionControlIdentifier(value) ?? '';
 }
 
 export function isFavoriteModelSelectableId(value: string | null | undefined): boolean {

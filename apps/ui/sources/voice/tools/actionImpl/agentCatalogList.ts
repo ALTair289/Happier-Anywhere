@@ -16,6 +16,23 @@ import { buildDynamicModelProbeCacheKey } from '@/sync/domains/models/dynamicMod
 import { parsePreflightModelListFromProbeModelsResult } from '@/sync/domains/models/parsePreflightModelListFromProbeModelsResult';
 import type { PreflightModelList } from '@/sync/domains/models/modelOptions';
 import type { CapabilityId } from '@/sync/api/capabilities/capabilitiesProtocol';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
+
+type AgentModelCatalogItem = Readonly<{
+  modelId: string;
+  label: string;
+  description?: string;
+}>;
+
+function dedupeOpaqueModelCatalogItems(items: readonly AgentModelCatalogItem[]): AgentModelCatalogItem[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const id = readNonBlankSessionControlIdentifier(item.modelId);
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
 
 function normalizeId(raw: unknown): string {
   return String(raw ?? '').trim();
@@ -181,14 +198,7 @@ export async function listAgentModelsForVoiceTool(params: Readonly<{
       }));
 
       const withDefault = [{ modelId: 'default', label: 'Default' }, ...dynamic.filter((m) => m.modelId !== 'default')];
-      const seen = new Set<string>();
-      const items = withDefault.filter((m) => {
-        const id = String(m.modelId ?? '').trim();
-        if (!id) return false;
-        if (seen.has(id)) return false;
-        seen.add(id);
-        return true;
-      });
+      const items = dedupeOpaqueModelCatalogItems(withDefault);
 
       return {
         agentId,
@@ -242,14 +252,7 @@ export async function listAgentModelsForVoiceTool(params: Readonly<{
         }));
 
         const withDefault = [{ modelId: 'default', label: 'Default' }, ...dynamic.filter((m) => m.modelId !== 'default')];
-        const seen = new Set<string>();
-        const items = withDefault.filter((m) => {
-          const id = String(m.modelId ?? '').trim();
-          if (!id) return false;
-          if (seen.has(id)) return false;
-          seen.add(id);
-          return true;
-        });
+        const items = dedupeOpaqueModelCatalogItems(withDefault);
 
         return {
           agentId,
@@ -269,14 +272,7 @@ export async function listAgentModelsForVoiceTool(params: Readonly<{
           ...(typeof m.description === 'string' ? { description: m.description } : {}),
         }));
         const withDefault = [{ modelId: 'default', label: 'Default' }, ...dynamic.filter((m) => m.modelId !== 'default')];
-        const seen = new Set<string>();
-        const items = withDefault.filter((m) => {
-          const id = String(m.modelId ?? '').trim();
-          if (!id) return false;
-          if (seen.has(id)) return false;
-          seen.add(id);
-          return true;
-        });
+        const items = dedupeOpaqueModelCatalogItems(withDefault);
 
         return {
           agentId,
@@ -297,14 +293,7 @@ export async function listAgentModelsForVoiceTool(params: Readonly<{
           ...(typeof m.description === 'string' ? { description: m.description } : {}),
         }));
         const withDefault = [{ modelId: 'default', label: 'Default' }, ...dynamic.filter((m) => m.modelId !== 'default')];
-        const seen = new Set<string>();
-        const items = withDefault.filter((m) => {
-          const id = String(m.modelId ?? '').trim();
-          if (!id) return false;
-          if (seen.has(id)) return false;
-          seen.add(id);
-          return true;
-        });
+        const items = dedupeOpaqueModelCatalogItems(withDefault);
 
         return {
           agentId,
@@ -319,21 +308,14 @@ export async function listAgentModelsForVoiceTool(params: Readonly<{
     }
   }
 
-  const seen = new Set<string>();
-  const items = [
+  const items = dedupeOpaqueModelCatalogItems([
     { modelId: 'default', label: 'Default' },
     ...getAgentStaticModels(agentId).map((model) => ({
       modelId: String(model.id),
       label: String(model.name),
       ...(typeof model.description === 'string' ? { description: model.description } : {}),
     })),
-  ].filter((item) => {
-    const id = String(item.modelId ?? '').trim();
-    if (!id) return false;
-    if (seen.has(id)) return false;
-    seen.add(id);
-    return true;
-  });
+  ]);
 
   return {
     agentId,

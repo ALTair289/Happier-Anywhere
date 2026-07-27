@@ -30,6 +30,13 @@ function buildSession(overrides: Partial<Session> = {}): Session {
 }
 
 describe('getModelOverrideForSpawn', () => {
+    it('preserves exact nonblank opaque model identifiers', () => {
+        expect(getModelOverrideForSpawn(buildSession({ modelMode: ' model-a ' as any }))).toEqual({
+            modelId: ' model-a ',
+            modelUpdatedAt: 11,
+        });
+    });
+
     it('returns null when local modelModeUpdatedAt is missing', () => {
         expect(
             getModelOverrideForSpawn(

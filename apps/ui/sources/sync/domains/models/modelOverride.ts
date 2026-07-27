@@ -1,6 +1,7 @@
 import { resolveMetadataStringOverrideV1 } from '@happier-dev/agents';
 
 import type { Session } from '../state/storageTypes';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 export type ModelOverrideForSpawn = {
     modelId: string;
@@ -15,7 +16,7 @@ export function getModelOverrideForSpawn(session: Session): ModelOverrideForSpaw
     const metadataUpdatedAt = metadataOverride?.updatedAt ?? 0;
     if (localUpdatedAt <= metadataUpdatedAt) return null;
 
-    const modelId = typeof session.modelMode === 'string' ? session.modelMode.trim() : '';
+    const modelId = readNonBlankSessionControlIdentifier(session.modelMode) ?? '';
     if (!modelId) return null;
 
     // Spawn-time override uses `--model <id>`, which must never be the sentinel "default".
@@ -23,4 +24,3 @@ export function getModelOverrideForSpawn(session: Session): ModelOverrideForSpaw
 
     return { modelId, modelUpdatedAt: localUpdatedAt };
 }
-

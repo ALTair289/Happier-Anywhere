@@ -4,7 +4,9 @@ import type { Metadata } from '@/sync/domains/state/storageTypes';
 import {
     readSessionConfigOptionOverridesState,
     readSessionConfigOptionsState,
+    readSessionModeOverrideState,
     readSessionModelsState,
+    readSessionModesState,
 } from './readSessionControlMetadata';
 
 function metadata(overrides: Partial<Metadata>): Metadata {
@@ -47,5 +49,38 @@ describe('readSessionControlMetadata', () => {
         });
 
         expect(readSessionConfigOptionOverridesState(value)).toEqual(value.acpConfigOptionOverridesV1);
+    });
+
+    it('selects a newer valid legacy mode state and ignores a malformed canonical state', () => {
+        const value = metadata({
+            sessionModesV1: {
+                v: 1, provider: 'grok', updatedAt: Number.NaN, currentModeId: 'canonical-mode',
+                availableModes: [{ id: 'canonical-mode', name: 'Canonical mode' }],
+            },
+            acpSessionModesV1: {
+                v: 1, provider: 'grok', updatedAt: 20, currentModeId: 'legacy-mode',
+                availableModes: [{ id: 'legacy-mode', name: 'Legacy mode' }],
+            },
+        });
+
+        expect(readSessionModesState(value)?.currentModeId).toBe('legacy-mode');
+    });
+
+    it('preserves a newer legacy mode tombstone and prefers canonical ties', () => {
+        const cleared = metadata({
+            sessionModeOverrideV1: { v: 1, updatedAt: 10, modeId: 'plan' },
+            acpSessionModeOverrideV1: { v: 1, updatedAt: 20, modeId: null },
+        });
+        expect(readSessionModeOverrideState(cleared)).toEqual({ state: 'cleared', updatedAt: 20 });
+
+        const tied = metadata({
+            sessionModeOverrideV1: { v: 1, updatedAt: 30, modeId: 'canonical-mode' },
+            acpSessionModeOverrideV1: { v: 1, updatedAt: 30, modeId: 'legacy-mode' },
+        });
+        expect(readSessionModeOverrideState(tied)).toEqual({
+            state: 'set',
+            value: 'canonical-mode',
+            updatedAt: 30,
+        });
     });
 });
