@@ -29,6 +29,17 @@ const DEFAULT_FONT_FAMILY =
 
 const OUTPUT_PREVIEW_MAX_CHARS = 4096;
 
+function disposeTerminalAfterPendingViewportSync(term: Terminal): void {
+    if (typeof window === 'undefined') {
+        term.dispose();
+        return;
+    }
+
+    // xterm 5.5 queues an untracked Viewport.syncScrollArea timer during open.
+    // Keep this boundary delay until xterm cancels that timer during disposal.
+    window.setTimeout(() => term.dispose(), 0);
+}
+
 export const XtermTerminalView = React.forwardRef<XtermTerminalHandle, XtermTerminalViewProps>(function XtermTerminalView(
     props,
     ref,
@@ -318,12 +329,12 @@ export const XtermTerminalView = React.forwardRef<XtermTerminalHandle, XtermTerm
 
             resizeObserver?.disconnect();
 
-            term.dispose();
             terminalRef.current = null;
             fitAddonRef.current = null;
             didReportReadyRef.current = false;
             lastReportedSizeRef.current = null;
             resetWriteState();
+            disposeTerminalAfterPendingViewportSync(term);
         };
     }, [fitTerminal, props.fontSize, resetWriteState, scheduleFlushWrites, theme.colors.surface.base, theme.colors.surface.selected, theme.colors.text.primary]);
 

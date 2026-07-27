@@ -15,16 +15,21 @@ const openSpy = vi.fn();
 const attachCustomKeyEventHandlerSpy = vi.fn();
 const onDataSpy = vi.fn();
 const disposeSpy = vi.fn();
+const viewportTimerObservedDisposedSpy = vi.fn();
 const terminalConstructorOptions: Record<string, unknown>[] = [];
 
 class MockTerminal {
     cols = 80;
     rows = 24;
     options: Record<string, unknown> = {};
+    disposed = false;
 
     constructor(options: Record<string, unknown> = {}) {
         this.options = options;
         terminalConstructorOptions.push(options);
+        // xterm 5.5's Viewport constructor queues an untracked syncScrollArea
+        // timer. Model that third-party lifecycle boundary here.
+        setTimeout(() => viewportTimerObservedDisposedSpy(this.disposed), 0);
     }
 
     loadAddon = loadAddonSpy;
@@ -35,7 +40,10 @@ class MockTerminal {
     getSelection = vi.fn(() => '');
     attachCustomKeyEventHandler = attachCustomKeyEventHandlerSpy;
     write = vi.fn((_data: string, callback?: () => void) => callback?.());
-    dispose = disposeSpy;
+    dispose = () => {
+        this.disposed = true;
+        disposeSpy();
+    };
 
     onData(callback: (data: string) => void) {
         onDataSpy.mockImplementation(callback);
@@ -88,6 +96,7 @@ describe('XtermTerminalView.web', () => {
         attachCustomKeyEventHandlerSpy.mockReset();
         onDataSpy.mockReset();
         disposeSpy.mockReset();
+        viewportTimerObservedDisposedSpy.mockReset();
         terminalConstructorOptions.length = 0;
         container = document.createElement('div');
         document.body.appendChild(container);
@@ -98,7 +107,13 @@ describe('XtermTerminalView.web', () => {
         await act(async () => {
             root.unmount();
         });
+        if (vi.isFakeTimers()) {
+            await vi.runAllTimersAsync();
+        } else {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
         container.remove();
+        vi.useRealTimers();
     });
 
     it('refocuses the terminal when the web container receives mouse down', async () => {
@@ -152,5 +167,35 @@ describe('XtermTerminalView.web', () => {
         expect(terminalConstructorOptions[0]).toEqual(
             expect.objectContaining({ screenReaderMode: false }),
         );
+    });
+
+    it('lets xterm viewport timers settle before disposing the terminal', async () => {
+        vi.useFakeTimers();
+        const { XtermTerminalView } = await import('./XtermTerminalView.web');
+
+        await act(async () => {
+            root.render(
+                <XtermTerminalView
+                    testID="terminal"
+                    fontSize={14}
+                    onInput={() => {}}
+                    onResize={() => {}}
+                    onReady={() => {}}
+                />,
+            );
+        });
+
+        await act(async () => {
+            root.render(<></>);
+        });
+
+        expect(disposeSpy).not.toHaveBeenCalled();
+
+        await act(async () => {
+            await vi.runAllTimersAsync();
+        });
+
+        expect(viewportTimerObservedDisposedSpy).toHaveBeenCalledWith(false);
+        expect(disposeSpy).toHaveBeenCalledTimes(1);
     });
 });
