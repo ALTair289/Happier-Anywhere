@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import { createTestAuth, type TestAuth } from './auth';
+import { upsertEncryptedAccountSettingsV2 } from './accountSettings';
 import { seedCliAuthForServer } from './cliAuth';
 import { writeCliSessionAttachFile } from './cliAttachFile';
 import { stopDaemonFromHomeDir } from './daemon/daemon';
@@ -195,11 +196,18 @@ export async function writeFakeCodexAppServerScript(params: Readonly<{
     '  const parsed = Number.parseInt(String(turnDelayMsRaw), 10);',
     '  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;',
     '})();',
+    'const nativeGoalSuccessorEnabled = process.env.HAPPIER_E2E_FAKE_CODEX_APP_SERVER_NATIVE_GOAL_SUCCESSOR === "1";',
+    'const nativeGoalSuccessorDelayMs = (() => {',
+    '  const parsed = Number.parseInt(String(process.env.HAPPIER_E2E_FAKE_CODEX_APP_SERVER_NATIVE_GOAL_SUCCESSOR_DELAY_MS ?? ""), 10);',
+    '  return Number.isFinite(parsed) && parsed > 0 ? parsed : Math.max(250, turnDelayMs * 2);',
+    '})();',
     'const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });',
     'let turnCounter = 0;',
     'let activeTurnId = null;',
     'let activeTurn = null;',
     'let completedTurns = [];',
+    'let nativeGoalSuccessorLaunched = false;',
+    'let nativeGoalActivationAt = 0;',
     'function readReviewLabel(target) {',
     '  if (target?.custom && typeof target.custom.instructions === "string") return target.custom.instructions.trim() || "custom review";',
     '  if (target?.type === "custom" && typeof target.instructions === "string") return target.instructions.trim() || "custom review";',
@@ -338,6 +346,7 @@ export async function writeFakeCodexAppServerScript(params: Readonly<{
     '      createdAt: goalSetBehavior === "nativePartial" && typeof currentGoal?.createdAt === "string" ? currentGoal.createdAt : nowIso,',
     '      updatedAt: nowIso',
     '    };',
+    '    if (nativeGoalSuccessorEnabled && activeTurn && currentGoal.status === "active") nativeGoalActivationAt = Date.now();',
     '    await persistGoal();',
     '    process.stdout.write(JSON.stringify({ id: msg.id, result: currentGoal }) + "\\n");',
     '    process.stdout.write(JSON.stringify({ method: "thread/goal/updated", params: { threadId: currentGoal.threadId, goal: currentGoal } }) + "\\n");',
@@ -400,12 +409,49 @@ export async function writeFakeCodexAppServerScript(params: Readonly<{
     '      if (activeTurn?.id === turnId) activeTurn.items.push({ id: messageId, type: "agentMessage", text: `reply:${promptText}:done` });',
     '      process.stdout.write(JSON.stringify({ method: "item/completed", params: { item: { id: messageId, type: "agentMessage", text: `reply:${promptText}:done` } } }) + "\\n");',
     '    }, turnDelayMs + 7);',
-    '    setTimeout(async () => {',
+    '    const completeTurn = async () => {',
+    '      if (nativeGoalSuccessorEnabled && !nativeGoalSuccessorLaunched && nativeGoalActivationAt === 0) {',
+    '        setTimeout(completeTurn, 25);',
+    '        return;',
+    '      }',
+    '      if (nativeGoalSuccessorEnabled && !nativeGoalSuccessorLaunched && Date.now() < nativeGoalActivationAt + 1000) {',
+    '        setTimeout(completeTurn, 25);',
+    '        return;',
+    '      }',
     '      await appendHarnessEvent("happier/test/turn/completed", { threadId, turnId, promptText, status: "completed" });',
     '      process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: turnId } } }) + "\\n");',
     '      if (activeTurn?.id === turnId) { completedTurns.push(activeTurn); activeTurn = null; }',
     '      if (activeTurnId === turnId) activeTurnId = null;',
-    '    }, turnDelayMs + 10);',
+    '      if (nativeGoalSuccessorEnabled && !nativeGoalSuccessorLaunched && currentGoal?.status === "active") {',
+    '        nativeGoalSuccessorLaunched = true;',
+    '        const successorTurnId = "turn-native-goal-successor";',
+    '        const successorMessageId = "msg-native-goal-successor";',
+    '        activeTurnId = successorTurnId;',
+    '        activeTurn = { id: successorTurnId, threadId, items: [] };',
+    '        await appendHarnessEvent("happier/test/goal-successor/started", { threadId, turnId: successorTurnId });',
+    '        process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId, turn: { id: successorTurnId } } }) + "\\n");',
+    '        setTimeout(() => {',
+    '          process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId, turnId: successorTurnId, itemId: successorMessageId, delta: "native-goal-successor-visible" } }) + "\\n");',
+    '        }, 25);',
+    '        setTimeout(() => {',
+    '          const text = "native-goal-successor-visible:done";',
+    '          if (activeTurn?.id === successorTurnId) activeTurn.items.push({ id: successorMessageId, type: "agentMessage", text });',
+    '          process.stdout.write(JSON.stringify({ method: "item/completed", params: { threadId, turnId: successorTurnId, item: { id: successorMessageId, type: "agentMessage", text } } }) + "\\n");',
+    '        }, 50);',
+    '        setTimeout(async () => {',
+    '          if (currentGoal?.status === "active") {',
+    '            currentGoal = { ...currentGoal, status: "complete", updatedAt: new Date().toISOString() };',
+    '            await persistGoal();',
+    '            process.stdout.write(JSON.stringify({ method: "thread/goal/updated", params: { threadId, turnId: successorTurnId, goal: currentGoal } }) + "\\n");',
+    '          }',
+    '          await appendHarnessEvent("happier/test/goal-successor/completed", { threadId, turnId: successorTurnId });',
+    '          process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: successorTurnId } } }) + "\\n");',
+    '          if (activeTurn?.id === successorTurnId) { completedTurns.push(activeTurn); activeTurn = null; }',
+    '          if (activeTurnId === successorTurnId) activeTurnId = null;',
+    '        }, nativeGoalSuccessorDelayMs);',
+    '      }',
+    '    };',
+    '    setTimeout(completeTurn, turnDelayMs + 10);',
     '    continue;',
     '  }',
     '  if (msg.method === "turn/steer") {',
@@ -522,6 +568,7 @@ export async function startCodexAppServerRemoteHarness(params: Readonly<{
   cliEnvOverrides?: NodeJS.ProcessEnv;
   manifestEnv?: Record<string, string>;
   metadataOverrides?: Record<string, unknown>;
+  accountSettings?: unknown;
   waitForPublishedMetadata?: boolean;
 }>): Promise<StartedCodexAppServerRemoteHarness> {
   const startedAt = new Date().toISOString();
@@ -542,6 +589,14 @@ export async function startCodexAppServerRemoteHarness(params: Readonly<{
 
   const secret = Uint8Array.from(randomBytes(32));
   await seedCliAuthForServer({ cliHome, serverUrl: serverBaseUrl, token: auth.token, secret });
+  if (params.accountSettings !== undefined) {
+    await upsertEncryptedAccountSettingsV2({
+      baseUrl: serverBaseUrl,
+      token: auth.token,
+      secret,
+      settings: params.accountSettings,
+    });
+  }
 
   const metadataCiphertextBase64 = encryptLegacyBase64(
     {

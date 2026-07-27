@@ -49,6 +49,7 @@ async function enqueuePromptAndWaitForTranscript(params: Readonly<{
   sessionId: string;
   secret: Uint8Array;
   afterSeq: number;
+  requestLogPath: string;
   text: string;
 }>): Promise<void> {
   const localId = `pending-${randomUUID()}`;
@@ -91,6 +92,50 @@ async function enqueuePromptAndWaitForTranscript(params: Readonly<{
     });
     return transcriptRows.some((row) => row.localId === localId);
   }, { timeoutMs: 45_000, context: 'Codex app-server materializes seed prompt before goal RPC' });
+
+  await waitFor(async () => {
+    const requests = await readFakeCodexAppServerRequestLog(params.requestLogPath);
+    return requests.some((request) => (
+      request.method === 'happier/test/turn/completed'
+      && typeof request.params?.promptText === 'string'
+      && request.params.promptText.endsWith(params.text)
+    ));
+  }, { timeoutMs: 45_000, context: 'Codex app-server completes seed prompt before inactive goal controls' });
+}
+
+async function enqueuePrompt(params: Readonly<{
+  baseUrl: string;
+  token: string;
+  sessionId: string;
+  secret: Uint8Array;
+  text: string;
+}>): Promise<string> {
+  const localId = `pending-${randomUUID()}`;
+  const enqueue = await enqueuePendingQueueV2({
+    baseUrl: params.baseUrl,
+    token: params.token,
+    sessionId: params.sessionId,
+    localId,
+    ciphertext: encryptLegacyBase64(
+      {
+        role: 'user',
+        content: { type: 'text', text: params.text },
+        localId,
+        meta: { source: 'ui', sentFrom: 'e2e' },
+      },
+      params.secret,
+    ),
+    timeoutMs: 20_000,
+  });
+  expect(enqueue.status).toBe(200);
+  return localId;
+}
+
+function containsText(value: unknown, expected: string): boolean {
+  if (typeof value === 'string') return value.includes(expected);
+  if (Array.isArray(value)) return value.some((entry) => containsText(entry, expected));
+  if (!value || typeof value !== 'object') return false;
+  return Object.values(value as Record<string, unknown>).some((entry) => containsText(entry, expected));
 }
 
 function countLoggedRequests(
@@ -165,6 +210,7 @@ describe('core e2e: Codex app-server goal session controls', () => {
       sessionId,
       secret,
       afterSeq: baselineSeq,
+      requestLogPath,
       text: `start app-server thread before goal RPC ${randomUUID()}`,
     });
 
@@ -271,6 +317,7 @@ describe('core e2e: Codex app-server goal session controls', () => {
       sessionId,
       secret,
       afterSeq: baselineSeq,
+      requestLogPath,
       text: `start app-server thread before inactive goal action ${randomUUID()}`,
     });
 
@@ -344,5 +391,167 @@ describe('core e2e: Codex app-server goal session controls', () => {
     ]));
     expect(countLoggedRequests(requests, 'turn/start')).toBe(turnStartsBeforeInactiveControls);
     expect(countLoggedRequests(requests, 'thread/resume')).toBe(resumesBeforeInactiveControls);
+  }, 300_000);
+
+  it('fences queued input across a same-thread native goal successor and drains it only after successor terminal', async () => {
+    const testDir = run.testDir('codex-app-server-native-goal-successor-queue-fence');
+    harness = await startCodexAppServerRemoteHarness({
+      testDir,
+      runId: run.runId,
+      testName: 'codex-app-server-native-goal-successor-queue-fence',
+      accountSettings: {
+        sessionBusySteerSendPolicy: 'server_pending',
+      },
+      cliEnvOverrides: {
+        HAPPIER_E2E_FAKE_CODEX_APP_SERVER_TURN_DELAY_MS: '50',
+        HAPPIER_E2E_FAKE_CODEX_APP_SERVER_NATIVE_GOAL_SUCCESSOR: '1',
+        // Keep the successor open long enough for a real encrypted HTTP enqueue/list roundtrip
+        // under contended CI; the assertion must observe queued custody before terminal drain.
+        HAPPIER_E2E_FAKE_CODEX_APP_SERVER_NATIVE_GOAL_SUCCESSOR_DELAY_MS: '10000',
+      },
+    });
+    const { auth, requestLogPath, secret, serverBaseUrl, sessionId } = harness;
+    const baselineSeq = harness.readySession.seq ?? 0;
+    const predecessorText = `predecessor before native goal successor ${randomUUID()}`;
+    const queuedText = `queued until native goal successor terminal ${randomUUID()}`;
+    const objective = `continue native goal ${randomUUID()}`;
+
+    await enqueuePrompt({
+      baseUrl: serverBaseUrl,
+      token: auth.token,
+      sessionId,
+      secret,
+      text: predecessorText,
+    });
+
+    await waitFor(async () => {
+      const requests = await readFakeCodexAppServerRequestLog(requestLogPath);
+      return requests.some((request) => (
+        request.method === 'turn/start'
+        && containsText(request.params?.input, predecessorText)
+      ));
+    }, { timeoutMs: 45_000, context: 'predecessor turn starts before native goal activation' });
+
+    const socket = await connectUserSocket({ baseUrl: serverBaseUrl, token: auth.token });
+    try {
+      await callLegacyEncryptedSessionRpc({
+        ui: socket,
+        sessionId,
+        method: SESSION_RPC_METHODS.SESSION_GOAL_SET,
+        req: { objective },
+        secret,
+        schema: SessionWorkStateGetResponseV1Schema,
+        timeoutMs: 45_000,
+      });
+    } finally {
+      socket.close();
+    }
+
+    await waitFor(async () => {
+      const requests = await readFakeCodexAppServerRequestLog(requestLogPath);
+      return requests.some((request) => request.method === 'happier/test/goal-successor/started');
+    }, { timeoutMs: 15_000, context: 'same-thread native goal successor starts after predecessor terminal' });
+
+    const queuedLocalId = await enqueuePrompt({
+      baseUrl: serverBaseUrl,
+      token: auth.token,
+      sessionId,
+      secret,
+      text: queuedText,
+    });
+
+    const requestsDuringSuccessor = await readFakeCodexAppServerRequestLog(requestLogPath);
+    expect(requestsDuringSuccessor.some((request) => (
+      (request.method === 'turn/start' || request.method === 'turn/steer')
+      && containsText(request.params?.input, queuedText)
+    ))).toBe(false);
+    const pendingDuringSuccessor = await listPendingQueueV2({
+      baseUrl: serverBaseUrl,
+      token: auth.token,
+      sessionId,
+      timeoutMs: 20_000,
+    });
+    expect(pendingDuringSuccessor.status).toBe(200);
+    expect(pendingDuringSuccessor.data.pending).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        localId: queuedLocalId,
+        status: 'queued',
+      }),
+    ]));
+
+    await waitFor(async () => {
+      const rows = await fetchMessagesSince({
+        baseUrl: serverBaseUrl,
+        token: auth.token,
+        sessionId,
+        afterSeq: baselineSeq,
+      });
+      return rows.some((row) => containsText(
+        decryptLegacyBase64Normalized(row.content.c, secret),
+        'native-goal-successor-visible',
+      ));
+    }, { timeoutMs: 20_000, context: 'native goal successor transcript remains visible while queue is fenced' });
+
+    await waitFor(async () => {
+      const requests = await readFakeCodexAppServerRequestLog(requestLogPath);
+      return requests.some((request) => request.method === 'happier/test/goal-successor/completed');
+    }, { timeoutMs: 20_000, context: 'native goal successor reaches terminal' });
+
+    await waitFor(async () => {
+      const pending = await listPendingQueueV2({
+        baseUrl: serverBaseUrl,
+        token: auth.token,
+        sessionId,
+        timeoutMs: 20_000,
+      });
+      const requests = await readFakeCodexAppServerRequestLog(requestLogPath);
+      return pending.status === 200
+        && pending.data.pending?.every((row) => row.localId !== queuedLocalId) === true
+        && requests.some((request) => (
+          request.method === 'turn/start'
+          && containsText(request.params?.input, queuedText)
+        ));
+    }, { timeoutMs: 45_000, context: 'queued input drains only after native goal successor terminal' });
+
+    const finalRequests = await readFakeCodexAppServerRequestLog(requestLogPath);
+    const matchingStarts = finalRequests
+      .map((request, index) => ({ request, index }))
+      .filter(({ request }) => (
+        request.method === 'turn/start'
+        && containsText(request.params?.input, queuedText)
+      ));
+    const matchingSteers = finalRequests.filter((request) => (
+      request.method === 'turn/steer'
+      && containsText(request.params?.input, queuedText)
+    ));
+    const successorStartedIndex = finalRequests.findIndex((request) => (
+      request.method === 'happier/test/goal-successor/started'
+    ));
+    const successorCompletedIndex = finalRequests.findIndex((request) => (
+      request.method === 'happier/test/goal-successor/completed'
+    ));
+
+    expect(successorStartedIndex).toBeGreaterThanOrEqual(0);
+    expect(successorCompletedIndex).toBeGreaterThan(successorStartedIndex);
+    expect(matchingStarts).toHaveLength(1);
+    expect(matchingStarts[0]?.index).toBeGreaterThan(successorCompletedIndex);
+    expect(matchingSteers).toHaveLength(0);
+
+    const finalPending = await listPendingQueueV2({
+      baseUrl: serverBaseUrl,
+      token: auth.token,
+      sessionId,
+      timeoutMs: 20_000,
+    });
+    expect(finalPending.status).toBe(200);
+    expect(finalPending.data.pending?.some((row) => row.localId === queuedLocalId)).toBe(false);
+
+    const finalTranscript = await fetchMessagesSince({
+      baseUrl: serverBaseUrl,
+      token: auth.token,
+      sessionId,
+      afterSeq: baselineSeq,
+    });
+    expect(finalTranscript.filter((row) => row.localId === queuedLocalId)).toHaveLength(1);
   }, 300_000);
 });
