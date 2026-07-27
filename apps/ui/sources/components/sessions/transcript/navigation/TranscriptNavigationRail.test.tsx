@@ -3,6 +3,7 @@ import { act } from 'react-test-renderer';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
 import { renderScreen } from '@/dev/testkit';
+import { getTranscriptNavigationVisibilityStore } from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityStore';
 
 import type { TranscriptNavigationEntry } from './transcriptNavigationTypes';
 import type { TranscriptNavigationRailEntry } from './TranscriptNavigationRail';
@@ -118,16 +119,25 @@ const entries: readonly TranscriptNavigationEntry[] = [
     }),
 ];
 
+const RAIL_SESSION_ID = 'session-1';
+
+function seedVisibility(snapshot: Readonly<{
+    currentAnchorId: string | null;
+    visibleAnchorIds: readonly string[];
+}>) {
+    getTranscriptNavigationVisibilityStore(RAIL_SESSION_ID).set(snapshot);
+}
+
 function baseProps(onJump = vi.fn()) {
+    seedVisibility({ currentAnchorId: 'turn-1', visibleAnchorIds: ['turn-1'] });
     return {
-        currentAnchorId: 'turn-1',
         entries,
         onJumpToEntry: onJump,
         paneHeightPx: 800,
         paneWidthPx: 1000,
         platformOS: 'web' as const,
+        sessionId: RAIL_SESSION_ID,
         transcriptContentWidthPx: 800,
-        visibleAnchorIds: ['turn-1'],
     };
 }
 
@@ -216,23 +226,157 @@ describe('TranscriptNavigationRail', () => {
         });
     });
 
-    it('shows an accessible preview for the focused marker and ignores touch hover activation', async () => {
+    it('shows an accessible preview for the focused marker on hover and on touch', async () => {
         const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
 
         const screen = await renderScreen(<TranscriptNavigationRail {...baseProps()} />);
         const marker = screen.findByTestId('transcript-navigation-rail.marker:pin-a');
 
         await act(async () => {
-            marker?.props.onPointerEnter?.({ nativeEvent: { pointerType: 'touch' } });
-        });
-        expect(screen.findByTestId('transcript-navigation-rail.preview')).toBeNull();
-
-        await act(async () => {
             marker?.props.onPointerEnter?.({ nativeEvent: { pointerType: 'mouse' } });
         });
-
         expect(screen.findByTestId('transcript-navigation-rail.preview')).toBeTruthy();
         expect(screen.getTextContent()).toContain('Pinned answer preview');
+
+        await act(async () => {
+            screen.findByTestId('transcript-navigation-rail')?.props.onPointerLeave?.({
+                nativeEvent: { pointerType: 'mouse' },
+            });
+        });
+        await waitForSoftExit();
+        expect(screen.findByTestId('transcript-navigation-rail.preview')).toBeNull();
+
+        // Touch-web: a tap must reveal the preview too, not silently fall
+        // through to a 4px target with no affordance.
+        await act(async () => {
+            screen.findByTestId('transcript-navigation-rail.marker:pin-a')?.props.onPointerEnter?.({
+                nativeEvent: { pointerType: 'touch' },
+            });
+        });
+        expect(screen.findByTestId('transcript-navigation-rail.preview')).toBeTruthy();
+    });
+
+    it('activates a marker on a touch tap', async () => {
+        const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
+        const onJump = vi.fn();
+
+        const screen = await renderScreen(<TranscriptNavigationRail {...baseProps(onJump)} />);
+        const marker = screen.findByTestId('transcript-navigation-rail.marker:turn-2');
+        await act(async () => {
+            marker?.props.onPointerEnter?.({ nativeEvent: { pointerType: 'touch' } });
+            marker?.props.onClick?.();
+        });
+
+        expect(onJump).toHaveBeenCalledTimes(1);
+        expect(onJump.mock.calls[0]?.[0]).toBe(entries[2]);
+    });
+
+    it('marks the turn being read active from the visibility store even when its prompt row is unmounted', async () => {
+        const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
+
+        const screen = await renderScreen(<TranscriptNavigationRail {...baseProps()} />);
+        expect(screen.findByTestId('transcript-navigation-rail.marker:turn-1')?.props.accessibilityState?.selected)
+            .toBe(true);
+
+        // Scrolled deep into turn-2's body: nothing is visible (its prompt row
+        // is virtualized away) yet turn-2 is the turn being read.
+        await act(async () => {
+            seedVisibility({ currentAnchorId: 'turn-2', visibleAnchorIds: [] });
+        });
+
+        expect(screen.findByTestId('transcript-navigation-rail.marker:turn-2')?.props.accessibilityState?.selected)
+            .toBe(true);
+        expect(screen.findByTestId('transcript-navigation-rail.marker:turn-1')?.props.accessibilityState?.selected)
+            .toBe(false);
+    });
+
+    it('points the roving tabstop at the active descendant without moving DOM focus', async () => {
+        const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
+
+        const screen = await renderScreen(<TranscriptNavigationRail {...baseProps()} />);
+        const tabstop = screen.findByTestId('transcript-navigation-rail.roving-tabstop');
+        const activeMarker = screen.findByTestId('transcript-navigation-rail.marker:turn-1');
+
+        expect(tabstop?.props.tabIndex).toBe(0);
+        expect(tabstop?.props['aria-activedescendant']).toBe(activeMarker?.props.id);
+        expect(activeMarker?.props.tabIndex).toBe(-1);
+    });
+
+    it('names markers through the canonical entry accessibility resolver', async () => {
+        const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
+        const fallbackEntries = [
+            entries[0]!,
+            entry({
+                id: 'pin-fallback',
+                kind: 'pinned-tool',
+                label: '',
+                fallbackLabelKind: 'pinned-tool',
+                pinned: true,
+                pinnedAtMs: 5,
+                role: 'tool',
+                routeMessageId: 'server:tool-1',
+                seq: 13,
+            }),
+        ];
+
+        const screen = await renderScreen(
+            <TranscriptNavigationRail {...baseProps()} entries={fallbackEntries} />,
+        );
+
+        const label = screen.findByTestId('transcript-navigation-rail.marker:pin-fallback')?.props.accessibilityLabel;
+        expect(typeof label).toBe('string');
+        expect(String(label).length).toBeGreaterThan(0);
+    });
+
+    it('renders marker motion from React alone: hover, unhover, then active leaves no inline write behind', async () => {
+        const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
+
+        const screen = await renderScreen(<TranscriptNavigationRail {...baseProps()} />);
+        const readWidth = () => readStyleNumber(
+            screen.findByTestId('transcript-navigation-rail.marker-line:pin-a')?.props.style,
+            'width',
+        );
+        expect(readWidth()).toBe(3);
+
+        await act(async () => {
+            screen.findByTestId('transcript-navigation-rail.marker:pin-a')?.props.onPointerEnter?.({
+                nativeEvent: { pointerType: 'mouse' },
+            });
+        });
+        expect(readWidth()).toBe(16);
+
+        await act(async () => {
+            screen.findByTestId('transcript-navigation-rail')?.props.onPointerLeave?.({
+                nativeEvent: { pointerType: 'mouse' },
+            });
+        });
+        expect(readWidth()).toBe(3);
+
+        await act(async () => {
+            seedVisibility({ currentAnchorId: 'pin-a', visibleAnchorIds: ['pin-a'] });
+        });
+
+        const activeLine = screen.findByTestId('transcript-navigation-rail.marker-line:pin-a');
+        // The active style is the rendered style: no leftover imperative
+        // magnification, and every channel comes from props.
+        expect(readStyleNumber(activeLine?.props.style, 'width')).toBe(3);
+        expect(readStyleNumber(activeLine?.props.style, 'opacity')).toBeGreaterThanOrEqual(0.9);
+        expect(screen.findByTestId('transcript-navigation-rail.marker:pin-a')?.props.accessibilityState?.selected)
+            .toBe(true);
+    });
+
+    it('eases marker motion through a CSS transition whose duration collapses under reduced motion', async () => {
+        const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
+
+        const eased = await renderScreen(<TranscriptNavigationRail {...baseProps()} />);
+        expect(flattenStyle(
+            eased.findByTestId('transcript-navigation-rail.marker-line:pin-a')?.props.style,
+        ).transitionDuration).toBe('160ms');
+
+        const instant = await renderScreen(<TranscriptNavigationRail {...baseProps()} reducedMotion />);
+        expect(flattenStyle(
+            instant.findByTestId('transcript-navigation-rail.marker-line:pin-a')?.props.style,
+        ).transitionDuration).toBe('0ms');
     });
 
     it('renders a bold one-line title over the multi-line message text on a glass surface', async () => {
@@ -365,10 +509,8 @@ describe('TranscriptNavigationRail', () => {
         const screen = await renderScreen(
             <TranscriptNavigationRail
                 {...baseProps()}
-                currentAnchorId="turn-1"
                 entries={longEntries}
                 paneHeightPx={240}
-                visibleAnchorIds={['turn-1']}
             />,
         );
         expect(screen.findByTestId('transcript-navigation-rail.fade.top')).toBeNull();
@@ -406,173 +548,6 @@ describe('TranscriptNavigationRail', () => {
         });
 
         expect(screen.findByTestId('transcript-navigation-rail.fade.bottom')).toBeNull();
-    });
-
-    it('batches pointer motion through one animation frame for large rails', async () => {
-        const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
-        const previousRaf = globalThis.requestAnimationFrame;
-        const previousCancelRaf = globalThis.cancelAnimationFrame;
-        const frameCallbacks: FrameRequestCallback[] = [];
-        const requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
-            frameCallbacks.push(callback);
-            return frameCallbacks.length;
-        });
-        const cancelAnimationFrame = vi.fn();
-
-        globalThis.requestAnimationFrame = requestAnimationFrame;
-        globalThis.cancelAnimationFrame = cancelAnimationFrame;
-
-        try {
-            const screen = await renderScreen(
-                <TranscriptNavigationRail
-                    {...baseProps()}
-                    entries={buildEntries(250)}
-                    paneHeightPx={900}
-                />,
-            );
-
-            await act(async () => {
-                screen.findByTestId('transcript-navigation-rail.marker:turn-100')?.props.onPointerEnter?.({
-                    nativeEvent: { pointerType: 'mouse' },
-                });
-                screen.findByTestId('transcript-navigation-rail.marker:turn-101')?.props.onPointerEnter?.({
-                    nativeEvent: { pointerType: 'mouse' },
-                });
-            });
-
-            expect(requestAnimationFrame).toHaveBeenCalledTimes(1);
-            await act(async () => {
-                frameCallbacks[0]?.(16);
-            });
-        } finally {
-            globalThis.requestAnimationFrame = previousRaf;
-            globalThis.cancelAnimationFrame = previousCancelRaf;
-        }
-    });
-
-    it('magnifies the focused marker through bounded React state when direct style writes are unavailable', async () => {
-        const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
-
-        // react-test-renderer host refs are null without createNodeMock, so the
-        // direct write path is unavailable and the rail must fall back to
-        // React-state-driven marker motion instead of silently no-oping.
-        const screen = await renderScreen(<TranscriptNavigationRail {...baseProps()} />);
-        const marker = screen.findByTestId('transcript-navigation-rail.marker:pin-a');
-
-        await act(async () => {
-            marker?.props.onPointerEnter?.({ nativeEvent: { pointerType: 'mouse' } });
-        });
-
-        const focusedLine = screen.findByTestId('transcript-navigation-rail.marker-line:pin-a');
-        expect(readStyleNumber(focusedLine?.props.style, 'width')).toBe(16);
-        expect(readStyleNumber(focusedLine?.props.style, 'opacity')).toBeGreaterThanOrEqual(0.7);
-
-        // Neighbors taper instead of jumping to full focus width.
-        const neighborLine = screen.findByTestId('transcript-navigation-rail.marker-line:turn-2');
-        const neighborWidth = readStyleNumber(neighborLine?.props.style, 'width');
-        expect(neighborWidth).toBeGreaterThan(3);
-        expect(neighborWidth).toBeLessThan(16);
-
-        await act(async () => {
-            screen.findByTestId('transcript-navigation-rail')?.props.onKeyDown?.({ key: 'Escape', preventDefault: vi.fn() });
-        });
-        expect(readStyleNumber(
-            screen.findByTestId('transcript-navigation-rail.marker-line:pin-a')?.props.style,
-            'width',
-        )).toBe(3);
-    });
-
-    it('drives marker motion through direct handle writes without re-rendering markers when handles support it', async () => {
-        const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
-        const nodeMocks = new Map<string, { style: Record<string, unknown> }>();
-
-        const screen = await renderScreen(<TranscriptNavigationRail {...baseProps()} />, {
-            createNodeMock: (element) => {
-                const mock = { style: {} as Record<string, unknown> };
-                const testID = (element.props as { testID?: unknown } | null)?.testID;
-                if (typeof testID === 'string') nodeMocks.set(testID, mock);
-                return mock;
-            },
-        });
-        const marker = screen.findByTestId('transcript-navigation-rail.marker:pin-a');
-
-        await act(async () => {
-            marker?.props.onPointerEnter?.({ nativeEvent: { pointerType: 'mouse' } });
-        });
-
-        const focusedHandle = nodeMocks.get('transcript-navigation-rail.marker-line:pin-a');
-        expect(focusedHandle?.style.width).toBe('16px');
-        expect(Number(focusedHandle?.style.opacity)).toBeGreaterThanOrEqual(0.7);
-
-        // The React render output keeps rest motion: styling came from the
-        // direct handle write, not from re-rendering every marker.
-        const focusedLine = screen.findByTestId('transcript-navigation-rail.marker-line:pin-a');
-        expect(readStyleNumber(focusedLine?.props.style, 'width')).toBe(3);
-    });
-
-    it('glides marker magnification toward the target across frames instead of snapping', async () => {
-        const { TranscriptNavigationRail } = await import('./TranscriptNavigationRail');
-        const previousRaf = globalThis.requestAnimationFrame;
-        const previousCancelRaf = globalThis.cancelAnimationFrame;
-        const frameCallbacks: FrameRequestCallback[] = [];
-        globalThis.requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
-            frameCallbacks.push(callback);
-            return frameCallbacks.length;
-        });
-        globalThis.cancelAnimationFrame = vi.fn();
-        const nodeMocks = new Map<string, { style: Record<string, unknown> }>();
-
-        try {
-            const screen = await renderScreen(<TranscriptNavigationRail {...baseProps()} />, {
-                createNodeMock: (element) => {
-                    const mock = { style: {} as Record<string, unknown> };
-                    const testID = (element.props as { testID?: unknown } | null)?.testID;
-                    if (typeof testID === 'string') nodeMocks.set(testID, mock);
-                    return mock;
-                },
-            });
-
-            await act(async () => {
-                screen.findByTestId('transcript-navigation-rail.marker:pin-a')?.props.onPointerEnter?.({
-                    nativeEvent: { pointerType: 'mouse' },
-                });
-            });
-
-            const handle = nodeMocks.get('transcript-navigation-rail.marker-line:pin-a');
-            const readWidth = () => Number.parseFloat(String(handle?.style.width ?? '0'));
-            // Run one "frame tick": every callback queued so far (motion loop
-            // plus any presence-frame flips), never callbacks queued by them.
-            const runFrameTick = async (timestamp: number) => {
-                const callbacks = frameCallbacks.splice(0, frameCallbacks.length);
-                await act(async () => {
-                    for (const callback of callbacks) callback(timestamp);
-                });
-            };
-
-            await runFrameTick(16);
-            const firstFrameWidth = readWidth();
-            expect(firstFrameWidth).toBeGreaterThan(3);
-            expect(firstFrameWidth).toBeLessThan(16);
-
-            await runFrameTick(32);
-            const secondFrameWidth = readWidth();
-            expect(secondFrameWidth).toBeGreaterThan(firstFrameWidth);
-            expect(secondFrameWidth).toBeLessThanOrEqual(16);
-
-            // The loop keeps stepping until it settles exactly on the target,
-            // then stops scheduling frames.
-            let guard = 0;
-            while (frameCallbacks.length > 0 && guard < 120) {
-                await runFrameTick(48 + guard);
-                guard += 1;
-            }
-            expect(guard).toBeLessThan(120);
-            expect(readWidth()).toBe(16);
-            expect(frameCallbacks).toHaveLength(0);
-        } finally {
-            globalThis.requestAnimationFrame = previousRaf;
-            globalThis.cancelAnimationFrame = previousCancelRaf;
-        }
     });
 
     it('fades the rail out softly when it drops below the width threshold', async () => {

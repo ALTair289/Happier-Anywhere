@@ -5095,6 +5095,9 @@ export const pt: TranslationStructure = {
       jumpFailed: "Não foi possível saltar para esta mensagem.",
       emptyPinnedHint: "Passe o cursor sobre uma mensagem e escolha o ícone de fixar para fixá-la.",
       emptyPinnedPrivacy: "As mensagens fixadas são guardadas apenas neste dispositivo.",
+      awaitingReply: "A aguardar a resposta",
+      replyNotLoaded: "Resposta ainda não carregada",
+      loadingBody: "A criar a cronologia desta sessão",
     },
     usageLimitRecovery: {
       title: "Limite de uso atingido",

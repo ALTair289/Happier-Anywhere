@@ -5448,6 +5448,9 @@ export const ru: TranslationStructure = {
       jumpFailed: "Не удалось перейти к этому сообщению.",
       emptyPinnedHint: "Наведите курсор на сообщение и выберите значок закрепления, чтобы закрепить его.",
       emptyPinnedPrivacy: "Закрепленные сообщения сохраняются только на этом устройстве.",
+      awaitingReply: "Ожидание ответа",
+      replyNotLoaded: "Ответ ещё не загружен",
+      loadingBody: "Формируем хронологию этой сессии",
     },
     usageLimitRecovery: {
       title: "Достигнут лимит использования",

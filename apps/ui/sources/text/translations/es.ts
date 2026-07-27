@@ -4975,6 +4975,9 @@ export const es: TranslationStructure = {
       jumpFailed: "No se pudo saltar a este mensaje.",
       emptyPinnedHint: "Pasa el cursor sobre un mensaje y elige el icono de fijar para fijarlo.",
       emptyPinnedPrivacy: "Los mensajes fijados solo se guardan en este dispositivo.",
+      awaitingReply: "Esperando la respuesta",
+      replyNotLoaded: "Respuesta aún no cargada",
+      loadingBody: "Creando la cronología de esta sesión",
     },
     usageLimitRecovery: {
       title: "Límite de uso alcanzado",

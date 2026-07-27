@@ -4996,6 +4996,9 @@ export const pl: TranslationStructure = {
       jumpFailed: "Nie udało się przejść do tej wiadomości.",
       emptyPinnedHint: "Najedź kursorem na wiadomość i wybierz ikonę pinezki, aby ją przypiąć.",
       emptyPinnedPrivacy: "Przypięte wiadomości są zapisywane tylko na tym urządzeniu.",
+      awaitingReply: "Czekam na odpowiedź",
+      replyNotLoaded: "Odpowiedź jeszcze niewczytana",
+      loadingBody: "Tworzenie osi czasu tej sesji",
     },
     usageLimitRecovery: {
       title: "Osiągnięto limit użycia",

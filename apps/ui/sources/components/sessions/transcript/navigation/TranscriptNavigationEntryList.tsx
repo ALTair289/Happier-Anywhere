@@ -1,11 +1,18 @@
 import * as React from 'react';
-import { ActivityIndicator, Pressable, ScrollView, View } from 'react-native';
+import { ActivityIndicator, Animated, FlatList, Pressable, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Octicons } from '@expo/vector-icons';
 
 import { Text } from '@/components/ui/text/Text';
+import { RelativeTimeText } from '@/components/ui/selectionList/accessories/RelativeTimeText';
 import { Typography } from '@/constants/Typography';
+import { useNowMs } from '@/hooks/time/useNowMs';
+import { useReducedMotionPreference } from '@/hooks/ui/useReducedMotionPreference';
 import { t } from '@/text';
+import {
+    buildTranscriptNavigationTimelineRows,
+    type TranscriptNavigationTimelineRow,
+} from './buildTranscriptNavigationTimelineRows';
 import {
     resolveTranscriptNavigationEntryAccessibilityLabel,
     resolveTranscriptNavigationEntryPrimaryText,
@@ -32,6 +39,11 @@ type KeyboardViewProps = React.ComponentProps<typeof View> & Readonly<{
 
 const KeyboardView = View as React.ComponentType<KeyboardViewProps>;
 
+/** Only the rows visible at first paint are worth staggering; later rows arrive on scroll. */
+const TIMELINE_STAGGER_ROW_LIMIT = 6;
+const TIMELINE_STAGGER_STEP_MS = 28;
+const TIMELINE_STAGGER_DURATION_MS = 180;
+
 export type TranscriptNavigationEntryListProps = Readonly<{
     entries: readonly TranscriptNavigationEntry[];
     activeEntryId: string | null;
@@ -47,52 +59,85 @@ const stylesheet = StyleSheet.create((theme) => ({
         minWidth: 0,
     },
     content: {
-        paddingVertical: 6,
-        paddingHorizontal: 8,
-        gap: 4,
+        paddingVertical: 4,
+        paddingEnd: 10,
     },
     row: {
-        minHeight: 48,
-        borderRadius: 8,
         flexDirection: 'row',
+        alignItems: 'stretch',
+        minHeight: 56,
+        minWidth: 0,
+    },
+    // The spine lives inside every row (entry rows and day headers alike) so it
+    // stays continuous, and `flexDirection: 'row'` puts it on the leading edge in
+    // both LTR and RTL without any physical `left` placement.
+    rail: {
+        width: 34,
         alignItems: 'center',
-        gap: 8,
-        paddingHorizontal: 8,
-        paddingVertical: 7,
-        borderWidth: 1,
-        borderColor: 'transparent',
+        alignSelf: 'stretch',
+    },
+    railSegment: {
+        width: 2,
+        flex: 1,
+        backgroundColor: theme.colors.border.default,
+    },
+    railSegmentTravelled: {
+        backgroundColor: theme.colors.state.info.foreground,
+        opacity: 0.55,
+    },
+    railSegmentHidden: {
         backgroundColor: 'transparent',
     },
-    rowActive: {
-        backgroundColor: theme.colors.surface.selected,
-        borderColor: theme.colors.border.default,
+    node: {
+        width: 11,
+        height: 11,
+        borderRadius: 6,
+        marginVertical: 3,
+        borderWidth: 1.5,
+        borderColor: theme.colors.border.strong,
+        backgroundColor: theme.colors.surface.base,
     },
-    rowFocused: {
-        backgroundColor: theme.colors.surface.inset,
-    },
-    markerColumn: {
-        width: 18,
-        alignItems: 'center',
-        justifyContent: 'center',
-        alignSelf: 'stretch',
-    },
-    activeAccent: {
-        width: 3,
-        borderRadius: 2,
-        alignSelf: 'stretch',
+    nodePinned: {
+        borderColor: theme.colors.state.info.foreground,
         backgroundColor: theme.colors.state.info.foreground,
     },
-    quietAccent: {
-        width: 3,
-        borderRadius: 2,
-        alignSelf: 'stretch',
-        backgroundColor: theme.colors.border.default,
-        opacity: 0.55,
+    nodeCurrent: {
+        width: 15,
+        height: 15,
+        borderRadius: 8,
+        borderWidth: 3,
+        borderColor: theme.colors.state.info.foreground,
+        backgroundColor: theme.colors.surface.base,
+    },
+    staggerFrame: {
+        flex: 1,
+        minWidth: 0,
+    },
+    body: {
+        flex: 1,
+        minWidth: 0,
+        flexDirection: 'row',
+        alignItems: 'flex-start',
+        gap: 10,
+        borderRadius: 10,
+        paddingVertical: 9,
+        paddingHorizontal: 10,
+        marginVertical: 2,
+        backgroundColor: 'transparent',
+        borderWidth: 1,
+        borderColor: 'transparent',
+    },
+    bodyFocused: {
+        backgroundColor: theme.colors.surface.inset,
+    },
+    bodyActive: {
+        backgroundColor: theme.colors.surface.selected,
+        borderColor: theme.colors.border.default,
     },
     copy: {
         flex: 1,
         minWidth: 0,
-        gap: 2,
+        gap: 3,
     },
     primaryText: {
         color: theme.colors.text.primary,
@@ -101,13 +146,33 @@ const stylesheet = StyleSheet.create((theme) => ({
     secondaryText: {
         color: theme.colors.text.secondary,
     },
+    pendingText: {
+        color: theme.colors.text.tertiary,
+        ...Typography.default('italic'),
+    },
     unloadedText: {
         color: theme.colors.text.secondary,
     },
-    trailing: {
-        width: 18,
-        alignItems: 'center',
-        justifyContent: 'center',
+    meta: {
+        alignItems: 'flex-end',
+        gap: 4,
+        paddingTop: 1,
+    },
+    dayRow: {
+        flexDirection: 'row',
+        alignItems: 'stretch',
+        minWidth: 0,
+    },
+    dayLabelBlock: {
+        flex: 1,
+        minWidth: 0,
+        paddingTop: 12,
+        paddingBottom: 4,
+        paddingHorizontal: 10,
+    },
+    dayLabel: {
+        color: theme.colors.text.tertiary,
+        ...Typography.default('semiBold'),
     },
     errorRow: {
         marginTop: 4,
@@ -143,13 +208,243 @@ function classifySettledOutcome(outcome: TranscriptNavigationEntryJumpOutcome | 
     return null;
 }
 
-export const TranscriptNavigationEntryList = React.memo((props: TranscriptNavigationEntryListProps) => {
+function resolveDayStartMs(atMs: number): number {
+    const date = new Date(atMs);
+    date.setHours(0, 0, 0, 0);
+    return date.getTime();
+}
+
+function formatTimelineDayLabel(dayStartMs: number, nowMs: number): string {
+    const todayStartMs = resolveDayStartMs(nowMs);
+    if (dayStartMs === todayStartMs) return t('sessionHistory.today');
+    if (dayStartMs === todayStartMs - 86_400_000) return t('sessionHistory.yesterday');
+    return new Date(dayStartMs).toLocaleDateString(undefined, {
+        day: 'numeric',
+        month: 'short',
+        year: resolveDayStartMs(nowMs) - dayStartMs > 300 * 86_400_000 ? 'numeric' : undefined,
+    });
+}
+
+type TimelineNodeKind = 'none' | 'plain' | 'pinned' | 'current';
+
+type TimelineRailProps = Readonly<{
+    hasSegmentAbove: boolean;
+    hasSegmentBelow: boolean;
+    node: TimelineNodeKind;
+    nodeTestID?: string;
+    travelledAbove: boolean;
+    travelledBelow: boolean;
+}>;
+
+const TimelineRail = React.memo((props: TimelineRailProps) => {
+    const styles = stylesheet;
+    return (
+        <View
+            style={styles.rail}
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+            pointerEvents="none"
+        >
+            <View
+                style={[
+                    styles.railSegment,
+                    props.hasSegmentAbove ? null : styles.railSegmentHidden,
+                    props.hasSegmentAbove && props.travelledAbove ? styles.railSegmentTravelled : null,
+                ]}
+            />
+            {props.node === 'none' ? null : (
+                <View
+                    testID={props.nodeTestID}
+                    style={[
+                        styles.node,
+                        props.node === 'pinned' ? styles.nodePinned : null,
+                        props.node === 'current' ? styles.nodeCurrent : null,
+                    ]}
+                />
+            )}
+            <View
+                style={[
+                    styles.railSegment,
+                    props.hasSegmentBelow ? null : styles.railSegmentHidden,
+                    props.hasSegmentBelow && props.travelledBelow ? styles.railSegmentTravelled : null,
+                ]}
+            />
+        </View>
+    );
+});
+
+const TimelineStaggerFrame = React.memo((props: Readonly<{
+    enabled: boolean;
+    delayMs: number;
+    children: React.ReactNode;
+}>) => {
+    const enabled = props.enabled;
+    const progress = React.useRef(new Animated.Value(enabled ? 0 : 1)).current;
+
+    React.useEffect(() => {
+        if (!enabled) {
+            progress.setValue(1);
+            return;
+        }
+        const animation = Animated.timing(progress, {
+            toValue: 1,
+            delay: props.delayMs,
+            duration: TIMELINE_STAGGER_DURATION_MS,
+            useNativeDriver: true,
+        });
+        animation.start();
+        return () => {
+            animation.stop();
+        };
+    }, [enabled, progress, props.delayMs]);
+
+    // The frame is present in both cases so reduced motion changes the animation, never
+    // the layout: the row body still owns the remaining width beside the rail.
+    return (
+        <Animated.View
+            style={[
+                stylesheet.staggerFrame,
+                enabled
+                    ? {
+                        opacity: progress,
+                        transform: [{
+                            translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [6, 0] }),
+                        }],
+                    }
+                    : null,
+            ]}
+        >
+            {props.children}
+        </Animated.View>
+    );
+});
+
+type TimelineEntryRowProps = Readonly<{
+    entry: TranscriptNavigationEntry;
+    isActive: boolean;
+    isFocused: boolean;
+    isFirstRow: boolean;
+    isLastRow: boolean;
+    isNewestEntry: boolean;
+    nowMs: number;
+    onPress: (entry: TranscriptNavigationEntry) => void;
+    pressState: EntryPressState | null;
+    reducedMotion: boolean;
+    staggerIndex: number;
+    testIDPrefix: string;
+    travelledAbove: boolean;
+    travelledBelow: boolean;
+}>;
+
+const TimelineEntryRow = React.memo((props: TimelineEntryRowProps) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
+    const entry = props.entry;
+    const primaryText = resolveTranscriptNavigationEntryPrimaryText(entry);
+    const secondaryText = resolveTranscriptNavigationEntrySecondaryText(entry);
+    const pendingReplyText = secondaryText
+        ? null
+        : entry.loaded === false
+            ? t('session.transcriptNavigation.replyNotLoaded')
+            : props.isNewestEntry
+                ? t('session.transcriptNavigation.awaitingReply')
+                : null;
+    const node = props.isActive ? 'current' : entry.pinned ? 'pinned' : 'plain';
+
+    return (
+        <View style={styles.row}>
+            <TimelineRail
+                hasSegmentAbove={!props.isFirstRow}
+                hasSegmentBelow={!props.isLastRow}
+                node={node}
+                nodeTestID={`${props.testIDPrefix}-node-${node}:${entry.id}`}
+                travelledAbove={props.travelledAbove}
+                travelledBelow={props.travelledBelow}
+            />
+            <TimelineStaggerFrame
+                enabled={!props.reducedMotion && props.staggerIndex >= 0}
+                delayMs={Math.max(0, props.staggerIndex) * TIMELINE_STAGGER_STEP_MS}
+            >
+                <Pressable
+                    testID={`${props.testIDPrefix}-entry:${entry.id}`}
+                    onPress={() => props.onPress(entry)}
+                    style={[
+                        styles.body,
+                        props.isFocused && !props.isActive ? styles.bodyFocused : null,
+                        props.isActive ? styles.bodyActive : null,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel={resolveTranscriptNavigationEntryAccessibilityLabel(entry)}
+                    accessibilityState={{ selected: props.isActive }}
+                >
+                    <View style={styles.copy}>
+                        <Text
+                            numberOfLines={2}
+                            style={[styles.primaryText, entry.loaded ? null : styles.unloadedText]}
+                        >
+                            {primaryText}
+                        </Text>
+                        {secondaryText ? (
+                            <Text numberOfLines={2} style={styles.secondaryText}>
+                                {secondaryText}
+                            </Text>
+                        ) : null}
+                        {pendingReplyText ? (
+                            <Text
+                                testID={`${props.testIDPrefix}-entry-pending-reply:${entry.id}`}
+                                numberOfLines={1}
+                                style={styles.pendingText}
+                            >
+                                {pendingReplyText}
+                            </Text>
+                        ) : null}
+                        {props.pressState === 'error' ? (
+                            <View testID={`${props.testIDPrefix}-entry-error:${entry.id}`} style={styles.errorRow}>
+                                <Text numberOfLines={1} style={styles.errorText}>
+                                    {t('session.transcriptNavigation.jumpFailed')}
+                                </Text>
+                                <Pressable
+                                    testID={`${props.testIDPrefix}-entry-retry:${entry.id}`}
+                                    onPress={() => props.onPress(entry)}
+                                    accessibilityRole="button"
+                                    accessibilityLabel={t('common.retry')}
+                                    hitSlop={6}
+                                >
+                                    <Text numberOfLines={1} style={styles.retryText}>
+                                        {t('common.retry')}
+                                    </Text>
+                                </Pressable>
+                            </View>
+                        ) : null}
+                    </View>
+                    <View style={styles.meta}>
+                        {entry.createdAtMs !== null ? (
+                            <RelativeTimeText atMs={entry.createdAtMs} nowMs={props.nowMs} />
+                        ) : null}
+                        {props.pressState === 'pending' ? (
+                            <ActivityIndicator
+                                testID={`${props.testIDPrefix}-entry-pending:${entry.id}`}
+                                size="small"
+                                color={theme.colors.text.secondary}
+                            />
+                        ) : entry.pinned ? (
+                            <Octicons name="pin" size={13} color={theme.colors.state.info.foreground} />
+                        ) : null}
+                    </View>
+                </Pressable>
+            </TimelineStaggerFrame>
+        </View>
+    );
+});
+
+export const TranscriptNavigationEntryList = React.memo((props: TranscriptNavigationEntryListProps) => {
+    const styles = stylesheet;
     const [focusedIndex, setFocusedIndex] = React.useState(0);
     const [pressStates, setPressStates] = React.useState<ReadonlyMap<string, EntryPressState>>(() => new Map());
     const pressTokensRef = React.useRef(new Map<string, number>());
     const mountedRef = React.useRef(true);
+    const reducedMotion = useReducedMotionPreference();
+    const nowMs = useNowMs();
     const entries = props.entries;
     const activeEntryId = props.activeEntryId;
     const onEntryPress = props.onEntryPress;
@@ -202,7 +497,8 @@ export const TranscriptNavigationEntryList = React.memo((props: TranscriptNaviga
             return;
         }
 
-        // Only surface a pending indicator when data is actually pending (unloaded target).
+        // Only surface a pending indicator when data is actually pending (unloaded target):
+        // a jump into an already-loaded row settles within a frame and a spinner would flash.
         setEntryPressState(entry.id, entry.loaded === false ? 'pending' : null);
         result.then(
             (outcome) => {
@@ -261,6 +557,68 @@ export const TranscriptNavigationEntryList = React.memo((props: TranscriptNaviga
         }
     }, [activateFocusedEntry, entries.length, onRequestClose]);
 
+    const rows = React.useMemo(() => buildTranscriptNavigationTimelineRows(entries), [entries]);
+    const activeEntryIndex = React.useMemo(
+        () => entries.findIndex((entry) => entry.id === activeEntryId),
+        [activeEntryId, entries],
+    );
+
+    const renderRow = React.useCallback(({ item, index }: Readonly<{ item: TranscriptNavigationTimelineRow; index: number }>) => {
+        const isFirstRow = index === 0;
+        const isLastRow = index === rows.length - 1;
+        if (item.kind === 'day') {
+            return (
+                <View testID={`${testIDPrefix}-day:${item.dayStartMs}`} style={styles.dayRow}>
+                    <TimelineRail
+                        hasSegmentAbove={!isFirstRow}
+                        hasSegmentBelow={!isLastRow}
+                        node="none"
+                        travelledAbove={false}
+                        travelledBelow={false}
+                    />
+                    <View style={styles.dayLabelBlock}>
+                        <Text numberOfLines={1} style={styles.dayLabel}>
+                            {formatTimelineDayLabel(item.dayStartMs, nowMs)}
+                        </Text>
+                    </View>
+                </View>
+            );
+        }
+        // The spine above the reader's current position is tinted, so the panel doubles
+        // as a "how far through this session am I" indicator.
+        const travelled = activeEntryIndex >= 0 && item.entryIndex <= activeEntryIndex;
+        return (
+            <TimelineEntryRow
+                entry={item.entry}
+                isActive={item.entry.id === activeEntryId}
+                isFocused={item.entryIndex === focusedIndex}
+                isFirstRow={isFirstRow}
+                isLastRow={isLastRow}
+                isNewestEntry={item.entryIndex === entries.length - 1}
+                nowMs={nowMs}
+                onPress={handleEntryPress}
+                pressState={pressStates.get(item.entry.id) ?? null}
+                reducedMotion={reducedMotion}
+                staggerIndex={index < TIMELINE_STAGGER_ROW_LIMIT ? index : -1}
+                testIDPrefix={testIDPrefix}
+                travelledAbove={travelled}
+                travelledBelow={activeEntryIndex >= 0 && item.entryIndex < activeEntryIndex}
+            />
+        );
+    }, [
+        activeEntryId,
+        activeEntryIndex,
+        entries.length,
+        focusedIndex,
+        handleEntryPress,
+        nowMs,
+        pressStates,
+        reducedMotion,
+        rows.length,
+        styles,
+        testIDPrefix,
+    ]);
+
     return (
         <KeyboardView
             testID={`${testIDPrefix}-entry-list`}
@@ -269,81 +627,22 @@ export const TranscriptNavigationEntryList = React.memo((props: TranscriptNaviga
             tabIndex={0}
             accessibilityRole="list"
         >
-            <ScrollView
+            <FlatList
+                data={rows}
+                extraData={renderRow}
+                keyExtractor={keyExtractor}
+                renderItem={renderRow}
                 style={styles.root}
                 contentContainerStyle={styles.content}
                 keyboardShouldPersistTaps="handled"
-            >
-                {entries.map((entry, index) => {
-                    const active = activeEntryId === entry.id;
-                    const focused = index === focusedIndex;
-                    const primaryText = resolveTranscriptNavigationEntryPrimaryText(entry);
-                    const secondaryText = resolveTranscriptNavigationEntrySecondaryText(entry);
-                    const pressState = pressStates.get(entry.id) ?? null;
-                    return (
-                        <Pressable
-                            key={entry.id}
-                            testID={`${testIDPrefix}-entry:${entry.id}`}
-                            onPress={() => handleEntryPress(entry)}
-                            onFocus={() => setFocusedIndex(index)}
-                            style={[
-                                styles.row,
-                                focused && !active ? styles.rowFocused : null,
-                                active ? styles.rowActive : null,
-                            ]}
-                            accessibilityRole="button"
-                            accessibilityLabel={resolveTranscriptNavigationEntryAccessibilityLabel(entry)}
-                            accessibilityState={{ selected: active }}
-                        >
-                            <View style={styles.markerColumn}>
-                                <View style={active ? styles.activeAccent : styles.quietAccent} />
-                            </View>
-                            <View style={styles.copy}>
-                                <Text
-                                    numberOfLines={2}
-                                    style={[styles.primaryText, entry.loaded ? null : styles.unloadedText]}
-                                >
-                                    {primaryText}
-                                </Text>
-                                {secondaryText ? (
-                                    <Text numberOfLines={1} style={styles.secondaryText}>
-                                        {secondaryText}
-                                    </Text>
-                                ) : null}
-                                {pressState === 'error' ? (
-                                    <View testID={`${testIDPrefix}-entry-error:${entry.id}`} style={styles.errorRow}>
-                                        <Text numberOfLines={1} style={styles.errorText}>
-                                            {t('session.transcriptNavigation.jumpFailed')}
-                                        </Text>
-                                        <Pressable
-                                            testID={`${testIDPrefix}-entry-retry:${entry.id}`}
-                                            onPress={() => handleEntryPress(entry)}
-                                            accessibilityRole="button"
-                                            accessibilityLabel={t('common.retry')}
-                                            hitSlop={6}
-                                        >
-                                            <Text numberOfLines={1} style={styles.retryText}>
-                                                {t('common.retry')}
-                                            </Text>
-                                        </Pressable>
-                                    </View>
-                                ) : null}
-                            </View>
-                            <View style={styles.trailing}>
-                                {pressState === 'pending' ? (
-                                    <ActivityIndicator
-                                        testID={`${testIDPrefix}-entry-pending:${entry.id}`}
-                                        size="small"
-                                        color={theme.colors.text.secondary}
-                                    />
-                                ) : entry.pinned ? (
-                                    <Octicons name="pin" size={14} color={theme.colors.state.info.foreground} />
-                                ) : null}
-                            </View>
-                        </Pressable>
-                    );
-                })}
-            </ScrollView>
+                initialNumToRender={16}
+                windowSize={7}
+                removeClippedSubviews={false}
+            />
         </KeyboardView>
     );
 });
+
+function keyExtractor(row: TranscriptNavigationTimelineRow): string {
+    return row.id;
+}

@@ -4,25 +4,21 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { ScrollEdgeFades } from '@/components/ui/scroll/ScrollEdgeFades';
 import {
+    useTranscriptNavigationCurrentAnchorId,
+    useTranscriptNavigationVisibleAnchorIds,
+} from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityStore';
+
+import {
     deriveTranscriptNavigationRailLayout,
     type TranscriptNavigationRailPlatformOS,
 } from './deriveTranscriptNavigationRailLayout';
-import {
-    resolveTranscriptNavigationRailMarkerMotion,
-    resolveTranscriptNavigationRailMotionUpdateIndexes,
-    stepTranscriptNavigationRailMarkerMotion,
-    transcriptNavigationRailMarkerMotionEquals,
-    type TranscriptNavigationRailMarkerMotion,
-} from './resolveTranscriptNavigationRailMotion';
+import { resolveTranscriptNavigationRailMarkerMotion } from './resolveTranscriptNavigationRailMotion';
 import {
     resolveTranscriptNavigationRailSoftFadeStyle,
     useTranscriptNavigationRailSoftPresence,
 } from './useTranscriptNavigationRailSoftPresence';
 import { resolveTranscriptNavigationRailPreviewPlacement } from './resolveTranscriptNavigationRailPreviewPlacement';
-import {
-    applyTranscriptNavigationRailMarkerMotionWrite,
-    type TranscriptNavigationRailMarkerLineHandle,
-} from './transcriptNavigationRailMotionWrite';
+import { resolveTranscriptNavigationEntryAccessibilityLabel } from './transcriptNavigationAccessibility';
 import { TranscriptNavigationRailMarker } from './TranscriptNavigationRailMarker';
 import { TranscriptNavigationRailPreview } from './TranscriptNavigationRailPreview';
 import type { TranscriptJumpTarget } from '../viewport/jump/transcriptJumpTargetTypes';
@@ -33,7 +29,6 @@ export type TranscriptNavigationRailEntry = TranscriptNavigationEntry;
 export type TranscriptNavigationRailJumpRequest = TranscriptNavigationJumpRequest & Readonly<{ source: 'rail' }>;
 
 export type TranscriptNavigationRailProps = Readonly<{
-    currentAnchorId: string | null;
     entries: readonly TranscriptNavigationRailEntry[];
     onJumpToEntry: (entry: TranscriptNavigationRailEntry, request: TranscriptNavigationRailJumpRequest) => void;
     paneHeightPx: number;
@@ -42,12 +37,14 @@ export type TranscriptNavigationRailProps = Readonly<{
     previewMaxWidthPx?: number;
     reducedMotion?: boolean;
     scrollTopPx?: number;
+    /** The rail subscribes to this session's navigation visibility itself. */
+    sessionId: string;
     transcriptContentWidthPx: number;
     transcriptMaxWidthPx?: number;
-    visibleAnchorIds?: readonly string[];
 }>;
 
 type WebRovingViewProps = React.ComponentPropsWithRef<typeof View> & {
+    'aria-activedescendant'?: string;
     onKeyDown?: (event: {
         key?: string;
         preventDefault?: () => void;
@@ -93,13 +90,6 @@ function resolveJumpTarget(entry: TranscriptNavigationRailEntry): TranscriptJump
     return null;
 }
 
-function readPointerType(event: unknown): string | null {
-    if (!event || typeof event !== 'object') return null;
-    const nativeEvent = (event as { nativeEvent?: { pointerType?: unknown }; pointerType?: unknown }).nativeEvent;
-    const pointerType = nativeEvent?.pointerType ?? (event as { pointerType?: unknown }).pointerType;
-    return typeof pointerType === 'string' ? pointerType : null;
-}
-
 function readScrollTop(event: unknown): number {
     if (!event || typeof event !== 'object') return 0;
     const nativeEvent = (event as { nativeEvent?: { contentOffset?: { y?: unknown } } }).nativeEvent;
@@ -123,6 +113,7 @@ function resolveDocumentKeydownHost(): DocumentKeydownHost | null {
 export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
     const styles = stylesheet;
     const { theme } = useUnistyles();
+    const railDomId = React.useId();
     const [scrollTopPx, setScrollTopPx] = React.useState(() => (
         typeof props.scrollTopPx === 'number' && Number.isFinite(props.scrollTopPx) && props.scrollTopPx >= 0
             ? props.scrollTopPx
@@ -137,37 +128,29 @@ export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
         transcriptContentWidthPx: props.transcriptContentWidthPx,
         transcriptMaxWidthPx: props.transcriptMaxWidthPx,
     });
-    const activeIndex = React.useMemo(
-        () => props.entries.findIndex((entry) => entry.id === props.currentAnchorId),
-        [props.currentAnchorId, props.entries],
-    );
-    const [focusedIndex, setFocusedIndex] = React.useState<number | null>(null);
-    // True once a direct style write failed, switching marker motion to
-    // bounded React-state rendering. Never silently no-op motion writes.
-    const [motionWriteFallback, setMotionWriteFallback] = React.useState(false);
-    const [previewHeightPx, setPreviewHeightPx] = React.useState<number | null>(null);
-    const keyboardIndexRef = React.useRef(activeIndex >= 0 ? activeIndex : 0);
-    const markerLineRefs = React.useRef(new Map<string, TranscriptNavigationRailMarkerLineHandle>());
-    const pointerInsidePreviewRef = React.useRef(false);
-    const pointerInsideRailRef = React.useRef(false);
-    const pendingFocusIndexRef = React.useRef<number | null>(null);
-    const appliedFocusIndexRef = React.useRef<number | null>(null);
-    const motionFrameRef = React.useRef<number | null>(null);
-    const motionWriteFallbackRef = React.useRef(false);
-    // In-flight glide state per marker id: the last style written by the rAF
-    // loop while it eases toward the resolved target. Focused markers that
-    // settled off their rendered rest style stay here so post-render
-    // re-applies can restore them after React commits reset inline styles.
-    const motionStateRef = React.useRef(new Map<string, TranscriptNavigationRailMarkerMotion>());
+    // Two narrow subscriptions off the ONE visibility store: the current anchor
+    // changes at turn-boundary rate and the visible set at frame rate. Reading
+    // them here (instead of accepting a host-published snapshot) keeps an anchor
+    // change inside the rail rather than re-rendering the whole transcript host.
+    const currentAnchorId = useTranscriptNavigationCurrentAnchorId(props.sessionId, { enabled: layout.visible });
+    const visibleAnchorIdList = useTranscriptNavigationVisibleAnchorIds(props.sessionId, { enabled: layout.visible });
     const entryIndexById = React.useMemo(() => {
         const map = new Map<string, number>();
         props.entries.forEach((entry, index) => map.set(entry.id, index));
         return map;
     }, [props.entries]);
+    const activeIndex = currentAnchorId !== null
+        ? entryIndexById.get(currentAnchorId) ?? -1
+        : -1;
     const visibleAnchorIds = React.useMemo(
-        () => new Set(props.visibleAnchorIds ?? []),
-        [props.visibleAnchorIds],
+        () => new Set(visibleAnchorIdList),
+        [visibleAnchorIdList],
     );
+    const [focusedIndex, setFocusedIndex] = React.useState<number | null>(null);
+    const [previewHeightPx, setPreviewHeightPx] = React.useState<number | null>(null);
+    const keyboardIndexRef = React.useRef(activeIndex >= 0 ? activeIndex : 0);
+    const pointerInsidePreviewRef = React.useRef(false);
+    const pointerInsideRailRef = React.useRef(false);
 
     React.useEffect(() => {
         if (typeof props.scrollTopPx !== 'number' || !Number.isFinite(props.scrollTopPx) || props.scrollTopPx < 0) return;
@@ -180,121 +163,9 @@ export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
         }
     }, [layout.scrollTopPx, scrollTopPx]);
 
-    React.useEffect(() => () => {
-        if (motionFrameRef.current !== null && typeof globalThis.cancelAnimationFrame === 'function') {
-            globalThis.cancelAnimationFrame(motionFrameRef.current);
-        }
-        motionFrameRef.current = null;
-    }, []);
-
-    const scheduleMotionUpdate = React.useCallback((nextFocusIndex: number | null) => {
-        pendingFocusIndexRef.current = nextFocusIndex;
-        if (motionFrameRef.current !== null) return;
-
-        // Single rAF-driven motion applier: per-marker styles are written
-        // directly to platform handles (DOM inline styles on web,
-        // setNativeProps on native) and the focused-preview React state is
-        // committed once per frame. Markers themselves do not re-render on
-        // pointer moves unless the direct write path is unavailable. Styles
-        // glide toward their targets with a critically-damped lerp, so the
-        // loop keeps scheduling frames until every touched marker settles.
-        const runFrame = () => {
-            motionFrameRef.current = null;
-            const nextIndex = pendingFocusIndexRef.current;
-            const previousIndex = appliedFocusIndexRef.current;
-            let needsAnotherFrame = false;
-            if (!motionWriteFallbackRef.current) {
-                const rafAvailable = typeof globalThis.requestAnimationFrame === 'function';
-                // Temporal easing needs schedulable frames; reduced motion
-                // keeps the instant, opacity-only styling contract.
-                const easing = rafAvailable && props.reducedMotion !== true;
-                const updateIndexes = new Set(resolveTranscriptNavigationRailMotionUpdateIndexes({
-                    markerCount: props.entries.length,
-                    nextFocusIndex: nextIndex,
-                    previousFocusIndex: previousIndex,
-                }));
-                const focusWindow = new Set(resolveTranscriptNavigationRailMotionUpdateIndexes({
-                    markerCount: props.entries.length,
-                    nextFocusIndex: nextIndex,
-                    previousFocusIndex: nextIndex,
-                }));
-                for (const id of motionStateRef.current.keys()) {
-                    const inFlightIndex = entryIndexById.get(id);
-                    if (inFlightIndex === undefined) {
-                        motionStateRef.current.delete(id);
-                        continue;
-                    }
-                    updateIndexes.add(inFlightIndex);
-                }
-                for (const index of updateIndexes) {
-                    const entry = props.entries[index];
-                    if (!entry) continue;
-                    const handle = markerLineRefs.current.get(entry.id);
-                    const resolveInput = {
-                        activeIndex: activeIndex >= 0 ? activeIndex : null,
-                        markerIndex: index,
-                        reducedMotion: props.reducedMotion === true,
-                        visible: visibleAnchorIds.has(entry.id),
-                    };
-                    const target = resolveTranscriptNavigationRailMarkerMotion({ ...resolveInput, focusIndex: nextIndex });
-                    // Rest = what React renders for this marker in direct-write
-                    // mode, so first glide frames continue from the committed
-                    // styles instead of jumping.
-                    const rest = resolveTranscriptNavigationRailMarkerMotion({ ...resolveInput, focusIndex: null });
-                    const step = stepTranscriptNavigationRailMarkerMotion(
-                        easing ? motionStateRef.current.get(entry.id) ?? rest : null,
-                        target,
-                    );
-                    const writeResult = applyTranscriptNavigationRailMarkerMotionWrite(handle, step.motion);
-                    if (writeResult === 'unsupported') {
-                        // Explicit fallback: render motion through React state
-                        // instead of leaving markers frozen at rest.
-                        motionWriteFallbackRef.current = true;
-                        setMotionWriteFallback(true);
-                        motionStateRef.current.clear();
-                        break;
-                    }
-                    if (!step.settled) {
-                        motionStateRef.current.set(entry.id, step.motion);
-                        needsAnotherFrame = true;
-                    } else if (focusWindow.has(index) && !transcriptNavigationRailMarkerMotionEquals(step.motion, rest)) {
-                        motionStateRef.current.set(entry.id, step.motion);
-                    } else {
-                        motionStateRef.current.delete(entry.id);
-                    }
-                }
-            }
-            appliedFocusIndexRef.current = nextIndex;
-            setFocusedIndex(nextIndex);
-            if (needsAnotherFrame && motionFrameRef.current === null && typeof globalThis.requestAnimationFrame === 'function') {
-                motionFrameRef.current = globalThis.requestAnimationFrame(runFrame);
-            }
-        };
-
-        if (typeof globalThis.requestAnimationFrame === 'function') {
-            motionFrameRef.current = globalThis.requestAnimationFrame(runFrame);
-            return;
-        }
-        runFrame();
-    }, [activeIndex, entryIndexById, props.entries, props.reducedMotion, visibleAnchorIds]);
-
     const updateFocusedIndex = React.useCallback((nextIndex: number | null) => {
-        scheduleMotionUpdate(nextIndex);
-    }, [scheduleMotionUpdate]);
-
-    // React re-renders reset marker inline styles from props (for example when
-    // the active anchor or visible set changes). In direct-write mode, re-apply
-    // the current focus motion after every commit so rAF-applied styles are
-    // never clobbered by a render pass.
-    React.useEffect(() => {
-        if (motionWriteFallbackRef.current) return;
-        if (
-            appliedFocusIndexRef.current === null &&
-            pendingFocusIndexRef.current === null &&
-            motionStateRef.current.size === 0
-        ) return;
-        scheduleMotionUpdate(pendingFocusIndexRef.current);
-    });
+        setFocusedIndex(nextIndex);
+    }, []);
 
     React.useEffect(() => {
         if (focusedIndex !== null && focusedIndex >= props.entries.length) {
@@ -305,28 +176,26 @@ export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
         }
     }, [focusedIndex, props.entries.length, updateFocusedIndex]);
 
+    const onJumpToEntry = props.onJumpToEntry;
+    const entries = props.entries;
     const activateEntry = React.useCallback((entry: TranscriptNavigationRailEntry) => {
         const target = resolveJumpTarget(entry);
         if (!target) return;
-        props.onJumpToEntry(entry, {
+        onJumpToEntry(entry, {
             align: resolveJumpAlignment(entry),
             scope: { kind: 'main', sessionId: entry.sessionId },
             source: 'rail',
             target,
         });
-    }, [props.onJumpToEntry]);
+    }, [onJumpToEntry]);
 
     const activateEntryAtIndex = React.useCallback((index: number) => {
-        const entry = props.entries[index];
+        const entry = entries[index];
         if (entry) activateEntry(entry);
-    }, [activateEntry, props.entries]);
+    }, [activateEntry, entries]);
 
     const moveKeyboardFocus = (delta: number) => {
-        // Prefer the pending (rAF-batched) focus so rapid keypresses within one
-        // frame accumulate instead of resetting to the committed state.
-        const baseIndex = pendingFocusIndexRef.current
-            ?? focusedIndex
-            ?? (activeIndex >= 0 ? activeIndex : keyboardIndexRef.current);
+        const baseIndex = focusedIndex ?? (activeIndex >= 0 ? activeIndex : keyboardIndexRef.current);
         const nextIndex = Math.max(0, Math.min(props.entries.length - 1, baseIndex + delta));
         keyboardIndexRef.current = nextIndex;
         updateFocusedIndex(nextIndex);
@@ -401,33 +270,31 @@ export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
         }
     };
 
-    const handleMarkerPointerEnter = React.useCallback((index: number, event: unknown) => {
-        if (readPointerType(event) === 'touch') return;
+    // Pointer type is deliberately NOT filtered: a touch tap must both reveal
+    // the marker's preview and activate it. Touch pointers emit the matching
+    // leave event when the tap ends, so the preview never sticks open.
+    const handleMarkerPointerEnter = React.useCallback((index: number) => {
         pointerInsideRailRef.current = true;
         keyboardIndexRef.current = index;
         updateFocusedIndex(index);
     }, [updateFocusedIndex]);
 
-    const handleRailPointerEnter = React.useCallback((event: unknown) => {
-        if (readPointerType(event) === 'touch') return;
+    const handleRailPointerEnter = React.useCallback(() => {
         pointerInsideRailRef.current = true;
     }, []);
 
-    const handleRailPointerLeave = React.useCallback((event: unknown) => {
-        if (readPointerType(event) === 'touch') return;
+    const handleRailPointerLeave = React.useCallback(() => {
         pointerInsideRailRef.current = false;
         if (!pointerInsidePreviewRef.current) {
             updateFocusedIndex(null);
         }
     }, [updateFocusedIndex]);
 
-    const handlePreviewPointerEnter = React.useCallback((event: unknown) => {
-        if (readPointerType(event) === 'touch') return;
+    const handlePreviewPointerEnter = React.useCallback(() => {
         pointerInsidePreviewRef.current = true;
     }, []);
 
-    const handlePreviewPointerLeave = React.useCallback((event: unknown) => {
-        if (readPointerType(event) === 'touch') return;
+    const handlePreviewPointerLeave = React.useCallback(() => {
         pointerInsidePreviewRef.current = false;
         if (!pointerInsideRailRef.current) {
             updateFocusedIndex(null);
@@ -436,17 +303,6 @@ export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
 
     const handleRailScroll = React.useCallback((event: unknown) => {
         setScrollTopPx(readScrollTop(event));
-    }, []);
-
-    const registerMarkerLineRef = React.useCallback((
-        anchorId: string,
-        handle: TranscriptNavigationRailMarkerLineHandle | null,
-    ) => {
-        if (handle) {
-            markerLineRefs.current.set(anchorId, handle);
-            return;
-        }
-        markerLineRefs.current.delete(anchorId);
     }, []);
 
     const handlePreviewLayout = React.useCallback((event: unknown) => {
@@ -479,6 +335,11 @@ export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
 
     if (!railPresence.mounted) return null;
 
+    // Roving tabstop: the rail keeps DOM focus while the active descendant
+    // moves, so assistive technology follows the selection without the rail
+    // stealing focus from the transcript or auto-scrolling itself.
+    const activeDescendantIndex = focusedIndex ?? (activeIndex >= 0 ? activeIndex : null);
+
     return (
         <WebRailView
             testID="transcript-navigation-rail"
@@ -500,6 +361,7 @@ export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
         >
             <WebRovingView
                 testID="transcript-navigation-rail.roving-tabstop"
+                aria-activedescendant={activeDescendantIndex !== null ? `${railDomId}marker${activeDescendantIndex}` : undefined}
                 onKeyDown={handleKeyDown}
                 tabIndex={0}
                 style={[
@@ -534,25 +396,23 @@ export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
                         {props.entries.map((entry, index) => (
                             <TranscriptNavigationRailMarker
                                 key={entry.id}
+                                accessibilityLabel={resolveTranscriptNavigationEntryAccessibilityLabel(entry)}
                                 active={index === activeIndex}
                                 anchorId={entry.id}
+                                domId={`${railDomId}marker${index}`}
                                 index={index}
-                                label={entry.label}
-                                lineRef={registerMarkerLineRef}
                                 markerHeightPx={layout.markerHeightPx}
                                 motion={resolveTranscriptNavigationRailMarkerMotion({
                                     activeIndex: activeIndex >= 0 ? activeIndex : null,
-                                    // Direct-write mode renders rest motion and lets the
-                                    // rAF loop style focus; fallback mode renders focus
-                                    // motion through React state.
-                                    focusIndex: motionWriteFallback ? focusedIndex : null,
+                                    focusIndex: focusedIndex,
                                     markerIndex: index,
-                                    reducedMotion: props.reducedMotion === true,
+                                    reducedMotion,
                                     visible: visibleAnchorIds.has(entry.id),
                                 })}
                                 onFocusFromPointer={handleMarkerPointerEnter}
                                 onPress={activateEntryAtIndex}
                                 pinned={isPinnedEntry(entry)}
+                                reducedMotion={reducedMotion}
                                 topPx={index * (layout.markerHeightPx + layout.markerSpacingPx)}
                                 visible={visibleAnchorIds.has(entry.id)}
                             />

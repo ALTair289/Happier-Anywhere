@@ -7,6 +7,7 @@ import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 
 import {
+    resolveTranscriptNavigationEntryAccessibilityLabel,
     resolveTranscriptNavigationEntryPrimaryText,
     resolveTranscriptNavigationEntrySecondaryText,
 } from './transcriptNavigationAccessibility';
@@ -51,7 +52,7 @@ export function TranscriptNavigationRailPreview(props: TranscriptNavigationRailP
     const body = resolveTranscriptNavigationEntrySecondaryText(props.entry);
     return (
         <WebPreviewView
-            accessibilityLabel={props.entry.label}
+            accessibilityLabel={resolveTranscriptNavigationEntryAccessibilityLabel(props.entry)}
             onLayout={props.onLayout}
             onPointerEnter={props.onPointerEnter}
             onPointerLeave={props.onPointerLeave}

@@ -4633,6 +4633,9 @@ export const en = {
             jumpFailed: 'Could not jump to this message.',
             emptyPinnedHint: 'Hover a message and choose the pin icon to pin it.',
             emptyPinnedPrivacy: 'Pins are saved on this device only.',
+            awaitingReply: 'Waiting for the reply',
+            replyNotLoaded: 'Reply not loaded yet',
+            loadingBody: 'Building the timeline for this session',
         },
         usageLimitRecovery: {
             title: 'Usage limit reached',

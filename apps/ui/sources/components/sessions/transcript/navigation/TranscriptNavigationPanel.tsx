@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
+import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import { SegmentedTabBar, type SegmentedTab } from '@/components/ui/navigation/SegmentedTabBar';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
@@ -20,13 +21,10 @@ export type TranscriptNavigationPanelProps = Readonly<{
     activeEntryId: string | null;
     onEntryPress: TranscriptNavigationEntryPressHandler;
     onRequestClose?: () => void;
+    /** True while the session transcript has not produced its first page yet. */
+    isLoading?: boolean;
     testIDPrefix?: string;
 }>;
-
-const MODE_TABS: ReadonlyArray<SegmentedTab<TranscriptNavigationDerivationMode>> = [
-    { id: 'all', label: t('session.transcriptNavigation.modeAll') },
-    { id: 'pinned', label: t('session.transcriptNavigation.modePinned') },
-];
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -84,6 +82,16 @@ const stylesheet = StyleSheet.create((theme) => ({
         marginTop: 6,
         color: theme.colors.text.tertiary,
     },
+    loading: {
+        flex: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 10,
+        paddingHorizontal: 18,
+    },
+    loadingText: {
+        color: theme.colors.text.secondary,
+    },
 }));
 
 function defaultTestIDPrefix(prefix: string | undefined): string {
@@ -99,6 +107,7 @@ function filterEntries(entries: readonly TranscriptNavigationEntry[], mode: Tran
 
 export const TranscriptNavigationPanel = React.memo((props: TranscriptNavigationPanelProps) => {
     const styles = stylesheet;
+    const { theme } = useUnistyles();
     const [mode, setMode] = React.useState<TranscriptNavigationDerivationMode>('all');
     const testIDPrefix = defaultTestIDPrefix(props.testIDPrefix);
     const entries = React.useMemo(() => filterEntries(props.entries, mode), [mode, props.entries]);
@@ -106,6 +115,14 @@ export const TranscriptNavigationPanel = React.memo((props: TranscriptNavigation
     const countLabel = mode === 'pinned'
         ? t('session.transcriptNavigation.pinnedCount', { count: pinnedCount })
         : t('session.transcriptNavigation.entryCount', { count: props.entries.length });
+    // Resolved during render, never at module scope or behind a mount-time memo: `t` reads
+    // the in-app language, which may differ from the device default the module first saw
+    // and can change while this panel stays mounted.
+    const modeTabs: ReadonlyArray<SegmentedTab<TranscriptNavigationDerivationMode>> = [
+        { id: 'all', label: t('session.transcriptNavigation.modeAll') },
+        { id: 'pinned', label: t('session.transcriptNavigation.modePinned') },
+    ];
+    const showLoading = props.isLoading === true && props.entries.length === 0;
 
     return (
         <View
@@ -129,7 +146,7 @@ export const TranscriptNavigationPanel = React.memo((props: TranscriptNavigation
             </View>
             <View style={styles.mode}>
                 <SegmentedTabBar
-                    tabs={MODE_TABS}
+                    tabs={modeTabs}
                     activeTabId={mode}
                     onSelectTab={setMode}
                     testIDPrefix={`${testIDPrefix}-mode`}
@@ -137,7 +154,12 @@ export const TranscriptNavigationPanel = React.memo((props: TranscriptNavigation
                 />
             </View>
             <View style={styles.body}>
-                {entries.length > 0 ? (
+                {showLoading ? (
+                    <View testID={`${testIDPrefix}-loading`} style={styles.loading}>
+                        <ActivitySpinner size="small" color={theme.colors.text.secondary} />
+                        <Text style={styles.loadingText}>{t('session.transcriptNavigation.loadingBody')}</Text>
+                    </View>
+                ) : entries.length > 0 ? (
                     <TranscriptNavigationEntryList
                         entries={entries}
                         activeEntryId={props.activeEntryId}

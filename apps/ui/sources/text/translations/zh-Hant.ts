@@ -4298,6 +4298,9 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
               jumpFailed: '無法跳至此訊息。',
               emptyPinnedHint: '將游標移到訊息上並選擇固定圖示即可固定。',
               emptyPinnedPrivacy: '固定內容僅儲存在此裝置上。',
+              awaitingReply: '正在等待回覆',
+              replyNotLoaded: '回覆尚未載入',
+              loadingBody: '正在建立此工作階段的時間軸',
           },
           usageLimitRecovery: {
             title: '已達到使用限制',

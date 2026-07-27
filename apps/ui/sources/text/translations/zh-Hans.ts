@@ -4797,6 +4797,9 @@ export const zhHans: TranslationStructure = {
       jumpFailed: "无法跳转到此消息。",
       emptyPinnedHint: "将光标悬停在消息上并选择固定图标即可固定。",
       emptyPinnedPrivacy: "固定内容仅保存在此设备上。",
+      awaitingReply: "正在等待回复",
+      replyNotLoaded: "回复尚未加载",
+      loadingBody: "正在构建此会话的时间线",
     },
     usageLimitRecovery: {
       title: "已达到使用限制",

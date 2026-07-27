@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { Pressable } from 'react-native';
 import { act } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -12,20 +13,42 @@ import type { TranscriptNavigationEntry } from './transcriptNavigationTypes';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+/** Stands in for the in-app language setting, which can change while the panel stays mounted. */
+const appLanguage = vi.hoisted(() => ({ current: 'en' }));
+
 installNavigationCommonModuleMocks({
+    typography: async () => ({
+        Typography: {
+            default: () => ({}),
+            tabular: () => ({}),
+        },
+    }),
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
         return createReactNativeWebMock({
             Pressable: ({ children, ...props }: any) => React.createElement('Pressable', props, children),
             ScrollView: ({ children, ...props }: any) => React.createElement('ScrollView', props, children),
             View: ({ children, ...props }: any) => React.createElement('View', props, children),
+            // The stub renders `FlatList` as an empty host element; the timeline is a real
+            // virtualized list, so stand the renderer in to keep asserting on its rows.
+            FlatList: ({ data, renderItem, keyExtractor, ...rest }: any) => React.createElement(
+                'FlatList',
+                rest,
+                (data ?? []).map((item: any, index: number) => React.createElement(
+                    React.Fragment,
+                    { key: keyExtractor ? keyExtractor(item, index) : String(index) },
+                    renderItem?.({ item, index }),
+                )),
+            ),
         });
     },
     text: async () => {
         const { createTextModuleMock } = await import('@/dev/testkit/mocks/text');
         return createTextModuleMock({
             translate: (key, params) => (
-                typeof params?.label === 'string' ? `${key}:${params.label}` : key
+                typeof params?.label === 'string'
+                    ? `${appLanguage.current}/${key}:${params.label}`
+                    : `${appLanguage.current}/${key}`
             ),
         });
     },
@@ -73,6 +96,37 @@ const ENTRIES: readonly TranscriptNavigationEntry[] = [
 ];
 
 describe('TranscriptNavigationPanel', () => {
+    it('resolves the mode tab labels at render time so an in-app language change reaches them', async () => {
+        standardCleanup();
+        appLanguage.current = 'en';
+        const { TranscriptNavigationPanel } = await import('./TranscriptNavigationPanel');
+
+        function Wrapper() {
+            const [, forceRender] = React.useReducer((value: number) => value + 1, 0);
+            return (
+                <>
+                    <Pressable testID="force-rerender" onPress={forceRender} />
+                    <TranscriptNavigationPanel
+                        sessionId="s1"
+                        entries={ENTRIES}
+                        activeEntryId={null}
+                        onEntryPress={() => {}}
+                        testIDPrefix="nav"
+                    />
+                </>
+            );
+        }
+
+        const screen = await renderScreen(<Wrapper />);
+        expect(screen.getTextContent()).toContain('en/session.transcriptNavigation.modeAll');
+
+        appLanguage.current = 'fr';
+        await screen.pressByTestIdAsync('force-rerender');
+
+        expect(screen.getTextContent()).toContain('fr/session.transcriptNavigation.modeAll');
+        expect(screen.getTextContent()).toContain('fr/session.transcriptNavigation.modePinned');
+    });
+
     it('switches between All and Pinned modes with the segmented control', async () => {
         standardCleanup();
         const { TranscriptNavigationPanel } = await import('./TranscriptNavigationPanel');

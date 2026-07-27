@@ -4651,6 +4651,9 @@ deps: {
             jumpFailed: 'No s’ha pogut saltar a aquest missatge.',
             emptyPinnedHint: 'Passa el cursor per sobre d’un missatge i tria la icona de fixar per fixar-lo.',
             emptyPinnedPrivacy: 'Els missatges fixats només es desen en aquest dispositiu.',
+            awaitingReply: 'Esperant la resposta',
+            replyNotLoaded: 'Resposta encara no carregada',
+            loadingBody: 'Creant la cronologia de la sessió',
         },
         usageLimitRecovery: {
             title: 'S’ha assolit el límit d’ús',

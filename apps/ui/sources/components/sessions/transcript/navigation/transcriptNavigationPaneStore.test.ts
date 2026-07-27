@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { TranscriptNavigationEntry } from './transcriptNavigationTypes';
 import {
+    awaitTranscriptNavigationJumpHandler,
     createEmptyTranscriptNavigationPaneSnapshot,
     createTranscriptNavigationPaneStore,
+    transcriptNavigationPaneStore,
 } from './transcriptNavigationPaneStore';
 
 function entry(overrides: Partial<TranscriptNavigationEntry> & Pick<TranscriptNavigationEntry, 'id' | 'sessionId' | 'seq'>): TranscriptNavigationEntry {
@@ -91,29 +93,63 @@ describe('transcript navigation pane store', () => {
     });
 });
 
-describe('transcript navigation pane subscriber signal', () => {
-    it('reports per-session subscriber presence reactively as consumers attach and detach', () => {
-        const store = createTranscriptNavigationPaneStore();
-        const countListener = vi.fn();
+describe('awaitTranscriptNavigationJumpHandler', () => {
+    afterEach(() => {
+        transcriptNavigationPaneStore.set('await-session', null);
+    });
 
-        expect(store.hasSubscribers('s1')).toBe(false);
-        const stopCountWatch = store.subscribeSubscriberPresence('s1', countListener);
+    it('resolves with the handler a host publishes AFTER the press, never before the reveal commits', async () => {
+        const entries = [entry({ id: 'turn-1', sessionId: 'await-session', seq: 1 })];
+        const onEntryPress = vi.fn();
+        let observedHandlerWhileWaiting: unknown = 'unobserved';
 
-        const unsubscribeA = store.subscribe('s1', vi.fn());
-        expect(store.hasSubscribers('s1')).toBe(true);
-        expect(countListener).toHaveBeenCalledTimes(1);
+        // No host registered yet: this is the phone-cockpit case, where the chat
+        // scene is frozen and React has torn its layout effects down.
+        const pending = awaitTranscriptNavigationJumpHandler('await-session', { timeoutMs: 2_000 });
+        pending.then((handler) => {
+            observedHandlerWhileWaiting = handler;
+        });
 
-        const unsubscribeB = store.subscribe('s1', vi.fn());
-        expect(store.hasSubscribers('s1')).toBe(true);
+        await Promise.resolve();
+        expect(observedHandlerWhileWaiting).toBe('unobserved');
 
-        unsubscribeA();
-        expect(store.hasSubscribers('s1')).toBe(true);
-        unsubscribeB();
-        expect(store.hasSubscribers('s1')).toBe(false);
-        expect(countListener).toHaveBeenCalledTimes(countListener.mock.calls.length);
-        expect(countListener.mock.calls.length).toBeGreaterThanOrEqual(2);
+        transcriptNavigationPaneStore.set('await-session', {
+            activeEntryId: null,
+            entries,
+            onEntryPress,
+        });
 
-        stopCountWatch();
-        expect(store.hasSubscribers('s2')).toBe(false);
+        await expect(pending).resolves.toBe(onEntryPress);
+    });
+
+    it('yields a task before handing back an already-registered handler', async () => {
+        const onEntryPress = vi.fn();
+        transcriptNavigationPaneStore.set('await-session', {
+            activeEntryId: null,
+            entries: [entry({ id: 'turn-1', sessionId: 'await-session', seq: 1 })],
+            onEntryPress,
+        });
+
+        let settled = false;
+        const pending = awaitTranscriptNavigationJumpHandler('await-session').then((handler) => {
+            settled = true;
+            return handler;
+        });
+
+        await Promise.resolve();
+        expect(settled).toBe(false);
+
+        await expect(pending).resolves.toBe(onEntryPress);
+    });
+
+    it('resolves null once the wait budget elapses with no host', async () => {
+        vi.useFakeTimers();
+        try {
+            const pending = awaitTranscriptNavigationJumpHandler('await-session', { timeoutMs: 50 });
+            await vi.advanceTimersByTimeAsync(60);
+            await expect(pending).resolves.toBeNull();
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

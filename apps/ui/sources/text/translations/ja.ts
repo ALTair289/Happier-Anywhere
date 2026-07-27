@@ -5242,6 +5242,9 @@ localTailscale: {
       jumpFailed: "このメッセージに移動できませんでした。",
       emptyPinnedHint: "メッセージにカーソルを合わせてピンアイコンを選ぶと固定できます。",
       emptyPinnedPrivacy: "ピン留めはこのデバイスにのみ保存されます。",
+      awaitingReply: "応答を待っています",
+      replyNotLoaded: "応答はまだ読み込まれていません",
+      loadingBody: "このセッションのタイムラインを作成中",
     },
     usageLimitRecovery: {
       title: "使用制限に達しました",

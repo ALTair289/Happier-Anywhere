@@ -11,7 +11,30 @@ import type {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-installNavigationCommonModuleMocks();
+installNavigationCommonModuleMocks({
+    typography: async () => ({
+        Typography: {
+            default: () => ({}),
+            tabular: () => ({}),
+        },
+    }),
+    reactNative: async () => {
+        const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
+        return createReactNativeWebMock({
+            // The stub renders `FlatList` as an empty host element; the timeline is a real
+            // virtualized list, so stand the renderer in to keep asserting on its rows.
+            FlatList: ({ data, renderItem, keyExtractor, ...rest }: any) => React.createElement(
+                'FlatList',
+                rest,
+                (data ?? []).map((item: any, index: number) => React.createElement(
+                    React.Fragment,
+                    { key: keyExtractor ? keyExtractor(item, index) : String(index) },
+                    renderItem?.({ item, index }),
+                )),
+            ),
+        });
+    },
+});
 
 vi.mock('@expo/vector-icons', async () => (await import('@/dev/testkit/mocks/icons')).createExpoVectorIconsMock());
 
