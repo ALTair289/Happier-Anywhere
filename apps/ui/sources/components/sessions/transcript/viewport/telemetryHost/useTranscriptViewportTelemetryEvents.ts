@@ -5,6 +5,7 @@ import type { ChatTranscriptListItem } from '@/components/sessions/transcript/ch
 import {
     configureTranscriptViewportTelemetryFromTuning,
     recordTranscriptViewportTelemetryEvent,
+    resolveTranscriptViewportTelemetryRendererFacts,
     resolveTranscriptViewportTelemetryPlatform,
     transcriptViewportTelemetry,
     type TranscriptViewportTelemetryBottomFollowMode,
@@ -13,6 +14,7 @@ import {
     type TranscriptViewportTelemetryObservationReason,
     type TranscriptViewportTelemetryScrollReason,
     type TranscriptViewportTelemetryTransactionState,
+    type TranscriptViewportTelemetryWebTrigger,
 } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
 import type { TranscriptBottomFollowModeState } from '@/components/sessions/transcript/scroll/transcriptBottomFollowMode';
 import type { TranscriptViewportMode } from '@/components/sessions/transcript/viewport/transcriptViewportTypes';
@@ -44,9 +46,15 @@ import {
     planTranscriptBlankRecoveryObservation,
     type TranscriptBlankRecoveryEffect,
 } from '@/components/sessions/transcript/viewport/visibility/blankRecoveryOwner';
-import { getTranscriptNavigationVisibilityStore } from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityStore';
+import {
+    getTranscriptNavigationVisibilityStore,
+    useTranscriptNavigationVisibilityHasSubscribers,
+} from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityStore';
+import {
+    publishTranscriptNavigationVisibility,
+    readRendererVisibleSourceIndexRange,
+} from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityPublish';
 import type { TranscriptNavigationRuntimeAnchor } from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationRuntimeAnchors';
-import type { TranscriptListOrientation } from '@/components/sessions/transcript/listOrientation';
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 import type { WebPrependTelemetryFacts, WebPrependTelemetryFactsInput } from '@/components/sessions/transcript/viewport/prepend/webPrependOwner';
 
@@ -69,21 +77,22 @@ export type TranscriptViewportTelemetryEventsDeps = Readonly<{
     bottomFollowModeStateRef: MutableRef<TranscriptBottomFollowModeState>;
     entryRestoreOwner: EntryRestoreOwner;
     getBottomFollowGestureActiveRef: MutableRef<() => boolean>;
-    itemsRef: MutableRef<readonly ChatTranscriptListItem[]>;
+    hasTranscriptNavigationAnchors: boolean;
+    items: readonly ChatTranscriptListItem[];
     lastNativeVisibleRowsSnapshotRef: MutableRef<NativeVisibleWindowSnapshot | null>;
     listContentHeightRef: MutableRef<number>;
-    listDataRef: MutableRef<readonly ChatTranscriptListItem[]>;
+    listData: readonly ChatTranscriptListItem[];
     listLayoutHeightRef: MutableRef<number>;
-    listOrientation: TranscriptListOrientation;
     listRef: MutableRef<ScrollableChatListRef | null>;
     nativeFlashListMvcpPolicyRef: MutableRef<TranscriptViewportTelemetryMvcpPolicy>;
     nativeFlashListPauseOffsetCorrectionRef: MutableRef<boolean>;
-    nativeHotEdgeVisibleRowsRef: MutableRef<NativeHotEdgeVisibleRows>;
+    nativeHotEdgeVisibleRows: NativeHotEdgeVisibleRows;
     nativeMomentumScrollActiveRef: MutableRef<boolean>;
     nativePrependTelemetryStateRef: MutableRef<() => TranscriptViewportTelemetryTransactionState>;
     nativeVisibleWindowSnapshotRef: MutableRef<NativeVisibleWindowSnapshot | null>;
     pinThresholdPxRef: MutableRef<number>;
     platformOS: typeof Platform.OS;
+    rendererKind: 'flashList' | 'legendList';
     readCurrentNativeDistanceFromBottom(params?: Readonly<{ contentHeight?: number; layoutHeight?: number }>): number | null;
     readViewportVisibleSourceRange(): NativeVisibleSourceRange;
     resolveNativeObservedScrollOffset(
@@ -100,7 +109,7 @@ export type TranscriptViewportTelemetryEventsDeps = Readonly<{
         paginationSuspendedReasons?: readonly string[];
         programmaticWebWrite: boolean;
         scrollable?: boolean;
-        trigger: 'scroll' | 'edge-reached' | 'restore' | 'prepend-restore' | 'jump';
+        trigger: TranscriptViewportTelemetryWebTrigger;
     }>): Record<string, unknown>;
     runtimeAnchorsRef: MutableRef<readonly TranscriptNavigationRuntimeAnchor[]>;
     sessionId: string;
@@ -154,6 +163,10 @@ export function useTranscriptViewportTelemetryEvents(
 ): TranscriptViewportTelemetryEvents {
     const blankRecoveryStateRef = React.useRef(createTranscriptBlankRecoveryState());
     const telemetryPlatform = resolveTranscriptViewportTelemetryPlatform(deps.platformOS);
+    const telemetryRendererFacts = resolveTranscriptViewportTelemetryRendererFacts({
+        platformOS: deps.platformOS,
+        rendererKind: deps.rendererKind,
+    });
 
     const resolveEnabledViewportTelemetryTuning = React.useCallback(() => {
         const tuning = sync.getSyncTuning();
@@ -164,12 +177,12 @@ export function useTranscriptViewportTelemetryEvents(
     const resolveNativeVisibleWindowSnapshot = React.useCallback((): NativeVisibleWindowSnapshot => {
         const result = resolveNativeVisibleWindowSnapshotResult({
             computeVisibleIndices: () => deps.listRef.current?.computeVisibleIndices?.(),
-            data: deps.listDataRef.current,
+            data: deps.listData,
             distanceFromBottom: deps.readCurrentNativeDistanceFromBottom(),
             firstVisibleIndex: () => deps.listRef.current?.getFirstVisibleIndex?.(),
             lastNativeVisibleRowsSnapshot: deps.lastNativeVisibleRowsSnapshotRef.current,
             layoutHeight: deps.listLayoutHeightRef.current,
-            nativeHotEdgeVisibleRows: deps.nativeHotEdgeVisibleRowsRef.current,
+            nativeHotEdgeVisibleRows: deps.nativeHotEdgeVisibleRows,
             nativeVisibleWindowSnapshot: deps.nativeVisibleWindowSnapshotRef.current,
             pinThresholdPx: deps.pinThresholdPxRef.current,
             rawOffsetY: readNativeAbsoluteScrollOffset(deps.listRef.current),
@@ -178,10 +191,10 @@ export function useTranscriptViewportTelemetryEvents(
         return result.snapshot;
     }, [
         deps.lastNativeVisibleRowsSnapshotRef,
-        deps.listDataRef,
+        deps.listData,
         deps.listLayoutHeightRef,
         deps.listRef,
-        deps.nativeHotEdgeVisibleRowsRef,
+        deps.nativeHotEdgeVisibleRows,
         deps.nativeVisibleWindowSnapshotRef,
         deps.pinThresholdPxRef,
         deps.readCurrentNativeDistanceFromBottom,
@@ -217,7 +230,7 @@ export function useTranscriptViewportTelemetryEvents(
             deps.nativePrependTelemetryStateRef.current();
         const recoveryPlan = planTranscriptBlankRecoveryObservation(blankRecoveryStateRef.current, {
             bottomFollowMode,
-            contentPresent: deps.listDataRef.current.length > 0,
+            contentPresent: deps.listData.length > 0,
             entryRestoreOpen: entryRestoreState === 'open',
             gestureActive:
                 deps.getBottomFollowGestureActiveRef.current() ||
@@ -238,7 +251,7 @@ export function useTranscriptViewportTelemetryEvents(
         deps.bottomFollowModeStateRef,
         deps.entryRestoreOwner,
         deps.getBottomFollowGestureActiveRef,
-        deps.listDataRef,
+        deps.listData,
         deps.listRef,
         deps.nativeMomentumScrollActiveRef,
         deps.nativePrependTelemetryStateRef,
@@ -293,10 +306,11 @@ export function useTranscriptViewportTelemetryEvents(
             entryRestoreState,
             eventContentHeight,
             eventLayoutHeight,
-            fullItemCount: deps.itemsRef.current.length,
+            fullItemCount: deps.items.length,
             layoutHeight,
-            listDataLength: deps.listDataRef.current.length,
+            listDataLength: deps.listData.length,
             nativeMomentumActive: deps.nativeMomentumScrollActiveRef.current,
+            orientation: telemetryRendererFacts.orientation,
             mvcpPolicy: deps.nativeFlashListMvcpPolicyRef.current,
             observedOffset,
             pauseOffsetCorrection: deps.nativeFlashListPauseOffsetCorrectionRef.current,
@@ -310,10 +324,10 @@ export function useTranscriptViewportTelemetryEvents(
     }, [
         deps.bottomFollowModeStateRef,
         deps.entryRestoreOwner,
-        deps.itemsRef,
+        deps.items,
         deps.lastNativeVisibleRowsSnapshotRef,
         deps.listContentHeightRef,
-        deps.listDataRef,
+        deps.listData,
         deps.listLayoutHeightRef,
         deps.listRef,
         deps.nativeFlashListMvcpPolicyRef,
@@ -326,6 +340,7 @@ export function useTranscriptViewportTelemetryEvents(
         deps.sessionId,
         deps.shouldUseNativeHotColdSplit,
         deps.transcriptHotColdSegments,
+        telemetryRendererFacts.orientation,
         resolveNativeVisibleWindowSnapshot,
     ]);
 
@@ -348,13 +363,14 @@ export function useTranscriptViewportTelemetryEvents(
             ...nativeDiagnostics,
             sessionId: options?.sessionId ?? deps.sessionId,
             platform: telemetryPlatform,
-            listImplementation: 'flash_v2',
+            listImplementation: telemetryRendererFacts.listImplementation,
             timestampMs: Date.now(),
         }, tuning);
     }, [
         deps.sessionId,
         resolveEnabledViewportTelemetryTuning,
         resolveNativeTelemetryDiagnostics,
+        telemetryRendererFacts.listImplementation,
         telemetryPlatform,
     ]);
 
@@ -425,13 +441,24 @@ export function useTranscriptViewportTelemetryEvents(
         viewableItems?: readonly NativeViewableTranscriptItem[];
     }>) => {
         if (deps.platformOS === 'web') return;
+        // Viewability is a navigation-visibility TRIGGER: it fires on
+        // layout-only changes that never emit a scroll event. The range itself
+        // still comes from the renderer's visible index window so web and
+        // native share exactly one anchor derivation.
+        publishTranscriptNavigationVisibility({
+            anchors: deps.runtimeAnchorsRef.current,
+            itemCount: deps.listData.length,
+            readVisibleSourceRange: () => (
+                deps.listLayoutHeightRef.current > 0
+                    ? readRendererVisibleSourceIndexRange(deps.listRef.current)
+                    : null
+            ),
+            store: getTranscriptNavigationVisibilityStore(deps.sessionId),
+        });
         const result = resolveNativeViewabilityTelemetry({
             info,
-            itemCount: deps.listDataRef.current.length,
+            itemCount: deps.listData.length,
             layoutHeight: deps.listLayoutHeightRef.current,
-            listOrientation: deps.listOrientation,
-            runtimeAnchors: deps.runtimeAnchorsRef.current,
-            sessionId: deps.sessionId,
             syncTuning: sync.getSyncTuning(),
         });
         if (!result) return;
@@ -447,9 +474,8 @@ export function useTranscriptViewportTelemetryEvents(
         recordNativeVisibleWindowTelemetry('observed');
     }, [
         deps.lastNativeVisibleRowsSnapshotRef,
-        deps.listDataRef,
+        deps.listData,
         deps.listLayoutHeightRef,
-        deps.listOrientation,
         deps.nativeVisibleWindowSnapshotRef,
         deps.platformOS,
         deps.runtimeAnchorsRef,
@@ -458,14 +484,18 @@ export function useTranscriptViewportTelemetryEvents(
         recordNativeVisibleWindowTelemetry,
     ]);
 
+    // Reactive: a navigation consumer that mounts AFTER this host rendered must
+    // still get the viewability trigger attached. Reading `hasSubscribers()`
+    // during render leaves the trigger detached until some unrelated render.
+    const hasNavigationVisibilityConsumers = useTranscriptNavigationVisibilityHasSubscribers(deps.sessionId);
     const shouldAttachNativeViewabilityTelemetry =
         deps.platformOS !== 'web' &&
         sync.getSyncTuning().transcriptViewportTelemetryEnabled === true;
     const shouldAttachNativeViewability =
         deps.platformOS !== 'web' &&
         (!deps.usesNativeFlashListBottomMaintenance || shouldAttachNativeViewabilityTelemetry || (
-            deps.runtimeAnchorsRef.current.length > 0 &&
-            getTranscriptNavigationVisibilityStore(deps.sessionId).hasSubscribers()
+            deps.hasTranscriptNavigationAnchors &&
+            hasNavigationVisibilityConsumers
         ));
     const nativeViewabilityConfig = React.useMemo(() => (
         shouldAttachNativeViewability

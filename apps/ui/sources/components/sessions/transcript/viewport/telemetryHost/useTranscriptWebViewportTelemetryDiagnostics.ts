@@ -2,6 +2,7 @@ import * as React from 'react';
 import {
     configureTranscriptViewportTelemetryFromTuning,
     transcriptViewportTelemetry,
+    type TranscriptViewportTelemetryWebTrigger,
 } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
 import type { ChatTranscriptListItem } from '@/components/sessions/transcript/chatListTypes';
 import { sync } from '@/sync/sync';
@@ -79,7 +80,7 @@ export function useTranscriptWebViewportTelemetryDiagnostics(params: Readonly<{
         paginationSuspendedReasons?: TranscriptOlderPaginationSnapshot['suspendedReasons'];
         programmaticWebWrite: boolean;
         scrollable?: boolean;
-        trigger: 'scroll' | 'edge-reached' | 'restore' | 'prepend-restore' | 'jump';
+        trigger: TranscriptViewportTelemetryWebTrigger;
     }>) => {
         return resolveWebViewportTelemetryDiagnosticsRecord({
             enabled: Boolean(resolveEnabledViewportTelemetryTuning()),

@@ -344,6 +344,7 @@ export function useTranscriptPaintTelemetryEffects(params: Readonly<{
         paintMetrics: TranscriptPaintMetrics,
         options?: Readonly<{ nativeViewportObserved?: boolean }>,
     ) => boolean;
+    rendererKind: 'flashList' | 'legendList';
     resolveEffectiveListPaintMetrics: () => TranscriptPaintMetrics | null;
     routeHydrationPending: boolean;
     scheduleWebStablePaintRetry: () => void;
@@ -359,6 +360,9 @@ export function useTranscriptPaintTelemetryEffects(params: Readonly<{
         if (!params.isLoaded) return;
         if (params.itemCount <= 0) return;
         if (params.showRouteHydrationFirstPaintPlaceholder) return;
+        // Legend exposes usable geometry before its readiness-gated row container becomes
+        // visible. Keep geometry as telemetry only until Legend's onLoad records first paint.
+        if (params.rendererKind === 'legendList' && params.showFirstPaintPlaceholder) return;
         if (!params.resolveEffectiveListPaintMetrics()) return;
 
         params.recordFirstListPaint();
@@ -369,7 +373,9 @@ export function useTranscriptPaintTelemetryEffects(params: Readonly<{
         params.listContentHeight,
         params.listLayoutHeight,
         params.recordFirstListPaint,
+        params.rendererKind,
         params.resolveEffectiveListPaintMetrics,
+        params.showFirstPaintPlaceholder,
         params.showRouteHydrationFirstPaintPlaceholder,
     ]);
 

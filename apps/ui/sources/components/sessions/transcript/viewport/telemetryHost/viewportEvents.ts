@@ -5,6 +5,7 @@ import {
     transcriptViewportTelemetry,
     type TranscriptViewportTelemetryEvent,
     type TranscriptViewportTelemetryObservationReason,
+    type TranscriptViewportTelemetryWebTrigger,
 } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
 import type { TranscriptViewportMode } from '@/components/sessions/transcript/viewport/transcriptViewportTypes';
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
@@ -24,7 +25,7 @@ export type RestoreDecisionTelemetryParams = Readonly<{
     offsetY?: number;
     programmaticWebWrite?: boolean;
     scrollable?: boolean;
-    webTrigger?: 'scroll' | 'edge-reached' | 'restore' | 'prepend-restore' | 'jump';
+    webTrigger?: TranscriptViewportTelemetryWebTrigger;
 }>;
 
 export type ScrollObservedTelemetryParams = Readonly<{
@@ -61,7 +62,7 @@ export function buildRestoreDecisionTelemetryEvent(params: Readonly<{
         metrics: WebTranscriptScrollMetrics | null;
         programmaticWebWrite: boolean;
         scrollable?: boolean;
-        trigger: 'scroll' | 'edge-reached' | 'restore' | 'prepend-restore' | 'jump';
+        trigger: TranscriptViewportTelemetryWebTrigger;
     }>) => Readonly<Record<string, unknown>>;
 }>): Readonly<Record<string, unknown> & {
     mode: TranscriptViewportMode;

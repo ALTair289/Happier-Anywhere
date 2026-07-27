@@ -26,6 +26,7 @@ export function resolveNativeTelemetryDiagnostics(params: Readonly<{
     layoutHeight?: number;
     listDataLength: number;
     nativeMomentumActive: boolean;
+    orientation: 'standard' | 'inverted';
     mvcpPolicy: unknown;
     observedOffset: Readonly<{
         canonicalOffsetY?: number;
@@ -67,7 +68,7 @@ export function resolveNativeTelemetryDiagnostics(params: Readonly<{
     const scrollToIndexFailureState: TranscriptViewportTelemetryScrollToIndexFailureState = 'none';
 
     return {
-        orientation: 'inverted',
+        orientation: params.orientation,
         ...(params.rawOffsetY !== undefined ? { rawOffsetY: params.rawOffsetY } : {}),
         ...(canonicalOffsetY !== undefined ? { canonicalOffsetY } : {}),
         ...(params.layoutHeight !== undefined ? { layoutHeight: params.layoutHeight } : {}),
