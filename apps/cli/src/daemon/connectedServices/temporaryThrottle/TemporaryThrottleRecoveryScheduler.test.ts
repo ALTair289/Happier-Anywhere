@@ -30,6 +30,8 @@ type TemporaryThrottleModule = Readonly<{
     wake: (input: { sessionId: string; reason: 'timer' | 'retry_now' }) => Promise<{ status: string }>;
     retryNow: (input: { sessionId: string }) => Promise<{ status: string }>;
     stopRetrying: (input: { sessionId: string }) => Promise<{ status: string } | null>;
+    hydrate: () => ReadonlyArray<unknown>;
+    dispose: () => void;
   };
 }>;
 
@@ -96,62 +98,73 @@ describe('TemporaryThrottleRecoveryScheduler', () => {
     });
   });
 
-  it('recovers a waiting throttle after daemon restart through the durable store', async () => {
-    const { TemporaryThrottleRecoveryScheduler } = await loadTemporaryThrottleModule();
-    let nowMs = 1_000;
-    const written = new Map<string, unknown>();
-    const store = {
-      read: (sessionId: string) => written.get(sessionId) ?? null,
-      readAll: () => [...written.entries()],
-      write: (sessionId: string, intent: unknown) => {
-        written.set(sessionId, intent);
-      },
-      remove: (sessionId: string) => {
-        written.delete(sessionId);
-      },
-    };
+  it('hydrates a waiting throttle passively after daemon restart and resumes exactly once on explicit retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const { TemporaryThrottleRecoveryScheduler } = await loadTemporaryThrottleModule();
+      let nowMs = 1_000;
+      const written = new Map<string, unknown>();
+      const store = {
+        read: (sessionId: string) => written.get(sessionId) ?? null,
+        readAll: () => [...written.entries()],
+        write: (sessionId: string, intent: unknown) => {
+          written.set(sessionId, intent);
+        },
+        remove: (sessionId: string) => {
+          written.delete(sessionId);
+        },
+      };
 
-    const firstScheduler = new TemporaryThrottleRecoveryScheduler({
-      nowMs: () => nowMs,
-      baseBackoffMs: 1_000,
-      maxBackoffMs: 10_000,
-      store,
-    });
+      const firstScheduler = new TemporaryThrottleRecoveryScheduler({
+        nowMs: () => nowMs,
+        baseBackoffMs: 1_000,
+        maxBackoffMs: 10_000,
+        store,
+      });
 
-    await firstScheduler.enable({
-      sessionId: 'session-1',
-      issueFingerprint: 'temporary-throttle:codex:no-group:profile-1',
-      retryAfterMs: 2_000,
-      maxAttempts: 3,
-    });
+      await firstScheduler.enable({
+        sessionId: 'session-1',
+        issueFingerprint: 'temporary-throttle:codex:no-group:profile-1',
+        retryAfterMs: 2_000,
+        maxAttempts: 3,
+      });
+      firstScheduler.dispose();
 
-    const retry = vi.fn(async () => ({ status: 'ready' as const }));
-    const resume = vi.fn();
-    const restartedScheduler = new TemporaryThrottleRecoveryScheduler({
-      nowMs: () => nowMs,
-      baseBackoffMs: 1_000,
-      maxBackoffMs: 10_000,
-      retry,
-      resume,
-      store,
-    });
+      const retry = vi.fn(async () => ({ status: 'ready' as const }));
+      const resume = vi.fn();
+      const restartedScheduler = new TemporaryThrottleRecoveryScheduler({
+        nowMs: () => nowMs,
+        baseBackoffMs: 1_000,
+        maxBackoffMs: 10_000,
+        retry,
+        resume,
+        store,
+      });
 
-    expect(restartedScheduler.read('session-1')).toMatchObject({
-      status: 'waiting',
-      issueFingerprint: 'temporary-throttle:codex:no-group:profile-1',
-      attemptCount: 0,
-      nextRetryAtMs: 3_000,
-    });
+      expect(restartedScheduler.hydrate()).toHaveLength(1);
+      expect(restartedScheduler.read('session-1')).toMatchObject({
+        status: 'waiting',
+        issueFingerprint: 'temporary-throttle:codex:no-group:profile-1',
+        attemptCount: 0,
+        nextRetryAtMs: 3_000,
+      });
 
-    nowMs = 3_000;
-    await expect(restartedScheduler.wake({ sessionId: 'session-1', reason: 'timer' }))
-      .resolves.toEqual({ status: 'resumed' });
-    expect(retry).toHaveBeenCalledTimes(1);
-    expect(resume).toHaveBeenCalledTimes(1);
-    expect(store.read('session-1')).toMatchObject({
-      status: 'cancelled',
-      nextRetryAtMs: null,
-    });
+      nowMs = 3_000;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(retry).not.toHaveBeenCalled();
+      expect(resume).not.toHaveBeenCalled();
+
+      await expect(restartedScheduler.retryNow({ sessionId: 'session-1' }))
+        .resolves.toEqual({ status: 'resumed' });
+      expect(retry).toHaveBeenCalledTimes(1);
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(store.read('session-1')).toMatchObject({
+        status: 'cancelled',
+        nextRetryAtMs: null,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('uses Retry-After before jittered backoff and retries with bounded attempts', async () => {

@@ -39,7 +39,7 @@ function buildTemporaryThrottleDefaultRespawnOptions(input: Readonly<{
 }>): SpawnSessionOptions | null {
   const spawnOptions = input.tracked.spawnOptions;
   if (!spawnOptions || !normalizeString(spawnOptions.directory)) return null;
-  const { initialPrompt: _initialPrompt, resume: _resume, sessionId: _sessionId, ...rest } = spawnOptions;
+  const { pendingFirstInput: _pendingFirstInput, resume: _resume, sessionId: _sessionId, ...rest } = spawnOptions;
   return {
     ...rest,
     ...(input.vendorResumeId ? { resume: input.vendorResumeId } : {}),

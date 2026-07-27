@@ -213,11 +213,11 @@ export class TemporaryThrottleRecoveryScheduler {
   }
 
   read(sessionId: string): TemporaryThrottleRecoveryIntent | null {
-    return this.scheduler.read(sessionId);
+    return this.scheduler.readByKeyPassive(sessionId);
   }
 
   hydrate(): ReadonlyArray<TemporaryThrottleRecoveryIntent> {
-    return this.scheduler.hydrate();
+    return this.scheduler.hydratePassive();
   }
 
   dispose(): void {

@@ -15,7 +15,7 @@ function createTracked(overrides: Partial<TrackedSession> = {}): TrackedSession 
       directory: '/tmp/project',
       machineId: 'machine-1',
       sessionId: 'new-session-id-should-not-survive',
-      initialPrompt: 'do not send this again',
+      pendingFirstInput: { text: 'do not send this again', localId: 'spawn-first:nonce' },
       resume: 'vendor-from-options',
       backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
     },
@@ -57,7 +57,7 @@ describe('resumeTrackedTemporaryThrottleSession', () => {
         approvedNewDirectoryCreation: true,
       }),
     }));
-    expect(resolveRespawnOptions.mock.calls[0]?.[0].defaultOptions).not.toHaveProperty('initialPrompt');
+    expect(resolveRespawnOptions.mock.calls[0]?.[0].defaultOptions).not.toHaveProperty('pendingFirstInput');
     expect(resolveRespawnOptions.mock.calls[0]?.[0].defaultOptions).not.toHaveProperty('sessionId', 'new-session-id-should-not-survive');
     expect(spawnSession).toHaveBeenCalledWith(expect.objectContaining({
       existingSessionId: 'sess-1',
