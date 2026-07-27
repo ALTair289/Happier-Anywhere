@@ -8,6 +8,7 @@ import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { setClipboardStringSafe } from '@/utils/ui/clipboard';
+import { useInitialPresentationProducer } from '@/components/ui/presentation/InitialPresentationReadinessContext';
 import { sanitizeRenderedMermaidSvg } from './mermaidSanitize';
 
 const webStyle: React.CSSProperties = {
@@ -25,9 +26,23 @@ const WebDiv: React.ElementType<{
 export const MermaidRenderer = React.memo((props: {
     content: string;
 }) => {
-    const [svgContent, setSvgContent] = React.useState<string | null>(null);
-    const [hasError, setHasError] = React.useState(false);
+    const [renderState, setRenderState] = React.useState<Readonly<{
+        content: string;
+        status: 'error' | 'pending' | 'ready';
+        svg: string | null;
+    }>>(() => ({
+        content: props.content,
+        status: 'pending',
+        svg: null,
+    }));
     const copyFeedback = useTemporaryCopyFeedback();
+    const currentRenderState = renderState.content === props.content
+        ? renderState
+        : { content: props.content, status: 'pending' as const, svg: null };
+    useInitialPresentationProducer({
+        producerKey: `mermaid:${props.content}`,
+        terminal: currentRenderState.status !== 'pending',
+    });
 
     const copyMermaid = React.useCallback(async () => {
         const copied = await setClipboardStringSafe(props.content);
@@ -40,8 +55,6 @@ export const MermaidRenderer = React.memo((props: {
 
     React.useEffect(() => {
         let isMounted = true;
-        setSvgContent(null);
-        setHasError(false);
 
         const renderMermaid = async () => {
             try {
@@ -53,11 +66,19 @@ export const MermaidRenderer = React.memo((props: {
                 });
                 const { svg } = await mermaid.render(`mermaid-${Date.now()}`, props.content);
                 if (isMounted) {
-                    setSvgContent(sanitizeRenderedMermaidSvg(svg));
+                    setRenderState({
+                        content: props.content,
+                        status: 'ready',
+                        svg: sanitizeRenderedMermaidSvg(svg),
+                    });
                 }
             } catch {
                 if (isMounted) {
-                    setHasError(true);
+                    setRenderState({
+                        content: props.content,
+                        status: 'error',
+                        svg: null,
+                    });
                 }
             }
         };
@@ -68,7 +89,7 @@ export const MermaidRenderer = React.memo((props: {
         };
     }, [props.content]);
 
-    if (hasError) {
+    if (currentRenderState.status === 'error') {
         return (
             <View testID="mermaid-render-error" style={[style.container, style.errorContainer]}>
                 <View style={style.errorContent}>
@@ -81,7 +102,7 @@ export const MermaidRenderer = React.memo((props: {
         );
     }
 
-    if (!svgContent) {
+    if (currentRenderState.status !== 'ready' || !currentRenderState.svg) {
         return (
             <View style={[style.container, style.loadingContainer]}>
                 <View style={style.loadingPlaceholder} />
@@ -103,7 +124,7 @@ export const MermaidRenderer = React.memo((props: {
                 </View>
                 <WebDiv
                     style={webStyle}
-                    dangerouslySetInnerHTML={{ __html: svgContent }}
+                    dangerouslySetInnerHTML={{ __html: currentRenderState.svg }}
                 />
             </View>
         </View>

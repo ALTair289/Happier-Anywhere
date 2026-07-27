@@ -4,7 +4,7 @@ import { EnrichedMarkdownText, type EnrichedMarkdownTextProps } from 'react-nati
 
 import { ENRICHED_MARKDOWN_MD4C_FLAGS } from './enrichedMarkdownConstants';
 import { normalizeMarkdownLinkUrl, openMarkdownLinkUrl, sanitizeEnrichedMarkdownLinkTargets } from './enrichedMarkdownLinkHandling';
-import { preloadEnrichedMarkdownRuntime } from './preloadEnrichedMarkdownRuntime';
+import { useEnrichedMarkdownRuntimeStatus } from './preloadEnrichedMarkdownRuntime';
 import { resolveEnrichedMarkdownFlavor } from './resolveEnrichedMarkdownFlavor';
 import { useEnrichedMarkdownStyle } from './useEnrichedMarkdownStyle';
 import type { MarkdownRenderingProfile } from '../rendering/MarkdownRenderingProfile';
@@ -85,6 +85,7 @@ type EnrichedMarkdownTextAdapterProps = Readonly<{
 }>;
 
 export const EnrichedMarkdownTextAdapter = React.memo((props: EnrichedMarkdownTextAdapterProps) => {
+    const runtimeStatus = useEnrichedMarkdownRuntimeStatus();
     const styleBundle = useEnrichedMarkdownStyle({
         profile: props.profile,
         textStyle: props.textStyle,
@@ -105,11 +106,6 @@ export const EnrichedMarkdownTextAdapter = React.memo((props: EnrichedMarkdownTe
         preset: props.streamingRevealPreset,
     });
     const flavor = React.useMemo(() => resolveEnrichedMarkdownFlavor(sanitizedMarkdown), [sanitizedMarkdown]);
-
-    React.useEffect(() => {
-        if (Platform.OS !== 'web') return;
-        void preloadEnrichedMarkdownRuntime();
-    }, []);
 
     useWebRevealStyleInsertion({
         enabled: revealConfig != null,
@@ -159,6 +155,7 @@ export const EnrichedMarkdownTextAdapter = React.memo((props: EnrichedMarkdownTe
 
     return (
         <EnrichedMarkdownText
+            key={runtimeStatus === 'ready' ? 'runtime-ready' : 'runtime-cold'}
             {...platformProps}
             markdown={sanitizedMarkdown}
             markdownStyle={styleBundle.markdownStyle}
