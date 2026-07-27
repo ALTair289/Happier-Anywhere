@@ -18,7 +18,7 @@ type RouteCheckNow = typeof routeSessionUsageLimitRecoveryCheckNow;
 
 type HydrateInactiveUsageLimitRecoveryResult = Readonly<{
   scanned: number;
-  scheduled: number;
+  observed: number;
 }>;
 
 function readSessionId(rawSession: RawSessionRecord): string {
@@ -65,12 +65,7 @@ export async function hydrateInactiveUsageLimitRecoveryFromSessionMetadata(param
     rawSession: RawSessionRecord;
   }>) => Record<string, unknown> | null;
   routeCheckNow?: RouteCheckNow;
-  resumeInactiveSessionWhenReady?: (input: Readonly<{
-    sessionId: string;
-    rawSession: RawSessionRecord;
-    metadata: Record<string, unknown>;
-  }>) => Promise<boolean> | boolean;
-  schedule(input: Readonly<{
+  observe(input: Readonly<{
     sessionId: string;
     recovery: SessionUsageLimitRecoveryV1;
     runCheckNow: () => Promise<unknown>;
@@ -84,7 +79,7 @@ export async function hydrateInactiveUsageLimitRecoveryFromSessionMetadata(param
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
   let scanned = 0;
-  let scheduled = 0;
+  let observed = 0;
 
   for (let page = 0; page < maxPages; page += 1) {
     const result = await fetchSessionsPage({
@@ -104,7 +99,7 @@ export async function hydrateInactiveUsageLimitRecoveryFromSessionMetadata(param
       });
       const recovery = readActiveRecoveryIntent(metadata);
       if (!metadata || !recovery) continue;
-      await params.schedule({
+      await params.observe({
         sessionId,
         recovery,
         runCheckNow: async () => {
@@ -127,13 +122,10 @@ export async function hydrateInactiveUsageLimitRecoveryFromSessionMetadata(param
               errorCode: 'session_rpc_unavailable',
               error: 'session_rpc_unavailable',
             }),
-            ...(params.resumeInactiveSessionWhenReady
-              ? { resumeInactiveSessionWhenReady: params.resumeInactiveSessionWhenReady }
-              : {}),
           });
         },
       });
-      scheduled += 1;
+      observed += 1;
     }
     if (!result.hasNext || !result.nextCursor) break;
     if (seenCursors.has(result.nextCursor)) break;
@@ -141,5 +133,5 @@ export async function hydrateInactiveUsageLimitRecoveryFromSessionMetadata(param
     cursor = result.nextCursor;
   }
 
-  return { scanned, scheduled };
+  return { scanned, observed };
 }

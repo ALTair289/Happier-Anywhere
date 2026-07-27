@@ -14,7 +14,7 @@ const credentials = {
 } as const;
 
 describe('hydrateInactiveUsageLimitRecoveryFromSessionMetadata', () => {
-  it('schedules inactive persisted recovery intents and rebuilds check-now runners', async () => {
+  it('observes inactive persisted recovery intents and rebuilds check-now runners without scheduling', async () => {
     const recovery = {
       v: 1 as const,
       status: 'waiting' as const,
@@ -27,7 +27,7 @@ describe('hydrateInactiveUsageLimitRecoveryFromSessionMetadata', () => {
       lastProbeError: null,
       selectedAuth: { kind: 'native' as const },
     };
-    const schedule = vi.fn();
+    const observe = vi.fn();
     const routeCheckNow = vi.fn(async () => ({ ok: true, status: 'ready' }));
     const fetchSessionsPage = vi.fn(async () => {
       const response = createSessionListResponseFixture([
@@ -54,18 +54,19 @@ describe('hydrateInactiveUsageLimitRecoveryFromSessionMetadata', () => {
       decryptMetadata: () => ({
         [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: recovery,
       }),
-      schedule,
+      observe,
       routeCheckNow,
     });
 
-    expect(result).toEqual({ scanned: 1, scheduled: 1 });
-    expect(schedule).toHaveBeenCalledWith({
+    expect(result).toEqual({ scanned: 1, observed: 1 });
+    expect(observe).toHaveBeenCalledWith({
       sessionId: 'session-1',
       recovery: { ...recovery, resumePromptMode: 'standard' },
       runCheckNow: expect.any(Function),
     });
 
-    const runCheckNow = schedule.mock.calls[0]?.[0]?.runCheckNow as (() => Promise<unknown>) | undefined;
+    const runCheckNow = observe.mock.calls[0]?.[0]?.runCheckNow as (() => Promise<unknown>) | undefined;
+    await expect(runCheckNow?.()).resolves.toEqual({ ok: true, status: 'ready' });
     await expect(runCheckNow?.()).resolves.toEqual({ ok: true, status: 'ready' });
     expect(routeCheckNow).toHaveBeenCalledWith(expect.objectContaining({
       token: 'token',
@@ -79,6 +80,10 @@ describe('hydrateInactiveUsageLimitRecoveryFromSessionMetadata', () => {
       }),
       request: { sessionId: 'session-1' },
     }));
+    expect(routeCheckNow).not.toHaveBeenCalledWith(expect.objectContaining({
+      resumeInactiveSessionWhenReady: expect.any(Function),
+    }));
+    expect(routeCheckNow).toHaveBeenCalledTimes(2);
   });
 
   it('skips persisted pending intents whose latest turn is no longer failed', async () => {
@@ -94,7 +99,7 @@ describe('hydrateInactiveUsageLimitRecoveryFromSessionMetadata', () => {
       lastProbeError: null,
       selectedAuth: { kind: 'native' as const },
     };
-    const schedule = vi.fn();
+    const observe = vi.fn();
     const fetchSessionsPage = vi.fn(async () => {
       const response = createSessionListResponseFixture([
         createSessionRecordFixture({
@@ -134,17 +139,17 @@ describe('hydrateInactiveUsageLimitRecoveryFromSessionMetadata', () => {
       decryptMetadata: () => ({
         [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: recovery,
       }),
-      schedule,
+      observe,
       routeCheckNow: vi.fn(),
     });
 
-    expect(result).toEqual({ scanned: 3, scheduled: 2 });
-    const scheduledSessionIds = schedule.mock.calls.map((call) => call[0]?.sessionId);
-    expect(scheduledSessionIds).toEqual(['failed-session', 'unknown-turn-session']);
+    expect(result).toEqual({ scanned: 3, observed: 2 });
+    const observedSessionIds = observe.mock.calls.map((call) => call[0]?.sessionId);
+    expect(observedSessionIds).toEqual(['failed-session', 'unknown-turn-session']);
   });
 
   it('skips active sessions and terminal recovery intents', async () => {
-    const schedule = vi.fn();
+    const observe = vi.fn();
     const fetchSessionsPage = vi.fn(async () => {
       const response = createSessionListResponseFixture([
         createSessionRecordFixture({ id: 'active-session', active: true, metadata: 'active', encryptionMode: 'plain' }),
@@ -177,11 +182,11 @@ describe('hydrateInactiveUsageLimitRecoveryFromSessionMetadata', () => {
           selectedAuth: { kind: 'native' },
         },
       }),
-      schedule,
+      observe,
       routeCheckNow: vi.fn(),
     });
 
-    expect(result).toEqual({ scanned: 2, scheduled: 0 });
-    expect(schedule).not.toHaveBeenCalled();
+    expect(result).toEqual({ scanned: 2, observed: 0 });
+    expect(observe).not.toHaveBeenCalled();
   });
 });
