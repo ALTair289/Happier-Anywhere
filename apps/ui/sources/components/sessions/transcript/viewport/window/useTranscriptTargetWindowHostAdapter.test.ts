@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
     executeTranscriptTargetWindowJump,
+    isTranscriptTargetObservedAtAlignment,
     resolveTranscriptNavigationTargetInRenderedWindow,
     resolveTranscriptTargetWindowHostFacts,
 } from './useTranscriptTargetWindowHostAdapter';
@@ -19,6 +20,64 @@ const inactiveState: TranscriptTargetWindowState = {
     windowMaxSeq: null,
     windowMinSeq: null,
 };
+
+function createRect(top: number, height: number): DOMRect {
+    return {
+        bottom: top + height,
+        height,
+        left: 0,
+        right: 0,
+        top,
+        width: 0,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+    };
+}
+
+describe('isTranscriptTargetObservedAtAlignment', () => {
+    it('uses live row geometry and the same clamp-aware center/top coordinates as the web driver', () => {
+        const element = {
+            getBoundingClientRect: () => createRect(50, 500),
+        } as HTMLElement;
+        const item = {
+            getBoundingClientRect: () => createRect(250, 100),
+        };
+
+        expect(isTranscriptTargetObservedAtAlignment({
+            align: { kind: 'center' },
+            item,
+            metrics: {
+                clientHeight: 500,
+                element,
+                scrollHeight: 2000,
+                scrollTop: 200,
+            },
+        })).toBe(true);
+        expect(isTranscriptTargetObservedAtAlignment({
+            align: { kind: 'top-with-item-offset', itemOffsetPx: 40 },
+            item,
+            metrics: {
+                clientHeight: 500,
+                element,
+                scrollHeight: 700,
+                scrollTop: 200,
+            },
+        })).toBe(true);
+        expect(isTranscriptTargetObservedAtAlignment({
+            align: { kind: 'center' },
+            item: {
+                getBoundingClientRect: () => createRect(190, 100),
+            },
+            metrics: {
+                clientHeight: 500,
+                element,
+                scrollHeight: 2000,
+                scrollTop: 260,
+            },
+        })).toBe(false);
+    });
+});
 
 describe('resolveTranscriptNavigationTargetInRenderedWindow', () => {
     it('requires live DOM presence on web even when the item space claims the target', () => {
@@ -62,6 +121,7 @@ describe('transcript target-window host adapter', () => {
         expect(facts.targetWindowActive).toBe(false);
         expect(facts.items).toEqual([{ id: 'row-1', seq: 1 }]);
         expect(facts.hasMoreNewer).toBe(false);
+        expect(facts.gaps).toEqual({ newer: null, older: null });
     });
 
     it('derives display items and hasMoreNewer from active window state instead of hard-coding false', () => {
@@ -90,9 +150,71 @@ describe('transcript target-window host adapter', () => {
         expect(facts.hasMoreNewer).toBe(true);
         expect(facts.display?.windowId).toBe('window-99');
         expect(facts.items.map((item) => item.id)).toEqual(['row-1', 'row-2', 'row-3']);
+        expect(facts.gaps).toEqual({
+            newer: {
+                direction: 'newer',
+                id: 'transcript-window-gap:window-99:newer',
+            },
+            older: {
+                direction: 'older',
+                id: 'transcript-window-gap:window-99:older',
+            },
+        });
     });
 
-    it('forces a target-window render when a mounted scroll reports no real movement', async () => {
+    it('does not infer missing messages from omitted synthetic rows', () => {
+        const facts = resolveTranscriptTargetWindowHostFacts({
+            items: [
+                { id: 'synthetic-before' },
+                { id: 'row-98', seq: 98 },
+                { id: 'row-99', seq: 99 },
+                { id: 'synthetic-after' },
+            ],
+            windowState: {
+                activatedAtMs: 1,
+                hasMoreNewer: false,
+                hasMoreOlder: false,
+                isWindowMode: true,
+                newerCursor: null,
+                olderCursor: null,
+                targetSeq: 99,
+                windowId: 'window-99',
+                windowMaxSeq: 99,
+                windowMinSeq: 98,
+            },
+        });
+
+        expect(facts.gaps).toEqual({ newer: null, older: null });
+    });
+
+    it('does not create an inert gap marker when authoritative window coverage spans more than 512 absorbed seqs', () => {
+        const facts = resolveTranscriptTargetWindowHostFacts({
+            items: [
+                { id: 'row-100', seq: 100 },
+                { id: 'row-900', seq: 900 },
+            ],
+            isSeqRangeLoaded: (fromInclusive, toInclusive) => (
+                fromInclusive >= 100 && toInclusive <= 900
+            ),
+            windowState: {
+                activatedAtMs: 1,
+                hasMoreNewer: false,
+                hasMoreOlder: false,
+                isWindowMode: true,
+                newerCursor: null,
+                olderCursor: null,
+                targetSeq: 100,
+                windowId: 'window-100',
+                windowMaxSeq: 900,
+                windowMinSeq: 100,
+            },
+        });
+
+        expect(facts.items.map((item) => item.id)).toEqual(['row-100', 'row-900']);
+        expect(facts.gaps).toEqual({ newer: null, older: null });
+    });
+
+    it('fails a target-window jump when the logical target never mounts after a no-movement write', async () => {
         const loadTargetWindow = vi.fn(async () => ({ windowId: 'window-500' }));
         const onJumpLanded = vi.fn();
 
@@ -111,11 +233,7 @@ describe('transcript target-window host adapter', () => {
             targetSeq: 500,
         });
 
-        expect(result).toEqual({
-            status: 'window-rendered',
-            target: { kind: 'seq', seq: 500 },
-            windowId: 'window-500',
-        });
+        expect(result).toEqual({ status: 'not-found', reason: 'unavailable' });
         expect(loadTargetWindow).toHaveBeenCalledWith({
             direction: null,
             target: { kind: 'seq', seq: 500 },
@@ -124,7 +242,7 @@ describe('transcript target-window host adapter', () => {
         expect(onJumpLanded).not.toHaveBeenCalled();
     });
 
-    it('forces a target-window render when a web mounted scroll moves but the target is still not mounted', async () => {
+    it('fails a target-window jump when a moving write still never mounts the logical target', async () => {
         const loadTargetWindow = vi.fn(async () => ({ windowId: 'window-331' }));
         const onJumpLanded = vi.fn();
 
@@ -143,11 +261,7 @@ describe('transcript target-window host adapter', () => {
             targetSeq: 331,
         });
 
-        expect(result).toEqual({
-            status: 'window-rendered',
-            target: { kind: 'seq', seq: 331 },
-            windowId: 'window-331',
-        });
+        expect(result).toEqual({ status: 'not-found', reason: 'unavailable' });
         expect(loadTargetWindow).toHaveBeenCalledWith({
             direction: null,
             target: { kind: 'seq', seq: 331 },
@@ -178,11 +292,7 @@ describe('transcript target-window host adapter', () => {
             targetSeq: 331,
         });
 
-        expect(result).toEqual({
-            status: 'window-rendered',
-            target: { kind: 'seq', seq: 331 },
-            windowId: 'window-331',
-        });
+        expect(result).toEqual({ status: 'not-found', reason: 'unavailable' });
         expect(isTargetInRenderedWindow).toHaveBeenCalled();
         expect(isTargetMounted).toHaveBeenCalled();
         expect(loadTargetWindow).toHaveBeenCalledWith({
@@ -246,8 +356,7 @@ describe('transcript target-window host adapter', () => {
         const onJumpLanded = vi.fn();
         const isTargetMounted = vi.fn()
             .mockReturnValueOnce(false)
-            .mockReturnValueOnce(true)
-            .mockReturnValueOnce(true);
+            .mockReturnValue(true);
 
         const result = await executeTranscriptTargetWindowJump({
             canRenderTargetWindow: true,
@@ -269,6 +378,31 @@ describe('transcript target-window host adapter', () => {
         });
         expect(onJumpLanded).toHaveBeenCalledTimes(1);
         expect(onJumpLanded).toHaveBeenCalledWith(result);
+    });
+
+    it('does not report target-window success until the mounted logical target is at the requested alignment', async () => {
+        const onJumpLanded = vi.fn();
+        const isTargetAligned = vi.fn(() => false);
+
+        const result = await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            isTargetAligned,
+            isTargetMounted: () => true,
+            landingSettleDeadlineMs: 0,
+            loadTargetWindow: vi.fn(async () => ({ windowId: 'window-500' })),
+            onJumpLanded,
+            platformOS: 'web',
+            readScrollTop: () => 100,
+            resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
+            scrollToTarget: vi.fn(() => true),
+            target: { kind: 'seq', seq: 500 },
+            targetSeq: 500,
+            waitForNextLandingFrame: () => Promise.resolve(),
+        });
+
+        expect(isTargetAligned).toHaveBeenCalled();
+        expect(result).toEqual({ status: 'not-found', reason: 'unavailable' });
+        expect(onJumpLanded).not.toHaveBeenCalled();
     });
 
     it('lands the web viewport on the target after a scroll-mounted fallback materialization', async () => {
@@ -438,6 +572,37 @@ describe('transcript target-window host adapter', () => {
         expect(onJumpLanded).toHaveBeenCalledTimes(1);
     });
 
+    it('returns aborted without post-supersession writes when a newer loaded-target jump starts between landing frames', async () => {
+        let currentOperation = true;
+        let writesAfterSupersession = 0;
+        const scrollToTarget = vi.fn(() => {
+            if (!currentOperation) writesAfterSupersession += 1;
+            return true;
+        });
+        let frameCount = 0;
+
+        const result = await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: false,
+            isCurrentOperation: () => currentOperation,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted: () => true,
+            loadTargetWindow: vi.fn(async () => null),
+            platformOS: 'web',
+            readScrollTop: () => 100,
+            resolveTargetIndex: () => ({ status: 'found', index: 0, seq: 100, routeMessageId: null }),
+            scrollToTarget,
+            target: { kind: 'seq', seq: 100 },
+            targetSeq: 100,
+            waitForNextLandingFrame: async () => {
+                frameCount += 1;
+                if (frameCount === 1) currentOperation = false;
+            },
+        });
+
+        expect(result).toEqual({ status: 'aborted' });
+        expect(writesAfterSupersession).toBe(0);
+    });
+
     it('nudges scrollTop to force FlashList chunk re-render when approach writes are stable but target is unmounted (P2SMOKE3-S3-JUMP-GAP)', async () => {
         // Live S3 evidence: route jumpSeq=41, st=22470 correct but FlashList chunk 1 has a
         // 6793px blank allocation gap (17449–24240) from streaming-growth reallocation.
@@ -461,6 +626,7 @@ describe('transcript target-window host adapter', () => {
             nudgeScrollForGap,
             onJumpLanded,
             platformOS: 'web',
+            rendererKind: 'flashList',
             // Stable scrollTop throughout — simulates the blank-chunk gap condition where
             // approach writes apply but scrollTop does not move.
             readScrollTop: vi.fn().mockReturnValue(22470),
@@ -498,6 +664,7 @@ describe('transcript target-window host adapter', () => {
             onJumpLanded,
             platformOS: 'web',
             readScrollTop: () => scrollTop,
+            rendererKind: 'flashList',
             resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
             scrollToTarget: vi.fn(() => {
                 scrollTop = targetScrollTop;
@@ -522,6 +689,94 @@ describe('transcript target-window host adapter', () => {
         expect(onJumpLanded).toHaveBeenCalledWith(result);
     });
 
+    it('ends app landing ownership as soon as the exact target write installs the matching renderer hold', async () => {
+        let nowMs = 1_000;
+        const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+        let heldItemId: string | null = null;
+        const waitForNextLandingFrame = vi.fn(async () => {
+            nowMs += 20_000;
+        });
+        const scrollToTarget = vi.fn(() => {
+            heldItemId = 'target-row';
+            return true;
+        });
+
+        const result = await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted: () => true,
+            isTargetOwnedByRenderer: () => heldItemId === 'target-row',
+            loadTargetWindow: vi.fn(async () => ({ windowId: 'window-41' })),
+            platformOS: 'web',
+            readScrollTop: () => 22_470,
+            rendererKind: 'legendList',
+            resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
+            scrollToTarget,
+            target: { kind: 'seq', seq: 41 },
+            targetSeq: 41,
+            waitForNextLandingFrame,
+        });
+        dateNow.mockRestore();
+
+        expect(result.status).toBe('window-rendered');
+        expect(scrollToTarget).toHaveBeenCalledTimes(1);
+        expect(waitForNextLandingFrame).not.toHaveBeenCalled();
+    });
+
+    it('does not issue a no-hold reverify write when its awaited frame resumes after the deadline', async () => {
+        let nowMs = 1_000;
+        const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+        let waitCount = 0;
+        const waitForNextLandingFrame = vi.fn(async () => {
+            waitCount += 1;
+            if (waitCount === 2) nowMs += 16_000;
+        });
+        const scrollToTarget = vi.fn(() => true);
+
+        const result = await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted: () => true,
+            isTargetOwnedByRenderer: () => false,
+            loadTargetWindow: vi.fn(async () => ({ windowId: 'window-41' })),
+            platformOS: 'web',
+            readScrollTop: () => 22_470,
+            rendererKind: 'flashList',
+            resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
+            scrollToTarget,
+            target: { kind: 'seq', seq: 41 },
+            targetSeq: 41,
+            waitForNextLandingFrame,
+        });
+        dateNow.mockRestore();
+
+        expect(result.status).toBe('window-rendered');
+        expect(scrollToTarget).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the app landing path active when the renderer hold belongs to another item', async () => {
+        const scrollToTarget = vi.fn(() => true);
+
+        const result = await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted: () => true,
+            isTargetOwnedByRenderer: () => false,
+            loadTargetWindow: vi.fn(async () => ({ windowId: 'window-41' })),
+            platformOS: 'web',
+            readScrollTop: () => 22_470,
+            rendererKind: 'legendList',
+            resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
+            scrollToTarget,
+            target: { kind: 'seq', seq: 41 },
+            targetSeq: 41,
+            waitForNextLandingFrame: () => Promise.resolve(),
+        });
+
+        expect(result.status).toBe('window-rendered');
+        expect(scrollToTarget.mock.calls.length).toBeGreaterThan(1);
+    });
+
     it('pages nearby unresolved targets before replacing the list with a target window', async () => {
         const pageTowardTarget = vi.fn(async () => ({
             status: 'scrolled' as const,
@@ -531,7 +786,7 @@ describe('transcript target-window host adapter', () => {
 
         const result = await executeTranscriptTargetWindowJump({
             canRenderTargetWindow: true,
-            isTargetMounted: () => false,
+            isTargetMounted: () => true,
             loadTargetWindow,
             pageTowardTarget,
             platformOS: 'web',
@@ -543,7 +798,7 @@ describe('transcript target-window host adapter', () => {
                 nearestIndex: 0,
                 nearestSeq: 100,
             }),
-            scrollToTarget: vi.fn(() => false),
+            scrollToTarget: vi.fn(() => true),
             target: { kind: 'seq', seq: 103 },
             targetSeq: 103,
         });
@@ -557,5 +812,83 @@ describe('transcript target-window host adapter', () => {
             targetSeq: 103,
         });
         expect(loadTargetWindow).not.toHaveBeenCalled();
+    });
+});
+
+describe('tail contiguous floor (tail-reset discontinuity display)', () => {
+    const activeWindowState: TranscriptTargetWindowState = {
+        activatedAtMs: 1,
+        hasMoreNewer: false,
+        hasMoreOlder: true,
+        isWindowMode: true,
+        newerCursor: null,
+        olderCursor: 5,
+        targetSeq: 6,
+        windowId: 'w1',
+        windowMaxSeq: 8,
+        windowMinSeq: 5,
+    };
+
+    it('bounds tail display to the tail-contiguous island when a floor is set', () => {
+        // Store shape after a tail-reset over an existing prefix: [401..410] + HOLE +
+        // [1951..2000]. Without the floor the tail glued yesterday directly onto the
+        // island (live defect 2026-07-12).
+        const facts = resolveTranscriptTargetWindowHostFacts({
+            items: [
+                { id: 'y-401', seq: 401 },
+                { id: 'y-410', seq: 410 },
+                { id: 't-1951', seq: 1951 },
+                { id: 't-2000', seq: 2000 },
+            ],
+            tailContiguousFloorSeq: 1951,
+            windowState: inactiveState,
+        });
+        expect(facts.targetWindowActive).toBe(false);
+        expect(facts.items.map((item) => item.id)).toEqual(['t-1951', 't-2000']);
+        expect(facts.gaps).toEqual({
+            newer: null,
+            older: {
+                direction: 'older',
+                id: 'transcript-window-gap:tail:older',
+            },
+        });
+    });
+
+    it('keeps seq-less rows and clears nothing when the floor is null', () => {
+        const items = [
+            { id: 'synthetic' },
+            { id: 'y-401', seq: 401 },
+            { id: 't-1951', seq: 1951 },
+        ];
+        const floored = resolveTranscriptTargetWindowHostFacts({
+            items,
+            tailContiguousFloorSeq: 1951,
+            windowState: inactiveState,
+        });
+        expect(floored.items.map((item) => item.id)).toEqual(['synthetic', 't-1951']);
+        expect(floored.gaps.older?.id).toBe('transcript-window-gap:tail:older');
+
+        const unfloored = resolveTranscriptTargetWindowHostFacts({
+            items,
+            tailContiguousFloorSeq: null,
+            windowState: inactiveState,
+        });
+        expect(unfloored.items).toBe(items);
+        expect(unfloored.gaps).toEqual({ newer: null, older: null });
+    });
+
+    it('ignores the floor while a target window is active (jumps below the floor must render)', () => {
+        const facts = resolveTranscriptTargetWindowHostFacts({
+            items: [
+                { id: 'w-5', seq: 5 },
+                { id: 'w-6', seq: 6 },
+                { id: 'w-7', seq: 7 },
+                { id: 't-1951', seq: 1951 },
+            ],
+            tailContiguousFloorSeq: 1951,
+            windowState: activeWindowState,
+        });
+        expect(facts.targetWindowActive).toBe(true);
+        expect(facts.items.map((item) => item.id)).toEqual(['w-5', 'w-6', 'w-7']);
     });
 });

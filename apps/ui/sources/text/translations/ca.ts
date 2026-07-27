@@ -4764,6 +4764,10 @@ deps: {
             openParentA11y: 'Obre la sessió mare',
             forkFromMessageA11y: 'Bifurca des d’aquest missatge',
 	        },
+	        transcriptGap: {
+	            earlierMessages: 'Missatges anteriors',
+	            laterMessages: 'Missatges posteriors',
+	        },
 	        rollback: {
 	            latestTurnA11y: "Reverteix l'ultim torn",
 	            beforeUserMessageA11y: 'Reverteix abans d\'aquest missatge',

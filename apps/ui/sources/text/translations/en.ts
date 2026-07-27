@@ -4746,6 +4746,10 @@ export const en = {
             openParentA11y: 'Open parent session',
             forkFromMessageA11y: 'Fork from this message',
         },
+        transcriptGap: {
+            earlierMessages: 'Earlier messages',
+            laterMessages: 'Later messages',
+        },
         rollback: {
             latestTurnA11y: 'Roll back the latest turn',
             beforeUserMessageA11y: 'Roll back to before this message',

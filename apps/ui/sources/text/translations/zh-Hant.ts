@@ -4411,6 +4411,10 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                 openParentA11y: '開啟父工作階段',
                 forkFromMessageA11y: '從此訊息分支',
             },
+            transcriptGap: {
+                earlierMessages: '較早的訊息',
+                laterMessages: '較晚的訊息',
+            },
             rollback: {
                 latestTurnA11y: '回退最新一輪',
                 beforeUserMessageA11y: '回退到這則訊息之前',

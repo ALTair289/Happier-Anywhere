@@ -5361,6 +5361,10 @@ localTailscale: {
       openParentA11y: "親セッションを開く",
       forkFromMessageA11y: "このメッセージから分岐",
 	    },
+	    transcriptGap: {
+	      earlierMessages: "前のメッセージ",
+	      laterMessages: "後のメッセージ",
+	    },
 	    rollback: {
 	      latestTurnA11y: '最新のターンをロールバック',
 	      beforeUserMessageA11y: 'このメッセージの前までロールバック',

@@ -5115,6 +5115,10 @@ export const pl: TranslationStructure = {
       openParentA11y: "Otwórz sesję nadrzędną",
       forkFromMessageA11y: "Utwórz gałąź z tego komunikatu",
 	    },
+	    transcriptGap: {
+	      earlierMessages: "Wcześniejsze wiadomości",
+	      laterMessages: "Późniejsze wiadomości",
+	    },
 	    rollback: {
 	      latestTurnA11y: 'Cofnij ostatnia ture',
 	      beforeUserMessageA11y: 'Cofnij do chwili przed ta wiadomoscia',

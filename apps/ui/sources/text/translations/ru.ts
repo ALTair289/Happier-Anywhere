@@ -5567,6 +5567,10 @@ export const ru: TranslationStructure = {
       openParentA11y: "Открыть родительскую сессию",
       forkFromMessageA11y: "Создать ветку от этого сообщения",
 	    },
+	    transcriptGap: {
+	      earlierMessages: "Более ранние сообщения",
+	      laterMessages: "Более поздние сообщения",
+	    },
 	    rollback: {
 	      latestTurnA11y: 'Откатить последний ход',
 	      beforeUserMessageA11y: 'Откатить к состоянию до этого сообщения',

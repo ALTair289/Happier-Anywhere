@@ -5094,6 +5094,10 @@ export const es: TranslationStructure = {
       openParentA11y: "Abrir sesión padre",
       forkFromMessageA11y: "Bifurcar desde este mensaje",
 	    },
+	    transcriptGap: {
+	      earlierMessages: "Mensajes anteriores",
+	      laterMessages: "Mensajes posteriores",
+	    },
 	    rollback: {
 	      latestTurnA11y: 'Revertir el ultimo turno',
 	      beforeUserMessageA11y: 'Revertir antes de este mensaje',

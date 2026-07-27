@@ -5434,6 +5434,10 @@ export const it: TranslationStructure = {
       openParentA11y: "Apri la sessione padre",
       forkFromMessageA11y: "Deriva da questo messaggio",
 	    },
+	    transcriptGap: {
+	      earlierMessages: "Messaggi precedenti",
+	      laterMessages: "Messaggi successivi",
+	    },
 	    rollback: {
 	      latestTurnA11y: "Ripristina l'ultimo turno",
 	      beforeUserMessageA11y: 'Ripristina fino a prima di questo messaggio',

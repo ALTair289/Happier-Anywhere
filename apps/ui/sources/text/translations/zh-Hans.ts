@@ -4913,6 +4913,10 @@ export const zhHans: TranslationStructure = {
       openParentA11y: "打开父会话",
       forkFromMessageA11y: "从此消息分叉",
 	    },
+	    transcriptGap: {
+	      earlierMessages: "更早的消息",
+	      laterMessages: "更晚的消息",
+	    },
 	    rollback: {
 	      latestTurnA11y: '回退最新一轮',
 	      beforeUserMessageA11y: '回退到这条消息之前',
