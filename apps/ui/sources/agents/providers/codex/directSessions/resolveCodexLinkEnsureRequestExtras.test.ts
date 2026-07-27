@@ -121,4 +121,48 @@ describe('resolveCodexLinkEnsureRequestExtras', () => {
             }),
         ).toEqual({});
     });
+
+    it('preserves the logical connected-service group in candidate source and runtime identity', () => {
+        const extras = resolveCodexLinkEnsureRequestExtras({
+            source: {
+                kind: 'codexHome',
+                home: 'connectedService',
+                connectedServiceId: 'openai-codex',
+                connectedServiceGroupId: 'primary-pool',
+                connectedServiceProfileId: 'member-a',
+            },
+            candidate: {
+                details: {
+                    source: {
+                        kind: 'codexHome',
+                        home: 'connectedService',
+                        connectedServiceId: 'openai-codex',
+                        connectedServiceGroupId: 'primary-pool',
+                        connectedServiceProfileId: 'member-b',
+                    },
+                    agentRuntimeDescriptorV1: {
+                        v: 1,
+                        providerId: 'codex',
+                        provider: {
+                            backendMode: 'appServer',
+                            vendorSessionId: 'thread_group',
+                        },
+                    },
+                },
+            },
+        });
+
+        expect(extras.source).toMatchObject({
+            connectedServiceId: 'openai-codex',
+            connectedServiceGroupId: 'primary-pool',
+            connectedServiceProfileId: 'member-b',
+        });
+        expect(readSessionMetadataRuntimeDescriptor({
+            agentRuntimeDescriptorV1: extras.runtimeDescriptor,
+        }, 'codex')).toMatchObject({
+            connectedServiceId: 'openai-codex',
+            connectedServiceGroupId: 'primary-pool',
+            connectedServiceProfileId: 'member-b',
+        });
+    });
 });

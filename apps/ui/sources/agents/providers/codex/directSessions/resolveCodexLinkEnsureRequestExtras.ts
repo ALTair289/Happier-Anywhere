@@ -23,6 +23,7 @@ function buildCanonicalRuntimeDescriptor(params: Readonly<{
         home: 'user' | 'connectedService';
         connectedServiceId?: string;
         connectedServiceProfileId?: string;
+        connectedServiceGroupId?: string;
         homePath?: string;
     }>;
 }>) {
@@ -38,6 +39,7 @@ function buildCanonicalRuntimeDescriptor(params: Readonly<{
         home: params.source.home,
         connectedServiceId: params.source.home === 'connectedService' ? params.source.connectedServiceId ?? null : null,
         connectedServiceProfileId: params.source.home === 'connectedService' ? params.source.connectedServiceProfileId ?? null : null,
+        connectedServiceGroupId: params.source.home === 'connectedService' ? params.source.connectedServiceGroupId ?? null : null,
     });
 }
 
@@ -53,6 +55,7 @@ function readCodexSource(details: Record<string, unknown> | undefined) {
         home,
         ...(typeof record.connectedServiceId === 'string' ? { connectedServiceId: record.connectedServiceId } : {}),
         ...(typeof record.connectedServiceProfileId === 'string' ? { connectedServiceProfileId: record.connectedServiceProfileId } : {}),
+        ...(typeof record.connectedServiceGroupId === 'string' ? { connectedServiceGroupId: record.connectedServiceGroupId } : {}),
         ...(typeof record.homePath === 'string' ? { homePath: record.homePath } : {}),
     };
 }
@@ -63,6 +66,7 @@ export function resolveCodexLinkEnsureRequestExtras(params: Readonly<{
         home: 'user' | 'connectedService';
         connectedServiceId?: string;
         connectedServiceProfileId?: string;
+        connectedServiceGroupId?: string;
         homePath?: string;
     }>;
     candidate: Readonly<{ details?: Record<string, unknown> }>;

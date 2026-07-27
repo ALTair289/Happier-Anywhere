@@ -56,4 +56,29 @@ describe('resolveCodexLockedBrowseSourceOption', () => {
 
         expect(resolved).toEqual(userOption);
     });
+
+    it('resolves a group binding as the durable source even when its active member changes', () => {
+        const resolved = resolveCodexLockedBrowseSourceOption({
+            sourceOptions: [userOption, connectedOption],
+            agentOptionState: {
+                [CONNECTED_SERVICES_BINDINGS_KEY]: {
+                    'openai-codex': {
+                        source: 'connected',
+                        selection: 'group',
+                        groupId: 'primary-pool',
+                        profileId: 'work',
+                    },
+                },
+            },
+        });
+
+        expect(resolved).toMatchObject({
+            source: {
+                kind: 'codexHome',
+                home: 'connectedService',
+                connectedServiceId: 'openai-codex',
+                connectedServiceGroupId: 'primary-pool',
+            },
+        });
+    });
 });
