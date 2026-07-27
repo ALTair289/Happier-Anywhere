@@ -14,6 +14,28 @@ describe('inferToolNameForRendering', () => {
         expect(result).toEqual({ normalizedToolName: 'read', source: 'original' });
     });
 
+    it('keeps an already-canonical CodeSearch name when the ACP display title says grep', () => {
+        const result = inferToolNameForRendering({
+            toolName: 'CodeSearch',
+            toolInput: { _acp: { kind: 'search', title: 'grep' } },
+            toolDescription: 'grep',
+            knownToolKeys: [...known, 'CodeSearch', 'Grep'],
+        });
+
+        expect(result).toEqual({ normalizedToolName: 'CodeSearch', source: 'original' });
+    });
+
+    it('keeps an already-canonical Read name when the ACP display title names another renderer', () => {
+        const result = inferToolNameForRendering({
+            toolName: 'Read',
+            toolInput: { _acp: { kind: 'read', title: 'web_fetch' } },
+            toolDescription: 'web_fetch',
+            knownToolKeys: [...known, 'Read'],
+        });
+
+        expect(result).toEqual({ normalizedToolName: 'Read', source: 'original' });
+    });
+
     it('prefers toolInput.toolName when tool name is unknown', () => {
         const result = inferToolNameForRendering({
             toolName: 'unknown',

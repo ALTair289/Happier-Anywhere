@@ -10377,3 +10377,10 @@ settingsSession: {
 } as const;
 
 export type TranslationsEs = typeof es;
+      codeSearch: {
+        aggregateMatchUnavailable: '1 coincidencia; no se proporcionaron detalles.',
+        aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} coincidencias; no se proporcionaron detalles.`,
+        aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} archivos; no se proporcionaron detalles.`,
+        detailsUnavailable: "La búsqueda terminó; no se proporcionaron detalles.",
+        truncated: "Los resultados pueden estar truncados.",
+      },

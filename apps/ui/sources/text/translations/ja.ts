@@ -10257,3 +10257,10 @@ settingsSession: {
     friendAcceptedGeneric: "友達リクエストが承認されました",
   },
 } as const;
+    codeSearch: {
+      aggregateMatchUnavailable: '1件の一致。詳細は提供されませんでした。',
+      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count}件の一致。詳細は提供されませんでした。`,
+      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count}件のファイル。詳細は提供されませんでした。`,
+      detailsUnavailable: "検索は完了しましたが、詳細は提供されませんでした。",
+      truncated: "結果は省略されている可能性があります。",
+    },

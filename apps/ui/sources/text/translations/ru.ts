@@ -10286,3 +10286,10 @@ settingsSession: {
 } as const;
 
 export type TranslationsRu = typeof ru;
+    codeSearch: {
+      aggregateMatchUnavailable: '1 совпадение; подробности не предоставлены.',
+      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} совпадений; подробности не предоставлены.`,
+      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} файлов; подробности не предоставлены.`,
+      detailsUnavailable: "Поиск завершён; подробности не предоставлены.",
+      truncated: "Результаты могут быть сокращены.",
+    },

@@ -10373,3 +10373,10 @@ settingsSession: {
 } as const;
 
 export type TranslationsPl = typeof pl;
+    codeSearch: {
+      aggregateMatchUnavailable: '1 dopasowanie; szczegóły nie zostały podane.',
+      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} dopasowań; szczegóły nie zostały podane.`,
+      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} plików; szczegóły nie zostały podane.`,
+      detailsUnavailable: "Wyszukiwanie zakończone; szczegóły nie zostały podane.",
+      truncated: "Wyniki mogą być skrócone.",
+    },

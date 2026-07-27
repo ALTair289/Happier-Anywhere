@@ -25,18 +25,43 @@ function getMatches(result: unknown): SearchMatch[] {
         const obj = asRecord(item);
         if (!obj) continue;
         out.push({
-            filePath: typeof (obj as any).filePath === 'string' ? (obj as any).filePath : undefined,
-            line: typeof (obj as any).line === 'number' ? (obj as any).line : undefined,
-            excerpt: typeof (obj as any).excerpt === 'string' ? (obj as any).excerpt : undefined,
+            filePath: typeof obj.filePath === 'string' ? obj.filePath : undefined,
+            line: typeof obj.line === 'number' ? obj.line : undefined,
+            excerpt: typeof obj.excerpt === 'string' ? obj.excerpt : undefined,
         });
     }
     return out;
 }
 
+function readSearchSummary(result: unknown): Readonly<{
+    totalMatches: number | null;
+    totalFiles: number | null;
+    detailsUnavailable: boolean;
+    truncated: boolean;
+}> {
+    const record = coerceToolResultRecord(result);
+    const readCount = (value: unknown): number | null => (
+        typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+    );
+    return {
+        totalMatches: readCount(record?.totalMatches),
+        totalFiles: readCount(record?.totalFiles),
+        detailsUnavailable: record?.detailsUnavailable === true,
+        truncated: record?.truncated === true,
+    };
+}
+
 export const CodeSearchView = React.memo<ToolViewProps>(({ tool, detailLevel }) => {
     if (tool.state !== 'completed') return null;
     const matches = getMatches(tool.result);
-    if (matches.length === 0) return null;
+    const summary = readSearchSummary(tool.result);
+    const aggregateCounts = [summary.totalMatches, summary.totalFiles]
+        .filter((count): count is number => count !== null);
+    const isExplicitZero = matches.length === 0
+        && aggregateCounts.length > 0
+        && aggregateCounts.every((count) => count === 0);
+    // Truncation alone is not evidence that a search completed or found results.
+    if (matches.length === 0 && !summary.detailsUnavailable && !isExplicitZero) return null;
 
     const isFullView = detailLevel === 'full';
     const shown = matches.slice(0, isFullView ? 20 : 6);
@@ -45,6 +70,18 @@ export const CodeSearchView = React.memo<ToolViewProps>(({ tool, detailLevel }) 
     return (
         <ToolSectionView fullWidth={isFullView}>
             <View style={styles.container}>
+                {summary.detailsUnavailable ? (
+                    <Text style={styles.summary}>
+                        {summary.totalMatches !== null
+                            ? summary.totalMatches === 1
+                                ? t('tools.codeSearch.aggregateMatchUnavailable')
+                                : t('tools.codeSearch.aggregateMatchesUnavailable', { count: summary.totalMatches })
+                            : summary.totalFiles !== null
+                                ? t('tools.codeSearch.aggregateFilesUnavailable', { count: summary.totalFiles })
+                                : t('tools.codeSearch.detailsUnavailable')}
+                    </Text>
+                ) : null}
+                {isExplicitZero ? <Text style={styles.summary}>{t('common.noMatches')}</Text> : null}
                 {shown.map((m, idx) => {
                     const label = m.filePath
                         ? `${m.filePath}${typeof m.line === 'number' ? `:${m.line}` : ''}`
@@ -57,6 +94,7 @@ export const CodeSearchView = React.memo<ToolViewProps>(({ tool, detailLevel }) 
                     );
                 })}
                 {more > 0 ? <Text style={styles.more}>{t('tools.structuredResult.more', { count: more })}</Text> : null}
+                {summary.truncated ? <Text style={styles.more}>{t('tools.codeSearch.truncated')}</Text> : null}
             </View>
         </ToolSectionView>
     );
@@ -71,6 +109,10 @@ const styles = StyleSheet.create((theme) => ({
     },
     row: {
         gap: 4,
+    },
+    summary: {
+        fontSize: 13,
+        color: theme.colors.text.secondary,
     },
     label: {
         fontSize: 12,

@@ -44,10 +44,10 @@ export function inferToolNameForRendering(params: {
     const acpTitle = firstNonEmptyString(asRecord(input?._acp)?.title) ?? firstNonEmptyString(input?.title);
     if (acpTitle && !acpTitle.includes(' ')) {
         const normalizedAcpTitle = normalizeByKnownKeys(acpTitle, params.knownToolKeys);
-        const originalLower = normalizedOriginal.toLowerCase();
+        const originalName = params.toolName.trim();
         const prefersSpecificAcpTitle =
-            (originalLower === 'read' || originalLower === 'search' || originalLower === 'codesearch')
-            && normalizedAcpTitle.toLowerCase() !== originalLower
+            (originalName === 'read' || originalName === 'search')
+            && normalizedAcpTitle.toLowerCase() !== normalizedOriginal.toLowerCase()
             && params.knownToolKeys.includes(normalizedAcpTitle);
         if (prefersSpecificAcpTitle) {
             return { normalizedToolName: normalizedAcpTitle, source: 'acpTitle' };

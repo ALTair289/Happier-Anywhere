@@ -9560,3 +9560,10 @@ settingsSession: {
 } as const;
 
 export type TranslationsCa = typeof ca;
+          codeSearch: {
+              aggregateMatchUnavailable: '1 coincidència; no s\'han proporcionat detalls.',
+              aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} coincidències; no s'han proporcionat detalls.`,
+              aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} fitxers; no s'han proporcionat detalls.`,
+              detailsUnavailable: 'La cerca ha finalitzat; no s\'han proporcionat detalls.',
+              truncated: 'Els resultats poden estar truncats.',
+          },

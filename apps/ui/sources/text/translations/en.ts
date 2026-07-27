@@ -9654,3 +9654,10 @@ export type TranslationsEn = typeof en;
 // Shape contract for all locales: enforce identical key structure without requiring English literal
 // string values. Functions are preserved so parameter lists remain typechecked.
 export type TranslationStructure = DeepTranslationShape<TranslationsEn>;
+        codeSearch: {
+            aggregateMatchUnavailable: '1 match; details were not provided.',
+            aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} matches; details were not provided.`,
+            aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} files; details were not provided.`,
+            detailsUnavailable: 'Search completed; details were not provided.',
+            truncated: 'Results may be truncated.',
+        },

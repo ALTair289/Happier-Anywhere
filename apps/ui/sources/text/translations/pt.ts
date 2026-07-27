@@ -10480,3 +10480,10 @@ settingsSession: {
 } as const;
 
 export type TranslationsPt = typeof pt;
+    codeSearch: {
+      aggregateMatchUnavailable: '1 correspondência; os detalhes não foram fornecidos.',
+      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} correspondências; os detalhes não foram fornecidos.`,
+      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} ficheiros; os detalhes não foram fornecidos.`,
+      detailsUnavailable: "A pesquisa terminou; os detalhes não foram fornecidos.",
+      truncated: "Os resultados podem estar truncados.",
+    },

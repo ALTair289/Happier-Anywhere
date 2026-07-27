@@ -9949,3 +9949,10 @@ settingsSession: {
     friendAcceptedGeneric: "好友请求已接受",
   },
 } as const;
+    codeSearch: {
+      aggregateMatchUnavailable: '1 个匹配项；未提供详情。',
+      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} 个匹配项；未提供详情。`,
+      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} 个文件；未提供详情。`,
+      detailsUnavailable: "搜索已完成；未提供详情。",
+      truncated: "结果可能已截断。",
+    },

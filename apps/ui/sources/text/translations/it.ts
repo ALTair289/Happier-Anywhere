@@ -10353,3 +10353,10 @@ settingsSession: {
 } as const;
 
 export type TranslationsIt = typeof it;
+      codeSearch: {
+        aggregateMatchUnavailable: '1 corrispondenza; i dettagli non sono stati forniti.',
+        aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} corrispondenze; i dettagli non sono stati forniti.`,
+        aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} file; i dettagli non sono stati forniti.`,
+        detailsUnavailable: "Ricerca completata; i dettagli non sono stati forniti.",
+        truncated: "I risultati potrebbero essere troncati.",
+      },

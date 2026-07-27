@@ -66,4 +66,98 @@ describe('CodeSearchView', () => {
         expect(renderedText).toContain('match-9');
         expect(renderedText).not.toContain('+4 more');
     });
+
+    it('renders aggregate-only counts honestly and preserves truncation state', async () => {
+        const { CodeSearchView } = await import('./CodeSearchView');
+        const tool = makeToolCall({
+            name: 'CodeSearch',
+            state: 'completed',
+            input: { query: 'needle' },
+            result: { matches: [], totalMatches: 4, detailsUnavailable: true, truncated: true },
+        });
+
+        const tree = (await renderScreen(React.createElement(CodeSearchView, makeToolViewProps(tool)))).tree;
+        const renderedText = collectHostText(tree).join(' ').replace(/\s+/g, ' ');
+        expect(renderedText).toContain('4 matches; details were not provided.');
+        expect(renderedText).toContain('Results may be truncated.');
+        expect(renderedText).not.toContain('0 matches');
+    });
+
+    it('uses singular aggregate copy for exactly one unavailable match', async () => {
+        const { CodeSearchView } = await import('./CodeSearchView');
+        const tool = makeToolCall({
+            name: 'CodeSearch',
+            state: 'completed',
+            input: { query: 'needle' },
+            result: { matches: [], totalMatches: 1, detailsUnavailable: true },
+        });
+
+        const tree = (await renderScreen(React.createElement(CodeSearchView, makeToolViewProps(tool)))).tree;
+        const renderedText = collectHostText(tree).join(' ').replace(/\s+/g, ' ');
+        expect(renderedText).toContain('1 match; details were not provided.');
+        expect(renderedText).not.toContain('1 matches');
+    });
+
+    it('renders an explicit empty state for a source-real zero-match result', async () => {
+        const { CodeSearchView } = await import('./CodeSearchView');
+        const tool = makeToolCall({
+            name: 'CodeSearch',
+            state: 'completed',
+            input: { query: 'definitely-absent-token' },
+            result: { matches: [], totalMatches: 0 },
+        });
+
+        const tree = (await renderScreen(React.createElement(CodeSearchView, makeToolViewProps(tool)))).tree;
+        expect(collectHostText(tree).join(' ').replace(/\s+/g, ' ')).toContain('No matches');
+    });
+
+    it('does not contradict detailed matches with a malformed zero aggregate', async () => {
+        const { CodeSearchView } = await import('./CodeSearchView');
+        const tool = makeToolCall({
+            name: 'CodeSearch',
+            state: 'completed',
+            input: { query: 'needle' },
+            result: {
+                matches: [{ filePath: '/repo/a.ts', line: 1, excerpt: 'needle' }],
+                totalMatches: 0,
+            },
+        });
+
+        const tree = (await renderScreen(React.createElement(CodeSearchView, makeToolViewProps(tool)))).tree;
+        const renderedText = collectHostText(tree).join(' ').replace(/\s+/g, ' ');
+        expect(renderedText).toContain('/repo/a.ts:1');
+        expect(renderedText).not.toContain('No matches');
+    });
+
+    it('renders detailed truncation without an aggregate-unavailable claim', async () => {
+        const { CodeSearchView } = await import('./CodeSearchView');
+        const tool = makeToolCall({
+            name: 'CodeSearch',
+            state: 'completed',
+            input: { query: 'needle' },
+            result: {
+                matches: [{ filePath: '/repo/a.ts', line: 1, excerpt: 'needle' }],
+                totalMatches: 1,
+                truncated: true,
+            },
+        });
+
+        const tree = (await renderScreen(React.createElement(CodeSearchView, makeToolViewProps(tool)))).tree;
+        const renderedText = collectHostText(tree).join(' ').replace(/\s+/g, ' ');
+        expect(renderedText).toContain('/repo/a.ts:1');
+        expect(renderedText).toContain('Results may be truncated.');
+        expect(renderedText).not.toContain('details were not provided');
+    });
+
+    it('does not render a success summary for malformed truncation-only output', async () => {
+        const { CodeSearchView } = await import('./CodeSearchView');
+        const tool = makeToolCall({
+            name: 'CodeSearch',
+            state: 'completed',
+            input: { query: 'needle' },
+            result: { truncated: true },
+        });
+        const tree = (await renderScreen(React.createElement(CodeSearchView, makeToolViewProps(tool)))).tree;
+        expect(collectHostText(tree)).toEqual([]);
+    });
 });
