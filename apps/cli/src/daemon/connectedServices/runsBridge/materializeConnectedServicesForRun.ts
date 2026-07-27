@@ -2,8 +2,13 @@ import type { CatalogAgentId } from '@/backends/types';
 import { logger as defaultLogger } from '@/ui/logger';
 
 import { createConnectedServiceMaterializedTargetRootCleanup } from '../materialize/createConnectedServiceMaterializedTargetRootCleanup';
+import { resolveConnectedServiceTargetMaterializedRoot } from '../materialize/resolveConnectedServiceTargetMaterializedRoot';
+import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '../connectedServiceChildEnvironment';
 import type { resolveConnectedServiceAuthForSpawn } from '../resolveConnectedServiceAuthForSpawn';
 import type { ConnectedServiceRuntimeRegistry } from '../runtimeRegistry/registry';
+import { buildRuntimeAccountIdentitySelectionFactV1 } from '../quotas/identity/runtimeAccountIdentityTypes';
+import type { ExecutionRunConnectedServiceMaterializationProofV1 } from './contract';
+import type { ExecutionRunConnectedServiceRegistrationV1 } from './contract';
 
 /**
  * The daemon-owned run-materialization bridge (design pins 2/3: the daemon stays the SOLE
@@ -50,6 +55,8 @@ export type ExecutionRunConnectedServiceReleaseRequest = Readonly<{
 
 export type ExecutionRunConnectedServiceMaterializeResult = Readonly<{
   env: Record<string, string>;
+  proof: ExecutionRunConnectedServiceMaterializationProofV1;
+  registration: ExecutionRunConnectedServiceRegistrationV1;
 }>;
 
 /**
@@ -89,12 +96,20 @@ export type ExecutionRunConnectedServicesBridge = Readonly<{
   release: (
     request: ExecutionRunConnectedServiceReleaseRequest,
   ) => Promise<Readonly<{ released: boolean }>>;
+  adoptLiveMaterialization: (input: Readonly<{
+    runId: string;
+    runKey: string;
+    pid: number;
+    agentId: CatalogAgentId;
+    materializedRoot: string;
+  }>) => boolean;
 }>;
 
-type RunReleaseEntry = Readonly<{
+type RunReleaseEntry = {
   pid: number;
-  cleanupOnExit: (() => void) | null;
-}>;
+  cleanupOnExit: (() => void | Promise<void>) | null;
+  cleanupPromise: Promise<void> | null;
+};
 
 export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
   resolveAuthForSpawn: ResolveConnectedServiceAuthForRun;
@@ -113,6 +128,11 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
    * on the run target and authorizes its access-token bridge even when no live session shares the pool.
    */
   resolveBrokerSelectionIdentity?: (env: Record<string, string>) => string | null;
+  createAdoptedRootCleanup?: (input: Readonly<{
+    materializedRoot: string;
+    materializationKey: string;
+    agentId: CatalogAgentId;
+  }>) => (() => void | Promise<void>) | null;
 }>): ExecutionRunConnectedServicesBridge {
   const logger = deps.logger ?? defaultLogger;
   // In-memory release state keyed by the run-scoped materialization key. A daemon restart drops it;
@@ -125,6 +145,17 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
   const inFlightMaterializeByKey = new Map<string, Promise<unknown>>();
 
   return {
+    adoptLiveMaterialization(input) {
+      if (releaseEntriesByKey.has(input.runKey)) return true;
+      const cleanup = deps.createAdoptedRootCleanup?.({
+        materializedRoot: input.materializedRoot,
+        materializationKey: input.runKey,
+        agentId: input.agentId,
+      }) ?? null;
+      if (!cleanup) return false;
+      releaseEntriesByKey.set(input.runKey, { pid: input.pid, cleanupOnExit: cleanup, cleanupPromise: null });
+      return true;
+    },
     async materialize(request) {
       const work = (async () => {
       let resolved: Awaited<ReturnType<ResolveConnectedServiceAuthForRun>>;
@@ -160,6 +191,7 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
       // materialized env carries a stable pool identity. Indexing it on the run target lets the broker
       // access-token refresh authorize the run even when no live session shares the pool.
       const brokerSelectionIdentity = deps.resolveBrokerSelectionIdentity?.(resolved.env) ?? null;
+      const connectedServiceSelectionsJson = resolved.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]?.trim() || null;
 
       // Register the run in the runtime-registry RUN KEYSPACE (keyed by materialization key, carrying
       // the runner pid for liveness) so it coexists with the host session's pid-keyed target and BOTH
@@ -172,6 +204,9 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
         ...(request.sessionId ? { sessionId: request.sessionId } : {}),
         ...(brokerSelectionIdentity ? { brokerSelectionIdentity } : {}),
         connectedServicesBindingsRaw: resolved.connectedServicesBindings,
+        connectedServiceSelectionsEnv: connectedServiceSelectionsJson
+          ? { [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: connectedServiceSelectionsJson }
+          : null,
         materializationKey: request.materializationKey,
         sessionDirectory: request.sessionDirectory ?? null,
         runtimeAccountIdentitySelections: resolved.runtimeAccountIdentitySelections,
@@ -185,9 +220,14 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
           agentId: request.agentId,
           env: resolved.env,
         });
+      const materializedRoot = resolveConnectedServiceTargetMaterializedRoot({
+        agentId: request.agentId,
+        targetMaterializedEnv: resolved.env,
+      })?.trim() || null;
       releaseEntriesByKey.set(request.materializationKey, {
         pid: request.pid,
         cleanupOnExit: runRootCleanup,
+        cleanupPromise: null,
       });
 
       logger.info('[DAEMON RUN] Connected-service run materialized', {
@@ -201,7 +241,28 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
         envKeyCount: Object.keys(resolved.env).length,
       });
 
-      return { env: resolved.env };
+      return {
+        env: resolved.env,
+        proof: {
+          v: 1 as const,
+          agentId: request.agentId,
+          materializationKey: request.materializationKey,
+          connectedServicesBindings: resolved.connectedServicesBindings,
+        },
+        registration: {
+          v: 1 as const,
+          agentId: request.agentId,
+          materializationKey: request.materializationKey,
+          connectedServicesBindings: resolved.connectedServicesBindings,
+          brokerSelectionIdentity,
+          runtimeAccountIdentitySelections: resolved.runtimeAccountIdentitySelections.flatMap((selection) => {
+            const fact = buildRuntimeAccountIdentitySelectionFactV1(selection);
+            return fact ? [fact] : [];
+          }),
+          sessionDirectory: request.sessionDirectory ?? null,
+          materializedRoot,
+        },
+      };
       })();
 
       inFlightMaterializeByKey.set(request.materializationKey, work.catch(() => {}));
@@ -231,9 +292,24 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
         });
         return { released: false };
       }
-      releaseEntriesByKey.delete(request.materializationKey);
       const cleanupRan = entry.cleanupOnExit !== null;
-      entry.cleanupOnExit?.();
+      entry.cleanupPromise ??= Promise.resolve().then(async () => {
+        await entry.cleanupOnExit?.();
+      });
+      try {
+        await entry.cleanupPromise;
+      } catch (error) {
+        entry.cleanupPromise = null;
+        logger.info('[DAEMON RUN] Connected-service run released', {
+          runId: request.runId,
+          released: false,
+          cleanupRan,
+        });
+        return { released: false };
+      }
+      if (releaseEntriesByKey.get(request.materializationKey) === entry) {
+        releaseEntriesByKey.delete(request.materializationKey);
+      }
       logger.info('[DAEMON RUN] Connected-service run released', {
         runId: request.runId,
         released: true,

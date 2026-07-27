@@ -4,7 +4,10 @@ import { join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY } from '../connectedServiceChildEnvironment';
+import {
+  HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY,
+  HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY,
+} from '../connectedServiceChildEnvironment';
 import { ConnectedServiceRuntimeRegistry } from '../runtimeRegistry/registry';
 import {
   ExecutionRunConnectedServiceMaterializeError,
@@ -58,6 +61,22 @@ describe('createExecutionRunConnectedServicesBridge', () => {
     const result = await bridge.materialize(buildRequest());
 
     expect(result.env).toEqual({ CODEX_HOME: '/materialized/run/codex/codex-home' });
+    expect(result.proof).toEqual({
+      v: 1,
+      agentId: 'codex',
+      materializationKey: RUN_KEY,
+      connectedServicesBindings: buildResolved().connectedServicesBindings,
+    });
+    expect(result.registration).toEqual({
+      v: 1,
+      agentId: 'codex',
+      materializationKey: RUN_KEY,
+      connectedServicesBindings: buildResolved().connectedServicesBindings,
+      brokerSelectionIdentity: null,
+      runtimeAccountIdentitySelections: [],
+      sessionDirectory: '/tmp/workspace',
+      materializedRoot: '/materialized/run/codex',
+    });
     expect(resolveAuthForSpawn.mock.calls.at(0)?.[0]).toMatchObject({
       agentId: 'codex',
       materializationKey: RUN_KEY,
@@ -68,6 +87,115 @@ describe('createExecutionRunConnectedServicesBridge', () => {
     expect(refreshTargets.map((target) => target.materializationKey)).toEqual([RUN_KEY]);
     expect(refreshTargets[0]?.agentId).toBe('codex');
     expect(refreshTargets[0]?.pid).toBe(4242);
+  });
+
+  it('registers and returns the exact non-secret generation and credential revision selected for a run', async () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const credentialRevision = 'csr_bbbbbbbbbbbbbbbbbbbbbb';
+    const connectedServiceSelectionsJson = JSON.stringify([{
+      kind: 'group',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      activeProfileId: 'work',
+      fallbackProfileId: 'backup',
+      generation: 12,
+      credentialRevision,
+    }]);
+    const connectedServicesBindings = {
+      v: 1 as const,
+      bindingsByServiceId: {
+        'openai-codex': {
+          source: 'connected' as const,
+          selection: 'group' as const,
+          groupId: 'team',
+          profileId: 'work',
+        },
+      },
+    };
+    const registrations: unknown[] = [];
+    registry.onTargetRegistration((registration) => registrations.push(registration));
+    const bridge = createExecutionRunConnectedServicesBridge({
+      resolveAuthForSpawn: (async () => ({
+        ...buildResolved(),
+        env: {
+          CODEX_HOME: '/materialized/run/codex/codex-home',
+          [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: connectedServiceSelectionsJson,
+        },
+        connectedServicesBindings,
+      })) as unknown as ResolveConnectedServiceAuthForRun,
+      runtimeRegistry: registry,
+    });
+
+    const result = await bridge.materialize(buildRequest());
+
+    // Preserve the old strict daemon→runner registration wire shape; the runner derives this
+    // non-secret envelope from the already-returned env before writing its local marker.
+    expect(result.registration).not.toHaveProperty('connectedServiceSelectionsJson');
+    expect(registry.listTargets()[0]?.activeBindings).toEqual([expect.objectContaining({
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'work',
+      generation: 12,
+      credentialRevision,
+    })]);
+    expect(registrations).toEqual([expect.objectContaining({
+      key: { kind: 'execution_run', runKey: RUN_KEY },
+      target: registry.listTargets()[0],
+    })]);
+  });
+
+  it('returns only non-secret runtime account identity facts for durable launch registration', async () => {
+    const credential = {
+      v: 1 as const,
+      serviceId: 'openai-codex' as const,
+      profileId: 'work',
+      kind: 'oauth' as const,
+      createdAt: 1,
+      updatedAt: 2,
+      expiresAt: 3,
+      oauth: {
+        accessToken: 'secret-access-token',
+        refreshToken: 'secret-refresh-token',
+        idToken: 'secret-id-token',
+        scope: 'openid',
+        tokenType: 'Bearer',
+        providerAccountId: 'account-1',
+        providerEmail: 'work@example.com',
+        raw: { secret: 'raw-secret' },
+      },
+      token: null,
+    };
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const bridge = createExecutionRunConnectedServicesBridge({
+      resolveAuthForSpawn: (async () => ({
+        ...buildResolved(),
+        runtimeAccountIdentitySelections: [{
+          serviceId: 'openai-codex',
+          profileId: 'work',
+          groupId: null,
+          groupGeneration: null,
+          record: credential,
+          source: 'spawn_selection',
+        }],
+      })) as unknown as ResolveConnectedServiceAuthForRun,
+      runtimeRegistry: registry,
+    });
+
+    const result = await bridge.materialize(buildRequest({ sessionId: 'session-1' }));
+
+    expect(result.registration.runtimeAccountIdentitySelections).toEqual([{
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      groupId: null,
+      groupGeneration: null,
+      providerAccountId: 'account-1',
+      accountLabel: 'work@example.com',
+      source: 'spawn_selection',
+    }]);
+    expect(JSON.stringify(result.registration)).not.toContain('secret-');
+    expect(registry.listQuotaTargets()[0]?.runtimeAccountIdentitySelections).toEqual([
+      expect.objectContaining({ record: credential }),
+    ]);
   });
 
   it('R3-1: coexists with an existing session target on the same PID — BOTH covered by refresh distribution', async () => {
@@ -326,5 +454,66 @@ describe('createExecutionRunConnectedServicesBridge', () => {
     expect(released.released).toBe(true);
     // …but the session's registration is untouched.
     expect(registry.getByPid(4242)?.materializationKey).toBe('session-key-1');
+  });
+
+  it('adopts a replacement cleanup passively and explicit release runs it exactly once', async () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const cleanup = vi.fn();
+    const bridge = createExecutionRunConnectedServicesBridge({
+      resolveAuthForSpawn: vi.fn() as unknown as ResolveConnectedServiceAuthForRun,
+      runtimeRegistry: registry,
+      createAdoptedRootCleanup: ({ materializedRoot }) => materializedRoot === '/managed/run-one' ? cleanup : null,
+    });
+
+    expect(bridge.adoptLiveMaterialization({
+      runId: 'run-one',
+      runKey: RUN_KEY,
+      pid: 4242,
+      agentId: 'codex',
+      materializedRoot: '/managed/run-one',
+    })).toBe(true);
+    expect(cleanup).not.toHaveBeenCalled();
+
+    await bridge.release({ runId: 'run-one', pid: 4242, materializationKey: RUN_KEY });
+    await bridge.release({ runId: 'run-one', pid: 4242, materializationKey: RUN_KEY });
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects unsafe adopted cleanup and allows a later valid retry', async () => {
+    const cleanup = vi.fn();
+    const bridge = createExecutionRunConnectedServicesBridge({
+      resolveAuthForSpawn: vi.fn() as unknown as ResolveConnectedServiceAuthForRun,
+      runtimeRegistry: new ConnectedServiceRuntimeRegistry(),
+      createAdoptedRootCleanup: ({ materializedRoot }) => materializedRoot === '/managed/retry' ? cleanup : null,
+    });
+
+    expect(bridge.adoptLiveMaterialization({
+      runId: 'run-one', runKey: RUN_KEY, pid: 4242, agentId: 'codex', materializedRoot: '/outside',
+    })).toBe(false);
+    expect(bridge.adoptLiveMaterialization({
+      runId: 'run-one', runKey: RUN_KEY, pid: 4242, agentId: 'codex', materializedRoot: '/managed/retry',
+    })).toBe(true);
+    await bridge.release({ runId: 'run-one', pid: 4242, materializationKey: RUN_KEY });
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains an adopted cleanup record after a partial failure so explicit release can retry', async () => {
+    const cleanup = vi.fn()
+      .mockRejectedValueOnce(new Error('busy'))
+      .mockResolvedValueOnce(undefined);
+    const bridge = createExecutionRunConnectedServicesBridge({
+      resolveAuthForSpawn: vi.fn() as unknown as ResolveConnectedServiceAuthForRun,
+      runtimeRegistry: new ConnectedServiceRuntimeRegistry(),
+      createAdoptedRootCleanup: () => cleanup,
+    });
+    bridge.adoptLiveMaterialization({
+      runId: 'run-one', runKey: RUN_KEY, pid: 4242, agentId: 'codex', materializedRoot: '/managed/retry',
+    });
+
+    await expect(bridge.release({ runId: 'run-one', pid: 4242, materializationKey: RUN_KEY }))
+      .resolves.toEqual({ released: false });
+    await expect(bridge.release({ runId: 'run-one', pid: 4242, materializationKey: RUN_KEY }))
+      .resolves.toEqual({ released: true });
+    expect(cleanup).toHaveBeenCalledTimes(2);
   });
 });

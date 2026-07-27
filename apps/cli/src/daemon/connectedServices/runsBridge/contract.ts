@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { AGENT_IDS } from '@happier-dev/agents';
+import { ConnectedServiceBindingsV1Schema } from '@happier-dev/protocol';
+import { RuntimeAccountIdentitySelectionFactV1Schema } from '../quotas/identity/runtimeAccountIdentityTypes';
 
 /**
  * Wire contract for the daemon run-materialization bridge. The runner POSTs here (DEDICATED scoped
@@ -22,9 +25,70 @@ export const ExecutionRunConnectedServiceMaterializeRequestSchema = z.object({
 export type ExecutionRunConnectedServiceMaterializeRequestWire =
   z.infer<typeof ExecutionRunConnectedServiceMaterializeRequestSchema>;
 
+export const ExecutionRunConnectedServiceMaterializationProofV1Schema = z.object({
+  v: z.literal(1),
+  agentId: z.string().min(1),
+  materializationKey: z.string().min(1),
+  connectedServicesBindings: ConnectedServiceBindingsV1Schema,
+}).strict();
+
+export type ExecutionRunConnectedServiceMaterializationProofV1 =
+  z.infer<typeof ExecutionRunConnectedServiceMaterializationProofV1Schema>;
+
+export const ExecutionRunConnectedServiceRegistrationV1Schema =
+  ExecutionRunConnectedServiceMaterializationProofV1Schema.extend({
+    brokerSelectionIdentity: z.string().min(1).nullable(),
+    runtimeAccountIdentitySelections: z.array(RuntimeAccountIdentitySelectionFactV1Schema).readonly(),
+    connectedServiceSelectionsJson: z.string().min(1).nullable().optional(),
+    sessionDirectory: z.string().min(1).nullable(),
+    materializedRoot: z.string().min(1).nullable(),
+  }).strict();
+export type ExecutionRunConnectedServiceRegistrationV1 =
+  z.infer<typeof ExecutionRunConnectedServiceRegistrationV1Schema>;
+
+/** Persisted daemon-local launch identity. Fields are non-secret and old markers may omit selections. */
+export const ExecutionRunConnectedServicesLaunchV1Schema = z.object({
+  v: z.literal(1),
+  runKey: z.string().min(1),
+  agentId: z.enum(AGENT_IDS),
+  connectedServicesBindings: ConnectedServiceBindingsV1Schema,
+  brokerSelectionIdentity: z.string().min(1).nullable().optional(),
+  runtimeAccountIdentitySelections: z.array(RuntimeAccountIdentitySelectionFactV1Schema).readonly().default([]),
+  connectedServiceSelectionsJson: z.string().min(1).nullable().optional(),
+  sessionDirectory: z.string().min(1).nullable().optional(),
+  materializedRoot: z.string().min(1).nullable(),
+}).strict();
+
+export type ExecutionRunConnectedServicesLaunchV1 = z.infer<typeof ExecutionRunConnectedServicesLaunchV1Schema>;
+
+export function buildExecutionRunConnectedServicesLaunchV1(
+  registration: ExecutionRunConnectedServiceRegistrationV1,
+): ExecutionRunConnectedServicesLaunchV1 {
+  return ExecutionRunConnectedServicesLaunchV1Schema.parse({
+    v: 1,
+    runKey: registration.materializationKey,
+    agentId: registration.agentId,
+    connectedServicesBindings: registration.connectedServicesBindings,
+    brokerSelectionIdentity: registration.brokerSelectionIdentity,
+    runtimeAccountIdentitySelections: registration.runtimeAccountIdentitySelections,
+    connectedServiceSelectionsJson: registration.connectedServiceSelectionsJson,
+    sessionDirectory: registration.sessionDirectory,
+    materializedRoot: registration.materializedRoot,
+  });
+}
+
+export const ExecutionRunConnectedServiceMaterializedEnvSchema = z
+  .record(z.string(), z.string())
+  .refine(
+    (env) => Object.values(env).some((value) => value.trim().length > 0),
+    { message: 'Connected-service materialization must contain a non-empty environment value' },
+  );
+
 export const ExecutionRunConnectedServiceMaterializeResponseSchema = z.object({
-  env: z.record(z.string(), z.string()),
-});
+  env: ExecutionRunConnectedServiceMaterializedEnvSchema,
+  proof: ExecutionRunConnectedServiceMaterializationProofV1Schema,
+  registration: ExecutionRunConnectedServiceRegistrationV1Schema.optional(),
+}).strict();
 
 export type ExecutionRunConnectedServiceMaterializeResponseWire =
   z.infer<typeof ExecutionRunConnectedServiceMaterializeResponseSchema>;

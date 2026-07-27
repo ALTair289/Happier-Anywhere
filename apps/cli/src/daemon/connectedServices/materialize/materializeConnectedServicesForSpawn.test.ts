@@ -426,6 +426,7 @@ describe('materializeConnectedServicesForSpawn', () => {
         activeProfileId: 'backup',
         fallbackProfileId: 'fallback',
         generation: 7,
+        credentialRevision: null,
       },
     ]);
     const auth = JSON.parse(await readFile(join(result!.env.CODEX_HOME, 'auth.json'), 'utf8'));
@@ -1101,7 +1102,7 @@ describe('materializeConnectedServicesForSpawn', () => {
     expect(credential.claudeAiOauth).not.toHaveProperty('refreshToken');
   });
 
-  it('materializes Claude Anthropic API key with an auth-isolated Claude config root', async () => {
+  it('materializes Claude Anthropic API key without inferring workspace trust from missing source state', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-source-claude-config-test-'));
@@ -1137,11 +1138,45 @@ describe('materializeConnectedServicesForSpawn', () => {
       ['ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR'],
     );
     await expect(readFile(join(result!.env.CLAUDE_CONFIG_DIR!, 'settings.json'), 'utf8')).resolves.toBe('{"theme":"dark"}\n');
-    const targetRootConfig = JSON.parse(await readFile(join(result!.env.CLAUDE_CONFIG_DIR!, '.claude.json'), 'utf8'));
-    expect(JSON.stringify(targetRootConfig)).not.toContain('do-not-copy');
-    expect(targetRootConfig.projects?.[process.cwd()]?.hasTrustDialogAccepted).toBe(true);
+    await expect(readFile(join(result!.env.CLAUDE_CONFIG_DIR!, '.claude.json'), 'utf8')).rejects.toThrow();
     expect('CLAUDE_CODE_SETUP_TOKEN' in result!.env).toBe(false);
     expect('CLAUDE_CODE_OAUTH_TOKEN' in result!.env).toBe(false);
+  });
+
+  it('materializes only explicitly accepted Claude workspace trust without copying source secrets', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
+    const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-source-claude-config-test-'));
+    await writeFile(join(sourceClaudeConfigDir, '.claude.json'), `${JSON.stringify({
+      token: 'do-not-copy',
+      projects: {
+        [process.cwd()]: { hasTrustDialogAccepted: true },
+      },
+    })}\n`);
+    const setup = buildConnectedServiceCredentialRecord({
+      now: 10,
+      serviceId: 'anthropic',
+      profileId: 'work',
+      kind: 'token',
+      token: { token: 'sk-ant-123', providerAccountId: null, providerEmail: null },
+    });
+
+    const result = await materializeConnectedServicesForSpawn({
+      agentId: 'claude',
+      materializationKey: 'session-explicit-workspace-trust',
+      activeServerDir,
+      baseDir,
+      recordsByServiceId: new Map([['anthropic', setup]]),
+      processEnv: {
+        HOME: tmpdir(),
+        CLAUDE_CONFIG_DIR: sourceClaudeConfigDir,
+      },
+    });
+
+    expect(result).not.toBeNull();
+    const targetRootConfig = JSON.parse(await readFile(join(result!.env.CLAUDE_CONFIG_DIR!, '.claude.json'), 'utf8'));
+    expect(targetRootConfig.projects?.[process.cwd()]?.hasTrustDialogAccepted).toBe(true);
+    expect(JSON.stringify(targetRootConfig)).not.toContain('do-not-copy');
   });
 
   it('shares Claude project state only when the account setting opts in', async () => {

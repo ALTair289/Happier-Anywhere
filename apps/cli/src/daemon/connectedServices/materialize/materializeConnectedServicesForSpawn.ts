@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import type {
   AccountSettings,
   ConnectedServiceCredentialRecordV1,
+  ConnectedServiceCredentialRevisionV1,
   ConnectedServiceId,
   ConnectedServiceMaterializationIdentityV1,
 } from '@happier-dev/protocol';
@@ -28,6 +29,7 @@ export type ConnectedServiceResolvedSelection =
       kind: 'profile';
       serviceId: ConnectedServiceId;
       profileId: string;
+      credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
       record: ConnectedServiceCredentialRecordV1;
     }>
   | Readonly<{
@@ -37,6 +39,7 @@ export type ConnectedServiceResolvedSelection =
       activeProfileId: string;
       fallbackProfileId: string;
       generation: number;
+      credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
       record: ConnectedServiceCredentialRecordV1;
       policy: unknown;
     }>;
@@ -47,7 +50,14 @@ type ConnectedServiceMaterializationCredentialRefresh = (
     profileId: string;
     record: ConnectedServiceCredentialRecordV1;
   }>,
-) => Promise<ConnectedServiceCredentialRecordV1 | null>;
+) => Promise<
+  | ConnectedServiceCredentialRecordV1
+  | Readonly<{
+      record: ConnectedServiceCredentialRecordV1;
+      credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
+    }>
+  | null
+>;
 
 const activeMaterializationAttemptByRootDir = new Map<string, string>();
 const materializationWorkTailByRootDir = new Map<string, Promise<void>>();
@@ -219,11 +229,14 @@ async function resolveFreshMaterializationRecords(params: Readonly<{
     ) {
       continue;
     }
-    const refreshed = await params.refreshCredentialForMaterialization({
+    const refreshResult = await params.refreshCredentialForMaterialization({
       serviceId,
       profileId: record.profileId,
       record,
     });
+    const refreshed = refreshResult && 'record' in refreshResult
+      ? refreshResult.record
+      : refreshResult;
     if (!refreshed || refreshed === record) continue;
     if (refreshed.serviceId !== serviceId || refreshed.profileId !== record.profileId) {
       throw new Error(`Connected-service materialization refresh returned mismatched credential for ${serviceId}/${record.profileId}`);
@@ -234,7 +247,13 @@ async function resolveFreshMaterializationRecords(params: Readonly<{
     const selection = params.selectionsByServiceId?.get(serviceId);
     if (selection) {
       selectionsByServiceId ??= new Map(params.selectionsByServiceId);
-      selectionsByServiceId.set(serviceId, { ...selection, record: refreshed });
+      selectionsByServiceId.set(serviceId, {
+        ...selection,
+        record: refreshed,
+        ...(refreshResult && 'record' in refreshResult
+          ? { credentialRevision: refreshResult.credentialRevision }
+          : {}),
+      });
     }
   }
 
