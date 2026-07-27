@@ -1,5 +1,5 @@
 diff --git a/node_modules/@shopify/flash-list/dist/FlashListProps.d.ts b/node_modules/@shopify/flash-list/dist/FlashListProps.d.ts
-index 5e90a5c..65d7c8d 100644
+index 5e90a5c..13a44d7 100644
 --- a/node_modules/@shopify/flash-list/dist/FlashListProps.d.ts
 +++ b/node_modules/@shopify/flash-list/dist/FlashListProps.d.ts
 @@ -312,6 +312,11 @@ export interface FlashListProps<TItem> extends Omit<ScrollViewProps, "maintainVi
@@ -15,7 +15,7 @@ index 5e90a5c..65d7c8d 100644
       * New arch only
       * Called when the layout is committed. Can be used to measure list.
 diff --git a/node_modules/@shopify/flash-list/dist/recyclerview/RecyclerView.js b/node_modules/@shopify/flash-list/dist/recyclerview/RecyclerView.js
-index 6799c8a..a575a7a 100644
+index 6799c8a..e505a79 100644
 --- a/node_modules/@shopify/flash-list/dist/recyclerview/RecyclerView.js
 +++ b/node_modules/@shopify/flash-list/dist/recyclerview/RecyclerView.js
 @@ -28,7 +28,8 @@ import { RenderTimeTracker } from "./helpers/RenderTimeTracker";
@@ -40,13 +40,14 @@ index 6799c8a..a575a7a 100644
      // Hook to handle list loading
      useOnListLoad(recyclerViewManager, onLoad);
      // Hook to detect when scrolling reaches list bounds
-@@ -125,13 +131,37 @@ const RecyclerViewComponent = (props, ref) => {
+@@ -125,13 +131,46 @@ const RecyclerViewComponent = (props, ref) => {
          if (hasExceededMaxRendersWithoutCommit) {
              console.warn(WarningMessages.exceededMaxRendersWithoutCommit);
          }
 -        if (recyclerViewManager.modifyChildrenLayout(layoutInfo, (_a = data === null || data === void 0 ? void 0 : data.length) !== null && _a !== void 0 ? _a : 0) &&
 -            !hasExceededMaxRendersWithoutCommit) {
-+        const didModifyChildrenLayout = recyclerViewManager.modifyChildrenLayout(layoutInfo, (_a = data === null || data === void 0 ? void 0 : data.length) !== null && _a !== void 0 ? _a : 0);
++        const dataLength = (_a = data === null || data === void 0 ? void 0 : data.length) !== null && _a !== void 0 ? _a : 0;
++        const didModifyChildrenLayout = recyclerViewManager.modifyChildrenLayout(layoutInfo, dataLength);
 +        if (didModifyChildrenLayout && !hasExceededMaxRendersWithoutCommit) {
              // Trigger re-render if layout modifications were made
 +            hasPendingCommitRef.current = true;
@@ -68,7 +69,15 @@ index 6799c8a..a575a7a 100644
 +                hasPendingCommitRef.current = true;
 +            }
 +            const shouldBlockCommitToBreakUpdateLoop = hasExceededMaxRendersWithoutCommit && hasCommittedOnceRef.current;
-+            if (hasPendingCommitRef.current && !shouldBlockCommitToBreakUpdateLoop) {
++            // HAPPIER PATCH(flash-list-nonempty-render-stack-commit): never reveal a
++            // data-bearing list before RecyclerViewManager has placed at least one holder.
++            // A zero-height web mount can exhaust the render budget with an empty renderStack;
++            // keep the commit pending so the next measurable layout reveals real rows instead
++            // of opacity: 1 blank content.
++            const hasRenderableCommitContent = dataLength === 0 || recyclerViewManager.getRenderStack().size > 0;
++            if (hasPendingCommitRef.current &&
++                !shouldBlockCommitToBreakUpdateLoop &&
++                hasRenderableCommitContent) {
 +                hasPendingCommitRef.current = false;
 +                hasCommittedOnceRef.current = true;
 +                (_b = viewHolderCollectionRef.current) === null || _b === void 0 ? void 0 : _b.commitLayout();
@@ -81,8 +90,25 @@ index 6799c8a..a575a7a 100644
              applyOffsetCorrection();
          }
          if (horizontal &&
+diff --git a/node_modules/@shopify/flash-list/dist/recyclerview/RecyclerViewManager.js b/node_modules/@shopify/flash-list/dist/recyclerview/RecyclerViewManager.js
+index 1aa651d..f99c8e9 100644
+--- a/node_modules/@shopify/flash-list/dist/recyclerview/RecyclerViewManager.js
++++ b/node_modules/@shopify/flash-list/dist/recyclerview/RecyclerViewManager.js
+@@ -316,8 +316,10 @@ export class RecyclerViewManager {
+             this.applyInitialScrollAdjustment();
+             const visibleIndices = this.computeVisibleIndices();
+             // console.log("---------> visibleIndices", visibleIndices);
+-            this.hasRenderedProgressively = visibleIndices.every((index) => layoutManager.getLayout(index).isHeightMeasured &&
+-                layoutManager.getLayout(index).isWidthMeasured);
++            this.hasRenderedProgressively =
++                visibleIndices.length > 0 &&
++                    visibleIndices.every((index) => layoutManager.getLayout(index).isHeightMeasured &&
++                        layoutManager.getLayout(index).isWidthMeasured);
+             if (this.hasRenderedProgressively) {
+                 this.isFirstLayoutComplete = true;
+             }
 diff --git a/node_modules/@shopify/flash-list/dist/recyclerview/ViewHolderCollection.js b/node_modules/@shopify/flash-list/dist/recyclerview/ViewHolderCollection.js
-index 8e3db51..ddd4b99 100644
+index 8e3db51..0815c52 100644
 --- a/node_modules/@shopify/flash-list/dist/recyclerview/ViewHolderCollection.js
 +++ b/node_modules/@shopify/flash-list/dist/recyclerview/ViewHolderCollection.js
 @@ -53,6 +53,18 @@ export const ViewHolderCollection = (props) => {
@@ -105,7 +131,7 @@ index 8e3db51..ddd4b99 100644
          width: horizontal ? containerLayout === null || containerLayout === void 0 ? void 0 : containerLayout.width : undefined,
          height: containerLayout === null || containerLayout === void 0 ? void 0 : containerLayout.height,
 diff --git a/node_modules/@shopify/flash-list/dist/recyclerview/hooks/useRecyclerViewController.js b/node_modules/@shopify/flash-list/dist/recyclerview/hooks/useRecyclerViewController.js
-index 08724d1..d63aa97 100644
+index 08724d1..3cfa37b 100644
 --- a/node_modules/@shopify/flash-list/dist/recyclerview/hooks/useRecyclerViewController.js
 +++ b/node_modules/@shopify/flash-list/dist/recyclerview/hooks/useRecyclerViewController.js
 @@ -5,6 +5,23 @@ import { PlatformConfig } from "../../native/config/PlatformHelper";
@@ -211,6 +237,24 @@ index 08724d1..d63aa97 100644
              const additionalOffset = (_c = initialScrollIndexParams === null || initialScrollIndexParams === void 0 ? void 0 : initialScrollIndexParams.viewOffset) !== null && _c !== void 0 ? _c : 0;
              const offset = horizontal
                  ? recyclerViewManager.getLayout(initialScrollIndex).x + additionalOffset
+diff --git a/node_modules/@shopify/flash-list/dist/recyclerview/viewability/ViewabilityManager.js b/node_modules/@shopify/flash-list/dist/recyclerview/viewability/ViewabilityManager.js
+index 67e342b..fdd2caa 100644
+--- a/node_modules/@shopify/flash-list/dist/recyclerview/viewability/ViewabilityManager.js
++++ b/node_modules/@shopify/flash-list/dist/recyclerview/viewability/ViewabilityManager.js
+@@ -33,7 +33,12 @@ export default class ViewabilityManager {
+                 this.rvManager.firstItemOffset;
+             this.viewabilityHelpers.forEach((viewabilityHelper) => {
+                 var _a;
+-                viewabilityHelper.updateViewableItems((_a = this.rvManager.props.horizontal) !== null && _a !== void 0 ? _a : false, scrollOffset, listSize, (index) => this.rvManager.getLayout(index), newViewableIndices);
++                // HAPPIER PATCH(flash-list-viewability-stale-index-guard): ViewabilityHelper caches
++                // possiblyViewableIndices across data updates; after the dataset shrinks those stale
++                // indices exceed the truncated layouts array and the throwing getLayout crashes release
++                // builds ("index out of bounds, not enough layouts"). tryGetLayout is the library's own
++                // bounds-safe accessor and isItemViewable already treats undefined as not viewable.
++                viewabilityHelper.updateViewableItems((_a = this.rvManager.props.horizontal) !== null && _a !== void 0 ? _a : false, scrollOffset, listSize, (index) => this.rvManager.tryGetLayout(index), newViewableIndices);
+             });
+         };
+         this.clearLastReportedViewableIndices = () => {
 diff --git a/node_modules/@shopify/flash-list/src/FlashListProps.ts b/node_modules/@shopify/flash-list/src/FlashListProps.ts
 index 1dba06c..e101b75 100644
 --- a/node_modules/@shopify/flash-list/src/FlashListProps.ts
@@ -229,7 +273,7 @@ index 1dba06c..e101b75 100644
     * New arch only
     * Called when the layout is committed. Can be used to measure list.
 diff --git a/node_modules/@shopify/flash-list/src/recyclerview/RecyclerView.tsx b/node_modules/@shopify/flash-list/src/recyclerview/RecyclerView.tsx
-index 3c25e7e..88f6b1b 100644
+index 3c25e7e..ac460c8 100644
 --- a/node_modules/@shopify/flash-list/src/recyclerview/RecyclerView.tsx
 +++ b/node_modules/@shopify/flash-list/src/recyclerview/RecyclerView.tsx
 @@ -84,12 +84,14 @@ const RecyclerViewComponent = <T,>(
@@ -260,7 +304,7 @@ index 3c25e7e..88f6b1b 100644
    // Hook to handle list loading
    useOnListLoad(recyclerViewManager, onLoad);
  
-@@ -234,14 +242,39 @@ const RecyclerViewComponent = <T,>(
+@@ -234,14 +242,51 @@ const RecyclerViewComponent = <T,>(
        console.warn(WarningMessages.exceededMaxRendersWithoutCommit);
      }
  
@@ -268,9 +312,10 @@ index 3c25e7e..88f6b1b 100644
 -      recyclerViewManager.modifyChildrenLayout(layoutInfo, data?.length ?? 0) &&
 -      !hasExceededMaxRendersWithoutCommit
 -    ) {
++    const dataLength = data?.length ?? 0;
 +    const didModifyChildrenLayout = recyclerViewManager.modifyChildrenLayout(
 +      layoutInfo,
-+      data?.length ?? 0
++      dataLength
 +    );
 +    if (didModifyChildrenLayout && !hasExceededMaxRendersWithoutCommit) {
        // Trigger re-render if layout modifications were made
@@ -293,7 +338,18 @@ index 3c25e7e..88f6b1b 100644
 +      }
 +      const shouldBlockCommitToBreakUpdateLoop =
 +        hasExceededMaxRendersWithoutCommit && hasCommittedOnceRef.current;
-+      if (hasPendingCommitRef.current && !shouldBlockCommitToBreakUpdateLoop) {
++      // HAPPIER PATCH(flash-list-nonempty-render-stack-commit): never reveal a
++      // data-bearing list before RecyclerViewManager has placed at least one holder.
++      // A zero-height web mount can exhaust the render budget with an empty renderStack;
++      // keep the commit pending so the next measurable layout reveals real rows instead
++      // of opacity: 1 blank content.
++      const hasRenderableCommitContent =
++        dataLength === 0 || recyclerViewManager.getRenderStack().size > 0;
++      if (
++        hasPendingCommitRef.current &&
++        !shouldBlockCommitToBreakUpdateLoop &&
++        hasRenderableCommitContent
++      ) {
 +        hasPendingCommitRef.current = false;
 +        hasCommittedOnceRef.current = true;
 +        viewHolderCollectionRef.current?.commitLayout();
@@ -305,6 +361,29 @@ index 3c25e7e..88f6b1b 100644
        applyOffsetCorrection();
      }
  
+diff --git a/node_modules/@shopify/flash-list/src/recyclerview/RecyclerViewManager.ts b/node_modules/@shopify/flash-list/src/recyclerview/RecyclerViewManager.ts
+index 41704d0..f34cab5 100644
+--- a/node_modules/@shopify/flash-list/src/recyclerview/RecyclerViewManager.ts
++++ b/node_modules/@shopify/flash-list/src/recyclerview/RecyclerViewManager.ts
+@@ -409,11 +409,13 @@ export class RecyclerViewManager<T> {
+       this.applyInitialScrollAdjustment();
+       const visibleIndices = this.computeVisibleIndices();
+       // console.log("---------> visibleIndices", visibleIndices);
+-      this.hasRenderedProgressively = visibleIndices.every(
+-        (index) =>
+-          layoutManager.getLayout(index).isHeightMeasured &&
+-          layoutManager.getLayout(index).isWidthMeasured
+-      );
++      this.hasRenderedProgressively =
++        visibleIndices.length > 0 &&
++        visibleIndices.every(
++          (index) =>
++            layoutManager.getLayout(index).isHeightMeasured &&
++            layoutManager.getLayout(index).isWidthMeasured
++        );
+ 
+       if (this.hasRenderedProgressively) {
+         this.isFirstLayoutComplete = true;
 diff --git a/node_modules/@shopify/flash-list/src/recyclerview/ViewHolderCollection.tsx b/node_modules/@shopify/flash-list/src/recyclerview/ViewHolderCollection.tsx
 index a652beb..db3313b 100644
 --- a/node_modules/@shopify/flash-list/src/recyclerview/ViewHolderCollection.tsx
@@ -450,3 +529,25 @@ index 3689830..06f52f4 100644
  
        const additionalOffset = initialScrollIndexParams?.viewOffset ?? 0;
        const offset = horizontal
+diff --git a/node_modules/@shopify/flash-list/src/recyclerview/viewability/ViewabilityManager.ts b/node_modules/@shopify/flash-list/src/recyclerview/viewability/ViewabilityManager.ts
+index 972c20f..d5510d7 100644
+--- a/node_modules/@shopify/flash-list/src/recyclerview/viewability/ViewabilityManager.ts
++++ b/node_modules/@shopify/flash-list/src/recyclerview/viewability/ViewabilityManager.ts
+@@ -79,11 +79,16 @@ export default class ViewabilityManager<T> {
+       (this.rvManager.getAbsoluteLastScrollOffset() ?? 0) -
+       this.rvManager.firstItemOffset;
+     this.viewabilityHelpers.forEach((viewabilityHelper) => {
++      // HAPPIER PATCH(flash-list-viewability-stale-index-guard): ViewabilityHelper caches
++      // possiblyViewableIndices across data updates; after the dataset shrinks those stale
++      // indices exceed the truncated layouts array and the throwing getLayout crashes release
++      // builds ("index out of bounds, not enough layouts"). tryGetLayout is the library's own
++      // bounds-safe accessor and isItemViewable already treats undefined as not viewable.
+       viewabilityHelper.updateViewableItems(
+         this.rvManager.props.horizontal ?? false,
+         scrollOffset,
+         listSize,
+-        (index: number) => this.rvManager.getLayout(index),
++        (index: number) => this.rvManager.tryGetLayout(index),
+         newViewableIndices
+       );
+     });
