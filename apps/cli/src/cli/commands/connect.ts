@@ -1,11 +1,10 @@
 import chalk from 'chalk';
-import { randomBytes } from 'node:crypto';
 import { readCredentials } from '@/persistence';
 import { ApiClient } from '@/api/api';
 import type { CloudConnectTarget, CloudConnectTargetStatus } from '@/cloud/connectTypes';
 import { AGENTS } from '@/backends/catalog';
 import { promptInput } from '@/terminal/prompts/promptInput';
-import { buildConnectedServiceCredentialRecord, sealConnectedServiceCredentialCiphertext, type ConnectedServiceId } from '@happier-dev/protocol';
+import { buildConnectedServiceCredentialRecord, type ConnectedServiceId } from '@happier-dev/protocol';
 
 import type { CommandContext } from '@/cli/commandRegistry';
 import { buildConnectedAccountOauthCredentialRecord } from '@/daemon/connectedServices/descriptors/buildConnectedAccountCredentialRecord';
@@ -13,6 +12,7 @@ import { githubConnectedAccountTarget } from '@/daemon/connectedServices/github/
 import { parseConnectArgs, type ConnectParsedOptions } from './connect/parseConnectArgs';
 import { resolveConnectAuthIntent } from './connect/resolveConnectAuthIntent';
 import { resolveConnectTargetServiceIds } from './connect/resolveConnectTargetServiceIds';
+import { storeConnectedServiceCredentialForAccount } from '@/cloud/connectedServices/storeConnectedServiceCredentialForAccount';
 
 /**
  * Handle connect subcommand.
@@ -177,28 +177,11 @@ async function handleConnectVendor(target: CloudConnectTarget, options: ConnectP
       });
     })();
 
-    const sealedCiphertext = sealConnectedServiceCredentialCiphertext({
-      material:
-        credentials.encryption.type === 'legacy'
-          ? { type: 'legacy', secret: credentials.encryption.secret }
-          : { type: 'dataKey', machineKey: credentials.encryption.machineKey },
-      payload: record,
-      randomBytes: (length) => randomBytes(length),
-    });
-
     console.log(`🚀 Registering ${target.displayName} credential with relay (${record.serviceId}/${options.profileId})`);
-    await api.registerConnectedServiceCredentialSealed({
-      serviceId: record.serviceId,
-      profileId: options.profileId,
-      sealed: { format: 'account_scoped_v1', ciphertext: sealedCiphertext },
-      metadata: {
-        kind: record.kind,
-        providerEmail:
-          record.kind === 'oauth' ? record.oauth.providerEmail ?? null : record.token.providerEmail ?? null,
-        providerAccountId:
-          record.kind === 'oauth' ? record.oauth.providerAccountId ?? null : record.token.providerAccountId ?? null,
-        expiresAt: record.expiresAt,
-      },
+    await storeConnectedServiceCredentialForAccount({
+      api,
+      credentials,
+      record,
     });
 
     console.log(`✅ ${target.displayName} credential registered with relay`);
