@@ -40,6 +40,37 @@ describe('withExecutionRunBackendModelOptions', () => {
     expect(setSessionConfigOption).toHaveBeenCalledWith('session-123', 'reasoning_effort', 'high');
   });
 
+  it('does not apply a cleared config override after startSession', async () => {
+    const { backend, setSessionConfigOption } = createConfigurableBackend();
+    const wrapped = withExecutionRunBackendModelOptions(backend, {
+      sessionConfigOptionOverrides: {
+        v: 1,
+        updatedAt: 1,
+        overrides: { reasoning_effort: { updatedAt: 1, value: null } },
+      },
+    });
+
+    await expect(wrapped.startSession()).resolves.toMatchObject({ sessionId: 'session-123' });
+    expect(setSessionConfigOption).not.toHaveBeenCalled();
+  });
+
+  it('preserves exact nonblank opaque model, config, and value identifiers', async () => {
+    const { backend, setSessionModel, setSessionConfigOption } = createConfigurableBackend();
+    const wrapped = withExecutionRunBackendModelOptions(backend, {
+      modelId: ' model-a ',
+      sessionConfigOptionOverrides: {
+        v: 1,
+        updatedAt: 1,
+        overrides: { ' effort ': { updatedAt: 1, value: ' high ' } },
+      },
+    });
+
+    await wrapped.startSession();
+
+    expect(setSessionModel).toHaveBeenCalledWith('session-123', ' model-a ');
+    expect(setSessionConfigOption).toHaveBeenCalledWith('session-123', ' effort ', ' high ');
+  });
+
   it('applies options after loadSession (resume path) using the loaded session id', async () => {
     const { backend, setSessionModel, setSessionConfigOption } = createConfigurableBackend();
     const wrapped = withExecutionRunBackendModelOptions(backend, {

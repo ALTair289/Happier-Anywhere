@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AgentBackend, AgentMessageHandler, SessionId, StartSessionResult } from '@/agent/core/AgentBackend';
 import type { ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
+import type {
+  SessionRuntimeActivityContribution,
+  SessionRuntimeActivityContributionHandle,
+} from '@/session/runtimeActivity/types';
 
 import { ExecutionRunManager } from '@/agent/executionRuns/runtime/ExecutionRunManager';
 
@@ -34,74 +38,54 @@ function createResumableBackend() {
   return { backend, getHandler: () => handler };
 }
 
-describe('ExecutionRunManager — resume rehydrates the immutable launch record', () => {
-  it('re-materializes the SAME CS account and re-applies model/effort/runId isolation after disposal', async () => {
-    const createBackendCalls: Array<Record<string, unknown>> = [];
-    const cleanup = vi.fn(async () => undefined);
-    const prepareConnectedServices = vi.fn(
-      async (_params: { backendTarget: unknown; connectedServices: unknown; sessionId: string }) => ({
-        env: { CODEX_HOME: '/resume/root/codex-home' },
-        materializationKey: 'execution_run:resume',
-        cleanup,
-        selection: SELECTION,
-      }),
-    );
+function createContributionHarness() {
+  const reports: SessionRuntimeActivityContribution[] = [];
+  return {
+    reports,
+    handle: {
+      report: vi.fn(async (snapshot: SessionRuntimeActivityContribution) => { reports.push(snapshot); }),
+      markUnknown: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } satisfies SessionRuntimeActivityContributionHandle,
+  };
+}
 
+describe('ExecutionRunManager — resume rehydrates the immutable launch record', () => {
+  it('reports a resumed canonical run before backend recreation and restores terminal state on report failure', async () => {
+    const contribution = createContributionHarness();
+    const createBackend = vi.fn(() => createResumableBackend().backend);
     const manager = new ExecutionRunManager({
       parentProvider: 'claude',
       cwd: '/tmp/wt',
-      createBackend: (opts) => {
-        createBackendCalls.push(opts as Record<string, unknown>);
-        return createResumableBackend().backend;
-      },
+      createBackend,
       sendAcp: () => {},
-      getNowMs: () => 1_700_000_000_000,
-      resolveAccountSettings: async () => ({ codexBackendMode: 'appServer' }),
-      prepareConnectedServices,
+      runtimeActivityContributionHandle: contribution.handle,
     });
-
     const started = await manager.start({
-      sessionId: 'parent_1',
-      intent: 'delegate',
-      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
-      permissionMode: 'read_only',
-      retentionPolicy: 'resumable',
-      runClass: 'long_lived',
-      ioMode: 'request_response',
-      modelId: 'gpt-5.5',
-      sessionConfigOptionOverrides: OVERRIDES,
-      connectedServicesSelection: SELECTION,
-      connectedServicesEnv: { CODEX_HOME: '/start/root/codex-home' },
+      sessionId: 'parent_1', intent: 'delegate', backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      permissionMode: 'read_only', retentionPolicy: 'resumable', runClass: 'long_lived', ioMode: 'request_response',
     });
-
-    // Dispose the backend + drop the controller (as a real stop / crash would).
-    const stopped = await manager.stop(started.runId);
-    expect(stopped.ok).toBe(true);
+    await manager.stop(started.runId);
     await manager.waitForTerminal(started.runId);
+    const backendCallsBeforeResume = createBackend.mock.calls.length;
+    contribution.handle.report.mockRejectedValueOnce(new Error('resume contribution rejected'));
 
-    const beforeResumeCalls = createBackendCalls.length;
-
-    const resumed = await manager.send(started.runId, { message: 'continue', resume: true });
-    expect(resumed.ok).toBe(true);
-
-    // A fresh backend was created for the resume.
-    expect(createBackendCalls.length).toBe(beforeResumeCalls + 1);
-    const resumeOpts = createBackendCalls.at(-1)!;
-    expect(resumeOpts).toMatchObject({
-      runId: started.runId,
-      backendId: 'codex',
-      modelId: 'gpt-5.5',
-      sessionConfigOptionOverrides: OVERRIDES,
-      // Re-materialized CS account env (NOT the runner's ambient auth).
-      connectedServicesEnv: { CODEX_HOME: '/resume/root/codex-home' },
+    await expect(manager.ensure(started.runId, { resume: true })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'execution_run_runtime_activity_unavailable',
+      error: 'resume contribution rejected',
     });
-    // The persisted selection was re-materialized verbatim (same account/profile).
-    expect(prepareConnectedServices).toHaveBeenCalledTimes(1);
-    expect(prepareConnectedServices.mock.calls[0]?.[0]).toMatchObject({
-      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
-      connectedServices: SELECTION,
-      sessionId: 'parent_1',
+
+    expect(createBackend).toHaveBeenCalledTimes(backendCallsBeforeResume);
+    expect(manager.get(started.runId)?.status).toBe('cancelled');
+    expect(contribution.handle.report.mock.calls.at(-2)?.[0]).toEqual({
+      state: 'active', activeCount: 1,
     });
+    expect(contribution.reports).toEqual([
+      { state: 'active', activeCount: 1 },
+      { state: 'idle', activeCount: 0 },
+      { state: 'idle', activeCount: 0 },
+    ]);
   });
 
   it('fails closed on resume when the persisted CS account cannot be re-materialized', async () => {
@@ -138,5 +122,73 @@ describe('ExecutionRunManager — resume rehydrates the immutable launch record'
     const resumed = await manager.send(started.runId, { message: 'continue', resume: true });
     expect(resumed.ok).toBe(false);
     expect(resumed.errorCode).toBe('execution_run_connected_services_unavailable');
+  });
+
+  it('awaits connected-service cleanup when resume backend construction throws', async () => {
+    let createCalls = 0;
+    let finishCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const cleanup = vi.fn(async () => {
+      await cleanupGate;
+    });
+    const manager = new ExecutionRunManager({
+      parentProvider: 'claude',
+      cwd: '/tmp/wt',
+      createBackend: () => {
+        createCalls += 1;
+        if (createCalls > 1) throw new Error('resume backend construction failed');
+        return createResumableBackend().backend;
+      },
+      sendAcp: () => {},
+      getNowMs: () => 1_700_000_000_000,
+      resolveAccountSettings: async () => null,
+      prepareConnectedServices: async () => ({
+        env: { CODEX_HOME: '/resume/root/codex-home' },
+        materializationKey: 'execution_run:resume',
+        cleanup,
+        selection: SELECTION,
+        registration: {
+          v: 1,
+          agentId: 'codex',
+          materializationKey: 'execution_run:resume',
+          connectedServicesBindings: SELECTION,
+          brokerSelectionIdentity: null,
+          runtimeAccountIdentitySelections: [],
+          sessionDirectory: '/tmp/wt',
+          materializedRoot: '/resume/root',
+        },
+      }),
+    });
+
+    const started = await manager.start({
+      sessionId: 'parent_1',
+      intent: 'delegate',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      permissionMode: 'read_only',
+      retentionPolicy: 'resumable',
+      runClass: 'long_lived',
+      ioMode: 'request_response',
+      connectedServicesSelection: SELECTION,
+      connectedServicesEnv: { CODEX_HOME: '/start/root/codex-home' },
+    });
+    await manager.stop(started.runId);
+    await manager.waitForTerminal(started.runId);
+
+    let resumeSettled = false;
+    const resume = manager.send(started.runId, { message: 'continue', resume: true }).then((result) => {
+      resumeSettled = true;
+      return result;
+    });
+    await vi.waitFor(() => expect(createCalls).toBe(2));
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(resumeSettled).toBe(false);
+    finishCleanup();
+
+    const result = await resume;
+    expect(result).toMatchObject({ ok: false, error: 'resume backend construction failed' });
+    expect(cleanup).toHaveBeenCalledTimes(1);
   });
 });

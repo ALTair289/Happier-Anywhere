@@ -41,6 +41,7 @@ export function createBackendControllerMessageHandler(args: Readonly<{
   backendSupportsResume: boolean;
   writeActivityMarker: (runId: string, nowMs: number, opts?: Readonly<{ force?: boolean }>) => Promise<void>;
   getNowMs: () => number;
+  isCurrentController: () => boolean;
   onPublicStateUpdated?: (runId: string) => void;
   onModelOutput?: () => void;
 }>): AgentMessageHandler {
@@ -52,6 +53,10 @@ export function createBackendControllerMessageHandler(args: Readonly<{
   });
 
   return (msg) => {
+    // Backends may deliver queued messages after stop/dispose. A retired controller must not
+    // overwrite a successor's resume handle, transcript, buffers, or activity markers.
+    if (!args.isCurrentController()) return;
+
     if (msg.type === 'event' && msg.name === 'vendor_session_id') {
       const payload = msg.payload;
       const vendorSessionId = payload

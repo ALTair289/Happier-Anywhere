@@ -1,6 +1,10 @@
-import type { AcpConfigOptionOverridesV1 } from '@happier-dev/protocol';
+import {
+  readSpawnConfigOptionOverrideValue,
+  type AcpConfigOptionOverridesV1,
+} from '@happier-dev/protocol';
 
 import type { AgentBackend, SessionId, StartSessionResult } from '@/agent/core/AgentBackend';
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 
 /**
  * Canonical, provider-agnostic apply-options seam for execution-run backends.
@@ -33,10 +37,15 @@ export function withExecutionRunBackendModelOptions(
     sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1;
   }>,
 ): AgentBackend {
-  const modelId = typeof options.modelId === 'string' ? options.modelId.trim() : '';
+  const modelId = readNonBlankSessionControlIdentifier(options.modelId) ?? '';
   const overrides = options.sessionConfigOptionOverrides?.overrides ?? null;
   const overrideEntries = overrides
-    ? Object.entries(overrides).filter(([configId]) => configId.trim().length > 0)
+    ? Object.keys(overrides)
+      .filter((configId) => readNonBlankSessionControlIdentifier(configId) !== null)
+      .flatMap((configId) => {
+        const value = readSpawnConfigOptionOverrideValue(options.sessionConfigOptionOverrides, configId);
+        return value === undefined || value === null ? [] : [[configId, value] as const];
+      })
     : [];
   if (!modelId && overrideEntries.length === 0) return backend;
 
@@ -47,8 +56,8 @@ export function withExecutionRunBackendModelOptions(
       await target.setSessionModel(sessionId, modelId);
     }
     if (overrideEntries.length > 0 && typeof target.setSessionConfigOption === 'function') {
-      for (const [configId, entry] of overrideEntries) {
-        await target.setSessionConfigOption(sessionId, configId.trim(), entry.value);
+      for (const [configId, value] of overrideEntries) {
+        await target.setSessionConfigOption(sessionId, configId, value);
       }
     }
   };

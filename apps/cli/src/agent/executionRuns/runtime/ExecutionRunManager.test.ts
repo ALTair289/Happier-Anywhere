@@ -2,49 +2,31 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AgentBackend, AgentMessage, AgentMessageHandler, SessionId } from '@/agent/core/AgentBackend';
 import type { ACPMessageData } from '@/api/session/sessionMessageTypes';
-import {
-  hasActiveSessionRuntimeActivity,
-} from '@happier-dev/protocol';
-import {
-  createSessionRuntimeActivityPublisher,
-  type RuntimeActivityProjection,
-} from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
+import type {
+  SessionRuntimeActivityContribution,
+  SessionRuntimeActivityContributionHandle,
+} from '@/session/runtimeActivity/types';
 
 import { ExecutionRunManager } from './ExecutionRunManager';
-
-function createRuntimeActivityHarness(opts: Readonly<{
-  nowMs?: number;
-  leaseDurationMs?: number;
-}> = {}): {
-  publisher: ReturnType<typeof createSessionRuntimeActivityPublisher>;
-  projections: RuntimeActivityProjection[];
-  getNowMs: () => number;
-  setNowMs: (next: number) => void;
-} {
-  let nowMs = opts.nowMs ?? 10_000;
-  const projections: RuntimeActivityProjection[] = [];
-  const publisher = createSessionRuntimeActivityPublisher({
-    nowMs: () => nowMs,
-    leaseDurationMs: opts.leaseDurationMs ?? 5_000,
-    updateRuntimeActivityProjection: (projection) => {
-      projections.push(projection);
-    },
-  });
-
-  return {
-    publisher,
-    projections,
-    getNowMs: () => nowMs,
-    setNowMs: (next) => {
-      nowMs = next;
-    },
-  };
-}
 
 async function flushAsyncEffects(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+}
+
+function createRuntimeActivityContributionHarness() {
+  const reports: SessionRuntimeActivityContribution[] = [];
+  return {
+    reports,
+    handle: {
+      report: vi.fn(async (snapshot: SessionRuntimeActivityContribution) => {
+        reports.push(snapshot);
+      }),
+      markUnknown: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } satisfies SessionRuntimeActivityContributionHandle,
+  };
 }
 
 function createStaticJsonBackend(responseText: string): AgentBackend {
@@ -374,45 +356,40 @@ describe('ExecutionRunManager (review intent)', () => {
     expect(manager.get(started.runId)?.status).toBe('succeeded');
   });
 
-  it('publishes an expiring provider-detached runtime activity lease for live bounded runs and clears it at terminal', async () => {
-    const runtimeActivity = createRuntimeActivityHarness({ nowMs: 20_000, leaseDurationMs: 5_000 });
-    let handler: AgentMessageHandler | null = null;
-    let resolvePrompt!: () => void;
-    const promptDone = new Promise<void>((resolve) => {
-      resolvePrompt = () => {
-        handler?.({
-          type: 'model-output',
-          fullText: JSON.stringify({ summary: 'Ok', findings: [] }),
-        } as any);
-        resolve();
+  it('reports complete execution-run contributions from the canonical run map and isolates sibling completion', async () => {
+    const contribution = createRuntimeActivityContributionHarness();
+    const completions: Array<() => void> = [];
+    const createBackend = (): AgentBackend => {
+      let handler: AgentMessageHandler | null = null;
+      let complete!: () => void;
+      const completed = new Promise<void>((resolve) => {
+        complete = () => {
+          handler?.({
+            type: 'model-output',
+            fullText: JSON.stringify({ summary: 'Ok', findings: [] }),
+          } as AgentMessage);
+          resolve();
+        };
+      });
+      completions.push(complete);
+      return {
+        async startSession() { return { sessionId: `child-${completions.length}` as SessionId }; },
+        async sendPrompt() { await completed; },
+        async cancel() { complete(); },
+        onMessage(next) { handler = next; },
+        async dispose() {},
+        async waitForResponseComplete() {},
       };
-    });
-
-    const backend: AgentBackend = {
-      async startSession(): Promise<{ sessionId: SessionId }> {
-        return { sessionId: 'child_session_1' as SessionId };
-      },
-      async sendPrompt(_sessionId: SessionId, _prompt: string): Promise<void> {
-        await promptDone;
-      },
-      async cancel(_sessionId: SessionId): Promise<void> {},
-      onMessage(next: AgentMessageHandler): void {
-        handler = next;
-      },
-      async dispose(): Promise<void> {},
-      async waitForResponseComplete(): Promise<void> {},
     };
-
     const manager = new ExecutionRunManager({
       parentProvider: 'claude',
       cwd: process.cwd(),
-      createBackend: () => backend,
+      createBackend,
       sendAcp: () => {},
-      getNowMs: runtimeActivity.getNowMs,
-      runtimeActivityPublisher: runtimeActivity.publisher,
+      getNowMs: () => 20_000,
+      runtimeActivityContributionHandle: contribution.handle,
     });
-
-    const started = await manager.start({
+    const start = async () => await manager.start({
       sessionId: 'parent_session_1',
       intent: 'review',
       backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
@@ -423,97 +400,50 @@ describe('ExecutionRunManager (review intent)', () => {
       ioMode: 'request_response',
     });
 
-    await flushAsyncEffects();
-
-    const activeProjection = runtimeActivity.projections.find(
-      (projection) => projection.runtimeActivityActiveCount === 1,
-    );
-    expect(activeProjection).toEqual({
-      runtimeActivityActiveCount: 1,
-      runtimeActivityObservedAt: 20_000,
-      runtimeActivityExpiresAt: 25_000,
-      runtimeActivitySourceClass: 'provider_detached_task',
-    });
-    expect(runtimeActivity.publisher.getSnapshot().sources).toEqual([
-      expect.objectContaining({
-        id: expect.stringContaining(started.runId),
-        kind: 'provider_detached_task',
-        status: 'active',
-        expiresAtMs: 25_000,
-      }),
+    const first = await start();
+    const second = await start();
+    expect(contribution.reports).toEqual([
+      { state: 'active', activeCount: 1 },
+      { state: 'active', activeCount: 2 },
     ]);
-    expect(hasActiveSessionRuntimeActivity(runtimeActivity.publisher.getSnapshot(), runtimeActivity.getNowMs())).toBe(true);
 
-    runtimeActivity.setNowMs(25_001);
-    expect(hasActiveSessionRuntimeActivity(runtimeActivity.publisher.getSnapshot(), runtimeActivity.getNowMs())).toBe(false);
-
-    resolvePrompt();
-    await manager.waitForTerminal(started.runId);
-    await flushAsyncEffects();
-
-    expect(runtimeActivity.projections.at(-1)).toEqual({
-      runtimeActivityActiveCount: 0,
-      runtimeActivityObservedAt: null,
-      runtimeActivityExpiresAt: null,
-      runtimeActivitySourceClass: null,
+    completions[0]!();
+    await manager.waitForTerminal(first.runId);
+    expect(contribution.reports.at(-1)).toEqual({
+      state: 'active', activeCount: 1,
     });
+
+    completions[1]!();
+    await manager.waitForTerminal(second.runId);
+    expect(contribution.reports.at(-1)).toEqual({ state: 'idle', activeCount: 0 });
   });
 
-  it('clears execution-run runtime activity when a live run is stopped', async () => {
-    const runtimeActivity = createRuntimeActivityHarness({ nowMs: 30_000, leaseDurationMs: 5_000 });
-    let releaseSend!: () => void;
-    const sendDone = new Promise<void>((resolve) => {
-      releaseSend = resolve;
-    });
-    const cancel = vi.fn(async () => {
-      releaseSend();
-    });
-    const backend: AgentBackend = {
-      async startSession(): Promise<{ sessionId: SessionId }> {
-        return { sessionId: 'child_session_1' as SessionId };
-      },
-      async sendPrompt(): Promise<void> {
-        await sendDone;
-      },
-      cancel,
-      onMessage(): void {},
-      async dispose(): Promise<void> {},
-      async waitForResponseComplete(): Promise<void> {},
-    };
-
+  it('rolls back only the exact provisional start when complete-contribution admission fails', async () => {
+    const contribution = createRuntimeActivityContributionHarness();
+    contribution.handle.report.mockRejectedValueOnce(new Error('activity report rejected'));
+    const createBackend = vi.fn(() => createStaticJsonBackend('{"summary":"should not run","findings":[]}'));
     const manager = new ExecutionRunManager({
       parentProvider: 'claude',
       cwd: process.cwd(),
-      createBackend: () => backend,
+      createBackend,
       sendAcp: () => {},
-      getNowMs: runtimeActivity.getNowMs,
-      runtimeActivityPublisher: runtimeActivity.publisher,
+      runtimeActivityContributionHandle: contribution.handle,
     });
 
-    const started = await manager.start({
+    await expect(manager.start({
       sessionId: 'parent_session_1',
       intent: 'review',
       backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
       instructions: 'Review this repo.',
       permissionMode: 'read_only',
       retentionPolicy: 'ephemeral',
-      runClass: 'bounded',
+      runClass: 'long_lived',
       ioMode: 'request_response',
-    });
+    })).rejects.toThrow('activity report rejected');
 
-    await flushAsyncEffects();
-    expect(runtimeActivity.publisher.getSnapshot().activeCount).toBe(1);
-
-    await expect(manager.stop(started.runId)).resolves.toEqual({ ok: true });
-    await flushAsyncEffects();
-
-    expect(cancel).toHaveBeenCalledTimes(1);
-    expect(runtimeActivity.projections.at(-1)).toEqual({
-      runtimeActivityActiveCount: 0,
-      runtimeActivityObservedAt: null,
-      runtimeActivityExpiresAt: null,
-      runtimeActivitySourceClass: null,
-    });
+    expect(createBackend).not.toHaveBeenCalled();
+    expect(manager.getRunningCount()).toBe(0);
+    expect(contribution.reports).toEqual([{ state: 'idle', activeCount: 0 }]);
   });
 
   it('forwards terminal output + file edits into the run sidechain transcript', async () => {

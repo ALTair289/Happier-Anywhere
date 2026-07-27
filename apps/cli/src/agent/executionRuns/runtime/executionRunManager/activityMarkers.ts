@@ -3,6 +3,7 @@ import { readBackendResumableChildSessionId } from '@/agent/executionRuns/contro
 import type { ExecutionRunState } from '@/agent/executionRuns/runtime/executionRunTypes';
 import { areExecutionRunBackendTargetsEqual } from '@/agent/executionRuns/runtime/backendTargets';
 import { writeExecutionRunMarker } from '@/daemon/executionRunRegistry';
+import { buildExecutionRunConnectedServicesLaunchV1 } from '@/daemon/connectedServices/runsBridge/contract';
 
 export function enqueueExecutionRunMarkerWrite(args: Readonly<{
   markerWriteChains: Map<string, Promise<void>>;
@@ -61,6 +62,11 @@ export async function writeExecutionRunActivityMarker(args: Readonly<{
     startedAtMs: run.startedAtMs,
     updatedAtMs: args.nowMs,
     lastActivityAtMs: args.nowMs,
+    ...(run.launch?.connectedServicesRegistration ? {
+      executionRunConnectedServicesLaunchV1: buildExecutionRunConnectedServicesLaunchV1(
+        run.launch.connectedServicesRegistration,
+      ),
+    } : {}),
     ...(typeof run.summary === 'string' && run.summary.trim().length > 0 ? { summary: run.summary } : {}),
     ...(run.error?.code ? { errorCode: run.error.code } : {}),
     resumeHandle: (() => {

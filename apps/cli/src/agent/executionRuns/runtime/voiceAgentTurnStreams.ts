@@ -3,17 +3,116 @@ import { randomUUID } from 'node:crypto';
 import { VoiceAgentError, type VoiceAgentManager } from '@/agent/voice/agent/VoiceAgentManager';
 import type { ExecutionRunState } from '@/agent/executionRuns/runtime/executionRunTypes';
 import type { ExecutionRunController, ExecutionRunVoiceAgentController } from '@/agent/executionRuns/controllers/types';
+import type { ExecutionRunUserTranscriptDirective } from '@happier-dev/protocol';
+
+type VoiceAgentUserTranscriptWriter = Readonly<{
+  appendUserText: (text: string, meta: Record<string, unknown>) => void | Promise<void>;
+  appendUserTextCommitted?: (
+    text: string,
+    options: Readonly<{ localId: string; meta: Record<string, unknown> }>,
+  ) => Promise<void>;
+}>;
+type CommittedVoiceAgentUserTranscriptWriter = NonNullable<
+  VoiceAgentUserTranscriptWriter['appendUserTextCommitted']
+>;
+
+function buildVoiceAgentUserTranscriptMeta(ctrl: ExecutionRunVoiceAgentController): Record<string, unknown> {
+  return {
+    sentFrom: 'voice_agent',
+    source: 'cli',
+    happier: {
+      kind: 'voice_agent_turn.v1',
+      payload: {
+        v: 1,
+        epoch: ctrl.transcript.epoch,
+        role: 'user',
+        voiceAgentId: ctrl.voiceAgentId,
+        ts: Date.now(),
+      },
+    },
+  };
+}
+
+function resolveDurableVoiceAgentUserTranscriptWriter(args: Readonly<{
+  ctrl: ExecutionRunVoiceAgentController;
+  transcriptWriter: VoiceAgentUserTranscriptWriter | null;
+}>):
+  | { ok: true; writer: CommittedVoiceAgentUserTranscriptWriter }
+  | { ok: false; errorCode: string; error: string } {
+  if (args.ctrl.transcript.persistenceMode !== 'persistent') {
+    return { ok: false, errorCode: 'execution_run_not_allowed', error: 'Persistent transcript required' };
+  }
+  if (!args.transcriptWriter?.appendUserTextCommitted) {
+    return {
+      ok: false,
+      errorCode: 'execution_run_not_allowed',
+      error: 'Committed user transcript writer is required for durable voice identity',
+    };
+  }
+  return { ok: true, writer: args.transcriptWriter.appendUserTextCommitted };
+}
+
+async function appendDurableVoiceAgentUserTranscript(args: Readonly<{
+  ctrl: ExecutionRunVoiceAgentController;
+  userText: string;
+  localId: string;
+  writer: CommittedVoiceAgentUserTranscriptWriter;
+}>): Promise<void> {
+  await args.writer(
+    args.userText,
+    {
+      localId: args.localId,
+      meta: buildVoiceAgentUserTranscriptMeta(args.ctrl),
+    },
+  );
+}
+
+export async function commitVoiceAgentUserTranscript(args: Readonly<{
+  runId: string;
+  params: Readonly<{ message: string; displayMessage?: string; localId: string }>;
+  runs: ReadonlyMap<string, ExecutionRunState>;
+  controllers: ReadonlyMap<string, ExecutionRunController>;
+  transcriptWriter: VoiceAgentUserTranscriptWriter | null;
+}>): Promise<{ ok: true } | { ok: false; errorCode: string; error: string }> {
+  const run = args.runs.get(args.runId) ?? null;
+  if (!run) return { ok: false, errorCode: 'execution_run_not_found', error: 'Not found' };
+  if (run.status !== 'running') return { ok: false, errorCode: 'execution_run_not_allowed', error: 'Not running' };
+  if (run.intent !== 'voice_agent' || run.ioMode !== 'streaming') {
+    return { ok: false, errorCode: 'execution_run_not_allowed', error: 'Not supported' };
+  }
+
+  const ctrl = args.controllers.get(args.runId);
+  if (!ctrl || ctrl.kind !== 'voice_agent') {
+    return { ok: false, errorCode: 'execution_run_not_allowed', error: 'Not running' };
+  }
+  const durableWriter = resolveDurableVoiceAgentUserTranscriptWriter({
+    ctrl,
+    transcriptWriter: args.transcriptWriter,
+  });
+  if (!durableWriter.ok) return durableWriter;
+
+  const userText = String(args.params.displayMessage ?? args.params.message);
+  if (!userText.trim()) return { ok: false, errorCode: 'execution_run_invalid_action_input', error: 'Invalid params' };
+  await appendDurableVoiceAgentUserTranscript({
+    ctrl,
+    userText,
+    localId: args.params.localId,
+    writer: durableWriter.writer,
+  });
+  return { ok: true };
+}
 
 export async function startVoiceAgentTurnStream(args: Readonly<{
   runId: string;
-  params: Readonly<{ message: string; displayMessage?: string }>;
+  params: Readonly<{
+    message: string;
+    displayMessage?: string;
+    userTranscript?: ExecutionRunUserTranscriptDirective;
+  }>;
   runs: ReadonlyMap<string, ExecutionRunState>;
   controllers: ReadonlyMap<string, ExecutionRunController>;
   voiceAgentManager: VoiceAgentManager;
-  transcriptWriter: Readonly<{
-    appendUserText: (text: string, meta: Record<string, unknown>) => void | Promise<void>;
-    appendUserTextCommitted?: (text: string, meta: Record<string, unknown>) => Promise<void>;
-  }> | null;
+  transcriptWriter: VoiceAgentUserTranscriptWriter | null;
 }>): Promise<{ ok: true; streamId: string } | { ok: false; errorCode: string; error: string }> {
   const run = args.runs.get(args.runId) ?? null;
   if (!run) return { ok: false, errorCode: 'execution_run_not_found', error: 'Not found' };
@@ -31,24 +130,23 @@ export async function startVoiceAgentTurnStream(args: Readonly<{
   if (!userText.trim()) return { ok: false, errorCode: 'execution_run_invalid_action_input', error: 'Invalid params' };
   const transcriptUserText = String(args.params.displayMessage ?? userText);
 
-  // Persist user turn (optional).
-  if (args.transcriptWriter && ctrl.transcript.persistenceMode === 'persistent') {
-    const meta = {
-      sentFrom: 'voice_agent',
-      source: 'cli',
-      happier: {
-        kind: 'voice_agent_turn.v1',
-        payload: {
-          v: 1,
-          epoch: ctrl.transcript.epoch,
-          role: 'user',
-          voiceAgentId: ctrl.voiceAgentId,
-          ts: Date.now(),
-        },
-      },
-    };
+  if (args.params.userTranscript?.mode === 'persist') {
+    const durableWriter = resolveDurableVoiceAgentUserTranscriptWriter({
+      ctrl,
+      transcriptWriter: args.transcriptWriter,
+    });
+    if (!durableWriter.ok) return durableWriter;
+    await appendDurableVoiceAgentUserTranscript({
+      ctrl,
+      userText: transcriptUserText,
+      localId: args.params.userTranscript.localId,
+      writer: durableWriter.writer,
+    });
+  } else if (!args.params.userTranscript && args.transcriptWriter && ctrl.transcript.persistenceMode === 'persistent') {
+    // Released v1 callers have no explicit custody directive and retain the owner-local legacy ID behavior.
+    const meta = buildVoiceAgentUserTranscriptMeta(ctrl);
     if (typeof args.transcriptWriter.appendUserTextCommitted === 'function') {
-      await args.transcriptWriter.appendUserTextCommitted(transcriptUserText, meta);
+      await args.transcriptWriter.appendUserTextCommitted(transcriptUserText, { localId: randomUUID(), meta });
     } else {
       await args.transcriptWriter.appendUserText(transcriptUserText, meta);
     }

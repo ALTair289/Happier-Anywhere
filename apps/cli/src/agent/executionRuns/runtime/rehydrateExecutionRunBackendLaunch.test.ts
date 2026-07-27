@@ -43,6 +43,16 @@ describe('resolveExecutionRunResumeBackendOptions', () => {
         materializationKey: 'execution_run:x',
         cleanup,
         selection: CONNECTED_SELECTION,
+        registration: {
+          v: 1 as const,
+          agentId: 'codex',
+          materializationKey: 'execution_run:x',
+          connectedServicesBindings: CONNECTED_SELECTION,
+          brokerSelectionIdentity: null,
+          runtimeAccountIdentitySelections: [],
+          sessionDirectory: '/tmp/workspace',
+          materializedRoot: '/run/root',
+        },
       }),
     );
     const overrides = { v: 1 as const, updatedAt: 1, overrides: { reasoning_effort: { updatedAt: 1, value: 'high' } } };

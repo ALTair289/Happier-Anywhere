@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AgentBackend, SessionId, StartSessionResult } from '@/agent/core/AgentBackend';
 import type { ExecutionRunState } from '@/agent/executionRuns/runtime/executionRunTypes';
-import { sendBackendLongLivedRun } from '@/agent/executionRuns/runtime/backendLongLivedSend';
+import {
+  prepareBackendLongLivedRunResume,
+  sendBackendLongLivedRun,
+  sendPreparedBackendLongLivedRun,
+} from '@/agent/executionRuns/runtime/backendLongLivedSend';
 
 function createResumableBackendHarness(): Readonly<{
   backend: AgentBackend;
@@ -86,6 +90,9 @@ describe('sendBackendLongLivedRun (resume)', () => {
       parentProvider: 'claude' as any,
       streamedTranscriptSession: null,
       writeActivityMarker: async () => undefined,
+      admitRuntimeActivity: async () => undefined,
+      rollbackRuntimeActivityAfterFailedAdmission: async () => undefined,
+      terminalRuntimeActivityAfterFailedAdmission: async () => undefined,
     });
 
     expect(res).toEqual({ ok: true });
@@ -113,10 +120,55 @@ describe('sendBackendLongLivedRun (resume)', () => {
       parentProvider: 'claude' as any,
       streamedTranscriptSession: null,
       writeActivityMarker: async () => undefined,
+      admitRuntimeActivity: async () => undefined,
+      rollbackRuntimeActivityAfterFailedAdmission: async () => undefined,
+      terminalRuntimeActivityAfterFailedAdmission: async () => undefined,
     });
 
     expect(res.ok).toBe(false);
     expect(res.errorCode).toBe('execution_run_not_allowed');
     expect(res.error).toBe('Turn limit exceeded');
+  });
+
+  it('refuses to dispatch through a prepared controller after a successor replaces it', async () => {
+    const first = createResumableBackendHarness();
+    const successor = createResumableBackendHarness();
+    const firstSend = vi.fn(async () => {});
+    const successorSend = vi.fn(async () => {});
+    first.backend.sendPrompt = firstSend;
+    successor.backend.sendPrompt = successorSend;
+    const run = createLongLivedResumableRun();
+    const runs = new Map([[run.runId, run]]);
+    const controllers = new Map();
+    const args = {
+      runId: run.runId,
+      params: { message: 'hi', resume: true },
+      runs,
+      controllers,
+      budgetRegistry: null,
+      createBackend: async () => first.backend,
+      maxTurns: null,
+      getNowMs: () => 123,
+      finishRun: () => undefined,
+      sendAcp: (() => undefined) as any,
+      parentProvider: 'claude' as const,
+      streamedTranscriptSession: null,
+      writeActivityMarker: async () => undefined,
+      admitRuntimeActivity: async () => undefined,
+      rollbackRuntimeActivityAfterFailedAdmission: async () => undefined,
+      terminalRuntimeActivityAfterFailedAdmission: async () => undefined,
+    };
+
+    const prepared = await prepareBackendLongLivedRunResume(args);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('expected prepared controller');
+    controllers.set(run.runId, { ...prepared.controller, backend: successor.backend });
+
+    await expect(sendPreparedBackendLongLivedRun(args, prepared.controller)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'execution_run_not_allowed',
+    });
+    expect(firstSend).not.toHaveBeenCalled();
+    expect(successorSend).not.toHaveBeenCalled();
   });
 });

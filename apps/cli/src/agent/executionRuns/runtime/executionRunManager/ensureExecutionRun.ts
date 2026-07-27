@@ -25,6 +25,9 @@ export async function ensureExecutionRun(args: Readonly<{
   streamedTranscriptSession: StreamedTranscriptWriterSession | null;
   getNowMs: () => number;
   writeActivityMarker: (runId: string, nowMs: number, opts?: Readonly<{ force?: boolean }>) => Promise<void>;
+  admitRuntimeActivity: (runId: string) => Promise<void>;
+  rollbackRuntimeActivityAfterFailedAdmission: (reason: string) => Promise<void>;
+  terminalRuntimeActivityAfterFailedAdmission: (runId: string, reason: string) => Promise<void>;
   voiceAgentManager: VoiceAgentManager;
   onPublicStateUpdated?: (runId: string) => void;
 }>): Promise<{ ok: boolean; errorCode?: string; error?: string }> {
@@ -67,6 +70,26 @@ export async function ensureExecutionRun(args: Readonly<{
       const builtInAgentId = resolveExecutionRunBuiltInAgentId(run.backendTarget);
       if (!builtInAgentId) {
         return { ok: false, errorCode: 'execution_run_not_allowed', error: 'Not supported' };
+      }
+
+      const previousRun = args.runs.get(args.runId) ?? run;
+      args.runs.set(args.runId, {
+        ...run,
+        status: 'running',
+        finishedAtMs: undefined,
+        error: undefined,
+      });
+      try {
+        await args.admitRuntimeActivity(args.runId);
+      } catch (error) {
+        args.runs.set(args.runId, previousRun);
+        if (needsBudget) args.budgetRegistry?.releaseExecutionRun(args.runId);
+        await args.rollbackRuntimeActivityAfterFailedAdmission('execution-run-resume-admission-rolled-back');
+        return {
+          ok: false,
+          errorCode: 'execution_run_runtime_activity_unavailable',
+          error: error instanceof Error ? error.message : 'Runtime activity admission failed',
+        };
       }
 
       const startedVoice = await args.voiceAgentManager.start({
@@ -115,8 +138,18 @@ export async function ensureExecutionRun(args: Readonly<{
       await args.writeActivityMarker(args.runId, args.getNowMs(), { force: true });
       return { ok: true };
     } catch (e: any) {
+      args.runs.set(args.runId, run);
       if (needsBudget) args.budgetRegistry?.releaseExecutionRun(args.runId);
       const message = e instanceof Error ? e.message : 'Resume failed';
+      try {
+        await args.terminalRuntimeActivityAfterFailedAdmission(args.runId, 'execution_run_resume_failed');
+      } catch (terminalError) {
+        return {
+          ok: false,
+          errorCode: 'execution_run_runtime_activity_unavailable',
+          error: terminalError instanceof Error ? terminalError.message : 'Runtime activity terminal publication failed',
+        };
+      }
       return { ok: false, errorCode: 'execution_run_not_allowed', error: message };
     }
   }
@@ -133,6 +166,9 @@ export async function ensureExecutionRun(args: Readonly<{
     streamedTranscriptSession: args.streamedTranscriptSession,
     writeActivityMarker: args.writeActivityMarker,
     getNowMs: args.getNowMs,
+    admitRuntimeActivity: args.admitRuntimeActivity,
+    rollbackRuntimeActivityAfterFailedAdmission: args.rollbackRuntimeActivityAfterFailedAdmission,
+    terminalRuntimeActivityAfterFailedAdmission: args.terminalRuntimeActivityAfterFailedAdmission,
     ...(args.onPublicStateUpdated ? { onPublicStateUpdated: args.onPublicStateUpdated } : {}),
     requireReplayCapture: run.runClass === 'long_lived',
     onModelOutput: () => {

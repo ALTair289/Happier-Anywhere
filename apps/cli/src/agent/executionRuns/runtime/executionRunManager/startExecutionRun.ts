@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { buildExecutionRunConnectedServicesLaunchV1 } from '@/daemon/connectedServices/runsBridge/contract';
 
 import type { AgentBackend, AgentMessageHandler, SessionId } from '@/agent/core/AgentBackend';
 import type { ACPProvider } from '@/api/session/sessionMessageTypes';
@@ -29,6 +30,17 @@ import {
 } from '@/agent/executionRuns/runtime/backendTargets';
 
 type SendAcp = AcpSendFn;
+
+export function settleExecutionRunControllerOccurrence<T extends Readonly<{ resolveTerminal(): void }>>(
+  controllers: Map<string, T>,
+  runId: string,
+  controller: T,
+): void {
+  controller.resolveTerminal();
+  if (controllers.get(runId) === controller) {
+    controllers.delete(runId);
+  }
+}
 
 type FinishRunNext = Omit<
   ExecutionRunState,
@@ -135,6 +147,9 @@ export async function startExecutionRun(args: Readonly<{
     }) => AgentBackend;
   getNowMs: () => number;
   budgetRegistry: ExecutionBudgetRegistry | null;
+  admitRuntimeActivity: (runId: string) => Promise<void>;
+  rollbackRuntimeActivityAfterFailedAdmission: (reason: string) => Promise<void>;
+  waitForRuntimeActivityTerminal: (runId: string) => Promise<void>;
   runs: Map<string, ExecutionRunState>;
   controllers: Map<string, ExecutionRunController>;
   enqueueMarkerWrite: (runId: string, write: () => Promise<void>) => Promise<void>;
@@ -190,6 +205,9 @@ export async function startExecutionRun(args: Readonly<{
     ...(args.params.connectedServicesSelection
       ? { connectedServicesSelection: args.params.connectedServicesSelection }
       : {}),
+    ...(args.params.connectedServicesRegistration
+      ? { connectedServicesRegistration: args.params.connectedServicesRegistration }
+      : {}),
   } as const;
   args.runs.set(runId, {
     runId,
@@ -212,6 +230,17 @@ export async function startExecutionRun(args: Readonly<{
     startedAtMs,
     resumeHandle: null,
   });
+
+  try {
+    // The canonical map is the complete contribution owner. Insert the provisional run first, but
+    // expose no marker, transcript, controller, backend, or public callback until its report lands.
+    await args.admitRuntimeActivity(runId);
+  } catch (error) {
+    args.runs.delete(runId);
+    args.budgetRegistry?.releaseExecutionRun(runId);
+    await args.rollbackRuntimeActivityAfterFailedAdmission('execution-run-start-admission-rolled-back');
+    throw error;
+  }
   args.onPublicStateUpdated?.(runId);
 
   // Persist a daemon-visible marker so machine-wide UIs can see the run immediately.
@@ -232,6 +261,11 @@ export async function startExecutionRun(args: Readonly<{
     startedAtMs,
     updatedAtMs: startedAtMs,
     resumeHandle: null,
+    ...(args.params.connectedServicesRegistration ? {
+      executionRunConnectedServicesLaunchV1: buildExecutionRunConnectedServicesLaunchV1(
+        args.params.connectedServicesRegistration,
+      ),
+    } : {}),
   } as const;
   await args.enqueueMarkerWrite(runId, () => writeExecutionRunMarker(startMarkerPayload)).catch(() => {});
 
@@ -257,6 +291,7 @@ export async function startExecutionRun(args: Readonly<{
     });
   }
 
+  let controllerOccurrence: ExecutionRunController | null = null;
   try {
     if (args.params.intent === 'voice_agent' && args.params.ioMode === 'streaming') {
       let resolveTerminal!: () => void;
@@ -356,6 +391,7 @@ export async function startExecutionRun(args: Readonly<{
         persistedDoneByExternalStreamId: new Set(),
       };
       args.controllers.set(runId, ctrl);
+      controllerOccurrence = ctrl;
       await args.writeActivityMarker(runId, args.getNowMs(), { force: true }).catch(() => {});
       return { runId, callId, sidechainId };
     }
@@ -407,6 +443,7 @@ export async function startExecutionRun(args: Readonly<{
       resolveTerminal,
     };
     args.controllers.set(runId, ctrl);
+    controllerOccurrence = ctrl;
 
     const onMessage: AgentMessageHandler = createBackendControllerMessageHandler({
       ctrl,
@@ -420,6 +457,7 @@ export async function startExecutionRun(args: Readonly<{
       backendSupportsResume,
       writeActivityMarker: args.writeActivityMarker,
       getNowMs: args.getNowMs,
+      isCurrentController: () => args.controllers.get(runId) === ctrl,
       onPublicStateUpdated: args.onPublicStateUpdated,
     });
 
@@ -468,9 +506,7 @@ export async function startExecutionRun(args: Readonly<{
             .executeBoundedRun({ runId, callId, sidechainId, startedAtMs, params: args.params })
             .finally(() => {
               // Ensure terminal promise resolves even if executeBoundedRun throws unexpectedly.
-              const ctrl = args.controllers.get(runId);
-              ctrl?.resolveTerminal();
-              args.controllers.delete(runId);
+              settleExecutionRunControllerOccurrence(args.controllers, runId, ctrl);
             });
         } catch (e: any) {
           const message = e instanceof Error ? e.message : 'Execution failed';
@@ -503,16 +539,12 @@ export async function startExecutionRun(args: Readonly<{
           } catch {
             // best effort
           }
-          const ctrl = args.controllers.get(runId) ?? null;
-          if (ctrl) {
-            try {
-              if (ctrl.kind === 'backend') await ctrl.backend.dispose();
-            } catch {
-              // best effort
-            }
-            ctrl.resolveTerminal();
-            args.controllers.delete(runId);
+          try {
+            await ctrl.backend.dispose();
+          } catch {
+            // best effort
           }
+          settleExecutionRunControllerOccurrence(args.controllers, runId, ctrl);
         }
       })();
 
@@ -606,16 +638,15 @@ export async function startExecutionRun(args: Readonly<{
     } catch {
       // best effort
     }
-    const ctrl = args.controllers.get(runId) ?? null;
-    if (ctrl) {
+    if (controllerOccurrence) {
       try {
-        if (ctrl.kind === 'backend') await ctrl.backend.dispose();
+        if (controllerOccurrence.kind === 'backend') await controllerOccurrence.backend.dispose();
       } catch {
         // best effort
       }
-      ctrl.resolveTerminal();
-      args.controllers.delete(runId);
+      settleExecutionRunControllerOccurrence(args.controllers, runId, controllerOccurrence);
     }
+    await args.waitForRuntimeActivityTerminal(runId);
     throw e;
   }
 }

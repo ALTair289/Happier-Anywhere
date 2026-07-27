@@ -29,6 +29,9 @@ export async function resumeBackendControllerForResumableRun(args: Readonly<{
   streamedTranscriptSession: StreamedTranscriptWriterSession | null;
   writeActivityMarker: (runId: string, nowMs: number, opts?: Readonly<{ force?: boolean }>) => Promise<void>;
   getNowMs: () => number;
+  admitRuntimeActivity: (runId: string) => Promise<void>;
+  rollbackRuntimeActivityAfterFailedAdmission: (reason: string) => Promise<void>;
+  terminalRuntimeActivityAfterFailedAdmission: (runId: string, reason: string) => Promise<void>;
   onPublicStateUpdated?: (runId: string) => void;
   onModelOutput?: () => void;
   requireReplayCapture?: boolean;
@@ -53,6 +56,43 @@ export async function resumeBackendControllerForResumableRun(args: Readonly<{
     return { ok: false, errorCode: 'execution_run_not_allowed', error: 'Missing resume handle' };
   }
 
+  const previousRun = args.runs.get(args.runId) ?? args.run;
+  args.runs.set(args.runId, {
+    ...args.run,
+    status: 'running',
+    finishedAtMs: undefined,
+    error: undefined,
+  });
+  try {
+    await args.admitRuntimeActivity(args.runId);
+  } catch (error) {
+    args.runs.set(args.runId, previousRun);
+    args.budgetRegistry?.releaseExecutionRun(args.runId);
+    await args.rollbackRuntimeActivityAfterFailedAdmission('execution-run-resume-admission-rolled-back');
+    return {
+      ok: false,
+      errorCode: 'execution_run_runtime_activity_unavailable',
+      error: error instanceof Error ? error.message : 'Runtime activity admission failed',
+    };
+  }
+
+  const failAfterAdmission = async (result: Readonly<{
+    errorCode: string;
+    error: string;
+  }>): Promise<{ ok: false; errorCode: string; error: string }> => {
+    args.runs.set(args.runId, previousRun);
+    try {
+      await args.terminalRuntimeActivityAfterFailedAdmission(args.runId, 'execution_run_resume_failed');
+      return { ok: false, ...result };
+    } catch (error) {
+      return {
+        ok: false,
+        errorCode: 'execution_run_runtime_activity_unavailable',
+        error: error instanceof Error ? error.message : 'Runtime activity terminal publication failed',
+      };
+    }
+  };
+
   let backend: AgentBackend;
   try {
     backend = await args.createBackend();
@@ -60,9 +100,12 @@ export async function resumeBackendControllerForResumableRun(args: Readonly<{
     args.budgetRegistry?.releaseExecutionRun(args.runId);
     // Fail closed: a resumable run bound to a connected account must not recreate on ambient auth.
     if (e instanceof ExecutionRunConnectedServicesUnavailableError) {
-      return { ok: false, errorCode: e.code, error: e.message };
+      return await failAfterAdmission({ errorCode: e.code, error: e.message });
     }
-    return { ok: false, errorCode: 'execution_run_failed', error: e instanceof Error ? e.message : 'Resume failed' };
+    return await failAfterAdmission({
+      errorCode: 'execution_run_failed',
+      error: e instanceof Error ? e.message : 'Resume failed',
+    });
   }
   const wantsReplayCapture = args.requireReplayCapture === true;
   const canResume = wantsReplayCapture
@@ -71,11 +114,10 @@ export async function resumeBackendControllerForResumableRun(args: Readonly<{
   if (!canResume) {
     await backend.dispose().catch(() => {});
     args.budgetRegistry?.releaseExecutionRun(args.runId);
-    return {
-      ok: false,
+    return await failAfterAdmission({
       errorCode: 'execution_run_not_allowed',
       error: wantsReplayCapture ? 'Backend does not support resumable long-lived runs' : 'Backend does not support resume',
-    };
+    });
   }
 
   let resolveTerminal!: () => void;
@@ -119,6 +161,7 @@ export async function resumeBackendControllerForResumableRun(args: Readonly<{
   const profile = resolveExecutionRunIntentProfile(args.run.intent);
   const shouldMaterializeInTranscript = profile.transcriptMaterialization !== 'none';
   const sendAcp = shouldMaterializeInTranscript ? args.sendAcp : (() => {});
+  let controllerPreparing = true;
 
   const onMessage = createBackendControllerMessageHandler({
     ctrl: resumeCtrl,
@@ -132,17 +175,21 @@ export async function resumeBackendControllerForResumableRun(args: Readonly<{
     backendSupportsResume: true,
     writeActivityMarker: args.writeActivityMarker,
     getNowMs: args.getNowMs,
+    // loadSessionWithReplayCapture may synchronously emit replay/live messages before the
+    // controller can be installed. The caller serializes this provisional ownership; after load,
+    // exact map identity is the only accepted authority.
+    isCurrentController: () => controllerPreparing || args.controllers.get(args.runId) === resumeCtrl,
     onPublicStateUpdated: args.onPublicStateUpdated,
     onModelOutput: args.onModelOutput,
   });
-  backend.onMessage(onMessage);
-
   try {
+    backend.onMessage(onMessage);
     const loaded = backend.loadSessionWithReplayCapture
       ? await backend.loadSessionWithReplayCapture(vendorSessionId)
       : await backend.loadSession!(vendorSessionId);
     resumeCtrl.childSessionId = loaded.sessionId;
     args.controllers.set(args.runId, resumeCtrl);
+    controllerPreparing = false;
     args.runs.set(args.runId, {
       ...args.run,
       status: 'running',
@@ -153,8 +200,12 @@ export async function resumeBackendControllerForResumableRun(args: Readonly<{
     args.onPublicStateUpdated?.(args.runId);
     return { ok: true };
   } catch (e: any) {
+    controllerPreparing = false;
     await backend.dispose().catch(() => {});
     args.budgetRegistry?.releaseExecutionRun(args.runId);
-    return { ok: false, errorCode: 'execution_run_failed', error: e instanceof Error ? e.message : 'Resume failed' };
+    return await failAfterAdmission({
+      errorCode: 'execution_run_failed',
+      error: e instanceof Error ? e.message : 'Resume failed',
+    });
   }
 }

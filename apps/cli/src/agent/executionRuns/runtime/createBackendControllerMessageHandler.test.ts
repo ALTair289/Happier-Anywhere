@@ -64,6 +64,7 @@ function createHandlerHarness() {
       writes.push({ runId, nowMs: markerNowMs, ...(opts?.force ? { force: true } : {}) });
     },
     getNowMs: () => nowMs,
+    isCurrentController: () => true,
   });
 
   return {

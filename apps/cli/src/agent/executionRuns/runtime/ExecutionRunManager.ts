@@ -1,9 +1,8 @@
-import { randomUUID } from 'node:crypto';
-
 import type { AgentBackend } from '@/agent/core/AgentBackend';
 import type { ACPProvider } from '@/api/session/sessionMessageTypes';
 import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import type { StreamedTranscriptWriterSession } from '@/api/session/streamedTranscriptWriter';
+import type { ExecutionRunUserTranscriptDirective } from '@happier-dev/protocol';
 import type { ExecutionBudgetRegistry } from '@/daemon/executionBudget/ExecutionBudgetRegistry';
 import {
   type AcpConfigOptionOverridesV1,
@@ -25,13 +24,18 @@ import type {
   ExecutionRunState,
 } from '@/agent/executionRuns/runtime/executionRunTypes';
 import type { ExecutionRunController } from '@/agent/executionRuns/controllers/types';
-import type { SessionRuntimeActivityPublisher } from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
+import type { SessionRuntimeActivityContributionHandle } from '@/session/runtimeActivity/types';
 import {
   cancelVoiceAgentTurnStream,
+  commitVoiceAgentUserTranscript,
   readVoiceAgentTurnStream,
   startVoiceAgentTurnStream,
 } from '@/agent/executionRuns/runtime/voiceAgentTurnStreams';
-import { sendBackendLongLivedRun } from '@/agent/executionRuns/runtime/backendLongLivedSend';
+import {
+  prepareBackendLongLivedRunResume,
+  sendBackendLongLivedRun,
+  sendPreparedBackendLongLivedRun,
+} from '@/agent/executionRuns/runtime/backendLongLivedSend';
 import { stopExecutionRun } from '@/agent/executionRuns/runtime/executionRunStop';
 import { applyExecutionRunAction } from '@/agent/executionRuns/runtime/executionRunApplyAction';
 import { getExecutionRunAvailableActionIds } from '@/agent/executionRuns/runtime/getExecutionRunAvailableActionIds';
@@ -47,8 +51,7 @@ import {
   enqueueExecutionRunMarkerWrite,
   writeExecutionRunActivityMarker,
 } from '@/agent/executionRuns/runtime/executionRunManager/activityMarkers';
-
-const EXECUTION_RUN_RUNTIME_ACTIVITY_SOURCE_CLASS = 'provider_detached_task' as const;
+import { deriveExecutionRunRuntimeActivityContribution } from '@/agent/executionRuns/runtime/executionRunRuntimeActivity';
 
 function readBoundedExternalSendAckTimeoutMs(): number {
   const raw = process.env.HAPPIER_EXECUTION_RUN_BOUNDED_SEND_ACK_TIMEOUT_MS;
@@ -81,7 +84,10 @@ export class ExecutionRunManager {
     | Readonly<{
         appendUserText: (text: string, meta: Record<string, unknown>) => void | Promise<void>;
         appendAssistantText: (text: string, meta: Record<string, unknown>) => void | Promise<void>;
-        appendUserTextCommitted?: (text: string, meta: Record<string, unknown>) => Promise<void>;
+        appendUserTextCommitted?: (
+          text: string,
+          options: Readonly<{ localId: string; meta: Record<string, unknown> }>,
+        ) => Promise<void>;
         appendAssistantTextCommitted?: (text: string, meta: Record<string, unknown>) => Promise<void>;
       }>
     | null;
@@ -89,11 +95,13 @@ export class ExecutionRunManager {
   private readonly boundedTimeoutMs: number | null;
   private readonly maxTurns: number | null;
   private readonly budgetRegistry: ExecutionBudgetRegistry | null;
-  private readonly runtimeActivityPublisher: SessionRuntimeActivityPublisher | null;
+  private readonly runtimeActivityContributionHandle: SessionRuntimeActivityContributionHandle | null;
   private readonly runs = new Map<string, ExecutionRunState>();
   private readonly controllers = new Map<string, ExecutionRunController>();
   private readonly markerWriteChains = new Map<string, Promise<void>>();
   private readonly terminalMarkerWritePromises = new Map<string, Promise<void>>();
+  private readonly terminalRuntimeActivityPromises = new Map<string, Promise<void>>();
+  private readonly runLifecycleTails = new Map<string, Promise<void>>();
   private readonly voiceAgentManager: VoiceAgentManager;
   private readonly onPublicStateUpdated: ((run: ExecutionRunPublicState) => void) | null;
 
@@ -120,40 +128,83 @@ export class ExecutionRunManager {
   }
 
   private async writeActivityMarker(runId: string, nowMs: number, opts?: Readonly<{ force?: boolean }>): Promise<void> {
-    try {
-      await writeExecutionRunActivityMarker({
-        runId,
-        nowMs,
-        opts,
-        runs: this.runs,
-        controllers: this.controllers,
-        enqueueMarkerWrite: this.enqueueMarkerWrite.bind(this),
-      });
-    } finally {
-      this.publishRunRuntimeActivityActive(runId);
+    await writeExecutionRunActivityMarker({
+      runId,
+      nowMs,
+      opts,
+      runs: this.runs,
+      controllers: this.controllers,
+      enqueueMarkerWrite: this.enqueueMarkerWrite.bind(this),
+    });
+  }
+
+  private async admitRunRuntimeActivity(runId: string): Promise<void> {
+    const normalizedRunId = runId.trim();
+    if (!normalizedRunId) return;
+    if (this.runtimeActivityContributionHandle) {
+      await this.runtimeActivityContributionHandle.report(
+        deriveExecutionRunRuntimeActivityContribution(this.runs),
+        'execution-run-admitted',
+      );
+      return;
     }
   }
 
-  private buildRuntimeActivitySourceId(runId: string): string | null {
-    const normalized = runId.trim();
-    return normalized.length > 0 ? `execution_run:${normalized}` : null;
+  private publishRunRuntimeActivityTerminal(
+    runId: string,
+    reason: string,
+    terminalStateOverride?: 'completed' | 'failed' | 'cancelled',
+  ): Promise<void> {
+    const normalizedRunId = runId.trim();
+    if (!normalizedRunId) return Promise.resolve();
+    if (this.runtimeActivityContributionHandle) {
+      return this.runtimeActivityContributionHandle.report(
+        deriveExecutionRunRuntimeActivityContribution(this.runs),
+        reason,
+      );
+    }
+    return Promise.resolve();
   }
 
-  private publishRunRuntimeActivityActive(runId: string): void {
-    const sourceId = this.buildRuntimeActivitySourceId(runId);
-    if (!sourceId || !this.runtimeActivityPublisher) return;
-    const run = this.runs.get(runId);
-    if (run?.status !== 'running' || !this.controllers.has(runId)) return;
-    void this.runtimeActivityPublisher.setSourceActive({
-      id: sourceId,
-      sourceClass: EXECUTION_RUN_RUNTIME_ACTIVITY_SOURCE_CLASS,
-    }).catch(() => {});
+  private async rollbackRunRuntimeActivityAfterFailedAdmission(reason: string): Promise<void> {
+    if (!this.runtimeActivityContributionHandle) return;
+    await this.runtimeActivityContributionHandle.report(
+      deriveExecutionRunRuntimeActivityContribution(this.runs),
+      reason,
+    );
   }
 
-  private clearRunRuntimeActivity(runId: string, reason: string): void {
-    const sourceId = this.buildRuntimeActivitySourceId(runId);
-    if (!sourceId || !this.runtimeActivityPublisher) return;
-    void this.runtimeActivityPublisher.clearSource(sourceId, reason).catch(() => {});
+  private trackRunRuntimeActivityTerminal(
+    runId: string,
+    reason: string,
+    terminalStateOverride?: 'completed' | 'failed' | 'cancelled',
+  ): Promise<void> {
+    const terminal = this.publishRunRuntimeActivityTerminal(runId, reason, terminalStateOverride);
+    this.terminalRuntimeActivityPromises.set(runId, terminal);
+    // The completion/drain APIs observe the original promise. This handler only prevents an
+    // unhandled rejection if a caller never waits; it does not convert failure into success.
+    void terminal.catch(() => {});
+    return terminal;
+  }
+
+  private async withRunLifecycleLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.runLifecycleTails.get(runId) ?? Promise.resolve();
+    let release!: () => void;
+    const currentGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const currentTail = previous.catch(() => {}).then(() => currentGate);
+    this.runLifecycleTails.set(runId, currentTail);
+
+    await previous.catch(() => {});
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.runLifecycleTails.get(runId) === currentTail) {
+        this.runLifecycleTails.delete(runId);
+      }
+    }
   }
 
   constructor(opts: Readonly<{
@@ -176,7 +227,10 @@ export class ExecutionRunManager {
     transcriptWriter?: Readonly<{
       appendUserText: (text: string, meta: Record<string, unknown>) => void | Promise<void>;
       appendAssistantText: (text: string, meta: Record<string, unknown>) => void | Promise<void>;
-      appendUserTextCommitted?: (text: string, meta: Record<string, unknown>) => Promise<void>;
+      appendUserTextCommitted?: (
+        text: string,
+        options: Readonly<{ localId: string; meta: Record<string, unknown> }>,
+      ) => Promise<void>;
       appendAssistantTextCommitted?: (text: string, meta: Record<string, unknown>) => Promise<void>;
     }>;
     onPublicStateUpdated?: (run: ExecutionRunPublicState) => void;
@@ -184,7 +238,7 @@ export class ExecutionRunManager {
     boundedTimeoutMs?: number;
     maxTurns?: number;
     budgetRegistry?: ExecutionBudgetRegistry;
-    runtimeActivityPublisher?: SessionRuntimeActivityPublisher | null;
+    runtimeActivityContributionHandle?: SessionRuntimeActivityContributionHandle | null;
     resolveAccountSettings?: () => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
     /**
      * Canonical connected-services owner used to RE-materialize a run's account on resume, driven by
@@ -215,7 +269,7 @@ export class ExecutionRunManager {
         ? Math.floor(opts.maxTurns)
         : null;
     this.budgetRegistry = opts.budgetRegistry ?? null;
-    this.runtimeActivityPublisher = opts.runtimeActivityPublisher ?? null;
+    this.runtimeActivityContributionHandle = opts.runtimeActivityContributionHandle ?? null;
     this.onPublicStateUpdated = typeof opts.onPublicStateUpdated === 'function' ? opts.onPublicStateUpdated : null;
     const resolveAccountSettings = opts.resolveAccountSettings ?? (async () => null);
     this.resolveAccountSettings = resolveAccountSettings;
@@ -285,9 +339,11 @@ export class ExecutionRunManager {
       await ctrl.terminalPromise;
       await ctrl.terminalMarkerWritePromise?.catch(() => {});
       await this.terminalMarkerWritePromises.get(runId)?.catch(() => {});
+      await this.terminalRuntimeActivityPromises.get(runId);
       return;
     }
     await this.terminalMarkerWritePromises.get(runId)?.catch(() => {});
+    await this.terminalRuntimeActivityPromises.get(runId);
     // If there's no controller, the run is either unknown or already terminal.
     return;
   }
@@ -403,7 +459,7 @@ export class ExecutionRunManager {
     });
     const current = this.runs.get(runId);
     if (wasRunning && current?.status !== 'running') {
-      this.clearRunRuntimeActivity(runId, `execution_run_${current?.status ?? 'terminal'}`);
+      this.trackRunRuntimeActivityTerminal(runId, `execution_run_${current?.status ?? 'terminal'}`);
     }
     this.emitPublicStateUpdated(runId);
   }
@@ -417,6 +473,11 @@ export class ExecutionRunManager {
       createBackend: this.createBackend,
       getNowMs: this.getNowMs,
       budgetRegistry: this.budgetRegistry,
+      admitRuntimeActivity: this.admitRunRuntimeActivity.bind(this),
+      rollbackRuntimeActivityAfterFailedAdmission: this.rollbackRunRuntimeActivityAfterFailedAdmission.bind(this),
+      waitForRuntimeActivityTerminal: async (runId) => {
+        await this.terminalRuntimeActivityPromises.get(runId);
+      },
       runs: this.runs,
       controllers: this.controllers,
       enqueueMarkerWrite: this.enqueueMarkerWrite.bind(this),
@@ -428,7 +489,6 @@ export class ExecutionRunManager {
       getDepthByCallId: this.getDepthByCallId.bind(this),
       onPublicStateUpdated: (runId) => this.emitPublicStateUpdated(runId),
     });
-    this.publishRunRuntimeActivityActive(started.runId);
     this.emitPublicStateUpdated(started.runId);
     return started;
   }
@@ -471,22 +531,29 @@ export class ExecutionRunManager {
         resolveAccountSettings: this.resolveAccountSettings,
         ...(this.prepareConnectedServices ? { prepareConnectedServices: this.prepareConnectedServices } : {}),
       });
-      return this.createBackend({
-        runId: run.runId,
-        backendId: run.backendId,
-        backendTarget: run.backendTarget,
-        permissionMode: run.permissionMode,
-        start: { retentionPolicy: run.retentionPolicy, intent: run.intent },
-        ...(resumeOptions.modelId ? { modelId: resumeOptions.modelId } : {}),
-        ...(resumeOptions.sessionConfigOptionOverrides
-          ? { sessionConfigOptionOverrides: resumeOptions.sessionConfigOptionOverrides }
-          : {}),
-        ...(typeof resumeOptions.accountSettings !== 'undefined' ? { accountSettings: resumeOptions.accountSettings } : {}),
-        ...(resumeOptions.connectedServicesEnv ? { connectedServicesEnv: resumeOptions.connectedServicesEnv } : {}),
-        ...(resumeOptions.connectedServicesCleanup
-          ? { connectedServicesCleanup: resumeOptions.connectedServicesCleanup }
-          : {}),
-      });
+      try {
+        return this.createBackend({
+          runId: run.runId,
+          backendId: run.backendId,
+          backendTarget: run.backendTarget,
+          permissionMode: run.permissionMode,
+          start: { retentionPolicy: run.retentionPolicy, intent: run.intent },
+          ...(resumeOptions.modelId ? { modelId: resumeOptions.modelId } : {}),
+          ...(resumeOptions.sessionConfigOptionOverrides
+            ? { sessionConfigOptionOverrides: resumeOptions.sessionConfigOptionOverrides }
+            : {}),
+          ...(typeof resumeOptions.accountSettings !== 'undefined' ? { accountSettings: resumeOptions.accountSettings } : {}),
+          ...(resumeOptions.connectedServicesEnv ? { connectedServicesEnv: resumeOptions.connectedServicesEnv } : {}),
+          ...(resumeOptions.connectedServicesCleanup
+            ? { connectedServicesCleanup: resumeOptions.connectedServicesCleanup }
+            : {}),
+        });
+      } catch (error) {
+        // Re-materialization and backend construction form one acquisition boundary. Cleanup is a
+        // shared idempotent promise, so this awaits an already-started factory cleanup when present.
+        await resumeOptions.connectedServicesCleanup?.();
+        throw error;
+      }
     };
   }
 
@@ -498,8 +565,7 @@ export class ExecutionRunManager {
     if (!run) return { ok: false, errorCode: 'execution_run_not_found', error: 'Not found' };
 
     if (params.resume === true) {
-      // Resume semantics are already centralized in the long-lived sender; preserve that behavior for resumable bounded runs.
-      return sendBackendLongLivedRun({
+      const sendArgs = {
         runId,
         params,
         runs: this.runs,
@@ -513,8 +579,21 @@ export class ExecutionRunManager {
         parentProvider: this.parentProvider,
         streamedTranscriptSession: this.streamedTranscriptSession,
         writeActivityMarker: this.writeActivityMarker.bind(this),
+        admitRuntimeActivity: this.admitRunRuntimeActivity.bind(this),
+        rollbackRuntimeActivityAfterFailedAdmission: this.rollbackRunRuntimeActivityAfterFailedAdmission.bind(this),
+        terminalRuntimeActivityAfterFailedAdmission: (runId2, reason) => (
+          this.trackRunRuntimeActivityTerminal(runId2, reason, 'failed')
+        ),
         onPublicStateUpdated: (runId2) => this.emitPublicStateUpdated(runId2),
-      });
+      } satisfies Parameters<typeof prepareBackendLongLivedRunResume>[0];
+      // Serialize only occurrence admission and controller installation. Provider prompt admission
+      // is intentionally outside this queue so stop can reach cancellation when sendPrompt stalls.
+      const prepared = await this.withRunLifecycleLock(
+        runId,
+        async () => await prepareBackendLongLivedRunResume(sendArgs),
+      );
+      if (!prepared.ok) return prepared;
+      return sendPreparedBackendLongLivedRun(sendArgs, prepared.controller);
     }
 
     if (run.runClass === 'bounded') {
@@ -585,13 +664,18 @@ export class ExecutionRunManager {
       parentProvider: this.parentProvider,
       streamedTranscriptSession: this.streamedTranscriptSession,
       writeActivityMarker: this.writeActivityMarker.bind(this),
+      admitRuntimeActivity: this.admitRunRuntimeActivity.bind(this),
+      rollbackRuntimeActivityAfterFailedAdmission: this.rollbackRunRuntimeActivityAfterFailedAdmission.bind(this),
+      terminalRuntimeActivityAfterFailedAdmission: (runId2, reason) => (
+        this.trackRunRuntimeActivityTerminal(runId2, reason, 'failed')
+      ),
       onPublicStateUpdated: (runId2) => this.emitPublicStateUpdated(runId2),
     });
   }
 
   async ensure(runId: string, params: Readonly<{ resume?: boolean }>): Promise<{ ok: boolean; errorCode?: string; error?: string }> {
     const run = this.runs.get(runId) ?? null;
-    return ensureExecutionRun({
+    const ensure = async () => await ensureExecutionRun({
       runId,
       params,
       runs: this.runs,
@@ -607,9 +691,17 @@ export class ExecutionRunManager {
       streamedTranscriptSession: this.streamedTranscriptSession,
       getNowMs: this.getNowMs,
       writeActivityMarker: this.writeActivityMarker.bind(this),
+      admitRuntimeActivity: this.admitRunRuntimeActivity.bind(this),
+      rollbackRuntimeActivityAfterFailedAdmission: this.rollbackRunRuntimeActivityAfterFailedAdmission.bind(this),
+      terminalRuntimeActivityAfterFailedAdmission: (runId2, reason) => (
+        this.trackRunRuntimeActivityTerminal(runId2, reason, 'failed')
+      ),
       voiceAgentManager: this.voiceAgentManager,
       onPublicStateUpdated: (runId2) => this.emitPublicStateUpdated(runId2),
     });
+    return params.resume === true
+      ? this.withRunLifecycleLock(runId, ensure)
+      : ensure();
   }
 
   async ensureOrStart(params: Readonly<{
@@ -634,7 +726,12 @@ export class ExecutionRunManager {
 
   async startTurnStream(
     runId: string,
-    params: Readonly<{ message: string; displayMessage?: string; resume?: boolean }>,
+    params: Readonly<{
+      message: string;
+      displayMessage?: string;
+      resume?: boolean;
+      userTranscript?: ExecutionRunUserTranscriptDirective;
+    }>,
   ): Promise<{ ok: true; streamId: string } | { ok: false; errorCode: string; error: string }> {
     if (params.resume === true) {
       const ensured = await this.ensure(runId, { resume: true });
@@ -645,10 +742,31 @@ export class ExecutionRunManager {
       params: {
         message: params.message,
         ...(typeof params.displayMessage === 'string' ? { displayMessage: params.displayMessage } : {}),
+        ...(params.userTranscript ? { userTranscript: params.userTranscript } : {}),
       },
       runs: this.runs,
       controllers: this.controllers,
       voiceAgentManager: this.voiceAgentManager,
+      transcriptWriter: this.transcriptWriter
+        ? {
+            appendUserText: this.transcriptWriter.appendUserText,
+            ...(this.transcriptWriter.appendUserTextCommitted
+              ? { appendUserTextCommitted: this.transcriptWriter.appendUserTextCommitted }
+              : {}),
+          }
+        : null,
+    });
+  }
+
+  async commitUserTranscript(
+    runId: string,
+    params: Readonly<{ message: string; displayMessage?: string; localId: string }>,
+  ): Promise<{ ok: true } | { ok: false; errorCode: string; error: string }> {
+    return await commitVoiceAgentUserTranscript({
+      runId,
+      params,
+      runs: this.runs,
+      controllers: this.controllers,
       transcriptWriter: this.transcriptWriter
         ? {
             appendUserText: this.transcriptWriter.appendUserText,
@@ -700,13 +818,26 @@ export class ExecutionRunManager {
   }
 
   async stop(runId: string): Promise<{ ok: boolean; errorCode?: string; error?: string }> {
-    return stopExecutionRun({
+    return this.withRunLifecycleLock(runId, async () => {
+      const result = await stopExecutionRun({
       runId,
       runs: this.runs,
       controllers: this.controllers,
       voiceAgentManager: this.voiceAgentManager,
       getNowMs: this.getNowMs,
       finishRun: this.finishRun.bind(this),
+      });
+      if (!result.ok) return result;
+      try {
+        await this.terminalRuntimeActivityPromises.get(runId);
+        return result;
+      } catch (error) {
+        return {
+          ok: false,
+          errorCode: 'execution_run_runtime_activity_unavailable',
+          error: error instanceof Error ? error.message : 'Runtime activity terminal publication failed',
+        };
+      }
     });
   }
 

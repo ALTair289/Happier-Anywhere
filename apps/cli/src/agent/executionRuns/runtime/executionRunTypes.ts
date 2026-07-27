@@ -1,6 +1,7 @@
 import type { AcpConfigOptionOverridesV1, BackendTargetRefV1, ConnectedServiceBindingsV1, ExecutionRunDisplay, ExecutionRunIntent, ExecutionRunResumeHandle } from '@happier-dev/protocol';
 
 import type { ExecutionRunStructuredMeta } from '@/agent/executionRuns/profiles/ExecutionRunIntentProfile';
+import type { ExecutionRunConnectedServiceRegistrationV1 } from '@/daemon/connectedServices/runsBridge/contract';
 
 export type ExecutionRunManagerStartParams = Readonly<{
   sessionId: string;
@@ -44,6 +45,7 @@ export type ExecutionRunManagerStartParams = Readonly<{
    * can re-materialize the SAME account/profile. Binding metadata only — never tokens/env values.
    */
   connectedServicesSelection?: ConnectedServiceBindingsV1 | null;
+  connectedServicesRegistration?: ExecutionRunConnectedServiceRegistrationV1 | null;
   // Internal runtime override for bounded-run timeouts. Not part of the public RPC contract.
   boundedTimeoutMs?: number;
   resumeHandle?: ExecutionRunResumeHandle | null;
@@ -101,6 +103,7 @@ export type ExecutionRunState = Readonly<{
     modelId?: string;
     sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1;
     connectedServicesSelection?: ConnectedServiceBindingsV1 | null;
+    connectedServicesRegistration?: ExecutionRunConnectedServiceRegistrationV1 | null;
   }>;
   startedAtMs: number;
   finishedAtMs?: number;

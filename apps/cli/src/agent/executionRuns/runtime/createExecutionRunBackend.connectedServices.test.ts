@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { dirname } from 'node:path';
+import { access } from 'node:fs/promises';
 
 import type { AgentBackend, SessionId } from '@/agent/core/AgentBackend';
 import type { ExecutionRunBackendFactoryOptions } from '@/agent/executionRuns/registry/executionRunBackendTypes';
@@ -93,7 +95,80 @@ describe('createExecutionRunBackend connected-services env merge', () => {
     });
 
     await backend.dispose();
+    await backend.dispose();
     expect(dispose).toHaveBeenCalledTimes(1);
     expect(connectedServicesCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans selected connected-service materialization exactly once when backend construction throws', async () => {
+    getExecutionRunBackendDescriptorMock.mockReturnValue({
+      factory: () => {
+        throw new Error('backend construction failed');
+      },
+    });
+    const connectedServicesCleanup = vi.fn(async () => {});
+
+    const { createExecutionRunBackend } = await import('./createExecutionRunBackend');
+    expect(() => createExecutionRunBackend({
+      cwd: '/tmp/workspace',
+      runId: 'run_codex_1',
+      backendId: 'codex',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      permissionMode: 'read_only',
+      start: { retentionPolicy: 'resumable' },
+      connectedServicesEnv: { CODEX_HOME: '/materialized/run/codex/codex-home' },
+      connectedServicesCleanup,
+    })).toThrow('backend construction failed');
+
+    expect(connectedServicesCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans selected connected-service materialization when the backend descriptor is unavailable', async () => {
+    getExecutionRunBackendDescriptorMock.mockReturnValue(null);
+    const connectedServicesCleanup = vi.fn(async () => {});
+
+    const { createExecutionRunBackend } = await import('./createExecutionRunBackend');
+    expect(() => createExecutionRunBackend({
+      cwd: '/tmp/workspace',
+      runId: 'run_missing_1',
+      backendId: 'missing-backend',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      permissionMode: 'read_only',
+      start: { retentionPolicy: 'resumable' },
+      connectedServicesEnv: { CODEX_HOME: '/materialized/run/codex/codex-home' },
+      connectedServicesCleanup,
+    })).toThrow('Unsupported execution-run backend: missing-backend');
+
+    await vi.waitFor(() => expect(connectedServicesCleanup).toHaveBeenCalledTimes(1));
+  });
+
+  it('preserves a resolveIsolation construction error while cleaning both acquired resources exactly once', async () => {
+    let isolationRoot: string | null = null;
+    getExecutionRunBackendDescriptorMock.mockReturnValue({
+      factory: () => createStubBackend(),
+      resolveIsolation: vi.fn((_request, baseBundle) => {
+        isolationRoot = dirname(dirname(String(baseBundle.env.XDG_STATE_HOME)));
+        throw new Error('resolve isolation failed');
+      }),
+    });
+    const connectedServicesCleanup = vi.fn(async () => {});
+
+    const { createExecutionRunBackend } = await import('./createExecutionRunBackend');
+    expect(() => createExecutionRunBackend({
+      cwd: '/tmp/workspace',
+      runId: 'run_isolation_failure_1',
+      backendId: 'codex',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      permissionMode: 'read_only',
+      start: { retentionPolicy: 'ephemeral' },
+      connectedServicesEnv: { CODEX_HOME: '/materialized/run/codex/codex-home' },
+      connectedServicesCleanup,
+    })).toThrow('resolve isolation failed');
+
+    await vi.waitFor(async () => {
+      expect(connectedServicesCleanup).toHaveBeenCalledTimes(1);
+      expect(isolationRoot).not.toBeNull();
+      await expect(access(isolationRoot!)).rejects.toThrow();
+    });
   });
 });

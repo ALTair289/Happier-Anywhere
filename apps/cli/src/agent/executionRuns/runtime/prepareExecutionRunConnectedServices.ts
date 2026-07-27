@@ -8,11 +8,21 @@ import {
   materializeDaemonConnectedServicesForExecutionRun,
   releaseDaemonConnectedServicesForExecutionRun,
 } from '@/daemon/controlClient';
+import {
+  ExecutionRunConnectedServiceMaterializationProofV1Schema,
+  ExecutionRunConnectedServiceMaterializedEnvSchema,
+} from '@/daemon/connectedServices/runsBridge/contract';
+import type { ExecutionRunConnectedServiceMaterializationProofV1 } from '@/daemon/connectedServices/runsBridge/contract';
+import { ExecutionRunConnectedServiceRegistrationV1Schema } from '@/daemon/connectedServices/runsBridge/contract';
+import type { ExecutionRunConnectedServiceRegistrationV1 } from '@/daemon/connectedServices/runsBridge/contract';
 import type { Credentials } from '@/persistence';
 import { resolveSessionAgentSpawnConnectedServicesDefaults } from '@/session/services/spawn/normalizeSessionAgentSpawnActionRequest';
 import { resolveSpawnConnectedServicesDefaults } from '@/session/services/spawnConnectedServicesDefaults';
 import { bootstrapAccountSettingsContext } from '@/settings/accountSettings/bootstrapAccountSettingsContext';
 import { logger } from '@/ui/logger';
+import {
+  readConnectedServiceChildSelectionsFromEnv,
+} from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 
 /**
  * Runner-side owner of the ER-CS start flow: resolve the run's effective connected-services selection
@@ -58,6 +68,8 @@ export type PreparedExecutionRunConnectedServices = Readonly<{
    * session default. Contains only binding metadata — never tokens or materialized env values.
    */
   selection: ConnectedServiceBindingsV1;
+  /** Exact non-secret daemon registration fact used only for passive replacement re-registration. */
+  registration: ExecutionRunConnectedServiceRegistrationV1;
 }>;
 
 type MaterializeViaDaemon = typeof materializeDaemonConnectedServicesForExecutionRun;
@@ -106,6 +118,40 @@ type ResolvedRunSelection = Readonly<{
 
 function hasConnectedBinding(bindings: ConnectedServiceBindingsV1): boolean {
   return Object.values(bindings.bindingsByServiceId).some((binding) => binding.source === 'connected');
+}
+
+function proofMatchesSelectedConnectedIdentity(params: Readonly<{
+  proof: unknown;
+  agentId: string;
+  materializationKey: string;
+  selection: ConnectedServiceBindingsV1;
+}>): boolean {
+  const parsed = ExecutionRunConnectedServiceMaterializationProofV1Schema.safeParse(params.proof);
+  if (
+    !parsed.success
+    || parsed.data.agentId !== params.agentId
+    || parsed.data.materializationKey !== params.materializationKey
+  ) return false;
+
+  const selectedConnectedEntries = Object.entries(params.selection.bindingsByServiceId)
+    .filter((entry): entry is [string, Extract<ConnectedServiceBindingSelectionV1, { source: 'connected' }>] =>
+      entry[1].source === 'connected');
+  const provenConnectedEntries = Object.entries(parsed.data.connectedServicesBindings.bindingsByServiceId)
+    .filter((entry): entry is [string, Extract<ConnectedServiceBindingSelectionV1, { source: 'connected' }>] =>
+      entry[1].source === 'connected');
+
+  if (selectedConnectedEntries.length === 0 || selectedConnectedEntries.length !== provenConnectedEntries.length) {
+    return false;
+  }
+
+  return selectedConnectedEntries.every(([serviceId, selected]) => {
+    const proven = parsed.data.connectedServicesBindings.bindingsByServiceId[serviceId];
+    if (!proven || proven.source !== 'connected') return false;
+    if (selected.selection === 'group') {
+      return proven.selection === 'group' && proven.groupId === selected.groupId;
+    }
+    return proven.selection !== 'group' && proven.profileId === selected.profileId;
+  });
 }
 
 async function resolveRunSelection(params: Readonly<{
@@ -233,16 +279,19 @@ export async function prepareExecutionRunConnectedServices(params: Readonly<{
   // to be run-unique and stable between materialize and release, so it carries its own id.
   const materializationKey = `execution_run:${randomUUID()}`;
 
-  let released = false;
-  const cleanup = async () => {
-    if (released) return;
-    released = true;
-    try {
-      await release({ runId: materializationKey, pid: process.pid, materializationKey });
-    } catch (error) {
-      // Best-effort: a failed release must not fail run teardown.
-      logger.debug('[EXECUTION RUN] Connected-services release failed (non-fatal)', error);
+  let cleanupPromise: Promise<void> | null = null;
+  const cleanup = (): Promise<void> => {
+    if (!cleanupPromise) {
+      cleanupPromise = (async () => {
+        try {
+          await release({ runId: materializationKey, pid: process.pid, materializationKey });
+        } catch (error) {
+          // Best-effort: a failed release must not fail run teardown.
+          logger.debug('[EXECUTION RUN] Connected-services release failed (non-fatal)', error);
+        }
+      })();
     }
+    return cleanupPromise;
   };
 
   let materialized: Awaited<ReturnType<MaterializeViaDaemon>>;
@@ -270,17 +319,45 @@ export async function prepareExecutionRunConnectedServices(params: Readonly<{
     throw new ExecutionRunConnectedServicesUnavailableError({ agentId, cause: error });
   }
 
-  const envKeys = Object.keys(materialized.env ?? {});
-  if (envKeys.length === 0) {
-    // Unexpected with the fail-closed bridge (it throws when nothing resolves), but never leave a
-    // daemon-side registration behind for a run that proceeds native.
+  // Keep a runner-side defense even though the control client parses the wire schema: injected test
+  // boundaries and mixed-version callers must not turn an empty path into ambient provider auth.
+  const parsedEnv = ExecutionRunConnectedServiceMaterializedEnvSchema.safeParse(materialized.env);
+  const envKeys = parsedEnv.success ? Object.keys(parsedEnv.data) : [];
+  const parsedProof = ExecutionRunConnectedServiceMaterializationProofV1Schema.safeParse(materialized.proof);
+  const hasValidProof = proofMatchesSelectedConnectedIdentity({
+    proof: materialized.proof,
+    agentId,
+    materializationKey,
+    selection: selection.bindings,
+  });
+  const parsedRegistration = ExecutionRunConnectedServiceRegistrationV1Schema.safeParse(materialized.registration);
+  const hasValidRegistration = parsedRegistration.success && proofMatchesSelectedConnectedIdentity({
+    proof: {
+      v: parsedRegistration.data.v,
+      agentId: parsedRegistration.data.agentId,
+      materializationKey: parsedRegistration.data.materializationKey,
+      connectedServicesBindings: parsedRegistration.data.connectedServicesBindings,
+    },
+    agentId,
+    materializationKey,
+    selection: selection.bindings,
+  }) && parsedProof.success
+    && JSON.stringify(parsedRegistration.data.connectedServicesBindings)
+      === JSON.stringify(parsedProof.data.connectedServicesBindings);
+  if (!parsedEnv.success || !hasValidProof || !hasValidRegistration) {
+    // Transport success is not connected-auth success. Under the current run bridge, a non-empty
+    // provider-owned environment is the minimum materialization proof; accepting an empty result
+    // would execute under ambient credentials after the user selected a connected identity.
     await cleanup();
-    logger.info('[EXECUTION RUN] connected services: bridge returned no env; proceeding native', {
+    logger.warn('[EXECUTION RUN] connected services: bridge returned no materialization proof; failing run start closed', {
       agentId,
       source: selection.source,
       materializationKey,
+      envKeyCount: envKeys.length,
+      proofValid: hasValidProof,
+      registrationValid: hasValidRegistration,
     });
-    return null;
+    throw new ExecutionRunConnectedServicesUnavailableError({ agentId });
   }
 
   // QA2-F03: the one decision line for the materialized path. Env key NAMES only — values are paths
@@ -293,9 +370,16 @@ export async function prepareExecutionRunConnectedServices(params: Readonly<{
   });
 
   return {
-    env: materialized.env,
+    env: parsedEnv.data,
     materializationKey,
     cleanup,
     selection: selection.bindings,
+    registration: (() => {
+      const connectedServiceSelections = readConnectedServiceChildSelectionsFromEnv(parsedEnv.data);
+      const connectedServiceSelectionsJson = connectedServiceSelections.length > 0
+        ? JSON.stringify(connectedServiceSelections)
+        : null;
+      return { ...parsedRegistration.data, connectedServiceSelectionsJson };
+    })(),
   };
 }

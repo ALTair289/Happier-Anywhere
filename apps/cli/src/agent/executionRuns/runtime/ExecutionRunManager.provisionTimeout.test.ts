@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentBackend, SessionId } from '@/agent/core/AgentBackend';
 
 import { ExecutionRunManager } from './ExecutionRunManager';
+import type {
+  SessionRuntimeActivityContribution,
+  SessionRuntimeActivityContributionHandle,
+} from '@/session/runtimeActivity/types';
 
 const PROVISION_TIMEOUT_ENV_KEY = 'HAPPIER_EXECUTION_RUN_BACKEND_PROVISION_TIMEOUT_MS';
 
@@ -95,5 +99,44 @@ describe('ExecutionRunManager backend provisioning bound (QA2-F04)', () => {
     expect(runs.length).toBe(1);
     expect(runs[0]?.status).toBe('failed');
     expect(runs[0]?.error?.code).toBe('execution_run_backend_provision_timeout');
+  });
+
+  it('terminalizes only the timed-out run and retains a running sibling contribution', async () => {
+    process.env[PROVISION_TIMEOUT_ENV_KEY] = '200';
+    const reports: SessionRuntimeActivityContribution[] = [];
+    const contributionHandle = {
+      report: vi.fn(async (snapshot: SessionRuntimeActivityContribution) => { reports.push(snapshot); }),
+      markUnknown: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } satisfies SessionRuntimeActivityContributionHandle;
+    let backendCount = 0;
+    const manager = new ExecutionRunManager({
+      parentProvider: 'claude',
+      cwd: process.cwd(),
+      createBackend: () => {
+        backendCount += 1;
+        if (backendCount === 2) return createNeverProvisioningBackend();
+        return {
+          async startSession() { return { sessionId: 'sibling' as SessionId }; },
+          async sendPrompt() {}, async cancel() {}, onMessage() {}, async dispose() {}, async waitForResponseComplete() {},
+        };
+      },
+      sendAcp: () => {},
+      runtimeActivityContributionHandle: contributionHandle,
+    });
+    const sibling = await manager.start({
+      sessionId: 'session-1', intent: 'delegate', backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      permissionMode: 'read_only', retentionPolicy: 'resumable', runClass: 'long_lived', ioMode: 'request_response',
+    });
+
+    await expect(manager.start({
+      sessionId: 'session-1', intent: 'delegate', backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      permissionMode: 'read_only', retentionPolicy: 'resumable', runClass: 'long_lived', ioMode: 'request_response',
+    })).rejects.toThrow(/provision/iu);
+
+    expect(manager.get(sibling.runId)?.status).toBe('running');
+    expect(reports).toContainEqual({ state: 'active', activeCount: 2 });
+    expect(reports.at(-1)).toEqual({ state: 'active', activeCount: 1 });
+    await manager.stop(sibling.runId);
   });
 });

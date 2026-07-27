@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Credentials } from '@/persistence';
+import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 
 const { loggerInfoMock, loggerWarnMock, loggerDebugMock } = vi.hoisted(() => ({
   loggerInfoMock: vi.fn(),
@@ -31,9 +32,78 @@ const TEAM_DEFAULT_BINDINGS = {
   },
 };
 
+function materialized(input: unknown, env: Record<string, string> = { CODEX_HOME: '/run/root/codex/codex-home' }) {
+  const request = input as { materializationKey: string; connectedServicesBindingsRaw: typeof TEAM_DEFAULT_BINDINGS };
+  return {
+    env,
+    proof: {
+      v: 1 as const,
+      agentId: 'codex',
+      materializationKey: request.materializationKey,
+      connectedServicesBindings: request.connectedServicesBindingsRaw,
+    },
+    registration: {
+      v: 1 as const,
+      agentId: 'codex',
+      materializationKey: request.materializationKey,
+      connectedServicesBindings: request.connectedServicesBindingsRaw,
+      brokerSelectionIdentity: null,
+      runtimeAccountIdentitySelections: [],
+      sessionDirectory: '/tmp/workspace',
+      materializedRoot: '/run/root/codex',
+    },
+  };
+}
+
 describe('prepareExecutionRunConnectedServices', () => {
+  it('adds the exact non-secret child selection envelope to durable run registration', async () => {
+    const connectedServiceSelectionsJson = JSON.stringify([{
+      kind: 'profile',
+      serviceId: 'openai-codex',
+      profileId: 'team',
+      credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
+      ignoredSecret: 'must-not-persist',
+    }]);
+    const expectedPersistedSelectionsJson = JSON.stringify([{
+      kind: 'profile',
+      serviceId: 'openai-codex',
+      profileId: 'team',
+      credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
+    }]);
+    const materialize = vi.fn(async (input: unknown) => {
+      const base = materialized(input, {
+        CODEX_HOME: '/run/root/codex/codex-home',
+        [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: connectedServiceSelectionsJson,
+      });
+      return {
+        ...base,
+        registration: {
+          ...base.proof,
+          brokerSelectionIdentity: null,
+          runtimeAccountIdentitySelections: [],
+          sessionDirectory: '/tmp/workspace',
+          materializedRoot: '/run/root/codex',
+        },
+      };
+    });
+
+    const prepared = await prepareExecutionRunConnectedServices({
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      connectedServices: TEAM_DEFAULT_BINDINGS,
+      credentials: CREDENTIALS,
+      cwd: '/tmp/workspace',
+      sessionId: 'session-1',
+      materializeViaDaemon: materialize,
+      releaseViaDaemon: vi.fn(async () => true),
+    });
+
+    expect(prepared?.registration?.connectedServiceSelectionsJson).toBe(expectedPersistedSelectionsJson);
+    expect(JSON.stringify(prepared?.registration)).not.toContain('CODEX_HOME');
+    expect(JSON.stringify(prepared?.registration)).not.toContain('must-not-persist');
+  });
+
   it('QA2-F02: an account default resolves through the SESSION spawn-default owner (not a runner settings snapshot) and materializes', async () => {
-    const materialize = vi.fn(async (_input: unknown) => ({ env: { CODEX_HOME: '/run/root/codex/codex-home' } }));
+    const materialize = vi.fn(async (input: unknown) => materialized(input));
     const release = vi.fn(async (_input: unknown) => true);
     // The session owner (blocking settings bootstrap) resolves the default — prepare must consume IT,
     // not any in-process settings snapshot (the live G5 failure: stale snapshot => silent native run).
@@ -78,8 +148,41 @@ describe('prepareExecutionRunConnectedServices', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
+  it('shares one in-flight cleanup promise so concurrent owners await the same release', async () => {
+    let finishRelease!: () => void;
+    const releaseGate = new Promise<void>((resolve) => {
+      finishRelease = resolve;
+    });
+    const release = vi.fn(async () => {
+      await releaseGate;
+      return true;
+    });
+    const prepared = await prepareExecutionRunConnectedServices({
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      connectedServices: TEAM_DEFAULT_BINDINGS,
+      credentials: CREDENTIALS,
+      cwd: '/tmp/workspace',
+      sessionId: 'session-1',
+      materializeViaDaemon: vi.fn(async (input: unknown) => materialized(input)),
+      releaseViaDaemon: release,
+    });
+
+    const first = prepared!.cleanup();
+    let secondSettled = false;
+    const second = prepared!.cleanup().then(() => {
+      secondSettled = true;
+    });
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+    expect(release).toHaveBeenCalledTimes(1);
+
+    finishRelease();
+    await Promise.all([first, second]);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
   it('an explicit per-target selection overrides the session default entirely', async () => {
-    const materialize = vi.fn(async (_input: unknown) => ({ env: { CODEX_HOME: '/run/root/codex/codex-home' } }));
+    const materialize = vi.fn(async (input: unknown) => materialized(input));
     const resolveSessionSpawnDefaults = vi.fn(async (_input: unknown) => ({
       connectedServices: TEAM_DEFAULT_BINDINGS,
       connectedServicesUpdatedAt: Date.now(),
@@ -110,7 +213,7 @@ describe('prepareExecutionRunConnectedServices', () => {
 
   it('QA2-F03: logs one info line when no selection resolves and proceeds native (no bridge call)', async () => {
     loggerInfoMock.mockClear();
-    const materialize = vi.fn(async (_input: unknown) => ({ env: {} }));
+    const materialize = vi.fn(async (input: unknown) => materialized(input, {}));
     const prepared = await prepareExecutionRunConnectedServices({
       backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
       credentials: CREDENTIALS,
@@ -133,7 +236,7 @@ describe('prepareExecutionRunConnectedServices', () => {
       credentials: CREDENTIALS,
       cwd: '/tmp/workspace',
       sessionId: 'session-1',
-      materializeViaDaemon: vi.fn(async (_input: unknown) => ({ env: { CODEX_HOME: '/run/root/codex/codex-home' } })),
+      materializeViaDaemon: vi.fn(async (input: unknown) => materialized(input)),
       releaseViaDaemon: vi.fn(async (_input: unknown) => true),
       resolveSessionSpawnDefaults: vi.fn(async (_input: unknown) => ({
         connectedServices: TEAM_DEFAULT_BINDINGS,
@@ -147,7 +250,7 @@ describe('prepareExecutionRunConnectedServices', () => {
   });
 
   it('returns null for non-builtInAgent targets without touching the default owner', async () => {
-    const materialize = vi.fn(async (_input: unknown) => ({ env: {} }));
+    const materialize = vi.fn(async (input: unknown) => materialized(input, {}));
     const resolveSessionSpawnDefaults = vi.fn(async (_input: unknown) => null);
     const prepared = await prepareExecutionRunConnectedServices({
       backendTarget: { kind: 'configuredAcpBackend', backendId: 'review-bot' },
@@ -171,7 +274,7 @@ describe('prepareExecutionRunConnectedServices', () => {
       credentials: null,
       cwd: '/tmp/workspace',
       sessionId: 'session-1',
-      materializeViaDaemon: vi.fn(async (_input: unknown) => ({ env: {} })),
+      materializeViaDaemon: vi.fn(async (input: unknown) => materialized(input, {})),
       releaseViaDaemon: vi.fn(async (_input: unknown) => true),
       resolveSessionSpawnDefaults,
     });
@@ -231,26 +334,281 @@ describe('prepareExecutionRunConnectedServices', () => {
     expect(releaseInput.materializationKey).toBe(materializeInput.materializationKey);
   });
 
-  it('releases the daemon-side state and proceeds native when the bridge returns an empty env', async () => {
+  it('fails closed and releases exactly once when selected auth returns an empty materialization', async () => {
     const release = vi.fn(async (_input: unknown) => true);
-    const prepared = await prepareExecutionRunConnectedServices({
+    await expect(
+      prepareExecutionRunConnectedServices({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        credentials: CREDENTIALS,
+        cwd: '/tmp/workspace',
+        sessionId: 'session-1',
+        materializeViaDaemon: vi.fn(async (input: unknown) => materialized(input, {})),
+        releaseViaDaemon: release,
+        resolveSessionSpawnDefaults: vi.fn(async (_input: unknown) => ({
+          connectedServices: TEAM_DEFAULT_BINDINGS,
+          connectedServicesUpdatedAt: Date.now(),
+        })),
+      }),
+    ).rejects.toBeInstanceOf(ExecutionRunConnectedServicesUnavailableError);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed and releases exactly once when selected auth returns only an empty env value', async () => {
+    const release = vi.fn(async (_input: unknown) => true);
+    await expect(
+      prepareExecutionRunConnectedServices({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        credentials: CREDENTIALS,
+        cwd: '/tmp/workspace',
+        sessionId: 'session-1',
+        materializeViaDaemon: vi.fn(async (input: unknown) => materialized(input, { CODEX_HOME: '' })),
+        releaseViaDaemon: release,
+        resolveSessionSpawnDefaults: vi.fn(async (_input: unknown) => ({
+          connectedServices: TEAM_DEFAULT_BINDINGS,
+          connectedServicesUpdatedAt: Date.now(),
+        })),
+      }),
+    ).rejects.toBeInstanceOf(ExecutionRunConnectedServicesUnavailableError);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed and releases exactly once when selected auth returns only a whitespace env value', async () => {
+    const release = vi.fn(async (_input: unknown) => true);
+    await expect(
+      prepareExecutionRunConnectedServices({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        credentials: CREDENTIALS,
+        cwd: '/tmp/workspace',
+        sessionId: 'session-1',
+        materializeViaDaemon: vi.fn(async (input: unknown) => materialized(input, { CODEX_HOME: '   ' })),
+        releaseViaDaemon: release,
+        resolveSessionSpawnDefaults: vi.fn(async (_input: unknown) => ({
+          connectedServices: TEAM_DEFAULT_BINDINGS,
+          connectedServicesUpdatedAt: Date.now(),
+        })),
+      }),
+    ).rejects.toBeInstanceOf(ExecutionRunConnectedServicesUnavailableError);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed and releases exactly once when the bridge returns malformed materialization proof', async () => {
+    const release = vi.fn(async (_input: unknown) => true);
+    await expect(
+      prepareExecutionRunConnectedServices({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        connectedServices: TEAM_DEFAULT_BINDINGS,
+        credentials: CREDENTIALS,
+        cwd: '/tmp/workspace',
+        sessionId: 'session-1',
+        materializeViaDaemon: vi.fn(async (_input: unknown) => ({
+          env: { CODEX_HOME: '/run/root/codex/codex-home' },
+          proof: {
+            v: 1 as const,
+            agentId: 'codex',
+            materializationKey: '',
+            connectedServicesBindings: TEAM_DEFAULT_BINDINGS,
+          },
+        })),
+        releaseViaDaemon: release,
+      }),
+    ).rejects.toBeInstanceOf(ExecutionRunConnectedServicesUnavailableError);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed and releases exactly once when proof names a different selected profile', async () => {
+    const release = vi.fn(async (_input: unknown) => true);
+    await expect(
+      prepareExecutionRunConnectedServices({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        connectedServices: TEAM_DEFAULT_BINDINGS,
+        credentials: CREDENTIALS,
+        cwd: '/tmp/workspace',
+        sessionId: 'session-1',
+        materializeViaDaemon: vi.fn(async (input: { materializationKey: string }) => ({
+          env: { CODEX_HOME: '/run/root/codex/codex-home' },
+          proof: {
+            v: 1 as const,
+            agentId: 'codex',
+            materializationKey: input.materializationKey,
+            connectedServicesBindings: {
+              v: 1 as const,
+              bindingsByServiceId: {
+                'openai-codex': {
+                  source: 'connected' as const,
+                  selection: 'profile' as const,
+                  profileId: 'another-profile',
+                },
+              },
+            },
+          },
+        })),
+        releaseViaDaemon: release,
+      }),
+    ).rejects.toBeInstanceOf(ExecutionRunConnectedServicesUnavailableError);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed and releases exactly once when proof names a different selected group', async () => {
+    const release = vi.fn(async (_input: unknown) => true);
+    const selectedGroup = {
+      v: 1 as const,
+      bindingsByServiceId: {
+        'openai-codex': { source: 'connected' as const, selection: 'group' as const, groupId: 'primary' },
+      },
+    };
+    await expect(
+      prepareExecutionRunConnectedServices({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        connectedServices: selectedGroup,
+        credentials: CREDENTIALS,
+        cwd: '/tmp/workspace',
+        sessionId: 'session-1',
+        materializeViaDaemon: vi.fn(async (input: { materializationKey: string }) => ({
+          env: { CODEX_HOME: '/run/root/codex/codex-home' },
+          proof: {
+            v: 1 as const,
+            agentId: 'codex',
+            materializationKey: input.materializationKey,
+            connectedServicesBindings: {
+              v: 1 as const,
+              bindingsByServiceId: {
+                'openai-codex': {
+                  source: 'connected' as const,
+                  selection: 'group' as const,
+                  groupId: 'another-group',
+                  profileId: 'member-a',
+                },
+              },
+            },
+          },
+        })),
+        releaseViaDaemon: release,
+      }),
+    ).rejects.toBeInstanceOf(ExecutionRunConnectedServicesUnavailableError);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed and releases exactly once when exact daemon registration is missing', async () => {
+    const selectedGroup = {
+      v: 1 as const,
+      bindingsByServiceId: {
+        'openai-codex': { source: 'connected' as const, selection: 'group' as const, groupId: 'primary' },
+      },
+    };
+    const release = vi.fn(async () => true);
+    await expect(prepareExecutionRunConnectedServices({
       backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      connectedServices: selectedGroup,
       credentials: CREDENTIALS,
       cwd: '/tmp/workspace',
       sessionId: 'session-1',
-      materializeViaDaemon: vi.fn(async (_input: unknown) => ({ env: {} })),
-      releaseViaDaemon: release,
-      resolveSessionSpawnDefaults: vi.fn(async (_input: unknown) => ({
-        connectedServices: TEAM_DEFAULT_BINDINGS,
-        connectedServicesUpdatedAt: Date.now(),
+      materializeViaDaemon: vi.fn(async (input: { materializationKey: string }) => ({
+        env: { CODEX_HOME: '/run/root/codex/codex-home' },
+        proof: {
+          v: 1 as const,
+          agentId: 'codex',
+          materializationKey: input.materializationKey,
+          connectedServicesBindings: {
+            v: 1 as const,
+            bindingsByServiceId: {
+              'openai-codex': {
+                source: 'connected' as const,
+                selection: 'group' as const,
+                groupId: 'primary',
+                profileId: 'member-a',
+              },
+            },
+          },
+        },
       })),
-    });
-    expect(prepared).toBeNull();
+      releaseViaDaemon: release,
+    })).rejects.toBeInstanceOf(ExecutionRunConnectedServicesUnavailableError);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed with joined cleanup when daemon registration does not match the reservation', async () => {
+    const release = vi.fn(async () => true);
+    await expect(prepareExecutionRunConnectedServices({
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      connectedServices: TEAM_DEFAULT_BINDINGS,
+      credentials: CREDENTIALS,
+      cwd: '/tmp/workspace',
+      sessionId: 'session-1',
+      materializeViaDaemon: vi.fn(async (input: unknown) => {
+        const base = materialized(input);
+        return {
+          ...base,
+          registration: {
+            ...base.registration,
+            materializationKey: 'execution_run:different-reservation',
+          },
+        };
+      }),
+      releaseViaDaemon: release,
+    })).rejects.toBeInstanceOf(ExecutionRunConnectedServicesUnavailableError);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed with joined cleanup when registration and materialization proof name different group members', async () => {
+    const release = vi.fn(async () => true);
+    const selectedGroup = {
+      v: 1 as const,
+      bindingsByServiceId: {
+        'openai-codex': { source: 'connected' as const, selection: 'group' as const, groupId: 'primary' },
+      },
+    };
+    await expect(prepareExecutionRunConnectedServices({
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      connectedServices: selectedGroup,
+      credentials: CREDENTIALS,
+      cwd: '/tmp/workspace',
+      sessionId: 'session-1',
+      materializeViaDaemon: vi.fn(async (input: { materializationKey: string }) => ({
+        env: { CODEX_HOME: '/run/root/codex/codex-home' },
+        proof: {
+          v: 1 as const,
+          agentId: 'codex',
+          materializationKey: input.materializationKey,
+          connectedServicesBindings: {
+            v: 1 as const,
+            bindingsByServiceId: {
+              'openai-codex': {
+                source: 'connected' as const,
+                selection: 'group' as const,
+                groupId: 'primary',
+                profileId: 'member-a',
+              },
+            },
+          },
+        },
+        registration: {
+          v: 1 as const,
+          agentId: 'codex',
+          materializationKey: input.materializationKey,
+          connectedServicesBindings: {
+            v: 1 as const,
+            bindingsByServiceId: {
+              'openai-codex': {
+                source: 'connected' as const,
+                selection: 'group' as const,
+                groupId: 'primary',
+                profileId: 'member-b',
+              },
+            },
+          },
+          brokerSelectionIdentity: null,
+          runtimeAccountIdentitySelections: [],
+          sessionDirectory: '/tmp/workspace',
+          materializedRoot: '/run/root/codex',
+        },
+      })),
+      releaseViaDaemon: release,
+    })).rejects.toBeInstanceOf(ExecutionRunConnectedServicesUnavailableError);
     expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('RO-F5: resolves a mixed bare-default + explicit selection, merging the resolved default UNDER explicit pins', async () => {
-    const materialize = vi.fn(async (_input: unknown) => ({ env: { CODEX_HOME: '/run/root/codex/codex-home' } }));
+    const materialize = vi.fn(async (input: unknown) => materialized(input));
     const resolvePerServiceDefaults = vi.fn(async (_input: { serviceIds: readonly string[] }) => ({
       v: 1 as const,
       bindingsByServiceId: {
@@ -291,7 +649,7 @@ describe('prepareExecutionRunConnectedServices', () => {
   });
 
   it('RO-F5: fails closed (typed) when a bare default token has no stored connected default', async () => {
-    const materialize = vi.fn(async (_input: unknown) => ({ env: { CODEX_HOME: '/x' } }));
+    const materialize = vi.fn(async (input: unknown) => materialized(input, { CODEX_HOME: '/x' }));
     await expect(
       prepareExecutionRunConnectedServices({
         backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
