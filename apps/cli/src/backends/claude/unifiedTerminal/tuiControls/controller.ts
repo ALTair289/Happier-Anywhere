@@ -204,6 +204,8 @@ export function createClaudeUnifiedTuiControlController(
     reason,
     telemetry,
     onCommandSubmitted: deps.onControlCommandTyped,
+    onCommandWillSubmit: deps.onControlCommandWillSubmit,
+    onCommandSubmissionResolved: deps.onControlCommandSubmissionResolved,
     onCommandTyped: deps.onControlCommandTextEntered,
   });
 

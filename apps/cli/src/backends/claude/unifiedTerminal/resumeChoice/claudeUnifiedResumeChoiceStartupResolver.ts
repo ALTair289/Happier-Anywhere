@@ -13,11 +13,23 @@ import {
   captureScreenState,
   sendResultToFailure,
 } from '../tuiControls/controlRuntime';
-import type { ClaudeUnifiedResumeChoiceBroker } from './claudeUnifiedResumeChoiceBroker';
+import {
+  getClaudeUnifiedRecognizedDialogRegistryEntry,
+  isClaudeUnifiedRegisteredDialogVisible,
+  resolveClaudeUnifiedRegisteredDialogOption,
+  resolveClaudeUnifiedVisibleDialog,
+  type ClaudeUnifiedRecognizedDialogRegistryEntry,
+} from '../tuiControls/dialogRegistry';
+import type { ClaudeUnifiedDialogChoiceBroker } from '../dialogChoice/claudeUnifiedDialogChoiceBroker';
 
 const MAX_STARTUP_DIALOG_ANSWER_ATTEMPTS = 2;
 
 type StartupDialogKind = 'effort_change' | 'switch_model';
+
+const STARTUP_DIALOGS: Readonly<Record<StartupDialogKind, ClaudeUnifiedRecognizedDialogRegistryEntry>> = {
+  effort_change: getClaudeUnifiedRecognizedDialogRegistryEntry('effort_change'),
+  switch_model: getClaudeUnifiedRecognizedDialogRegistryEntry('switch_model'),
+};
 
 type StartupDialogAnswerResult =
   | Readonly<{ kind: 'answered'; stateVisibleAfterAnswer: boolean }>
@@ -58,7 +70,7 @@ function hasConfiguredModel(startupMode: EnhancedMode | undefined): boolean {
 async function answerStartupDialogOption(params: Readonly<{
   port: TerminalControlPort;
   kind: StartupDialogKind;
-  option: '1' | '2';
+  choice: 'confirm' | 'cancel';
   wait: (ms: number) => Promise<void>;
   settleMs: number;
 }>): Promise<StartupDialogAnswerResult> {
@@ -66,13 +78,13 @@ async function answerStartupDialogOption(params: Readonly<{
   if (before.kind !== 'state') {
     return controlFailureToStartupDialogResult(captureFailureToResult(before)) ?? { kind: 'failed', reason: 'capture_failed' };
   }
-  const visibleBefore = params.kind === 'effort_change'
-    ? before.state.effortChangeDialogVisible
-    : before.state.switchModelDialogVisible;
-  if (!visibleBefore) return { kind: 'not_visible' };
+  const entry = STARTUP_DIALOGS[params.kind];
+  if (!isClaudeUnifiedRegisteredDialogVisible(before.state, entry)) return { kind: 'not_visible' };
+  const option = resolveClaudeUnifiedRegisteredDialogOption(before.state, entry, params.choice);
+  if (!option) return { kind: 'failed', reason: `startup_dialog_option_missing:${params.kind}:${params.choice}` };
 
   const sendOptionFailure = controlFailureToStartupDialogResult(
-    sendResultToFailure(await params.port.sendLiteralText(params.option)),
+    sendResultToFailure(await params.port.sendLiteralText(option.answer.text)),
   );
   if (sendOptionFailure) return sendOptionFailure;
 
@@ -86,20 +98,19 @@ async function answerStartupDialogOption(params: Readonly<{
   if (after.kind !== 'state') {
     return controlFailureToStartupDialogResult(captureFailureToResult(after)) ?? { kind: 'failed', reason: 'capture_failed' };
   }
-  const visibleAfter = params.kind === 'effort_change'
-    ? after.state.effortChangeDialogVisible
-    : after.state.switchModelDialogVisible;
+  const visibleAfter = isClaudeUnifiedRegisteredDialogVisible(after.state, entry);
   return { kind: 'answered', stateVisibleAfterAnswer: visibleAfter };
 }
 
 export function createClaudeUnifiedResumeChoiceStartupResolver(params: Readonly<{
   choice: ClaudeUnifiedTerminalResumeChoice;
-  broker: ClaudeUnifiedResumeChoiceBroker;
+  broker: ClaudeUnifiedDialogChoiceBroker;
   port: TerminalControlPort;
   wait: (ms: number) => Promise<void>;
   settleMs: number;
   startupMode?: EnhancedMode | undefined;
   isRuntimeControlInFlight?: (() => boolean) | undefined;
+  onResumeSummaryCompactResidue?: (() => void) | undefined;
 }>): ClaudeUnifiedStartupDialogResolver {
   let pendingAnswerTask: Promise<void> | null = null;
   let terminalAnswerInFlight = false;
@@ -109,7 +120,7 @@ export function createClaudeUnifiedResumeChoiceStartupResolver(params: Readonly<
 
   const answerOrphanStartupDialog = async (
     kind: StartupDialogKind,
-    option: '1' | '2',
+    choice: 'confirm' | 'cancel',
   ): Promise<Readonly<{ status: 'handled' | 'unhandled' }>> => {
     const attempts = startupDialogAnswerAttempts.get(kind) ?? 0;
     if (attempts >= MAX_STARTUP_DIALOG_ANSWER_ATTEMPTS) {
@@ -118,7 +129,7 @@ export function createClaudeUnifiedResumeChoiceStartupResolver(params: Readonly<
     const result = await answerStartupDialogOption({
       port: params.port,
       kind,
-      option,
+      choice,
       wait: params.wait,
       settleMs: params.settleMs,
     });
@@ -134,15 +145,20 @@ export function createClaudeUnifiedResumeChoiceStartupResolver(params: Readonly<
 
   const startUserChoice = (signal: AbortSignal): void => {
     params.broker.activate();
-    if (userChoiceClosed || params.broker.hasPendingChoice() || pendingAnswerTask) return;
-    pendingAnswerTask = params.broker.requestResumeChoice({ signal })
-      .then(async (choice: ClaudeUnifiedResumeChoiceAnswer) => {
+    if (userChoiceClosed || params.broker.hasPendingChoice('resume_choice') || pendingAnswerTask) return;
+    const captured = resolveClaudeUnifiedVisibleDialog(lastScreenState);
+    if (!captured || captured.dialogId !== 'resume_choice') return;
+    pendingAnswerTask = params.broker.requestDialogChoice({ dialog: captured, signal })
+      .then(async (decision) => {
         terminalAnswerInFlight = true;
         const result = await answerClaudeResumeChoiceDialog({
           port: params.port,
-          choice,
+          choice: decision.choice as ClaudeUnifiedResumeChoiceAnswer,
           wait: params.wait,
           settleMs: params.settleMs,
+          onSubmitted: decision.choice === 'resume_from_summary'
+            ? params.onResumeSummaryCompactResidue
+            : undefined,
         }).finally(() => {
           terminalAnswerInFlight = false;
         });
@@ -158,24 +174,36 @@ export function createClaudeUnifiedResumeChoiceStartupResolver(params: Readonly<
       });
   };
 
+  let lastScreenState: Parameters<ClaudeUnifiedStartupDialogResolver>[0]['screenState'];
+
   return async ({ screenState, abortSignal }) => {
+    lastScreenState = screenState;
     if (params.isRuntimeControlInFlight?.() !== true) {
-      if (screenState.effortChangeDialogVisible) {
+      if (isClaudeUnifiedRegisteredDialogVisible(screenState, STARTUP_DIALOGS.effort_change)) {
         const targets = resolveConfiguredEffortTargets(params.startupMode);
-        const option = screenState.effortChangeDialogTarget !== null
+        const choice = screenState.effortChangeDialogTarget !== null
           && targets.includes(screenState.effortChangeDialogTarget)
-          ? '1'
-          : '2';
-        return answerOrphanStartupDialog('effort_change', option);
+          ? 'confirm'
+          : 'cancel';
+        return answerOrphanStartupDialog('effort_change', choice);
       }
-      if (screenState.switchModelDialogVisible) {
-        return answerOrphanStartupDialog('switch_model', hasConfiguredModel(params.startupMode) ? '1' : '2');
+      if (isClaudeUnifiedRegisteredDialogVisible(screenState, STARTUP_DIALOGS.switch_model)) {
+        return answerOrphanStartupDialog('switch_model', hasConfiguredModel(params.startupMode) ? 'confirm' : 'cancel');
       }
     }
 
+    const visibleDialog = resolveClaudeUnifiedVisibleDialog(screenState);
+    if (
+      visibleDialog
+      && visibleDialog.dialogId !== 'resume_choice'
+      && params.broker.hasPendingChoiceForDialog(visibleDialog)
+    ) {
+      return { status: 'waiting_for_user' };
+    }
+
     if (!screenState.resumeChoiceDialogVisible) {
-      if (params.broker.hasPendingChoice()) {
-        params.broker.noteDialogResolvedInTerminal('resume_dialog_resolved_in_terminal');
+      if (params.broker.hasPendingChoice('resume_choice')) {
+        await params.broker.noteDialogResolvedInTerminal('resume_dialog_resolved_in_terminal');
         return { status: 'handled' };
       }
       return pendingAnswerTask ? { status: 'waiting_for_user' } : { status: 'unhandled' };
@@ -186,7 +214,7 @@ export function createClaudeUnifiedResumeChoiceStartupResolver(params: Readonly<
         return { status: 'unhandled' };
       }
       startUserChoice(abortSignal);
-      return params.broker.hasPendingChoice() || terminalAnswerInFlight
+      return params.broker.hasPendingChoice('resume_choice') || terminalAnswerInFlight
         ? { status: 'waiting_for_user' }
         : { status: 'unhandled' };
     }
@@ -200,8 +228,10 @@ export function createClaudeUnifiedResumeChoiceStartupResolver(params: Readonly<
       choice: params.choice,
       wait: params.wait,
       settleMs: params.settleMs,
+      onSubmitted: params.choice === 'resume_from_summary'
+        ? params.onResumeSummaryCompactResidue
+        : undefined,
     });
-
     if (result.kind === 'answered' || result.kind === 'not_visible') {
       return { status: 'handled' };
     }

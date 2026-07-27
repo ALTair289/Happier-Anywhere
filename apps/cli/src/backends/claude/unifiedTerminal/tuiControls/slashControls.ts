@@ -5,6 +5,7 @@ import {
   type ControlRuntime,
 } from './controlRuntime';
 import type { ControlAttemptResult } from './outcome';
+import type { ClaudeUnifiedIndependentControlSubmissionResolution } from '../acceptedPromptTranscriptDiscovery';
 import {
   isSafeWindowForSlashControl,
 } from './screenState';
@@ -37,6 +38,16 @@ export type SlashControlContext = Readonly<{
    * for executed slash commands which must not surface as UI messages.
    */
   onCommandSubmitted?: ((commandText: string) => void) | undefined;
+  /**
+   * Fired after the final pre-submit screen verification and immediately BEFORE Enter is sent.
+   * This is the provenance fence for transcript ownership: registering after Enter races a fast
+   * JSONL row, while registering at type time would claim commands that are later aborted.
+   */
+  onCommandWillSubmit?: ((commandText: string) => string | null) | undefined;
+  /** Resolves the exact pre-Enter provenance registration after the terminal send attempt. */
+  onCommandSubmissionResolved?: ((
+    input: ClaudeUnifiedIndependentControlSubmissionResolution,
+  ) => void) | undefined;
   /**
    * Fired the moment the command text is WRITTEN into the composer, before any verification or
    * Enter (incident cmq8y3nlx, RESUME2): a typed-but-never-submitted command can survive the
@@ -299,7 +310,19 @@ async function runSlashControl(ctx: SlashControlContext, spec: SlashControlSpec)
         return { kind: 'failed', reason: COMPOSER_CONTENT_MISMATCH_REASON };
       }
 
-      const sendEnter = sendResultToFailure(await port.sendSpecialKey('Enter'));
+      const submissionId = ctx.onCommandWillSubmit?.(spec.commandText) ?? null;
+      const sendEnterResult = await port.sendSpecialKey('Enter');
+      if (submissionId !== null) {
+        ctx.onCommandSubmissionResolved?.({
+          submissionId,
+          disposition: sendEnterResult.status === 'sent'
+            ? 'sent'
+            : sendEnterResult.status === 'unsupported'
+              ? 'not_sent'
+              : 'ambiguous',
+        });
+      }
+      const sendEnter = sendResultToFailure(sendEnterResult);
       if (sendEnter) return sendEnter;
       ctx.onCommandSubmitted?.(spec.commandText);
     }

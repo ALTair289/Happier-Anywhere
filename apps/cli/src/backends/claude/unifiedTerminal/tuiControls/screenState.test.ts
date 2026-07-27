@@ -328,6 +328,50 @@ describe('parseClaudeScreenState — dim contextual suggestion placeholder (2.1.
   });
 });
 
+// Live read-only tmux capture from runner pid 98095, Claude Code 2.1.217. The empty composer
+// suggestion uses DIM styling except for the first character under the real cursor, which is
+// inverse-video. The visible text is provider chrome, not a user-authored draft.
+const CLAUDE_2_1_217_CURSOR_HIGHLIGHTED_SUGGESTION = readFileSync(
+  new URL('./__fixtures__/incident-98095-contextual-suggestion.ansi', import.meta.url),
+  'utf8',
+);
+
+describe('parseClaudeScreenState — cursor-highlighted contextual suggestion (2.1.217, tmux)', () => {
+  it('treats the mixed inverse-cursor plus dim suggestion as an EMPTY composer', () => {
+    const state = parseClaudeScreenState(CLAUDE_2_1_217_CURSOR_HIGHLIGHTED_SUGGESTION, {
+      cursor: { x: 2, y: 3 },
+    });
+
+    expect(state.composerContent).toBe('');
+    expect(state.userDraftPresent).toBe(false);
+    expect(isClaudeScreenReadyForInput(state)).toBe(true);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBeNull();
+  });
+
+  it('keeps the same visible text as a real draft when it is normal intensity and the cursor is after it', () => {
+    const typed = CLAUDE_2_1_217_CURSOR_HIGHLIGHTED_SUGGESTION.replace(
+      `${ESC}[7mc${ESC}[0;2mommit this${ESC}[0m`,
+      `${ESC}[38;2;255;255;255mcommit this${ESC}[0m`,
+    );
+    const state = parseClaudeScreenState(typed, { cursor: { x: 13, y: 3 } });
+
+    expect(state.composerContent).toBe('commit this');
+    expect(state.userDraftPresent).toBe(true);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('user_draft');
+  });
+
+  it('does not treat inverse cursor position alone as placeholder evidence when the remaining text is normal', () => {
+    const typedAtStart = CLAUDE_2_1_217_CURSOR_HIGHLIGHTED_SUGGESTION.replace(
+      `${ESC}[0;2mommit this`,
+      `${ESC}[0mommit this`,
+    );
+    const state = parseClaudeScreenState(typedAtStart, { cursor: { x: 2, y: 3 } });
+
+    expect(state.composerContent).toBe('commit this');
+    expect(state.userDraftPresent).toBe(true);
+  });
+});
+
 // Live Lima/tmux capture 2026-06-19 (Claude Code 2.1.179-class): tmux `capture-pane -p -e`
 // returned the contextual suggestion with no SGR styling, but `#{cursor_x},#{cursor_y}` showed the
 // cursor at the start of the visual suggestion text. That cursor location is the host-owned proof
@@ -723,8 +767,17 @@ describe('parseClaudeScreenState — unrecognized confirmation dialogs (P-B fail
   ].join('\n');
 
   it('detects an unrecognized ❯-numbered confirmation dialog and blocks every safe window', () => {
-    const state = parseClaudeScreenState(unrecognizedDialog);
+    const state = parseClaudeScreenState(unrecognizedDialog, { cursor: { x: 3, y: 3 } });
     expect(state.unrecognizedConfirmationDialogVisible).toBe(true);
+    expect(state.unrecognizedConfirmationDialog?.context).toEqual([
+      'Reset conversation cache?',
+      'Your next response may be slower',
+    ]);
+    expect(state.unrecognizedConfirmationDialog?.options).toEqual([
+      { choice: '1', label: 'Yes, reset it' },
+      { choice: '2', label: 'No, go back' },
+    ]);
+    expect(state.unrecognizedConfirmationDialog?.signature).toContain('Yes, reset it');
     expect(state.inputBoxInteractive).toBe(false);
     expect(isSafeWindowForSlashControl(state)).toBe(false);
     expect(isSafeWindowForModeCycle(state)).toBe(false);
@@ -762,6 +815,20 @@ describe('parseClaudeScreenState — unrecognized confirmation dialogs (P-B fail
   it('vetoes in-flight steering on an unrecognized confirmation dialog (typed text would answer it)', () => {
     expect(resolveClaudeScreenInFlightSteerVeto(parseClaudeScreenState(unrecognizedDialog)))
       .toBe('unrecognized_confirmation_dialog');
+  });
+
+  it.each([
+    ['one option', ['Question', '❯ 1. One'].join('\n')],
+    ['ten options', ['Question', ...Array.from({ length: 10 }, (_, index) => `${index === 0 ? '❯ ' : '  '}${index + 1}. Choice ${index + 1}`)].join('\n')],
+    ['missing focus', ['Question', '  1. One', '  2. Two'].join('\n')],
+    ['multiple focus rows', ['Question', '❯ 1. One', '❯ 2. Two'].join('\n')],
+    ['non-contiguous option rows', ['Question', '❯ 1. One', 'help text', '  2. Two'].join('\n')],
+    ['non-contiguous numbering', ['Question', '❯ 1. One', '  3. Three'].join('\n')],
+    ['duplicate normalized labels', ['Question', '❯ 1. Retry', '  2. retry'].join('\n')],
+  ])('does not expose generic answer options for %s', (_label, screen) => {
+    const state = parseClaudeScreenState(screen);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(_label !== 'missing focus');
+    expect(state.unrecognizedConfirmationDialog).toBeNull();
   });
 });
 

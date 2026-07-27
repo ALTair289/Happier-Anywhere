@@ -150,6 +150,52 @@ describe('applyModelControl', () => {
     expect(submitted).toEqual([]);
   });
 
+  it('publishes independent-control provenance immediately before Enter and never for a pre-Enter abort', async () => {
+    const submittedPort = createFakeControlPort({ captures: [IDLE, IDLE, MODEL_CONFIRMATION] });
+    const { guard } = await makeGuard();
+    const submissionEvents: Array<Readonly<{ text: string; enterAlreadySent: boolean }>> = [];
+
+    await applyModelControl(
+      {
+        ...contextFor(submittedPort, guard),
+        onCommandWillSubmit: (text) => {
+          submissionEvents.push({
+            text,
+            enterAlreadySent: submittedPort.sentKeys.includes('Enter'),
+          });
+          return null;
+        },
+      },
+      'sonnet',
+    );
+
+    expect(submissionEvents).toEqual([{
+      text: '/model sonnet',
+      enterAlreadySent: false,
+    }]);
+
+    const abortedPort = createFakeControlPort({
+      captures: [
+        IDLE,
+        ['╭───────────────────────╮', '│ > my half-typed idea  │', '╰───────────────────────╯'].join('\n'),
+      ],
+    });
+    const abortedEvents: string[] = [];
+
+    await applyModelControl(
+      {
+        ...contextFor(abortedPort, guard),
+        onCommandWillSubmit: (text) => {
+          abortedEvents.push(text);
+          return null;
+        },
+      },
+      'sonnet',
+    );
+
+    expect(abortedEvents).toEqual([]);
+  });
+
   it('fails and clears the composer when the command never left the slash picker (not delivered)', async () => {
     const STUCK_PICKER = [
       '╭───────────────────────╮',
@@ -183,6 +229,33 @@ describe('applyModelControl', () => {
 
     expect(result.kind).toBe('failed');
     expect(await readFile(settingsPath, 'utf8')).toBe(original);
+  });
+
+  it('reports the terminal disposition for the exact pre-Enter submission identity', async () => {
+    const { guard } = await makeGuard();
+    const dispositions: Array<Readonly<{ submissionId: string; disposition: string }>> = [];
+    const sentPort = createFakeControlPort({ captures: [IDLE, IDLE, MODEL_CONFIRMATION] });
+
+    await applyModelControl({
+      ...contextFor(sentPort, guard),
+      onCommandWillSubmit: () => 'sent-submission',
+      onCommandSubmissionResolved: (input) => dispositions.push(input),
+    }, 'sonnet');
+
+    const ambiguousPort = createFakeControlPort({
+      captures: [IDLE, IDLE],
+      failSendKeys: ['Enter'],
+    });
+    await applyModelControl({
+      ...contextFor(ambiguousPort, guard),
+      onCommandWillSubmit: () => 'ambiguous-submission',
+      onCommandSubmissionResolved: (input) => dispositions.push(input),
+    }, 'sonnet');
+
+    expect(dispositions).toEqual([
+      { submissionId: 'sent-submission', disposition: 'sent' },
+      { submissionId: 'ambiguous-submission', disposition: 'ambiguous' },
+    ]);
   });
 
   it('restores settings when the post-Enter capture fails (host race)', async () => {

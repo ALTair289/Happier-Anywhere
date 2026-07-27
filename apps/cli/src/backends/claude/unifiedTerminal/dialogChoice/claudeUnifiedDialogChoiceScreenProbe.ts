@@ -8,6 +8,7 @@ import {
 } from '../tuiControls/controlRuntime';
 import {
   resolveClaudeUnifiedVisibleDialog,
+  getClaudeUnifiedDialogIdentity,
   type ClaudeUnifiedDialogId,
   type ClaudeUnifiedVisibleDialog,
 } from '../tuiControls/dialogRegistry';
@@ -20,6 +21,7 @@ import type {
 export type ClaudeUnifiedDialogChoiceScreenProbeResult =
   | Readonly<{ kind: 'request_published'; dialogId: ClaudeUnifiedDialogId }>
   | Readonly<{ kind: 'already_pending'; dialogId: ClaudeUnifiedDialogId }>
+  | Readonly<{ kind: 'automatic_answer_started'; dialogId: ClaudeUnifiedDialogId }>
   | Readonly<{ kind: 'owned'; dialogId: ClaudeUnifiedDialogId }>
   | Readonly<{ kind: 'not_visible' }>
   | Readonly<{ kind: 'failed'; reason: string }>
@@ -45,25 +47,41 @@ async function answerClaudeUnifiedDialogChoice(params: Readonly<{
   decision: ClaudeUnifiedDialogChoiceDecision;
   wait: (ms: number) => Promise<void>;
   settleMs: number;
-}>): Promise<'answered' | 'not_visible' | 'failed'> {
-  if (params.decision.dialogId === 'unrecognized_confirmation') return 'answered';
+  dialog: ClaudeUnifiedVisibleDialog;
+}>): Promise<
+  | Readonly<{ kind: 'answered' }>
+  | Readonly<{ kind: 'not_visible' }>
+  | Readonly<{ kind: 'dialog_changed'; dialog: ClaudeUnifiedVisibleDialog }>
+  | Readonly<{ kind: 'failed' }>
+> {
+  if (params.dialog.kind === 'unrecognized' && params.dialog.mode !== 'generic') return { kind: 'failed' };
   const before = await captureScreenState(params.port);
-  if (before.kind !== 'state') return 'failed';
+  if (before.kind !== 'state') return { kind: 'failed' };
   const dialog = resolveClaudeUnifiedVisibleDialog(before.state);
-  if (dialog?.kind !== 'recognized' || dialog.dialogId !== params.decision.dialogId) return 'not_visible';
-  const selected = dialog.options.find((option) => option.choice === params.decision.choice);
-  if (!selected) return 'failed';
+  if (!dialog) return { kind: 'not_visible' };
+  if (getClaudeUnifiedDialogIdentity(dialog) !== getClaudeUnifiedDialogIdentity(params.dialog)) {
+    return { kind: 'dialog_changed', dialog };
+  }
+  const expected = params.dialog.options.find((option) => option.choice === params.decision.choice);
+  const selected = expected && dialog.options.find((option) => (
+    option.choice === expected.choice
+    && option.label === expected.label
+    && option.answer.text === expected.answer.text
+  ));
+  if (!selected) return { kind: 'dialog_changed', dialog };
 
   const literalFailure = sendResultToFailure(await params.port.sendLiteralText(selected.answer.text));
-  if (literalFailure) return 'failed';
+  if (literalFailure) return { kind: 'failed' };
   const enterFailure = sendResultToFailure(await params.port.sendSpecialKey('Enter'));
-  if (enterFailure) return 'failed';
+  if (enterFailure) return { kind: 'failed' };
 
   await params.wait(params.settleMs);
   const after = await captureScreenState(params.port);
-  if (after.kind !== 'state') return 'failed';
+  if (after.kind !== 'state') return { kind: 'failed' };
   const remaining = resolveClaudeUnifiedVisibleDialog(after.state);
-  return remaining?.dialogId === params.decision.dialogId ? 'failed' : 'answered';
+  return remaining && getClaudeUnifiedDialogIdentity(remaining) === getClaudeUnifiedDialogIdentity(params.dialog)
+    ? { kind: 'failed' }
+    : { kind: 'answered' };
 }
 
 export function createClaudeUnifiedDialogChoiceScreenProbe(params: Readonly<{
@@ -73,15 +91,30 @@ export function createClaudeUnifiedDialogChoiceScreenProbe(params: Readonly<{
   graceMs: number;
   settleMs: number;
   isDialogOwned: (dialogId: ClaudeUnifiedDialogId) => boolean;
+  /**
+   * Whether the startup resume resolver is still active (i.e. the startup window has not yet closed).
+   * `resume_choice` is owned by that resolver ONLY during startup; once startup is ready the resolver
+   * has stood down, so a resume dialog surfacing afterward must fail OPEN and be published like any
+   * unowned dialog rather than deferred into a silent hang (S1-F2). Absent → assume startup-active
+   * (defer), preserving the startup single-publisher guarantee.
+   */
+  isResumeStartupActive?: (() => boolean) | undefined;
 }>): ClaudeUnifiedDialogChoiceScreenProbe {
   let disposed = false;
   let answerTask: Promise<void> | null = null;
-  let answerTaskDialogId: ClaudeUnifiedDialogId | null = null;
+  let answerTaskIdentity: string | null = null;
   let abortController: AbortController | null = null;
 
-  const dialogIsOwned = (dialog: ClaudeUnifiedVisibleDialog): boolean => (
-    dialog.owner !== null && params.isDialogOwned(dialog.dialogId)
-  );
+  const dialogIsOwned = (dialog: ClaudeUnifiedVisibleDialog): boolean => {
+    if (dialog.owner === null) return false;
+    // resume_choice is published exclusively by its dedicated startup resolver DURING the startup
+    // window; the generalized broker must defer then to avoid the startup double-publish (F2). But the
+    // ownership is scoped: once startup is ready the resolver has stood down, so a resume dialog that
+    // surfaces afterward is unowned and must be published — never silently deferred forever (S1-F2).
+    // slash-controls-owned dialogs stay gated on the live control-run ownership predicate.
+    if (dialog.owner.kind === 'resume_startup') return params.isResumeStartupActive?.() ?? true;
+    return params.isDialogOwned(dialog.dialogId);
+  };
 
   const cancelPendingIfResolved = (): void => {
     if (params.broker.hasPendingChoice()) {
@@ -89,8 +122,12 @@ export function createClaudeUnifiedDialogChoiceScreenProbe(params: Readonly<{
     }
   };
 
-  const startAnswerTask = (dialog: ClaudeUnifiedVisibleDialog): boolean => {
-    if (answerTask && answerTaskDialogId === dialog.dialogId) return false;
+  const startAnswerTask = (
+    dialog: ClaudeUnifiedVisibleDialog,
+    automaticDecision: ClaudeUnifiedDialogChoiceDecision | null = null,
+  ): boolean => {
+    const identity = getClaudeUnifiedDialogIdentity(dialog);
+    if (answerTask && answerTaskIdentity === identity) return false;
     if (answerTask) {
       abortController?.abort('claude_unified_dialog_changed');
       params.broker.cancelPendingChoice('claude_unified_dialog_changed');
@@ -99,7 +136,9 @@ export function createClaudeUnifiedDialogChoiceScreenProbe(params: Readonly<{
     abortController = taskAbortController;
     params.broker.activate();
     const signal = taskAbortController.signal;
-    const task = params.broker.requestDialogChoice({ dialog, signal })
+    const task = (automaticDecision
+      ? Promise.resolve(automaticDecision)
+      : params.broker.requestDialogChoice({ dialog, signal }))
       .then(async (decision) => {
         if (disposed) return;
         const result = await answerClaudeUnifiedDialogChoice({
@@ -107,10 +146,14 @@ export function createClaudeUnifiedDialogChoiceScreenProbe(params: Readonly<{
           decision,
           wait: params.wait,
           settleMs: params.settleMs,
+          dialog,
         });
-        if (result === 'not_visible') {
+        if (result.kind === 'not_visible') {
           params.broker.noteDialogResolvedInTerminal('claude_dialog_resolved_in_terminal');
-        } else if (result === 'failed') {
+        } else if (result.kind === 'dialog_changed') {
+          params.broker.cancelPendingChoice('claude_unified_dialog_changed');
+          if (!dialogIsOwned(result.dialog)) startAnswerTask(result.dialog);
+        } else if (result.kind === 'failed') {
           logger.debug('[unified]: failed to answer Claude unified terminal dialog', {
             dialogId: decision.dialogId,
           });
@@ -122,12 +165,12 @@ export function createClaudeUnifiedDialogChoiceScreenProbe(params: Readonly<{
       .finally(() => {
         if (answerTask === task) {
           answerTask = null;
-          answerTaskDialogId = null;
+          answerTaskIdentity = null;
           abortController = null;
         }
       });
     answerTask = task;
-    answerTaskDialogId = dialog.dialogId;
+    answerTaskIdentity = identity;
     return true;
   };
 
@@ -159,11 +202,16 @@ export function createClaudeUnifiedDialogChoiceScreenProbe(params: Readonly<{
       return { kind: 'owned', dialogId: dialog.dialogId };
     }
 
-    const alreadyPending = params.broker.hasPendingChoice(dialog.dialogId)
-      && answerTaskDialogId === dialog.dialogId;
-    const started = startAnswerTask(dialog);
+    const automaticDecision = params.broker.resolveAutomaticDialogChoice(dialog);
+    const alreadyPending = params.broker.hasPendingChoiceForDialog(dialog)
+      && answerTaskIdentity === getClaudeUnifiedDialogIdentity(dialog);
+    const started = startAnswerTask(dialog, automaticDecision);
     return {
-      kind: alreadyPending || !started ? 'already_pending' : 'request_published',
+      kind: alreadyPending || !started
+        ? 'already_pending'
+        : automaticDecision
+          ? 'automatic_answer_started'
+          : 'request_published',
       dialogId: dialog.dialogId,
     };
   };
@@ -184,7 +232,7 @@ export function createClaudeUnifiedDialogChoiceScreenProbe(params: Readonly<{
       abortController?.abort('claude_unified_dialog_choice_screen_probe_disposed');
       abortController = null;
       answerTask = null;
-      answerTaskDialogId = null;
+      answerTaskIdentity = null;
     },
   };
 }

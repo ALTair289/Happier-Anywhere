@@ -5,6 +5,7 @@ import type {
 } from '@happier-dev/protocol';
 import type { TerminalControlPort } from '@/integrations/terminalHost/controlTypes';
 
+import type { ClaudeUnifiedIndependentControlSubmissionResolution } from '../acceptedPromptTranscriptDiscovery';
 import type { SettingsGuard } from './settingsGuard';
 import type { ClaudeTuiControlTelemetrySink } from './telemetry';
 import type { ClaudeUnifiedDialogId } from './dialogRegistry';
@@ -210,6 +211,16 @@ export type ClaudeTuiControlControllerDeps = Readonly<{
    * rows never surface as UI messages while genuine user-typed commands still do.
    */
   onControlCommandTyped?: ((commandText: string) => void) | undefined;
+  /**
+   * Fired at the verified pre-Enter boundary. Provider transcript ownership must be registered
+   * here: type-time is too early (the command may abort), and post-Enter is too late (the JSONL
+   * command row may already have arrived).
+   */
+  onControlCommandWillSubmit?: ((commandText: string) => string | null) | undefined;
+  /** Resolves the exact pre-Enter registration with the terminal write disposition. */
+  onControlCommandSubmissionResolved?: ((
+    input: ClaudeUnifiedIndependentControlSubmissionResolution,
+  ) => void) | undefined;
   /**
    * Fired the moment a slash command's text is WRITTEN into the composer, before verification or
    * Enter (incident cmq8y3nlx, RESUME2). The integration layer records it in the own-composer-text

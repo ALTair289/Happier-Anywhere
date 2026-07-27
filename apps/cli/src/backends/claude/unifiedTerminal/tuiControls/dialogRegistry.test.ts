@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import { parseClaudeScreenState } from './screenState';
 import {
+  buildClaudeUnifiedDialogQuestionInput,
   CLAUDE_UNIFIED_RECOGNIZED_DIALOG_REGISTRY,
+  getClaudeUnifiedDialogIdentity,
   resolveClaudeUnifiedVisibleDialog,
 } from './dialogRegistry';
 
@@ -26,6 +28,23 @@ const UNKNOWN_DIALOG = [
   '  2. No, go back',
 ].join('\n');
 
+const TRUST_FOLDER_DIALOG = [
+  'Accessing workspace:',
+  '/private/tmp/new-project',
+  'Quick safety check: Is this a project you created or one you trust?',
+  '❯ 1. Yes, I trust this folder',
+  '  2. No, exit',
+].join('\n');
+
+// Live Claude 2.1.170+ terminal capture can crop the trust question while retaining the exact
+// numbered choices. Those choices still uniquely identify Claude's provider-owned trust gate.
+const CROPPED_TRUST_FOLDER_DIALOG = [
+  'execute files here.',
+  'Security guide',
+  '❯ 1. Yes, I trust this folder',
+  '  2. No, exit',
+].join('\n');
+
 describe('Claude unified recognized dialog registry', () => {
   it('registers every recognized screen-state detector key exactly once', () => {
     expect(CLAUDE_UNIFIED_RECOGNIZED_DIALOG_REGISTRY.map((entry) => entry.detectorStateKey)).toEqual([
@@ -34,8 +53,9 @@ describe('Claude unified recognized dialog registry', () => {
       'resumeChoiceDialogVisible',
       'safeguardPauseDialogVisible',
       'effortChangeDialogVisible',
+      'trustFolderPromptVisible',
     ]);
-    expect(new Set(CLAUDE_UNIFIED_RECOGNIZED_DIALOG_REGISTRY.map((entry) => entry.detectorStateKey)).size).toBe(5);
+    expect(new Set(CLAUDE_UNIFIED_RECOGNIZED_DIALOG_REGISTRY.map((entry) => entry.detectorStateKey)).size).toBe(6);
   });
 
   it('derives effort choices and answer recipes from parsed screen state without re-matching text', () => {
@@ -69,12 +89,94 @@ describe('Claude unified recognized dialog registry', () => {
     });
   });
 
-  it('turns an unrecognized confirmation into a typed terminal-only notice', () => {
-    expect(resolveClaudeUnifiedVisibleDialog(parseClaudeScreenState(UNKNOWN_DIALOG))).toEqual({
+  it('turns a strictly parsed unrecognized confirmation into an exact generic choice request', () => {
+    const dialog = resolveClaudeUnifiedVisibleDialog(parseClaudeScreenState(UNKNOWN_DIALOG));
+    expect(dialog).toMatchObject({
       kind: 'unrecognized',
+      mode: 'generic',
       dialogId: 'unrecognized_confirmation',
       owner: null,
-      notice: 'open_terminal',
+      context: ['Reset conversation cache?'],
+      options: [
+        { choice: '1', label: 'Yes, reset it', answer: { text: '1' } },
+        { choice: '2', label: 'No, go back', answer: { text: '2' } },
+      ],
+    });
+    expect(buildClaudeUnifiedDialogQuestionInput(dialog!)).toMatchObject({
+      happierDialog: {
+        kind: 'unrecognized',
+        mode: 'generic',
+        secondaryAction: 'open_terminal',
+      },
+      questions: [{
+        question: 'Reset conversation cache?',
+        options: [{ label: 'Yes, reset it' }, { label: 'No, go back' }],
+      }],
+    });
+  });
+
+  it('includes exact context and visible choices in the request identity', () => {
+    const first = resolveClaudeUnifiedVisibleDialog(parseClaudeScreenState(UNKNOWN_DIALOG));
+    const changedContext = resolveClaudeUnifiedVisibleDialog(parseClaudeScreenState(
+      UNKNOWN_DIALOG.replace('Reset conversation cache?', 'Delete conversation cache?'),
+    ));
+    const changedOption = resolveClaudeUnifiedVisibleDialog(parseClaudeScreenState(
+      UNKNOWN_DIALOG.replace('No, go back', 'Keep cache'),
+    ));
+
+    expect(getClaudeUnifiedDialogIdentity(first!)).not.toBe(getClaudeUnifiedDialogIdentity(changedContext!));
+    expect(getClaudeUnifiedDialogIdentity(first!)).not.toBe(getClaudeUnifiedDialogIdentity(changedOption!));
+  });
+
+  it('falls back to an unanswerable terminal notice when a numbered block is ambiguous', () => {
+    const ambiguous = [UNKNOWN_DIALOG, '', '❯ 1. A second block', '  2. Must not type'].join('\n');
+    const dialog = resolveClaudeUnifiedVisibleDialog(parseClaudeScreenState(ambiguous));
+
+    expect(dialog).toMatchObject({ kind: 'unrecognized', mode: 'notice', options: [] });
+    expect(buildClaudeUnifiedDialogQuestionInput(dialog!)).toMatchObject({
+      happierDialog: { kind: 'unrecognized', mode: 'notice', action: 'open_terminal' },
+      questions: [{ options: [] }],
+    });
+  });
+
+  it('requires an explicit trust-or-exit decision for Claude pre-hook workspace trust', () => {
+    expect(resolveClaudeUnifiedVisibleDialog(parseClaudeScreenState(TRUST_FOLDER_DIALOG))).toMatchObject({
+      kind: 'recognized',
+      dialogId: 'trust_folder',
+      owner: null,
+      options: [
+        { choice: 'trust_once', answer: { kind: 'literal_then_enter', text: '1' } },
+        {
+          choice: 'always_trust_happier_workspaces',
+          answer: { kind: 'literal_then_enter', text: '1' },
+          settingMutation: {
+            settingId: 'claudeUnifiedTerminalWorkspaceTrust',
+            value: 'always_trust_happier_workspaces',
+          },
+        },
+        { choice: 'reject_once', answer: { kind: 'literal_then_enter', text: '2' } },
+        {
+          choice: 'always_reject_happier_workspaces',
+          answer: { kind: 'literal_then_enter', text: '2' },
+          settingMutation: {
+            settingId: 'claudeUnifiedTerminalWorkspaceTrust',
+            value: 'always_reject_happier_workspaces',
+          },
+        },
+      ],
+    });
+  });
+
+  it('recognizes the live cropped trust screen from its exact numbered choices', () => {
+    expect(resolveClaudeUnifiedVisibleDialog(parseClaudeScreenState(CROPPED_TRUST_FOLDER_DIALOG))).toMatchObject({
+      kind: 'recognized',
+      dialogId: 'trust_folder',
+      options: [
+        { choice: 'trust_once', answer: { text: '1' } },
+        { choice: 'always_trust_happier_workspaces', answer: { text: '1' } },
+        { choice: 'reject_once', answer: { text: '2' } },
+        { choice: 'always_reject_happier_workspaces', answer: { text: '2' } },
+      ],
     });
   });
 });

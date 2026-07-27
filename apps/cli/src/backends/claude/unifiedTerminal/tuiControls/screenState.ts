@@ -11,6 +11,13 @@ export type ClaudeUnifiedSafeguardPauseDialogOption = Readonly<{
   modelLabel?: string | undefined;
 }>;
 
+export type ClaudeUnifiedGenericNumberedDialog = Readonly<{
+  context: readonly string[];
+  options: readonly Readonly<{ choice: string; label: string }>[];
+  /** Stable, bounded representation of the exact visible context and options. */
+  signature: string;
+}>;
+
 /**
  * Parsed Claude Unified TUI screen state used to gate runtime controls.
  *
@@ -46,6 +53,8 @@ export type ClaudeScreenState = Readonly<{
    * controls/steering must fail closed (`requires_interactive_control`) instead of touching it.
    */
   unrecognizedConfirmationDialogVisible: boolean;
+  /** Safe generic presentation, or null when the numbered prompt is incomplete or ambiguous. */
+  unrecognizedConfirmationDialog: ClaudeUnifiedGenericNumberedDialog | null;
   /** Lowercased target level from the dialog body ("Switching to high means…"), when visible. */
   effortChangeDialogTarget: string | null;
   /**
@@ -115,6 +124,7 @@ const EFFORT_CHANGE_DIALOG = /change effort level\?/i;
 // Used to fail closed on dialogs we do NOT recognize. Composer prompt echoes (`❯ <prompt>`) only
 // match when the prompt itself starts with `<digit>.` — accepted false-positive toward safety.
 const NUMBERED_SELECTION_OPTION = /(?:^|\n)[^\S\n]*❯[^\S\n]*\d+\./u;
+const NUMBERED_DIALOG_OPTION_LINE = /^[^\S\n]*(?:❯[^\S\n]*)?(\d+)\.[^\S\n]+(.+?)[^\S\n]*$/u;
 const EFFORT_CHANGE_DIALOG_TARGET = /switching to\s+([a-z]+)\s+means the full history/i;
 const PERMISSION_PROMPT = /do you want to proceed\?/i;
 // Legacy wording plus the real 2.1.170 `/permissions` editor tab row
@@ -122,7 +132,8 @@ const PERMISSION_PROMPT = /do you want to proceed\?/i;
 // pair is unique to the editor and never appears together in normal output.
 const PERMISSION_EDITOR = /\bpermission rules\b/i;
 const PERMISSION_EDITOR_HEADER = /\brecently denied\b[^\n]*\bdeny\b/i;
-const TRUST_FOLDER_PROMPT = /do you trust the files in this folder\?/i;
+const TRUST_FOLDER_PROMPT = /(?:do you trust the files in this folder\?|quick safety check:\s*is this a project you created or one you trust\?)/i;
+const TRUST_FOLDER_NUMBERED_CHOICES = /(?:^|\n)[^\S\n]*(?:❯[^\S\n]*)?1\.[^\S\n]+Yes, I trust this folder[^\S\n]*(?:\n)[^\S\n]*2\.[^\S\n]+No, exit[^\S\n]*(?:$|\n)/iu;
 const WORK_PROMPT = /what would you like to work on\?/i;
 
 const ACCEPT_EDITS_MARKER = /\baccept edits on\b/i;
@@ -207,19 +218,34 @@ function readComposerContentStartColumn(line: string): number | null {
  * Walk one RAW (ANSI-bearing) screen line and return its visible characters annotated with the
  * SGR dim (faint, code 2) state active at each character. Codes 0/empty and 22 clear dim.
  */
-function readStyledLineRuns(rawLine: string): ReadonlyArray<Readonly<{ char: string; dim: boolean }>> {
-  const runs: Array<Readonly<{ char: string; dim: boolean }>> = [];
+function readStyledLineRuns(rawLine: string): ReadonlyArray<Readonly<{ char: string; dim: boolean; inverse: boolean }>> {
+  const runs: Array<Readonly<{ char: string; dim: boolean; inverse: boolean }>> = [];
   let dim = false;
+  let inverse = false;
   let index = 0;
   while (index < rawLine.length) {
     if (rawLine.startsWith(SGR_SEQUENCE_PREFIX, index)) {
       const end = rawLine.indexOf('m', index + 2);
       const body = end === -1 ? null : rawLine.slice(index + 2, end);
       if (body !== null && /^[0-9;]*$/.test(body)) {
-        for (const code of (body.length === 0 ? '0' : body).split(';')) {
-          if (code === '' || code === '0') dim = false;
-          else if (code === '2') dim = true;
+        const codes = (body.length === 0 ? '0' : body).split(';');
+        for (let codeIndex = 0; codeIndex < codes.length; codeIndex += 1) {
+          const code = codes[codeIndex];
+          // Extended foreground/background/underline colors encode their mode as the next
+          // parameter (`38;2;r;g;b` / `38;5;n`). That `2` is RGB mode, not SGR faint.
+          if (code === '38' || code === '48' || code === '58') {
+            const colorMode = codes[codeIndex + 1];
+            if (colorMode === '2') codeIndex += 4;
+            else if (colorMode === '5') codeIndex += 2;
+            continue;
+          }
+          if (code === '' || code === '0') {
+            dim = false;
+            inverse = false;
+          } else if (code === '2') dim = true;
+          else if (code === '7') inverse = true;
           else if (code === '22') dim = false;
+          else if (code === '27') inverse = false;
         }
         index = end + 1;
         continue;
@@ -231,7 +257,7 @@ function readStyledLineRuns(rawLine: string): ReadonlyArray<Readonly<{ char: str
       index += 1;
       continue;
     }
-    runs.push({ char: rawLine[index], dim });
+    runs.push({ char: rawLine[index], dim, inverse });
     index += 1;
   }
   return runs;
@@ -240,11 +266,15 @@ function readStyledLineRuns(rawLine: string): ReadonlyArray<Readonly<{ char: str
 /**
  * Claude Code renders empty-composer placeholder/suggestion text DIM (SGR 2) — live capture
  * 2026-06-12, 2.1.174 zellij `dump-screen --ansi`: `❯ \x1b[2m\x1b[23mcheck the output`. The
- * contextual-suggestion family has arbitrary wording (no `Try "<hint>"` quoting), so styling is
- * the only honest discriminator from a real typed draft (which renders at normal intensity).
- * Fail-closed: without styling information (plain capture) the text stays a draft.
+ * contextual-suggestion family has arbitrary wording (no `Try "<hint>"` quoting), so styling plus
+ * the terminal cursor position are the honest discriminators from a real typed draft (which
+ * renders at normal intensity). Fail-closed when neither source proves an empty composer.
  */
-function composerContentIsDimPlaceholder(rawText: string, content: string): boolean {
+function composerContentIsDimPlaceholder(
+  rawText: string,
+  content: string,
+  cursorRelation: ClaudeScreenState['composerCursorRelation'],
+): boolean {
   if (content.length === 0) return false;
   if (!rawText.includes(SGR_SEQUENCE_PREFIX)) return false;
   const rawLines = rawText.replace(/\r\n?/g, '\n').split('\n');
@@ -260,12 +290,21 @@ function composerContentIsDimPlaceholder(rawText: string, content: string): bool
     const start = visible.lastIndexOf(content);
     if (start === -1) return false;
     let checkedVisibleContent = false;
+    let sawDimContent = false;
     for (let i = start; i < start + content.length; i += 1) {
       if (/[^\S\n]/u.test(runs[i]?.char ?? '')) continue;
       checkedVisibleContent = true;
-      if (!runs[i].dim) return false;
+      if (runs[i]?.dim === true) {
+        sawDimContent = true;
+        continue;
+      }
+      // tmux renders the character under the real cursor as inverse video, temporarily replacing
+      // its DIM placeholder style. Accept only that first cell when the host cursor independently
+      // proves the composer buffer begins there; a typed draft remains normal intensity.
+      if (i === start && cursorRelation === 'at_content_start' && runs[i]?.inverse === true) continue;
+      return false;
     }
-    return checkedVisibleContent;
+    return checkedVisibleContent && sawDimContent;
   }
   return false;
 }
@@ -340,7 +379,7 @@ function readComposerState(
   if (continuation.length === 0 && isClaudeResumePrefillComposerContent(content)) {
     return { content: '', cursorRelation };
   }
-  if (continuation.length === 0 && composerContentIsDimPlaceholder(rawText, content)) {
+  if (continuation.length === 0 && composerContentIsDimPlaceholder(rawText, content, cursorRelation)) {
     return { content: '', cursorRelation };
   }
   if (cursorProvesPlainPlaceholder({ rawText, content, continuation, cursorRelation })) {
@@ -439,6 +478,53 @@ function resolveVisibleEffort(text: string): string | null {
   return status?.[1] ? status[1].trim().toLowerCase() : null;
 }
 
+function resolveGenericNumberedDialog(text: string): ClaudeUnifiedGenericNumberedDialog | null {
+  const lines = text.split('\n');
+  const blocks: Array<Array<{ index: number; number: number; label: string; focused: boolean }>> = [];
+  let current: Array<{ index: number; number: number; label: string; focused: boolean }> = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    const match = NUMBERED_DIALOG_OPTION_LINE.exec(line);
+    if (!match?.[1] || !match[2]) {
+      if (current.length > 0) blocks.push(current);
+      current = [];
+      continue;
+    }
+    current.push({
+      index,
+      number: Number(match[1]),
+      label: match[2].trim(),
+      focused: /^[^\S\n]*❯/u.test(line),
+    });
+  }
+  if (current.length > 0) blocks.push(current);
+  if (blocks.length !== 1) return null;
+  const block = blocks[0];
+  if (!block || block.length < 2 || block.length > 9) return null;
+  if (block.filter((candidate) => candidate.focused).length !== 1) return null;
+  if (block.some((candidate, index) => candidate.number !== index + 1)) return null;
+  if (block.some((candidate) => candidate.label.length < 1 || candidate.label.length > 120)) return null;
+  const normalizedLabels = block.map((candidate) => candidate.label.toLocaleLowerCase());
+  if (new Set(normalizedLabels).size !== normalizedLabels.length) return null;
+  const firstIndex = block[0]?.index ?? -1;
+  const context = lines
+    .slice(Math.max(0, firstIndex - 4), firstIndex)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-3);
+  if (context.length === 0 || context.some((line) => line.length > 160)) return null;
+  const signature = JSON.stringify({
+    context,
+    options: block.map((candidate) => ({ number: candidate.number, label: candidate.label })),
+  });
+  if (signature.length > 1_024) return null;
+  return {
+    context,
+    options: block.map((candidate) => ({ choice: String(candidate.number), label: candidate.label })),
+    signature,
+  };
+}
+
 export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenParseContext): ClaudeScreenState {
   const text = normalizeCapturedScreen(rawText);
 
@@ -452,7 +538,7 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
   const effortChangeDialogTarget = effortChangeDialogVisible
     ? (EFFORT_CHANGE_DIALOG_TARGET.exec(text)?.[1]?.toLowerCase() ?? null)
     : null;
-  const trustFolderPromptVisible = TRUST_FOLDER_PROMPT.test(text);
+  const trustFolderPromptVisible = TRUST_FOLDER_PROMPT.test(text) || TRUST_FOLDER_NUMBERED_CHOICES.test(text);
   const permissionPromptVisible = !trustFolderPromptVisible && PERMISSION_PROMPT.test(text);
   const permissionEditorOpen = PERMISSION_EDITOR.test(text) || PERMISSION_EDITOR_HEADER.test(text);
   const queuedMessageBannerVisible = QUEUED_MESSAGE_BANNER.test(text);
@@ -461,12 +547,17 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
   const composerState = readComposerState(text, rawText, context);
   const composerContent = composerState.content;
   const hasComposer = composerContent !== null;
+  // A host cursor on the parsed composer is direct evidence that the composer, not an older
+  // selection-shaped transcript row elsewhere in the pane, owns keyboard input. Preserve
+  // fail-closed handling when cursor ownership is unavailable or remains on a real chooser.
+  const activeComposerOwnsInput = hasComposer && composerState.cursorRelation !== null;
   const composerHasSlash = hasComposer && composerContent.startsWith('/');
   const slashPickerOpen = composerHasSlash && SLASH_SUGGESTION_LINE.test(text);
   const userDraftPresent = hasComposer && composerContent.length > 0 && !composerHasSlash;
 
   const unrecognizedConfirmationDialogVisible =
     NUMBERED_SELECTION_OPTION.test(text)
+    && !activeComposerOwnsInput
     && !switchModelDialogVisible
     && !usageLimitDialogVisible
     && !resumeChoiceDialogVisible
@@ -475,6 +566,9 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     && !trustFolderPromptVisible
     && !permissionPromptVisible
     && !permissionEditorOpen;
+  const genericNumberedDialog = unrecognizedConfirmationDialogVisible
+    ? resolveGenericNumberedDialog(text)
+    : null;
 
   const anyDialog =
     switchModelDialogVisible
@@ -511,6 +605,7 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     safeguardPauseDialogOptions,
     effortChangeDialogVisible,
     unrecognizedConfirmationDialogVisible,
+    unrecognizedConfirmationDialog: genericNumberedDialog,
     effortChangeDialogTarget,
     latestEffortConfirmation: latestEffort === null ? null : { kind: latestEffort.kind, level: latestEffort.level },
     keptEffortNoticeCount: Array.from(text.matchAll(EFFORT_KEPT_NOTICE)).length,

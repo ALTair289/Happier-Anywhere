@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createFakeControlPort } from './fakeControlPort';
 import { answerClaudeResumeChoiceDialog } from './resumeChoice';
@@ -102,5 +102,42 @@ describe('answerClaudeResumeChoiceDialog', () => {
     expect(result).toEqual({ kind: 'failed', reason: 'resume_choice_dialog_still_visible' });
     expect(port.sentLiteral).toEqual(['1']);
     expect(port.sentKeys).toEqual(['Enter']);
+  });
+
+  it('publishes the exact submission boundary even when post-Enter recapture fails', async () => {
+    const onSubmitted = vi.fn();
+    const port = createFakeControlPort({
+      captures: [RESUME_DIALOG],
+      failCaptureAtIndexes: [1],
+    });
+
+    const result = await answerClaudeResumeChoiceDialog({
+      port,
+      choice: 'resume_from_summary',
+      wait: async () => undefined,
+      settleMs: 1,
+      onSubmitted,
+    });
+
+    expect(result).toEqual({ kind: 'failed', reason: 'host_dead:unrecoverable' });
+    expect(onSubmitted).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not publish submission when Enter fails', async () => {
+    const onSubmitted = vi.fn();
+    const port = createFakeControlPort({
+      captures: [RESUME_DIALOG],
+      failSendKeys: ['Enter'],
+    });
+
+    await answerClaudeResumeChoiceDialog({
+      port,
+      choice: 'resume_from_summary',
+      wait: async () => undefined,
+      settleMs: 1,
+      onSubmitted,
+    });
+
+    expect(onSubmitted).not.toHaveBeenCalled();
   });
 });

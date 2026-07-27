@@ -19,6 +19,10 @@ import type {
   ClaudeUnifiedDialogId,
   ClaudeUnifiedVisibleDialog,
 } from '../tuiControls/dialogRegistry';
+import {
+  buildClaudeUnifiedDialogQuestionInput,
+  getClaudeUnifiedDialogIdentity,
+} from '../tuiControls/dialogRegistry';
 
 export const CLAUDE_UNIFIED_DIALOG_CHOICE_QUESTION = 'How should Claude continue?' as const;
 
@@ -33,6 +37,7 @@ export type ClaudeUnifiedDialogChoiceDecision = Readonly<{
 type PendingChoice = Readonly<{
   requestId: string;
   dialogId: ClaudeUnifiedDialogId;
+  identity: string;
   promise: Promise<ClaudeUnifiedDialogChoiceDecision>;
 }>;
 
@@ -41,43 +46,35 @@ type DialogChoiceRequestParams = Readonly<{
   signal?: AbortSignal | undefined;
 }>;
 
-type RequestOption = Readonly<{ choice: string; label: string; description: string }>;
+type RequestOption = Readonly<{
+  choice: string;
+  label: string;
+  description: string;
+  settingMutation?: Readonly<{
+    settingId: 'claudeUnifiedTerminalWorkspaceTrust';
+    value: 'always_trust_happier_workspaces' | 'always_reject_happier_workspaces';
+  }> | undefined;
+}>;
 
 function requestOptions(dialog: ClaudeUnifiedVisibleDialog): readonly RequestOption[] {
-  if (dialog.kind === 'recognized') {
-    return dialog.options.map(({ choice, label, description }) => ({ choice, label, description }));
-  }
-  return [{
-    choice: 'open_terminal',
-    label: 'Open terminal',
-    description: 'Claude is showing a dialog that Happier cannot answer safely. Open the terminal to continue.',
-  }];
-}
-
-function createDialogChoiceToolInput(dialog: ClaudeUnifiedVisibleDialog): unknown {
-  const options = requestOptions(dialog);
-  return {
-    happierDialog: dialog.kind === 'recognized'
-      ? { kind: dialog.kind, dialogId: dialog.dialogId }
-      : { kind: dialog.kind, dialogId: dialog.dialogId, notice: dialog.notice },
-    questions: [
-      {
-        header: dialog.kind === 'recognized' ? dialog.header : 'Claude dialog',
-        question: dialog.kind === 'recognized'
-          ? dialog.question
-          : 'Claude is showing a dialog. Open the terminal to continue.',
-        answerKey: CLAUDE_UNIFIED_DIALOG_CHOICE_QUESTION,
-        multiSelect: false,
-        options: options.map(({ choice, label, description }) => ({ choice, label, description })),
-      },
-    ],
-  };
+  return dialog.options.map(({ choice, label, description, settingMutation }) => ({
+    choice,
+    label,
+    description,
+    ...(settingMutation ? { settingMutation } : {}),
+  }));
 }
 
 function readObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function isPrivateGenericDialogToolInput(toolInput: unknown): boolean {
+  const input = readObject(toolInput);
+  const metadata = readObject(input?.happierDialog);
+  return metadata?.kind === 'unrecognized' && metadata.mode === 'generic';
 }
 
 function readDialogId(toolInput: unknown): ClaudeUnifiedDialogId | null {
@@ -89,6 +86,7 @@ function readDialogId(toolInput: unknown): ClaudeUnifiedDialogId | null {
     || dialogId === 'resume_choice'
     || dialogId === 'safeguard_pause'
     || dialogId === 'effort_change'
+    || dialogId === 'trust_folder'
     || dialogId === 'unrecognized_confirmation'
     ? dialogId
     : null;
@@ -138,6 +136,7 @@ export class ClaudeUnifiedDialogChoiceBroker {
   private readonly permissionCoordinator: PermissionRequestCoordinator<ClaudeUnifiedDialogChoiceDecision>;
   private readonly createRequestId: () => string;
   private readonly nowMs: () => number;
+  private readonly sourceCompletionByRequestId = new Map<string, Promise<void>>();
   private pendingChoice: PendingChoice | null = null;
   private pendingOptions: readonly RequestOption[] = [];
   private activated = false;
@@ -176,17 +175,36 @@ export class ClaudeUnifiedDialogChoiceBroker {
       && (dialogId === undefined || this.pendingChoice.dialogId === dialogId);
   }
 
-  requestDialogChoice(params: DialogChoiceRequestParams): Promise<ClaudeUnifiedDialogChoiceDecision> {
+  hasPendingChoiceForDialog(dialog: ClaudeUnifiedVisibleDialog): boolean {
+    return this.pendingChoice?.identity === getClaudeUnifiedDialogIdentity(dialog);
+  }
+
+  resolveAutomaticDialogChoice(dialog: ClaudeUnifiedVisibleDialog): ClaudeUnifiedDialogChoiceDecision | null {
+    if (dialog.kind !== 'recognized' || dialog.dialogId !== 'trust_folder') return null;
+    const settings = this.session.accountSettings as Readonly<Record<string, unknown>> | null;
+    const policy = settings?.claudeUnifiedTerminalWorkspaceTrust;
+    const choice = policy === 'always_trust_happier_workspaces'
+      ? 'trust_once'
+      : policy === 'always_reject_happier_workspaces'
+        ? 'reject_once'
+        : null;
+    return choice && dialog.options.some((option) => option.choice === choice)
+      ? { dialogId: dialog.dialogId, choice }
+      : null;
+  }
+
+  async requestDialogChoice(params: DialogChoiceRequestParams): Promise<ClaudeUnifiedDialogChoiceDecision> {
     if (this.disposed) {
       return Promise.reject(new Error('claude_unified_dialog_choice_broker_disposed'));
     }
-    if (this.pendingChoice?.dialogId === params.dialog.dialogId) return this.pendingChoice.promise;
+    const identity = getClaudeUnifiedDialogIdentity(params.dialog);
+    if (this.pendingChoice?.identity === identity) return this.pendingChoice.promise;
     if (this.pendingChoice) {
-      this.completeSourceOwnedCancellation(this.pendingChoice.requestId, 'claude_unified_dialog_changed');
+      await this.completeSourceOwnedCancellation(this.pendingChoice.requestId, 'claude_unified_dialog_changed');
     }
 
     const requestId = this.createRequestId();
-    const toolInput = createDialogChoiceToolInput(params.dialog);
+    const toolInput = buildClaudeUnifiedDialogQuestionInput(params.dialog);
     this.pendingOptions = requestOptions(params.dialog);
     const promise = this.permissionCoordinator.requestDecision({
       requestId,
@@ -197,6 +215,15 @@ export class ClaudeUnifiedDialogChoiceBroker {
       source: CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE,
     }, {
       signal: params.signal,
+    }).then(async (decision) => {
+      await this.drainSourceCompletions(requestId);
+      if (this.disposed) {
+        throw new Error('claude_unified_dialog_choice_broker_disposed');
+      }
+      if (this.pendingChoice?.requestId !== requestId) {
+        throw new Error('claude_unified_dialog_choice_no_longer_live');
+      }
+      return decision;
     }).finally(() => {
       if (this.pendingChoice?.requestId === requestId) {
         this.pendingChoice = null;
@@ -204,24 +231,25 @@ export class ClaudeUnifiedDialogChoiceBroker {
       }
     });
 
-    this.pendingChoice = { requestId, dialogId: params.dialog.dialogId, promise };
+    this.pendingChoice = { requestId, dialogId: params.dialog.dialogId, identity, promise };
     return promise;
   }
 
-  cancelPendingChoice(reason: string): void {
+  async cancelPendingChoice(reason: string): Promise<void> {
     const requestId = this.pendingChoice?.requestId;
     if (!requestId) return;
-    this.completeSourceOwnedCancellation(requestId, reason);
+    await this.completeSourceOwnedCancellation(requestId, reason);
   }
 
-  noteDialogResolvedInTerminal(reason: string): void {
-    this.cancelPendingChoice(reason);
+  async noteDialogResolvedInTerminal(reason: string): Promise<void> {
+    await this.cancelPendingChoice(reason);
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    this.cancelAllSourceOwnedRequests('claude_unified_dialog_choice_broker_disposed');
+    await this.cancelAllSourceOwnedRequests('claude_unified_dialog_choice_broker_disposed');
+    await Promise.all(this.sourceCompletionByRequestId.values());
     this.permissionCoordinator.dispose();
   }
 
@@ -229,6 +257,7 @@ export class ClaudeUnifiedDialogChoiceBroker {
     return {
       publishRequest: (params) => this.requestStore.publishRequest({
         ...params,
+        notifyPush: !isPrivateGenericDialogToolInput(params.toolInput),
         updateState: (state) => ({
           ...state,
           capabilities: {
@@ -237,8 +266,13 @@ export class ClaudeUnifiedDialogChoiceBroker {
           },
         }),
       }),
-      completeRequest: (params) => this.requestStore.completeRequest(params),
-      cancelAllRequests: (params) => this.cancelAllSourceOwnedRequests(params.reason),
+      completeRequest: (params) => {
+        this.trackSourceCompletion(
+          params.requestId,
+          this.requestStore.completeRequest(params),
+        );
+      },
+      cancelAllRequests: (params) => { void this.cancelAllSourceOwnedRequests(params.reason); },
       hasOutstandingRequest: (requestId) => this.readSourceOwnedOutstandingRequest(requestId) !== null,
       readOutstandingRequest: (requestId) => this.readSourceOwnedOutstandingRequest(requestId),
     };
@@ -256,12 +290,16 @@ export class ClaudeUnifiedDialogChoiceBroker {
     if (!requestId) return false;
     const context = this.permissionCoordinator.getResponseContext(requestId);
     if (!isDialogChoiceContext(context)) return false;
+    if (context.status !== 'live') {
+      void this.completeSourceOwnedCancellation(requestId, 'claude_unified_dialog_choice_no_live_waiter');
+      return true;
+    }
 
     if (payload.approved !== true) {
       const reason = typeof payload.reason === 'string' && payload.reason.length > 0
         ? payload.reason
         : 'claude_unified_dialog_choice_denied';
-      this.completeSourceOwnedCancellation(requestId, reason);
+      void this.completeSourceOwnedCancellation(requestId, reason);
       return true;
     }
 
@@ -272,7 +310,14 @@ export class ClaudeUnifiedDialogChoiceBroker {
       ? this.pendingOptions
       : readOptionsFromToolInput(context.toolInput);
     const decision = dialogId ? decodeDialogChoice(payload, dialogId, options) : null;
-    if (!decision) throw new Error('invalid_claude_unified_dialog_choice_answer');
+    if (!decision) {
+      // The recognized dialogs are numbered-choice-only, so an approved answer that matches no option
+      // (e.g. a freeform "Other" entry) cannot be injected. Fail closed with a typed cancellation
+      // rather than throwing an opaque `permission_response_failed`; the still-visible dialog is
+      // re-surfaced by the next screen observation / turn-end probe.
+      void this.completeSourceOwnedCancellation(requestId, 'claude_unified_dialog_choice_unsupported_freeform_answer');
+      return true;
+    }
 
     return this.permissionCoordinator.completeResponse({
       context,
@@ -292,35 +337,67 @@ export class ClaudeUnifiedDialogChoiceBroker {
     });
   }
 
-  private completeSourceOwnedCancellation(requestId: string, reason: string): void {
+  private async completeSourceOwnedCancellation(requestId: string, reason: string): Promise<void> {
     const outstanding = this.readSourceOwnedOutstandingRequest(requestId);
     this.permissionCoordinator.cancelRequest(requestId, reason);
-    this.requestStore.completeRequest({
+    await this.trackSourceCompletion(
       requestId,
-      status: 'canceled',
-      decision: 'abort',
-      reason,
-      fallback: outstanding
-        ? {
-          toolName: outstanding.toolName,
-          toolInput: outstanding.toolInput,
-          createdAt: outstanding.createdAt,
-          kind: outstanding.kind,
-          source: CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE,
-        }
-        : null,
-    });
+      this.requestStore.completeRequest({
+        requestId,
+        status: 'canceled',
+        decision: 'abort',
+        reason,
+        fallback: outstanding
+          ? {
+            toolName: outstanding.toolName,
+            toolInput: outstanding.toolInput,
+            createdAt: outstanding.createdAt,
+            kind: outstanding.kind,
+            source: CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE,
+          }
+          : null,
+      }),
+    );
     if (this.pendingChoice?.requestId === requestId) {
       this.pendingChoice = null;
       this.pendingOptions = [];
     }
   }
 
-  private cancelAllSourceOwnedRequests(reason: string): void {
+  private async cancelAllSourceOwnedRequests(reason: string): Promise<void> {
     const requests = this.session.client.getAgentStateSnapshot?.()?.requests ?? {};
     for (const [requestId, request] of Object.entries(requests)) {
       if (!isClaudeUnifiedTerminalDialogChoiceAgentStateRequest(request)) continue;
-      this.completeSourceOwnedCancellation(requestId, reason);
+      await this.completeSourceOwnedCancellation(requestId, reason);
+    }
+  }
+
+  private trackSourceCompletion(requestId: string, completion: Promise<void>): Promise<void> {
+    const prior = this.sourceCompletionByRequestId.get(requestId);
+    const tracked = prior
+      ? Promise.all([prior, completion]).then(() => undefined)
+      : completion;
+    this.sourceCompletionByRequestId.set(requestId, tracked);
+    void tracked.then(
+      () => {
+        if (this.sourceCompletionByRequestId.get(requestId) === tracked) {
+          this.sourceCompletionByRequestId.delete(requestId);
+        }
+      },
+      () => {
+        if (this.sourceCompletionByRequestId.get(requestId) === tracked) {
+          this.sourceCompletionByRequestId.delete(requestId);
+        }
+      },
+    );
+    return tracked;
+  }
+
+  private async drainSourceCompletions(requestId: string): Promise<void> {
+    while (true) {
+      const completion = this.sourceCompletionByRequestId.get(requestId);
+      if (!completion) return;
+      await completion;
     }
   }
 }
