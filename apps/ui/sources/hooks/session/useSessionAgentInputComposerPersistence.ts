@@ -5,8 +5,10 @@ import { AppState, type AppStateStatus } from 'react-native';
 import {
     type AgentInputTextSelection,
     type AgentInputLocalUiStateV1,
+    agentInputDraftOwnerKey,
     clearAgentInputLocalUiState,
     flushAgentInputLocalUiState,
+    isAgentInputLocalUiStateTextBasisApplicable,
     patchAgentInputLocalUiState,
     readAgentInputLocalUiState,
     type AgentInputDraftOwner,
@@ -20,6 +22,7 @@ import {
 } from '@/sync/domains/input/draftValues/sessionDraftValueStore';
 import {
     areServerAccountScopesEqual,
+    serverAccountScopeKeySuffix,
     type ServerAccountScope,
 } from '@/sync/domains/scope/serverAccountScope';
 import { useActiveServerAccountScope } from '@/sync/domains/state/storage';
@@ -194,15 +197,25 @@ function isScopedComposerPersistenceStateCurrent(
         && state.fontScale === options.fontScale;
 }
 
+/**
+ * Identifies a restore GENERATION: it changes only when the composer adopts a
+ * different owner/scope, when the persisted basis becomes applicable to the
+ * live text (the draft finishing its async load on session open), or after an
+ * explicit transient-state restore. It must never churn on self-originated
+ * persist writes (selection/scroll patches made while the user types):
+ * consumers re-apply persisted selection/scroll when this token changes, and
+ * echoing our own writes back as "restores" drags the user's live caret to a
+ * stale position mid-typing (web composer incident, 2026-07-22).
+ */
 function buildRestoreToken(
     owner: AgentInputDraftOwner | null,
-    state: ReturnType<typeof readInputState>,
+    scope: ServerAccountScope | null,
+    restoreEpoch: number,
+    restoreBasisAdopted: boolean,
 ): string {
-    if (!owner || !state) return 'none';
-    const ownerKey = owner.kind === 'session'
-        ? `session:${owner.sessionId}`
-        : `new-session:${owner.flowId}`;
-    return `${ownerKey}:${state.updatedAt}:${state.textLength ?? ''}:${state.fontScale ?? ''}`;
+    const ownerKey = agentInputDraftOwnerKey(owner) ?? 'none';
+    const scopeKey = scope ? serverAccountScopeKeySuffix(scope) : 'none';
+    return `${ownerKey}:${scopeKey}:${restoreEpoch}:${restoreBasisAdopted ? 'adopted' : 'pending'}`;
 }
 
 export function useSessionAgentInputComposerPersistence({
@@ -224,12 +237,37 @@ export function useSessionAgentInputComposerPersistence({
     const [scopedState, setScopedState] = React.useState(() =>
         readScopedComposerPersistenceState(scope, owner, scopedStateReadOptions),
     );
+    // Bumped only by explicit restores (e.g. send-failure transient-state
+    // rollback) so consumers re-apply the restored selection/scroll exactly
+    // once. Self-originated persist writes must not touch it — see
+    // buildRestoreToken.
+    const [restoreEpoch, setRestoreEpoch] = React.useState(0);
     const currentScopedState = isScopedComposerPersistenceStateCurrent(scopedState, scope, owner, scopedStateReadOptions)
         ? scopedState
         : readScopedComposerPersistenceState(scope, owner, scopedStateReadOptions);
     const expanded = currentScopedState.expanded;
     const inputState = currentScopedState.inputState;
     const structuredInputMentions = currentScopedState.structuredInputMentions;
+    // One-way latch per owner/scope: flips when the persisted basis first
+    // becomes applicable to the live text (draft adopted after an async load on
+    // session open), so restoreToken changes exactly once at the moment the
+    // withheld scroll/selection payload becomes deliverable. Self-originated
+    // persists keep the basis applicable and never flip it back.
+    const restoreOwnerScopeKey = `${agentInputDraftOwnerKey(owner) ?? 'none'}:${scope ? serverAccountScopeKeySuffix(scope) : 'none'}`;
+    const restoreBasisLatchRef = React.useRef<Readonly<{ key: string; adopted: boolean }>>({
+        key: restoreOwnerScopeKey,
+        adopted: false,
+    });
+    if (restoreBasisLatchRef.current.key !== restoreOwnerScopeKey) {
+        restoreBasisLatchRef.current = { key: restoreOwnerScopeKey, adopted: false };
+    }
+    if (
+        !restoreBasisLatchRef.current.adopted
+        && isAgentInputLocalUiStateTextBasisApplicable(inputState, textLength)
+    ) {
+        restoreBasisLatchRef.current = { key: restoreOwnerScopeKey, adopted: true };
+    }
+    const restoreBasisAdopted = restoreBasisLatchRef.current.adopted;
     const setScopedStateFromStore = React.useCallback((
         nextScope: ServerAccountScope | null,
         nextOwner: AgentInputDraftOwner | null,
@@ -498,6 +536,7 @@ export function useSessionAgentInputComposerPersistence({
                 inputState: readInputState(scope, owner, inputStateReadOptions),
             };
         });
+        setRestoreEpoch((epoch) => epoch + 1);
     }, [inputStateReadOptions, owner, scope, scopedStateReadOptions]);
 
     const onStructuredMentionsChange = React.useCallback((mentions: readonly ComposerStructuredInputMention[]) => {
@@ -515,10 +554,10 @@ export function useSessionAgentInputComposerPersistence({
     const inputPersistence = React.useMemo(() => ({
         ...(typeof inputState?.scrollY === 'number' ? { initialScrollY: inputState.scrollY } : {}),
         ...(inputState?.selection ? { initialSelection: inputState.selection } : {}),
-        restoreToken: buildRestoreToken(owner, inputState),
+        restoreToken: buildRestoreToken(owner, scope, restoreEpoch, restoreBasisAdopted),
         onScrollYChange,
         onSelectionChangePersist,
-    }), [inputState, onScrollYChange, onSelectionChangePersist, owner]);
+    }), [inputState, onScrollYChange, onSelectionChangePersist, owner, restoreBasisAdopted, restoreEpoch, scope]);
 
     const structuredInputPersistence = React.useMemo(() => ({
         mentions: structuredInputMentions,
