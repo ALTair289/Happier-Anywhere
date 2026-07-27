@@ -281,7 +281,7 @@ export async function startStackDevTargets(
           await runProcess({
             label: `remote:${target.name}`,
             command: 'mutagen',
-            args: ['sync', 'flush', '--skip-wait', resolveMutagenSessionName(target.name)],
+            args: ['sync', 'flush', resolveMutagenSessionName(target.name)],
             env: mutagenEnv,
           }),
           `${target.name} Mutagen initial flush`,

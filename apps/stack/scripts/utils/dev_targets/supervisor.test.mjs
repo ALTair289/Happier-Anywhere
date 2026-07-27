@@ -379,7 +379,7 @@ test('supervisor keeps healthy targets and retries another target after its init
   }
 });
 
-test('supervisor retries when the only target bootstrap races its initial non-blocking sync', async () => {
+test('supervisor retries when the only target bootstrap fails after its initial sync', async () => {
   const root = await mkdtemp(join(tmpdir(), 'hstack-dev-target-initial-sync-race-'));
   const credentialPath = join(root, 'access.key');
   const target = {
@@ -761,7 +761,7 @@ test('dev target supervisor owns Mutagen publication, remote bootstrap, auth see
     );
     assert.deepEqual(
       calls.find((call) => call.command === 'mutagen' && call.args.includes('flush')).args,
-      ['sync', 'flush', '--skip-wait', 'happier-linux'],
+      ['sync', 'flush', 'happier-linux'],
     );
 
     await controller.close();
