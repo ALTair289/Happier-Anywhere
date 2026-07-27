@@ -202,10 +202,12 @@ export function resolveStackCredentialPaths({ cliHomeDir, serverUrl = '', env = 
   );
   const hostPortServerId = deriveLoopbackHostPortServerId(normalizedServerUrl);
   const stableScopeServerId = resolveActiveServerIdOverride(env);
+  const daemonLifecycleScopeId = resolveDaemonLifecycleScopeIdOverride(env);
   const settingsServerId = resolvePreferredStackServerIdFromCliSettings({ cliHomeDir: home, serverUrl: normalizedServerUrl, env });
   const activeServerId = settingsServerId || stableScopeServerId || urlHashServerId;
   const serverScopedPath = join(home, 'servers', activeServerId, 'access.key');
   const aliasServerIds = [
+    daemonLifecycleScopeId && daemonLifecycleScopeId !== activeServerId ? daemonLifecycleScopeId : null,
     stableScopeServerId && stableScopeServerId !== activeServerId ? stableScopeServerId : null,
     urlHashServerId && urlHashServerId !== activeServerId ? urlHashServerId : null,
     hostPortServerId && hostPortServerId !== activeServerId && hostPortServerId !== urlHashServerId ? hostPortServerId : null,
@@ -220,6 +222,7 @@ export function resolveStackCredentialPaths({ cliHomeDir, serverUrl = '', env = 
   return {
     activeServerId,
     settingsServerId,
+    daemonLifecycleScopeId,
     stableScopeServerId,
     urlHashServerId,
     hostPortServerId,
@@ -381,11 +384,8 @@ export function findAnyDaemonStatePairInCliHome({ cliHomeDir }) {
 export function findExistingStackCredentialPath({ cliHomeDir, serverUrl = '', env = process.env }) {
   const resolved = resolveStackCredentialPaths({ cliHomeDir, serverUrl, env });
   if (fileHasContent(resolved.serverScopedPath)) return resolved.serverScopedPath;
-  if (resolved.hostPortServerScopedPath && fileHasContent(resolved.hostPortServerScopedPath)) {
-    return resolved.hostPortServerScopedPath;
-  }
-  if (resolved.urlHashServerScopedPath && fileHasContent(resolved.urlHashServerScopedPath)) {
-    return resolved.urlHashServerScopedPath;
+  for (const aliasPath of resolved.aliasServerScopedPaths) {
+    if (fileHasContent(aliasPath)) return aliasPath;
   }
   if (fileHasContent(resolved.legacyPath)) return resolved.legacyPath;
   return null;

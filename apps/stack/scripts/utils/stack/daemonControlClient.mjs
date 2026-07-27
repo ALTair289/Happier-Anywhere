@@ -6,6 +6,10 @@ import { resolvePreferredStackDaemonStatePaths } from '../auth/credentials_paths
 import { applyStackDaemonLifecycleScopeEnv } from '../auth/stable_scope_id.mjs';
 import { resolvePidStackOwnership } from '../proc/ownership.mjs';
 import { readStackRuntimeStateFile } from './runtime_state.mjs';
+import {
+  processInstanceFingerprintMatches,
+  readProcessInstanceFingerprintSync,
+} from '@happier-dev/cli-common/processInstance';
 
 const DEFAULT_RESTART_CONFIRM_POLL_MS = 200;
 const DEFAULT_RESTART_CONFIRM_TIMEOUT_MS = 60_000;
@@ -176,26 +180,81 @@ export async function pingDaemon({
   env = process.env,
   stackName = null,
   timeoutMs = 1500,
-}) {
-  const controlState = await readDaemonControlState({
+  excludePid = null,
+}, {
+  platform = process.platform,
+  readDaemonControlStateImpl = readDaemonControlState,
+  daemonControlPostImpl = daemonControlPost,
+  readProcessInstanceFingerprintImpl = readProcessInstanceFingerprintSync,
+} = {}) {
+  const input = {
     cliHomeDir,
     serverUrl: serverUrl ?? internalServerUrl ?? '',
     env,
     stackName,
-  });
+  };
+  let controlState = await readDaemonControlStateImpl(input);
+  let windowsOwnershipBootstrap = false;
+  if (
+    !controlState.ok
+    && platform === 'win32'
+    && controlState.reason === 'daemon_not_owned'
+    && controlState.ownershipReason === 'process-identity-unsupported'
+  ) {
+    controlState = await readDaemonControlStateImpl({
+      ...input,
+      resolvePidStackOwnershipImpl: null,
+    });
+    windowsOwnershipBootstrap = controlState.ok === true;
+  }
   if (!controlState.ok) return controlState;
+  if (Number.isFinite(Number(excludePid)) && controlState.pid === Number(excludePid)) {
+    return { ok: false, reason: 'pid_unchanged', pid: controlState.pid };
+  }
+  const expectedRuntimeId = String(controlState.state?.runtimeId ?? '').trim();
+  const processInstanceFingerprintBefore = windowsOwnershipBootstrap
+    ? String(readProcessInstanceFingerprintImpl(controlState.pid) ?? '').trim()
+    : '';
+  if (windowsOwnershipBootstrap && (!expectedRuntimeId || !processInstanceFingerprintBefore)) {
+    return {
+      ok: false,
+      reason: expectedRuntimeId
+        ? 'process_instance_unavailable'
+        : 'daemon_runtime_identity_unavailable',
+      pid: controlState.pid,
+    };
+  }
   try {
-    const ping = await daemonControlPost({
+    const ping = await daemonControlPostImpl({
       httpPort: controlState.httpPort,
       path: '/ping',
       controlToken: controlState.controlToken,
       timeoutMs,
     });
+    if (windowsOwnershipBootstrap) {
+      const processInstanceFingerprintAfter = String(
+        readProcessInstanceFingerprintImpl(controlState.pid) ?? '',
+      ).trim();
+      if (
+        !processInstanceFingerprintMatches(
+          processInstanceFingerprintBefore,
+          processInstanceFingerprintAfter,
+        )
+      ) {
+        return { ok: false, reason: 'process_instance_changed', pid: controlState.pid };
+      }
+      if (String(ping?.runtimeId ?? '').trim() !== expectedRuntimeId) {
+        return { ok: false, reason: 'daemon_runtime_identity_mismatch', pid: controlState.pid };
+      }
+    }
     const distClosureFingerprint = String(ping?.distClosureFingerprint ?? '').trim().toLowerCase();
     return {
       ok: true,
       pid: controlState.pid,
       state: controlState.state,
+      processInstanceFingerprint: windowsOwnershipBootstrap
+        ? processInstanceFingerprintBefore
+        : null,
       distClosureFingerprint: /^[a-f0-9]{16}$/.test(distClosureFingerprint)
         ? distClosureFingerprint
         : null,
@@ -217,6 +276,7 @@ export async function restartDaemonViaControlServer({
   successorDistClosureFingerprint = null,
   readDaemonControlStateImpl = readDaemonControlState,
   daemonControlPostImpl = daemonControlPost,
+  pingDaemonImpl = null,
   delayImpl = delay,
 }) {
   const normalizedSuccessorDistClosureFingerprint = normalizeSuccessorDistClosureFingerprint(
@@ -248,14 +308,22 @@ export async function restartDaemonViaControlServer({
   }
 
   const previousPid = controlState.pid;
+  const probeReplacement = typeof pingDaemonImpl === 'function'
+    ? pingDaemonImpl
+    : async (input) => await pingDaemon(input, {
+        readDaemonControlStateImpl,
+        daemonControlPostImpl,
+      });
   const deadline = Date.now() + Math.max(100, confirmTimeoutMs);
   let lastReason = 'state_unchanged';
   while (Date.now() < deadline) {
-    const replacementState = await readDaemonControlStateImpl({
+    const replacementState = await probeReplacement({
       cliHomeDir,
       serverUrl: serverUrl ?? internalServerUrl ?? '',
       env,
       stackName,
+      timeoutMs: controlPostTimeoutMs,
+      excludePid: previousPid,
     });
     if (!replacementState.ok) {
       lastReason = replacementState.reason ?? 'state_unavailable';
@@ -267,31 +335,22 @@ export async function restartDaemonViaControlServer({
       await delayImpl(pollMs);
       continue;
     }
-    try {
-      const replacementPing = await daemonControlPostImpl({
-        httpPort: replacementState.httpPort,
-        path: '/ping',
-        controlToken: replacementState.controlToken,
-        timeoutMs: controlPostTimeoutMs,
-      });
-      if (
-        normalizedSuccessorDistClosureFingerprint
-        && String(replacementPing?.distClosureFingerprint ?? '').trim()
-          !== normalizedSuccessorDistClosureFingerprint
-      ) {
-        lastReason = 'successor_fingerprint_mismatch';
-        await delayImpl(pollMs);
-        continue;
-      }
-      return {
-        status: restartStatus,
-        previousPid,
-        pid: replacementState.pid,
-      };
-    } catch {
-      lastReason = 'replacement_ping_failed';
+    if (
+      normalizedSuccessorDistClosureFingerprint
+      && String(replacementState?.distClosureFingerprint ?? '').trim()
+        !== normalizedSuccessorDistClosureFingerprint
+    ) {
+      lastReason = 'successor_fingerprint_mismatch';
       await delayImpl(pollMs);
+      continue;
     }
+    return {
+      status: restartStatus,
+      previousPid,
+      pid: replacementState.pid,
+      processInstanceFingerprint:
+        replacementState.processInstanceFingerprint ?? null,
+    };
   }
 
   throw new Error(`daemon control /restart replacement was not confirmed within ${Math.max(100, confirmTimeoutMs)}ms (${lastReason})`);

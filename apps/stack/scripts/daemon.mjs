@@ -395,6 +395,7 @@ export async function checkDaemonStatePingAware(cliHomeDir, options = {}) {
     return {
       status: 'running',
       pid: Number(ping.pid) || state.pid,
+      processInstanceFingerprint: ping.processInstanceFingerprint ?? null,
       distClosureFingerprint: ping.distClosureFingerprint ?? null,
     };
   }
@@ -795,8 +796,8 @@ export async function ensureHappierCliDistExists(
     cliNodeEntrypoint = '',
     cliCommand = '',
     admittedDistClosureFingerprint = null,
-    env = process.env,
     admitPriorDistImmediately = false,
+    env = process.env,
   },
   {
     ensureCliBuiltImpl = ensureCliBuilt,
@@ -847,7 +848,6 @@ export async function ensureHappierCliDistExists(
       };
     }
     const priorIntegrity = readIntegrity();
-    let buildResult = null;
     if (admitPriorDistImmediately && priorIntegrity.ok) {
       try {
         await probeCliDistRuntimeImportImpl(distEntrypoint, {
@@ -871,6 +871,7 @@ export async function ensureHappierCliDistExists(
         // admission, which may repair it before the daemon is allowed to start.
       }
     }
+    let buildResult = null;
     let buildError = null;
     try {
       buildResult = await ensureCliBuiltImpl(cliDir, { buildCli, env });
@@ -1725,8 +1726,8 @@ export async function startLocalDaemonWithAuth({
   cliIdentity = 'default',
   runtimeBacked = false,
   admittedDistClosureFingerprint = null,
-}, {
   admitPriorDistImmediately = false,
+}, {
   restartDaemonViaControlServerImpl = restartDaemonViaControlServer,
 } = {}) {
   const resolvedStackName =
@@ -1762,6 +1763,7 @@ export async function startLocalDaemonWithAuth({
         cliHomeDir,
         internalServerUrl,
         runtimeDaemonPid,
+        authenticatedProcessInstanceFingerprint: observedState.processInstanceFingerprint ?? null,
         daemonDistFingerprint: readAuthenticatedDaemonDistFingerprint(observedState),
         env: daemonEnv,
       },
@@ -1783,9 +1785,9 @@ export async function startLocalDaemonWithAuth({
     cliNodeEntrypoint,
     cliCommand,
     admittedDistClosureFingerprint,
+    admitPriorDistImmediately,
     env: baseEnv,
   });
-    admitPriorDistImmediately,
   const distEntrypoint =
     explicitCommand
       ? ''

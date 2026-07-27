@@ -487,6 +487,79 @@ test('syncStackRuntimeDaemonPidFromDaemonState prunes live daemon pid set entrie
   assert.deepEqual(runtime?.processes?.daemonPids, [222]);
 });
 
+test('syncStackRuntimeDaemonPidFromDaemonState adopts and persists an authenticated Windows daemon identity', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-windows-bootstrap-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtimeStatePath = join(root, 'stack.runtime.json');
+  const cliHomeDir = join(root, 'cli');
+  await writeFile(runtimeStatePath, JSON.stringify({
+    version: 1,
+    stackName: 'remote-windows',
+    processes: {},
+  }) + '\n', 'utf8');
+
+  const ownershipCalls = [];
+  const resolvePidStackOwnershipImpl = async (pid, context) => {
+    ownershipCalls.push({ pid, context });
+    return context.processInstanceFingerprint === 'win32-cim:stable'
+      ? { owned: true, reason: 'process_instance' }
+      : { owned: null, reason: 'process-identity-unsupported' };
+  };
+
+  const first = await syncStackRuntimeDaemonPidFromDaemonState(
+    {
+      runtimeStatePath,
+      cliHomeDir,
+      internalServerUrl: 'http://127.0.0.1:3009',
+      authenticatedProcessInstanceFingerprint: 'win32-cim:stable',
+      env: {},
+    },
+    {
+      checkDaemonStateImpl: () => ({ status: 'running', pid: 4242 }),
+      isPidAliveImpl: () => true,
+      resolvePidStackOwnershipImpl,
+    },
+  );
+
+  assert.equal(first.running, true);
+  assert.equal(first.pid, 4242);
+  assert.ok(ownershipCalls.some((call) => (
+    call.pid === 4242
+    && call.context.processInstanceFingerprint === 'win32-cim:stable'
+  )));
+
+  const persisted = JSON.parse(await readFile(runtimeStatePath, 'utf8'));
+  assert.equal(persisted.processes.daemonPid, 4242);
+  assert.equal(
+    persisted.processInstances.processes.daemonPid.fingerprint,
+    'win32-cim:stable',
+  );
+
+  ownershipCalls.length = 0;
+  const second = await syncStackRuntimeDaemonPidFromDaemonState(
+    {
+      runtimeStatePath,
+      cliHomeDir,
+      internalServerUrl: 'http://127.0.0.1:3009',
+      env: {},
+    },
+    {
+      checkDaemonStateImpl: () => ({ status: 'running', pid: 4242 }),
+      isPidAliveImpl: () => true,
+      resolvePidStackOwnershipImpl,
+    },
+  );
+
+  assert.equal(second.running, true);
+  assert.ok(ownershipCalls.some((call) => (
+    call.pid === 4242
+    && call.context.processInstanceFingerprint === 'win32-cim:stable'
+  )));
+});
+
 test('syncStackRuntimeDaemonPidFromDaemonState rejects unowned daemon.state pid without marking runtime fallback running', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-unowned-state-'));
   t.after(async () => {

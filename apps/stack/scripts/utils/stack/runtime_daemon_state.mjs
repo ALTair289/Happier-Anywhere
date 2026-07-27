@@ -86,11 +86,25 @@ function resolveStackIdentityForDaemonPidOwnership({ runtimeStatePath, runtimeSt
   return { stackName, envPath, cliHomeDir: resolvedCliHomeDir };
 }
 
+function readRecordedDaemonProcessInstanceFingerprint(runtimeState, pid) {
+  const normalizedPid = normalizeDaemonPid(pid);
+  if (!normalizedPid) return null;
+  const identities = runtimeState?.processInstances?.processes ?? {};
+  const candidates = [
+    identities.daemonPid,
+    ...(Array.isArray(identities.daemonPids) ? identities.daemonPids : []),
+  ];
+  const identity = candidates.find((candidate) => Number(candidate?.pid) === normalizedPid);
+  return String(identity?.fingerprint ?? '').trim() || null;
+}
+
 function createDaemonPidOwnershipEligibility({
   runtimeStatePath,
   runtimeState,
   cliHomeDir,
   env,
+  authenticatedDaemonPid = null,
+  authenticatedProcessInstanceFingerprint = null,
   resolvePidStackOwnershipImpl,
 } = {}) {
   if (typeof resolvePidStackOwnershipImpl !== 'function') return null;
@@ -104,7 +118,18 @@ function createDaemonPidOwnershipEligibility({
     return null;
   }
   return async (pid) => {
-    const ownership = await resolvePidStackOwnershipImpl(pid, ownershipContext);
+    const trustedFingerprint = String(
+      authenticatedProcessInstanceFingerprint ?? '',
+    ).trim();
+    const processInstanceFingerprint =
+      trustedFingerprint
+      && normalizeDaemonPid(pid) === normalizeDaemonPid(authenticatedDaemonPid)
+        ? trustedFingerprint
+        : readRecordedDaemonProcessInstanceFingerprint(runtimeState, pid);
+    const ownership = await resolvePidStackOwnershipImpl(pid, {
+      ...ownershipContext,
+      ...(processInstanceFingerprint ? { processInstanceFingerprint } : {}),
+    });
     return ownership?.owned === true;
   };
 }
@@ -234,6 +259,7 @@ export async function recordStackRuntimeDaemonPid(
   daemonPid,
   {
     daemonDistFingerprint,
+    daemonProcessInstanceFingerprint = null,
     isPidAliveImpl = isPidAlive,
     isDaemonPidEligibleImpl = null,
     readStackRuntimeStateFileImpl = readStackRuntimeStateFile,
@@ -264,13 +290,41 @@ export async function recordStackRuntimeDaemonPid(
     const currentDaemonPids = normalizeDaemonPidList(existing?.processes?.daemonPids);
     const currentFingerprint = normalizeDaemonDistFingerprint(existing?.daemon?.distClosureFingerprint);
     const acceptedFingerprint = shouldUpdateFingerprint ? (acceptedDesiredPid ? desiredFingerprint : null) : currentFingerprint;
+    const acceptedProcessInstanceFingerprint = acceptedDesiredPid
+      ? String(daemonProcessInstanceFingerprint ?? '').trim()
+      : '';
+    const currentProcessInstanceFingerprint =
+      readRecordedDaemonProcessInstanceFingerprint(existing, acceptedDesiredPid);
     const unchanged = currentPid === acceptedDesiredPid
       && currentDaemonPids.length === desiredDaemonPids.length
       && currentDaemonPids.every((pid, index) => pid === desiredDaemonPids[index])
-      && (!shouldUpdateFingerprint || currentFingerprint === acceptedFingerprint);
+      && (!shouldUpdateFingerprint || currentFingerprint === acceptedFingerprint)
+      && (
+        !acceptedProcessInstanceFingerprint
+        || currentProcessInstanceFingerprint === acceptedProcessInstanceFingerprint
+      );
     const result = { updated: !unchanged, pid: acceptedDesiredPid, daemonPids: desiredDaemonPids, daemonDistFingerprint: acceptedFingerprint };
     if (unchanged) return { patch: null, result };
     const patch = { processes: { daemonPid: acceptedDesiredPid, daemonPids: desiredDaemonPids } };
+    if (acceptedProcessInstanceFingerprint) {
+      const desiredIdentity = {
+        pid: acceptedDesiredPid,
+        fingerprint: acceptedProcessInstanceFingerprint,
+      };
+      patch.processInstances = {
+        processes: {
+          daemonPid: desiredIdentity,
+          daemonPids: desiredDaemonPids.map((pid) => (
+            pid === acceptedDesiredPid
+              ? desiredIdentity
+              : {
+                  pid,
+                  fingerprint: readRecordedDaemonProcessInstanceFingerprint(existing, pid),
+                }
+          )).filter((identity) => identity.fingerprint),
+        },
+      };
+    }
     if (shouldUpdateFingerprint) patch.daemon = { distClosureFingerprint: acceptedFingerprint };
     return { patch, result };
   };
@@ -340,6 +394,7 @@ export async function syncStackRuntimeDaemonPidFromDaemonState(
     runtimeDaemonPid = null,
     runtimeDaemonPids = [],
     daemonDistFingerprint,
+    authenticatedProcessInstanceFingerprint = null,
     env = process.env,
   } = {},
   {
@@ -360,13 +415,6 @@ export async function syncStackRuntimeDaemonPidFromDaemonState(
   const effectiveRuntimeDaemonPids = explicitRuntimeDaemonPids.length > 0
     ? explicitRuntimeDaemonPids
     : normalizeDaemonPidList(runtimeState?.processes?.daemonPids);
-  const isDaemonPidEligibleImpl = createDaemonPidOwnershipEligibility({
-    runtimeStatePath,
-    runtimeState,
-    cliHomeDir,
-    env,
-    resolvePidStackOwnershipImpl,
-  });
   const observed = await getObservedStackDaemonAsync(
     {
       cliHomeDir,
@@ -380,6 +428,18 @@ export async function syncStackRuntimeDaemonPidFromDaemonState(
       isPidAliveImpl,
     },
   );
+  const isDaemonPidEligibleImpl = createDaemonPidOwnershipEligibility({
+    runtimeStatePath,
+    runtimeState,
+    cliHomeDir,
+    env,
+    authenticatedDaemonPid: observed.running === true ? observed.pid : null,
+    authenticatedProcessInstanceFingerprint:
+      authenticatedProcessInstanceFingerprint
+      || observed.daemonState?.processInstanceFingerprint
+      || null,
+    resolvePidStackOwnershipImpl,
+  });
 
   let acceptedObserved = observed;
   if (observed.pid) {
@@ -416,6 +476,10 @@ export async function syncStackRuntimeDaemonPidFromDaemonState(
     recordStackRuntimeUpdateImpl,
     isPidAliveImpl,
     isDaemonPidEligibleImpl,
+    daemonProcessInstanceFingerprint:
+      authenticatedProcessInstanceFingerprint
+      || observed.daemonState?.processInstanceFingerprint
+      || null,
   };
   if (shouldSyncFingerprint) {
     recordOptions.daemonDistFingerprint = acceptedObserved.pid ? daemonDistFingerprint : null;

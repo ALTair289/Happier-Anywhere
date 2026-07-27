@@ -339,17 +339,22 @@ export function createHappyCliReloadExecutor({
           throw new Error('[local] watch: daemon control restart did not confirm a successor pid');
         }
         if (runtimeStatePath) {
-          const successorObservation = {
-            status: 'running',
-            pid: successorPid,
-            distClosureFingerprint: successorDistClosureFingerprint,
-          };
+            const successorObservation = {
+              status: 'running',
+              pid: successorPid,
+              ...(replacement.processInstanceFingerprint
+                ? { processInstanceFingerprint: replacement.processInstanceFingerprint }
+                : {}),
+              distClosureFingerprint: successorDistClosureFingerprint,
+            };
           await syncStackRuntimeDaemonPidFromDaemonStateImpl(
             {
               runtimeStatePath,
               cliHomeDir,
               internalServerUrl,
               runtimeDaemonPid: successorPid,
+              authenticatedProcessInstanceFingerprint:
+                replacement.processInstanceFingerprint ?? null,
               env,
               daemonDistFingerprint: successorDistClosureFingerprint,
             },

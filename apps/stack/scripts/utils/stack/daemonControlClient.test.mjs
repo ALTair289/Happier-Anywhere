@@ -62,6 +62,47 @@ test('pingDaemon posts /ping with the daemon control token from state', async (t
   });
 });
 
+test('pingDaemon bootstraps Windows ownership from an authenticated matching daemon runtime', async () => {
+  const state = {
+    pid: 4242,
+    httpPort: 4321,
+    controlToken: 'state-token',
+    runtimeId: 'runtime-windows',
+  };
+  const ownershipAttempts = [];
+  const fingerprints = ['win32-cim:stable', 'win32-cim:stable'];
+
+  const result = await pingDaemon(
+    {
+      cliHomeDir: 'C:/Users/test/.happier/target',
+      serverUrl: 'http://127.0.0.1:3009',
+      stackName: 'remote-windows',
+    },
+    {
+      platform: 'win32',
+      readDaemonControlStateImpl: async (input) => {
+        ownershipAttempts.push(input.resolvePidStackOwnershipImpl);
+        return input.resolvePidStackOwnershipImpl === null
+          ? { ok: true, state, pid: state.pid, httpPort: state.httpPort, controlToken: state.controlToken }
+          : {
+              ok: false,
+              reason: 'daemon_not_owned',
+              ownershipReason: 'process-identity-unsupported',
+              pid: state.pid,
+            };
+      },
+      daemonControlPostImpl: async () => ({ status: 'ok', runtimeId: state.runtimeId }),
+      readProcessInstanceFingerprintImpl: () => fingerprints.shift() ?? null,
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.pid, state.pid);
+  assert.equal(result.processInstanceFingerprint, 'win32-cim:stable');
+  assert.equal(ownershipAttempts.length, 2);
+  assert.equal(ownershipAttempts[1], null);
+});
+
 test('readDaemonControlState rejects a live daemon pid that is not owned by the current stack', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'hstack-daemon-control-unowned-'));
   t.after(async () => {
