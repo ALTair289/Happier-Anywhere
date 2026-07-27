@@ -6,6 +6,7 @@ import { WebPromptModal } from './components/WebPromptModal';
 import { CustomModal } from './components/CustomModal';
 import { OverlayPortalHost, OverlayPortalProvider } from '@/components/ui/popover';
 import { motionTokens } from '@/components/ui/motion/motionTokens';
+import { restoreFocusToBestTarget, type FocusReturnTarget } from '@/keyboard/focusReturn';
 
 const ModalContext = createContext<ModalContextValue | undefined>(undefined);
 
@@ -16,6 +17,7 @@ type ModalProviderProps = Readonly<{
 
 type ModalHostEntry = ModalConfig & Readonly<{
     visible: boolean;
+    focusReturnTarget: FocusReturnTarget;
 }>;
 
 type ModalHostState = Readonly<{
@@ -40,10 +42,26 @@ export function ModalProvider({ active = true, children }: ModalProviderProps) {
     });
     const stateRef = React.useRef<ModalHostState>(state);
     const removalTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+    const pendingFocusReturnTargetsRef = React.useRef<FocusReturnTarget[]>([]);
 
     useEffect(() => {
         stateRef.current = state;
     }, [state]);
+
+    useEffect(() => {
+        const pendingTargets = pendingFocusReturnTargetsRef.current.splice(0);
+        if (pendingTargets.length === 0) return;
+
+        const target = pendingTargets[pendingTargets.length - 1];
+        const activeElement = typeof document !== 'undefined' ? document.activeElement : null;
+        const hasNewConnectedFocus = activeElement
+            && activeElement !== document.body
+            && activeElement !== target
+            && activeElement.isConnected !== false;
+        if (hasNewConnectedFocus) return;
+
+        restoreFocusToBestTarget({ current: target });
+    }, [state.modals]);
 
     const clearRemovalTimer = useCallback((id: string) => {
         const timer = removalTimersRef.current.get(id);
@@ -54,6 +72,10 @@ export function ModalProvider({ active = true, children }: ModalProviderProps) {
 
     const removeModalNow = useCallback((id: string) => {
         clearRemovalTimer(id);
+        const removedModal = stateRef.current.modals.find(modal => modal.id === id);
+        if (removedModal) {
+            pendingFocusReturnTargetsRef.current.push(removedModal.focusReturnTarget);
+        }
         setState(prev => {
             const nextState = {
                 modals: prev.modals.filter(modal => modal.id !== id)
@@ -69,7 +91,10 @@ export function ModalProvider({ active = true, children }: ModalProviderProps) {
 
     const showModal = useCallback((config: Omit<ModalConfig, 'id'>): string => {
         const id = generateId();
-        const modalConfig = { ...config, id, visible: true } as ModalHostEntry;
+        const focusReturnTarget = typeof document !== 'undefined'
+            ? document.activeElement as FocusReturnTarget
+            : null;
+        const modalConfig = { ...config, id, visible: true, focusReturnTarget } as ModalHostEntry;
         clearRemovalTimer(id);
         
         setState(prev => {
@@ -86,6 +111,9 @@ export function ModalProvider({ active = true, children }: ModalProviderProps) {
     const hideModal = useCallback((id: string) => {
         const target = stateRef.current.modals.find(modal => modal.id === id);
         const shouldDelayRemoval = target?.type === 'custom' && target.visible;
+        if (target && target.type !== 'custom') {
+            pendingFocusReturnTargetsRef.current.push(target.focusReturnTarget);
+        }
 
         setState(prev => {
             const currentTarget = prev.modals.find(modal => modal.id === id);
@@ -122,6 +150,13 @@ export function ModalProvider({ active = true, children }: ModalProviderProps) {
             clearTimeout(timer);
         }
         removalTimersRef.current.clear();
+        // The first modal owns the only opener that predates the stack. It remains authoritative
+        // even while that modal is in its exit window; later openers live inside the stack and can
+        // disconnect when hideAll removes every modal in the same commit.
+        const rootModal = stateRef.current.modals[0];
+        if (rootModal) {
+            pendingFocusReturnTargetsRef.current.push(rootModal.focusReturnTarget);
+        }
         const nextState = { modals: [] };
         stateRef.current = nextState;
         setState(nextState);

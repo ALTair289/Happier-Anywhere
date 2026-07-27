@@ -207,6 +207,91 @@ describe('ModalProvider', () => {
         expect(screen.findAllByType(DummyModalA).length).toBe(0);
     });
 
+    it('returns focus to the imperative opener after a custom modal is removed', async () => {
+        vi.useFakeTimers();
+        const body = {};
+        const opener = {
+            isConnected: true,
+            focus: vi.fn(),
+        };
+        const fakeDocument = {
+            activeElement: opener as unknown,
+            body,
+        };
+        vi.stubGlobal('document', fakeDocument);
+
+        try {
+            const { ModalProvider } = await import('./ModalProvider');
+            const { Modal } = await import('./ModalManager');
+            const screen = await renderProvider({ ModalProvider });
+            showCustomModal(Modal, DummyModalA);
+            fakeDocument.activeElement = body;
+
+            act(() => {
+                screen.findByType(DummyModalA)?.props.onClose();
+                vi.advanceTimersByTime(motionTokens.overlay.modal.exitMs);
+            });
+
+            expect(screen.findAllByType(DummyModalA)).toHaveLength(0);
+            expect(opener.focus).toHaveBeenCalledTimes(1);
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
+    it('does not steal focus from a newer connected target when a custom modal closes', async () => {
+        vi.useFakeTimers();
+        const body = {};
+        const opener = { isConnected: true, focus: vi.fn() };
+        const newerTarget = { isConnected: true, focus: vi.fn() };
+        const fakeDocument = { activeElement: opener as unknown, body };
+        vi.stubGlobal('document', fakeDocument);
+
+        try {
+            const { ModalProvider } = await import('./ModalProvider');
+            const { Modal } = await import('./ModalManager');
+            const screen = await renderProvider({ ModalProvider });
+            showCustomModal(Modal, DummyModalA);
+            fakeDocument.activeElement = newerTarget;
+
+            act(() => {
+                screen.findByType(DummyModalA)?.props.onClose();
+                vi.advanceTimersByTime(motionTokens.overlay.modal.exitMs);
+            });
+
+            expect(opener.focus).not.toHaveBeenCalled();
+            expect(newerTarget.focus).not.toHaveBeenCalled();
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
+    it('does not focus an imperative opener that disconnected before modal removal', async () => {
+        vi.useFakeTimers();
+        const body = {};
+        const opener = { isConnected: true, focus: vi.fn() };
+        const fakeDocument = { activeElement: opener as unknown, body };
+        vi.stubGlobal('document', fakeDocument);
+
+        try {
+            const { ModalProvider } = await import('./ModalProvider');
+            const { Modal } = await import('./ModalManager');
+            const screen = await renderProvider({ ModalProvider });
+            showCustomModal(Modal, DummyModalA);
+            opener.isConnected = false;
+            fakeDocument.activeElement = body;
+
+            act(() => {
+                screen.findByType(DummyModalA)?.props.onClose();
+                vi.advanceTimersByTime(motionTokens.overlay.modal.exitMs);
+            });
+
+            expect(opener.focus).not.toHaveBeenCalled();
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
     it('keeps earlier modal mounted and transfers top backdrop when the top modal finishes closing', async () => {
         vi.useFakeTimers();
         const { ModalProvider } = await import('./ModalProvider');
@@ -251,6 +336,71 @@ describe('ModalProvider', () => {
         expect(screen.findAllByType(DummyModalA).length).toBe(0);
         expect(screen.findAllByType(DummyModalB).length).toBe(0);
         expect(screen.findAllByType('Backdrop' as any).length).toBe(0);
+    });
+
+    it('returns focus to the earliest durable opener when hideAll removes a modal stack', async () => {
+        const body = {};
+        const rootOpener = { isConnected: true, focus: vi.fn() };
+        const nestedOpener = { isConnected: true, focus: vi.fn() };
+        const fakeDocument = { activeElement: rootOpener as unknown, body };
+        vi.stubGlobal('document', fakeDocument);
+
+        try {
+            const { ModalProvider } = await import('./ModalProvider');
+            const { Modal } = await import('./ModalManager');
+            await renderProvider({ ModalProvider });
+            showCustomModal(Modal, DummyModalA);
+            fakeDocument.activeElement = nestedOpener;
+            showCustomModal(Modal, DummyModalB);
+            nestedOpener.isConnected = false;
+            fakeDocument.activeElement = body;
+
+            act(() => {
+                Modal.hideAll();
+            });
+
+            expect(rootOpener.focus).toHaveBeenCalledTimes(1);
+            expect(nestedOpener.focus).not.toHaveBeenCalled();
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
+    it('keeps the root opener authoritative when hideAll follows a pending root exit', async () => {
+        vi.useFakeTimers();
+        const body = {};
+        const rootOpener = { isConnected: true, focus: vi.fn() };
+        const nestedOpener = { isConnected: true, focus: vi.fn() };
+        const fakeDocument = { activeElement: rootOpener as unknown, body };
+        vi.stubGlobal('document', fakeDocument);
+
+        try {
+            const { ModalProvider } = await import('./ModalProvider');
+            const { Modal } = await import('./ModalManager');
+            await renderProvider({ ModalProvider });
+
+            let rootModalId = '';
+            act(() => {
+                rootModalId = Modal.show({ component: DummyModalA });
+            });
+            fakeDocument.activeElement = nestedOpener;
+            showCustomModal(Modal, DummyModalB);
+
+            act(() => {
+                Modal.hide(rootModalId);
+            });
+            nestedOpener.isConnected = false;
+            fakeDocument.activeElement = body;
+
+            act(() => {
+                Modal.hideAll();
+            });
+
+            expect(rootOpener.focus).toHaveBeenCalledTimes(1);
+            expect(nestedOpener.focus).not.toHaveBeenCalled();
+        } finally {
+            vi.unstubAllGlobals();
+        }
     });
 
     it('updates props for an open custom modal without remounting it', async () => {

@@ -320,6 +320,7 @@ export function BaseModal({
                           <Dialog.Content
                               aria-describedby={undefined}
                               style={contentStyle}
+                              onCloseAutoFocus={(event) => event.preventDefault()}
                               onPointerDown={stopPropagation}
                               onTouchStart={stopPropagation}
                               onClick={(e) => {

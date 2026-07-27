@@ -104,6 +104,17 @@ describe('BaseModal (web)', () => {
         expect(screen.findAllByType('DialogTitle' as any).length).toBe(1);
     });
 
+    it('suppresses Radix close autofocus so the shared focus-return policy remains authoritative', async () => {
+        const { BaseModal } = await import('./BaseModal');
+        const screen = await renderBaseModalScreen(BaseModal);
+        const content = screen.findAllByType('DialogContent' as any)[0];
+        const preventDefault = vi.fn();
+
+        content?.props.onCloseAutoFocus({ preventDefault });
+
+        expect(preventDefault).toHaveBeenCalledTimes(1);
+    });
+
     it('omits the overlay when showBackdrop is false', async () => {
         const { BaseModal } = await import('./BaseModal');
         const screen = await renderBaseModalScreen(BaseModal, { showBackdrop: false });
