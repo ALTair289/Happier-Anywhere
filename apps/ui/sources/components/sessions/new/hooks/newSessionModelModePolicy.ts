@@ -1,3 +1,5 @@
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
+
 export type NewSessionModelConfig = Readonly<{
     defaultMode: string;
     allowedModes: readonly string[];
@@ -12,7 +14,7 @@ export type NewSessionPreflightModels = Readonly<{
 }>;
 
 function normalizeModelId(value: unknown): string {
-    return typeof value === 'string' ? value.trim() : '';
+    return readNonBlankSessionControlIdentifier(value) ?? '';
 }
 
 export function resolveInitialNewSessionModelMode(params: Readonly<{

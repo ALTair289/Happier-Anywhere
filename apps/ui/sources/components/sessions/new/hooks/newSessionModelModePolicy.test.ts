@@ -17,6 +17,13 @@ describe('newSessionModelModePolicy', () => {
         expect(out).toBe('custom-model-id');
     });
 
+    it('preserves exact nonblank opaque model identifiers', () => {
+        expect(resolveInitialNewSessionModelMode({
+            draftModelMode: ' model-a ',
+            modelConfig: { defaultMode: 'default', allowedModes: [], supportsFreeform: true },
+        })).toBe(' model-a ');
+    });
+
     it('falls back to defaultMode when draft modelMode is empty', () => {
         const out = resolveInitialNewSessionModelMode({
             draftModelMode: '   ',
