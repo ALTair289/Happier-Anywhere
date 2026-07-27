@@ -290,6 +290,12 @@ export type ActionExecutorDeps = Readonly<{
     expectedStateAtMs?: number;
     serverId?: string | null;
   }>) => Promise<unknown>;
+  sessionPendingInputInterruptAndRun?: (args: Readonly<{
+    sessionId: string;
+    localId: string;
+    expectedStateAtMs?: number;
+    serverId?: string | null;
+  }>) => Promise<unknown>;
   sessionVendorPluginCatalogList?: (args: Readonly<{ sessionId: string; cwd?: string; serverId?: string | null }>) => Promise<unknown>;
   sessionSkillCatalogList?: (args: Readonly<{ sessionId: string; cwd?: string; serverId?: string | null }>) => Promise<unknown>;
   sessionUsageLimitWaitResumeEnable?: (args: Readonly<{
@@ -2161,6 +2167,24 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
           const res = await deps.sessionTerminalComposerClear({
             sessionId,
+            ...(typeof expectedStateAtMs === 'number' ? { expectedStateAtMs } : {}),
+            ...(serverId ? { serverId } : {}),
+          });
+          return { ok: true, result: res };
+        }
+
+        if (actionId === 'session.pendingInput.interruptAndRun') {
+          const sessionId = normalizeId((parsed.data as any).sessionId);
+          const localId = normalizeId((parsed.data as any).localId);
+          if (!sessionId || !localId) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          if (!deps.sessionPendingInputInterruptAndRun) {
+            return { ok: false, errorCode: 'unsupported_action', error: 'unsupported_action:session.pendingInput.interruptAndRun' };
+          }
+          const expectedStateAtMs = (parsed.data as any).expectedStateAtMs;
+          const serverId = resolveServerIdForSession(deps, ctx, sessionId);
+          const res = await deps.sessionPendingInputInterruptAndRun({
+            sessionId,
+            localId,
             ...(typeof expectedStateAtMs === 'number' ? { expectedStateAtMs } : {}),
             ...(serverId ? { serverId } : {}),
           });

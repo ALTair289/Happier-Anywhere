@@ -21,7 +21,7 @@ describe('pending delivery status v1 contract', () => {
     [
       'claimed provider row',
       { status: 'queued', deliveryState: 'delivering', deliveryBlockedReason: null },
-      { status: 'delivering' },
+      { status: 'delivering', detail: 'awaiting_acceptance' },
       { status: 'queued', deliveryState: 'delivering', deliveryBlockedReason: null, discardedReason: null },
     ],
     [
@@ -60,6 +60,17 @@ describe('pending delivery status v1 contract', () => {
 
   it('parses typed status values received from server projections', () => {
     expect(parsePendingDeliveryStatusV1({ status: 'delivering' })).toEqual({ status: 'delivering' });
+    expect(parsePendingDeliveryStatusV1({ status: 'delivering', detail: 'custody_observed' })).toEqual({
+      status: 'delivering',
+      detail: 'custody_observed',
+    });
+    expect(parsePendingDeliveryStatusV1({ status: 'delivering', detail: 'awaiting_acceptance' })).toEqual({
+      status: 'delivering',
+      detail: 'awaiting_acceptance',
+    });
+    expect(parsePendingDeliveryStatusV1({ status: 'delivering', detail: 'future_detail' })).toEqual({
+      status: 'delivering',
+    });
     expect(parsePendingDeliveryStatusV1({ status: 'external_handoff' })).toEqual({ status: 'external_handoff' });
     expect(parsePendingDeliveryStatusV1({ status: 'blocked', reason: 'payload_too_large' })).toEqual({
       status: 'blocked',
@@ -80,9 +91,29 @@ describe('pending delivery status v1 contract', () => {
     expect(parsePendingDeliveryStatusV1({ status: 'resolved' })).toBeNull();
   });
 
+  it('keeps custody detail descriptive instead of persisting it as delivery authority', () => {
+    const persisted = pendingDeliveryStatusV1ToPersistedFields({
+      status: 'delivering',
+      detail: 'custody_observed',
+    });
+
+    expect(persisted).toEqual({
+      status: 'queued',
+      deliveryState: 'delivering',
+      deliveryBlockedReason: null,
+      discardedReason: null,
+    });
+    expect(normalizePendingDeliveryStatusV1(persisted)).toEqual({
+      status: 'delivering',
+      detail: 'awaiting_acceptance',
+    });
+  });
+
   it.each([
     [{ status: 'queued' }, false],
     [{ status: 'delivering' }, true],
+    [{ status: 'delivering', detail: 'custody_observed' }, true],
+    [{ status: 'delivering', detail: 'awaiting_acceptance' }, true],
     [{ status: 'external_handoff' }, true],
     [{ status: 'blocked', reason: 'ambiguous_terminal_delivery' }, true],
     [{ status: 'blocked', reason: 'delivery_outcome_uncertain' }, true],
@@ -100,6 +131,7 @@ describe('pending delivery status v1 contract', () => {
   it.each([
     [{ status: 'queued' }, { status: 'resolved', reason: 'provider_accepted' }, false],
     [{ status: 'delivering' }, { status: 'resolved', reason: 'provider_accepted' }, true],
+    [{ status: 'delivering', detail: 'custody_observed' }, { status: 'resolved', reason: 'provider_accepted' }, true],
     [{ status: 'external_handoff' }, { status: 'resolved', reason: 'provider_accepted' }, true],
     [{ status: 'blocked', reason: 'terminal_composer_draft' }, { status: 'resolved', reason: 'provider_accepted' }, true],
     [{ status: 'queued' }, { status: 'resolved', reason: 'materialized' }, true],

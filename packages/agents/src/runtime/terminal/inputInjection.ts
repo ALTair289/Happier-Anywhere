@@ -10,6 +10,29 @@ export type TerminalInjectionFailurePhase =
 
 export type TerminalInjectionDuplicateRisk = 'none' | 'possible' | 'likely';
 
+export type TerminalInputInjectionDeferredBlocker =
+  | Readonly<{
+      kind: 'runtime_config_blocked';
+      source: 'runtime_control';
+      blockedReason?: string | null | undefined;
+    }>
+  | Readonly<{
+      kind: 'terminal_user_draft' | 'own_leftover_clear_failed' | 'capture_ambiguous';
+      source: 'draft_guard' | 'readiness';
+      guardStatus?: 'foreign_draft' | 'capture_style_unavailable' | 'clear_failed' | undefined;
+      draftLength?: number | undefined;
+    }>
+  | Readonly<{
+      kind: 'provider_unavailable';
+      source: 'draft_guard' | 'readiness';
+      detail?: string | undefined;
+    }>
+  | Readonly<{
+      kind: 'pane_initializing' | 'terminal_busy';
+      source: 'terminal_injection' | 'readiness';
+      detail?: string | undefined;
+    }>;
+
 export type TerminalPromptInput = Readonly<{
   text: string;
   multiline: boolean;
@@ -32,6 +55,7 @@ export type TerminalInputInjectionResult =
       status: 'deferred';
       reason: 'user_typing' | 'terminal_busy' | 'permission_blocked' | 'pane_initializing';
       retryAfterMs?: number | undefined;
+      blocker?: TerminalInputInjectionDeferredBlocker | undefined;
     }>
   | Readonly<{
       status: 'failed';

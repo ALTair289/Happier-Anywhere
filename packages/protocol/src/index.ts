@@ -762,6 +762,7 @@ export {
   normalizePendingDeliveryStatusV1,
   parsePendingDeliveryStatusV1,
   pendingDeliveryStatusV1ToPersistedFields,
+  type PendingDeliveryDetailV1,
   type PendingDeliveryResolvedReasonV1,
   type PendingDeliveryStatusPersistedFieldsV1,
   type PendingDeliveryStatusPersistedProjectionV1,
@@ -1498,6 +1499,14 @@ export {
   type SessionTerminalComposerClearResultV1,
   type SessionTerminalComposerClearSuccessStatusV1,
 } from './sessionControl/sessionTerminalComposerClearV1.js';
+
+export {
+  SessionPendingInputInterruptAndRunRequestV1Schema,
+  SessionPendingInputInterruptAndRunResultV1Schema,
+  buildUnsupportedSessionPendingInputInterruptAndRunResult,
+  type SessionPendingInputInterruptAndRunRequestV1,
+  type SessionPendingInputInterruptAndRunResultV1,
+} from './sessionControl/sessionPendingInputInterruptAndRunV1.js';
 
 export {
   DefaultSessionFoldersV1,

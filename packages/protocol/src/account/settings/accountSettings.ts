@@ -142,6 +142,7 @@ export const DEFAULT_ACTIONS_SETTINGS_V1: ActionsSettingsV1 = ActionsSettingsV1S
     'session.target.primary.set': { disabledSurfaces: ['session_agent'] },
     'session.target.tracked.set': { disabledSurfaces: ['session_agent'] },
     'session.terminalComposer.clear': { disabledSurfaces: ['session_agent'] },
+    'session.pendingInput.interruptAndRun': { disabledSurfaces: ['session_agent'] },
   },
 });
 
@@ -156,6 +157,7 @@ const CURRENT_DEFAULT_SESSION_AGENT_DISABLED_ACTION_IDS_V1 = Object.freeze([
   'session.target.primary.set',
   'session.target.tracked.set',
   'session.terminalComposer.clear',
+  'session.pendingInput.interruptAndRun',
 ] as const satisfies readonly string[]);
 
 const CURRENT_DEFAULT_SESSION_AGENT_DISABLED_ACTION_ID_SET_V1 = new Set<string>(

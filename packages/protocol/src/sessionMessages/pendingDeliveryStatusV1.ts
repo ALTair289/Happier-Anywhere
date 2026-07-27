@@ -1,9 +1,11 @@
 import type { PendingDeliveryBlockedReason } from './pendingDeliveryBlockedReason.js';
 import { normalizePendingDeliveryBlockedReason } from './pendingDeliveryBlockedReason.js';
 
+export type PendingDeliveryDetailV1 = 'custody_observed' | 'awaiting_acceptance';
+
 export type PendingDeliveryStatusV1 =
   | Readonly<{ status: 'queued' }>
-  | Readonly<{ status: 'delivering' }>
+  | Readonly<{ status: 'delivering'; detail?: PendingDeliveryDetailV1 }>
   | Readonly<{ status: 'external_handoff' }>
   | Readonly<{ status: 'blocked'; reason: PendingDeliveryBlockedReason }>
   | Readonly<{ status: 'discarded'; reason: string | null }>;
@@ -39,6 +41,10 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+function readPendingDeliveryDetailV1(value: unknown): PendingDeliveryDetailV1 | null {
+  return value === 'custody_observed' || value === 'awaiting_acceptance' ? value : null;
+}
+
 export function normalizePendingDeliveryStatusV1(fields: PendingDeliveryStatusPersistedFieldsV1): PendingDeliveryStatusV1 {
   if (fields.status === 'discarded') {
     return { status: 'discarded', reason: readNonEmptyString(fields.discardedReason) };
@@ -49,7 +55,7 @@ export function normalizePendingDeliveryStatusV1(fields: PendingDeliveryStatusPe
   }
 
   if (fields.deliveryState === 'delivering') {
-    return { status: 'delivering' };
+    return { status: 'delivering', detail: 'awaiting_acceptance' };
   }
 
   if (fields.deliveryState === 'external_handoff') {
@@ -73,7 +79,8 @@ export function parsePendingDeliveryStatusV1(value: unknown): PendingDeliverySta
     return { status: 'queued' };
   }
   if (record.status === 'delivering') {
-    return { status: 'delivering' };
+    const detail = readPendingDeliveryDetailV1(record.detail);
+    return detail ? { status: 'delivering', detail } : { status: 'delivering' };
   }
   if (record.status === 'external_handoff') {
     return { status: 'external_handoff' };

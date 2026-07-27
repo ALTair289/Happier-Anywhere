@@ -21,6 +21,7 @@ import {
   SessionUsageLimitWaitResumeEnableRequestV1Schema,
 } from '../sessionWorkState/sessionWorkStateRpc.js';
 import { SessionTerminalComposerClearRequestV1Schema } from '../sessionControl/sessionTerminalComposerClearV1.js';
+import { SessionPendingInputInterruptAndRunRequestV1Schema } from '../sessionControl/sessionPendingInputInterruptAndRunV1.js';
 import { SessionWorkStateStatusV1Schema } from '../sessionWorkState/sessionWorkStateV1.js';
 import { STRUCTURED_QUESTION_LIMITS } from '../tools/structuredQuestionAnswersV1.js';
 import { AcpConfigOptionOverridesV1Schema } from '../sessionMetadata/metadataOverridesV1.js';
@@ -2513,6 +2514,32 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     inputSchema: SessionTerminalComposerClearRequestV1Schema,
+  },
+  {
+    id: 'session.pendingInput.interruptAndRun',
+    title: 'Interrupt and run now',
+    description: 'Interrupt the live provider turn so its exact native queued prompt can run now.',
+    safety: 'danger',
+    approval: APPROVAL_RESULT_REQUIRED,
+    placements: [],
+    surfaces: {
+      ui_button: true,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: false,
+      mcp: false,
+      cli: true,
+    },
+    inputHints: {
+      title: 'Interrupt and run now',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'localId', title: 'Pending message local id', widget: 'text', required: true },
+        { path: 'expectedStateAtMs', title: 'Expected state timestamp', widget: 'text' },
+      ],
+    },
+    inputSchema: SessionPendingInputInterruptAndRunRequestV1Schema,
   },
   {
     id: 'session.usageLimit.waitResume.enable',

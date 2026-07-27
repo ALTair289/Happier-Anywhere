@@ -39,6 +39,7 @@ export const ACTION_IDS = [
   'session.goal.set',
   'session.goal.clear',
   'session.terminalComposer.clear',
+  'session.pendingInput.interruptAndRun',
   'session.usageLimit.waitResume.enable',
   'session.usageLimit.waitResume.cancel',
   'session.usageLimit.checkNow',
