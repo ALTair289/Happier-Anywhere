@@ -31,7 +31,7 @@ function flattenStyle(style: unknown): Record<string, unknown> {
 }
 
 describe('AgentInputStatusBadge', () => {
-    it('keeps quiet badges pressable while removing persistent border and background chrome', async () => {
+    it('maps quiet active badges to pressable plain info pills', async () => {
         const onPress = vi.fn();
         const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
         const { AgentInputStatusBadge } = await import('./AgentInputStatusBadge');
@@ -45,22 +45,29 @@ describe('AgentInputStatusBadge', () => {
                     tone="active"
                     emphasis="quiet"
                     onPress={onPress}
+                    accessibilityHint="Open status details"
+                    accessibilityState={{ expanded: false }}
                 />,
             );
 
             const badge = screen.findByTestId('quiet-work-state-badge');
+            const pill = screen.findByTestId('quiet-work-state-badge:pill');
+            const pillStyle = flattenStyle(pill?.props.style);
+            const label = screen.findByTestId('quiet-work-state-badge:pill:label');
+
             expect(badge?.type).toBe('Pressable');
-            expect(typeof badge?.props.children).toBe('function');
-
-            const badgeSurface = React.isValidElement(badge?.props.children?.({ pressed: false }))
-                ? flattenStyle(badge?.props.children({ pressed: false }).props.style)
-                : undefined;
-
-            expect(badgeSurface).toEqual(expect.objectContaining({
+            expect(badge?.props.accessibilityRole).toBe('button');
+            expect(badge?.props.accessibilityHint).toBe('Open status details');
+            expect(badge?.props.accessibilityState).toEqual({ expanded: false });
+            expect(badge?.props.hitSlop).toEqual({ top: 10, bottom: 10, left: 6, right: 6 });
+            expect(pillStyle).toEqual(expect.objectContaining({
                 backgroundColor: 'transparent',
-                borderColor: 'transparent',
                 borderWidth: 0,
             }));
+            expect(screen.findByTestId('quiet-work-state-badge:pill:variant:info')).not.toBeNull();
+            expect(screen.findByTestId('quiet-work-state-badge:pill:dot')).toBeNull();
+            expect(label?.props.numberOfLines).toBe(1);
+            expect(screen.getTextContent()).toContain('Goal: Ship the release');
 
             badge?.props.onPress?.();
             expect(onPress).toHaveBeenCalledTimes(1);

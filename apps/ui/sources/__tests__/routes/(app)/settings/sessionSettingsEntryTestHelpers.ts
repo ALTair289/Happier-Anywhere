@@ -159,6 +159,9 @@ export function installSessionSettingsEntryModuleMocks(
     }));
 
     vi.mock('@/constants/Typography', () => ({
+        FontWeights: {
+            regular: '400',
+        },
         Typography: {
             default: () => ({}),
             pillLabel: () => ({}),

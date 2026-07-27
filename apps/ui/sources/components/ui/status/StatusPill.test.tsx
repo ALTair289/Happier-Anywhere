@@ -88,6 +88,41 @@ describe('StatusPill', () => {
         expect(Number(flat.fontSize)).toBeGreaterThan(0);
         expect(Number(flat.lineHeight)).toBeGreaterThanOrEqual(Number(flat.fontSize));
     });
+
+    it('uses regular untracked typography for phrase labels', async () => {
+        const { StatusPill } = await import('./StatusPill');
+
+        const screen = await renderScreen(
+            <StatusPill variant="warning" label="Account rotation pending" labelVariant="phrase" testID="status-rotation" />,
+        );
+        const label = screen.findByTestId('status-rotation:label');
+        const flat = flattenStyle(label?.props.style);
+
+        expect(flat.fontWeight).toBe('400');
+        expect(flat.letterSpacing).toBe(0);
+    });
+
+    it('replaces the dot with a leading element and truncates constrained labels', async () => {
+        const { StatusPill } = await import('./StatusPill');
+
+        const screen = await renderScreen(
+            <StatusPill
+                variant="info"
+                label="A deliberately long status phrase"
+                leading={<React.Fragment>marker</React.Fragment>}
+                labelNumberOfLines={1}
+                testID="status-constrained"
+            />,
+        );
+        const label = screen.findByTestId('status-constrained:label');
+        const flat = flattenStyle(label?.props.style);
+
+        expect(screen.findByTestId('status-constrained:dot')).toBeNull();
+        expect(screen.getTextContent()).toContain('marker');
+        expect(label?.props.numberOfLines).toBe(1);
+        expect(label?.props.ellipsizeMode).toBe('tail');
+        expect(flat.flexShrink).toBe(1);
+    });
 });
 
 function flattenStyle(style: unknown): Record<string, any> {
