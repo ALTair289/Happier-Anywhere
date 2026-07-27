@@ -33,26 +33,14 @@ describe('resolveReactiveRuntimeAuthRecoveryClear', () => {
     expect(decision.clear).toBe(false);
   });
 
-  it('clears on verified exact account adoption', () => {
+  it('does NOT clear on application verification without provider outcome evidence', () => {
     const decision = resolveReactiveRuntimeAuthRecoveryClear({
       activeProfileId: 'backup',
       verificationByServiceId: {
         'openai-codex': { status: 'verified' },
       },
     });
-    expect(decision.clear).toBe(true);
-    expect(decision.proof).toBe('account_adoption_verified');
-  });
-
-  it('clears on weakly_verified auth-surface proof without treating it as exact identity', () => {
-    const decision = resolveReactiveRuntimeAuthRecoveryClear({
-      activeProfileId: 'backup',
-      verificationByServiceId: {
-        'openai-codex': { status: 'weakly_verified', reason: 'probe_partial' },
-      },
-    });
-    expect(decision.clear).toBe(true);
-    expect(decision.proof).toBe('account_adoption_verified');
+    expect(decision).toEqual({ clear: false, proof: null });
   });
 
   it('keeps a genuinely fresh candidate pending until later provider proof arrives', () => {

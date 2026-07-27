@@ -125,7 +125,6 @@ type DecideConnectedServiceRecoveryInput = Readonly<{
   credentialHealth?: ConnectedServiceCredentialHealthPolicyInput | null;
   groupSwitch?: Readonly<{ status: 'idle' | 'in_progress' }> | null;
   groupCandidate?: ConnectedServiceRecoveryGroupCandidatePolicyInput | null;
-  providerContinuity?: Readonly<{ restart: 'available' | 'unavailable' | 'shared_state_required' }> | null;
   credentialRefresh?: Readonly<{ status: 'refreshable' | 'not_refreshable' }> | null;
 }>;
 
@@ -160,6 +159,9 @@ function isSwitchableGroupIssue(kind: ConnectedServiceRecoveryPolicyIssue['kind'
     || kind === 'capacity'
     || kind === 'dependency_failure'
     || kind === 'soft_limit'
+    || kind === 'auth_expired'
+    || kind === 'refresh_failed'
+    || kind === 'permission_denied'
     || kind === 'unknown';
 }
 
@@ -213,24 +215,11 @@ export function decideConnectedServiceRecovery(
   }
 
   if (
-    (
-      hasProviderSharedStateRecoveryAction(issue)
-      || input.providerContinuity?.restart === 'shared_state_required'
-    )
+    hasProviderSharedStateRecoveryAction(issue)
     && !isSwitchableGroupSelection(issue, input.selection)
   ) {
     return {
       action: 'shared_state_required',
-      serviceId: issue.serviceId,
-      profileId,
-      groupId,
-      reason: issue.kind,
-    };
-  }
-
-  if (input.providerContinuity?.restart === 'unavailable') {
-    return {
-      action: 'retry_required',
       serviceId: issue.serviceId,
       profileId,
       groupId,
@@ -297,6 +286,7 @@ export function decideConnectedServiceRecovery(
 
   if (
     isCredentialFailure(issue.kind)
+    && input.selection?.kind !== 'group'
     && (
       input.credentialHealth?.cachedStatus === 'needs_reauth'
       || input.credentialHealth?.liveEvidence === 'auth_failed'

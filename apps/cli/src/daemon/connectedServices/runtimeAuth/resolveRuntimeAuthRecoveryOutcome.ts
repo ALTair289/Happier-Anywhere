@@ -6,11 +6,9 @@
 // root cause behind the live Codex/Pi/Claude recovery loops: recovery was cleared
 // while the provider session was still broken.
 //
-// This helper accepts only DETERMINISTIC evidence at this stage of the work:
-//   - accepted post-switch verification (exact `verified` account proof or
-//     `weakly_verified` auth-surface/provenance proof surfaced as `verificationByServiceId`); or
-//   - a genuinely fresh candidate was selected (the adopted profile differs from
-//     the exhausted/failed profile).
+// Switch application results are progress, not provider recovery. A later
+// provider-qualified outcome may recover the intent; a genuinely fresh candidate
+// remains useful intermediate evidence only.
 //
 // A bare `credential_refreshed`, a generic `ok: true`, or an `observed_generation`
 // with no verification and no candidate change is INTERMEDIATE: the local step
@@ -29,16 +27,14 @@
 //
 // This resolver MAPS the runtime-auth switch result onto the shared, provider-agnostic
 // `ProviderOutcomeProofKind` contract. The mapping is thin and behavior-preserving:
-// the deterministic evidence it can establish is `account_adoption_verified` and
-// `fresh_candidate_selected`. Only accepted post-switch verification is a recovered proof today;
-// fresh-candidate selection intentionally stays intermediate until later provider
+// the deterministic evidence it can establish is `fresh_candidate_selected`.
+// Fresh-candidate selection intentionally stays intermediate until later provider
 // activity/native resume/quota proof arrives. All other local completions
 // (credential_refreshed, generic ok:true, unverified switch/observed_generation)
 // map to `null` (no proof).
 
 import {
   type ProviderOutcomeProofKind,
-  isProviderOutcomeProofKind,
   isRecoveredProviderOutcomeProof,
 } from '../recovery/providerOutcomeProof';
 
@@ -48,21 +44,6 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
-}
-
-function hasExactVerificationIdentityMaterial(verification: Readonly<Record<string, unknown>>): boolean {
-  return readString(verification.providerAccountId) !== null
-    || readString(verification.activeAccountId) !== null
-    || readString(verification.sharedAuthSurfaceId) !== null;
-}
-
-function hasAcceptedVerificationProof(verification: unknown): boolean {
-  if (!isRecord(verification)) return false;
-  if (verification.status === 'weakly_verified') return true;
-  if (verification.status !== 'verified') return false;
-  return verification.proofStrength === 'exact'
-    ? hasExactVerificationIdentityMaterial(verification)
-    : true;
 }
 
 /**
@@ -76,12 +57,6 @@ export function readRuntimeAuthRecoverySwitchResult(
   if (!isRecord(result)) return null;
   if (result.status === 'switch_attempted' && isRecord(result.result)) return result.result;
   return result;
-}
-
-function hasAcceptedPostSwitchVerification(switchResult: Readonly<Record<string, unknown>>): boolean {
-  const verificationByServiceId = switchResult.verificationByServiceId;
-  if (!isRecord(verificationByServiceId)) return false;
-  return Object.values(verificationByServiceId).some(hasAcceptedVerificationProof);
 }
 
 function hasFreshCandidateSelected(switchResult: Readonly<Record<string, unknown>>): boolean {
@@ -98,9 +73,9 @@ function hasFreshCandidateSelected(switchResult: Readonly<Record<string, unknown
 // evidence from switch results. Provider/runtime owners may also pass through an explicit
 // `proofKind` from the shared provider-outcome contract when they own stronger
 // evidence such as native resume, quota probe, provider activity, or terminal proof.
-// Account-adoption proof is deliberately derived from verificationByServiceId so
-// malformed exact verification cannot bypass the identity-material gate by setting
-// proofKind directly.
+// Quota proof is settled by the quota owner with its failure-class/fingerprint
+// scope. `native_resume` has no producer. Application verification carried by a
+// switch result is deliberately not promoted here.
 export type RuntimeAuthRecoveryProofKind = ProviderOutcomeProofKind;
 
 /**
@@ -111,11 +86,11 @@ export type RuntimeAuthRecoveryProofKind = ProviderOutcomeProofKind;
 export function resolveRuntimeAuthRecoveryProof(result: unknown): RuntimeAuthRecoveryProofKind | null {
   const switchResult = readRuntimeAuthRecoverySwitchResult(result);
   if (!switchResult) return null;
+  if (switchResult.proofKind === 'provider_activity') return 'provider_activity';
   if (
-    isProviderOutcomeProofKind(switchResult.proofKind)
-    && switchResult.proofKind !== 'account_adoption_verified'
+    switchResult.proofKind === 'terminal_action_required'
+    || switchResult.proofKind === 'terminal_exhausted'
   ) return switchResult.proofKind;
-  if (hasAcceptedPostSwitchVerification(switchResult)) return 'account_adoption_verified';
   if (hasFreshCandidateSelected(switchResult)) return 'fresh_candidate_selected';
   return null;
 }

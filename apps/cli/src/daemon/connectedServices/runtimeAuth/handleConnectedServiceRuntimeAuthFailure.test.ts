@@ -17,6 +17,7 @@ function groupSwitchState(input: Readonly<{
     groupId: 'main',
     activeProfileId: input.activeProfileId,
     generation: 1,
+    runtimeStateRevision: 0,
     policy: { ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1, strategy: 'priority', autoSwitch: true },
     members: [
       { profileId: 'primary', priority: 1, createdAtMs: 1, enabled: true },

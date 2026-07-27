@@ -141,7 +141,7 @@ describe('ConnectedServiceRecoveryPolicy', () => {
     });
   });
 
-  it('prefers refresh over account switching for refreshable credential failures', () => {
+  it('prefers refresh first, then switches a group away from a member with live auth failure', () => {
     expect(decideConnectedServiceRecovery({
       actor: 'automatic',
       issue: {
@@ -188,10 +188,12 @@ describe('ConnectedServiceRecoveryPolicy', () => {
         applyMode: 'restart_rematerialize',
       },
     })).toEqual({
-      action: 'reconnect_required',
+      action: 'switch_account',
+      mode: 'restart_rematerialize',
       serviceId: 'openai-codex',
-      profileId: 'primary',
       groupId: 'main',
+      fromProfileId: 'primary',
+      toProfileId: 'backup',
       reason: 'auth_expired',
       actor: 'automatic',
     });
@@ -330,31 +332,7 @@ describe('ConnectedServiceRecoveryPolicy', () => {
     });
   });
 
-  it('returns shared-state-required when provider continuity says restart cannot preserve context for a single profile', () => {
-    expect(decideConnectedServiceRecovery({
-      actor: 'automatic',
-      issue: {
-        kind: 'usage_limit',
-        ...baseIssue,
-      },
-      selection: {
-        kind: 'profile',
-        serviceId: 'openai-codex',
-        profileId: 'primary',
-      },
-      providerContinuity: {
-        restart: 'shared_state_required',
-      },
-    })).toEqual({
-      action: 'shared_state_required',
-      serviceId: 'openai-codex',
-      profileId: 'primary',
-      groupId: 'main',
-      reason: 'usage_limit',
-    });
-  });
-
-  it('prefers same-group rotation over provider shared-state hints for switchable group failures', () => {
+  it('prefers same-group rotation over provider shared-state recovery actions for switchable group failures', () => {
     expect(decideConnectedServiceRecovery({
       actor: 'automatic',
       issue: {
@@ -367,9 +345,6 @@ describe('ConnectedServiceRecoveryPolicy', () => {
         serviceId: 'openai-codex',
         groupId: 'main',
         activeProfileId: 'primary',
-      },
-      providerContinuity: {
-        restart: 'shared_state_required',
       },
       groupCandidate: {
         status: 'selected',

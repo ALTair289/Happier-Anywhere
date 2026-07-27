@@ -2,6 +2,8 @@ type SwitchAttemptKeyInput = Readonly<{
   sessionId: string;
   serviceId: string;
   groupId: string;
+  profileId?: string | null;
+  credentialRevision?: string | null;
 }>;
 
 type CredentialRefreshAttemptKeyInput = Readonly<{
@@ -20,8 +22,16 @@ function normalizeString(value: string): string {
   return value.trim();
 }
 
-function keyFor(input: SwitchAttemptKeyInput): string {
+function sessionGroupKeyFor(input: SwitchAttemptKeyInput): string {
   return `${normalizeString(input.sessionId)}\0${normalizeString(input.serviceId)}\0${normalizeString(input.groupId)}`;
+}
+
+function failureEdgeKeyFor(input: SwitchAttemptKeyInput): string {
+  const profileId = typeof input.profileId === 'string' ? normalizeString(input.profileId) : '';
+  const credentialRevision = typeof input.credentialRevision === 'string'
+    ? normalizeString(input.credentialRevision)
+    : '';
+  return `${sessionGroupKeyFor(input)}\0${profileId}\0${credentialRevision}`;
 }
 
 function credentialRefreshKeyFor(input: CredentialRefreshAttemptKeyInput): string {
@@ -52,7 +62,7 @@ export class ConnectedServiceRuntimeAuthSwitchAttemptTracker {
     reportedSwitchesThisTurn: number;
   }>): number {
     const nowMs = this.deps.nowMs();
-    const key = keyFor(input);
+    const key = failureEdgeKeyFor(input);
     const entry = this.attemptsByKey.get(key);
     const reported = normalizeSwitches(input.reportedSwitchesThisTurn);
     if (!entry) return reported;
@@ -68,15 +78,16 @@ export class ConnectedServiceRuntimeAuthSwitchAttemptTracker {
   }>): void {
     if (input.resultStatus !== 'switched') return;
     const nowMs = this.deps.nowMs();
-    const key = keyFor(input);
+    const key = failureEdgeKeyFor(input);
     const existing = this.attemptsByKey.get(key);
     const existingSwitches = existing && this.isFresh(existing, nowMs) ? existing.switches : 0;
     this.attemptsByKey.set(key, {
       switches: existingSwitches + 1,
       updatedAtMs: nowMs,
     });
-    const existingTimestamps = this.sessionSwitchTimestampsByKey.get(key) ?? [];
-    this.sessionSwitchTimestampsByKey.set(key, [...existingTimestamps, nowMs]);
+    const sessionGroupKey = sessionGroupKeyFor(input);
+    const existingTimestamps = this.sessionSwitchTimestampsByKey.get(sessionGroupKey) ?? [];
+    this.sessionSwitchTimestampsByKey.set(sessionGroupKey, [...existingTimestamps, nowMs]);
   }
 
   countRecordedSwitchesInWindow(input: SwitchAttemptKeyInput & Readonly<{
@@ -84,7 +95,7 @@ export class ConnectedServiceRuntimeAuthSwitchAttemptTracker {
   }>): number {
     const nowMs = this.deps.nowMs();
     const windowMs = Math.max(0, Math.trunc(input.windowMs));
-    const key = keyFor(input);
+    const key = sessionGroupKeyFor(input);
     const recent = (this.sessionSwitchTimestampsByKey.get(key) ?? []).filter((timestamp) =>
       windowMs === 0 || nowMs - timestamp <= windowMs,
     );

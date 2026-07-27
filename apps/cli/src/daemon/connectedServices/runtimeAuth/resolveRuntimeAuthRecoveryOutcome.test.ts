@@ -6,7 +6,7 @@ import {
 } from './resolveRuntimeAuthRecoveryOutcome';
 
 describe('resolveRuntimeAuthRecoveryProof', () => {
-  it('accepts a switch with exact verified account adoption as deterministic proof', () => {
+  it('keeps exact switch application as progress until a provider-qualified outcome arrives', () => {
     const result = {
       status: 'switch_attempted',
       result: {
@@ -18,11 +18,11 @@ describe('resolveRuntimeAuthRecoveryProof', () => {
         },
       },
     };
-    expect(resolveRuntimeAuthRecoveryProof(result)).toBe('account_adoption_verified');
-    expect(isProvenRuntimeAuthRecoverySuccess(result)).toBe(true);
+    expect(resolveRuntimeAuthRecoveryProof(result)).toBeNull();
+    expect(isProvenRuntimeAuthRecoverySuccess(result)).toBe(false);
   });
 
-  it('accepts weakly_verified auth-surface proof without claiming exact account identity', () => {
+  it('rejects weakly_verified auth-surface progress as provider recovery proof', () => {
     const result = {
       status: 'observed_generation',
       activeProfileId: 'backup',
@@ -31,10 +31,10 @@ describe('resolveRuntimeAuthRecoveryProof', () => {
         'openai-codex': { status: 'weakly_verified', reason: 'probe_partial' },
       },
     };
-    expect(resolveRuntimeAuthRecoveryProof(result)).toBe('account_adoption_verified');
+    expect(resolveRuntimeAuthRecoveryProof(result)).toBeNull();
   });
 
-  it('rejects exact verified account adoption without identity material', () => {
+  it('rejects exact application verification without provider outcome evidence', () => {
     const result = {
       status: 'observed_generation',
       activeProfileId: 'backup',
@@ -51,26 +51,7 @@ describe('resolveRuntimeAuthRecoveryProof', () => {
     expect(isProvenRuntimeAuthRecoverySuccess(result)).toBe(false);
   });
 
-  it('does not let explicit account-adoption proof bypass malformed exact verification', () => {
-    const result = {
-      status: 'observed_generation',
-      proofKind: 'account_adoption_verified',
-      activeProfileId: 'backup',
-      generation: 3,
-      verificationByServiceId: {
-        'openai-codex': {
-          status: 'verified',
-          proofStrength: 'exact',
-          source: 'applied_credential',
-        },
-      },
-    };
-
-    expect(resolveRuntimeAuthRecoveryProof(result)).toBeNull();
-    expect(isProvenRuntimeAuthRecoverySuccess(result)).toBe(false);
-  });
-
-  it('accepts exact verified account adoption when identity material is present', () => {
+  it('does not turn exact application identity material into provider recovery', () => {
     const result = {
       status: 'observed_generation',
       activeProfileId: 'backup',
@@ -84,19 +65,23 @@ describe('resolveRuntimeAuthRecoveryProof', () => {
         },
       },
     };
-    expect(resolveRuntimeAuthRecoveryProof(result)).toBe('account_adoption_verified');
-    expect(isProvenRuntimeAuthRecoverySuccess(result)).toBe(true);
+    expect(resolveRuntimeAuthRecoveryProof(result)).toBeNull();
+    expect(isProvenRuntimeAuthRecoverySuccess(result)).toBe(false);
   });
 
-  it('accepts explicit recovered proof kinds from provider-owned recovery results', () => {
+  it('accepts a provider-qualified activity outcome but rejects producer-less native resume and unscoped quota', () => {
+    expect(resolveRuntimeAuthRecoveryProof({
+      status: 'provider_outcome_observed',
+      proofKind: 'provider_activity',
+    })).toBe('provider_activity');
     expect(resolveRuntimeAuthRecoveryProof({
       status: 'native_resume_accepted',
       proofKind: 'native_resume',
-    })).toBe('native_resume');
+    })).toBeNull();
     expect(isProvenRuntimeAuthRecoverySuccess({
       status: 'quota_probe_succeeded',
       proofKind: 'quota_probe_fresh',
-    })).toBe(true);
+    })).toBe(false);
   });
 
   it('returns explicit terminal proof kinds without treating them as recovered success', () => {

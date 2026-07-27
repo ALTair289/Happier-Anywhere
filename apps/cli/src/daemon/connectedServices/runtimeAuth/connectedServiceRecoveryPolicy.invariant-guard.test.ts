@@ -35,7 +35,7 @@ describe('connected service recovery invariant guard', () => {
     }
   });
 
-  it('never routes credential failures to pool account switching, while quota exhaustion may switch', () => {
+  it('routes credential failures to a healthy pool fallback while direct profiles still reconnect', () => {
     for (const kind of ['auth_expired', 'refresh_failed', 'permission_denied'] as const) {
       expect(decideConnectedServiceRecovery({
         actor: 'automatic',
@@ -54,34 +54,30 @@ describe('connected service recovery invariant guard', () => {
           applyMode: 'restart_rematerialize',
         },
       })).toMatchObject({
-        action: 'reconnect_required',
+        action: 'switch_account',
         serviceId: 'openai-codex',
-        profileId: 'primary',
         groupId: 'pool',
+        fromProfileId: 'primary',
+        toProfileId: 'backup',
+        reason: kind,
+      });
+
+      expect(decideConnectedServiceRecovery({
+        actor: 'automatic',
+        issue: { kind, ...baseIssue, groupId: null },
+        selection: {
+          kind: 'profile',
+          serviceId: 'openai-codex',
+          profileId: 'primary',
+        },
+        credentialHealth: { liveEvidence: 'auth_failed' },
+      })).toMatchObject({
+        action: 'reconnect_required',
+        profileId: 'primary',
         reason: kind,
       });
     }
 
-    expect(decideConnectedServiceRecovery({
-      actor: 'automatic',
-      issue: { kind: 'usage_limit', ...baseIssue },
-      selection: {
-        kind: 'group',
-        serviceId: 'openai-codex',
-        groupId: 'pool',
-        activeProfileId: 'primary',
-      },
-      groupCandidate: {
-        status: 'selected',
-        profileId: 'backup',
-        applyMode: 'restart_rematerialize',
-      },
-    })).toMatchObject({
-      action: 'switch_account',
-      reason: 'usage_limit',
-      fromProfileId: 'primary',
-      toProfileId: 'backup',
-    });
   });
 
   it('keeps spawn needs-reauth out of the pool switch coordinator', async () => {
