@@ -10384,3 +10384,4 @@ export type TranslationsEs = typeof es;
         detailsUnavailable: "La búsqueda terminó; no se proporcionaron detalles.",
         truncated: "Los resultados pueden estar truncados.",
       },
+      switchMode: "Cambiar modo",

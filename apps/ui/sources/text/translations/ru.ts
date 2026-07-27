@@ -10293,3 +10293,4 @@ export type TranslationsRu = typeof ru;
       detailsUnavailable: "Поиск завершён; подробности не предоставлены.",
       truncated: "Результаты могут быть сокращены.",
     },
+      switchMode: "Сменить режим",

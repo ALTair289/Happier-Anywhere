@@ -7,6 +7,28 @@ import { extractShellCommand, stripShellCommandPreludeForDisplay } from '../../n
 import { extractHappierToolsShellBridgeCommand } from '../../normalization/parse/happierToolsShellBridge';
 import { getHappierToolsShellBridgeDisplay } from '../../normalization/parse/happierToolsShellBridgeDisplay';
 import { BashInputV2Schema, BashResultV2Schema, ExitPlanModeInputV2Schema } from '@happier-dev/protocol';
+import * as z from 'zod';
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null;
+}
+
+function readModeId(tool: ToolCall, metadata: Metadata | null): string | null {
+    const input = asRecord(tool.input);
+    const result = asRecord(tool.result);
+    const candidate = input?.targetModeId
+        ?? input?.modeId
+        ?? result?.currentModeId
+        ?? metadata?.sessionModesV1?.currentModeId;
+    return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate.trim() : null;
+}
+
+function readModeLabel(modeId: string, metadata: Metadata | null): string {
+    const mode = metadata?.sessionModesV1?.availableModes?.find((entry) => entry.id === modeId);
+    return typeof mode?.name === 'string' && mode.name.trim().length > 0 ? mode.name.trim() : modeId;
+}
 
 export const coreTerminalTools = {
     'Bash': {
@@ -77,5 +99,18 @@ export const coreTerminalTools = {
         title: t('tools.names.planProposal'),
         icon: ICON_EXIT,
         input: ExitPlanModeInputV2Schema,
+    },
+    'SwitchMode': {
+        title: t('tools.names.switchMode'),
+        icon: ICON_EXIT,
+        minimal: true,
+        input: z.object({
+            targetModeId: z.string().optional(),
+            modeId: z.string().optional(),
+        }).partial().passthrough(),
+        extractSubtitle: ({ metadata, tool }) => {
+            const modeId = readModeId(tool, metadata);
+            return modeId ? readModeLabel(modeId, metadata) : null;
+        },
     },
 } satisfies Record<string, KnownToolDefinition>;

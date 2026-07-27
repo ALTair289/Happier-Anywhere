@@ -10487,3 +10487,4 @@ export type TranslationsPt = typeof pt;
       detailsUnavailable: "A pesquisa terminou; os detalhes não foram fornecidos.",
       truncated: "Os resultados podem estar truncados.",
     },
+      switchMode: "Alterar modo",

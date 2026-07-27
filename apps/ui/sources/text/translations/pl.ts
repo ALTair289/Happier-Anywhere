@@ -10380,3 +10380,4 @@ export type TranslationsPl = typeof pl;
       detailsUnavailable: "Wyszukiwanie zakończone; szczegóły nie zostały podane.",
       truncated: "Wyniki mogą być skrócone.",
     },
+      switchMode: "Zmień tryb",

@@ -9661,3 +9661,4 @@ export type TranslationStructure = DeepTranslationShape<TranslationsEn>;
             detailsUnavailable: 'Search completed; details were not provided.',
             truncated: 'Results may be truncated.',
         },
+            switchMode: 'Switch mode',

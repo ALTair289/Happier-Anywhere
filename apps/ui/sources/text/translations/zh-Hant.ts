@@ -8014,3 +8014,4 @@ export const zhHant: TranslationStructure = deepMerge(zhHans, zhHantOverrides);
             detailsUnavailable: '搜尋已完成；未提供詳細資料。',
             truncated: '結果可能已截斷。',
         },
+            switchMode: '切換模式',

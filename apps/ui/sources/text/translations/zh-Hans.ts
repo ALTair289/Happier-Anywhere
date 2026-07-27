@@ -9956,3 +9956,4 @@ settingsSession: {
       detailsUnavailable: "搜索已完成；未提供详情。",
       truncated: "结果可能已截断。",
     },
+      switchMode: "切换模式",

@@ -9567,3 +9567,4 @@ export type TranslationsCa = typeof ca;
               detailsUnavailable: 'La cerca ha finalitzat; no s\'han proporcionat detalls.',
               truncated: 'Els resultats poden estar truncats.',
           },
+            switchMode: 'Canvia el mode',

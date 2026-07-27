@@ -10264,3 +10264,4 @@ settingsSession: {
       detailsUnavailable: "検索は完了しましたが、詳細は提供されませんでした。",
       truncated: "結果は省略されている可能性があります。",
     },
+      switchMode: "モードを切り替え",

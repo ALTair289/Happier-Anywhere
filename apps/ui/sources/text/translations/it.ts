@@ -10360,3 +10360,4 @@ export type TranslationsIt = typeof it;
         detailsUnavailable: "Ricerca completata; i dettagli non sono stati forniti.",
         truncated: "I risultati potrebbero essere troncati.",
       },
+      switchMode: "Cambia modalità",
