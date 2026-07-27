@@ -1,6 +1,8 @@
 import { io, type Socket } from 'socket.io-client';
 
 import type { ManagedConnectionTransport, TransportDisconnectEvent } from '@happier-dev/connection-supervisor';
+import { buildUiClientCompatibilitySocketAuth } from '@/sync/runtime/clientCompatibility/uiClientCompatibility';
+import { applyUiClientUpgradeRequired } from '@/sync/runtime/clientCompatibility/uiClientUpgradeRequired';
 
 type SyncSocket = Socket;
 
@@ -31,6 +33,7 @@ export function createSyncSocketTransport(params: Readonly<{
             token: params.token,
             clientType: 'user-scoped' as const,
             clientPurpose: 'sync' as const,
+            ...buildUiClientCompatibilitySocketAuth(),
         },
         ...(params.transports ? { transports: params.transports } : null),
         // Explicitly disable cookies/credentialed requests for cross-origin polling transport.
@@ -65,6 +68,7 @@ export function createSyncSocketTransport(params: Readonly<{
     });
 
     socket.on('connect_error', (error) => {
+        if (applyUiClientUpgradeRequired(error)) return;
         errorListeners.forEach((listener) => listener(error));
     });
 

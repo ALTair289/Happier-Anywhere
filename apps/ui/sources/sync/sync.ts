@@ -3,6 +3,8 @@ import { apiSocket } from '@/sync/api/session/apiSocket';
 import { resumeSession } from '@/sync/ops';
 import { type AuthCredentials } from '@/auth/storage/tokenStorage';
 import {
+    ClientVersionCheckRequestV1Schema,
+    ClientVersionCheckResponseV1Schema,
     SESSION_USER_MESSAGE_DELIVERY_INTENT_META_KEY,
     type DirectTranscriptRawMessageV1,
 } from '@happier-dev/protocol';
@@ -4393,21 +4395,24 @@ class Sync {
                 return;
             }
 
-            // Get platform and app identifiers
-            const platform = Platform.OS;
+            // Use the same canonical client identity as HTTP and Socket.IO session sync.
+            const declaration = readCurrentUiClientCompatibilityDeclaration();
             const version = Constants.expoConfig?.version!;
             const appId = (Platform.OS === 'ios' ? Constants.expoConfig?.ios?.bundleIdentifier! : Constants.expoConfig?.android?.package!);
+            const requestBody = ClientVersionCheckRequestV1Schema.parse({
+                v: 1,
+                clientKind: declaration.clientKind,
+                appVersion: version,
+                ...(declaration.releaseChannel ? { releaseChannel: declaration.releaseChannel } : {}),
+                appId,
+            });
 
             const response = await serverFetch('/v1/version', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({
-                    platform,
-                    version,
-                    app_id: appId,
-                }),
+                body: JSON.stringify(requestBody),
             }, { includeAuth: false });
 
             if (!response.ok) {
@@ -4415,13 +4420,19 @@ class Sync {
                 return;
             }
 
-            const data = await response.json();
+            const parsed = ClientVersionCheckResponseV1Schema.safeParse(await response.json());
+            if (!parsed.success) {
+                throw new Error('Invalid /v1/version response');
+            }
+            const data = parsed.data;
 
             // Apply update status to storage
-            if (data.update_required && data.update_url) {
+            if (data.status === 'upgrade-required') {
+                applyUiClientUpgradeRequired(data);
+            } else if (data.status === 'update-available') {
                 storage.getState().applyNativeUpdateStatus({
                     available: true,
-                    updateUrl: data.update_url
+                    updateUrl: data.updateUrl,
                 });
             } else {
                 storage.getState().applyNativeUpdateStatus({

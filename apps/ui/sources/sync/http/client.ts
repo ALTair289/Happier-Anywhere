@@ -14,6 +14,8 @@ import {
     readServerFetchWriteTimeoutMs,
     readServerReachabilityWaitTimeoutMs,
 } from '@/sync/runtime/connectivity/serverReachabilityTuning';
+import { buildUiClientCompatibilityHttpHeaders } from '@/sync/runtime/clientCompatibility/uiClientCompatibility';
+import { observeUiClientUpgradeRequiredResponse } from '@/sync/runtime/clientCompatibility/uiClientUpgradeRequired';
 
 export { resetRuntimeFetch, setRuntimeFetch } from '@/utils/system/runtimeFetch';
 
@@ -201,6 +203,11 @@ export async function serverFetch(
         && absoluteRequestUrl.origin !== activeServerUrl.origin;
 
     const headers = new Headers(init?.headers ?? {});
+    if (!isCrossOrigin) {
+        for (const [name, value] of Object.entries(buildUiClientCompatibilityHttpHeaders())) {
+            headers.set(name, value);
+        }
+    }
     let usedToken: string | null = null;
     if (options.includeAuth !== false) {
         const credentials = await TokenStorage.getCredentials();

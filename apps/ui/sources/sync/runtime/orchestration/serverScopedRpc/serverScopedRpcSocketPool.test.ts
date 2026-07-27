@@ -9,6 +9,7 @@ function createFakeSocket(options: Readonly<{ disconnectEventDelayMs?: number }>
     socket: any;
     connectSpy: ReturnType<typeof vi.fn>;
     disconnectSpy: ReturnType<typeof vi.fn>;
+    emitEvent: (event: string, ...args: any[]) => void;
 }> {
     const listeners = new Map<string, Set<Listener>>();
 
@@ -57,7 +58,7 @@ function createFakeSocket(options: Readonly<{ disconnectEventDelayMs?: number }>
         emit: vi.fn(),
     };
 
-    return { socket, connectSpy, disconnectSpy };
+    return { socket, connectSpy, disconnectSpy, emitEvent: emit };
 }
 
 describe('serverScopedRpcSocketPool', () => {
@@ -205,6 +206,45 @@ describe('serverScopedRpcSocketPool', () => {
         await vi.runAllTimersAsync();
         expect(reportUnreachableSpy).not.toHaveBeenCalled();
 
+        pool.resetForTests();
+    });
+
+    it('does not report upgrade-required connect errors as server reachability failures', async () => {
+        const { socket, emitEvent } = createFakeSocket();
+        const reportUnreachableSpy = vi.fn();
+        const pool = createServerScopedRpcSocketPool({
+            createSocket: () => socket,
+            reachability: {
+                waitForReachable: async () => {},
+                startReachability: async () => {},
+                reportUnreachable: reportUnreachableSpy,
+                subscribeNetworkAllowed: () => () => {},
+            },
+            readIdleDisconnectMs: () => 5_000,
+        });
+
+        const client = await pool.acquire({
+            serverUrl: 'https://server.example.test',
+            token: 't',
+            timeoutMs: 1_000,
+        });
+        emitEvent('connect_error', {
+            data: {
+                error: 'client-upgrade-required',
+                requirement: {
+                    v: 1,
+                    minimumSessionSyncProtocolVersion: 2,
+                    clientKind: 'ui-web',
+                    minimumAppVersion: '0.3.0',
+                    updateUrl: null,
+                },
+            },
+        });
+
+        expect(reportUnreachableSpy).not.toHaveBeenCalled();
+
+        client.disconnect();
+        await pool.stopAll();
         pool.resetForTests();
     });
 });

@@ -2,6 +2,8 @@ import { io } from 'socket.io-client';
 
 import { canonicalizeServerUrl } from '@/sync/domains/server/url/serverUrlCanonical';
 import { resolveSocketIoTransports } from '@/sync/runtime/socketIoTransports';
+import { buildUiClientCompatibilitySocketAuth } from '@/sync/runtime/clientCompatibility/uiClientCompatibility';
+import { applyUiClientUpgradeRequired } from '@/sync/runtime/clientCompatibility/uiClientUpgradeRequired';
 import {
     reportServerUnreachable,
     startServerReachabilitySupervisor,
@@ -135,6 +137,7 @@ async function connectSocketWithTimeout(socket: SocketLike, timeoutMs: number): 
 
         const onConnectError = (error: unknown) => {
             if (settled) return;
+            applyUiClientUpgradeRequired(error);
             settled = true;
             cleanup();
             reject(error instanceof Error ? error : new Error('Scoped RPC socket connection failed'));
@@ -164,6 +167,7 @@ export function createServerScopedRpcSocketPool(overrides?: Partial<Deps>): Read
                     token: params.token,
                     clientType: 'user-scoped' as const,
                     clientPurpose: 'scoped-rpc' as const,
+                    ...buildUiClientCompatibilitySocketAuth(),
                 },
                 forceNew: true,
                 ...(transports ? { transports } : null),
@@ -256,6 +260,7 @@ export function createServerScopedRpcSocketPool(overrides?: Partial<Deps>): Read
             deps.reachability.reportUnreachable(serverUrl, new Error(typeof reason === 'string' ? reason : 'socket disconnect'));
         });
         socket.on('connect_error', (error: unknown) => {
+            if (applyUiClientUpgradeRequired(error)) return;
             deps.reachability.reportUnreachable(serverUrl, error);
         });
         socket.on('error', (error: unknown) => {

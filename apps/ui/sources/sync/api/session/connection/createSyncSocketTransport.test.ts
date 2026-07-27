@@ -78,6 +78,10 @@ describe('createSyncSocketTransport', () => {
                     token: 'token-a',
                     clientType: 'user-scoped',
                     clientPurpose: 'sync',
+                    clientCompatibility: expect.objectContaining({
+                        v: 1,
+                        sessionSyncProtocolVersion: 2,
+                    }),
                 }),
                 transports: ['websocket'],
                 forceNew: true,
@@ -109,6 +113,37 @@ describe('createSyncSocketTransport', () => {
         socket.__emit('error', error);
 
         expect(errorListener).toHaveBeenCalledWith(error);
+    });
+
+    it('handles upgrade-required connect errors without classifying the server as unreachable', async () => {
+        vi.resetModules();
+        const socket = createSocketStub();
+        vi.doMock('socket.io-client', () => ({
+            io: vi.fn(() => socket),
+        }));
+
+        const { createSyncSocketTransport } = await import('./createSyncSocketTransport');
+        const { transport } = createSyncSocketTransport({
+            endpoint: 'https://api.example.test',
+            token: 'token-a',
+        });
+        const errorListener = vi.fn();
+        transport.onError(errorListener);
+
+        socket.__emit('connect_error', {
+            data: {
+                error: 'client-upgrade-required',
+                requirement: {
+                    v: 1,
+                    minimumSessionSyncProtocolVersion: 2,
+                    clientKind: 'ui-web',
+                    minimumAppVersion: '0.3.0',
+                    updateUrl: null,
+                },
+            },
+        });
+
+        expect(errorListener).not.toHaveBeenCalled();
     });
 
     it('disconnects the underlying socket when transport.destroy is called', async () => {

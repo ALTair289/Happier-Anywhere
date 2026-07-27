@@ -18,7 +18,22 @@ export type SyncError = {
   nextRetryAt?: number;
 } | null;
 
-export type NativeUpdateStatus = { available: boolean; updateUrl?: string } | null;
+export type NativeUpdateStatus = {
+  available: boolean;
+  updateUrl?: string;
+  required?: boolean;
+  minimumAppVersion?: string;
+} | null;
+
+export function mergeNativeUpdateStatus(
+  previous: NativeUpdateStatus,
+  next: NativeUpdateStatus,
+): NativeUpdateStatus {
+  if (previous?.required === true && next?.required !== true) {
+    return previous;
+  }
+  return next;
+}
 
 export type EndpointConnectivityStatus = 'idle' | 'offline' | 'connecting' | 'online' | 'auth_failed' | 'shutting_down';
 
@@ -98,7 +113,7 @@ export function createRealtimeDomain<S extends RealtimeDomain>({
     applyNativeUpdateStatus: (status) =>
       set((state) => ({
         ...state,
-        nativeUpdateStatus: status,
+        nativeUpdateStatus: mergeNativeUpdateStatus(state.nativeUpdateStatus, status),
       })),
     setRealtimeStatus: (status) =>
       set((state) => ({

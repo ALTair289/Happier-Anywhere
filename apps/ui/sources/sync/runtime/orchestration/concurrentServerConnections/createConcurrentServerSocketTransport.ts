@@ -5,6 +5,8 @@ import type {
 } from '@happier-dev/connection-supervisor';
 
 import { resolveSocketIoTransports } from '@/sync/runtime/socketIoTransports';
+import { buildUiClientCompatibilitySocketAuth } from '@/sync/runtime/clientCompatibility/uiClientCompatibility';
+import { applyUiClientUpgradeRequired } from '@/sync/runtime/clientCompatibility/uiClientUpgradeRequired';
 
 export type ConcurrentServerSocket = Socket;
 
@@ -22,6 +24,7 @@ export function createConcurrentServerSocketTransport(params: Readonly<{
             token: params.token,
             clientType: 'user-scoped' as const,
             clientPurpose: 'concurrent-server-cache' as const,
+            ...buildUiClientCompatibilitySocketAuth(),
         },
         ...(transports ? { transports } : null),
         withCredentials: false,
@@ -52,6 +55,7 @@ export function createConcurrentServerSocketTransport(params: Readonly<{
     });
 
     socket.on('connect_error', (error: unknown) => {
+        if (applyUiClientUpgradeRequired(error)) return;
         errorListeners.forEach((listener) => listener(error));
     });
 
