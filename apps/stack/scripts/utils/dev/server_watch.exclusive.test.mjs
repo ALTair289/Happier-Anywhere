@@ -1465,6 +1465,44 @@ test('server executor renders retryability only from the coordinator committed d
   });
 });
 
+test('unannotated restart failure reports unavailable when the recorded backend process and listener are gone', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    const lifecycle = [];
+    const maintenance = [];
+    const executor = createDevServerReloadExecutor(
+      createExecutorOptions(serverDir, {
+        proxyController: {
+          enterMaintenance(options) { maintenance.push(options); },
+        },
+      }),
+      {
+        isPidAliveImpl: () => false,
+        listListenPidsWithStatusImpl: async () => ({ status: 'ok', supported: true, pids: [] }),
+        recordStackRuntimeServerLifecycleImpl: async (_path, transition) => lifecycle.push(transition),
+        logger: { log() {}, error() {} },
+      },
+    );
+    const plan = createDevServerReloadPlan({
+      changedDescriptors: ['server:app'],
+      generation: 10,
+    });
+
+    await executor.publishFailureDisposition({
+      error: new Error('restart failed before failure annotation'),
+      plan,
+      retryScheduled: false,
+      retryAfterMs: null,
+    });
+
+    assert.equal(lifecycle.at(-1)?.phase, 'unavailable');
+    assert.deepEqual(maintenance.at(-1), {
+      retryAfterMs: 0,
+      retryable: false,
+      message: 'Server unavailable; edit or restart the stack.',
+    });
+  });
+});
+
 test('server executor observes the active child and disarms observation on close', async (t) => {
   await withTempServerDir(t, async (serverDir) => {
     const child = Object.assign(new EventEmitter(), { pid: 101, exitCode: null, signalCode: null });

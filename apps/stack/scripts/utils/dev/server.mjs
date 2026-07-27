@@ -1139,14 +1139,36 @@ export function createDevServerReloadExecutor({
     ) return null;
     return await recordStackRuntimeServerLifecycleImpl(runtimeStatePath, transition);
   };
+  const activeBackendIsProvablyUnavailable = async () => {
+    const activeChild = serverProcRef?.current;
+    const activePid = Number(activeChild?.pid);
+    if (!Number.isInteger(activePid) || activePid <= 1) return false;
+    if (!hasChildExited(activeChild) && isPidAliveImpl(activePid)) return false;
+    try {
+      const observation = await listListenPidsWithStatusImpl(
+        proxyController ? activeBackendPort : serverPort,
+        { timeoutMs: 1_000 },
+      );
+      return observation?.status === 'ok' && observation.pids.length === 0;
+    } catch {
+      return false;
+    }
+  };
   const publishFailureDisposition = async ({ error, plan, retryScheduled, retryAfterMs }) => {
     const failure = error?.serverRestartFailure;
-    const unavailable = failure?.oldServerStopped === true
+    const annotatedUnavailable = failure?.oldServerStopped === true
       && failure?.serviceRestored !== true
       && failure?.transportCommitted !== true
       && failure?.activationCommitUnknown !== true
       && failure?.kind !== 'cleanup_incomplete'
       && error?.code !== 'ESERVERPROVISIONALCLEANUPINCOMPLETE';
+    const observedUnavailable = failure?.serviceRestored !== true
+      && failure?.transportCommitted !== true
+      && failure?.activationCommitUnknown !== true
+      && failure?.kind !== 'cleanup_incomplete'
+      && error?.code !== 'ESERVERPROVISIONALCLEANUPINCOMPLETE'
+      && await activeBackendIsProvablyUnavailable();
+    const unavailable = annotatedUnavailable || observedUnavailable;
     const transition = {
       phase: retryScheduled ? 'retry-scheduled' : unavailable ? 'unavailable' : 'blocked',
       plan,
