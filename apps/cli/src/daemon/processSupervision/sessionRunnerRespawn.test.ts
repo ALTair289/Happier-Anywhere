@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import {
+  CONNECTED_SERVICE_UX_DIAGNOSTIC_ACTIONS,
+  CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES,
+  SPAWN_SESSION_ERROR_CODES,
+  SPAWN_SESSION_ERROR_DETAIL_KINDS,
+} from '@happier-dev/protocol';
+
 import type { TrackedSession } from '@/daemon/types';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 
@@ -182,7 +189,7 @@ describe('createSessionRunnerRespawnManager', () => {
     expect(spawnSession).toHaveBeenCalledWith(expect.not.objectContaining({ resume: expect.anything() }));
   });
 
-  it('preserves daemon initialPrompt across respawn so startup delivery can recover after a crash', async () => {
+  it('preserves pending first-input custody and stable identity across respawn', async () => {
     vi.useFakeTimers();
     const spawnSession = vi.fn(async (_opts: unknown) => ({ type: 'success' as const, pid: 123 }));
 
@@ -206,7 +213,10 @@ describe('createSessionRunnerRespawnManager', () => {
       spawnOptions: {
         directory: '/tmp',
         backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
-        initialPrompt: 'Recover this startup prompt after respawn.',
+        pendingFirstInput: {
+          text: 'Recover this startup prompt after respawn.',
+          localId: 'spawn-first:stable-respawn',
+        },
       } as any,
     };
 
@@ -217,7 +227,10 @@ describe('createSessionRunnerRespawnManager', () => {
     expect(spawnSession).toHaveBeenCalledWith(
       expect.objectContaining({
         existingSessionId: 'sess-initial-prompt',
-        initialPrompt: 'Recover this startup prompt after respawn.',
+        pendingFirstInput: {
+          text: 'Recover this startup prompt after respawn.',
+          localId: 'spawn-first:stable-respawn',
+        },
         approvedNewDirectoryCreation: true,
       }),
     );
@@ -289,6 +302,156 @@ describe('createSessionRunnerRespawnManager', () => {
       existingSessionId: 'sess-connected-service-restart',
       resume: 'codex-thread',
     }));
+  });
+
+  it('bounds a storm of SUCCESSFUL intended restarts across cycles by the rolling window (RR-2)', async () => {
+    vi.useFakeTimers();
+    const spawnSession = vi.fn(async (_opts: unknown) => ({ type: 'success' as const, pid: 123 }));
+    const onRespawnTerminal = vi.fn();
+
+    const manager = createSessionRunnerRespawnManager({
+      enabled: true,
+      maxRestarts: 10,
+      maxIntendedRestarts: 2,
+      baseDelayMs: 50,
+      maxDelayMs: 50,
+      jitterMs: 0,
+      isSessionAlreadyRunning: async () => false,
+      spawnSession: (opts) => spawnSession(opts),
+      onRespawnTerminal,
+      random: () => 0,
+      logDebug: () => {},
+      logWarn: () => {},
+    });
+
+    const tracked: TrackedSession = {
+      startedBy: 'daemon',
+      pid: 111,
+      happySessionId: 'sess-intended-storm',
+      spawnOptions: { directory: '/tmp', backendTarget: { kind: 'builtInAgent', agentId: 'claude' }, resume: 'claude-thread' } as any,
+    };
+
+    // Two intended restarts, EACH succeeding (state would previously reset on success).
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      manager.handleUnexpectedExit(
+        tracked,
+        { reason: 'process-exited', code: null, signal: 'SIGTERM' },
+        { forceRestart: true },
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(spawnSession).toHaveBeenCalledTimes(2);
+
+    // Third intended restart within the window: refused loudly despite the intermediate successes —
+    // the exact incident-#1 restart-loop shape (every relaunch "succeeds", then restarts again).
+    manager.handleUnexpectedExit(
+      tracked,
+      { reason: 'process-exited', code: null, signal: 'SIGTERM' },
+      { forceRestart: true },
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(spawnSession).toHaveBeenCalledTimes(2);
+    expect(onRespawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'sess-intended-storm',
+      reason: 'no_restart',
+      detail: 'max_intended_restarts_exceeded:2',
+    }));
+  });
+
+  it('still respawns a genuine crash after a successful intended restart (crash budget untouched)', async () => {
+    vi.useFakeTimers();
+    const spawnSession = vi.fn(async (_opts: unknown) => ({ type: 'success' as const, pid: 123 }));
+
+    const manager = createSessionRunnerRespawnManager({
+      enabled: true,
+      maxRestarts: 1,
+      maxIntendedRestarts: 5,
+      baseDelayMs: 50,
+      maxDelayMs: 50,
+      jitterMs: 0,
+      isSessionAlreadyRunning: async () => false,
+      spawnSession: (opts) => spawnSession(opts),
+      random: () => 0,
+      logDebug: () => {},
+      logWarn: () => {},
+    });
+
+    const tracked: TrackedSession = {
+      startedBy: 'daemon',
+      pid: 111,
+      happySessionId: 'sess-crash-after-intended',
+      spawnOptions: { directory: '/tmp', backendTarget: { kind: 'builtInAgent', agentId: 'claude' }, resume: 'claude-thread' } as any,
+    };
+
+    manager.handleUnexpectedExit(
+      tracked,
+      { reason: 'process-exited', code: null, signal: 'SIGTERM' },
+      { forceRestart: true },
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+
+    // A later genuine crash must still respawn on the generic budget.
+    manager.handleUnexpectedExit(tracked, { reason: 'process-exited', code: 1, signal: null });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(spawnSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs intended connected-service restarts distinctly from respawn retries', async () => {
+    vi.useFakeTimers();
+    const spawnSession = vi
+      .fn()
+      .mockResolvedValueOnce({ type: 'error' as const, errorCode: 'SPAWN_FAILED' })
+      .mockResolvedValueOnce({ type: 'success' as const, pid: 123 });
+    const logDebug = vi.fn();
+
+    const manager = createSessionRunnerRespawnManager({
+      enabled: true,
+      maxRestarts: 2,
+      baseDelayMs: 50,
+      maxDelayMs: 50,
+      jitterMs: 0,
+      isSessionAlreadyRunning: async () => false,
+      spawnSession: (opts) => spawnSession(opts),
+      random: () => 0,
+      logDebug,
+      logWarn: () => {},
+    });
+
+    const tracked: TrackedSession = {
+      startedBy: 'daemon',
+      pid: 111,
+      happySessionId: 'sess-connected-service-telemetry',
+      spawnOptions: {
+        directory: '/tmp',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-thread',
+      },
+    };
+
+    manager.handleUnexpectedExit(
+      tracked,
+      { reason: 'process-exited', code: null, signal: 'SIGTERM' },
+      { forceRestart: true },
+    );
+
+    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(logDebug).toHaveBeenCalledWith(
+      expect.stringContaining('Respawning runner for session sess-connected-service-telemetry'),
+      expect.objectContaining({
+        respawnKind: 'connected_service_intended_restart',
+        attempt: 1,
+      }),
+    );
+    expect(logDebug).toHaveBeenCalledWith(
+      expect.stringContaining('Respawning runner for session sess-connected-service-telemetry'),
+      expect.objectContaining({
+        respawnKind: 'respawn_retry',
+        attempt: 2,
+      }),
+    );
   });
 
   it('does not delay connected-service restart requests behind crash-respawn backoff', async () => {
@@ -692,6 +855,86 @@ describe('createSessionRunnerRespawnManager', () => {
     expect(logWarn).toHaveBeenCalledWith(
       '[DAEMON RUN] Respawn suppressed for session sess-stale-auth (auth:not_authenticated)',
     );
+
+    await vi.advanceTimersByTimeAsync(150);
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses respawn retries when spawnSession returns a structured resume-unreachable continuity error', async () => {
+    vi.useFakeTimers();
+    const spawnSession = vi.fn().mockResolvedValue({
+      type: 'error' as const,
+      errorCode: SPAWN_SESSION_ERROR_CODES.SPAWN_VALIDATION_FAILED,
+      errorMessage: 'provider_session_state_unavailable_for_resume',
+      errorDetail: {
+        kind: SPAWN_SESSION_ERROR_DETAIL_KINDS.CONNECTED_SERVICE_RESUME_UNREACHABLE,
+        continuityErrorCode: 'provider_session_state_unavailable_for_resume',
+        failurePhase: 'continuity',
+        agentId: 'claude',
+        reason: 'no_resumable_session_file',
+        uxDiagnostic: {
+          code: CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.providerSessionStateUnavailableForResume,
+          failurePhase: 'continuity',
+          source: 'spawn_resume',
+          agentId: 'claude',
+          retryable: false,
+          suggestedActions: [
+            CONNECTED_SERVICE_UX_DIAGNOSTIC_ACTIONS.startFreshUnderSelectedAccount,
+            CONNECTED_SERVICE_UX_DIAGNOSTIC_ACTIONS.resumeCurrentAccount,
+            CONNECTED_SERVICE_UX_DIAGNOSTIC_ACTIONS.openConnectedAccounts,
+          ],
+          diagnostics: {
+            reason: 'no_resumable_session_file',
+          },
+        },
+      },
+    });
+    const logWarn = vi.fn();
+    const onRespawnTerminal = vi.fn();
+
+    const manager = createSessionRunnerRespawnManager({
+      enabled: true,
+      maxRestarts: 2,
+      baseDelayMs: 50,
+      maxDelayMs: 50,
+      jitterMs: 0,
+      isSessionAlreadyRunning: async () => false,
+      spawnSession: (opts) => spawnSession(opts),
+      onRespawnTerminal,
+      random: () => 0,
+      logDebug: () => {},
+      logWarn,
+    });
+
+    const tracked: TrackedSession = {
+      startedBy: 'daemon',
+      pid: 111,
+      happySessionId: 'sess-resume-missing',
+      vendorResumeId: 'vendor-missing',
+      spawnOptions: {
+        directory: '/tmp',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        connectedServices: {
+          v: 1,
+          bindingsByServiceId: {
+            'claude-subscription': { source: 'connected', profileId: 'work' },
+          },
+        },
+      },
+    };
+
+    manager.handleUnexpectedExit(tracked, { reason: 'process-missing', code: null, signal: null });
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+    expect(logWarn).toHaveBeenCalledWith(
+      '[DAEMON RUN] Respawn suppressed for session sess-resume-missing (resume unreachable)',
+    );
+    expect(onRespawnTerminal).toHaveBeenCalledWith({
+      sessionId: 'sess-resume-missing',
+      previousPid: 111,
+      reason: 'resume_unreachable',
+    });
 
     await vi.advanceTimersByTimeAsync(150);
     expect(spawnSession).toHaveBeenCalledTimes(1);

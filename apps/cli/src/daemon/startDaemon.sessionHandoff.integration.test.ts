@@ -36,10 +36,14 @@ const harness = vi.hoisted(() => {
         handleServerUpdate: vi.fn(),
     }));
     const apiMachine = {
+        recoverDaemonTerminalSessionMutationJournals: vi.fn(async () => {}),
+        enqueueDaemonTerminalExactTurnEnd: vi.fn(async () => {}),
         setRPCHandlers: vi.fn(),
         onUpdate: vi.fn(),
         onAccountSettingsVersionHint: vi.fn(() => () => {}),
+        onConnectedServicesProjectionChange: vi.fn(() => () => {}),
         onConnectionStateChange: vi.fn(() => () => {}),
+        onPendingSessionActivationHint: vi.fn(() => () => {}),
         connect: vi.fn((params?: { onConnect?: () => void | Promise<void> }) => {
             void params?.onConnect?.();
             setTimeout(() => requestShutdownRef?.('happier-cli'), 0);
@@ -47,6 +51,7 @@ const harness = vi.hoisted(() => {
         callMachineRpc: vi.fn(async () => ({})),
         updateMachineMetadata: vi.fn(async () => {}),
         updateDaemonState: vi.fn(async () => {}),
+        awaitPendingRpcRequests: vi.fn(async () => {}),
         shutdown: vi.fn(),
         onMachineTransferEnvelope: vi.fn(() => () => {}),
         sendMachineTransferEnvelope: vi.fn(),
@@ -109,7 +114,14 @@ vi.mock('@/ui/logger', () => ({
 
 vi.mock('@/ui/auth', () => ({
     authAndSetupMachineIfNeeded: vi.fn(async () => ({
-        credentials: { token: 'token-session-handoff', encryption: { publicKey: 'a', machineKey: 'b' } },
+        credentials: {
+            token: 'token-session-handoff',
+            encryption: {
+                type: 'dataKey',
+                publicKey: new Uint8Array(32).fill(1),
+                machineKey: new Uint8Array(32).fill(2),
+            },
+        },
         machineId: 'machine-session-handoff',
     })),
 }));
@@ -143,24 +155,56 @@ vi.mock('@/utils/spawnHappyCLI', () => ({
     spawnHappyCLI: vi.fn(),
 }));
 
-vi.mock('@/backends/catalog', () => ({
-    AGENTS: {},
+vi.mock('@/backends/catalog', async () => {
+    const { buildClaudeRuntimeLocalHandoffMetadata } = await import(
+        '@/backends/claude/sessionHandoff/runtimeLocalMetadata'
+    );
+    return {
+    AGENTS: {
+        claude: {
+            buildRuntimeLocalHandoffMetadata: buildClaudeRuntimeLocalHandoffMetadata,
+        },
+    },
+    getConnectedServiceRuntimeAuthAdapter: vi.fn(async () => null),
+    getConnectedServiceStateSharingDescriptor: vi.fn(async () => null),
     getVendorResumeSupport: vi.fn(async () => () => true),
+    notifyTerminalAttachmentRetiredThroughCatalog: vi.fn(async () => {}),
     requireCatalogEntry: vi.fn(),
+    resolveConnectedServiceCandidatePersistedSessionFile: vi.fn(async () => null),
+    resolveConnectedServiceCredentialLifecycleDescriptor: vi.fn(async (providerId: string) => ({
+        providerId,
+        serviceIds: [],
+        spawnPreflightOauthRefresh: { mode: 'expiry_window' as const },
+        refreshedCredentialApplication: { mode: 'no_restart_required' as const },
+        predictiveSoftSwitch: { mode: 'unsupported' as const, liveSessionRequirement: { kind: 'none' as const } },
+        sameAccountFanoutStrategy: 'none' as const,
+        generationApplicationScope: 'unsupported' as const,
+        runtimeAuthApply: { directLiveHotAuth: 'unsupported' as const },
+    })),
+    resolveConnectedServiceGenerationApplicationScope: vi.fn(async () => ({
+        status: 'unsupported' as const,
+        errorCode: 'generation_application_scope_unsupported',
+    })),
+    resolveConnectedServiceSwitchContinuity: vi.fn(async () => null),
     resolveAgentCliSubcommand: vi.fn(),
-    resolveCatalogAgentId: vi.fn(() => 'codex'),
-}));
+    resolveCatalogAgentId: vi.fn((agentId?: string | null) => agentId ?? 'codex'),
+    };
+});
 
 vi.mock('@/persistence', () => ({
     writeDaemonState: vi.fn(),
+    clearDaemonState: vi.fn(async () => {}),
     acquireDaemonLock: vi.fn(async () => harness.lockHandle),
     releaseDaemonLock: vi.fn(async () => {}),
     readCredentials: vi.fn(async () => null),
+    readSettings: vi.fn(async () => ({})),
 }));
 
 vi.mock('./controlClient', () => ({
     cleanupDaemonState: vi.fn(async () => {}),
+    forceStopKnownDaemonPid: vi.fn(async () => {}),
     isDaemonRunningCurrentlyInstalledHappyVersion: vi.fn(async () => false),
+    resolveDaemonSpawnSessionByNonce: vi.fn(async () => ({ status: 'not_found' as const })),
     stopDaemon: vi.fn(async () => {}),
 }));
 
@@ -198,7 +242,7 @@ vi.mock('./sessions/visibleConsoleSpawnWaiter', () => ({
 }));
 
 vi.mock('./sessions/stopSession', () => ({
-    createStopSession: vi.fn(() => vi.fn(async () => ({ stopped: true }))),
+    createStopSession: vi.fn(() => vi.fn(async () => ({ status: 'stopped' as const }))),
 }));
 
 vi.mock('./sessions/resolveSpawnWebhookResult', () => ({
@@ -338,11 +382,6 @@ vi.mock('./connectedServices/quotas/resolveConnectedServicesQuotasDaemonEnabled'
 
 vi.mock('./connectedServices/quotas/startConnectedServiceQuotasLoop', () => ({
     startConnectedServiceQuotasLoop: vi.fn(() => ({ stop: vi.fn(), pause: vi.fn(), resume: vi.fn() })),
-}));
-
-vi.mock('@/agent/runtime/daemonInitialPrompt', () => ({
-    HAPPIER_DAEMON_INITIAL_PROMPT_ENV_KEY: 'HAPPIER_DAEMON_INITIAL_PROMPT',
-    normalizeDaemonInitialPrompt: vi.fn(() => null),
 }));
 
 vi.mock('@/terminal/attachment/terminalAttachmentInfo', () => ({

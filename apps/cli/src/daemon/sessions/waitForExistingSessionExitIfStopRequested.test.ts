@@ -72,6 +72,46 @@ describe('waitForExistingSessionExitIfStopRequested', () => {
     });
   });
 
+  it('does not complete the stop observation before the exit lifecycle obligation settles', async () => {
+    const { waitForExistingSessionExitIfStopRequested } = await import('./waitForExistingSessionExitIfStopRequested');
+    let resolveExit = (): void => {
+      throw new Error('Exit resolver was not installed');
+    };
+    let markExitObserved = (): void => {
+      throw new Error('Exit observation resolver was not installed');
+    };
+    const exitObserved = new Promise<void>((resolve) => {
+      markExitObserved = resolve;
+    });
+    const onExitObserved = vi.fn(() => new Promise<void>((resolve) => {
+      markExitObserved();
+      resolveExit = resolve;
+    }));
+    const pidToTrackedSession = new Map<number, any>([
+      [1, { happySessionId: 'sess-1', stopRequestedAtMs: 123 }],
+    ]);
+    let completed = false;
+
+    const wait = waitForExistingSessionExitIfStopRequested({
+      sessionId: 'sess-1',
+      pidToTrackedSession,
+      isSessionRunnerActive: async () => false,
+      timeoutMs: 1_000,
+      pollIntervalMs: 50,
+      onExitObserved,
+    }).then(() => {
+      completed = true;
+    });
+
+    await exitObserved;
+    await Promise.resolve();
+    expect(completed).toBe(false);
+
+    resolveExit();
+    await wait;
+    expect(completed).toBe(true);
+  });
+
   it('can observe explicit tracked pids even when no stopRequestedAtMs marker exists', async () => {
     const { waitForExistingSessionExitIfStopRequested } = await import('./waitForExistingSessionExitIfStopRequested');
 

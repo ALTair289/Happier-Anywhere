@@ -6,6 +6,7 @@ import type { CommandHandler } from '@/cli/commandRegistry';
 import type { CloudConnectTarget } from '@/cloud/connectTypes';
 import type { DaemonSpawnHooks } from '@/daemon/spawnHooks';
 import type { TrackedSession } from '@/daemon/types';
+import type { BoundTerminalAttachmentInfo } from '@/terminal/attachment/terminalAttachmentInfo';
 import type { DirectSessionsProviderId } from '@happier-dev/protocol';
 import type {
   BackendTargetRefV1,
@@ -73,6 +74,18 @@ export type ProviderRuntimeLocalHandoffMetadataBuilder = (params: Readonly<{
   trackedSession: TrackedSession;
   vendorResumeId: string;
 }>) => Partial<Pick<Metadata, 'claudeSessionId' | 'codexSessionId' | 'opencodeSessionId' | 'directSessionV1'>>;
+
+export type ProviderTerminalAttachmentRetirementHook = (params: Readonly<{
+  happyHomeDir: string;
+  sessionId: string;
+  attachmentInfo: BoundTerminalAttachmentInfo;
+}>) => Promise<void>;
+
+export type ProviderTerminalAttachmentControlProbe = (params: Readonly<{
+  happyHomeDir: string;
+  sessionId: string;
+  attachmentId?: string;
+}>) => Promise<boolean>;
 
 export type ProviderAttachScope = 'local' | 'remote';
 
@@ -274,6 +287,14 @@ export type AgentCatalogEntry = Readonly<{
    * and expose it through this catalog hook instead of branching in shared CLI code.
    */
   getProviderAttachOps?: () => Promise<ProviderAttachOps>;
+  /**
+   * Optional provider-owned cleanup after an exact terminal attachment has been retired.
+   * Shared lifecycle code broadcasts the immutable retirement fact; providers clean only
+   * descriptors fenced to that attachment and must not infer host ownership here.
+   */
+  onTerminalAttachmentRetired?: ProviderTerminalAttachmentRetirementHook;
+  /** Whether this provider owns attachment-bound control state for a disconnected host. */
+  hasTerminalAttachmentControlDescriptor?: ProviderTerminalAttachmentControlProbe;
   /**
    * Optional provider-owned connected-services materializer.
    *

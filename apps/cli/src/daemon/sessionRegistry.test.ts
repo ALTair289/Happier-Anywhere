@@ -104,6 +104,138 @@ describe('sessionRegistry', () => {
     expect(markers2[0].happySessionId).toBe('sess-2');
   });
 
+  it('atomically upgrades pre-webhook placeholder custody without losing the spawn nonce', async () => {
+    const { listSessionMarkers, writeSessionMarker } = await import('./sessionRegistry');
+    const respawn = {
+      version: 1 as const,
+      directory: '/tmp/project',
+      backendTarget: { kind: 'builtInAgent' as const, agentId: 'claude' as const },
+      spawnNonce: 'spawn-nonce-marker-upgrade',
+    };
+
+    await writeSessionMarker({
+      pid: 12346,
+      happySessionId: 'PID-12346',
+      startedBy: 'daemon',
+      cwd: '/tmp/project',
+      respawn,
+    });
+    await writeSessionMarker({
+      pid: 12346,
+      happySessionId: 'sess-marker-upgraded',
+      startedBy: 'daemon',
+      cwd: '/tmp/project',
+      metadata: { hostPid: 12346 },
+      respawn,
+    });
+
+    await expect(listSessionMarkers()).resolves.toEqual([
+      expect.objectContaining({
+        pid: 12346,
+        happySessionId: 'sess-marker-upgraded',
+        metadata: { hostPid: 12346 },
+        respawn: expect.objectContaining({
+          spawnNonce: 'spawn-nonce-marker-upgrade',
+        }),
+      }),
+    ]);
+  });
+
+  it('persists and clears only the exact active turn for the matching tracked session marker', async () => {
+    const {
+      listSessionMarkers,
+      updateSessionMarkerActiveTurn,
+      writeSessionMarker,
+    } = await import('./sessionRegistry');
+    await writeSessionMarker({
+      pid: 12347,
+      happySessionId: 'sess-active-turn',
+      startedBy: 'daemon',
+      cwd: '/tmp',
+    });
+
+    await expect(updateSessionMarkerActiveTurn({
+      pid: 12347,
+      sessionId: 'sess-active-turn',
+      activeTurnId: 'session-turn:exact-1',
+    })).resolves.toBe(true);
+    await expect(listSessionMarkers()).resolves.toEqual([
+      expect.objectContaining({ activeTurnId: 'session-turn:exact-1' }),
+    ]);
+
+    await expect(updateSessionMarkerActiveTurn({
+      pid: 12347,
+      sessionId: 'other-session',
+      activeTurnId: null,
+    })).resolves.toBe(false);
+    await expect(listSessionMarkers()).resolves.toEqual([
+      expect.objectContaining({ activeTurnId: 'session-turn:exact-1' }),
+    ]);
+
+    await expect(updateSessionMarkerActiveTurn({
+      pid: 12347,
+      sessionId: 'sess-active-turn',
+      activeTurnId: null,
+    })).resolves.toBe(true);
+    const [cleared] = await listSessionMarkers();
+    expect(cleared).not.toHaveProperty('activeTurnId');
+  });
+
+  it('publishes terminal host death into the existing session marker state file', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-09T18:00:00.000Z'));
+    const {
+      clearSessionMarkerTerminalHostHealth,
+      listSessionMarkers,
+      publishSessionMarkerTerminalHostHealth,
+      writeSessionMarker,
+    } = await import('./sessionRegistry');
+
+    await writeSessionMarker({
+      pid: 67178,
+      happySessionId: 'sess-host-dead',
+      startedBy: 'daemon',
+      cwd: '/workspace',
+    });
+
+    await expect(publishSessionMarkerTerminalHostHealth({
+      pid: 67178,
+      health: {
+        status: 'host_dead',
+        sessionId: 'sess-host-dead',
+        runnerPid: 67178,
+        hostKind: 'zellij',
+        zellijSessionName: 'happier-claude-unified-67178-1783572630999',
+        observedAt: 1783616376567,
+        reason: 'pane_dead',
+      },
+    })).resolves.toBe(true);
+
+    expect(await listSessionMarkers()).toEqual([
+      expect.objectContaining({
+        pid: 67178,
+        happySessionId: 'sess-host-dead',
+        terminalHostHealth: {
+          status: 'host_dead',
+          sessionId: 'sess-host-dead',
+          runnerPid: 67178,
+          hostKind: 'zellij',
+          zellijSessionName: 'happier-claude-unified-67178-1783572630999',
+          observedAt: 1783616376567,
+          reason: 'pane_dead',
+        },
+      }),
+    ]);
+
+    await expect(clearSessionMarkerTerminalHostHealth({
+      pid: 67178,
+      sessionId: 'sess-host-dead',
+    })).resolves.toBe(true);
+    expect(await listSessionMarkers()).toEqual([
+      expect.not.objectContaining({ terminalHostHealth: expect.anything() }),
+    ]);
+  });
+
   it('should ignore markers with wrong happyHomeDir and tolerate invalid JSON', async () => {
     const { configuration } = await import('@/configuration');
     const { listSessionMarkers } = await import('./sessionRegistry');

@@ -89,7 +89,7 @@ export function startDaemonHeartbeatLoop(params: Readonly<{
   spawnResourceCleanupByPid: Map<number, () => void>;
   sessionAttachCleanupByPid: Map<number, () => Promise<void>>;
   getApiMachineForSessions: () => ApiMachineClient | null;
-  onChildExited?: (pid: number, exit: Readonly<{ reason: string; code: number | null; signal: string | null }>) => void;
+  onChildExited?: (pid: number, exit: Readonly<{ reason: string; code: number | null; signal: string | null }>) => void | Promise<void>;
   controlPort: number;
   fileState: DaemonLocallyPersistedState;
   currentCliVersion: string;
@@ -225,7 +225,7 @@ export function startDaemonHeartbeatLoop(params: Readonly<{
               pruneReason === 'process-missing' ? 'process no longer exists' : 'PID was reused by another process'
             })`,
           );
-          onChildExitedForPrune(pid, { reason: pruneReason, code: null, signal: null });
+          await onChildExitedForPrune(pid, { reason: pruneReason, code: null, signal: null });
           continue;
         }
         if (tracked.happySessionId) {

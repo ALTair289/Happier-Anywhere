@@ -8,9 +8,33 @@ import type { HappyProcessInfo } from './doctor';
 
 import { adoptSessionsFromMarkers } from './reattach';
 import type { SessionRunnerRespawnDescriptorV1 } from './processSupervision/sessionRunnerRespawnDescriptor';
+import { resolveSessionRunnerRestartEligibility } from './sessionRunnerRuntime/resolveRestartEligibility';
 import type { Credentials } from '@/persistence';
 
 describe('adoptSessionsFromMarkers respawn descriptor', () => {
+  it('restores the exact active turn from the adopted runner marker without inference', () => {
+    const command = `${process.execPath} -e "setInterval(()=>{}, 1000)"`;
+    const map = new Map<number, TrackedSession>();
+    const { adopted } = adoptSessionsFromMarkers({
+      markers: [{
+        pid: 122,
+        happySessionId: 'sess-active-turn',
+        happyHomeDir: '/tmp/happy-home',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        startedBy: 'daemon',
+        processCommandHash: hashProcessCommand(command),
+        processCommand: command,
+        activeTurnId: 'session-turn:restored-exact',
+      }],
+      happyProcesses: [{ pid: 122, command, type: 'daemon-spawned-session' } satisfies HappyProcessInfo],
+      pidToTrackedSession: map,
+    });
+
+    expect(adopted).toBe(1);
+    expect(map.get(122)?.activeTurnId).toBe('session-turn:restored-exact');
+  });
+
   it('hydrates spawnOptions when marker includes respawn descriptor', () => {
     const command = `${process.execPath} -e "setInterval(()=>{}, 1000)"`;
     const marker = {
@@ -367,5 +391,70 @@ describe('adoptSessionsFromMarkers respawn descriptor', () => {
     expect(adopted).toBe(1);
     expect(map.get(680)?.happySessionId).toBe('sess-680');
     expect(map.get(680)?.reattachedFromDiskMarker).toBe(true);
+  });
+
+  it('restores vendorResumeId from the respawn descriptor so restart eligibility survives adoption', () => {
+    const command = `${process.execPath} -e "setInterval(()=>{}, 1000)" --happy-starting-mode remote --started-by daemon`;
+    const marker = {
+      pid: 781,
+      happySessionId: 'sess-781',
+      happyHomeDir: '/tmp/happy-home',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      startedBy: 'daemon' as const,
+      cwd: '/tmp/workspace',
+      processCommandHash: hashProcessCommand(command),
+      processCommand: command,
+      metadata: { path: '/tmp/workspace', hostPid: 781 },
+      respawn: {
+        version: 1 as const,
+        directory: '/tmp/workspace',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        vendorResumeId: 'vendor-sess-781',
+      } satisfies SessionRunnerRespawnDescriptorV1,
+    };
+
+    const map = new Map<number, TrackedSession>();
+    const { adopted } = adoptSessionsFromMarkers({
+      markers: [marker],
+      happyProcesses: [{ pid: 781, command, type: 'daemon-spawned-session' } satisfies HappyProcessInfo],
+      pidToTrackedSession: map,
+    });
+
+    expect(adopted).toBe(1);
+    expect(map.get(781)?.vendorResumeId).toBe('vendor-sess-781');
+    expect(resolveSessionRunnerRestartEligibility(map.get(781)).eligible).toBe(true);
+  });
+
+  it('backfills vendorResumeId from live argv when the descriptor lacks resume identity', () => {
+    const command = `${process.execPath} -e "setInterval(()=>{}, 1000)" --resume vendor-argv-782 --happy-starting-mode remote --started-by daemon`;
+    const marker = {
+      pid: 782,
+      happySessionId: 'sess-782',
+      happyHomeDir: '/tmp/happy-home',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      startedBy: 'daemon' as const,
+      cwd: '/tmp/workspace',
+      processCommandHash: hashProcessCommand(command),
+      processCommand: command,
+      metadata: { path: '/tmp/workspace', hostPid: 782 },
+      respawn: {
+        version: 1 as const,
+        directory: '/tmp/workspace',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      } satisfies SessionRunnerRespawnDescriptorV1,
+    };
+
+    const map = new Map<number, TrackedSession>();
+    const { adopted } = adoptSessionsFromMarkers({
+      markers: [marker],
+      happyProcesses: [{ pid: 782, command, type: 'daemon-spawned-session' } satisfies HappyProcessInfo],
+      pidToTrackedSession: map,
+    });
+
+    expect(adopted).toBe(1);
+    expect(map.get(782)?.vendorResumeId).toBe('vendor-argv-782');
+    expect(resolveSessionRunnerRestartEligibility(map.get(782)).eligible).toBe(true);
   });
 });

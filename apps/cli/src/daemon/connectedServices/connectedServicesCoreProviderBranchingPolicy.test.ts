@@ -75,7 +75,12 @@ async function listSourceFiles(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   const files = await Promise.all(entries.map(async (entry) => {
     const fullPath = `${dir}${sep}${entry.name}`;
-    if (entry.isDirectory()) return await listSourceFiles(fullPath);
+    if (entry.isDirectory()) {
+      // Executable test fixtures intentionally carry realistic provider wire data. They are not
+      // product branching and remain covered by their owning tests rather than the production scan.
+      if (entry.name === 'fixtures' || entry.name === '__fixtures__') return [];
+      return await listSourceFiles(fullPath);
+    }
     if (!entry.isFile()) return [];
     if (!entry.name.endsWith('.ts') || entry.name.endsWith('.test.ts')) return [];
     return [fullPath];

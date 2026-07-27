@@ -101,6 +101,93 @@ describe('resolveSessionRunnerRuntimeState', () => {
     expect(state.plannedRestart.disabledReason).toBe('runner_entrypoint_unknown');
   });
 
+  it('classifies a runner on an older pinned snapshot as stale against the current snapshot generation', () => {
+    // 2026-07-10 zero-roll defect shape: runner spawned from snapshot 2ee2ef1b…, daemon
+    // launch identity pinned to snapshot 30bb29f6…. Must classify STALE (was: unknown).
+    const state = resolveSessionRunnerRuntimeState({
+      sessionId: 'sess-1',
+      tracked: trackedSession({
+        processCommand:
+          'node --no-warnings --no-deprecation /Users/alice/dev/happier/apps/cli/.runner-snapshots/2ee2ef1b2f776a89/index.mjs claude --happy-starting-mode remote --started-by daemon',
+      }),
+      currentIdentity: {
+        status: 'known',
+        source: 'launch_spec',
+        comparableId: 'snapshot:30bb29f6afae521d',
+        entrypointVersion: null,
+      },
+      observedAtMs: 100,
+    });
+
+    expect(state.versionState).toBe('stale');
+    expect(state.runner.runtimeId).toBe('snapshot:2ee2ef1b2f776a89');
+    expect(state.plannedRestart).toEqual({ supported: true, eligible: true, disabledReason: null });
+    expect(SessionRunnerRuntimeStateV1Schema.parse(state)).toEqual(state);
+  });
+
+  it('classifies a runner on the current pinned snapshot as current', () => {
+    const state = resolveSessionRunnerRuntimeState({
+      sessionId: 'sess-1',
+      tracked: trackedSession({
+        processCommand:
+          'node /Users/alice/dev/happier/apps/cli/.runner-snapshots/30bb29f6afae521d/index.mjs claude --happy-starting-mode remote --started-by daemon',
+      }),
+      currentIdentity: {
+        status: 'known',
+        source: 'launch_spec',
+        comparableId: 'snapshot:30bb29f6afae521d',
+        entrypointVersion: null,
+      },
+      observedAtMs: 100,
+    });
+
+    expect(state.versionState).toBe('current');
+  });
+
+  it('classifies a frozen tsx source-mode runner as stale against the current snapshot generation', () => {
+    const state = resolveSessionRunnerRuntimeState({
+      sessionId: 'sess-1',
+      tracked: trackedSession({
+        processCommand:
+          'node --import /Users/alice/dev/happier/node_modules/tsx/dist/esm/index.mjs /Users/alice/dev/happier/apps/cli/src/index.ts codex --happy-starting-mode remote --started-by daemon',
+      }),
+      currentIdentity: {
+        status: 'known',
+        source: 'launch_spec',
+        comparableId: 'snapshot:30bb29f6afae521d',
+        entrypointVersion: null,
+      },
+      observedAtMs: 100,
+    });
+
+    expect(state.versionState).toBe('stale');
+    expect(state.plannedRestart.eligible).toBe(true);
+  });
+
+  it('never claims current for equal mutable source paths (tsx runners are frozen at spawn)', () => {
+    // Same source root ≠ same code generation: tsx loads source at spawn and never hot-reloads,
+    // so path equality cannot attest the generation. Must be unknown, not already_current.
+    const state = resolveSessionRunnerRuntimeState({
+      sessionId: 'sess-1',
+      tracked: trackedSession({
+        processCommand:
+          'node --import /Users/alice/dev/happier/node_modules/tsx/dist/esm/index.mjs /Users/alice/dev/happier/apps/cli/src/index.ts codex --happy-starting-mode remote --started-by daemon',
+      }),
+      currentIdentity: {
+        status: 'known',
+        source: 'launch_spec',
+        comparableId: 'path:/users/alice/dev/happier/apps/cli',
+        entrypointVersion: null,
+      },
+      observedAtMs: 100,
+    });
+
+    expect(state.versionState).toBe('unknown');
+    expect(state.plannedRestart.eligible).toBe(false);
+    expect(state.plannedRestart.disabledReason).toBe('runner_generation_unattested');
+    expect(SessionRunnerRuntimeStateV1Schema.parse(state)).toEqual(state);
+  });
+
   it('fails closed when the current daemon entrypoint identity cannot be resolved', () => {
     const state = resolveSessionRunnerRuntimeState({
       sessionId: 'sess-1',

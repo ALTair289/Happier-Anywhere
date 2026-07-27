@@ -9,13 +9,16 @@ export type DaemonShutdownRequest = {
 
 export function createDaemonShutdownController(): {
   requestShutdown: (source: DaemonShutdownSource, errorMessage?: string) => void;
+  isShutdownRequested: () => boolean;
   resolvesWhenShutdownRequested: Promise<DaemonShutdownRequest>;
 } {
   // In case the setup malfunctions - our signal handlers will not properly
   // shut down. We will force exit the process with code 1.
   let requestShutdown: (source: DaemonShutdownSource, errorMessage?: string) => void;
+  let shutdownRequested = false;
   const resolvesWhenShutdownRequested = new Promise<DaemonShutdownRequest>((resolve) => {
     requestShutdown = (source, errorMessage) => {
+      shutdownRequested = true;
       logger.debug(`[DAEMON RUN] Requesting shutdown (source: ${source}, errorMessage: ${errorMessage})`);
 
       // Start graceful shutdown
@@ -56,5 +59,9 @@ export function createDaemonShutdownController(): {
     logger.debug(`[DAEMON RUN] Process about to exit with code: ${code}`);
   });
 
-  return { requestShutdown: requestShutdown!, resolvesWhenShutdownRequested };
+  return {
+    requestShutdown: requestShutdown!,
+    isShutdownRequested: () => shutdownRequested,
+    resolvesWhenShutdownRequested,
+  };
 }

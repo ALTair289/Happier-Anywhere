@@ -3,12 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
-
 import type { ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 
 import { writeConnectedServiceStateSharingManifest } from '@/daemon/connectedServices/stateSharing/connectedServiceStateSharingManifest';
 
-import { resolveSessionConnectedServiceSwitchContinuity } from './startDaemon';
+import {
+  resolveSessionConnectedServiceSwitchContinuity,
+} from './startDaemon';
 
 const bindings: ConnectedServiceBindingsV1 = {
   v: 1,

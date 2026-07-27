@@ -423,7 +423,10 @@ describe('reconcileConnectedServiceAuthGroupGenerations', () => {
       verifySharedGenerationApplication: async () => null,
       notifyCurrentGroupTruth,
     });
-    const target = groupTarget('restored');
+    const target = {
+      ...groupTarget('restored'),
+      connectedServiceMaterializationIdentityV1: { id: 'csm_restored' },
+    };
 
     await reconcileConnectedServiceAuthGroupGenerationForRuntimeTarget({
       target,

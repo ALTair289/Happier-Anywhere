@@ -22,6 +22,7 @@ vi.mock('../sessionRegistry', () => ({
   promoteSessionMarkerConnectedServiceRestartIntent: vi.fn(async () => {}),
   readSessionMarkerForPid,
   removeSessionMarker: vi.fn(async () => {}),
+  updateSessionMarkerActiveTurn: vi.fn(async () => {}),
 }));
 
 import { readDaemonState } from '@/persistence';
@@ -238,7 +239,7 @@ describe('startDaemonHeartbeatLoop process-missing delegation', () => {
     expect(pidToTrackedSession.has(pid)).toBe(true);
   });
 
-  it('removes stale session runner markers when onChildExited is not provided', async () => {
+  it('releases stale session runner markers through the canonical no-exact-turn observation', async () => {
     vi.mocked(readDaemonState).mockResolvedValue({
       pid: process.pid,
       httpPort: 4001,
@@ -292,9 +293,9 @@ describe('startDaemonHeartbeatLoop process-missing delegation', () => {
 
     await tick!();
 
-    expect(vi.mocked(removeSessionMarker).mock.calls.map((call) => call[0])).toEqual(
-      expect.arrayContaining([pid, runnerPid]),
-    );
+    expect(removeSessionMarker).toHaveBeenCalledWith(pid);
+    expect(removeSessionMarker).toHaveBeenCalledWith(runnerPid);
+    expect(pidToTrackedSession.has(pid)).toBe(false);
   });
 
   it('does not prune sessions when kill(0) fails with EPERM (process exists but permission denied)', async () => {

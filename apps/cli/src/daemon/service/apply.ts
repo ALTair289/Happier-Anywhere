@@ -3,7 +3,10 @@ import { chmod, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-import { buildServiceCommandEnv } from '@happier-dev/cli-common/service';
+import {
+  buildServiceCommandEnv,
+  isBenignServiceAbsenceFailure,
+} from '@happier-dev/cli-common/service';
 
 import type { DaemonServiceInstallPlan, DaemonServiceUninstallPlan, DaemonServicePlannedCommand } from './plan';
 import { commandExistsInPath } from './commandExistsInPath';
@@ -65,10 +68,6 @@ function isBenignLaunchctlFailure(
 
   const action = String(command.args[0] ?? '').trim().toLowerCase();
   const output = String(result.out ?? '').trim().toLowerCase();
-  if (action === 'bootout' || action === 'disable') {
-    return output.includes('no such process') || output.includes('could not find service');
-  }
-
   if (action === 'kickstart') {
     return output.includes('could not find service');
   }
@@ -88,28 +87,17 @@ function isBenignLaunchctlFailure(
   return false;
 }
 
-function isBenignSystemctlFailure(
+function isBenignServiceAbsence(
   command: DaemonServicePlannedCommand,
   result: Readonly<{ ok: boolean; out: string | null }>,
 ): boolean {
-  if (result.ok || command.cmd !== 'systemctl') {
-    return false;
-  }
-
-  const target = String(command.args.at(-1) ?? '').trim().toLowerCase();
-  if (!target.startsWith('happier-daemon') || !target.endsWith('.service')) {
-    return false;
-  }
-
-  const action = command.args
-    .map((arg) => String(arg).trim().toLowerCase())
-    .find((arg) => arg.length > 0 && !arg.startsWith('-'));
-  if (action !== 'disable' && action !== 'stop') {
-    return false;
-  }
-
-  const output = String(result.out ?? '').trim().toLowerCase();
-  return output.includes('does not exist') || output.includes('not loaded') || output.includes('not found');
+  return !result.ok && isBenignServiceAbsenceFailure({
+    cmd: command.cmd,
+    args: command.args,
+    status: 1,
+    stdout: '',
+    stderr: result.out ?? '',
+  });
 }
 
 /**
@@ -161,7 +149,7 @@ export function runDaemonServiceCommands(
 
     refreshLaunchctlBootstrapPath(command);
     const result = shouldRetryLaunchctlCommand(command) ? runLaunchctlWithRetry(command) : runCommand(command);
-    if (command.ignoreFailure || isBenignLaunchctlFailure(command, result) || isBenignSystemctlFailure(command, result)) {
+    if (command.ignoreFailure || isBenignServiceAbsence(command, result) || isBenignLaunchctlFailure(command, result)) {
       continue;
     }
     if (!result.ok && failureMode === 'strict') {

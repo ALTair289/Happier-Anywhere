@@ -73,7 +73,20 @@ function daemonProcessMatchesCurrentScope(processInfo: HappyProcessInfo): boolea
   if (!processEnvValueMatchesCurrent(env.HAPPIER_HOME_DIR, configuration.happyHomeDir, normalizePathFragment)) {
     return false;
   }
-  if (!processEnvValueMatchesCurrent(env.HAPPIER_ACTIVE_SERVER_ID, configuration.activeServerId)) {
+  const processLifecycleScopeId = normalizeScopeValue(env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID);
+  const currentLifecycleScopeId = normalizeScopeValue(process.env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID);
+  if (processLifecycleScopeId) {
+    if (!currentLifecycleScopeId || processLifecycleScopeId !== currentLifecycleScopeId) return false;
+    // Explicit lifecycle scope is the canonical owner identity. Endpoint profile and URL are
+    // independently mutable connection facts and cannot disqualify that exact owner.
+    return true;
+  }
+
+  // Released stack daemons predate the explicit lifecycle-scope variable and used their
+  // already-resolved active server id as the stable lifecycle id. Only that old-daemon shape
+  // may fall back to ACTIVE_SERVER_ID and endpoint URL comparison.
+  const currentFallbackScope = currentLifecycleScopeId || configuration.activeServerId;
+  if (!processEnvValueMatchesCurrent(env.HAPPIER_ACTIVE_SERVER_ID, currentFallbackScope)) {
     return false;
   }
 

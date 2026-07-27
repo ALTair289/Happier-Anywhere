@@ -75,6 +75,7 @@ export async function waitForReplacementDaemon(params: Readonly<{
   ownPid: number;
   expectedCliVersion: string;
   expectedRuntimeId?: string | null;
+  expectedSelfRestartCorrelationId?: string | null;
   timeoutMs: number;
   pollMs: number;
   readDaemonStateImpl?: ReadDaemonState;
@@ -83,6 +84,7 @@ export async function waitForReplacementDaemon(params: Readonly<{
   const {
     ownPid,
     expectedRuntimeId,
+    expectedSelfRestartCorrelationId,
     timeoutMs,
     pollMs,
     readDaemonStateImpl = readDaemonState,
@@ -90,6 +92,9 @@ export async function waitForReplacementDaemon(params: Readonly<{
   } = params;
   const normalizedExpectedCliVersion = String(params.expectedCliVersion ?? '').trim();
   const normalizedExpectedRuntimeId = typeof expectedRuntimeId === 'string' ? expectedRuntimeId.trim() : '';
+  const normalizedExpectedCorrelationId = typeof expectedSelfRestartCorrelationId === 'string'
+    ? expectedSelfRestartCorrelationId.trim()
+    : '';
   const deadline = Date.now() + timeoutMs;
   let lastObserved: Readonly<{
     pid: number;
@@ -111,6 +116,11 @@ export async function waitForReplacementDaemon(params: Readonly<{
         lastObserved = { ...observed, reason: 'version_mismatch' };
       } else if (normalizedExpectedRuntimeId && daemonState.runtimeId !== normalizedExpectedRuntimeId) {
         lastObserved = { ...observed, reason: 'runtime_mismatch' };
+      } else if (
+        normalizedExpectedCorrelationId
+        && daemonState.selfRestartCorrelationId !== normalizedExpectedCorrelationId
+      ) {
+        lastObserved = { ...observed, reason: 'correlation_mismatch' };
       } else if (normalizedExpectedRuntimeId && !hasAuthenticatedPingDetails(daemonState)) {
         lastObserved = { ...observed, reason: 'authenticated_ping_unavailable' };
       } else if (await confirmReplacementStateImpl(daemonState)) {
@@ -177,6 +187,7 @@ async function performDaemonSelfRestart(params: Readonly<{
     ...env,
     HAPPIER_DAEMON_STARTUP_SOURCE: 'self-restart',
     HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID: params.correlationId,
+    HAPPIER_DAEMON_SELF_RESTART_DEADLINE_MS: String(Date.now() + Math.max(0, timeoutMs)),
     ...(runtimeId ? { HAPPIER_DAEMON_RUNTIME_ID: runtimeId } : {}),
     ...(takeover ? { HAPPIER_DAEMON_TAKEOVER: '1' } : {}),
   };
@@ -197,6 +208,7 @@ async function performDaemonSelfRestart(params: Readonly<{
     ownPid: params.ownPid ?? process.pid,
     expectedCliVersion,
     expectedRuntimeId: runtimeId,
+    expectedSelfRestartCorrelationId: params.correlationId,
     timeoutMs,
     pollMs,
     readDaemonStateImpl,

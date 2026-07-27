@@ -1,0 +1,113 @@
+import { readFile } from 'node:fs/promises';
+
+import { describe, expect, it } from 'vitest';
+
+import { createConnectedServiceSwitchDeferralQueue } from './connectedServices/sessionAuthSwitch/connectedServiceSwitchDeferralQueue';
+import {
+  doesRestartCompletionProvePreviousRunnerRetired,
+  resolveConnectedServiceContinuationInterruptionForSwitch,
+  resolveConnectedServiceContinuationOriginId,
+  resolveContinuationResumePromptMode,
+} from './startDaemon';
+
+describe('startDaemon connected-service continuation composition', () => {
+  it('freezes the routed prompt mode with group policy precedence', async () => {
+    await expect(resolveContinuationResumePromptMode({
+      explicit: undefined,
+      readAccountSettings: () => ({ usageLimitRecoverySettingsV1: { resumePromptMode: 'custom' } }),
+      loadGroupPolicy: () => ({ resumePromptMode: 'off' }),
+    })).resolves.toBe('off');
+  });
+
+  it('classifies only a replacement of the interrupted origin as continuation-eligible', () => {
+    const turnDeferralQueue = createConnectedServiceSwitchDeferralQueue({ timeoutMs: 60_000, disableDeferral: false });
+    expect(resolveConnectedServiceContinuationInterruptionForSwitch({
+      sessionId: 'session-1',
+      action: 'hot_applied',
+      failureDriven: true,
+      turnDeferralQueue,
+    })).toBe('none');
+    expect(resolveConnectedServiceContinuationInterruptionForSwitch({
+      sessionId: 'session-1',
+      interruptedSessionId: 'session-1',
+      action: 'hot_applied',
+      failureDriven: true,
+      turnDeferralQueue,
+    })).toBe('provider_failed_turn');
+    expect(resolveConnectedServiceContinuationInterruptionForSwitch({
+      sessionId: 'session-1',
+      interruptedSessionId: 'session-1',
+      action: 'restart_requested',
+      failureDriven: true,
+      turnDeferralQueue,
+    })).toBe('provider_failed_turn');
+    expect(resolveConnectedServiceContinuationInterruptionForSwitch({
+      sessionId: 'session-sibling',
+      interruptedSessionId: 'session-1',
+      action: 'restart_requested',
+      failureDriven: true,
+      turnDeferralQueue,
+    })).toBe('none');
+    expect(resolveConnectedServiceContinuationInterruptionForSwitch({
+      sessionId: 'session-1',
+      action: 'restart_requested',
+      turnDeferralQueue,
+    })).toBe('clean_boundary');
+  });
+
+  it('uses a fresh report identity when the failed provider turn has already cleared activeTurnId', () => {
+    expect(resolveConnectedServiceContinuationOriginId({
+      source: 'daemon_report',
+      activeTurnId: null,
+      reportId: 'runtime-auth-report:origin-a',
+    })).toBe('runtime-auth-report:origin-a');
+    expect(resolveConnectedServiceContinuationOriginId({
+      source: 'daemon_report',
+      activeTurnId: 'turn-live',
+      reportId: 'runtime-auth-report:origin-a',
+    })).toBe('turn-live');
+    expect(resolveConnectedServiceContinuationOriginId({
+      source: 'scheduler_retry',
+      activeTurnId: 'turn-stale',
+      reportId: 'runtime-auth-report:origin-a',
+    })).toBeNull();
+  });
+
+  it('accepts terminal respawn outcomes as retired-predecessor proof but fails closed on waiter timeout', () => {
+    expect(doesRestartCompletionProvePreviousRunnerRetired({ ok: true })).toBe(true);
+    expect(doesRestartCompletionProvePreviousRunnerRetired({
+      ok: false,
+      status: 'spawn_failed',
+      diagnostics: { respawnTerminalReason: 'not_authenticated' },
+    })).toBe(true);
+    expect(doesRestartCompletionProvePreviousRunnerRetired({
+      ok: false,
+      status: 'partial_failure',
+      diagnostics: { respawnTerminalReason: 'timeout', timeoutMs: 60_000 },
+    })).toBe(false);
+  });
+
+  it('contains no daemon replay, attempt timer, or historical-original reconstruction path', async () => {
+    const source = await readFile(new URL('./startDaemon.ts', import.meta.url), 'utf8');
+    expect(source).toContain('enqueueInterruptedOriginContinuation');
+    expect(source.match(/\.enqueueInterruptedOriginContinuation\(/g)).toHaveLength(1);
+    expect(source).toContain("input.source === 'scheduler_retry'");
+    expect(source).toContain('resolveConnectedServiceContinuationOriginId({');
+    expect(source).toContain('reportId: input.interruptedOriginId');
+    expect(source).not.toContain('createSessionContinuationRecoveryController');
+    expect(source).not.toContain('retryOriginalCommittedUserMessage');
+    expect(source).not.toContain('hydratePendingConnectedServiceContinuationsForDaemon');
+    expect(source).not.toContain('resolveConnectedServiceContinuationReplayPlan');
+    expect(source).not.toContain('scheduleSessionContinuationRecoveryTimeout');
+    expect(source).not.toContain('hasNewerExplicitUserInput');
+    expect(source).not.toContain('hasCommittedUserMessageAfterMs');
+    expect(source).not.toContain('failure-at:');
+  });
+
+  it('shares exact live source resolution between in-band reports and scheduler retries', async () => {
+    const source = await readFile(new URL('./startDaemon.ts', import.meta.url), 'utf8');
+    expect(
+      source.match(/resolveCurrentRuntimeAuthFailureSource: resolveCurrentCodexRuntimeAuthFailureSourceForSession/g),
+    ).toHaveLength(2);
+  });
+});

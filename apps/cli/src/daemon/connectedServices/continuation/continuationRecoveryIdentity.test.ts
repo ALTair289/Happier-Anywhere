@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildContinuationRecoveryIdentityFromBindings,
+  listProviderActivityRecoveryIdentitiesFromRuntimeBindings,
   listContinuationRecoveryIdentitiesFromBindings,
 } from './continuationRecoveryIdentity';
 
@@ -102,5 +103,111 @@ describe('continuation recovery identity', () => {
         profileId: 'leeroy_new',
       },
     ]);
+  });
+
+  it('qualifies current bindings with the exact pending recovery attempt and adopted group generation', () => {
+    expect(listProviderActivityRecoveryIdentitiesFromRuntimeBindings([{
+      serviceId: 'openai-codex',
+      groupId: 'codex',
+      profileId: 'codex3',
+      generation: 18,
+      credentialRevision: 'csr_group',
+    }, {
+      serviceId: 'claude-subscription',
+      groupId: null,
+      profileId: 'leeroy_new',
+      generation: null,
+      credentialRevision: 'csr_profile',
+    }], [{
+      serviceId: 'openai-codex',
+      profileId: 'codex-old',
+      groupId: 'codex',
+      status: 'resumed_awaiting_proof',
+      attemptId: 'runtime-auth-attempt:group-1',
+      pendingTargetProfileId: 'codex3',
+      pendingTargetGeneration: 18,
+    }, {
+      serviceId: 'claude-subscription',
+      profileId: 'leeroy_new',
+      groupId: null,
+      status: 'waiting',
+      attemptId: 'runtime-auth-attempt:profile-1',
+      pendingTargetProfileId: null,
+      pendingTargetGeneration: null,
+    }])).toEqual([
+      {
+        serviceId: 'openai-codex',
+        selectionKind: 'group',
+        groupId: 'codex',
+        profileId: 'codex3',
+        failureFingerprint: 'runtime-auth-attempt:group-1',
+        targetGeneration: 18,
+      },
+      {
+        serviceId: 'claude-subscription',
+        selectionKind: 'profile',
+        profileId: 'leeroy_new',
+        failureFingerprint: 'runtime-auth-attempt:profile-1',
+      },
+    ]);
+  });
+
+  it('qualifies refresh-without-switch activity from the exact current binding and rejects stale revision/profile bindings', () => {
+    const refreshIntent = {
+      serviceId: 'claude-subscription',
+      profileId: 'claude-primary',
+      groupId: 'claude-pool',
+      status: 'resumed_awaiting_proof',
+      attemptId: 'runtime-auth-attempt:refresh-1',
+      pendingTargetProfileId: null,
+      pendingTargetGeneration: null,
+      classification: {
+        groupGeneration: 7,
+        credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+      },
+    };
+    const exactCurrentBinding = {
+      serviceId: 'claude-subscription',
+      groupId: 'claude-pool',
+      profileId: 'claude-primary',
+      generation: 7,
+      credentialRevision: 'csr_bcdefghijklmnopqrstuvw',
+    } as const;
+
+    expect(listProviderActivityRecoveryIdentitiesFromRuntimeBindings(
+      [exactCurrentBinding],
+      [refreshIntent],
+    )).toEqual([{
+      serviceId: 'claude-subscription',
+      selectionKind: 'group',
+      groupId: 'claude-pool',
+      profileId: 'claude-primary',
+      failureFingerprint: 'runtime-auth-attempt:refresh-1',
+      targetGeneration: 7,
+    }]);
+    expect(listProviderActivityRecoveryIdentitiesFromRuntimeBindings(
+      [{ ...exactCurrentBinding, generation: 8 }],
+      [refreshIntent],
+    )).toEqual([{
+      serviceId: 'claude-subscription',
+      selectionKind: 'group',
+      groupId: 'claude-pool',
+      profileId: 'claude-primary',
+      failureFingerprint: 'runtime-auth-attempt:refresh-1',
+      targetGeneration: 8,
+    }]);
+
+    expect(listProviderActivityRecoveryIdentitiesFromRuntimeBindings(
+      [{ ...exactCurrentBinding, credentialRevision: 'csr_abcdefghijklmnopqrstuv' }],
+      [refreshIntent],
+    )).toEqual([]);
+    expect(listProviderActivityRecoveryIdentitiesFromRuntimeBindings(
+      [{ ...exactCurrentBinding, generation: 6 }],
+      [refreshIntent],
+    )).toEqual([]);
+    expect(listProviderActivityRecoveryIdentitiesFromRuntimeBindings(
+      [{ ...exactCurrentBinding, profileId: 'claude-other' }],
+      [refreshIntent],
+    )).toEqual([]);
   });
 });

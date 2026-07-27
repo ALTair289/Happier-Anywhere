@@ -1,7 +1,10 @@
 import type { TrackedSession } from '@/daemon/types';
 import type { SessionRunnerDaemonEntrypointSourceV1 } from '@happier-dev/protocol';
 
-import { resolveSessionRunnerEntrypointIdentityFromProcessCommand } from './resolveRunnerEntrypointIdentity';
+import {
+  isGenerationAttestedComparableId,
+  resolveSessionRunnerEntrypointIdentityFromProcessCommand,
+} from './resolveRunnerEntrypointIdentity';
 import { readSessionRunnerStartingModeFromProcessCommand } from './readSessionRunnerStartingMode';
 import { resolveSessionRunnerRestartEligibility } from './resolveRestartEligibility';
 import type {
@@ -33,12 +36,27 @@ function resolveDisabledReason(tracked: TrackedSession | null): SessionRunnerRes
   return resolveSessionRunnerRestartEligibility(tracked).disabledReason;
 }
 
+function isUnattestedEqualGeneration(input: Readonly<{
+  runnerIdentity: SessionRunnerEntrypointIdentity;
+  currentIdentity: SessionRunnerEntrypointIdentity;
+}>): boolean {
+  return (
+    input.runnerIdentity.status === 'known' &&
+    input.currentIdentity.status === 'known' &&
+    input.runnerIdentity.comparableId === input.currentIdentity.comparableId &&
+    !isGenerationAttestedComparableId(input.runnerIdentity.comparableId)
+  );
+}
+
 function resolveIdentityDisabledReason(input: Readonly<{
   runnerIdentity: SessionRunnerEntrypointIdentity;
   currentIdentity: SessionRunnerEntrypointIdentity;
 }>): SessionRunnerRestartDisabledReason | null {
   if (input.currentIdentity.status !== 'known') return 'current_entrypoint_unknown';
   if (input.runnerIdentity.status !== 'known') return 'runner_entrypoint_unknown';
+  // Equal MUTABLE roots (tsx source mode, in-place dist) cannot attest the running generation:
+  // the runner froze the root's content at spawn, so equality proves neither current nor stale.
+  if (isUnattestedEqualGeneration(input)) return 'runner_generation_unattested';
   return null;
 }
 
@@ -49,7 +67,8 @@ function resolveVersionState(input: Readonly<{
   if (input.runnerIdentity.status !== 'known' || input.currentIdentity.status !== 'known') {
     return 'unknown';
   }
-  return input.runnerIdentity.comparableId === input.currentIdentity.comparableId ? 'current' : 'stale';
+  if (input.runnerIdentity.comparableId !== input.currentIdentity.comparableId) return 'stale';
+  return isUnattestedEqualGeneration(input) ? 'unknown' : 'current';
 }
 
 export function resolveSessionRunnerRuntimeState(params: Readonly<{

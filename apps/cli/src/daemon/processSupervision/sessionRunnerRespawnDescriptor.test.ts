@@ -12,6 +12,33 @@ import type { Credentials } from '@/persistence';
 import { HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY } from '@/agent/runtime/sessionConnectedServiceMaterializationIdentityEnv';
 
 describe('sessionRunnerRespawnDescriptor', () => {
+  it('does not persist the ephemeral pending first input across daemon restart', () => {
+    const descriptor = buildSessionRunnerRespawnDescriptorV1FromSpawnOptions({
+      directory: '/tmp/repo',
+      spawnNonce: 'nonce-1',
+      pendingFirstInput: { text: 'one process only', localId: 'spawn-first:nonce-1' },
+    });
+
+    expect(descriptor).toMatchObject({ directory: '/tmp/repo', spawnNonce: 'nonce-1' });
+    expect(descriptor).not.toHaveProperty('pendingFirstInput');
+    expect(buildSpawnSessionOptionsFromRespawnDescriptorV1(descriptor!)).not.toHaveProperty('pendingFirstInput');
+  });
+
+  it('persists a runtime-learned vendorResumeId option even when spawnOptions has no --resume', () => {
+    const spawnOptions = {
+      directory: '/tmp/repo',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+    } satisfies SpawnSessionOptions;
+
+    const descriptor = buildSessionRunnerRespawnDescriptorV1FromSpawnOptions(spawnOptions, {
+      vendorResumeId: '  vendor-session-9  ',
+    });
+
+    expect(descriptor?.vendorResumeId).toBe('vendor-session-9');
+    expect(descriptor?.resume).toBeUndefined();
+    expect(SessionRunnerRespawnDescriptorV1Schema.safeParse(descriptor).success).toBe(true);
+  });
+
   it('round-trips mcpSelection through the respawn descriptor', () => {
     const spawnOptions = {
       directory: '/tmp/repo',
@@ -74,6 +101,27 @@ describe('sessionRunnerRespawnDescriptor', () => {
       directory: '/tmp/repo',
       backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
       existingSessionId: 'sess-existing-1',
+      approvedNewDirectoryCreation: true,
+    });
+  });
+
+  it('round-trips spawnNonce so a reattached runner remains resolvable after daemon restart', () => {
+    const spawnOptions = {
+      directory: '/tmp/repo',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      spawnNonce: '  nonce-survives-restart  ',
+    } satisfies SpawnSessionOptions;
+
+    const descriptor = buildSessionRunnerRespawnDescriptorV1FromSpawnOptions(spawnOptions);
+
+    expect(descriptor).toMatchObject({
+      version: 1,
+      directory: '/tmp/repo',
+      spawnNonce: 'nonce-survives-restart',
+    });
+    expect(buildSpawnSessionOptionsFromRespawnDescriptorV1(descriptor!)).toMatchObject({
+      directory: '/tmp/repo',
+      spawnNonce: 'nonce-survives-restart',
       approvedNewDirectoryCreation: true,
     });
   });

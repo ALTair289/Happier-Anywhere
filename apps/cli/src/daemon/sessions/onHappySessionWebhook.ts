@@ -114,8 +114,9 @@ export function createOnHappySessionWebhook(params: Readonly<{
   writeSessionMarkerFn?: typeof writeSessionMarker;
   getParentPidFn?: (pid: number) => number | null;
   readCredentialsFn?: typeof readCredentials;
+  onTrackedSessionReady?: (tracked: TrackedSession) => Promise<void> | void;
   onTrackedSessionReported?: (tracked: TrackedSession) => Promise<void> | void;
-}>): (sessionId: string, sessionMetadata: Metadata) => void {
+}>): (sessionId: string, sessionMetadata: Metadata) => Promise<void> {
   const {
     pidToTrackedSession,
     pidToAwaiter,
@@ -123,10 +124,11 @@ export function createOnHappySessionWebhook(params: Readonly<{
     writeSessionMarkerFn = writeSessionMarker,
     getParentPidFn = getParentPid,
     readCredentialsFn = readCredentials,
+    onTrackedSessionReady,
     onTrackedSessionReported,
   } = params;
 
-  return (sessionId: string, sessionMetadata: Metadata) => {
+  return async (sessionId: string, sessionMetadata: Metadata) => {
     const normalizedPath = expandHomeDirPath(sessionMetadata.path, process.env);
     const normalizedMetadata =
       normalizedPath === sessionMetadata.path ? sessionMetadata : { ...sessionMetadata, path: normalizedPath };
@@ -306,9 +308,17 @@ export function createOnHappySessionWebhook(params: Readonly<{
       const vendorResumeId = resolveVendorResumeIdFromSessionMetadata(agentId, normalizedMetadata);
       if (vendorResumeId) trackedForPid.vendorResumeId = vendorResumeId;
       if (trackedForPid.startedBy === 'daemon' && !isPlaceholderSessionId) {
-        void Promise.resolve(onTrackedSessionReported?.(trackedForPid)).catch((error) => {
+        if (onTrackedSessionReady) {
+          await onTrackedSessionReady(trackedForPid);
+        }
+        const reportObserverFailure = (error: unknown): void => {
           logger.debug('[DAEMON RUN] Tracked session reported callback failed', error);
-        });
+        };
+        try {
+          void Promise.resolve(onTrackedSessionReported?.(trackedForPid)).catch(reportObserverFailure);
+        } catch (error) {
+          reportObserverFailure(error);
+        }
       }
     }
 
@@ -346,11 +356,18 @@ export function createOnHappySessionWebhook(params: Readonly<{
         trackedForPid?.startedBy === 'daemon' && trackedForPid.spawnOptions
           ? await readCredentialsFn().catch(() => null)
           : null;
+      const trackedVendorResumeId =
+        typeof trackedForPid?.vendorResumeId === 'string' && trackedForPid.vendorResumeId.trim().length > 0
+          ? trackedForPid.vendorResumeId.trim()
+          : undefined;
       const respawn =
         trackedForPid?.startedBy === 'daemon' && trackedForPid.spawnOptions
           ? buildSessionRunnerRespawnDescriptorV1FromSpawnOptions(
             trackedForPid.spawnOptions,
-            storedCredentials ? { encryptionMaterial: storedCredentials.encryption } : undefined,
+            {
+              ...(storedCredentials ? { encryptionMaterial: storedCredentials.encryption } : {}),
+              ...(trackedVendorResumeId ? { vendorResumeId: trackedVendorResumeId } : {}),
+            },
           )
           : null;
       await writeSessionMarkerFn({
@@ -362,6 +379,7 @@ export function createOnHappySessionWebhook(params: Readonly<{
         processCommand,
         metadata: normalizedMetadata,
         ...(respawn ? { respawn } : {}),
+        ...(trackedForPid?.activeTurnId ? { activeTurnId: trackedForPid.activeTurnId } : {}),
       });
     })().catch((e) => {
       logger.debug('[DAEMON RUN] Failed to write session marker', e);

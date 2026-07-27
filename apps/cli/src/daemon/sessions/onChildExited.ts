@@ -3,9 +3,9 @@ import { logger } from '@/ui/logger';
 import { writeSessionExitReport } from '@/session/diagnostics/sessionExitReport';
 
 import type { TrackedSession } from '../types';
-import { reportDaemonObservedSessionExit, settleDaemonObservedOpenTurn } from '../sessionTermination';
-import { removeSessionMarker } from '../sessionRegistry';
+import { removeSessionMarker, updateSessionMarkerActiveTurn } from '../sessionRegistry';
 import { cleanupPidSessionResources } from './cleanupPidSessionResources';
+import { stageObservedExit } from './stageObservedExit';
 
 export type ChildExit = { reason: string; code: number | null; signal: string | null };
 
@@ -55,7 +55,9 @@ export function createOnChildExited(params: Readonly<{
   onPidPromoted?: (input: Readonly<{ fromPid: number; toPid: number; trackedSession: TrackedSession }>) => void;
   shouldPreserveSessionMarkerOnExit?: (input: Readonly<{ pid: number; trackedSession: TrackedSession; exit: ChildExit }>) => boolean;
   removeSessionMarkerFn?: typeof removeSessionMarker;
-}>): (pid: number, exit: ChildExit) => void {
+  updateSessionMarkerActiveTurnFn?: typeof updateSessionMarkerActiveTurn;
+  stageObservedExitFn?: typeof stageObservedExit;
+}>): (pid: number, exit: ChildExit) => Promise<void> {
   const {
     pidToTrackedSession,
     spawnResourceCleanupByPid,
@@ -66,9 +68,11 @@ export function createOnChildExited(params: Readonly<{
     onPidPromoted,
     shouldPreserveSessionMarkerOnExit,
     removeSessionMarkerFn = removeSessionMarker,
+    updateSessionMarkerActiveTurnFn = updateSessionMarkerActiveTurn,
+    stageObservedExitFn = stageObservedExit,
   } = params;
 
-  return (pid: number, exit: ChildExit) => {
+  return async (pid: number, exit: ChildExit) => {
     logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
     const tracked = pidToTrackedSession.get(pid);
     const runnerPid = tracked?.sessionRunnerPid;
@@ -119,33 +123,51 @@ export function createOnChildExited(params: Readonly<{
         });
       }
 
+      const preserveExitedMarker = shouldPreserveSessionMarkerOnExit?.({ pid, trackedSession: tracked, exit }) === true;
+      const apiMachineForSessions = getApiMachineForSessions();
+      const observedAt = Date.now();
+      try {
+        await stageObservedExitFn({
+          trackedSession: tracked,
+          observedAt,
+          enqueueExactTurnEnd: async (mutation) => {
+            if (!apiMachineForSessions?.enqueueDaemonTerminalExactTurnEnd) {
+              throw new Error('Daemon terminal custody is unavailable');
+            }
+            await apiMachineForSessions.enqueueDaemonTerminalExactTurnEnd(mutation);
+          },
+          releaseMarkerEvidence: async ({ markerPid, sessionId, turnId }) => {
+            const markerPids = Array.from(new Set([pid, markerPid]));
+            if (preserveExitedMarker) {
+              if (turnId === null) return;
+              await Promise.all(markerPids.map(async (candidatePid) => {
+                await updateSessionMarkerActiveTurnFn({
+                  pid: candidatePid,
+                  sessionId,
+                  activeTurnId: null,
+                });
+              }));
+              return;
+            }
+            await Promise.all(markerPids.map(async (candidatePid) => {
+              await removeSessionMarkerFn(candidatePid);
+            }));
+          },
+        });
+      } catch (error) {
+        logger.warn('[DAEMON RUN] Failed to durably stage observed runner exit; retaining marker evidence', {
+          sessionId: tracked.happySessionId,
+          pid,
+          error,
+        });
+        throw error;
+      }
       if (shouldReportSessionEnd && isUnexpected && typeof tracked.happySessionId === 'string' && tracked.happySessionId.trim().length > 0) {
         try {
           onUnexpectedExit?.(tracked, exit);
         } catch (e) {
           logger.debug('[DAEMON RUN] Failed to run onUnexpectedExit handler', e);
         }
-      }
-
-      const apiMachineForSessions = getApiMachineForSessions();
-      if (apiMachineForSessions) {
-        // Settle the dead runner's open canonical turn even when a live replacement exists
-        // (the case where the full session-end below is skipped). Without this, a respawn-kill
-        // (e.g. usage-limit account switch) leaves the turn 'in_progress' forever and the UI
-        // stuck "working" (Lane N1, incident cmq7pyqkj).
-        settleDaemonObservedOpenTurn({
-          apiMachine: apiMachineForSessions,
-          trackedSession: tracked,
-          now: () => Date.now(),
-        });
-      }
-      if (shouldReportSessionEnd && apiMachineForSessions) {
-        reportDaemonObservedSessionExit({
-          apiMachine: apiMachineForSessions,
-          trackedSession: tracked,
-          now: () => Date.now(),
-          exit,
-        });
       }
       void writeSessionExitReport({
         sessionId: tracked.happySessionId ?? null,
@@ -159,19 +181,14 @@ export function createOnChildExited(params: Readonly<{
         },
       }).catch((e) => logger.debug('[DAEMON RUN] Failed to write session exit report', e));
     }
-    void cleanupPidSessionResources({
+    await cleanupPidSessionResources({
       pid,
       spawnResourceCleanupByPid,
       sessionAttachCleanupByPid,
     });
     pidToTrackedSession.delete(pid);
-    const preserveExitedMarker =
-      tracked !== undefined && shouldPreserveSessionMarkerOnExit?.({ pid, trackedSession: tracked, exit }) === true;
-    if (!preserveExitedMarker) {
+    if (!tracked) {
       void removeSessionMarkerFn(pid);
-    }
-    if (typeof runnerPid === 'number' && runnerPid !== pid) {
-      void removeSessionMarkerFn(runnerPid);
     }
   };
 }

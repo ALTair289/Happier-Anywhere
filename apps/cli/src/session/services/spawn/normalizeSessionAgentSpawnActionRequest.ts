@@ -29,7 +29,7 @@ import {
 } from '@/session/inheritance/resolveChildSessionInheritedContextFromMetadata';
 import {
   agentSupportsSpawnConnectedServicesDefaults,
-  resolveSpawnConnectedServicesDefaults,
+  resolveSpawnConnectedServicesDefaultDisposition,
 } from '@/session/services/spawnConnectedServicesDefaults';
 import type { CreateSpawnedSessionParams } from '@/session/services/createSpawnedSession';
 
@@ -403,16 +403,22 @@ export const resolveSessionAgentSpawnConnectedServicesDefaults: SessionAgentSpaw
       // R4-2 (user-ruled): LITERAL resolution. The configured default is honored exactly as stored —
       // a profile default binds to that profile, a pool default binds to the pool. No silent
       // profile→pool upgrade here; rotation intent must be migrated by updating the STORED default.
-      const connectedServices = resolveSpawnConnectedServicesDefaults({
+      const disposition = resolveSpawnConnectedServicesDefaultDisposition({
         accountSettings: accountSettingsContext.settings,
         agentId: agentId as AgentId,
       });
-      if (!connectedServices) return null;
+      if (disposition.kind === 'unavailable') {
+        throw new Error(disposition.reason);
+      }
+      if (disposition.kind === 'native') return null;
       return {
-        connectedServices,
+        connectedServices: disposition.bindings,
         connectedServicesUpdatedAt: Date.now(),
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === 'connected_services_default_settings_invalid') {
+        throw error;
+      }
       return null;
     }
   };

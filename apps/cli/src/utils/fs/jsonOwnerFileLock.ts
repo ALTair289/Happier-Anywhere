@@ -369,6 +369,9 @@ export async function reclaimJsonOwnerFileLockSnapshot(
   expectedRaw: string,
   readQuarantinedRaw: (path: string) => Promise<string> = async (quarantinePath) => await readFile(quarantinePath, 'utf8'),
 ): Promise<ReclaimResult> {
+  // A reclaimer can die after publishing the guard but before removing it. Recover a proven-dead
+  // structured guard immediately so exact-owner release and replacement do not remain blocked.
+  await recoverStaleReclaimGuard(path, 60_000, readQuarantinedRaw);
   const guard = await publishReclaimGuard(path);
   if (typeof guard === 'string') return guard;
 

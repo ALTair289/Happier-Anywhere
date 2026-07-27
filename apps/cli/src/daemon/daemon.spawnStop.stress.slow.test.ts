@@ -16,7 +16,11 @@ import { listDaemonSessions, spawnDaemonSession, stopDaemonHttp, stopDaemonSessi
 import { readCredentials, readDaemonState } from '@/persistence';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { waitForCondition } from '@/testkit/async/waitFor';
-import { prepareIsolatedDaemonTestHome, type PreparedDaemonTestHome } from './testkit/realIntegration.testkit';
+import {
+  ensureDaemonIntegrationCredentialsForActiveServer,
+  prepareIsolatedDaemonTestHome,
+  type PreparedDaemonTestHome,
+} from './testkit/realIntegration.testkit';
 
 type WaitForOptions = {
   timeoutMs: number;
@@ -82,6 +86,10 @@ describe('daemon spawn/stop stress (slow lane)', () => {
       prefix: 'happier-cli-daemon-slow-',
       logCopyPrefix: 'daemon-slow',
     });
+    const credentialsReady = await ensureDaemonIntegrationCredentialsForActiveServer();
+    if (!credentialsReady.ready) {
+      throw new Error(`Daemon stress preflight failed: ${credentialsReady.reason}`);
+    }
   });
 
   afterAll(async () => {
@@ -93,7 +101,7 @@ describe('daemon spawn/stop stress (slow lane)', () => {
     const child = startDaemonProcessForStartSync();
     child.unref?.();
     await waitForDaemonReady();
-  });
+  }, 60_000);
 
   afterEach(async () => {
     try {
@@ -118,7 +126,7 @@ describe('daemon spawn/stop stress (slow lane)', () => {
     await waitForSessionCount(sessionCount, SESSION_CONSISTENCY_WAIT);
 
     const stopResults = await Promise.all(sessionIds.map((sessionId) => stopDaemonSession(sessionId)));
-    expect(stopResults.every((r) => r), 'Not all sessions reported stopped').toBe(true);
+    expect(stopResults.every((result) => result.status === 'stopped'), 'Not all sessions reported stopped').toBe(true);
     await waitForSessionCount(0, {
       ...SESSION_CONSISTENCY_WAIT,
       label: 'all stress sessions stopped',

@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { ConnectedServiceRuntimeRegistry } from '../runtimeRegistry/registry';
+import { ConnectedServiceAuthGroupGenerationConsumer } from '../accountGroups/generation/ConnectedServiceAuthGroupGenerationConsumer';
+import { parseConnectedServiceProjectionSnapshot } from '../accountGroups/generation/connectedServiceProjectionSnapshot';
+import { reconcileConnectedServiceAuthGroupGenerationForRuntimeTarget } from '../accountGroups/generation/reconcileConnectedServiceAuthGroupGenerations';
 import { registerConnectedServiceRuntimeTargetForDaemon } from './runtimeTargetRegistration';
+import { registerConnectedServiceTrackedSessionTargetsForDaemon } from './runtimeTargetRegistration';
+import * as runtimeTargetRegistrationModule from './runtimeTargetRegistration';
 
 /**
  * RR-8: the `successful_spawn` positive-evidence emit is wired through this registration seam via
@@ -124,5 +129,171 @@ describe('registerConnectedServiceRuntimeTargetForDaemon onRegisteredTarget', ()
       onRegisteredTarget,
     });
     expect(onRegisteredTarget).not.toHaveBeenCalled();
+  });
+
+  it('propagates late tracked-session registration to the durable generation replay seam', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const onRegisteredTarget = vi.fn();
+
+    registerConnectedServiceTrackedSessionTargetsForDaemon({
+      runtimeRegistry: registry,
+      tracked: {
+        pid: 4324,
+        startedBy: 'daemon',
+        happySessionId: 'late-session',
+        spawnOptions: {
+          connectedServices: connectedBindings,
+        },
+      } as Parameters<typeof registerConnectedServiceTrackedSessionTargetsForDaemon>[0]['tracked'],
+      onRegisteredTarget,
+    });
+
+    expect(onRegisteredTarget).toHaveBeenCalledWith(expect.objectContaining({
+      pid: 4324,
+      sessionId: 'late-session',
+    }));
+  });
+
+  it('reconciles a late runtime against the latest projection when the profile is unchanged but its credential revision changed', async () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const previousCredentialRevision = 'csr_aaaaaaaaaaaaaaaaaaaaaa';
+    const currentCredentialRevision = 'csr_bbbbbbbbbbbbbbbbbbbbbb';
+    const projection = parseConnectedServiceProjectionSnapshot({
+      connectedServicesV2: [{
+        serviceId: 'openai-codex',
+        groups: [{ groupId: 'team', activeProfileId: 'codex-a', generation: 7 }],
+      }],
+      connectedServiceCredentialRevisionsV1: [{
+        serviceId: 'openai-codex',
+        profileId: 'codex-a',
+        credentialRevision: currentCredentialRevision,
+      }],
+    });
+    const applyCommittedGeneration = vi.fn(async () => ({
+      reconciliationDisposition: 'converged' as const,
+      errorCode: null,
+      providerAdoptedTarget: {
+        serviceId: 'openai-codex' as const,
+        groupId: 'team',
+        profileId: 'codex-a',
+        generation: 7,
+        credentialRevision: currentCredentialRevision,
+        proof: {
+          status: 'verified' as const,
+          source: 'codex_app_server',
+          credentialRevision: currentCredentialRevision,
+        },
+      },
+    }));
+    const consumer = new ConnectedServiceAuthGroupGenerationConsumer({
+      applyCommittedGeneration,
+      resolveGenerationApplicationScope: async () => ({
+        status: 'supported',
+        scope: 'per_session_runtime',
+        ownerId: 'codex',
+      }),
+      verifySharedGenerationApplication: async () => null,
+      notifyCurrentGroupTruth: async () => ({ ok: true }),
+    });
+    const reconciliations: Promise<unknown>[] = [];
+    registry.onTargetRegistration(({ target }) => {
+      reconciliations.push(reconcileConnectedServiceAuthGroupGenerationForRuntimeTarget({
+        target,
+        consumer,
+        listCurrentGroups: async (serviceId) => projection.groups.filter((group) => group.serviceId === serviceId),
+        resolveCredentialRevision: projection.resolveCredentialRevision,
+        resolveCredentialBoundary: projection.resolveCredentialBoundary,
+        executionAuthority: 'passive_projection',
+      }));
+    });
+
+    registerConnectedServiceRuntimeTargetForDaemon({
+      runtimeRegistry: registry,
+      pid: 4325,
+      agentId: 'codex',
+      sessionId: 'late-current-truth-session',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: {
+          'openai-codex': {
+            source: 'connected',
+            selection: 'group',
+            groupId: 'team',
+            profileId: 'codex-a',
+          },
+        },
+      },
+      connectedServiceSelectionsEnv: {
+        HAPPIER_CONNECTED_SERVICE_SELECTIONS_JSON: JSON.stringify([{
+          kind: 'group',
+          serviceId: 'openai-codex',
+          groupId: 'team',
+          activeProfileId: 'codex-a',
+          fallbackProfileId: 'codex-b',
+          generation: 7,
+          credentialRevision: previousCredentialRevision,
+        }]),
+      },
+    });
+    await Promise.all(reconciliations);
+
+    expect(applyCommittedGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      executionAuthority: 'passive_projection',
+      committedGeneration: expect.objectContaining({
+        decisionCommittedTarget: expect.objectContaining({
+          profileId: 'codex-a',
+          generation: 7,
+          credentialRevision: currentCredentialRevision,
+        }),
+      }),
+    }));
+  });
+});
+
+describe('runtime-target reconciliation readiness', () => {
+  it('does not reconcile a daemon-spawned session registration before its runner webhook is ready', () => {
+    const candidate = Reflect.get(
+      runtimeTargetRegistrationModule,
+      'shouldReconcileConnectedServiceRuntimeTargetRegistration',
+    );
+    expect(candidate).toBeTypeOf('function');
+    if (typeof candidate !== 'function') return;
+
+    expect(candidate({
+      registration: {
+        key: { kind: 'session', pid: 4321 },
+        target: { pid: 4321, sessionId: 'sess-starting' },
+      },
+      tracked: {
+        pid: 4321,
+        happySessionId: 'sess-starting',
+      },
+    })).toBe(false);
+    expect(candidate({
+      registration: {
+        key: { kind: 'session', pid: 4321 },
+        target: { pid: 4321, sessionId: 'sess-ready' },
+      },
+      tracked: {
+        pid: 4321,
+        happySessionId: 'sess-ready',
+        happySessionMetadataFromLocalWebhook: {
+          path: '/tmp/session-ready',
+          host: 'test-host',
+          homeDir: '/tmp/home',
+          happyHomeDir: '/tmp/happier',
+          happyLibDir: '/tmp/happier/lib',
+          happyToolsDir: '/tmp/happier/tools',
+          hostPid: 4321,
+        },
+      },
+    })).toBe(true);
+    expect(candidate({
+      registration: {
+        key: { kind: 'execution_run', runKey: 'run-1' },
+        target: { pid: 4321, sessionId: 'sess-ready' },
+      },
+      tracked: null,
+    })).toBe(true);
   });
 });

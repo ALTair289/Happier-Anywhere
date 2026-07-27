@@ -7,6 +7,7 @@
 
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 import type { TrackedSession } from '@/daemon/types';
+import { isConnectedServiceResumeUnreachableSpawnErrorDetail } from '@happier-dev/protocol';
 
 import { RestartController } from '@/subprocess/supervision/restartController';
 import type { StopRequest, TerminationEvent } from '@/subprocess/supervision/types';
@@ -25,6 +26,7 @@ export type SessionRunnerRespawnManager = Readonly<{
 
 export type SessionRunnerRespawnOptionsResolver = (input: Readonly<{
   sessionId: string;
+  previousPid: number;
   spawnOptions: SpawnSessionOptions;
   vendorResumeId: string;
   defaultOptions: SpawnSessionOptions;
@@ -36,6 +38,7 @@ export type SessionRunnerRespawnTerminalReason =
   | 'missing_spawn_options'
   | 'directory_approval_required'
   | 'not_authenticated'
+  | 'resume_unreachable'
   | 'no_restart';
 
 function normalizeSessionId(raw: unknown): string {
@@ -55,6 +58,12 @@ function isNotAuthenticatedSpawnResult(result: unknown): boolean {
     value.errorCode === 'not_authenticated' ||
     value.errorMessage === 'not_authenticated'
   );
+}
+
+function isResumeUnreachableSpawnResult(result: unknown): boolean {
+  if (!result || typeof result !== 'object') return false;
+  const value = result as { errorDetail?: unknown };
+  return isConnectedServiceResumeUnreachableSpawnErrorDetail(value.errorDetail);
 }
 
 function toTerminationEvent(exit: DaemonChildExit): TerminationEvent {
@@ -77,6 +86,14 @@ const connectedServiceRestartRequestedTerminationEvent: TerminationEvent = {
   errorMessage: 'connected_service_auth_group_restart_requested',
 };
 
+function resolveRespawnKind(event: TerminationEvent): 'connected_service_intended_restart' | 'respawn_retry' {
+  return event.type === 'spawn_error'
+    && event.errorName === 'ConnectedServiceRestartRequested'
+    && event.errorMessage === 'connected_service_auth_group_restart_requested'
+    ? 'connected_service_intended_restart'
+    : 'respawn_retry';
+}
+
 function buildRespawnOptions(params: Readonly<{
   spawnOptions: SpawnSessionOptions;
   sessionId: string;
@@ -98,6 +115,18 @@ function buildRespawnOptions(params: Readonly<{
 export function createSessionRunnerRespawnManager(params: Readonly<{
   enabled: boolean;
   maxRestarts: number | null;
+  /**
+   * Own budget for INTENDED connected-service restarts, kept separate from `maxRestarts` so a forced
+   * relaunch never consumes the generic crash-loop counter (RR-2). Left undefined the controller uses
+   * its bounded default.
+   */
+  maxIntendedRestarts?: number | null;
+  /**
+   * Rolling window for intended-restart accounting. Intended restarts inside the window count
+   * against `maxIntendedRestarts` even across SUCCESSFUL respawns, so a successful restart loop is
+   * still bounded; occasional restarts spread over time decay out.
+   */
+  intendedRestartWindowMs?: number;
   baseDelayMs: number;
   maxDelayMs: number;
   jitterMs: number;
@@ -122,7 +151,7 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
   const stopRequestedBySessionId = new Map<string, StopRequest>();
   const stateBySessionId = new Map<
     string,
-    Readonly<{ controller: RestartController; timer: NodeJS.Timeout | null }>
+    { controller: RestartController; timer: NodeJS.Timeout | null; intended: boolean }
   >();
 
   const getOrCreateController = (sessionId: string): RestartController => {
@@ -133,6 +162,10 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
       {
         mode: 'on_unexpected_exit',
         maxRestarts: params.maxRestarts,
+        maxIntendedRestarts: params.maxIntendedRestarts,
+        ...(params.intendedRestartWindowMs === undefined ? {} : {
+          intendedRestartWindowMs: params.intendedRestartWindowMs,
+        }),
         baseDelayMs: params.baseDelayMs,
         maxDelayMs: params.maxDelayMs,
         jitterMs: params.jitterMs,
@@ -143,15 +176,52 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
     const stopRequest = stopRequestedBySessionId.get(sessionId);
     if (stopRequest) controller.markStopRequested(stopRequest);
 
-    stateBySessionId.set(sessionId, { controller, timer: null });
+    stateBySessionId.set(sessionId, { controller, timer: null, intended: false });
     return controller;
+  };
+
+  /**
+   * A restart cycle that began as an INTENDED connected-service relaunch stays on the intended
+   * budget for every retry within that cycle, so the whole storm (initial + retries) is bounded by
+   * its OWN limiter and never leaks into the generic crash budget (RR-2). A genuine crash exit runs
+   * the generic termination decision.
+   */
+  const decideRestartForCycle = (
+    sessionId: string,
+    controller: RestartController,
+    event: TerminationEvent,
+  ): ReturnType<RestartController['nextDecisionForTermination']> => {
+    return stateBySessionId.get(sessionId)?.intended === true
+      ? controller.nextDecisionForIntendedRestart()
+      : controller.nextDecisionForTermination(event);
   };
 
   const clearTimer = (sessionId: string) => {
     const existing = stateBySessionId.get(sessionId);
     if (!existing?.timer) return;
     clearTimeout(existing.timer);
-    stateBySessionId.set(sessionId, { controller: existing.controller, timer: null });
+    stateBySessionId.set(sessionId, { ...existing, timer: null });
+  };
+
+  /**
+   * Ends a respawn cycle (success or terminal outcome). Historically this deleted the whole state,
+   * which also reset the intended-restart budget — so a storm of SUCCESSFUL intended restarts
+   * (each restart succeeds, state resets, next restart begins; the incident-#1 restart-loop shape)
+   * was unbounded across cycles. Intended-restart accounting lives in the controller's rolling
+   * window, so while any intended restarts remain inside the window the controller is RETAINED with
+   * only its crash budget reset (preserving the historical fresh-crash-budget semantics); once the
+   * window decays empty the state is dropped as before.
+   */
+  const endRespawnCycle = (sessionId: string) => {
+    const existing = stateBySessionId.get(sessionId);
+    if (!existing) return;
+    if (existing.controller.hasRecentIntendedRestarts()) {
+      existing.controller.resetCrashBudget();
+      existing.intended = false;
+      existing.timer = null;
+      return;
+    }
+    stateBySessionId.delete(sessionId);
   };
 
   const scheduleRetryFromTermination = (
@@ -164,12 +234,12 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
     const state = stateBySessionId.get(sessionId);
     if (!state) return;
 
-    const decision = state.controller.nextDecisionForTermination(event);
+    const decision = decideRestartForCycle(sessionId, state.controller, event);
     if (decision.type === 'no_restart') {
-      if (decision.reason.startsWith('max_restarts_exceeded')) {
+      if (decision.reason.startsWith('max_restarts_exceeded') || decision.reason.startsWith('max_intended_restarts_exceeded')) {
         params.logWarn(`[DAEMON RUN] Session ${sessionId} crashed; respawn suppressed (${decision.reason})`);
       }
-      stateBySessionId.delete(sessionId);
+      endRespawnCycle(sessionId);
       params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'no_restart', detail: decision.reason });
       return;
     }
@@ -194,24 +264,24 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
       void (async () => {
         const alreadyRunning = await params.isSessionAlreadyRunning(sessionId);
         if (alreadyRunning) {
-          stateBySessionId.delete(sessionId);
+          endRespawnCycle(sessionId);
           params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'already_running' });
           return;
         }
         const stopRequest = stopRequestedBySessionId.get(sessionId);
         if (stopRequest) {
-          stateBySessionId.delete(sessionId);
+          endRespawnCycle(sessionId);
           params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'stop_requested' });
           return;
         }
 
         const defaultOptions = buildRespawnOptions({ spawnOptions, sessionId, vendorResumeId });
         const respawnOptions = params.resolveRespawnOptions
-          ? await params.resolveRespawnOptions({ sessionId, spawnOptions, vendorResumeId, defaultOptions })
+          ? await params.resolveRespawnOptions({ sessionId, previousPid, spawnOptions, vendorResumeId, defaultOptions })
           : defaultOptions;
         params.logDebug(
           `[DAEMON RUN] Respawning runner for session ${sessionId} after ${delayMs}ms (attempt ${attempt})`,
-          { exit: event },
+          { exit: event, attempt, respawnKind: resolveRespawnKind(event) },
         );
 
         void params
@@ -219,21 +289,30 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
           .then((result) => {
             if (result && typeof result === 'object' && (result as any).type === 'success') {
               params.onRespawnSuccess?.({ sessionId, previousPid, result });
-              stateBySessionId.delete(sessionId);
+              // Cycle end, NOT a full reset: the intended-restart window must survive a successful
+              // respawn or a "successful" intended-restart loop is unbounded across cycles (RR-2).
+              endRespawnCycle(sessionId);
               return;
             }
 
             if (result && typeof result === 'object' && (result as any).type === 'requestToApproveDirectoryCreation') {
               params.logWarn(`[DAEMON RUN] Respawn suppressed for session ${sessionId} (directory approval required)`);
-              stateBySessionId.delete(sessionId);
+              endRespawnCycle(sessionId);
               params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'directory_approval_required' });
               return;
             }
 
             if (isNotAuthenticatedSpawnResult(result)) {
               params.logWarn(`[DAEMON RUN] Respawn suppressed for session ${sessionId} (auth:not_authenticated)`);
-              stateBySessionId.delete(sessionId);
+              endRespawnCycle(sessionId);
               params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'not_authenticated' });
+              return;
+            }
+
+            if (isResumeUnreachableSpawnResult(result)) {
+              params.logWarn(`[DAEMON RUN] Respawn suppressed for session ${sessionId} (resume unreachable)`);
+              endRespawnCycle(sessionId);
+              params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'resume_unreachable' });
               return;
             }
 
@@ -268,7 +347,7 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
       });
     }, delayMs) as unknown as { unref?: () => void };
     timer.unref?.();
-    stateBySessionId.set(sessionId, { controller: existing.controller, timer: timer as any });
+    stateBySessionId.set(sessionId, { ...existing, timer: timer as any });
   };
 
   return {
@@ -320,13 +399,20 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
 
       const vendorResumeId = normalizeOptionalString(trackedSession.vendorResumeId);
       const controller = getOrCreateController(sessionId);
+      if (forceRestart) {
+        // Mark this as an intended (connected-service-initiated) restart cycle so its whole storm —
+        // the initial relaunch plus any retries — runs on the intended budget, never the generic
+        // crash counter (RR-2).
+        const state = stateBySessionId.get(sessionId);
+        if (state) state.intended = true;
+      }
       const event = forceRestart ? connectedServiceRestartRequestedTerminationEvent : toTerminationEvent(exit);
-      const decision = controller.nextDecisionForTermination(event);
+      const decision = decideRestartForCycle(sessionId, controller, event);
       if (decision.type === 'no_restart') {
-        if (decision.reason.startsWith('max_restarts_exceeded')) {
+        if (decision.reason.startsWith('max_restarts_exceeded') || decision.reason.startsWith('max_intended_restarts_exceeded')) {
           params.logWarn(`[DAEMON RUN] Session ${sessionId} crashed; respawn suppressed (${decision.reason})`);
         }
-        stateBySessionId.delete(sessionId);
+        endRespawnCycle(sessionId);
         params.onRespawnTerminal?.({
           sessionId,
           previousPid: trackedSession.pid,

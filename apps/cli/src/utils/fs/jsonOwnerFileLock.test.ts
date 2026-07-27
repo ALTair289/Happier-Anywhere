@@ -370,6 +370,27 @@ describe('withJsonOwnerFileLock', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+  it('reclaims the expected owner after a previous reclaimer dies', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-json-owner-lock-dead-reclaimer-'));
+    const lockPath = join(dir, 'owner.lock');
+    const expectedRaw = 'expected-owner';
+    const deadGuardRaw = JSON.stringify({
+      pid: 999_999,
+      ownerToken: 'dead-reclaimer',
+      processStartedAtMs: 1,
+      createdAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+    });
+    try {
+      await writeFile(lockPath, expectedRaw, 'utf8');
+      await writeFile(`${lockPath}.reclaim`, deadGuardRaw, 'utf8');
+
+      await expect(reclaimJsonOwnerFileLockSnapshot(lockPath, expectedRaw)).resolves.toBe('reclaimed');
+      await expect(readdir(dir)).resolves.toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it('preserves a canonical owner that appears immediately after guard publication', async () => {
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');

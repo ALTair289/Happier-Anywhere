@@ -12,6 +12,7 @@ import {
 } from './processSupervision/sessionRunnerRespawnDescriptor';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 import { resolveSessionRuntimeSnapshot } from './sessions/runtimeSnapshot/resolveSessionRuntimeSnapshot';
+import { extractResumeIdFromCommand } from './sessions/extractResumeIdFromCommand';
 
 type AdoptSessionsFromMarkersResult = Readonly<{
   adopted: number;
@@ -222,11 +223,20 @@ export function adoptSessionsFromMarkers(params: {
       }
     }
 
+    // Restore the runner's vendor resume identity so adoption never reduces restartability.
+    // Prefer the persisted descriptor field; belt-and-braces backfill from the live argv
+    // (`--resume <id>`) heals runners whose marker predates identity persistence.
+    const vendorResumeId =
+      (respawnParsed.success ? normalizeOptionalString(respawnParsed.data.vendorResumeId) : undefined) ??
+      normalizeOptionalString(extractResumeIdFromCommand(currentCommand));
+
     params.pidToTrackedSession.set(marker.pid, {
       startedBy: marker.startedBy ?? 'reattached',
       happySessionId: marker.happySessionId,
       happySessionMetadataFromLocalWebhook: marker.metadata,
       ...(spawnOptions ? { spawnOptions } : {}),
+      ...(vendorResumeId ? { vendorResumeId } : {}),
+      ...(marker.activeTurnId ? { activeTurnId: marker.activeTurnId } : {}),
       pid: marker.pid,
       processCommandHash: currentHash,
       processCommand: currentCommand,

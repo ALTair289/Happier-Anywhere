@@ -16,7 +16,7 @@ import {
   DaemonStartupSourceSchema,
   type DaemonStartupSource,
 } from '@/daemon/ownership/daemonOwnershipMetadata';
-import { sanitizeServerIdForFilesystem } from '@/server/serverId';
+import { isServerIdFilesystemSafe, sanitizeServerIdForFilesystem } from '@/server/serverId';
 import { isLocalishServerUrl } from '@/server/serverUrlClassification';
 import * as z from 'zod';
 import { decodeBase64, encodeBase64 } from '@/api/encryption';
@@ -52,15 +52,24 @@ async function ensureHappyHomeDirExists(): Promise<void> {
   await bestEffortChmod(configuration.happyHomeDir, 0o700);
 }
 
-function resolveLegacyDaemonStatePathsForActiveServer(): string[] {
+function resolveDaemonStateCandidatePathsForCurrentLifecycle(): readonly string[] {
   return resolveDaemonStateCandidatePaths({
-    serverDir: configuration.activeServerDir,
+    serverDir: dirname(configuration.daemonStateFile),
     preferredRing: configuration.publicReleaseRing,
-  }).filter((candidatePath) => candidatePath !== configuration.daemonStateFile);
+  });
+}
+
+function resolveLegacyDaemonStatePathsForCurrentLifecycle(): string[] {
+  return resolveDaemonStateCandidatePathsForCurrentLifecycle()
+    .filter((candidatePath) => candidatePath !== configuration.daemonStateFile);
+}
+
+function hasExplicitDaemonLifecycleScope(): boolean {
+  return isServerIdFilesystemSafe(String(process.env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID ?? '').trim());
 }
 
 function cleanupLegacyDaemonStateFilesBestEffortSync(): void {
-  for (const legacyPath of resolveLegacyDaemonStatePathsForActiveServer()) {
+  for (const legacyPath of resolveLegacyDaemonStatePathsForCurrentLifecycle()) {
     try {
       if (existsSync(legacyPath)) {
         unlinkSync(legacyPath);
@@ -73,7 +82,7 @@ function cleanupLegacyDaemonStateFilesBestEffortSync(): void {
 }
 
 async function cleanupLegacyDaemonStateFilesBestEffort(): Promise<void> {
-  for (const legacyPath of resolveLegacyDaemonStatePathsForActiveServer()) {
+  for (const legacyPath of resolveLegacyDaemonStatePathsForCurrentLifecycle()) {
     try {
       if (existsSync(legacyPath)) {
         await unlink(legacyPath);
@@ -308,6 +317,8 @@ export interface DaemonLocallyPersistedState {
   startedWithCliVersion: string;
   startedWithPublicReleaseChannel?: PublicReleaseRingLabel;
   runtimeId?: string;
+  selfRestartCorrelationId?: string;
+  daemonExecutionGenerationV1?: string;
   startupSource?: DaemonStartupSource;
   serviceLabel?: string;
   machineId?: string;
@@ -323,6 +334,8 @@ const DaemonLocallyPersistedStateSchemaV2 = z.object({
   startedWithCliVersion: z.string(),
   startedWithPublicReleaseChannel: DaemonPublicReleaseChannelLabelSchema.optional(),
   runtimeId: z.string().min(1).optional(),
+  selfRestartCorrelationId: z.string().min(1).optional(),
+  daemonExecutionGenerationV1: z.string().min(1).optional(),
   startupSource: DaemonStartupSourceSchema.optional(),
   serviceLabel: z.string().min(1).optional(),
   machineId: z.string().min(1).optional(),
@@ -881,10 +894,7 @@ async function readDaemonStateFallbackFromServersDir(): Promise<DaemonLocallyPer
 }
 
 export async function readDaemonState(): Promise<DaemonLocallyPersistedState | null> {
-  const candidatePaths = resolveDaemonStateCandidatePaths({
-    serverDir: configuration.activeServerDir,
-    preferredRing: configuration.publicReleaseRing,
-  });
+  const candidatePaths = resolveDaemonStateCandidatePathsForCurrentLifecycle();
   for (let attempt = 1; attempt <= 3; attempt++) {
     let sawEnoent = false;
     for (const candidatePath of candidatePaths) {
@@ -924,7 +934,13 @@ export async function readDaemonState(): Promise<DaemonLocallyPersistedState | n
       }
     }
     if (sawEnoent) {
-      if (attempt === 3) return await readDaemonStateFallbackFromServersDir();
+      if (attempt === 3) {
+        // Released daemons predate the lifecycle scope. Keep their endpoint-profile discovery only
+        // when no explicit lifecycle owner is present; an explicit scope must fail closed.
+        return hasExplicitDaemonLifecycleScope()
+          ? null
+          : await readDaemonStateFallbackFromServersDir();
+      }
       await new Promise((resolve) => setTimeout(resolve, 15));
       continue;
     }

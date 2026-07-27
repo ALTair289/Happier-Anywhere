@@ -116,7 +116,18 @@ export async function requestPlannedRunnerRestart(input: Readonly<{
           },
         });
 
-        if (!ownerStillCurrent || signalResult.status === 'skipped_stale_owner') {
+        if (signalResult.status === 'skipped_duplicate_restart') {
+          notSignaledReason = 'duplicate_restart';
+        }
+        if (signalResult.status === 'skipped_terminal_restart') {
+          notSignaledReason = 'terminal_restart';
+        }
+        if (
+          !ownerStillCurrent
+          || signalResult.status === 'skipped_stale_owner'
+          || signalResult.status === 'skipped_duplicate_restart'
+          || signalResult.status === 'skipped_terminal_restart'
+        ) {
           input.restartRequestedPids.delete(input.tracked.pid);
           input.clearRestartIntentForPid?.(input.tracked.pid);
           if (notSignaledReason === 'unsafe_process') {

@@ -15,6 +15,12 @@ import {
 import type { HappyProcessInfo } from '../doctor';
 import type { TrackedSession } from '../types';
 import type { Credentials } from '@/persistence';
+import type { TerminalHostAdapter, TerminalHostHandle } from '@/integrations/terminalHost/_types';
+import {
+  removeTerminalAttachmentInfo,
+  type TerminalAttachmentInfo,
+  type TerminalAttachmentReadState,
+} from '@/terminal/attachment/terminalAttachmentInfo';
 
 const emptyAdoptResult = {
   adopted: 0,
@@ -38,6 +44,23 @@ type TestConnectedServiceRestartIntentMarker = DaemonSessionMarker & Readonly<{
 const { isOwnedLiveDaemonSessionProcessCommandMock } = vi.hoisted(() => ({
   isOwnedLiveDaemonSessionProcessCommandMock: vi.fn(() => true),
 }));
+const terminalAttachmentInfoMock = vi.hoisted(() => ({
+  readTerminalAttachmentInfo: vi.fn<(_: {
+    happyHomeDir: string;
+    sessionId: string;
+  }) => Promise<TerminalAttachmentInfo | null>>(async () => null),
+  readTerminalAttachmentState: vi.fn<(_: {
+    happyHomeDir: string;
+    sessionId: string;
+  }) => Promise<TerminalAttachmentReadState>>(async () => ({ status: 'absent' })),
+}));
+
+function mockTerminalAttachmentState(state: TerminalAttachmentReadState): void {
+  terminalAttachmentInfoMock.readTerminalAttachmentState.mockResolvedValue(state);
+  terminalAttachmentInfoMock.readTerminalAttachmentInfo.mockResolvedValue(
+    state.status === 'present' ? state.info : null,
+  );
+}
 
 vi.mock('../doctor', () => ({
   findAllHappyProcesses: vi.fn(async () => []),
@@ -57,14 +80,21 @@ vi.mock('../sessionRegistry', () => ({
   hashProcessCommand: vi.fn((command: string) => `hash:${command}`),
 }));
 
+vi.mock('@/terminal/attachment/terminalAttachmentInfo', () => ({
+  readTerminalAttachmentInfo: terminalAttachmentInfoMock.readTerminalAttachmentInfo,
+  readTerminalAttachmentState: terminalAttachmentInfoMock.readTerminalAttachmentState,
+  removeTerminalAttachmentInfo: vi.fn(async () => true),
+}));
+
 describe('reattachTrackedSessionsFromMarkers', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.HAPPIER_DAEMON_MARKERLESS_REATTACH_ENABLED;
     isOwnedLiveDaemonSessionProcessCommandMock.mockReturnValue(true);
+    mockTerminalAttachmentState({ status: 'absent' });
   });
 
-  it('returns orphaned dead daemon sessions when removing dead markers', async () => {
+  it('returns exact-turn orphan evidence without removing the replayable marker', async () => {
     const marker = {
       pid: 43210,
       happySessionId: 'session-123',
@@ -74,6 +104,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
       startedBy: 'daemon' as const,
       cwd: '/tmp/project',
       processCommandHash: 'a'.repeat(64),
+      activeTurnId: 'turn-exact-123',
     };
 
     vi.mocked(listSessionMarkers).mockResolvedValue([marker satisfies DaemonSessionMarker]);
@@ -90,16 +121,306 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         {
           sessionId: 'session-123',
           pid: 43210,
+          activeTurnId: 'turn-exact-123',
         },
       ],
       connectedServiceRestartIntents: [],
     });
-    expect(removeSessionMarker).toHaveBeenCalledWith(43210);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(43210);
     expect(adoptSessionsFromMarkers).toHaveBeenCalledWith({
       markers: [],
       happyProcesses: [],
       pidToTrackedSession,
     });
+  });
+
+  it('keeps cold-start reconstruction passive across many dead terminal markers', async () => {
+    const markers = Array.from({ length: 83 }, (_, index) => ({
+      pid: 50_000 + index,
+      happySessionId: `session-dead-${index}`,
+      happyHomeDir: '/tmp/happy',
+      createdAt: 1,
+      updatedAt: 1,
+      startedBy: 'daemon' as const,
+      cwd: '/workspace/project',
+      respawn: {
+        version: 1 as const,
+        directory: '/workspace/project',
+        backendTarget: { kind: 'builtInAgent' as const, agentId: 'claude' },
+        resume: `claude-thread-${index}`,
+      },
+    })) satisfies DaemonSessionMarker[];
+    const evaluateLiveness = vi.fn(async () => ({ paneAlive: true, observedAt: 1 }));
+    const adapter: TerminalHostAdapter = {
+      kind: 'zellij',
+      createOrAttachHost: vi.fn(),
+      injectUserPrompt: vi.fn(),
+      interruptTurn: vi.fn(),
+      evaluateLiveness,
+      dispose: vi.fn(),
+    };
+
+    vi.mocked(listSessionMarkers).mockResolvedValue(markers);
+    mockTerminalAttachmentState({ status: 'present', info: {
+      version: 1,
+      sessionId: 'ignored-on-passive-startup',
+      terminal: {
+        mode: 'zellij',
+        zellij: { sessionName: 'legacy-host', paneId: 'terminal_1' },
+      },
+      updatedAt: 1,
+    } });
+    mockHappyProcessesForDiscovery([]);
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+
+    const result = await reattachTrackedSessionsFromMarkers({
+      pidToTrackedSession: new Map<number, TrackedSession>(),
+      terminalHostAdapters: { zellij: adapter },
+    });
+
+    // Cold reconstruction may read immutable local attachment descriptors, but it must not
+    // probe or mutate any host until the connected supervision owner runs.
+    expect(evaluateLiveness).not.toHaveBeenCalled();
+    expect(adapter.dispose).not.toHaveBeenCalled();
+    expect(result.orphanedDeadDaemonSessions).toHaveLength(0);
+    expect(result.unresolvedTerminalHostSessionIds).toHaveLength(83);
+    expect(removeSessionMarker).not.toHaveBeenCalled();
+  });
+
+  it('preserves a disconnected session when its bound provider host is still alive', async () => {
+    const marker = {
+      pid: 43214,
+      happySessionId: 'session-live-terminal-dead-runner',
+      happyHomeDir: '/tmp/happy',
+      createdAt: 1,
+      updatedAt: 1,
+      startedBy: 'daemon' as const,
+      activeTurnId: 'turn-live-terminal-dead-runner',
+      cwd: '/workspace/project',
+      respawn: {
+        version: 1,
+        directory: '/workspace/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-live-terminal-thread',
+      },
+    } satisfies DaemonSessionMarker;
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-session-live-terminal-dead-runner',
+      paneId: 'claude.1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async () => ({ status: 'injected', at: 1, bytesWritten: 1 } as const)),
+      interruptTurn: vi.fn(async () => {}),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: 1 })),
+      dispose: vi.fn(async () => {}),
+    };
+    vi.mocked(listSessionMarkers).mockResolvedValue([marker]);
+    mockTerminalAttachmentState({ status: 'present', info: {
+      version: 2,
+      attachmentId: 'attachment-live-provider-host' as NonNullable<TerminalHostHandle['attachmentId']>,
+      sessionId: 'session-live-terminal-dead-runner',
+      handle: {
+        ...handle,
+        attachmentId: 'attachment-live-provider-host' as NonNullable<TerminalHostHandle['attachmentId']>,
+      },
+      terminal: {
+        mode: 'tmux',
+        tmux: {
+          target: 'happier-session-live-terminal-dead-runner:claude.1',
+        },
+      },
+      updatedAt: 1,
+    } });
+    mockHappyProcessesForDiscovery([]);
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+
+    const pidToTrackedSession = new Map<number, TrackedSession>();
+    const result = await reattachTrackedSessionsFromMarkers({
+      pidToTrackedSession,
+      terminalHostAdapters: { tmux: adapter },
+      hasTerminalAttachmentControlDescriptor: async () => true,
+    });
+
+    expect(adapter.evaluateLiveness).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      orphanedDeadDaemonSessions: [],
+      disconnectedTerminalHostCandidates: [expect.objectContaining({
+        sessionId: 'session-live-terminal-dead-runner',
+        pid: 43214,
+        attachmentId: 'attachment-live-provider-host',
+        activeTurnId: 'turn-live-terminal-dead-runner',
+      })],
+      connectedServiceRestartIntents: [],
+    });
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(43214);
+  });
+
+  it('does not treat a stale session descriptor as control proof for a successor attachment', async () => {
+    const marker = {
+      pid: 43216,
+      happySessionId: 'session-stale-provider-descriptor',
+      happyHomeDir: '/tmp/happy',
+      createdAt: 1,
+      updatedAt: 1,
+      startedBy: 'daemon' as const,
+      cwd: '/workspace/project',
+      flavor: 'claude' as const,
+      respawn: {
+        version: 1,
+        directory: '/workspace/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-stale-provider-descriptor',
+      },
+    } satisfies DaemonSessionMarker;
+    const attachmentId = 'attachment-successor-without-control' as NonNullable<TerminalHostHandle['attachmentId']>;
+    vi.mocked(listSessionMarkers).mockResolvedValue([marker]);
+    mockTerminalAttachmentState({ status: 'present', info: {
+      version: 2,
+      attachmentId,
+      sessionId: marker.happySessionId,
+      handle: {
+        attachmentId,
+        kind: 'tmux',
+        sessionName: 'successor-host',
+        paneId: 'successor.1',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          liveProbe: 'required',
+        },
+      },
+      terminal: { mode: 'tmux', tmux: { target: 'successor-host:successor.1' } },
+      updatedAt: 2,
+    } });
+    mockHappyProcessesForDiscovery([]);
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+    const hasTerminalAttachmentControlDescriptor = vi.fn(async () => false);
+
+    const result = await reattachTrackedSessionsFromMarkers({
+      pidToTrackedSession: new Map<number, TrackedSession>(),
+      terminalHostAdapters: {},
+      hasTerminalAttachmentControlDescriptor,
+    });
+
+    expect(hasTerminalAttachmentControlDescriptor).toHaveBeenCalledOnce();
+    expect(hasTerminalAttachmentControlDescriptor).toHaveBeenCalledWith('claude', {
+      happyHomeDir: marker.happyHomeDir,
+      sessionId: marker.happySessionId,
+      attachmentId,
+    });
+    expect(result.disconnectedTerminalHostCandidates ?? []).toEqual([
+      expect.objectContaining({
+        sessionId: marker.happySessionId,
+        pid: marker.pid,
+        attachmentId,
+        controlDescriptorAvailable: false,
+      }),
+    ]);
+    expect(result.orphanedDeadDaemonSessions).toEqual([]);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(marker.pid);
+  });
+
+  it('does not probe or destroy a dead legacy terminal attachment during startup reconstruction', async () => {
+    const marker = {
+      pid: 43215,
+      happySessionId: 'session-dead-terminal-dead-runner',
+      happyHomeDir: '/tmp/happy',
+      createdAt: 1,
+      updatedAt: 1,
+      startedBy: 'daemon' as const,
+      cwd: '/workspace/project',
+      respawn: {
+        version: 1,
+        directory: '/workspace/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-dead-terminal-thread',
+      },
+    } satisfies DaemonSessionMarker;
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(),
+      injectUserPrompt: vi.fn(),
+      interruptTurn: vi.fn(),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: false, paneDead: true, observedAt: 1 })),
+      dispose: vi.fn(async () => {}),
+    };
+
+    vi.mocked(listSessionMarkers).mockResolvedValue([marker]);
+    mockTerminalAttachmentState({ status: 'present', info: {
+      version: 1,
+      sessionId: 'session-dead-terminal-dead-runner',
+      terminal: {
+        mode: 'tmux',
+        tmux: {
+          target: 'happier-session-dead-terminal-dead-runner:claude.1',
+        },
+      },
+      updatedAt: 1,
+    } });
+    mockHappyProcessesForDiscovery([]);
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+
+    const result = await reattachTrackedSessionsFromMarkers({
+      pidToTrackedSession: new Map<number, TrackedSession>(),
+      terminalHostAdapters: { tmux: adapter },
+    });
+
+    expect(result.orphanedDeadDaemonSessions).toEqual([]);
+    expect(result.unresolvedTerminalHostSessionIds).toEqual(['session-dead-terminal-dead-runner']);
+    expect(adapter.evaluateLiveness).not.toHaveBeenCalled();
+    expect(adapter.dispose).not.toHaveBeenCalled();
+    expect(removeTerminalAttachmentInfo).not.toHaveBeenCalled();
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(43215);
+  });
+
+  it('preserves a dead-runner marker when terminal attachment state is unreadable', async () => {
+    const marker = {
+      pid: 43217,
+      happySessionId: 'session-unreadable-terminal-topology',
+      happyHomeDir: '/tmp/happy',
+      createdAt: 1,
+      updatedAt: 1,
+      startedBy: 'daemon' as const,
+      cwd: '/workspace/project',
+      respawn: {
+        version: 1,
+        directory: '/workspace/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-unreadable-terminal-topology',
+      },
+    } satisfies DaemonSessionMarker;
+    vi.mocked(listSessionMarkers).mockResolvedValue([marker]);
+    mockTerminalAttachmentState({ status: 'unreadable', reason: 'invalid' });
+    mockHappyProcessesForDiscovery([]);
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+
+    const result = await reattachTrackedSessionsFromMarkers({
+      pidToTrackedSession: new Map<number, TrackedSession>(),
+    });
+
+    expect(result.orphanedDeadDaemonSessions).toEqual([]);
+    expect(result.unresolvedTerminalHostSessionIds).toEqual([marker.happySessionId]);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(marker.pid);
   });
 
   it('treats a dead OpenCode daemon marker as passive orphan cleanup state', async () => {
@@ -138,8 +459,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         pid: 43211,
       },
     ]);
-    expect(result.sessionRestartIntents).toBeUndefined();
-    expect(removeSessionMarker).toHaveBeenCalledWith(43211);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(43211);
     expect(adoptSessionsFromMarkers).toHaveBeenCalledWith({
       markers: [],
       happyProcesses: [],
@@ -191,9 +511,8 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         pid: 43213,
       },
     ]);
-    expect(result.sessionRestartIntents).toBeUndefined();
-    expect(removeSessionMarker).toHaveBeenCalledWith(43212);
-    expect(removeSessionMarker).toHaveBeenCalledWith(43213);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(43212);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(43213);
   });
 
   it('reattaches a live marker and clears a stale connected-service restart intent without replaying it', async () => {
@@ -284,7 +603,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
       ],
       connectedServiceRestartIntents: [],
     });
-    expect(removeSessionMarker).toHaveBeenCalledWith(24681);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(24681);
   });
 
   it('removes a dead connected-service restart marker when resume is only in marker metadata', async () => {
@@ -330,7 +649,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
       ],
       connectedServiceRestartIntents: [],
     });
-    expect(removeSessionMarker).toHaveBeenCalledWith(24682);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(24682);
   });
 
   it('removes a dead connected-service restart marker without a vendor resume id', async () => {
@@ -374,7 +693,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
       ],
       connectedServiceRestartIntents: [],
     });
-    expect(removeSessionMarker).toHaveBeenCalledWith(24684);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(24684);
   });
 
   it('does not convert a dead resumable terminal-injection daemon marker into startup restart inputs', async () => {
@@ -416,7 +735,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
       ],
       connectedServiceRestartIntents: [],
     });
-    expect(removeSessionMarker).toHaveBeenCalledWith(24683);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(24683);
   });
 
   it('reattaches a live resumable terminal-injection daemon marker without scheduling a startup restart', async () => {
@@ -561,6 +880,121 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       },
     });
+  });
+
+  it('does not probe a dead-runner terminal attachment during cold startup', async () => {
+    const marker = {
+      pid: 43216,
+      happySessionId: 'session-transient-terminal-probe',
+      happyHomeDir: '/tmp/happy',
+      createdAt: 1,
+      updatedAt: 1,
+      startedBy: 'daemon' as const,
+      cwd: '/workspace/project',
+      respawn: {
+        version: 1,
+        directory: '/workspace/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-transient-probe-thread',
+      },
+    } satisfies DaemonSessionMarker;
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(),
+      injectUserPrompt: vi.fn(),
+      interruptTurn: vi.fn(),
+      evaluateLiveness: vi
+        .fn()
+        .mockResolvedValueOnce({ paneAlive: false, probeInconclusive: true, observedAt: 1 })
+        .mockResolvedValueOnce({ paneAlive: true, observedAt: 2 }),
+      dispose: vi.fn(),
+    };
+
+    vi.mocked(listSessionMarkers).mockResolvedValue([marker]);
+    mockTerminalAttachmentState({ status: 'present', info: {
+      version: 1,
+      sessionId: 'session-transient-terminal-probe',
+      terminal: {
+        mode: 'tmux',
+        tmux: {
+          target: 'happier-session-transient-terminal-probe:claude.1',
+        },
+      },
+      updatedAt: 1,
+    } });
+    mockHappyProcessesForDiscovery([]);
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+
+    const result = await reattachTrackedSessionsFromMarkers({
+      pidToTrackedSession: new Map<number, TrackedSession>(),
+      terminalHostAdapters: { tmux: adapter },
+    });
+
+    expect(adapter.evaluateLiveness).not.toHaveBeenCalled();
+    expect(removeTerminalAttachmentInfo).not.toHaveBeenCalled();
+    expect(result.orphanedDeadDaemonSessions).toEqual([]);
+    expect(result.unresolvedTerminalHostSessionIds).toEqual([marker.happySessionId]);
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(marker.pid);
+  });
+
+  it('does not let an unavailable terminal probe delay cold startup', async () => {
+    const marker = {
+      pid: 43217,
+      happySessionId: 'session-inconclusive-terminal-probe',
+      happyHomeDir: '/tmp/happy',
+      createdAt: 1,
+      updatedAt: 1,
+      startedBy: 'daemon' as const,
+      cwd: '/workspace/project',
+      respawn: {
+        version: 1,
+        directory: '/workspace/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-inconclusive-probe-thread',
+      },
+    } satisfies DaemonSessionMarker;
+    const adapter: TerminalHostAdapter = {
+      kind: 'zellij',
+      createOrAttachHost: vi.fn(),
+      injectUserPrompt: vi.fn(),
+      interruptTurn: vi.fn(),
+      evaluateLiveness: vi.fn(async () => {
+        throw new Error('zellij list-panes timed out');
+      }),
+      dispose: vi.fn(),
+    };
+
+    vi.mocked(listSessionMarkers).mockResolvedValue([marker]);
+    mockTerminalAttachmentState({ status: 'present', info: {
+      version: 1,
+      sessionId: marker.happySessionId,
+      terminal: {
+        mode: 'zellij',
+        zellij: {
+          sessionName: 'happier-session-inconclusive-terminal-probe',
+          paneId: 'terminal_7',
+        },
+      },
+      updatedAt: 1,
+    } });
+    mockHappyProcessesForDiscovery([]);
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+
+    const result = await reattachTrackedSessionsFromMarkers({
+      pidToTrackedSession: new Map<number, TrackedSession>(),
+      terminalHostAdapters: { zellij: adapter },
+    });
+
+    expect(result.orphanedDeadDaemonSessions).toEqual([]);
+    expect(result.unresolvedTerminalHostSessionIds).toEqual([marker.happySessionId]);
+    expect(adapter.evaluateLiveness).not.toHaveBeenCalled();
+    expect(adapter.dispose).not.toHaveBeenCalled();
+    expect(removeTerminalAttachmentInfo).not.toHaveBeenCalled();
+    expect(removeSessionMarker).not.toHaveBeenCalledWith(marker.pid);
   });
 
   it('skips markerless daemon-spawned session recovery when disabled by environment', async () => {
@@ -1052,6 +1486,58 @@ describe('reattachTrackedSessionsFromMarkers', () => {
     );
   });
 
+  it('reattaches pre-webhook placeholder custody with its spawn nonce after daemon restart', async () => {
+    vi.mocked(listSessionMarkers).mockResolvedValue([
+      {
+        pid: 54322,
+        happySessionId: 'PID-54322',
+        happyHomeDir: '/tmp/happy',
+        createdAt: 1,
+        updatedAt: 1,
+        startedBy: 'daemon',
+        cwd: '/tmp/project',
+        respawn: {
+          version: 1,
+          directory: '/tmp/project',
+          backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+          spawnNonce: 'spawn-nonce-pre-webhook-restart',
+        },
+      } satisfies DaemonSessionMarker,
+    ]);
+    mockHappyProcessesForDiscovery([
+      {
+        pid: 54322,
+        type: 'daemon-spawned-session',
+        cwd: '/tmp/project',
+        command:
+          '/tmp/happier claude --happy-starting-mode remote --started-by daemon',
+      } satisfies HappyProcessInfo,
+    ]);
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    const pidToTrackedSession = new Map<number, TrackedSession>();
+    await reattachTrackedSessionsFromMarkers({ pidToTrackedSession });
+
+    expect(pidToTrackedSession.get(54322)).toEqual(expect.objectContaining({
+      startedBy: 'daemon',
+      happySessionId: 'PID-54322',
+      pid: 54322,
+      reattachedFromDiskMarker: true,
+      spawnOptions: expect.objectContaining({
+        directory: '/tmp/project',
+        spawnNonce: 'spawn-nonce-pre-webhook-restart',
+      }),
+    }));
+    expect(writeSessionMarker).toHaveBeenCalledWith(expect.objectContaining({
+      pid: 54322,
+      happySessionId: 'PID-54322',
+      startedBy: 'daemon',
+      respawn: expect.objectContaining({
+        spawnNonce: 'spawn-nonce-pre-webhook-restart',
+      }),
+    }));
+  });
+
   it('recovers incomplete daemon markers when process classification falls back to user-session but command still declares --started-by daemon', async () => {
     isOwnedLiveDaemonSessionProcessCommandMock.mockReturnValue(false);
     vi.mocked(listSessionMarkers).mockResolvedValue([
@@ -1206,45 +1692,72 @@ describe('reattachTrackedSessionsFromMarkers', () => {
     expect(findAllHappyProcesses).not.toHaveBeenCalled();
   });
 
-  it('uses marker pid lookups without a full process-table scan when live markers exist', async () => {
-    isOwnedLiveDaemonSessionProcessCommandMock.mockReturnValue(false);
-    vi.mocked(listSessionMarkers).mockResolvedValue([
-      {
-        pid: 76546,
-        happySessionId: 'session-marker-default',
-        happyHomeDir: '/tmp/happy',
-        createdAt: 1,
-        updatedAt: 1,
-        startedBy: 'daemon',
-        cwd: '/tmp/project',
-        respawn: {
-          version: 1,
-          directory: '/tmp/project',
-          backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
-        },
-      } satisfies DaemonSessionMarker,
-    ]);
-    mockHappyProcessesForDiscovery([
-      {
-        pid: 99991,
-        type: 'daemon-spawned-session',
-        cwd: '/tmp/other',
-        command: 'happier codex --started-by daemon --existing-session session-markerless',
-      } satisfies HappyProcessInfo,
-    ]);
-    vi.mocked(findHappyProcessByPid).mockResolvedValue({
+  it('recovers a markerless daemon session alongside an adopted live marker and heals only the missing marker', async () => {
+    const markedProcess = {
       pid: 76546,
-      type: 'user-session',
+      type: 'daemon-spawned-session',
       cwd: '/tmp/project',
-      command: 'node',
-    } satisfies HappyProcessInfo);
+      command: 'happier claude --started-by daemon --existing-session session-marker-default',
+    } satisfies HappyProcessInfo;
+    const markerlessProcess = {
+      pid: 99991,
+      type: 'daemon-spawned-session',
+      cwd: '/tmp/other',
+      command: 'happier codex --started-by daemon --existing-session session-markerless',
+    } satisfies HappyProcessInfo;
+    const marker = {
+      pid: markedProcess.pid,
+      happySessionId: 'session-marker-default',
+      happyHomeDir: '/tmp/happy',
+      createdAt: 1,
+      updatedAt: 1,
+      startedBy: 'daemon' as const,
+      cwd: markedProcess.cwd,
+      respawn: {
+        version: 1 as const,
+        directory: markedProcess.cwd,
+        backendTarget: { kind: 'builtInAgent' as const, agentId: 'claude' },
+      },
+    } satisfies DaemonSessionMarker;
+    vi.mocked(listSessionMarkers).mockResolvedValue([marker]);
+    mockHappyProcessesForDiscovery([
+      markedProcess,
+      markerlessProcess,
+    ]);
+    vi.mocked(adoptSessionsFromMarkers).mockImplementationOnce(({ pidToTrackedSession }) => {
+      pidToTrackedSession.set(markedProcess.pid, {
+        pid: markedProcess.pid,
+        startedBy: 'daemon',
+        happySessionId: marker.happySessionId,
+        reattachedFromDiskMarker: true,
+      });
+      return {
+        ...emptyAdoptResult,
+        adopted: 1,
+        adoptedPids: [markedProcess.pid],
+      };
+    });
     vi.spyOn(process, 'kill').mockImplementation(() => true);
 
     const pidToTrackedSession = new Map<number, TrackedSession>();
     await reattachTrackedSessionsFromMarkers({ pidToTrackedSession });
 
-    expect(findHappyProcessByPid).toHaveBeenCalledWith(76546);
-    expect(findAllHappyProcesses).not.toHaveBeenCalled();
+    expect(findAllHappyProcesses).toHaveBeenCalledOnce();
+    expect(pidToTrackedSession.get(markedProcess.pid)).toEqual(expect.objectContaining({
+      happySessionId: marker.happySessionId,
+      pid: markedProcess.pid,
+    }));
+    expect(pidToTrackedSession.get(markerlessProcess.pid)).toEqual(expect.objectContaining({
+      happySessionId: 'session-markerless',
+      pid: markerlessProcess.pid,
+      reattachedFromDiskMarker: true,
+    }));
+    expect(writeSessionMarker).toHaveBeenCalledOnce();
+    expect(writeSessionMarker).toHaveBeenCalledWith(expect.objectContaining({
+      pid: markerlessProcess.pid,
+      happySessionId: 'session-markerless',
+      startedBy: 'daemon',
+    }));
   });
 
   it('does not report an orphaned dead daemon session when the same happy session was recovered live during startup', async () => {

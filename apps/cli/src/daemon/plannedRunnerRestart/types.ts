@@ -26,14 +26,21 @@ export type PlannedRunnerRestartMode = SessionRunnerRestartModeV1;
 export type PlannedRunnerRestartRequestReason = SessionRunnerRestartReasonV1;
 
 export type PlannedRunnerRestartSignalResult = Readonly<{
-  status: 'requested' | 'process_already_missing' | 'skipped_stale_owner';
+  status:
+    | 'requested'
+    | 'process_already_missing'
+    | 'skipped_stale_owner'
+    | 'skipped_duplicate_restart'
+    | 'skipped_terminal_restart';
 }>;
 
 export type PlannedRunnerRestartNotSignaledReason =
   | 'stale_owner'
   | 'unsafe_process'
   | 'superseded'
-  | 'activity_in_progress';
+  | 'activity_in_progress'
+  | 'duplicate_restart'
+  | 'terminal_restart';
 
 export type PlannedRunnerRestartSignalActivityGateResult =
   | boolean

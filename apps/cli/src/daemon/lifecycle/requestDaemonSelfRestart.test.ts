@@ -15,8 +15,15 @@ function makeState(overrides: Partial<DaemonLocallyPersistedState> = {}): Daemon
 
 describe('requestDaemonSelfRestart', () => {
   it('spawns a takeover replacement with the inherited runtime id and exits only after confirmation', async () => {
-    const spawnDetachedDaemonStartSync = vi.fn(async () => ({ unref: vi.fn() }));
-    const readDaemonState = vi.fn(async () => makeState({ runtimeId: 'runtime-1' }));
+    let spawnedCorrelationId = '';
+    const spawnDetachedDaemonStartSync = vi.fn(async (options?: { env?: Record<string, string | undefined> }) => {
+      spawnedCorrelationId = String(options?.env?.HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID ?? '');
+      return { unref: vi.fn() };
+    });
+    const readDaemonState = vi.fn(async () => makeState({
+      runtimeId: 'runtime-1',
+      selfRestartCorrelationId: spawnedCorrelationId,
+    }));
     const confirmReplacementState = vi.fn(async () => true);
     const exitProcess = vi.fn();
 
@@ -32,13 +39,17 @@ describe('requestDaemonSelfRestart', () => {
       readDaemonStateImpl: readDaemonState,
       confirmReplacementStateImpl: confirmReplacementState,
       exitProcess,
-      env: { KEEP_ME: '1' },
+      env: {
+        KEEP_ME: '1',
+        HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT: 'abcdef1234567890',
+      },
     });
 
     expect(spawnDetachedDaemonStartSync).toHaveBeenCalledWith(expect.objectContaining({
       startupSource: 'self-restart',
       env: expect.objectContaining({
         KEEP_ME: '1',
+        HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT: 'abcdef1234567890',
         HAPPIER_DAEMON_RUNTIME_ID: 'runtime-1',
         HAPPIER_DAEMON_TAKEOVER: '1',
       }),
@@ -128,11 +139,44 @@ describe('requestDaemonSelfRestart', () => {
     expect(result.status).toBe('replacement_not_confirmed');
   });
 
-  it('can confirm a matching runtime replacement without requiring a predicted CLI version', async () => {
+  it('does not confirm an unrelated starter that reused the runtime id during delayed handoff', async () => {
     const spawnDetachedDaemonStartSync = vi.fn(async () => ({ unref: vi.fn() }));
+    const readDaemonState = vi.fn(async () => makeState({
+      runtimeId: 'runtime-1',
+      selfRestartCorrelationId: 'unrelated-starter',
+    } as Partial<DaemonLocallyPersistedState>));
+    const confirmReplacementState = vi.fn(async () => true);
+    const exitProcess = vi.fn();
+
+    const { requestDaemonSelfRestart } = await import('./requestDaemonSelfRestart');
+    const result = await requestDaemonSelfRestart({
+      runtimeId: 'runtime-1',
+      expectedCliVersion: '2.0.0',
+      ownPid: process.pid,
+      timeoutMs: 5,
+      pollMs: 1,
+      spawnDetachedDaemonStartSyncImpl: spawnDetachedDaemonStartSync,
+      readDaemonStateImpl: readDaemonState,
+      confirmReplacementStateImpl: confirmReplacementState,
+      exitProcess,
+      env: {},
+    });
+
+    expect(confirmReplacementState).not.toHaveBeenCalled();
+    expect(exitProcess).not.toHaveBeenCalled();
+    expect(result.status).toBe('replacement_not_confirmed');
+  });
+
+  it('can confirm a matching runtime replacement without requiring a predicted CLI version', async () => {
+    let spawnedCorrelationId = '';
+    const spawnDetachedDaemonStartSync = vi.fn(async (options?: { env?: Record<string, string | undefined> }) => {
+      spawnedCorrelationId = String(options?.env?.HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID ?? '');
+      return { unref: vi.fn() };
+    });
     const readDaemonState = vi.fn(async () => makeState({
       startedWithCliVersion: '2.1.0',
       runtimeId: 'runtime-1',
+      selfRestartCorrelationId: spawnedCorrelationId,
     }));
     const confirmReplacementState = vi.fn(async () => true);
     const exitProcess = vi.fn();
@@ -158,11 +202,16 @@ describe('requestDaemonSelfRestart', () => {
   });
 
   it('does not confirm a replacement from stale daemon state alone', async () => {
-    const spawnDetachedDaemonStartSync = vi.fn(async () => ({ unref: vi.fn() }));
+    let spawnedCorrelationId = '';
+    const spawnDetachedDaemonStartSync = vi.fn(async (options?: { env?: Record<string, string | undefined> }) => {
+      spawnedCorrelationId = String(options?.env?.HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID ?? '');
+      return { unref: vi.fn() };
+    });
     const readDaemonState = vi.fn(async () => makeState({
       pid: process.pid + 100,
       startedWithCliVersion: '2.0.0',
       runtimeId: 'runtime-1',
+      selfRestartCorrelationId: spawnedCorrelationId,
       httpPort: 51234,
       controlToken: 'stale-token',
     }));
@@ -223,13 +272,18 @@ describe('requestDaemonSelfRestart', () => {
 
   it('coalesces concurrent self-restart requests with one correlation id and one spawn', async () => {
     let resolveSpawn!: () => void;
-    const spawnDetachedDaemonStartSync = vi.fn(async () => {
+    let spawnedCorrelationId = '';
+    const spawnDetachedDaemonStartSync = vi.fn(async (options?: { env?: Record<string, string | undefined> }) => {
+      spawnedCorrelationId = String(options?.env?.HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID ?? '');
       await new Promise<void>((resolve) => {
         resolveSpawn = resolve;
       });
       return { unref: vi.fn() };
     });
-    const readDaemonState = vi.fn(async () => makeState({ runtimeId: 'runtime-single-flight' }));
+    const readDaemonState = vi.fn(async () => makeState({
+      runtimeId: 'runtime-single-flight',
+      selfRestartCorrelationId: spawnedCorrelationId,
+    }));
     const confirmReplacementState = vi.fn(async () => true);
     const exitProcess = vi.fn();
 

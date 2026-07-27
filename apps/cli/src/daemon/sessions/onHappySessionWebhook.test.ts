@@ -263,6 +263,49 @@ describe('createOnHappySessionWebhook', () => {
     }));
   });
 
+  it('does not acknowledge daemon readiness until the strict tracked-session callback settles', async () => {
+    const tracked: TrackedSession = { pid: 792, startedBy: 'daemon' };
+    let releaseReady!: () => void;
+    const ready = new Promise<void>((resolve) => { releaseReady = resolve; });
+    const onWebhook = createOnHappySessionWebhook({
+      pidToTrackedSession: new Map<number, TrackedSession>([[792, tracked]]),
+      pidToAwaiter: new Map<number, (session: TrackedSession) => void>(),
+      getParentPidFn: () => null,
+      findHappyProcessByPidFn: async () => null,
+      writeSessionMarkerFn: async () => {},
+      onTrackedSessionReady: async () => await ready,
+    });
+
+    let acknowledged = false;
+    const report = Promise.resolve(onWebhook('session-daemon-792', createMetadata(792, 'daemon')))
+      .then(() => { acknowledged = true; });
+    await Promise.resolve();
+    expect(acknowledged).toBe(false);
+    releaseReady();
+    await report;
+    expect(acknowledged).toBe(true);
+  });
+
+  it('does not fail session registration when a best-effort tracked-session observer throws synchronously', () => {
+    const tracked: TrackedSession = {
+      pid: 791,
+      startedBy: 'daemon',
+    };
+    const onWebhook = createOnHappySessionWebhook({
+      pidToTrackedSession: new Map<number, TrackedSession>([[791, tracked]]),
+      pidToAwaiter: new Map<number, (session: TrackedSession) => void>(),
+      getParentPidFn: () => null,
+      findHappyProcessByPidFn: async () => null,
+      writeSessionMarkerFn: async () => {},
+      onTrackedSessionReported: () => {
+        throw new ReferenceError('optional observer is unavailable');
+      },
+    });
+
+    expect(() => onWebhook('session-daemon-791', createMetadata(791, 'daemon'))).not.toThrow();
+    expect(tracked.happySessionId).toBe('session-daemon-791');
+  });
+
   it('stores vendorResumeId from session metadata when available', () => {
     const tracked: TrackedSession = {
       pid: 444,
@@ -428,7 +471,7 @@ describe('createOnHappySessionWebhook', () => {
       backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
       transcriptStorage: 'direct',
       token: 'secret-token-should-not-be-persisted',
-      initialPrompt: 'secret prompt should not be persisted',
+      pendingFirstInput: { text: 'secret prompt should not be persisted', localId: 'spawn-first:nonce' },
       resume: 'vendor-resume-id',
       environmentVariables: {
         CLAUDE_CONFIG_DIR: '/tmp/claude-config',
@@ -498,7 +541,49 @@ describe('createOnHappySessionWebhook', () => {
       OPENAI_API_KEY: expect.any(String),
       FOO: expect.any(String),
     });
-    expect(marker.respawn?.initialPrompt).toBeUndefined();
+    expect(marker.respawn?.pendingFirstInput).toBeUndefined();
+  });
+
+  it('persists the learned vendorResumeId into the respawn descriptor for fresh daemon sessions started without --resume', async () => {
+    const tracked: TrackedSession = {
+      pid: 557,
+      startedBy: 'daemon',
+      spawnOptions: {
+        directory: '/tmp/workspace',
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      } satisfies SpawnSessionOptions,
+    };
+
+    const pidToTrackedSession = new Map<number, TrackedSession>([[557, tracked]]);
+    const pidToAwaiter = new Map<number, (session: TrackedSession) => void>();
+
+    let markerArgs: SessionMarkerWriteArgs | null = null;
+    let resolveMarker!: () => void;
+    const markerWritten = new Promise<void>((resolve) => {
+      resolveMarker = resolve;
+    });
+
+    const onWebhook = createOnHappySessionWebhook({
+      pidToTrackedSession,
+      pidToAwaiter,
+      getParentPidFn: () => null,
+      findHappyProcessByPidFn: async () => null,
+      writeSessionMarkerFn: async (args) => {
+        markerArgs = args;
+        resolveMarker();
+      },
+    });
+
+    onWebhook('session-daemon-557', {
+      ...createMetadata(557, 'daemon', '/tmp/workspace'),
+      flavor: 'codex',
+      codexSessionId: 'vendor-session-557',
+    });
+    await markerWritten;
+
+    expect(pidToTrackedSession.get(557)?.vendorResumeId).toBe('vendor-session-557');
+    const marker = expectSessionMarkerWriteArgs(markerArgs);
+    expect(marker.respawn?.vendorResumeId).toBe('vendor-session-557');
   });
 
   it('matches an unknown webhook PID to a daemon-tracked wrapper PID via PPID and resolves awaiter', () => {

@@ -9,6 +9,10 @@ import type { ACPMessageData } from '@/api/session/sessionMessageTypes';
 import { FeaturesResponseSchema, type ExecutionRunPublicState, type ExecutionRunStartResponse } from '@happier-dev/protocol';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
 import type { CliServerFeaturesSnapshot } from '@/features/serverFeaturesClient';
+import type {
+  SessionRuntimeActivityContribution,
+  SessionRuntimeActivityContributionHandle,
+} from '@/session/runtimeActivity/types';
 
 import { createEncryptedRpcTestClient } from './encryptedRpc.testkit';
 import { registerExecutionRunHandlers as registerExecutionRunHandlersBase } from './executionRuns';
@@ -312,6 +316,41 @@ function createCancelRaceBackend(params: Readonly<{
 }
 
 describe('executionRuns session RPC handlers', () => {
+  it('threads one prepared execution contribution handle into the canonical manager', async () => {
+    const reports: SessionRuntimeActivityContribution[] = [];
+    const runtimeActivityContributionHandle = {
+      report: vi.fn(async (snapshot: SessionRuntimeActivityContribution) => { reports.push(snapshot); }),
+      markUnknown: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } satisfies SessionRuntimeActivityContributionHandle;
+    const client = createEncryptedRpcTestClient({
+      scopePrefix: 'sess_1',
+      registerHandlers: (rpc) => {
+        registerExecutionRunHandlers(rpc, {
+          sessionId: 'sess_1',
+          cwd: process.cwd(),
+          parentProvider: 'claude',
+          createBackend: () => createStaticBackend('{"summary":"done"}'),
+          sendAcp: () => {},
+          runtimeActivityContributionHandle,
+        });
+      },
+    });
+
+    const started = await client.call<ExecutionRunStartResponse, any>(SESSION_RPC_METHODS.EXECUTION_RUN_START, {
+      intent: 'delegate',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      instructions: 'Delegate.',
+      permissionMode: 'read_only',
+      retentionPolicy: 'ephemeral',
+      runClass: 'bounded',
+      ioMode: 'request_response',
+    });
+    expect(started.runId).toMatch(/^run_/);
+    await vi.waitFor(() => expect(reports.at(-1)).toEqual({ state: 'idle', activeCount: 0 }));
+    expect(reports[0]).toEqual({ state: 'active', activeCount: 1 });
+  });
+
   it('passes resolved account settings into built-in backend creation', async () => {
     const createBackend = vi.fn(() => createStaticBackend('ok'));
 
@@ -1529,8 +1568,162 @@ describe('executionRuns session RPC handlers', () => {
     expect(events.sendPrompts[1]).toContain('Old assistant turn');
   });
 
+  it('rejects v2 durable transcript custody before provider execution for an ephemeral voice transcript', async () => {
+    const sendPrompt = vi.fn(async () => {});
+    const appendUserText = vi.fn();
+    const appendUserTextCommitted = vi.fn(async () => {});
+    const client = createEncryptedRpcTestClient({
+      scopePrefix: 'sess_1',
+      registerHandlers: (rpc) => {
+        registerExecutionRunHandlers(rpc, {
+          sessionId: 'sess_1',
+          cwd: process.cwd(),
+          parentProvider: 'claude',
+          createBackend: () => ({
+            ...createStaticBackend('provider must not start'),
+            sendPrompt,
+          }),
+          sendAcp: () => {},
+          transcriptWriter: {
+            appendUserText,
+            appendAssistantText: vi.fn(),
+            appendUserTextCommitted,
+            appendAssistantTextCommitted: vi.fn(async () => {}),
+          },
+        });
+      },
+    });
+
+    const started = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_START, {
+      intent: 'voice_agent',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      permissionMode: 'read_only',
+      retentionPolicy: 'ephemeral',
+      runClass: 'long_lived',
+      ioMode: 'streaming',
+      chatModelId: 'chat',
+      commitModelId: 'commit',
+      idleTtlSeconds: 60,
+      initialContext: 'ctx',
+      verbosity: 'short',
+      transcript: { persistenceMode: 'ephemeral', epoch: 4 },
+    });
+
+    await expect(
+      client.call(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START_V2, {
+        runId: started.runId,
+        message: 'Persist this exact turn',
+        userTranscript: {
+          mode: 'persist',
+          localId: ' ephemeral-durable-id ',
+        },
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      errorCode: 'execution_run_not_allowed',
+      error: 'Persistent transcript required',
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(appendUserText).not.toHaveBeenCalled();
+    expect(appendUserTextCommitted).not.toHaveBeenCalled();
+  });
+
+  it('rejects v2 durable transcript custody before provider execution when no transcript writer exists', async () => {
+    const sendPrompt = vi.fn(async () => {});
+    const client = createEncryptedRpcTestClient({
+      scopePrefix: 'sess_1',
+      registerHandlers: (rpc) => {
+        registerExecutionRunHandlers(rpc, {
+          sessionId: 'sess_1',
+          cwd: process.cwd(),
+          parentProvider: 'claude',
+          createBackend: () => ({
+            ...createStaticBackend('provider must not start'),
+            sendPrompt,
+          }),
+          sendAcp: () => {},
+        });
+      },
+    });
+
+    const started = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_START, {
+      intent: 'voice_agent',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      permissionMode: 'read_only',
+      retentionPolicy: 'resumable',
+      runClass: 'long_lived',
+      ioMode: 'streaming',
+      chatModelId: 'chat',
+      commitModelId: 'commit',
+      idleTtlSeconds: 60,
+      initialContext: 'ctx',
+      verbosity: 'short',
+      transcript: { persistenceMode: 'persistent', epoch: 4 },
+    });
+
+    await expect(
+      client.call(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START_V2, {
+        runId: started.runId,
+        message: 'Persist this exact turn',
+        userTranscript: {
+          mode: 'persist',
+          localId: ' missing-writer-durable-id ',
+        },
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      errorCode: 'execution_run_not_allowed',
+      error: 'Committed user transcript writer is required for durable voice identity',
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('allows an explicit v2 suppress turn without a persistent transcript or transcript writer', async () => {
+    const sendPrompt = vi.fn(async () => {});
+    const client = createEncryptedRpcTestClient({
+      scopePrefix: 'sess_1',
+      registerHandlers: (rpc) => {
+        registerExecutionRunHandlers(rpc, {
+          sessionId: 'sess_1',
+          cwd: process.cwd(),
+          parentProvider: 'claude',
+          createBackend: () => ({
+            ...createStaticBackend('suppressed transcript reply'),
+            sendPrompt,
+          }),
+          sendAcp: () => {},
+        });
+      },
+    });
+
+    const started = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_START, {
+      intent: 'voice_agent',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      permissionMode: 'read_only',
+      retentionPolicy: 'ephemeral',
+      runClass: 'long_lived',
+      ioMode: 'streaming',
+      chatModelId: 'chat',
+      commitModelId: 'commit',
+      idleTtlSeconds: 60,
+      initialContext: 'ctx',
+      verbosity: 'short',
+      transcript: { persistenceMode: 'ephemeral', epoch: 4 },
+    });
+
+    const streamStart = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START_V2, {
+      runId: started.runId,
+      message: 'VOICE_TOOL_RESULTS_JSON:[{"ok":true}]',
+      userTranscript: { mode: 'suppress' },
+    });
+
+    expect(streamStart.streamId).toMatch(/^stream_/);
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it('commits persistent voice_agent transcript turns durably via the transcript port', async () => {
-    const committedUserTurns: Array<{ text: string; meta: Record<string, unknown> }> = [];
+    const deterministicRandomIdTrap = 'random-id-trap';
+    const committedUserTurns: Array<{ text: string; localId: string; meta: Record<string, unknown> }> = [];
     const committedAssistantTurns: Array<{ text: string; meta: Record<string, unknown> }> = [];
     const bestEffortUserTurns: string[] = [];
     const bestEffortAssistantTurns: string[] = [];
@@ -1551,8 +1744,15 @@ describe('executionRuns session RPC handlers', () => {
             appendAssistantText: (text: string) => {
               bestEffortAssistantTurns.push(text);
             },
-            appendUserTextCommitted: async (text: string, meta: Record<string, unknown>) => {
-              committedUserTurns.push({ text, meta });
+            appendUserTextCommitted: async (
+              text: string,
+              options: Readonly<{ localId?: string; meta: Record<string, unknown> }>,
+            ) => {
+              committedUserTurns.push({
+                text,
+                localId: options.localId ?? deterministicRandomIdTrap,
+                meta: options.meta,
+              });
             },
             appendAssistantTextCommitted: async (text: string, meta: Record<string, unknown>) => {
               committedAssistantTurns.push({ text, meta });
@@ -1577,10 +1777,14 @@ describe('executionRuns session RPC handlers', () => {
       transcript: { persistenceMode: 'persistent', epoch: 4 },
     });
 
-    const streamStart = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START, {
+    const streamStart = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START_V2, {
       runId: started.runId,
       message: 'Persist this user turn',
       displayMessage: 'Persist only this clean user turn',
+      userTranscript: {
+        mode: 'persist',
+        localId: ' durable-outer-id ',
+      },
     });
     const read = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_READ, {
       runId: started.runId,
@@ -1590,18 +1794,71 @@ describe('executionRuns session RPC handlers', () => {
     });
 
     expect(read.done).toBe(true);
+
+    const followUpStreamStart = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START_V2, {
+      runId: started.runId,
+      message: 'VOICE_TOOL_RESULTS_JSON:[{"ok":true}]',
+      userTranscript: { mode: 'suppress' },
+    });
+    const followUpRead = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_READ, {
+      runId: started.runId,
+      streamId: followUpStreamStart.streamId,
+      cursor: 0,
+      maxEvents: 128,
+    });
+
+    expect(followUpRead.done).toBe(true);
     expect(committedUserTurns).toHaveLength(1);
     expect(committedUserTurns[0]?.text).toBe('Persist only this clean user turn');
+    expect(committedUserTurns[0]?.localId).toBe(' durable-outer-id ');
+    expect(committedUserTurns[0]?.localId).not.toBe(deterministicRandomIdTrap);
     expect(committedUserTurns[0]?.meta).toMatchObject({
       happier: { kind: 'voice_agent_turn.v1', payload: { epoch: 4, role: 'user' } },
     });
-    expect(committedAssistantTurns).toHaveLength(1);
+    expect(committedAssistantTurns).toHaveLength(2);
     expect(committedAssistantTurns[0]?.text).toBe('Committed reply');
     expect(committedAssistantTurns[0]?.meta).toMatchObject({
       happier: { kind: 'voice_agent_turn.v1', payload: { epoch: 4, role: 'assistant' } },
     });
     expect(bestEffortUserTurns).toHaveLength(0);
     expect(bestEffortAssistantTurns).toHaveLength(0);
+
+    committedUserTurns.length = 0;
+    await expect(
+      client.call(SESSION_RPC_METHODS.EXECUTION_RUN_USER_TRANSCRIPT_COMMIT_V1, {
+        runId: started.runId,
+        message: 'Approve the pending permission request.',
+        localId: ' shortcut-durable-id ',
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(committedUserTurns).toEqual([
+      expect.objectContaining({
+        text: 'Approve the pending permission request.',
+        localId: ' shortcut-durable-id ',
+      }),
+    ]);
+    expect(committedUserTurns[0]?.localId).not.toBe(deterministicRandomIdTrap);
+
+    committedUserTurns.length = 0;
+    const legacyStreamStart = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START, {
+      runId: started.runId,
+      message: 'Legacy caller turn',
+    });
+    const legacyRead = await client.call<any, any>(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_READ, {
+      runId: started.runId,
+      streamId: legacyStreamStart.streamId,
+      cursor: 0,
+      maxEvents: 128,
+    });
+    expect(legacyRead.done).toBe(true);
+    expect(committedUserTurns).toEqual([
+      expect.objectContaining({
+        text: 'Legacy caller turn',
+        localId: expect.any(String),
+      }),
+    ]);
+    expect(committedUserTurns[0]?.localId).not.toBe(' durable-outer-id ');
+    expect(committedUserTurns[0]?.localId).not.toBe(deterministicRandomIdTrap);
   });
 
   it('supports voice_agent stream resume via execution.run.stream.start(resume=true) after stop when backend supports loadSession', async () => {

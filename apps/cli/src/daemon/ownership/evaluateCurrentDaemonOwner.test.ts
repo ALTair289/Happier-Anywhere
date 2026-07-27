@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { withTempDir } from '@/testkit/fs/tempDir';
@@ -59,9 +59,20 @@ describe('evaluateCurrentDaemonOwner', () => {
     const envScope = createEnvKeyScope([
         'HAPPIER_HOME_DIR',
         'HAPPIER_ACTIVE_SERVER_ID',
+        'HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID',
         'HAPPIER_PUBLIC_RELEASE_CHANNEL',
         'HAPPIER_DAEMON_PROCESS_INVENTORY_FALLBACK',
+        'HAPPIER_SERVER_URL',
+        'HAPPIER_WEBAPP_URL',
     ]);
+
+    beforeEach(() => {
+        envScope.patch({
+            HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: undefined,
+            HAPPIER_SERVER_URL: undefined,
+            HAPPIER_WEBAPP_URL: undefined,
+        });
+    });
 
     afterEach(() => {
         envScope.restore();
@@ -146,6 +157,162 @@ describe('evaluateCurrentDaemonOwner', () => {
                 const { evaluateCurrentDaemonOwner } = await import('./evaluateCurrentDaemonOwner');
                 await expect(evaluateCurrentDaemonOwner()).resolves.toEqual({ kind: 'none' });
             } finally {
+                vi.doUnmock('@/daemon/doctor');
+            }
+        });
+    });
+
+    it('accepts a state-less daemon with the same explicit lifecycle scope despite a different endpoint profile', async () => {
+        await withTempDir('happier-daemon-owner-lifecycle-match-', async (homeDir) => {
+            envScope.patch({
+                HAPPIER_HOME_DIR: homeDir,
+                HAPPIER_ACTIVE_SERVER_ID: 'current-endpoint-profile',
+                HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-current__id_default',
+                HAPPIER_PUBLIC_RELEASE_CHANNEL: 'stable',
+                HAPPIER_DAEMON_PROCESS_INVENTORY_FALLBACK: '1',
+            });
+            vi.resetModules();
+            vi.doMock('@/daemon/controlClient', () => ({
+                inspectDaemonRunningStateAndCleanupStaleState: async () => ({ status: 'not-running' }),
+            }));
+            vi.doMock('@/daemon/doctor', () => ({
+                findAllHappyProcesses: async () => [{
+                    pid: process.pid + 1000,
+                    command: `${process.execPath} ${process.cwd()}/apps/cli/src/index.ts daemon start-sync`,
+                    type: 'dev-daemon',
+                    daemonOwnershipEnvironmentVariables: {
+                        HAPPIER_HOME_DIR: homeDir,
+                        HAPPIER_ACTIVE_SERVER_ID: 'older-endpoint-profile',
+                        HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-current__id_default',
+                    },
+                } satisfies HappyProcessInfo],
+            }));
+
+            try {
+                const { evaluateCurrentDaemonOwner } = await import('./evaluateCurrentDaemonOwner');
+                const evaluation = await evaluateCurrentDaemonOwner();
+                expect(evaluation.kind).toBe('conflict');
+                if (evaluation.kind === 'conflict') {
+                    expect(evaluation.owner.source).toBe('process');
+                    expect(evaluation.owner.state.pid).toBe(process.pid + 1000);
+                }
+            } finally {
+                vi.doUnmock('@/daemon/controlClient');
+                vi.doUnmock('@/daemon/doctor');
+            }
+        });
+    });
+
+    it('accepts a state-less daemon with the same explicit lifecycle scope despite a changed endpoint URL', async () => {
+        await withTempDir('happier-daemon-owner-lifecycle-match-url-change-', async (homeDir) => {
+            envScope.patch({
+                HAPPIER_HOME_DIR: homeDir,
+                HAPPIER_ACTIVE_SERVER_ID: 'current-endpoint-profile',
+                HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-current__id_default',
+                HAPPIER_PUBLIC_RELEASE_CHANNEL: 'stable',
+                HAPPIER_DAEMON_PROCESS_INVENTORY_FALLBACK: '1',
+                HAPPIER_SERVER_URL: 'http://127.0.0.1:43127',
+                HAPPIER_WEBAPP_URL: 'http://127.0.0.1:43127',
+            });
+            vi.resetModules();
+            vi.doMock('@/daemon/controlClient', () => ({
+                inspectDaemonRunningStateAndCleanupStaleState: async () => ({ status: 'not-running' }),
+            }));
+            vi.doMock('@/daemon/doctor', () => ({
+                findAllHappyProcesses: async () => [{
+                    pid: process.pid + 1000,
+                    command: `${process.execPath} ${process.cwd()}/apps/cli/src/index.ts daemon start-sync`,
+                    type: 'dev-daemon',
+                    daemonOwnershipEnvironmentVariables: {
+                        HAPPIER_HOME_DIR: homeDir,
+                        HAPPIER_ACTIVE_SERVER_ID: 'older-endpoint-profile',
+                        HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-current__id_default',
+                        HAPPIER_SERVER_URL: 'http://127.0.0.1:3005',
+                    },
+                } satisfies HappyProcessInfo],
+            }));
+
+            try {
+                const { evaluateCurrentDaemonOwner } = await import('./evaluateCurrentDaemonOwner');
+                const evaluation = await evaluateCurrentDaemonOwner();
+                expect(evaluation.kind).toBe('conflict');
+                if (evaluation.kind === 'conflict') {
+                    expect(evaluation.owner.source).toBe('process');
+                }
+            } finally {
+                vi.doUnmock('@/daemon/controlClient');
+                vi.doUnmock('@/daemon/doctor');
+            }
+        });
+    });
+
+    it('rejects a state-less daemon with a different explicit lifecycle scope despite the same endpoint profile', async () => {
+        await withTempDir('happier-daemon-owner-lifecycle-mismatch-', async (homeDir) => {
+            envScope.patch({
+                HAPPIER_HOME_DIR: homeDir,
+                HAPPIER_ACTIVE_SERVER_ID: 'shared-endpoint-profile',
+                HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-current__id_default',
+                HAPPIER_PUBLIC_RELEASE_CHANNEL: 'stable',
+                HAPPIER_DAEMON_PROCESS_INVENTORY_FALLBACK: '1',
+            });
+            vi.resetModules();
+            vi.doMock('@/daemon/controlClient', () => ({
+                inspectDaemonRunningStateAndCleanupStaleState: async () => ({ status: 'not-running' }),
+            }));
+            vi.doMock('@/daemon/doctor', () => ({
+                findAllHappyProcesses: async () => [{
+                    pid: process.pid + 1000,
+                    command: `${process.execPath} ${process.cwd()}/apps/cli/src/index.ts daemon start-sync`,
+                    type: 'dev-daemon',
+                    daemonOwnershipEnvironmentVariables: {
+                        HAPPIER_HOME_DIR: homeDir,
+                        HAPPIER_ACTIVE_SERVER_ID: 'shared-endpoint-profile',
+                        HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-other__id_default',
+                    },
+                } satisfies HappyProcessInfo],
+            }));
+
+            try {
+                const { evaluateCurrentDaemonOwner } = await import('./evaluateCurrentDaemonOwner');
+                await expect(evaluateCurrentDaemonOwner()).resolves.toEqual({ kind: 'none' });
+            } finally {
+                vi.doUnmock('@/daemon/controlClient');
+                vi.doUnmock('@/daemon/doctor');
+            }
+        });
+    });
+
+    it('does not treat a current explicitly scoped daemon as an old daemon when the caller has no lifecycle scope', async () => {
+        await withTempDir('happier-daemon-owner-current-scope-vs-generic-caller-', async (homeDir) => {
+            envScope.patch({
+                HAPPIER_HOME_DIR: homeDir,
+                HAPPIER_ACTIVE_SERVER_ID: 'shared-endpoint-profile',
+                HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: undefined,
+                HAPPIER_PUBLIC_RELEASE_CHANNEL: 'stable',
+                HAPPIER_DAEMON_PROCESS_INVENTORY_FALLBACK: '1',
+            });
+            vi.resetModules();
+            vi.doMock('@/daemon/controlClient', () => ({
+                inspectDaemonRunningStateAndCleanupStaleState: async () => ({ status: 'not-running' }),
+            }));
+            vi.doMock('@/daemon/doctor', () => ({
+                findAllHappyProcesses: async () => [{
+                    pid: process.pid + 1000,
+                    command: `${process.execPath} ${process.cwd()}/apps/cli/src/index.ts daemon start-sync`,
+                    type: 'dev-daemon',
+                    daemonOwnershipEnvironmentVariables: {
+                        HAPPIER_HOME_DIR: homeDir,
+                        HAPPIER_ACTIVE_SERVER_ID: 'shared-endpoint-profile',
+                        HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-current__id_default',
+                    },
+                } satisfies HappyProcessInfo],
+            }));
+
+            try {
+                const { evaluateCurrentDaemonOwner } = await import('./evaluateCurrentDaemonOwner');
+                await expect(evaluateCurrentDaemonOwner()).resolves.toEqual({ kind: 'none' });
+            } finally {
+                vi.doUnmock('@/daemon/controlClient');
                 vi.doUnmock('@/daemon/doctor');
             }
         });

@@ -28,13 +28,28 @@ export type TerminalPtySessionManagerConfig = Readonly<{
   defaultRows: number;
 }>;
 
+export type TerminalPtyLaunchSpec = Readonly<{
+  file: string;
+  args: readonly string[];
+  env?: Readonly<Record<string, string>>;
+}>;
+
+type TerminalPtyEnsureInput = Readonly<{
+  terminalKey: string;
+  cwd: string;
+  cols?: number;
+  rows?: number;
+  initialCommand?: string;
+  launch?: TerminalPtyLaunchSpec;
+}>;
+
 export type TerminalPtySessionManager = Readonly<{
-  ensure: (input: Readonly<{ terminalKey: string; cwd: string; cols?: number; rows?: number; initialCommand?: string }>) => EnsureOk | ErrorResult;
+  ensure: (input: TerminalPtyEnsureInput) => EnsureOk | ErrorResult;
   read: (input: Readonly<{ terminalId: string; cursor: number; maxBytes: number; maxEvents: number }>) => ReadOk | ErrorResult;
   input: (input: Readonly<{ terminalId: string; data: string }>) => SimpleOk | ErrorResult;
   resize: (input: Readonly<{ terminalId: string; cols: number; rows: number }>) => SimpleOk | ErrorResult;
   close: (input: Readonly<{ terminalId: string }>) => SimpleOk | ErrorResult;
-  restart: (input: Readonly<{ terminalKey: string; cwd: string; cols?: number; rows?: number; initialCommand?: string }>) => EnsureOk | ErrorResult;
+  restart: (input: TerminalPtyEnsureInput) => EnsureOk | ErrorResult;
 }>;
 
 function okDisabled(errorCode: DaemonTerminalErrorCode): ErrorResult {
@@ -228,7 +243,7 @@ export function createTerminalPtySessionManager(params: Readonly<{
     return { ok: true };
   };
 
-  const ensure = (input: Readonly<{ terminalKey: string; cwd: string; cols?: number; rows?: number; initialCommand?: string }>): EnsureOk | ErrorResult => {
+  const ensure = (input: TerminalPtyEnsureInput): EnsureOk | ErrorResult => {
     reapIdle();
     const existingId = terminalIdByKey.get(input.terminalKey) ?? null;
     if (existingId) {
@@ -268,19 +283,22 @@ export function createTerminalPtySessionManager(params: Readonly<{
     const cols = typeof input.cols === 'number' && Number.isFinite(input.cols) ? Math.max(2, Math.trunc(input.cols)) : config.defaultCols;
     const rows = typeof input.rows === 'number' && Number.isFinite(input.rows) ? Math.max(2, Math.trunc(input.rows)) : config.defaultRows;
 
-    const shell = resolveTerminalShell(env, platform);
+    const shell = input.launch ?? resolveTerminalShell(env, platform);
 
     let pty: PtyProcess;
     try {
       pty = params.ptyProvider.spawn({
         file: shell.file,
-        args: shell.args.slice(),
+        args: [...shell.args],
         options: {
           name: 'xterm-256color',
           cols,
           rows,
           cwd: input.cwd,
-          env: resolveTerminalSpawnEnv(env),
+          env: {
+            ...resolveTerminalSpawnEnv(env),
+            ...(input.launch?.env ?? {}),
+          },
           encoding: 'utf8',
         },
       });
@@ -332,7 +350,7 @@ export function createTerminalPtySessionManager(params: Readonly<{
     sessionsById.set(terminalId, session);
     terminalIdByKey.set(input.terminalKey, terminalId);
 
-    if (input.initialCommand && input.initialCommand.trim()) {
+    if (!input.launch && input.initialCommand && input.initialCommand.trim()) {
       const cmd = input.initialCommand.endsWith('\n') ? input.initialCommand : `${input.initialCommand}\n`;
       try {
         pty.write(cmd);
@@ -344,7 +362,7 @@ export function createTerminalPtySessionManager(params: Readonly<{
     return { ok: true, terminalId, reused: false };
   };
 
-  const restart = (input: Readonly<{ terminalKey: string; cwd: string; cols?: number; rows?: number; initialCommand?: string }>): EnsureOk | ErrorResult => {
+  const restart = (input: TerminalPtyEnsureInput): EnsureOk | ErrorResult => {
     reapIdle();
     const existing = terminalIdByKey.get(input.terminalKey) ?? null;
     if (existing) {
@@ -356,6 +374,7 @@ export function createTerminalPtySessionManager(params: Readonly<{
       cols: input.cols,
       rows: input.rows,
       initialCommand: input.initialCommand,
+      launch: input.launch,
     });
   };
 

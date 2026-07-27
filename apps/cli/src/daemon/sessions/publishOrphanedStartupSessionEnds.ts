@@ -1,43 +1,40 @@
-import {
-  reportDaemonObservedSessionExit,
-  type DaemonSessionEndPayload,
-} from '../sessionTermination';
+import type { ExactSessionTurnEndMutationV1 } from '@happier-dev/protocol';
 
-type OrphanedDeadDaemonSession = Readonly<{
+import { removeSessionMarker } from '../sessionRegistry';
+import { stageObservedExit } from './stageObservedExit';
+
+export type OrphanedDeadDaemonSession = Readonly<{
   sessionId: string;
   pid: number;
+  activeTurnId?: string;
 }>;
 
-export function publishOrphanedStartupSessionEnds(params: Readonly<{
+/**
+ * Startup Adapter for dead daemon-owned markers. The staging owner makes the
+ * exact-turn decision; this Adapter supplies persisted marker evidence only.
+ */
+export async function publishOrphanedStartupSessionEnds(params: Readonly<{
   apiMachine: {
-    emitSessionEnd: (payload: DaemonSessionEndPayload) => void;
-    enqueueSessionEndMutation?: (payload: DaemonSessionEndPayload) => void;
+    enqueueDaemonTerminalExactTurnEnd: (mutation: ExactSessionTurnEndMutationV1) => Promise<void>;
   };
   orphanedDeadDaemonSessions: ReadonlyArray<OrphanedDeadDaemonSession>;
   now?: () => number;
-}>): void {
+  removeSessionMarkerFn?: typeof removeSessionMarker;
+}>): Promise<void> {
   const now = params.now ?? (() => Date.now());
-  const publishSessionEnd = (payload: DaemonSessionEndPayload): void => {
-    if (params.apiMachine.enqueueSessionEndMutation) {
-      params.apiMachine.enqueueSessionEndMutation(payload);
-      return;
-    }
-    params.apiMachine.emitSessionEnd(payload);
-  };
+  const removeSessionMarkerFn = params.removeSessionMarkerFn ?? removeSessionMarker;
 
   for (const orphanedSession of params.orphanedDeadDaemonSessions) {
-    reportDaemonObservedSessionExit({
-      apiMachine: { emitSessionEnd: publishSessionEnd },
+    await stageObservedExit({
       trackedSession: {
-        startedBy: 'daemon',
         happySessionId: orphanedSession.sessionId,
         pid: orphanedSession.pid,
+        ...(orphanedSession.activeTurnId ? { activeTurnId: orphanedSession.activeTurnId } : {}),
       },
-      now,
-      exit: {
-        reason: 'process-missing',
-        code: null,
-        signal: null,
+      observedAt: now(),
+      enqueueExactTurnEnd: (mutation) => params.apiMachine.enqueueDaemonTerminalExactTurnEnd(mutation),
+      releaseMarkerEvidence: async ({ markerPid }) => {
+        await removeSessionMarkerFn(markerPid);
       },
     });
   }

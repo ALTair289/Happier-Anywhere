@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { withTempDir } from '@/testkit/fs/tempDir';
 
@@ -8,11 +8,16 @@ describe('readDaemonState', () => {
     const envKeys = [
         'HAPPIER_HOME_DIR',
         'HAPPIER_ACTIVE_SERVER_ID',
+        'HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID',
         'HAPPIER_PUBLIC_RELEASE_CHANNEL',
         'HAPPIER_SERVER_URL',
         'HAPPIER_WEBAPP_URL',
     ] as const;
     let envScope = createEnvKeyScope(envKeys);
+
+    beforeEach(() => {
+        envScope.patch({ HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: undefined });
+    });
 
     afterEach(() => {
         envScope.restore();
@@ -150,6 +155,92 @@ describe('readDaemonState', () => {
             expect(state?.startupSource).toBe('background-service');
             expect(state?.serviceLabel).toBe('com.happier.cli.daemon.default');
             expect(state?.startedWithPublicReleaseChannel).toBe('preview');
+        });
+    });
+
+    it('reads only the explicit daemon lifecycle scope when the endpoint profile differs', async () => {
+        await withTempDir('happier-cli-daemon-state-explicit-lifecycle-', async (homeDir) => {
+            vi.resetModules();
+            envScope.patch({
+                HAPPIER_HOME_DIR: homeDir,
+                HAPPIER_ACTIVE_SERVER_ID: 'endpoint-profile',
+                HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-current__id_default',
+            });
+
+            const [{ configuration }, { readDaemonState }] = await Promise.all([
+                import('./configuration'),
+                import('./persistence'),
+            ]);
+            const exactState = {
+                pid: 741,
+                httpPort: 5173,
+                startedAt: Date.now(),
+                startedWithCliVersion: '0.0.0-current',
+            };
+            const endpointDecoy = {
+                ...exactState,
+                pid: 742,
+                startedWithCliVersion: '0.0.0-endpoint-decoy',
+            };
+            mkdirSync(dirname(configuration.daemonStateFile), { recursive: true });
+            writeFileSync(configuration.daemonStateFile, JSON.stringify(exactState), 'utf-8');
+            mkdirSync(configuration.activeServerDir, { recursive: true });
+            writeFileSync(join(configuration.activeServerDir, 'daemon.state.json'), JSON.stringify(endpointDecoy), 'utf-8');
+
+            expect(configuration.daemonStateFile).not.toBe(join(configuration.activeServerDir, 'daemon.state.json'));
+            await expect(readDaemonState()).resolves.toMatchObject({ pid: 741 });
+        });
+    });
+
+    it('does not scan matching settings profiles when an explicit daemon lifecycle scope is missing state', async () => {
+        await withTempDir('happier-cli-daemon-state-explicit-no-profile-scan-', async (homeDir) => {
+            const livePid = 743;
+            const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+                if (signal === 0 && pid === livePid) return true;
+                const error = new Error('ESRCH') as NodeJS.ErrnoException;
+                error.code = 'ESRCH';
+                throw error;
+            }) as typeof process.kill);
+            try {
+                writeFileSync(join(homeDir, 'settings.json'), JSON.stringify({
+                    schemaVersion: 6,
+                    activeServerId: 'endpoint-profile',
+                    servers: {
+                        'endpoint-profile': {
+                            id: 'endpoint-profile',
+                            serverUrl: 'http://127.0.0.1:53288',
+                            webappUrl: 'http://127.0.0.1:53288',
+                        },
+                        'matching-profile-alias': {
+                            id: 'matching-profile-alias',
+                            serverUrl: 'http://127.0.0.1:53288',
+                            webappUrl: 'http://127.0.0.1:53288',
+                        },
+                    },
+                }), 'utf-8');
+                vi.resetModules();
+                envScope.patch({
+                    HAPPIER_HOME_DIR: homeDir,
+                    HAPPIER_ACTIVE_SERVER_ID: 'endpoint-profile',
+                    HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-current__id_default',
+                    HAPPIER_SERVER_URL: 'http://127.0.0.1:53288',
+                    HAPPIER_WEBAPP_URL: 'http://127.0.0.1:53288',
+                });
+
+                const { readDaemonState } = await import('./persistence');
+                const decoyPath = join(homeDir, 'servers', 'matching-profile-alias', 'daemon.state.json');
+                mkdirSync(dirname(decoyPath), { recursive: true });
+                writeFileSync(decoyPath, JSON.stringify({
+                    pid: livePid,
+                    httpPort: 5173,
+                    startedAt: Date.now(),
+                    startedWithCliVersion: '0.0.0-decoy',
+                }), 'utf-8');
+
+                await expect(readDaemonState()).resolves.toBeNull();
+            } finally {
+                killSpy.mockRestore();
+            }
         });
     });
 
@@ -380,11 +471,16 @@ describe('daemon state canonicalization', () => {
     const envKeys = [
         'HAPPIER_HOME_DIR',
         'HAPPIER_ACTIVE_SERVER_ID',
+        'HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID',
         'HAPPIER_PUBLIC_RELEASE_CHANNEL',
         'HAPPIER_SERVER_URL',
         'HAPPIER_WEBAPP_URL',
     ] as const;
     let envScope = createEnvKeyScope(envKeys);
+
+    beforeEach(() => {
+        envScope.patch({ HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: undefined });
+    });
 
     afterEach(() => {
         envScope.restore();
@@ -429,6 +525,40 @@ describe('daemon state canonicalization', () => {
 
             expect(existsSync(configuration.daemonStateFile)).toBe(true);
             expect(existsSync(legacyPath)).toBe(false);
+        });
+    });
+
+    it('cleans legacy ring state only inside the explicit lifecycle directory', async () => {
+        await withTempDir('happier-cli-daemon-state-lifecycle-cleanup-', async (homeDir) => {
+            vi.resetModules();
+            envScope.patch({
+                HAPPIER_HOME_DIR: homeDir,
+                HAPPIER_ACTIVE_SERVER_ID: 'endpoint-profile',
+                HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-current__id_default',
+                HAPPIER_PUBLIC_RELEASE_CHANNEL: 'dev',
+            });
+
+            const [{ configuration }, { writeDaemonState }] = await Promise.all([
+                import('./configuration'),
+                import('./persistence'),
+            ]);
+            const lifecycleLegacyPath = join(dirname(configuration.daemonStateFile), 'daemon.dev.state.json');
+            const endpointLegacyPath = join(configuration.activeServerDir, 'daemon.dev.state.json');
+            mkdirSync(dirname(lifecycleLegacyPath), { recursive: true });
+            mkdirSync(dirname(endpointLegacyPath), { recursive: true });
+            writeFileSync(lifecycleLegacyPath, '{}', 'utf-8');
+            writeFileSync(endpointLegacyPath, '{}', 'utf-8');
+
+            writeDaemonState({
+                pid: 744,
+                httpPort: 5173,
+                startedAt: Date.now(),
+                startedWithCliVersion: '0.0.0-current',
+            });
+
+            expect(existsSync(configuration.daemonStateFile)).toBe(true);
+            expect(existsSync(lifecycleLegacyPath)).toBe(false);
+            expect(existsSync(endpointLegacyPath)).toBe(true);
         });
     });
 

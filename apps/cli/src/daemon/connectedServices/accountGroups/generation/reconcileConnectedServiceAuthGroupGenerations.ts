@@ -500,6 +500,7 @@ export async function reconcileConnectedServiceAuthGroupGenerationForRuntimeTarg
         applicationSettledCredentialRevision: settled.credentialRevision,
         applicationSettledBySpawnMaterialization: (
           spawnMaterialized !== undefined
+          && (providerAdopted === undefined || providerAdopted.credentialRevision === null)
           && !readNonEmptyString(params.target.brokerSelectionIdentity)
         ),
       } : scope;

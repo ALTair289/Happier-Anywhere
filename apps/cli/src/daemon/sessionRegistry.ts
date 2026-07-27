@@ -1,7 +1,7 @@
 import { configuration } from '@/configuration';
 import { logger } from '@/ui/logger';
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readdir, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod';
 import { CATALOG_AGENT_IDS } from '@/backends/types';
@@ -12,6 +12,9 @@ import {
 } from './processSupervision/sessionRunnerRespawnDescriptor';
 import { resolveReleaseRingScopedBasename } from '@/cli/runtime/publicReleaseChannel';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
+import type { TerminalHostHealthState } from './types';
+import { writeJsonAtomic } from '@/utils/fs/writeJsonAtomic';
+import { withJsonOwnerFileLock } from '@/utils/fs/jsonOwnerFileLock';
 
 const DaemonSessionMarkerSchema = z.object({
   pid: z.number().int().positive(),
@@ -34,6 +37,16 @@ const DaemonSessionMarkerSchema = z.object({
     v: z.literal(1),
     requestedAtMs: z.number().int().nonnegative(),
   }).optional(),
+  terminalHostHealth: z.object({
+    status: z.literal('host_dead'),
+    sessionId: z.string().trim().min(1),
+    runnerPid: z.number().int().positive(),
+    hostKind: z.string().trim().min(1),
+    zellijSessionName: z.string().trim().min(1).optional(),
+    observedAt: z.number().int().nonnegative(),
+    reason: z.string().trim().min(1),
+  }).optional(),
+  activeTurnId: z.string().trim().min(1).max(512).optional(),
 });
 
 export type DaemonSessionMarker = z.infer<typeof DaemonSessionMarkerSchema>;
@@ -45,6 +58,7 @@ export function hashProcessCommand(command: string): string {
 function currentDaemonSessionsDir(): string {
   return join(configuration.happyHomeDir, 'tmp', resolveReleaseRingScopedBasename('daemon-sessions', configuration.publicReleaseRing));
 }
+
 
 function legacyDaemonSessionsDir(): string | null {
   return configuration.publicReleaseRing === 'stable' ? null : join(configuration.happyHomeDir, 'tmp', 'daemon-sessions');
@@ -61,6 +75,8 @@ function markerPathsForPid(pid: number): string[] {
 }
 
 const sessionMarkerMutationLocks = new Map<number, Promise<void>>();
+const SESSION_MARKER_LOCK_TIMEOUT_MS = 5_000;
+const SESSION_MARKER_LOCK_STALE_MS = 30_000;
 
 async function runWithSessionMarkerMutationLock<T>(pid: number, task: () => Promise<T>): Promise<T> {
   const previous = sessionMarkerMutationLocks.get(pid) ?? Promise.resolve();
@@ -72,7 +88,12 @@ async function runWithSessionMarkerMutationLock<T>(pid: number, task: () => Prom
   sessionMarkerMutationLocks.set(pid, next);
   await previous.catch(() => undefined);
   try {
-    return await task();
+    return await withJsonOwnerFileLock({
+      lockPath: join(currentDaemonSessionsDir(), `pid-${pid}.json.lock`),
+      timeoutMs: SESSION_MARKER_LOCK_TIMEOUT_MS,
+      staleAfterMs: SESSION_MARKER_LOCK_STALE_MS,
+      errorCode: 'SESSION_MARKER_MUTATION_LOCK_TIMEOUT',
+    }, task);
   } finally {
     release();
     if (sessionMarkerMutationLocks.get(pid) === next) {
@@ -85,39 +106,9 @@ async function ensureDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true });
 }
 
-async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
-  const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(tmpPath, JSON.stringify(value, null, 2), 'utf-8');
-    try {
-      await rename(tmpPath, filePath);
-    } catch (e) {
-      const err = e as NodeJS.ErrnoException;
-      // On Windows, rename may fail if destination exists.
-      if (err?.code === 'EEXIST' || err?.code === 'EPERM') {
-        try {
-          await unlink(filePath);
-        } catch {
-          // ignore unlink failure (e.g. ENOENT)
-        }
-        await rename(tmpPath, filePath);
-        return;
-      }
-      throw e;
-    }
-  } catch (e) {
-    // Best-effort cleanup to avoid leaving behind orphaned temp files on failure.
-    try {
-      await unlink(tmpPath);
-    } catch {
-      // ignore cleanup failure
-    }
-    throw e;
-  }
-}
-
 export type WriteSessionMarkerOptions = Readonly<{
   preserveConnectedServiceRestartIntent?: boolean;
+  preserveTerminalHostHealth?: boolean;
 }>;
 
 async function writeSessionMarkerUnlocked(
@@ -155,11 +146,18 @@ async function writeSessionMarkerUnlocked(
     && existingMarkerFromDisk?.happySessionId === marker.happySessionId
       ? existingMarkerFromDisk.connectedServiceRestartIntent
       : undefined;
+  const preservedTerminalHostHealth =
+    options.preserveTerminalHostHealth !== false
+    && marker.terminalHostHealth === undefined
+    && existingMarkerFromDisk?.happySessionId === marker.happySessionId
+      ? existingMarkerFromDisk.terminalHostHealth
+      : undefined;
   const payload: DaemonSessionMarker = DaemonSessionMarkerSchema.parse({
     ...marker,
     ...(preservedConnectedServiceRestartIntent
       ? { connectedServiceRestartIntent: preservedConnectedServiceRestartIntent }
       : {}),
+    ...(preservedTerminalHostHealth ? { terminalHostHealth: preservedTerminalHostHealth } : {}),
     happyHomeDir: configuration.happyHomeDir,
     createdAt: marker.createdAt ?? createdAtFromDisk ?? now,
     updatedAt: now,
@@ -172,6 +170,29 @@ export async function writeSessionMarker(
   options: WriteSessionMarkerOptions = {},
 ): Promise<void> {
   await runWithSessionMarkerMutationLock(marker.pid, () => writeSessionMarkerUnlocked(marker, options));
+}
+
+export async function updateSessionMarkerActiveTurn(params: Readonly<{
+  pid: number;
+  sessionId: string;
+  activeTurnId: string | null;
+}>): Promise<boolean> {
+  return await runWithSessionMarkerMutationLock(params.pid, async () => {
+    const existing = await readSessionMarkerForPid(params.pid);
+    if (!existing || existing.happySessionId !== params.sessionId) return false;
+
+    const {
+      activeTurnId: _activeTurnId,
+      happyHomeDir: _happyHomeDir,
+      updatedAt: _updatedAt,
+      ...rest
+    } = existing;
+    await writeSessionMarkerUnlocked({
+      ...rest,
+      ...(params.activeTurnId ? { activeTurnId: params.activeTurnId } : {}),
+    });
+    return true;
+  });
 }
 
 /**
@@ -224,7 +245,44 @@ export async function refreshSessionMarkerRespawn(params: Readonly<{
   });
 }
 
-async function readSessionMarkerForPid(pid: number): Promise<DaemonSessionMarker | null> {
+export async function publishSessionMarkerTerminalHostHealth(params: Readonly<{
+  pid: number;
+  health: TerminalHostHealthState;
+}>): Promise<boolean> {
+  return await runWithSessionMarkerMutationLock(params.pid, async () => {
+    const existing = await readSessionMarkerForPid(params.pid);
+    if (!existing) return false;
+    if (existing.happySessionId !== params.health.sessionId) return false;
+
+    const { happyHomeDir: _happyHomeDir, updatedAt: _updatedAt, ...rest } = existing;
+    await writeSessionMarkerUnlocked({
+      ...rest,
+      terminalHostHealth: params.health,
+    });
+    return true;
+  });
+}
+
+export async function clearSessionMarkerTerminalHostHealth(params: Readonly<{
+  pid: number;
+  sessionId: string;
+}>): Promise<boolean> {
+  return await runWithSessionMarkerMutationLock(params.pid, async () => {
+    const existing = await readSessionMarkerForPid(params.pid);
+    if (!existing || existing.happySessionId !== params.sessionId) return false;
+
+    const {
+      happyHomeDir: _happyHomeDir,
+      updatedAt: _updatedAt,
+      terminalHostHealth: _terminalHostHealth,
+      ...rest
+    } = existing;
+    await writeSessionMarkerUnlocked(rest, { preserveTerminalHostHealth: false });
+    return true;
+  });
+}
+
+export async function readSessionMarkerForPid(pid: number): Promise<DaemonSessionMarker | null> {
   for (const candidatePath of markerPathsForPid(pid)) {
     try {
       const raw = await readFile(candidatePath, 'utf-8');
@@ -318,7 +376,7 @@ async function promoteSessionMarkerConnectedServiceRestartIntentUnlocked(params:
   return true;
 }
 
-export async function removeSessionMarker(pid: number): Promise<void> {
+async function removeSessionMarkerUnlocked(pid: number): Promise<void> {
   for (const filePath of markerPathsForPid(pid)) {
     try {
       await unlink(filePath);
@@ -329,6 +387,12 @@ export async function removeSessionMarker(pid: number): Promise<void> {
       }
     }
   }
+}
+
+export async function removeSessionMarker(pid: number): Promise<void> {
+  await runWithSessionMarkerMutationLock(pid, async () => {
+    await removeSessionMarkerUnlocked(pid);
+  });
 }
 
 export async function listSessionMarkers(): Promise<DaemonSessionMarker[]> {

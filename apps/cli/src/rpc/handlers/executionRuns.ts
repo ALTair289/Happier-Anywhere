@@ -1,5 +1,6 @@
 import type { RpcHandlerRegistrar } from '@/api/rpc/types';
 import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import type { AgentBackend } from '@/agent/core/AgentBackend';
 import type { AcpConfigOptionOverridesV1, BackendTargetRefV1, ExecutionRunPublicState } from '@happier-dev/protocol';
 
@@ -14,12 +15,14 @@ import {
   ExecutionRunEnsureOrStartRequestSchema,
   ExecutionRunActionRequestSchema,
   ExecutionRunTurnStreamStartRequestSchema,
+  ExecutionRunTurnStreamStartV2RequestSchema,
+  ExecutionRunUserTranscriptCommitRequestSchema,
   ExecutionRunTurnStreamReadRequestSchema,
   ExecutionRunTurnStreamCancelRequestSchema,
 } from '@happier-dev/protocol';
 
 import { ExecutionRunManager } from '@/agent/executionRuns/runtime/ExecutionRunManager';
-import type { SessionRuntimeActivityPublisher } from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
+import type { SessionRuntimeActivityContributionHandle } from '@/session/runtimeActivity/types';
 import {
   ExecutionRunConnectedServicesUnavailableError,
   prepareExecutionRunConnectedServices,
@@ -76,7 +79,7 @@ export function registerExecutionRunHandlers(
       connectedServicesEnv?: Readonly<Record<string, string>> | null;
       connectedServicesCleanup?: (() => Promise<void>) | null;
     }) => AgentBackend;
-    sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+    sendAcp: AcpSendFn;
     streamedTranscriptSession?: Readonly<{
       sendAgentMessageCommitted: (
         provider: ACPProvider,
@@ -87,7 +90,10 @@ export function registerExecutionRunHandlers(
     transcriptWriter?: Readonly<{
       appendUserText: (text: string, meta: Record<string, unknown>) => void | Promise<void>;
       appendAssistantText: (text: string, meta: Record<string, unknown>) => void | Promise<void>;
-      appendUserTextCommitted?: (text: string, meta: Record<string, unknown>) => Promise<void>;
+      appendUserTextCommitted?: (
+        text: string,
+        options: Readonly<{ localId: string; meta: Record<string, unknown> }>,
+      ) => Promise<void>;
       appendAssistantTextCommitted?: (text: string, meta: Record<string, unknown>) => Promise<void>;
     }>;
     getServerFeaturesSnapshot?: () => CliServerFeaturesSnapshot | undefined;
@@ -99,7 +105,7 @@ export function registerExecutionRunHandlers(
       maxDepth?: number;
     }>;
     budgetRegistry?: ExecutionBudgetRegistry;
-    runtimeActivityPublisher?: SessionRuntimeActivityPublisher;
+    runtimeActivityContributionHandle?: SessionRuntimeActivityContributionHandle | null;
     onExecutionRunPublicStateUpdated?: (run: ExecutionRunPublicState) => void;
     resolveAccountSettings?: () => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
   }>,
@@ -129,7 +135,7 @@ export function registerExecutionRunHandlers(
     boundedTimeoutMs: policy.boundedTimeoutMs ?? undefined,
     maxTurns: policy.maxTurns ?? undefined,
     budgetRegistry: ctx.budgetRegistry,
-    runtimeActivityPublisher: ctx.runtimeActivityPublisher,
+    runtimeActivityContributionHandle: ctx.runtimeActivityContributionHandle,
     resolveAccountSettings: ctx.resolveAccountSettings,
     // Resume rehydration re-materializes connected services through the SAME canonical CS owner used
     // at start, driven by the run's persisted selection. Fail-closed: a run with a persisted CS
@@ -269,6 +275,7 @@ export function registerExecutionRunHandlers(
         // Persist the resolved selection into the run's immutable launch record so a later resume can
         // re-materialize the SAME account/profile (fail-closed) instead of ambient auth.
         startParams.connectedServicesSelection = preparedConnectedServices.selection;
+        startParams.connectedServicesRegistration = preparedConnectedServices.registration;
       }
       delete startParams.connectedServices;
       if (parsed.data.intent === 'voice_agent' && parsed.data.replay?.kind === 'voice_session.v1') {
@@ -420,6 +427,33 @@ export function registerExecutionRunHandlers(
     });
     if (!started.ok) return { ok: false, error: started.error, errorCode: started.errorCode };
     return { streamId: started.streamId };
+  });
+
+  rpc.registerHandler(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START_V2, async (raw: unknown) => {
+    if (!isExecutionRunsEnabled()) return executionRunsDisabled();
+    const parsed = ExecutionRunTurnStreamStartV2RequestSchema.safeParse(raw);
+    if (!parsed.success) return invalidParams();
+    const started = await manager.startTurnStream(parsed.data.runId, {
+      message: parsed.data.message,
+      ...(typeof parsed.data.displayMessage === 'string' ? { displayMessage: parsed.data.displayMessage } : {}),
+      userTranscript: parsed.data.userTranscript,
+      resume: parsed.data.resume,
+    });
+    if (!started.ok) return { ok: false, error: started.error, errorCode: started.errorCode };
+    return { streamId: started.streamId };
+  });
+
+  rpc.registerHandler(SESSION_RPC_METHODS.EXECUTION_RUN_USER_TRANSCRIPT_COMMIT_V1, async (raw: unknown) => {
+    if (!isExecutionRunsEnabled()) return executionRunsDisabled();
+    const parsed = ExecutionRunUserTranscriptCommitRequestSchema.safeParse(raw);
+    if (!parsed.success) return invalidParams();
+    const committed = await manager.commitUserTranscript(parsed.data.runId, {
+      message: parsed.data.message,
+      ...(typeof parsed.data.displayMessage === 'string' ? { displayMessage: parsed.data.displayMessage } : {}),
+      localId: parsed.data.localId,
+    });
+    if (!committed.ok) return { ok: false, error: committed.error, errorCode: committed.errorCode };
+    return { ok: true };
   });
 
   rpc.registerHandler(SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_READ, async (raw: unknown) => {

@@ -163,7 +163,9 @@ export const SessionRunnerRespawnDescriptorV1Schema = z
     directory: z.string(),
     backendTarget: BackendTargetRefSchema.optional(),
     resume: z.string().optional(),
+    vendorResumeId: z.string().optional(),
     existingSessionId: z.string().optional(),
+    spawnNonce: z.string().optional(),
     transcriptStorage: z.enum(['persisted', 'direct']).optional(),
     terminal: TerminalSpawnOptionsSchema.optional(),
     windowsRemoteSessionLaunchMode: z.enum(['hidden', 'windows_terminal', 'console']).optional(),
@@ -201,12 +203,20 @@ export function buildSessionRunnerRespawnDescriptorV1FromSpawnOptions(
   options?: Readonly<{
     encryptionMaterial?: RespawnDescriptorEncryptionMaterial;
     randomBytes?: (length: number) => Uint8Array;
+    /**
+     * Runtime-learned vendor resume identity (from the webhook seam). Persisted so a runner
+     * spawned WITHOUT an initial `--resume` still records how to resume its vendor conversation
+     * across daemon restarts. Distinct from `resume`, which is the spawn-time CLI resume arg.
+     */
+    vendorResumeId?: string;
   }>,
 ): SessionRunnerRespawnDescriptorV1 | null {
   const directory = normalizeOptionalString(spawnOptions.directory);
   if (!directory) return null;
   const resume = normalizeOptionalString(spawnOptions.resume);
+  const vendorResumeId = normalizeOptionalString(options?.vendorResumeId);
   const existingSessionId = normalizeOptionalString(spawnOptions.existingSessionId);
+  const spawnNonce = normalizeOptionalString(spawnOptions.spawnNonce);
   const transcriptStorage = spawnOptions.transcriptStorage === 'direct' ? 'direct' : undefined;
   const canonicalCodexBackendMode = resolveCanonicalCodexBackendMode({
     codexBackendMode: spawnOptions.codexBackendMode,
@@ -226,7 +236,9 @@ export function buildSessionRunnerRespawnDescriptorV1FromSpawnOptions(
     directory,
     ...(spawnOptions.backendTarget ? { backendTarget: spawnOptions.backendTarget } : {}),
     ...(resume ? { resume } : {}),
+    ...(vendorResumeId ? { vendorResumeId } : {}),
     ...(existingSessionId ? { existingSessionId } : {}),
+    ...(spawnNonce ? { spawnNonce } : {}),
     ...(transcriptStorage ? { transcriptStorage } : {}),
     ...(spawnOptions.terminal ? { terminal: spawnOptions.terminal } : {}),
     ...(spawnOptions.windowsRemoteSessionLaunchMode ? { windowsRemoteSessionLaunchMode: spawnOptions.windowsRemoteSessionLaunchMode } : {}),
@@ -280,6 +292,7 @@ export function buildSpawnSessionOptionsFromRespawnDescriptorV1(
     ...(descriptor.backendTarget ? { backendTarget: descriptor.backendTarget } : {}),
     ...(typeof descriptor.resume === 'string' ? { resume: descriptor.resume } : {}),
     ...(typeof descriptor.existingSessionId === 'string' ? { existingSessionId: descriptor.existingSessionId } : {}),
+    ...(typeof descriptor.spawnNonce === 'string' ? { spawnNonce: descriptor.spawnNonce } : {}),
     ...(descriptor.transcriptStorage === 'direct' ? { transcriptStorage: 'direct' } : {}),
     ...(descriptor.terminal ? { terminal: descriptor.terminal } : {}),
     ...(descriptor.windowsRemoteSessionLaunchMode ? { windowsRemoteSessionLaunchMode: descriptor.windowsRemoteSessionLaunchMode } : {}),

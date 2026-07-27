@@ -1598,6 +1598,14 @@ export function createCliActionDeps(params: Readonly<{
       });
     },
 
+    sessionPendingInputInterruptAndRun: async ({ sessionId, localId, expectedStateAtMs }) => {
+      return await callResolvedSessionRpc(sessionId, SESSION_RPC_METHODS.SESSION_PENDING_INPUT_INTERRUPT_AND_RUN, {
+        sessionId,
+        localId,
+        ...(typeof expectedStateAtMs === 'number' ? { expectedStateAtMs } : {}),
+      });
+    },
+
     sessionVendorPluginCatalogList: async ({ sessionId, cwd }) => {
       return await callRoutedSessionCatalogControl(sessionId, 'vendorPlugins', { cwd });
     },

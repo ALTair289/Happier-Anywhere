@@ -6,6 +6,16 @@ import { Metadata } from '@/api/types';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 import { ChildProcess } from 'child_process';
 
+export type TerminalHostHealthState = Readonly<{
+  status: 'host_dead';
+  sessionId: string;
+  runnerPid: number;
+  hostKind: 'zellij' | 'tmux' | 'pty' | string;
+  zellijSessionName?: string;
+  observedAt: number;
+  reason: string;
+}>;
+
 /**
  * Session tracking for daemon
  */
@@ -17,6 +27,8 @@ export interface TrackedSession {
   spawnOptions?: SpawnSessionOptions;
   /** Vendor resume id (e.g. Claude/Codex session id) supplied/derived at spawn time. */
   vendorResumeId?: string;
+  /** Exact session-owned foreground turn currently open in this runner. */
+  activeTurnId?: string;
   /**
    * Expected terminal host metadata for visible/hosted daemon launches.
    * Used to correlate wrapper host PIDs (for example wt.exe) with the child session runner webhook.
@@ -55,4 +67,10 @@ export interface TrackedSession {
    * of racing the in-flight stop.
    */
   stopRequestedAtMs?: number;
+  /**
+   * Exact nested terminal attachment whose servable projection this daemon has published.
+   * Prevents repeated capability probes when the runner reports unrelated metadata later.
+   */
+  publishedTerminalControlServiceabilityAttachmentId?: string;
+  terminalHostHealth?: TerminalHostHealthState;
 }

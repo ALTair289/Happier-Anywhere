@@ -3,6 +3,18 @@ import { describe, expect, it } from 'vitest';
 import { buildHappySessionControlArgs } from './sessionSpawnArgs';
 
 describe('buildHappySessionControlArgs', () => {
+  it('preserves exact nonblank opaque mode and model identifiers', () => {
+    expect(buildHappySessionControlArgs({
+      agentModeId: ' plan ',
+      agentModeUpdatedAt: 123,
+      modelId: ' model-a ',
+      modelUpdatedAt: 456,
+    })).toEqual([
+      '--agent-mode', ' plan ', '--agent-mode-updated-at', '123',
+      '--model', ' model-a ', '--model-updated-at', '456',
+    ]);
+  });
+
   it('includes permission mode flags when provided', () => {
     expect(buildHappySessionControlArgs({
       permissionMode: 'safe-yolo',

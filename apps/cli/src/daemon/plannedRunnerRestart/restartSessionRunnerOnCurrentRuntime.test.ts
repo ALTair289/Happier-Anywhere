@@ -4,8 +4,12 @@ import { RestartAllSessionRunnersResultV1Schema, RestartSessionRunnerResultV1Sch
 
 import type { TrackedSession } from '@/daemon/types';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
+import type { TerminalHostHandle } from '@/integrations/terminalHost/_types';
+
+import { createConnectedServiceSwitchDeferralQueue } from '@/daemon/connectedServices/sessionAuthSwitch/connectedServiceSwitchDeferralQueue';
 
 import type { SessionRunnerEntrypointIdentity } from '../sessionRunnerRuntime/types';
+import { resolveSessionRunnerActivityDisabledReason } from '../sessionRunnerRuntime/resolveActivityDisabledReason';
 import {
   restartAllSessionRunnersOnCurrentRuntime,
   restartSessionRunnerOnCurrentRuntime,
@@ -300,6 +304,81 @@ describe('restartSessionRunnerOnCurrentRuntime', () => {
     expect(requestRestart).not.toHaveBeenCalled();
   });
 
+  it('returns typed unsupported for terminal-host refresh without a bound attachment identity', async () => {
+    const requestRestart = vi.fn(async () => ({ signaled: true }));
+    const base = trackedSession();
+    if (!base.spawnOptions) throw new Error('Expected spawn options fixture');
+
+    const result = await restartSessionRunnerOnCurrentRuntime({
+      request: {
+        sessionId: 'sess-1',
+        mode: 'force_current_cli',
+        reason: 'ui_stale_runner_banner',
+      },
+      tracked: trackedSession({
+        spawnOptions: {
+          ...base.spawnOptions,
+          terminal: { mode: 'tmux', tmux: { sessionName: 'happy' } },
+        },
+      }),
+      currentIdentity: currentIdentity('0.2.11'),
+      requestRestart,
+      readTerminalAttachmentInfo: async () => ({
+        version: 1,
+        sessionId: 'sess-1',
+        terminal: { mode: 'tmux', tmux: { target: 'happy:owned-window' } },
+        updatedAt: 1,
+      }),
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      status: 'ineligible',
+      reasonCode: 'non_destructive_refresh_unsupported',
+    }));
+    expect(requestRestart).not.toHaveBeenCalled();
+  });
+
+  it('allows manual refresh only when the terminal host exposes bound non-destructive identity', async () => {
+    const requestRestart = vi.fn(async () => ({ signaled: true }));
+    const base = trackedSession();
+    if (!base.spawnOptions) throw new Error('Expected spawn options fixture');
+    const handle = {
+      attachmentId: 'attachment-refresh-1' as NonNullable<TerminalHostHandle['attachmentId']>,
+      kind: 'tmux',
+      sessionName: 'happy',
+      paneId: 'owned-window',
+      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+    } satisfies TerminalHostHandle;
+
+    const result = await restartSessionRunnerOnCurrentRuntime({
+      request: {
+        sessionId: 'sess-1',
+        mode: 'force_current_cli',
+        reason: 'ui_stale_runner_banner',
+      },
+      tracked: trackedSession({
+        spawnOptions: {
+          ...base.spawnOptions,
+          terminal: { mode: 'tmux', tmux: { sessionName: 'happy' } },
+        },
+      }),
+      currentIdentity: currentIdentity('0.2.11'),
+      requestRestart,
+      readTerminalAttachmentInfo: async () => ({
+        version: 2,
+        attachmentId: handle.attachmentId!,
+        sessionId: 'sess-1',
+        handle: handle as TerminalHostHandle & { attachmentId: NonNullable<TerminalHostHandle['attachmentId']> },
+        terminal: { mode: 'tmux', tmux: { target: 'happy:owned-window' } },
+        updatedAt: 1,
+      }),
+    });
+
+    expect(result.status).toBe('restarted');
+    expect(requestRestart).toHaveBeenCalledTimes(1);
+  });
+
   it('fails idempotently when expected PID or command hash no longer matches', async () => {
     const requestRestart = vi.fn(async () => ({ signaled: true }));
 
@@ -366,6 +445,161 @@ describe('restartSessionRunnerOnCurrentRuntime', () => {
       status: 'busy',
       reasonCode: 'approval_pending',
     }));
+  });
+
+  it('rolls a stale idle pinned-snapshot runner onto the current snapshot generation', async () => {
+    // 2026-07-10 zero-roll defect shape (live-observed): runner on snapshot 2ee2ef1b…,
+    // daemon pinned to snapshot 30bb29f6…. if_stale must restart, not skip version_unknown.
+    const requestRestart = vi.fn(async () => ({ signaled: true }));
+
+    const result = await restartSessionRunnerOnCurrentRuntime({
+      request: {
+        sessionId: 'sess-1',
+        mode: 'if_stale',
+        reason: 'daemon_dist_generation_rollout',
+      },
+      tracked: trackedSession({
+        processCommand:
+          'node --no-warnings --no-deprecation /Users/alice/dev/happier/apps/cli/.runner-snapshots/2ee2ef1b2f776a89/index.mjs claude --happy-starting-mode remote --started-by daemon',
+      }),
+      currentIdentity: {
+        status: 'known',
+        source: 'launch_spec',
+        comparableId: 'snapshot:30bb29f6afae521d',
+        entrypointVersion: null,
+      },
+      requestRestart,
+    });
+
+    expect(result).toEqual(expect.objectContaining({ ok: true, status: 'restarted', sessionId: 'sess-1' }));
+    expect(requestRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies a frozen tsx source-mode runner as stale and rolls it onto the current snapshot', async () => {
+    const requestRestart = vi.fn(async () => ({ signaled: true }));
+
+    const result = await restartSessionRunnerOnCurrentRuntime({
+      request: {
+        sessionId: 'sess-1',
+        mode: 'if_stale',
+        reason: 'daemon_dist_generation_rollout',
+      },
+      tracked: trackedSession({
+        processCommand:
+          'node --import /Users/alice/dev/happier/node_modules/tsx/dist/esm/index.mjs /Users/alice/dev/happier/apps/cli/src/index.ts codex --happy-starting-mode remote --started-by daemon',
+      }),
+      currentIdentity: {
+        status: 'known',
+        source: 'launch_spec',
+        comparableId: 'snapshot:30bb29f6afae521d',
+        entrypointVersion: null,
+      },
+      requestRestart,
+    });
+
+    expect(result).toEqual(expect.objectContaining({ ok: true, status: 'restarted' }));
+    expect(requestRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it('never reports already_current for equal mutable source paths in if_stale mode', async () => {
+    const requestRestart = vi.fn(async () => ({ signaled: true }));
+
+    const result = await restartSessionRunnerOnCurrentRuntime({
+      request: {
+        sessionId: 'sess-1',
+        mode: 'if_stale',
+        reason: 'daemon_dist_generation_rollout',
+      },
+      tracked: trackedSession({
+        processCommand:
+          'node --import /Users/alice/dev/happier/node_modules/tsx/dist/esm/index.mjs /Users/alice/dev/happier/apps/cli/src/index.ts codex --happy-starting-mode remote --started-by daemon',
+      }),
+      currentIdentity: {
+        status: 'known',
+        source: 'launch_spec',
+        comparableId: 'path:/users/alice/dev/happier/apps/cli',
+        entrypointVersion: null,
+      },
+      requestRestart,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      status: 'version_unknown',
+      reasonCode: 'runner_generation_unattested',
+    }));
+    expect(requestRestart).not.toHaveBeenCalled();
+  });
+
+  it('treats a session whose last turn lifecycle event is terminal as NOT busy and rolls it', async () => {
+    // Interlock with the stuck-thinking latch: busyness must come from genuine turn-in-flight
+    // lifecycle state (terminal event wins), never from a latched presence flag.
+    const queue = createConnectedServiceSwitchDeferralQueue({ timeoutMs: 60_000, disableDeferral: false });
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess-1', event: 'task_started' });
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess-1', event: 'assistant_message_end' });
+    const requestRestart = vi.fn(async () => ({ signaled: true }));
+
+    const result = await restartSessionRunnerOnCurrentRuntime({
+      request: {
+        sessionId: 'sess-1',
+        mode: 'if_stale',
+        reason: 'daemon_dist_generation_rollout',
+      },
+      tracked: trackedSession({
+        processCommand:
+          'node /Users/alice/dev/happier/apps/cli/.runner-snapshots/2ee2ef1b2f776a89/index.mjs claude --happy-starting-mode remote --started-by daemon',
+      }),
+      currentIdentity: {
+        status: 'known',
+        source: 'launch_spec',
+        comparableId: 'snapshot:30bb29f6afae521d',
+        entrypointVersion: null,
+      },
+      requestRestart,
+      resolveActivityDisabledReason: (sessionId) =>
+        resolveSessionRunnerActivityDisabledReason(sessionId, {
+          isTurnInProgress: (id) => queue.isTurnInFlight(id),
+        }),
+    });
+
+    expect(result).toEqual(expect.objectContaining({ ok: true, status: 'restarted' }));
+    expect(requestRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a genuinely mid-turn stale runner as busy with the turn_in_progress reason', async () => {
+    const queue = createConnectedServiceSwitchDeferralQueue({ timeoutMs: 60_000, disableDeferral: false });
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess-1', event: 'prompt_or_steer' });
+    const requestRestart = vi.fn(async () => ({ signaled: true }));
+
+    const result = await restartSessionRunnerOnCurrentRuntime({
+      request: {
+        sessionId: 'sess-1',
+        mode: 'if_stale',
+        reason: 'daemon_dist_generation_rollout',
+      },
+      tracked: trackedSession({
+        processCommand:
+          'node /Users/alice/dev/happier/apps/cli/.runner-snapshots/2ee2ef1b2f776a89/index.mjs claude --happy-starting-mode remote --started-by daemon',
+      }),
+      currentIdentity: {
+        status: 'known',
+        source: 'launch_spec',
+        comparableId: 'snapshot:30bb29f6afae521d',
+        entrypointVersion: null,
+      },
+      requestRestart,
+      resolveActivityDisabledReason: (sessionId) =>
+        resolveSessionRunnerActivityDisabledReason(sessionId, {
+          isTurnInProgress: (id) => queue.isTurnInFlight(id),
+        }),
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      status: 'busy',
+      reasonCode: 'turn_in_progress',
+    }));
+    expect(requestRestart).not.toHaveBeenCalled();
   });
 
   it('supports dry-run without signalling the runner', async () => {

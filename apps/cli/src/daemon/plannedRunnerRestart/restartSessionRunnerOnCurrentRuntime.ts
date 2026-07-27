@@ -1,5 +1,7 @@
 import type { TrackedSession } from '@/daemon/types';
 import type { SessionRunnerRestartDisabledReason } from '@happier-dev/protocol';
+import { configuration } from '@/configuration';
+import { readTerminalAttachmentInfo } from '@/terminal/attachment/terminalAttachmentInfo';
 
 import type { SessionRunnerEntrypointIdentity } from '../sessionRunnerRuntime/types';
 import { resolveSessionRunnerRuntimeState } from '../sessionRunnerRuntime/resolveRuntimeState';
@@ -7,6 +9,7 @@ import { resolveSessionRunnerEntrypointIdentityFromProcessCommand } from '../ses
 import { resolveSessionRunnerRestartEligibility } from '../sessionRunnerRuntime/resolveRestartEligibility';
 import type {
   PlannedRunnerRestartMode,
+  PlannedRunnerRestartNotSignaledReason,
   RestartAllSessionRunnersResult,
   RestartSessionRunnerRequest,
   RestartSessionRunnerResult,
@@ -19,7 +22,7 @@ type RequestRestart = (input: Readonly<{
   reason: 'version_runtime_refresh';
 }>) => Promise<Readonly<{
   signaled: boolean;
-  notSignaledReason?: 'stale_owner' | 'unsafe_process' | 'superseded' | 'activity_in_progress';
+  notSignaledReason?: PlannedRunnerRestartNotSignaledReason;
   activityDisabledReason?: SessionRunnerRestartDisabledReason;
   completion?: RestartSessionRunnerCompletion;
 }>>;
@@ -137,8 +140,13 @@ function resolveVersionGate(input: Readonly<{
     };
   }
   if (state.versionState === 'unknown') {
-    const reasonCode = state.plannedRestart.disabledReason === 'current_entrypoint_unknown'
-      ? 'current_entrypoint_unknown'
+    const identityReasons: readonly SessionRunnerRestartDisabledReason[] = [
+      'current_entrypoint_unknown',
+      'runner_generation_unattested',
+    ];
+    const disabledReason = state.plannedRestart.disabledReason ?? null;
+    const reasonCode = disabledReason && identityReasons.includes(disabledReason)
+      ? disabledReason
       : 'runner_entrypoint_unknown';
     return skipped('version_unknown', input.request.sessionId, reasonCode);
   }
@@ -151,12 +159,28 @@ export async function restartSessionRunnerOnCurrentRuntime(input: Readonly<{
   currentIdentity: SessionRunnerEntrypointIdentity;
   requestRestart: RequestRestart;
   resolveActivityDisabledReason?: ResolveActivityDisabledReason;
+  readTerminalAttachmentInfo?: typeof readTerminalAttachmentInfo;
 }>): Promise<RestartSessionRunnerResult> {
   const sessionId = normalizeString(input.request.sessionId);
   const tracked = input.tracked ?? null;
   const contextFailure = validateRestartContext({ request: input.request, tracked });
   if (contextFailure) return contextFailure;
   if (!tracked) return skipped('not_found', sessionId);
+
+  const terminalMode = tracked.spawnOptions?.terminal?.mode;
+  const attachmentInfo = await (input.readTerminalAttachmentInfo ?? readTerminalAttachmentInfo)({
+    happyHomeDir: configuration.happyHomeDir,
+    sessionId,
+  }).catch(() => null);
+  if (terminalMode === 'tmux' || attachmentInfo) {
+    if (
+      attachmentInfo?.version !== 2
+      || (terminalMode === 'tmux' && attachmentInfo.handle.kind !== 'tmux')
+      || attachmentInfo.handle.attachmentId !== attachmentInfo.attachmentId
+    ) {
+      return skipped('ineligible', sessionId, 'non_destructive_refresh_unsupported');
+    }
+  }
 
   const versionGate = resolveVersionGate({
     request: input.request,

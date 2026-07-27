@@ -52,13 +52,33 @@ function isMutableEntrypointPointer(pathLike: string): boolean {
   return /(?:^|\/)(current|previous)(?:\/|$)/.test(normalized);
 }
 
+/**
+ * Pinned dist runner snapshots (`spawnHappyCLI.ts#copyCliDistToPinnedSnapshot`) copy the dist
+ * closure into `.runner-snapshots/<distClosureFingerprint>/` with the entrypoint at the snapshot
+ * root (`<fingerprint>/index.mjs`, no `/dist/` segment). The fingerprint directory is
+ * content-addressed and immutable, so it IS the code generation: equal fingerprints attest the
+ * same build, different fingerprints attest different builds. This was the 2026-07-10 zero-roll
+ * root cause — snapshot entrypoints resolved to `entrypoint_not_found`, so every rollout pass
+ * skipped every runner with `current_entrypoint_unknown`.
+ */
+function resolveRunnerSnapshotFingerprint(pathLike: string): string | null {
+  const normalized = normalizeComparablePath(pathLike);
+  const match = /\/\.runner-snapshots\/([^/]+)\//.exec(`${normalized}/`);
+  const fingerprint = match?.[1]?.trim() ?? '';
+  if (!fingerprint || fingerprint.startsWith('.')) return null;
+  return fingerprint;
+}
+
 function isCliEntrypointPath(pathLike: string): boolean {
   const normalized = normalizePathLike(pathLike).toLowerCase();
-  return (
+  if (
     normalized.endsWith('/package-dist/index.mjs') ||
     normalized.endsWith('/dist/index.mjs') ||
     normalized.endsWith('/src/index.ts')
-  );
+  ) {
+    return true;
+  }
+  return normalized.endsWith('/index.mjs') && resolveRunnerSnapshotFingerprint(normalized) !== null;
 }
 
 function isCliBinaryPath(pathLike: string): boolean {
@@ -105,6 +125,16 @@ function resolveEntrypointPathIdentity(
     };
   }
 
+  const snapshotFingerprint = resolveRunnerSnapshotFingerprint(normalized);
+  if (snapshotFingerprint) {
+    return {
+      status: 'known',
+      source,
+      comparableId: `snapshot:${snapshotFingerprint}`,
+      entrypointVersion: null,
+    };
+  }
+
   const root = resolveRuntimeRoot(normalized);
   if (!root) return unknownIdentity('entrypoint_not_found');
   return {
@@ -113,6 +143,18 @@ function resolveEntrypointPathIdentity(
     comparableId: `path:${root}`,
     entrypointVersion: null,
   };
+}
+
+/**
+ * Whether equality of two comparable ids proves the SAME code generation.
+ *
+ * `version:` (immutable install dir) and `snapshot:` (content-addressed dist closure) ids attest
+ * their generation. Bare `path:` ids point at MUTABLE roots (tsx source trees, in-place-rebuilt
+ * dist): the process froze whatever the path contained at spawn, so path equality proves nothing
+ * about the running generation and must never classify a runner as `current`/`already_current`.
+ */
+export function isGenerationAttestedComparableId(comparableId: string): boolean {
+  return comparableId.startsWith('version:') || comparableId.startsWith('snapshot:');
 }
 
 function findEntrypointToken(tokens: readonly string[]): string | null {

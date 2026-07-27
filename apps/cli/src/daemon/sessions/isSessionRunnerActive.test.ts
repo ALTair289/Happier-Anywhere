@@ -1,7 +1,76 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TrackedSession } from '../types';
-import { isSessionRunnerActive } from './isSessionRunnerActive';
+import { isSessionRunnerActive, probeSessionRunnerServiceability, resolveSessionRunnerResumeDecision } from './isSessionRunnerActive';
+
+describe('probeSessionRunnerServiceability', () => {
+  it('uses one decision owner for the servable-to-present-unservable transition', () => {
+    expect(resolveSessionRunnerResumeDecision({ state: 'runner_present', control: { state: 'servable' } })).toEqual({ action: 'adopt' });
+    expect(resolveSessionRunnerResumeDecision({
+      state: 'runner_present', control: { state: 'recoverable_unservable', reason: 'rpc_method_unavailable' },
+    })).toEqual({ action: 'fence', reason: 'rpc_method_unavailable' });
+    expect(resolveSessionRunnerResumeDecision({
+      state: 'runner_present', control: { state: 'recoverable_unservable', reason: 'runtime_terminating' },
+    })).toEqual({ action: 'wait_for_exit', reason: 'runtime_terminating' });
+    expect(resolveSessionRunnerResumeDecision({ state: 'runner_absent' })).toEqual({ action: 'spawn' });
+  });
+  it('does not claim serviceability from a live matching PID alone', async () => {
+    const tracked: TrackedSession = { startedBy: 'daemon', pid: 456, happySessionId: 'sess_1' };
+    await expect(probeSessionRunnerServiceability({
+      sessionId: 'sess_1',
+      trackedSessions: [tracked],
+      readProcessRunState: async () => 'servable',
+      readSessionRunnerLockStatus: async () => ({ ok: false, reason: 'not_found' }),
+      getProcessCommandHash: async () => null,
+      probeCapability: async () => ({ state: 'recoverable_unservable', reason: 'rpc_method_unavailable' }),
+    })).resolves.toEqual({ state: 'runner_present', control: { state: 'recoverable_unservable', reason: 'rpc_method_unavailable' } });
+  });
+
+  it('reports serviceability only after the exact-session capability succeeds', async () => {
+    const tracked: TrackedSession = { startedBy: 'daemon', pid: 456, happySessionId: 'sess_1' };
+    await expect(probeSessionRunnerServiceability({
+      sessionId: 'sess_1',
+      trackedSessions: [tracked],
+      readProcessRunState: async () => 'servable',
+      readSessionRunnerLockStatus: async () => ({ ok: false, reason: 'not_found' }),
+      getProcessCommandHash: async () => null,
+      probeCapability: async () => ({ state: 'servable' }),
+    })).resolves.toEqual({ state: 'runner_present', control: { state: 'servable' } });
+  });
+
+  it('preserves unknown as a duplicate-spawn fence', async () => {
+    const tracked: TrackedSession = { startedBy: 'daemon', pid: 456, happySessionId: 'sess_1' };
+    await expect(probeSessionRunnerServiceability({
+      sessionId: 'sess_1',
+      trackedSessions: [tracked],
+      readProcessRunState: async () => 'servable',
+      readSessionRunnerLockStatus: async () => ({ ok: false, reason: 'not_found' }),
+      getProcessCommandHash: async () => null,
+      probeCapability: async () => ({ state: 'unknown', reason: 'rpc_failed' }),
+    })).resolves.toEqual({ state: 'runner_present', control: { state: 'unknown', reason: 'rpc_failed' } });
+  });
+
+  it('does not prove runner absence from a stopped process or unreadable runner lock', async () => {
+    const tracked: TrackedSession = { startedBy: 'daemon', pid: 456, happySessionId: 'sess_1' };
+    await expect(probeSessionRunnerServiceability({
+      sessionId: 'sess_1',
+      trackedSessions: [tracked],
+      readProcessRunState: async () => 'stopped',
+      readSessionRunnerLockStatus: async () => ({ ok: false, reason: 'not_found' }),
+      getProcessCommandHash: async () => null,
+      probeCapability: async () => ({ state: 'servable' }),
+    })).resolves.toEqual({ state: 'runner_unknown', reason: 'runner_presence_unproven' });
+
+    await expect(probeSessionRunnerServiceability({
+      sessionId: 'sess_1',
+      trackedSessions: [],
+      readProcessRunState: async () => 'dead',
+      readSessionRunnerLockStatus: async () => ({ ok: false, reason: 'io_error', errorMessage: 'read failed' }),
+      getProcessCommandHash: async () => null,
+      probeCapability: async () => ({ state: 'servable' }),
+    })).resolves.toEqual({ state: 'runner_unknown', reason: 'runner_presence_unproven' });
+  });
+});
 
 describe('isSessionRunnerActive', () => {
   it('returns false for empty session id', async () => {

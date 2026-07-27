@@ -2,286 +2,191 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { RuntimeAuthRecoveryScheduler } from '../runtimeAuth/RuntimeAuthRecoveryScheduler';
 import { buildRuntimeAuthRecoveryKey } from '../runtimeAuth/recoveryKey/runtimeAuthRecoveryKey';
-import { createConnectedServiceProviderActivityProofRecorder } from './providerActivityProofRecorder';
-
-function createInMemoryContinuationStore(initial?: Readonly<Record<string, unknown>>) {
-  const bySessionId = new Map<string, unknown>(Object.entries(initial ?? {}));
-  return {
-    read: (sessionId: string) => bySessionId.get(sessionId) ?? null,
-    write: (sessionId: string, state: unknown) => {
-      bySessionId.set(sessionId, state);
-    },
-    snapshot: (sessionId: string) => bySessionId.get(sessionId) ?? null,
-  };
-}
-
-function createSeededRuntimeAuthScheduler() {
-  const scheduler = new RuntimeAuthRecoveryScheduler({
-    nowMs: () => 1_000,
-    baseBackoffMs: 100,
-    maxBackoffMs: 1_000,
-    jitterMs: () => 0,
-    recover: async () => ({ status: 'credential_refreshed' }),
-  });
-  return scheduler;
-}
-
-const classification = {
-  kind: 'usage_limit',
-  serviceId: 'openai-codex',
-  profileId: 'primary',
-  groupId: 'main',
-  resetsAtMs: null,
-  planType: null,
-  rateLimits: null,
-  source: 'structured_provider_error',
-} as const;
-
-const groupIdentity = {
-  serviceId: 'openai-codex',
-  selectionKind: 'group',
-  groupId: 'main',
-  profileId: 'primary',
-} as const;
+import { listProviderActivityRecoveryIdentitiesFromRuntimeBindings } from '../continuation/continuationRecoveryIdentity';
+import {
+  createConnectedServiceProviderActivityProofRecorder,
+  isProviderActivityTurnLifecycleEvent,
+} from './providerActivityProofRecorder';
 
 describe('createConnectedServiceProviderActivityProofRecorder', () => {
-  it('clears an identity-matching runtime-auth intent on provider activity even when NO continuation attempt exists (RD-REC-2)', async () => {
-    const scheduler = createSeededRuntimeAuthScheduler();
+  it('does not upgrade a coarse binding identity into exact provider-outcome proof', async () => {
+    const scheduler = new RuntimeAuthRecoveryScheduler({
+      nowMs: () => 1_000,
+      baseBackoffMs: 100,
+      maxBackoffMs: 1_000,
+      jitterMs: () => 0,
+      recover: async () => ({ status: 'credential_refreshed' }),
+    });
     await scheduler.beginClassifiedFailure({
-      sessionId: 'sess_1',
+      sessionId: 'session-1',
       switchesThisTurn: 0,
-      classification,
+      classification: {
+        kind: 'usage_limit',
+        serviceId: 'openai-codex',
+        profileId: 'primary',
+        groupId: 'main',
+        resetsAtMs: null,
+        planType: null,
+        rateLimits: null,
+        source: 'structured_provider_error',
+      },
     });
-    const recoveryKey = buildRuntimeAuthRecoveryKey({
-      sessionId: 'sess_1',
-      serviceId: 'openai-codex',
-      profileId: 'primary',
-      groupId: 'main',
-    });
-    expect(scheduler.readByKey(recoveryKey)).toMatchObject({ status: 'waiting' });
-
+    const markUsageProof = vi.fn(async () => undefined);
     const recorder = createConnectedServiceProviderActivityProofRecorder({
-      nowMs: () => 2_000,
-      providerActivityTimeoutMs: 60_000,
-      continuationStore: createInMemoryContinuationStore(),
       runtimeAuthRecovery: scheduler,
-    });
-
-    // Idle session / suppressed replay / resumePromptMode:off: there is no
-    // continuation attempt in `awaiting_provider_activity`. Real provider work
-    // matching the recovery identity is still provider-outcome proof.
-    await recorder({ sessionId: 'sess_1', recoveryIdentities: [groupIdentity] });
-
-    expect(scheduler.readByKey(recoveryKey)).toBeNull();
-  });
-
-  it('does NOT clear intents for a non-matching recovery identity', async () => {
-    const scheduler = createSeededRuntimeAuthScheduler();
-    await scheduler.beginClassifiedFailure({
-      sessionId: 'sess_1',
-      switchesThisTurn: 0,
-      classification,
-    });
-    const recoveryKey = buildRuntimeAuthRecoveryKey({
-      sessionId: 'sess_1',
-      serviceId: 'openai-codex',
-      profileId: 'primary',
-      groupId: 'main',
-    });
-
-    const recorder = createConnectedServiceProviderActivityProofRecorder({
-      nowMs: () => 2_000,
-      providerActivityTimeoutMs: 60_000,
-      continuationStore: createInMemoryContinuationStore(),
-      runtimeAuthRecovery: scheduler,
+      usageLimitRecovery: { markProviderOutcomeProofForSession: markUsageProof },
     });
 
     await recorder({
-      sessionId: 'sess_1',
+      sessionId: 'session-1',
       recoveryIdentities: [{
-        serviceId: 'anthropic',
+        serviceId: 'openai-codex',
         selectionKind: 'group',
-        groupId: 'other',
+        groupId: 'main',
+        profileId: 'primary',
       }],
     });
 
-    expect(scheduler.readByKey(recoveryKey)).toMatchObject({ status: 'waiting' });
+    expect(scheduler.readByKey(buildRuntimeAuthRecoveryKey({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      profileId: 'primary',
+      groupId: 'main',
+    }))).toMatchObject({ status: 'waiting' });
+    expect(markUsageProof).not.toHaveBeenCalled();
   });
 
-  it('still settles a continuation attempt awaiting provider activity for the identity', async () => {
-    const store = createInMemoryContinuationStore({
-      sess_1: {
-        v: 1,
-        attemptsById: {
-          attempt_1: {
-            v: 1,
-            attemptId: 'attempt_1',
-            status: 'awaiting_provider_activity',
-            failureAtMs: 500,
-            updatedAtMs: 900,
-            sentAtMs: 900,
-            resumePromptMode: 'standard',
-            recoveryIdentity: groupIdentity,
-          },
-        },
-      },
-    });
-    const recorder = createConnectedServiceProviderActivityProofRecorder({
-      nowMs: () => 2_000,
-      providerActivityTimeoutMs: 60_000,
-      continuationStore: store,
-    });
-
-    await recorder({ sessionId: 'sess_1', recoveryIdentities: [groupIdentity] });
-
-    expect(store.snapshot('sess_1')).toMatchObject({
-      attemptsById: {
-        attempt_1: { status: 'provider_activity_observed' },
-      },
-    });
+  it('accepts only completed provider output as lifecycle proof', () => {
+    expect(isProviderActivityTurnLifecycleEvent('assistant_message_end', 'completed')).toBe(true);
+    expect(isProviderActivityTurnLifecycleEvent('assistant_message_end', 'failed')).toBe(false);
+    expect(isProviderActivityTurnLifecycleEvent('task_started')).toBe(false);
   });
 
-  it('forwards provider_activity proof to the usage-limit recovery owner per identity without requiring an attempt', async () => {
-    const markProviderOutcomeProofForSession = vi.fn(async () => null);
+  it('settles only the exact recovery attempt carried by qualified provider activity', async () => {
+    const markProviderOutcomeProofByKey = vi.fn(async () => undefined);
+    const markUsageLimitProviderOutcomeProof = vi.fn(async () => undefined);
     const recorder = createConnectedServiceProviderActivityProofRecorder({
+      runtimeAuthRecovery: {
+        readForSession: () => [{
+          sessionId: 'session-1',
+          serviceId: 'openai-codex',
+          profileId: 'primary',
+          groupId: 'main',
+          status: 'resumed_awaiting_proof',
+          attemptId: 'runtime-auth-attempt:current',
+          pendingTargetProfileId: 'backup',
+          pendingTargetGeneration: 18,
+        }] as never,
+        markProviderOutcomeProofByKey,
+      },
       nowMs: () => 2_000,
-      providerActivityTimeoutMs: 60_000,
-      continuationStore: createInMemoryContinuationStore(),
-      usageLimitRecovery: { markProviderOutcomeProofForSession },
+      usageLimitRecovery: {
+        markProviderOutcomeProofForSession: markUsageLimitProviderOutcomeProof,
+      },
     });
 
-    await recorder({ sessionId: 'sess_1', recoveryIdentities: [groupIdentity] });
+    await recorder({
+      sessionId: 'session-1',
+      recoveryIdentities: [{
+        serviceId: 'openai-codex',
+        selectionKind: 'group',
+        groupId: 'main',
+        profileId: 'backup',
+        failureFingerprint: 'runtime-auth-attempt:current',
+        targetGeneration: 18,
+      }],
+    });
 
-    expect(markProviderOutcomeProofForSession).toHaveBeenCalledWith({
-      sessionId: 'sess_1',
+    expect(markProviderOutcomeProofByKey).toHaveBeenCalledWith({
+      recoveryKey: buildRuntimeAuthRecoveryKey({
+        sessionId: 'session-1',
+        serviceId: 'openai-codex',
+        profileId: 'primary',
+        groupId: 'main',
+      }),
+      proofKind: 'provider_activity',
+      expectedAttemptId: 'runtime-auth-attempt:current',
+      observedAtMs: 2_000,
+    });
+    expect(markUsageLimitProviderOutcomeProof).toHaveBeenCalledWith({
+      sessionId: 'session-1',
       proofKind: 'provider_activity',
       serviceId: 'openai-codex',
-      profileId: 'primary',
+      profileId: 'backup',
       groupId: 'main',
+      expectedRuntimeAuthRecoveryAttemptId: 'runtime-auth-attempt:current',
     });
   });
 
-  it('records unscoped provider activity when no recovery identities are bound', async () => {
-    const store = createInMemoryContinuationStore({
-      sess_1: {
-        v: 1,
-        attemptsById: {
-          attempt_1: {
-            v: 1,
-            attemptId: 'attempt_1',
-            status: 'awaiting_provider_activity',
-            failureAtMs: 500,
-            updatedAtMs: 900,
-            sentAtMs: 900,
-            resumePromptMode: 'standard',
-          },
-        },
-      },
-    });
-    const markProviderOutcomeProofForSession = vi.fn(async () => null);
-    const recorder = createConnectedServiceProviderActivityProofRecorder({
-      nowMs: () => 2_000,
-      providerActivityTimeoutMs: 60_000,
-      continuationStore: store,
-      usageLimitRecovery: { markProviderOutcomeProofForSession },
-    });
-
-    await recorder({ sessionId: 'sess_1' });
-
-    expect(store.snapshot('sess_1')).toMatchObject({
-      attemptsById: {
-        attempt_1: { status: 'provider_activity_observed' },
-      },
-    });
-    // No identity => no scoped scheduler clears (identity-matching is the guard).
-    expect(markProviderOutcomeProofForSession).not.toHaveBeenCalled();
-  });
-
-  it('uses a single pending runtime-auth recovery intent as durable identity when live bindings are unavailable', async () => {
-    const scheduler = createSeededRuntimeAuthScheduler();
-    await scheduler.beginClassifiedFailure({
-      sessionId: 'sess_1',
-      switchesThisTurn: 0,
-      classification,
+  it('settles refresh-without-switch only from exact post-boundary current-binding activity', async () => {
+    let observedAtMs = 1_100;
+    const scheduler = new RuntimeAuthRecoveryScheduler({
+      nowMs: () => 1_000,
+      baseBackoffMs: 100,
+      maxBackoffMs: 1_000,
+      jitterMs: () => 0,
+      recover: async () => ({ status: 'credential_refreshed' }),
     });
     const recoveryKey = buildRuntimeAuthRecoveryKey({
-      sessionId: 'sess_1',
-      serviceId: 'openai-codex',
-      profileId: 'primary',
-      groupId: 'main',
-    });
-    expect(scheduler.readByKey(recoveryKey)).toMatchObject({ status: 'waiting' });
-
-    const recorder = createConnectedServiceProviderActivityProofRecorder({
-      nowMs: () => 2_000,
-      providerActivityTimeoutMs: 60_000,
-      continuationStore: createInMemoryContinuationStore(),
-      runtimeAuthRecovery: scheduler,
-    });
-
-    await recorder({ sessionId: 'sess_1' });
-
-    expect(scheduler.readByKey(recoveryKey)).toBeNull();
-  });
-
-  it('does not infer a runtime-auth recovery identity when multiple pending identities are possible', async () => {
-    const scheduler = createSeededRuntimeAuthScheduler();
-    await scheduler.beginClassifiedFailure({
-      sessionId: 'sess_1',
-      switchesThisTurn: 0,
-      classification,
-    });
-    const otherClassification = {
-      ...classification,
+      sessionId: 'session-refresh',
       serviceId: 'claude-subscription',
       profileId: 'claude-primary',
-      groupId: 'claude',
+      groupId: 'claude-pool',
+    });
+    const attempt = await scheduler.beginClassifiedFailure({
+      sessionId: 'session-refresh',
+      switchesThisTurn: 0,
+      classification: {
+        kind: 'auth_expired',
+        serviceId: 'claude-subscription',
+        profileId: 'claude-primary',
+        groupId: 'claude-pool',
+        groupGeneration: 7,
+        credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+        resetsAtMs: null,
+        planType: null,
+        rateLimits: null,
+        source: 'structured_provider_error',
+      },
+    });
+    await scheduler.markAwaitingProviderOutcomeProofForResultByKey({
+      recoveryKey,
+      expectedAttemptId: attempt.attemptId,
+      result: { status: 'credential_refreshed' },
+    });
+    const recorder = createConnectedServiceProviderActivityProofRecorder({
+      runtimeAuthRecovery: scheduler,
+      nowMs: () => observedAtMs,
+    });
+    const currentBinding = {
+      serviceId: 'claude-subscription',
+      groupId: 'claude-pool',
+      profileId: 'claude-primary',
+      generation: 8,
+      credentialRevision: 'csr_bcdefghijklmnopqrstuvw',
     } as const;
-    await scheduler.beginClassifiedFailure({
-      sessionId: 'sess_1',
-      switchesThisTurn: 0,
-      classification: otherClassification,
+
+    observedAtMs = 999;
+    await recorder({
+      sessionId: 'session-refresh',
+      recoveryIdentities: listProviderActivityRecoveryIdentitiesFromRuntimeBindings(
+        [currentBinding],
+        scheduler.readForSession('session-refresh'),
+      ),
     });
-    const recoveryKey = buildRuntimeAuthRecoveryKey({
-      sessionId: 'sess_1',
-      serviceId: 'openai-codex',
-      profileId: 'primary',
-      groupId: 'main',
+    expect(scheduler.readByKey(recoveryKey)).toMatchObject({ status: 'resumed_awaiting_proof' });
+
+    observedAtMs = 1_100;
+    await recorder({
+      sessionId: 'session-refresh',
+      recoveryIdentities: listProviderActivityRecoveryIdentitiesFromRuntimeBindings(
+        [currentBinding],
+        scheduler.readForSession('session-refresh'),
+      ),
     });
-    const otherRecoveryKey = buildRuntimeAuthRecoveryKey({
-      sessionId: 'sess_1',
-      serviceId: 'claude-subscription',
-      profileId: 'claude-primary',
-      groupId: 'claude',
+    expect(scheduler.readByKey(recoveryKey)).toMatchObject({
+      status: 'recovered',
+      attemptId: attempt.attemptId,
     });
-
-    const recorder = createConnectedServiceProviderActivityProofRecorder({
-      nowMs: () => 2_000,
-      providerActivityTimeoutMs: 60_000,
-      continuationStore: createInMemoryContinuationStore(),
-      runtimeAuthRecovery: scheduler,
-    });
-
-    await recorder({ sessionId: 'sess_1' });
-
-    expect(scheduler.readByKey(recoveryKey)).toMatchObject({ status: 'waiting' });
-    expect(scheduler.readByKey(otherRecoveryKey)).toMatchObject({ status: 'waiting' });
-  });
-});
-
-describe('isProviderActivityTurnLifecycleEvent', () => {
-  it('treats task_started and completed assistant_message_end as provider activity (REV-1)', async () => {
-    const { isProviderActivityTurnLifecycleEvent } = await import('./providerActivityProofRecorder');
-    expect(isProviderActivityTurnLifecycleEvent('task_started')).toBe(true);
-    expect(isProviderActivityTurnLifecycleEvent('assistant_message_end')).toBe(true);
-    expect(isProviderActivityTurnLifecycleEvent('assistant_message_end', 'completed')).toBe(true);
-  });
-
-  it('rejects FAILED-turn terminal events and non-activity events as proof (REV-1)', async () => {
-    const { isProviderActivityTurnLifecycleEvent } = await import('./providerActivityProofRecorder');
-    // failTurn emits assistant_message_end too; a failed turn proves nothing recovered.
-    expect(isProviderActivityTurnLifecycleEvent('assistant_message_end', 'failed')).toBe(false);
-    expect(isProviderActivityTurnLifecycleEvent('prompt_or_steer')).toBe(false);
-    expect(isProviderActivityTurnLifecycleEvent('turn_cancelled')).toBe(false);
   });
 });

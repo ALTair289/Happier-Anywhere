@@ -29,6 +29,11 @@ import {
   readDisplayableSessionWorkStateV1,
   type SessionTerminalComposerClearRequestV1,
   type SessionTerminalComposerClearResultV1,
+  SessionPendingInputInterruptAndRunRequestV1Schema,
+  SessionPendingInputInterruptAndRunResultV1Schema,
+  buildUnsupportedSessionPendingInputInterruptAndRunResult,
+  type SessionPendingInputInterruptAndRunRequestV1,
+  type SessionPendingInputInterruptAndRunResultV1,
 } from '@happier-dev/protocol';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
 import { mergeUsageLimitRecoveryFieldIntoMetadata } from '@/session/usageLimitRecoveryControls/persistUsageLimitRecoveryFieldDurably';
@@ -83,6 +88,9 @@ export type SessionRuntimeControls = {
   clearTerminalComposer?: (
     request: Readonly<SessionTerminalComposerClearRequestV1>,
   ) => Promise<SessionTerminalComposerClearResultV1 | unknown> | SessionTerminalComposerClearResultV1 | unknown;
+  interruptPendingInputAndRun?: (
+    request: Readonly<SessionPendingInputInterruptAndRunRequestV1>,
+  ) => Promise<SessionPendingInputInterruptAndRunResultV1 | unknown> | SessionPendingInputInterruptAndRunResultV1 | unknown;
   handleUserMessage?: (
     request: Readonly<{
       text: string;
@@ -219,6 +227,28 @@ function normalizeTerminalComposerClearResult(
   });
 }
 
+function normalizePendingInputInterruptAndRunResult(
+  result: unknown,
+  request: SessionPendingInputInterruptAndRunRequestV1,
+): SessionPendingInputInterruptAndRunResultV1 {
+  const parsed = SessionPendingInputInterruptAndRunResultV1Schema.safeParse(result);
+  if (parsed.success) {
+    return SessionPendingInputInterruptAndRunResultV1Schema.parse({
+      ...parsed.data,
+      sessionId: parsed.data.sessionId ?? request.sessionId,
+      localId: parsed.data.localId ?? request.localId,
+    });
+  }
+  return SessionPendingInputInterruptAndRunResultV1Schema.parse({
+    ok: false,
+    status: 'interrupt_failed',
+    sessionId: request.sessionId,
+    localId: request.localId,
+    errorCode: 'invalid_runtime_control_result',
+    error: 'invalid_runtime_control_result',
+  });
+}
+
 export function registerSessionControlHandlers(
   rpc: RpcHandlerRegistrar,
   opts: Readonly<{
@@ -306,6 +336,22 @@ export function registerSessionControlHandlers(
     return normalizeTerminalComposerClearResult(
       await opts.sessionRuntimeControls.clearTerminalComposer(parsed.data),
       parsed.data.sessionId,
+    );
+  });
+
+  rpc.registerHandler(SESSION_RPC_METHODS.SESSION_PENDING_INPUT_INTERRUPT_AND_RUN, async (raw: unknown) => {
+    const parsed = SessionPendingInputInterruptAndRunRequestV1Schema.safeParse(raw);
+    if (!parsed.success) return invalidInput();
+    if (typeof opts.sessionRuntimeControls?.interruptPendingInputAndRun !== 'function') {
+      return buildUnsupportedSessionPendingInputInterruptAndRunResult(
+        parsed.data.sessionId,
+        parsed.data.localId,
+        SESSION_RPC_METHODS.SESSION_PENDING_INPUT_INTERRUPT_AND_RUN,
+      );
+    }
+    return normalizePendingInputInterruptAndRunResult(
+      await opts.sessionRuntimeControls.interruptPendingInputAndRun(parsed.data),
+      parsed.data,
     );
   });
 

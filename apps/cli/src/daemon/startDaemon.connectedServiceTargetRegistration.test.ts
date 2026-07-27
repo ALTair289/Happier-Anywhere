@@ -1,60 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-
-import {
-  buildProviderAccountUsageRecordId,
-  SESSION_CONTINUATION_RECOVERY_METADATA_KEY,
-  sealProviderAccountUsageSnapshotCiphertext,
-  writeProviderAccountUsageRecordIdToMetadata,
-  type ProviderAccountUsageRecordKeyV1,
-  type ProviderAccountUsageSnapshotV1,
-  type SessionContinuationRecoveryV1,
-} from '@happier-dev/protocol';
+import axios from 'axios';
 
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from './connectedServices/connectedServiceChildEnvironment';
-import { createProviderAccountUsageStore } from './connectedServices/accountUsage/store';
 import { ConnectedServiceRuntimeRegistry } from './connectedServices/runtimeRegistry/registry';
 import {
-  hydrateProviderAccountUsageStoreForDaemon,
   registerConnectedServiceTrackedSessionTargetsForDaemon,
-  replayExactPendingConnectedServiceContinuationsForDaemon,
+  commitRuntimeAuthRecoveryDiagnosticForDaemon,
 } from './startDaemon';
+import { buildRuntimeAuthRecoveryAttemptTransitionLocalId } from './connectedServices/runtimeAuth/commitConnectedServiceRuntimeAuthRecoverySessionEvent';
 import type { TrackedSession } from './types';
-
-function createProviderAccountUsageSnapshot(accountSubjectId = 'acct_live_codex'): ProviderAccountUsageSnapshotV1 {
-  const recordKey: ProviderAccountUsageRecordKeyV1 = {
-    providerId: 'codex',
-    accountSubjectId,
-    subjectKind: 'account',
-    quotaScope: 'account',
-  };
-  return {
-    v: 1,
-    recordId: buildProviderAccountUsageRecordId(recordKey),
-    recordKey,
-    providerId: 'codex',
-    accountSubject: { kind: 'providerSubject', id: accountSubjectId },
-    observedAtMs: 1_000,
-    fetchedAtMs: 1_000,
-    staleAfterMs: 300_000,
-    source: 'runtimeSignal',
-    confidence: 'confirmed',
-    state: 'loaded_data',
-    planLabel: 'Pro',
-    accountLabel: 'codex@example.com',
-    meters: [{
-      meterId: 'weekly',
-      label: 'Weekly',
-      used: null,
-      limit: null,
-      unit: 'unknown',
-      utilizationPct: 25,
-      remainingPct: 75,
-      resetsAt: 600_000,
-      status: 'ok',
-      details: { limitCategory: 'usage_limit' },
-    }],
-  };
-}
 
 describe('registerConnectedServiceTrackedSessionTargetsForDaemon', () => {
   function createClaudeTrackedSession(metadata: Record<string, unknown> = {}): TrackedSession {
@@ -123,7 +77,10 @@ describe('registerConnectedServiceTrackedSessionTargetsForDaemon', () => {
       runtimeRegistry,
     });
 
-    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toEqual({ mode: 'daemon_callback' });
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toEqual({
+      mode: 'daemon_callback',
+      serviceIds: ['claude-subscription'],
+    });
   });
 
   it('clears Claude callback capability when the runtime reports the legacy fallback', () => {
@@ -148,6 +105,149 @@ describe('registerConnectedServiceTrackedSessionTargetsForDaemon', () => {
       runtimeRegistry,
     });
 
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toBeNull();
+  });
+
+  it('registers and replaces a provider-reported Codex app-server refresh callback capability', () => {
+    const runtimeRegistry = new ConnectedServiceRuntimeRegistry();
+    const tracked = createClaudeTrackedSession({
+      flavor: 'codex',
+      connectedServiceAccessTokenRefreshV1: {
+        v: 1,
+        mode: 'daemon_callback',
+        serviceIds: ['openai-codex'],
+      },
+    });
+    tracked.spawnOptions = {
+      ...tracked.spawnOptions,
+      directory: '/tmp/codex-workspace',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      connectedServices: {
+        v: 1,
+        bindingsByServiceId: {
+          'openai-codex': { source: 'connected', selection: 'profile', profileId: 'codex-primary' },
+        },
+      },
+    };
+
+    registerConnectedServiceTrackedSessionTargetsForDaemon({ tracked, runtimeRegistry });
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toEqual({
+      mode: 'daemon_callback',
+      serviceIds: ['openai-codex'],
+    });
+
+    tracked.happySessionMetadataFromLocalWebhook = {
+      ...tracked.happySessionMetadataFromLocalWebhook!,
+      connectedServiceAccessTokenRefreshV1: undefined,
+    };
+    registerConnectedServiceTrackedSessionTargetsForDaemon({ tracked, runtimeRegistry });
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toBeNull();
+
+    tracked.happySessionMetadataFromLocalWebhook = {
+      ...tracked.happySessionMetadataFromLocalWebhook!,
+      connectedServiceAccessTokenRefreshV1: {
+        v: 1,
+        mode: 'daemon_callback',
+        serviceIds: ['openai-codex'],
+      },
+    };
+    registerConnectedServiceTrackedSessionTargetsForDaemon({ tracked, runtimeRegistry });
+
+    tracked.happySessionMetadataFromLocalWebhook = {
+      ...tracked.happySessionMetadataFromLocalWebhook!,
+      connectedServiceAccessTokenRefreshV1: { v: 1, mode: 'unavailable', serviceIds: ['openai-codex'] },
+    };
+    registerConnectedServiceTrackedSessionTargetsForDaemon({ tracked, runtimeRegistry });
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toBeNull();
+
+    tracked.happySessionMetadataFromLocalWebhook = {
+      ...tracked.happySessionMetadataFromLocalWebhook!,
+      connectedServiceAccessTokenRefreshV1: {
+        v: 1,
+        mode: 'daemon_callback',
+        serviceIds: ['openai-codex'],
+      },
+    };
+    registerConnectedServiceTrackedSessionTargetsForDaemon({ tracked, runtimeRegistry });
+
+    tracked.happySessionMetadataFromLocalWebhook = {
+      ...tracked.happySessionMetadataFromLocalWebhook!,
+      connectedServiceAccessTokenRefreshV1: { v: 1, mode: 'daemon_callback', serviceIds: null },
+    } as unknown as TrackedSession['happySessionMetadataFromLocalWebhook'];
+    expect(() => registerConnectedServiceTrackedSessionTargetsForDaemon({ tracked, runtimeRegistry })).not.toThrow();
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toBeNull();
+
+    runtimeRegistry.unregisterPid(6610);
+    expect(runtimeRegistry.getByPid(6610)).toBeNull();
+  });
+
+  it('publishes the Codex callback fact after startup registration and preserves it across a changed generation', () => {
+    const runtimeRegistry = new ConnectedServiceRuntimeRegistry();
+    const tracked = createClaudeTrackedSession({ flavor: 'codex' });
+    if (!tracked.spawnOptions) throw new Error('Expected tracked spawn options fixture');
+    tracked.spawnOptions = {
+      ...tracked.spawnOptions,
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      connectedServices: {
+        v: 1,
+        bindingsByServiceId: {
+          'openai-codex': { source: 'connected', selection: 'group', groupId: 'team', profileId: 'codex-a' },
+        },
+      },
+      environmentVariables: {
+        [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+          kind: 'group',
+          serviceId: 'openai-codex',
+          groupId: 'team',
+          activeProfileId: 'codex-a',
+          fallbackProfileId: 'codex-b',
+          generation: 7,
+        }]),
+      },
+    };
+
+    registerConnectedServiceTrackedSessionTargetsForDaemon({ tracked, runtimeRegistry });
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toBeNull();
+
+    tracked.happySessionMetadataFromLocalWebhook = {
+      ...tracked.happySessionMetadataFromLocalWebhook!,
+      connectedServiceAccessTokenRefreshV1: {
+        v: 1,
+        mode: 'daemon_callback',
+        serviceIds: ['openai-codex'],
+      },
+    };
+    registerConnectedServiceTrackedSessionTargetsForDaemon({ tracked, runtimeRegistry });
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toEqual({
+      mode: 'daemon_callback',
+      serviceIds: ['openai-codex'],
+    });
+
+    tracked.spawnOptions.environmentVariables = {
+      [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+        kind: 'group',
+        serviceId: 'openai-codex',
+        groupId: 'team',
+        activeProfileId: 'codex-b',
+        fallbackProfileId: 'codex-a',
+        generation: 8,
+      }]),
+    };
+    registerConnectedServiceTrackedSessionTargetsForDaemon({ tracked, runtimeRegistry });
+    expect(runtimeRegistry.getByPid(6610)).toMatchObject({
+      accessTokenRefresh: { mode: 'daemon_callback', serviceIds: ['openai-codex'] },
+      activeBindings: [expect.objectContaining({ groupId: 'team', generation: 8 })],
+    });
+
+    tracked.happySessionMetadataFromLocalWebhook = {
+      ...tracked.happySessionMetadataFromLocalWebhook!,
+      connectedServiceAccessTokenRefreshV1: {
+        v: 1,
+        mode: 'unavailable',
+        serviceIds: ['openai-codex'],
+      },
+    };
+    registerConnectedServiceTrackedSessionTargetsForDaemon({ tracked, runtimeRegistry });
     expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toBeNull();
   });
 
@@ -190,6 +290,8 @@ describe('registerConnectedServiceTrackedSessionTargetsForDaemon', () => {
       },
     };
     const runtimeRegistry = new ConnectedServiceRuntimeRegistry();
+    const onRuntimeTargetRegistration = vi.fn();
+    runtimeRegistry.onTargetRegistration(onRuntimeTargetRegistration);
 
     registerConnectedServiceTrackedSessionTargetsForDaemon({
       tracked,
@@ -213,167 +315,92 @@ describe('registerConnectedServiceTrackedSessionTargetsForDaemon', () => {
     expect(runtimeRegistry.getBySessionId('sess-reattached-connected-service')?.pid).toBe(6510);
     expect(runtimeRegistry.listRefreshTargets()).toHaveLength(1);
     expect(runtimeRegistry.listQuotaTargets()).toHaveLength(1);
+    expect(onRuntimeTargetRegistration).toHaveBeenCalledWith(expect.objectContaining({
+      key: { kind: 'session', pid: 6510 },
+      target: runtimeRegistry.getByPid(6510),
+    }));
   });
 });
 
-describe('hydrateProviderAccountUsageStoreForDaemon', () => {
-  it('opens durable provider-account-usage record ids from passive reconstruction metadata into the local store', async () => {
-    const snapshot = createProviderAccountUsageSnapshot();
-    const store = createProviderAccountUsageStore();
-    const api = {
-      getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
-      getProviderAccountUsageSnapshotPlain: vi.fn(async ({ recordId }: { recordId: string }) => (
-        recordId === snapshot.recordId
-          ? {
-              content: { t: 'plain' as const, v: snapshot },
-              metadata: { fetchedAt: snapshot.fetchedAtMs, staleAfterMs: snapshot.staleAfterMs, status: 'ok' as const },
-            }
-          : null
-      )),
-      getProviderAccountUsageSnapshotSealed: vi.fn(async () => null),
-    };
+describe('commitRuntimeAuthRecoveryDiagnosticForDaemon', () => {
+  it('forwards the durable attempt and transition identity through the production commit adapter', async () => {
+    const previousServerUrl = process.env.HAPPIER_SERVER_URL;
+    process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
+    try {
+      vi.spyOn(axios, 'get').mockResolvedValueOnce({
+        status: 200,
+        data: {
+          session: {
+            id: 'sess-runtime-auth-composition',
+            seq: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            active: true,
+            activeAt: 1,
+            encryptionMode: 'plain',
+            metadata: '{}',
+            metadataVersion: 1,
+            agentState: null,
+            agentStateVersion: 1,
+            dataEncryptionKey: null,
+          },
+        },
+      });
+      const postSpy = vi.spyOn(axios, 'post').mockResolvedValueOnce({
+        status: 200,
+        data: {
+          didWrite: true,
+          message: { id: 'msg-runtime-auth-composition', seq: 2, localId: 'local', createdAt: 2 },
+        },
+      });
 
-    await expect(hydrateProviderAccountUsageStoreForDaemon({
-      trackedSessions: [{
-        happySessionId: 'sess-reattached-connected-service',
-        spawnOptions: { directory: '/tmp/reattached-workspace' },
-      }],
-      resolvePersistedSessionMetadata: async () => writeProviderAccountUsageRecordIdToMetadata({}, {
-        recordId: snapshot.recordId,
-        updatedAtMs: 2_000,
-      }),
-      api,
-      credentials: {
-        token: 'happy-token',
-        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(7) },
-      },
-      store,
-    })).resolves.toEqual({ hydratedRecordIds: [snapshot.recordId] });
+      await commitRuntimeAuthRecoveryDiagnosticForDaemon({
+        credentials: {
+          token: 'token-runtime-auth-composition',
+          encryption: { type: 'legacy', secret: new Uint8Array([1, 2, 3, 4]) },
+        },
+        delivery: {
+          sessionId: 'sess-runtime-auth-composition',
+          attemptId: 'runtime-auth-attempt:composition-1',
+          transition: 'working',
+          transcriptEvent: {
+            type: 'connected-service-runtime-auth-recovery',
+            status: 'retry_scheduled',
+            serviceId: 'openai-codex',
+            groupId: 'team',
+            profileId: 'primary',
+            attempt: 1,
+            nextRetryAtMs: null,
+            terminal: false,
+            reason: 'runtime_auth_failure',
+            diagnostic: {
+              code: 'recovery_retry_scheduled',
+              failurePhase: 'runtime_auth_recovery',
+              source: 'runtime_auth_recovery',
+              serviceId: 'openai-codex',
+              groupId: 'team',
+              profileId: 'primary',
+              retryable: true,
+              suggestedActions: ['retry'],
+            },
+          },
+        },
+      });
 
-    expect(api.getProviderAccountUsageSnapshotPlain).toHaveBeenCalledWith({ recordId: snapshot.recordId });
-    expect(store.resolveRecordId(snapshot.recordId)).toEqual(snapshot);
-  });
-
-  it('ignores decrypted account-usage records whose id does not match passive reconstruction metadata', async () => {
-    const requestedSnapshot = createProviderAccountUsageSnapshot('acct_requested_codex');
-    const mismatchedSnapshot = createProviderAccountUsageSnapshot('acct_other_codex');
-    const store = createProviderAccountUsageStore();
-    const credentials = {
-      token: 'happy-token',
-      encryption: { type: 'legacy' as const, secret: new Uint8Array(32).fill(7) },
-    };
-    const ciphertext = sealProviderAccountUsageSnapshotCiphertext({
-      material: { type: 'legacy', secret: credentials.encryption.secret },
-      payload: mismatchedSnapshot,
-      randomBytes: (length) => new Uint8Array(length).fill(5),
-    });
-    const api = {
-      getAccountEncryptionMode: vi.fn(async () => 'e2ee' as const),
-      getProviderAccountUsageSnapshotPlain: vi.fn(async () => null),
-      getProviderAccountUsageSnapshotSealed: vi.fn(async ({ recordId }: { recordId: string }) => (
-        recordId === requestedSnapshot.recordId
-          ? { sealed: { format: 'account_scoped_v1' as const, ciphertext } }
-          : null
-      )),
-    };
-
-    await expect(hydrateProviderAccountUsageStoreForDaemon({
-      trackedSessions: [{
-        happySessionId: 'sess-reattached-connected-service',
-        spawnOptions: { directory: '/tmp/reattached-workspace' },
-      }],
-      resolvePersistedSessionMetadata: async () => writeProviderAccountUsageRecordIdToMetadata({}, {
-        recordId: requestedSnapshot.recordId,
-        updatedAtMs: 2_000,
-      }),
-      api,
-      credentials,
-      store,
-    })).resolves.toEqual({ hydratedRecordIds: [] });
-
-    expect(store.resolveRecordId(requestedSnapshot.recordId)).toBeNull();
-    expect(store.resolveRecordId(mismatchedSnapshot.recordId)).toBeNull();
-  });
-});
-
-describe('replayExactPendingConnectedServiceContinuationsForDaemon', () => {
-  const tracked = (sessionId: string): TrackedSession => ({
-    pid: 7520,
-    startedBy: 'daemon',
-    happySessionId: sessionId,
-    reattachedFromDiskMarker: true,
-    spawnOptions: {
-      directory: '/tmp/reattached-workspace',
-      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
-    },
-  });
-
-  const pendingRecovery: SessionContinuationRecoveryV1 = {
-    v: 1,
-    attemptsById: {
-      'durable-attempt-1': {
-        v: 1,
-        attemptId: 'durable-attempt-1',
-        status: 'pending_provider_context',
-        failureAtMs: 1_000,
-        updatedAtMs: 1_100,
-        resumePromptMode: 'standard',
-        replayMode: 'continuation_prompt',
-        continuationRequired: true,
-      },
-    },
-  };
-
-  const terminalRecovery: SessionContinuationRecoveryV1 = {
-    v: 1,
-    attemptsById: {
-      'terminal-attempt-1': {
-        v: 1,
-        attemptId: 'terminal-attempt-1',
-        status: 'retry_required',
-        failureAtMs: 1_000,
-        updatedAtMs: 1_100,
-        resumePromptMode: 'standard',
-      },
-    },
-  };
-
-  it('does not resolve replay for passively reattached sessions without pending durable continuation metadata', async () => {
-    const resolvePersistedSessionMetadata = vi.fn(async () => ({ path: '/tmp/reattached-workspace' }));
-    const resolvePendingContinuation = vi.fn(async () => {});
-
-    await expect(replayExactPendingConnectedServiceContinuationsForDaemon({
-      trackedSessions: [tracked('session-without-pending-operation')],
-      resolvePersistedSessionMetadata,
-      resolvePendingContinuation,
-    })).resolves.toEqual({ attemptedSessionIds: [] });
-
-    expect(resolvePersistedSessionMetadata).toHaveBeenCalledTimes(1);
-    expect(resolvePendingContinuation).not.toHaveBeenCalled();
-  });
-
-  it('resolves replay only for sessions with non-terminal durable continuation attempts', async () => {
-    const resolvePersistedSessionMetadata = vi.fn(async ({ sessionId }: { sessionId: string }) => {
-      if (sessionId === 'session-with-pending-operation') {
-        return { [SESSION_CONTINUATION_RECOVERY_METADATA_KEY]: pendingRecovery };
-      }
-      return { [SESSION_CONTINUATION_RECOVERY_METADATA_KEY]: terminalRecovery };
-    });
-    const resolvePendingContinuation = vi.fn(async () => {});
-
-    await expect(replayExactPendingConnectedServiceContinuationsForDaemon({
-      trackedSessions: [
-        tracked('session-with-pending-operation'),
-        tracked('session-with-terminal-operation'),
-      ],
-      resolvePersistedSessionMetadata,
-      resolvePendingContinuation,
-    })).resolves.toEqual({ attemptedSessionIds: ['session-with-pending-operation'] });
-
-    expect(resolvePendingContinuation).toHaveBeenCalledTimes(1);
-    expect(resolvePendingContinuation).toHaveBeenCalledWith({
-      sessionId: 'session-with-pending-operation',
-      exactProviderContextAvailable: true,
-    });
+      expect(postSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/\/v2\/sessions\/sess-runtime-auth-composition\/messages$/),
+        expect.objectContaining({
+          localId: buildRuntimeAuthRecoveryAttemptTransitionLocalId({
+            attemptId: 'runtime-auth-attempt:composition-1',
+            transition: 'working',
+          }),
+        }),
+        expect.anything(),
+      );
+    } finally {
+      if (previousServerUrl === undefined) delete process.env.HAPPIER_SERVER_URL;
+      else process.env.HAPPIER_SERVER_URL = previousServerUrl;
+      vi.restoreAllMocks();
+    }
   });
 });

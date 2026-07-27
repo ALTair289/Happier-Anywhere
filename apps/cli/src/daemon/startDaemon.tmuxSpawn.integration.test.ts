@@ -2,7 +2,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/utils/spawnHappyCLI', () => {
   return {
-    buildHappyCliSubprocessLaunchSpec: vi.fn((args: string[]) => {
+    buildHappyCliSubprocessLaunchSpec: vi.fn((args: string[], options?: {
+      runtimeDecision?: { runtime: 'node'; argvPrefix: string[]; env?: Record<string, string> };
+    }) => {
+      if (options?.runtimeDecision) {
+        return {
+          runtime: options.runtimeDecision.runtime,
+          filePath: 'node',
+          args: [...options.runtimeDecision.argvPrefix, ...args],
+          env: options.runtimeDecision.env,
+        };
+      }
       const runtime = process.env.HAPPIER_CLI_SUBPROCESS_RUNTIME === 'bun' ? 'bun' : 'node';
       if (runtime === 'bun') {
         return {
@@ -61,5 +71,30 @@ describe('daemon tmux spawn config', () => {
     expect(cfg.tmuxEnv.FOO).toBe('bar');
     expect(cfg.tmuxCommandEnv.TMUX_TMPDIR).toBe('/custom/tmux');
     expect(cfg.commandTokens).toEqual(expect.arrayContaining(['--happy-terminal-mode', 'tmux']));
+  });
+
+  it('uses the admitted immutable runner decision for the tmux child command', () => {
+    const immutableEntrypoint = '/runtime/.runner-snapshots/0123456789abcdef/index.mjs';
+    const cfg = buildTmuxSpawnConfig({
+      agent: 'claude',
+      directory: '/tmp',
+      extraEnv: {},
+      extraArgs: ['--happy-terminal-mode', 'tmux'],
+      launchOptions: {
+        runtimeDecision: {
+          runtime: 'node',
+          argvPrefix: ['--no-warnings', '--no-deprecation', immutableEntrypoint],
+          env: { HAPPIER_TEST_ADMITTED_CLOSURE: '0123456789abcdef' },
+        },
+      },
+    });
+
+    expect(cfg.commandTokens).toEqual(expect.arrayContaining([
+      immutableEntrypoint,
+      'claude',
+      '--happy-terminal-mode',
+      'tmux',
+    ]));
+    expect(cfg.tmuxEnv.HAPPIER_TEST_ADMITTED_CLOSURE).toBe('0123456789abcdef');
   });
 });

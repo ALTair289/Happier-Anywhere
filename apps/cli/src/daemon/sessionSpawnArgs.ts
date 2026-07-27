@@ -1,5 +1,6 @@
 import type { BackendTargetRefV1 } from '@happier-dev/protocol';
 import { normalizeClaudeHappyCliSessionControlPermissionMode } from '@/backends/claude/utils/permissionMode';
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 
 function normalizeDaemonSessionPermissionModeForBackend(opts: {
   backendTarget?: BackendTargetRefV1;
@@ -52,7 +53,7 @@ export function buildHappySessionControlArgs(opts: Readonly<{
     }
   }
 
-  const agentModeId = typeof opts.agentModeId === 'string' ? opts.agentModeId.trim() : '';
+  const agentModeId = readNonBlankSessionControlIdentifier(opts.agentModeId) ?? '';
   if (agentModeId) {
     args.push('--agent-mode', agentModeId);
     if (typeof opts.agentModeUpdatedAt === 'number') {
@@ -60,7 +61,7 @@ export function buildHappySessionControlArgs(opts: Readonly<{
     }
   }
 
-  const modelId = typeof opts.modelId === 'string' ? opts.modelId.trim() : '';
+  const modelId = readNonBlankSessionControlIdentifier(opts.modelId) ?? '';
   if (modelId && typeof opts.modelUpdatedAt === 'number') {
     args.push('--model', modelId, '--model-updated-at', `${opts.modelUpdatedAt}`);
   }
