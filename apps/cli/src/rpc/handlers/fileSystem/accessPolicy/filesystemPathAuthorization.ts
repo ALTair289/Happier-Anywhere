@@ -30,29 +30,27 @@ function resolveRealPathForAuthorization(pathValue: string, platform: NodeJS.Pla
     return resolved;
   }
 
-  try {
-    return realpathSync(resolved);
-  } catch {
+  const api = pathApi(platform);
+  const missingSegments: string[] = [];
+  let candidate = resolved;
+  while (true) {
     try {
-      const parent = realpathSync(dirname(resolved));
-      return normalizeFilesystemPathForPolicy(pathApi(platform).join(parent, basename(resolved)), platform);
+      const realAncestor = realpathSync(candidate);
+      return normalizeFilesystemPathForPolicy(
+        api.join(realAncestor, ...missingSegments.reverse()),
+        platform,
+      );
     } catch {
-      return resolved;
+      const parent = dirname(candidate);
+      if (parent === candidate) return resolved;
+      missingSegments.push(basename(candidate));
+      candidate = parent;
     }
   }
 }
 
 function resolveAllowedRootForAuthorization(pathValue: string, platform: NodeJS.Platform): string {
-  const resolved = normalizeFilesystemPathForPolicy(pathValue, platform);
-  if (platform !== process.platform) {
-    return resolved;
-  }
-
-  try {
-    return realpathSync(resolved);
-  } catch {
-    return resolved;
-  }
+  return resolveRealPathForAuthorization(pathValue, platform);
 }
 
 function isWithinRoot(targetPath: string, rootPath: string, platform: NodeJS.Platform): boolean {

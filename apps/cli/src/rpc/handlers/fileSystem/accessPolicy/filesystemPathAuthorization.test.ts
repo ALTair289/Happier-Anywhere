@@ -115,6 +115,25 @@ describe('authorizeFilesystemPath', () => {
     expect(result.error).toContain('outside the allowed directories');
   });
 
+  it('allows a non-existent descendant through a symlink-aliased restricted root', () => {
+    const container = createTempRoot('happier-fs-policy-alias');
+    const realRoot = join(container, 'real-root');
+    const aliasRoot = join(container, 'alias-root');
+    mkdirSync(realRoot, { recursive: true });
+    symlinkSync(realRoot, aliasRoot);
+
+    const result = authorizeFilesystemPath({
+      targetPath: join(aliasRoot, '.happier', 'uploads', 'generated'),
+      defaultDirectory: aliasRoot,
+      accessPolicy: { kind: 'restrictedRoots', roots: [aliasRoot] },
+    });
+
+    expect(result).toEqual({
+      valid: true,
+      resolvedPath: join(aliasRoot, '.happier', 'uploads', 'generated'),
+    });
+  });
+
   it('handles Windows sibling-prefix collisions and mixed separators', () => {
     const allowed = authorizeFilesystemPath({
       targetPath: 'C:/Users/alice/work\\repo/file.txt',
