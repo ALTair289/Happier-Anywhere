@@ -9,8 +9,13 @@ export function shouldUseCandidateSource(
     if (selectedSource.kind === 'codexHome' && candidateSource.kind === 'codexHome') {
         if (selectedSource.home !== candidateSource.home) return false;
         if (selectedSource.home === 'connectedService') {
-            return selectedSource.connectedServiceId === candidateSource.connectedServiceId
-                && (selectedSource.connectedServiceProfileId ?? '') === (candidateSource.connectedServiceProfileId ?? '');
+            if (selectedSource.connectedServiceId !== candidateSource.connectedServiceId) return false;
+            const selectedGroupId = selectedSource.connectedServiceGroupId ?? '';
+            const candidateGroupId = candidateSource.connectedServiceGroupId ?? '';
+            if (selectedGroupId || candidateGroupId) {
+                return Boolean(selectedGroupId) && selectedGroupId === candidateGroupId;
+            }
+            return (selectedSource.connectedServiceProfileId ?? '') === (candidateSource.connectedServiceProfileId ?? '');
         }
         return true;
     }
@@ -27,4 +32,3 @@ export function shouldUseCandidateSource(
 
     return false;
 }
-
