@@ -49,10 +49,12 @@ function performNativeStandardPinBottomCommand(
         : deps.listLayoutHeightRef.current;
     const targetOffsetY = Math.max(0, Math.trunc(contentHeight - layoutHeight));
 
-    if (typeof node.scrollToOffset === 'function') {
-        node.scrollToOffset({ offset: targetOffsetY, animated: command.animated ?? false });
-    } else if (typeof node.scrollToEnd === 'function') {
+    // Bottom placement is a semantic intent, not a one-shot offset. Legend's renderer-owned
+    // settle transaction must receive it so late item measurements can repair the landing.
+    if (typeof node.scrollToEnd === 'function') {
         node.scrollToEnd({ animated: command.animated ?? false });
+    } else if (typeof node.scrollToOffset === 'function') {
+        node.scrollToOffset({ offset: targetOffsetY, animated: command.animated ?? false });
     } else {
         return false;
     }
@@ -108,16 +110,10 @@ function performNativeStandardIndexCommand(
     command: Extract<TranscriptViewportCommand, Readonly<{ kind: 'restore-anchor' | 'jump-to-seq' }>>,
     deps: TranscriptViewportDriverDeps,
 ): boolean {
-    const index = command.kind === 'jump-to-seq'
-        ? (command.routeMessageId
-            ? deps.resolveJumpToSeqIndex(
-                command.seq,
-                command.routeMessageId,
-                command.transcriptBlockIndex,
-                command.role,
-            )
-            : deps.resolveJumpToSeqIndex(command.seq))
-        : deps.resolveRestoreAnchorIndex(command.target.anchor);
+    const rendererTarget = deps.resolveRendererDataTarget(command);
+    const index = rendererTarget?.kind === 'data'
+        ? rendererTarget.index
+        : rendererTarget?.fallbackIndex;
     if (typeof index !== 'number' || !Number.isFinite(index)) return false;
     const node = deps.listRef.current;
     if (!node || typeof node.scrollToIndex !== 'function') return false;
@@ -135,6 +131,20 @@ function performNativeStandardIndexCommand(
             index,
             animated: command.animated ?? false,
             viewOffset,
+            ...(command.reason === 'entry-restore'
+                ? {
+                    context: {
+                        anchor: {
+                            itemId: command.target.anchor.itemId,
+                            itemOffsetPx: command.target.itemOffsetPx,
+                            kind: command.target.anchor.kind,
+                            messageId: command.target.anchor.messageId ?? null,
+                            reason: command.reason,
+                        },
+                        kind: 'entry-placement' as const,
+                    },
+                }
+                : {}),
         });
     } else {
         const jumpAlignment = command.align;

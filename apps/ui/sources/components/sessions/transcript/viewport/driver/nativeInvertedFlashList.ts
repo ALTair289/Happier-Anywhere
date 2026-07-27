@@ -4,7 +4,6 @@ import {
     resolveNativeInvertedBottomRawOffset,
     toNativeInvertedCanonicalOffset,
 } from './nativeInvertedRawScroll';
-import { resolveNativeInvertedColdScrollIndex } from '@/components/sessions/transcript/segments/resolveWebHotColdScrollDecision';
 import {
     type TranscriptViewportTelemetryScrollWriter,
     resolveTranscriptViewportTelemetryPlatform,
@@ -155,29 +154,11 @@ function performNativeIndexCommand(
     command: Extract<TranscriptViewportCommand, Readonly<{ kind: 'restore-anchor' | 'jump-to-seq' }>>,
     deps: TranscriptViewportDriverDeps,
 ): boolean {
-    let index = command.kind === 'jump-to-seq'
-        ? (command.routeMessageId
-            ? deps.resolveJumpToSeqIndex(
-                command.seq,
-                command.routeMessageId,
-                command.transcriptBlockIndex,
-                command.role,
-            )
-            : deps.resolveJumpToSeqIndex(command.seq))
-        : deps.resolveRestoreAnchorIndex(command.target.anchor);
+    const rendererTarget = deps.resolveRendererDataTarget(command);
+    const index = rendererTarget?.kind === 'data'
+        ? rendererTarget.index
+        : rendererTarget?.fallbackIndex;
     if (typeof index !== 'number' || !Number.isFinite(index)) return false;
-    if (deps.shouldUseNativeHotColdSplit) {
-        // Map the FULL rendered display index to a COLD rendered index (FlashList `data` is the cold
-        // slice); a hot-tail target resolves to the newest cold row, bringing the live tail into view.
-        const renderedColdIndex = resolveNativeInvertedColdScrollIndex({
-            renderedFullIndex: index,
-            fullCount: deps.itemsRef.current.length,
-            coldCount: deps.listDataRef.current.length,
-        });
-        if (renderedColdIndex != null) {
-            index = renderedColdIndex;
-        }
-    }
     const node = deps.listRef.current;
     if (!node || typeof node.scrollToIndex !== 'function') return false;
     if (command.kind === 'restore-anchor') {

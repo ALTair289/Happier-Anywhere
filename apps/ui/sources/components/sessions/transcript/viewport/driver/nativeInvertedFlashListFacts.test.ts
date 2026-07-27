@@ -15,7 +15,7 @@ function factSource(state: {
     visibleRange?: Readonly<{ startIndex: number; endIndex: number }> | null;
     firstVisibleIndex?: number | null;
     renderedItemCount?: number;
-    sourceIndexForRenderedIndex?: (renderedIndex: number) => number | null;
+    sourceIndexForRenderedIndex?: (renderedIndex: number) => number | null | undefined;
 }) {
     return createNativeInvertedFlashListFactSource({
         readRawScrollOffset: () => state.offset,
@@ -24,8 +24,9 @@ function factSource(state: {
         readRenderedVisibleRange: () => state.visibleRange,
         readFirstVisibleRenderedIndex: () => state.firstVisibleIndex,
         readRenderedItemCount: () => state.renderedItemCount ?? 0,
-        readSourceIndexForRenderedIndex: (renderedIndex) =>
-            state.sourceIndexForRenderedIndex?.(renderedIndex) ?? null,
+        ...(state.sourceIndexForRenderedIndex
+            ? { readSourceIndexForRenderedIndex: state.sourceIndexForRenderedIndex }
+            : {}),
     });
 }
 
@@ -229,6 +230,25 @@ describe('createNativeInvertedFlashListFactSource — visibleSourceRange (C3c vi
             firstSourceIndex: 42,
             lastSourceIndex: 45,
         });
+    });
+
+    it('skips an explicit-null synthetic row while retaining visible mapped content', () => {
+        expect(factSource({
+            renderedItemCount: 3,
+            sourceIndexForRenderedIndex: (renderedIndex) => renderedIndex === 2 ? null : 1,
+            visibleRange: { startIndex: 1, endIndex: 2 },
+        }).getVisibleSourceRange()).toEqual({
+            firstSourceIndex: 1,
+            lastSourceIndex: 1,
+        });
+    });
+
+    it('returns no visible source range when every rendered row is explicitly synthetic', () => {
+        expect(factSource({
+            renderedItemCount: 2,
+            sourceIndexForRenderedIndex: () => null,
+            visibleRange: { startIndex: 0, endIndex: 1 },
+        }).getVisibleSourceRange()).toBeNull();
     });
 });
 

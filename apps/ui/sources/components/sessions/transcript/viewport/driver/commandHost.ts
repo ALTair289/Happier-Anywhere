@@ -35,7 +35,7 @@ export type TranscriptViewportCommandHost = Readonly<{
         anchor: WebTranscriptViewportAnchor;
         animated?: boolean;
         itemIndex?: number | null;
-        reason?: Extract<TranscriptViewportScrollReason, 'content-size-change' | 'entry-restore'>;
+        reason?: Extract<TranscriptViewportScrollReason, 'content-size-change' | 'entry-restore' | 'prepend-restore'>;
         sessionId: string;
     }>) => WebTranscriptViewportAnchorRestoreResult;
 }>;

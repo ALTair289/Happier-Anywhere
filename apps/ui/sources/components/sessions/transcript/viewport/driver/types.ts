@@ -8,10 +8,10 @@ import type {
     ScrollableChatListRef,
 } from '@/components/sessions/transcript/viewport/transcriptScrollableListTypes';
 import type {
-    TranscriptViewportAnchorIdentity,
+    TranscriptViewportCommand,
     TranscriptViewportMode,
 } from '@/components/sessions/transcript/viewport/transcriptViewportTypes';
-import type { TranscriptJumpTargetRole } from '@/components/sessions/transcript/viewport/jump/transcriptJumpTargetTypes';
+import type { TranscriptRendererDataTarget } from '@/components/sessions/transcript/viewport/window/resolveTranscriptRenderWindowProjection';
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 import type { WebDomScrollObservation } from './webDomObservation';
 
@@ -40,7 +40,6 @@ export type TranscriptViewportDriverDeps = Readonly<{
     listContentHeightRef: { readonly current: number };
     listLayoutHeightRef: { readonly current: number };
     listDataRef: { readonly current: TranscriptViewportListData };
-    itemsRef: { readonly current: TranscriptViewportListData };
     composerInsetHeightRef: { readonly current: number };
     nativeHotTailHeightRef: { readonly current: number };
     lastPinOffsetForIntentRef: { readonly current: number | null };
@@ -49,22 +48,10 @@ export type TranscriptViewportDriverDeps = Readonly<{
     lastNativeRestoreIndexCommandRef: { current: LastNativeRestoreIndexCommand | null };
     nativeMountSettleStable: boolean;
     telemetryPlatform: ReturnType<typeof resolveTranscriptViewportTelemetryPlatform>;
-    shouldUseNativeHotColdSplit: boolean;
-    /**
-     * Live web hot/cold facts (ref-read at command time). Jump/restore commands can run inside
-     * long async flows (window materialization + landing settle); captured boolean/count values
-     * go stale when the window re-slices mid-flight and remap the write into the wrong index
-     * space. `hotCount > 0` means the web hot/cold split is active.
-     */
-    webHotColdCountsRef: { readonly current: Readonly<{ coldCount: number; hotCount: number }> };
     clearWebPrependRangeReserve: () => void;
-    resolveRestoreAnchorIndex: (anchor: TranscriptViewportAnchorIdentity) => number | null;
-    resolveJumpToSeqIndex: (
-        seq: number,
-        routeMessageId?: string | null,
-        transcriptBlockIndex?: number | null,
-        role?: TranscriptJumpTargetRole | null,
-    ) => number | null;
+    resolveRendererDataTarget: (
+        command: Extract<TranscriptViewportCommand, Readonly<{ kind: 'restore-anchor' | 'jump-to-seq' }>>,
+    ) => TranscriptRendererDataTarget | null;
     resolveWebScrollMetrics: () => WebTranscriptScrollMetrics | null;
     recordViewportTelemetryEvent: (
         event: Readonly<Record<string, unknown> & {

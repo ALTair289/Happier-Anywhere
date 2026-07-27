@@ -107,6 +107,9 @@ export type NativeListFactReaders = Readonly<{
     /**
      * Optional authoritative rendered-index -> canonical source-index remap. The host can provide this for
      * hot/cold slices where rendered item count is not the same as the full source item count.
+     * A number is a source row, `null` deliberately marks a synthetic/unmapped recycler row,
+     * and `undefined` means no authoritative mapping is available so the driver may use its
+     * orientation identity fallback.
      */
     readSourceIndexForRenderedIndex?: (renderedIndex: number) => number | null | undefined;
 }>;

@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useCommittedTranscriptRef } from '@/components/sessions/transcript/viewport/lifecycle/host/useCommittedTranscriptRef';
 import type {
     TranscriptViewportCommand,
     TranscriptViewportControllerInput,
@@ -62,7 +63,7 @@ export function useTranscriptViewportCommandHostWiring(params: Readonly<{
         platformOS,
         viewportCommandController,
     ]);
-    commandHostRef.current = commandHost;
+    useCommittedTranscriptRef(commandHostRef, commandHost);
 
     const resolveViewportCommand = React.useCallback((input: TranscriptViewportControllerInput): TranscriptViewportCommand => {
         return commandHost.resolve(input);

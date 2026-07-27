@@ -49,8 +49,12 @@ export function useNativeInvertedFactSource(params: Readonly<{
         },
         readRenderedItemCount: () => listDataRef.current.length,
         readSourceIndexForRenderedIndex: (renderedIndex: number) => {
-            const projectionSourceIndex = renderWindowIndexMapRef.current?.renderedToSourceIndex(renderedIndex);
-            if (projectionSourceIndex != null) return projectionSourceIndex;
+            const projectionIndexMap = renderWindowIndexMapRef.current;
+            if (projectionIndexMap) {
+                // `null` is authoritative for synthetic rows (window-gap markers).
+                // Falling through by id would turn them into source identities.
+                return projectionIndexMap.renderedToWindowContentIndex(renderedIndex);
+            }
             const itemId = listDataRef.current[renderedIndex]?.id;
             if (!itemId) return null;
             const sourceIndex = canonicalWindowedItemsRef.current.findIndex((item) => item.id === itemId);
