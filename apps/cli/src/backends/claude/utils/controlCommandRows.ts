@@ -13,6 +13,31 @@ export type ClaudeControlCommandRowShape =
   | Readonly<{ kind: 'command'; name: string; args: string }>
   | Readonly<{ kind: 'stdout' }>;
 
+export type ClaudeControlCommandCompletionOwner = 'local_stdout' | 'external_lifecycle';
+
+const LOCAL_STDOUT_TERMINAL_COMMANDS = new Set([
+  '/effort',
+  '/model',
+  '/status',
+]);
+
+/**
+ * Classifies which existing lifecycle owner may terminalize a Claude local command.
+ *
+ * Settings/status commands are fully completed by their paired local-command stdout row.
+ * Conversation-affecting commands (`/compact`, `/btw`, and unknown/future commands) remain on
+ * their dedicated provider lifecycle owner; treating their acknowledgement stdout as turn
+ * completion can race or double-settle real conversation/compaction work. Unknown commands are
+ * deliberately fail-closed until real provider evidence establishes their semantics.
+ */
+export function resolveClaudeControlCommandCompletionOwner(
+  commandName: string,
+): ClaudeControlCommandCompletionOwner {
+  return LOCAL_STDOUT_TERMINAL_COMMANDS.has(commandName.trim().toLowerCase())
+    ? 'local_stdout'
+    : 'external_lifecycle';
+}
+
 export const CLAUDE_CONTROL_COMMAND_TRANSCRIPT_PREFIXES = [
   '<command-name>',
   '<local-command-stdout>',

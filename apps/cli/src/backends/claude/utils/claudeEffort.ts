@@ -21,7 +21,13 @@ function resolveClaudeEffortLevelsForKnownAliasOrModel(modelIdRaw: unknown): rea
     if (modelId === 'fable' || modelId.includes('fable-5')) {
         return agentProviders.claude.resolveClaudeEffortLevelsForModelId('claude-fable-5') as readonly ClaudeEffortLevel[];
     }
-    if (modelId === 'opus' || modelId.includes('opus-4-8')) {
+    if (modelId.includes('opus-5')) {
+        return agentProviders.claude.resolveClaudeEffortLevelsForModelId('claude-opus-5') as readonly ClaudeEffortLevel[];
+    }
+    if (modelId === 'opus') {
+        return agentProviders.claude.resolveClaudeEffortLevelsForModelId(agentProviders.claude.CURRENT_FLAGSHIP_CLAUDE_MODEL_ID) as readonly ClaudeEffortLevel[];
+    }
+    if (modelId.includes('opus-4-8')) {
         return agentProviders.claude.resolveClaudeEffortLevelsForModelId('claude-opus-4-8') as readonly ClaudeEffortLevel[];
     }
     if (modelId.includes('opus-4-7')) {
@@ -49,7 +55,13 @@ function resolveClaudeDefaultEffortForKnownAliasOrModel(modelIdRaw: unknown): Cl
     if (modelId === 'fable' || modelId.includes('fable-5')) {
         return agentProviders.claude.resolveClaudeDefaultEffortLevelForModelId('claude-fable-5') as ClaudeEffortLevel | null;
     }
-    if (modelId === 'opus' || modelId.includes('opus-4-8')) {
+    if (modelId.includes('opus-5')) {
+        return agentProviders.claude.resolveClaudeDefaultEffortLevelForModelId('claude-opus-5') as ClaudeEffortLevel | null;
+    }
+    if (modelId === 'opus') {
+        return agentProviders.claude.resolveClaudeDefaultEffortLevelForModelId(agentProviders.claude.CURRENT_FLAGSHIP_CLAUDE_MODEL_ID) as ClaudeEffortLevel | null;
+    }
+    if (modelId.includes('opus-4-8')) {
         return agentProviders.claude.resolveClaudeDefaultEffortLevelForModelId('claude-opus-4-8') as ClaudeEffortLevel | null;
     }
     if (modelId.includes('opus-4-7')) {

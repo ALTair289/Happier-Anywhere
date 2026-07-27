@@ -17,7 +17,12 @@ describe('buildClaudeEffortCliArgs', () => {
     expect(buildClaudeEffortCliArgs({ modelId: 'claude-opus-4-8', effort: 'xhigh' })).toEqual(['--effort', 'xhigh']);
   });
 
-  it('treats the generic opus alias as Opus 4.8 for default effort resolution', () => {
+  it('treats Opus 5 high as the default effort', () => {
+    expect(buildClaudeEffortCliArgs({ modelId: 'claude-opus-5', effort: 'high' })).toEqual([]);
+    expect(buildClaudeEffortCliArgs({ modelId: 'claude-opus-5', effort: 'xhigh' })).toEqual(['--effort', 'xhigh']);
+  });
+
+  it('treats the generic opus alias as the current flagship Claude model for default effort resolution', () => {
     expect(buildClaudeEffortCliArgs({ modelId: 'opus', effort: 'high' })).toEqual([]);
     expect(buildClaudeEffortCliArgs({ modelId: 'opus', effort: 'xhigh' })).toEqual(['--effort', 'xhigh']);
   });
@@ -36,6 +41,7 @@ describe('buildClaudeEffortCliArgs', () => {
 describe('resolveClaudeUltracodeForModel', () => {
   it('enables ultracode only when requested AND the model is xhigh-capable', () => {
     expect(resolveClaudeUltracodeForModel({ modelId: 'claude-fable-5', ultracode: true })).toBe(true);
+    expect(resolveClaudeUltracodeForModel({ modelId: 'claude-opus-5', ultracode: true })).toBe(true);
     expect(resolveClaudeUltracodeForModel({ modelId: 'claude-opus-4-8', ultracode: true })).toBe(true);
     expect(resolveClaudeUltracodeForModel({ modelId: 'opus', ultracode: true })).toBe(true);
     expect(resolveClaudeUltracodeForModel({ modelId: 'claude-fable-5[1m]', ultracode: true })).toBe(true);
