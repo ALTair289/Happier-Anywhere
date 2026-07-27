@@ -7,6 +7,7 @@ import * as persistenceModule from '@/persistence';
 import * as accountSettingsModule from '@/settings/accountSettings/bootstrapAccountSettingsContext';
 import * as providerSettingsModule from '@/settings/providerSettings';
 import * as authModule from '@/ui/auth';
+import * as directConnectedServicesModule from '@/cli/connectedServices/resolveDirectConnectedServiceEnvironment';
 import { logger } from '@/ui/logger';
 
 afterEach(() => {
@@ -14,6 +15,74 @@ afterEach(() => {
 });
 
 describe('handleClaudeCliCommand --profile', () => {
+  it('materializes the configured Connected Services default before starting Claude', async () => {
+    vi.spyOn(persistenceModule, 'readCredentials').mockResolvedValue({
+      token: 'x',
+      encryption: { type: 'legacy', secret: new Uint8Array(32) },
+    } as any);
+    vi.spyOn(persistenceModule, 'readSettings').mockResolvedValue({ chromeMode: false, machineId: 'machine-1' } as any);
+    vi.spyOn(authModule, 'ensureMachineIdForCredentials').mockResolvedValue({ machineId: 'machine-1' } as any);
+    vi.spyOn(ensureDaemonModule, 'shouldAutoStartDaemonAfterAuth').mockReturnValue(false);
+    vi.spyOn(providerSettingsModule, 'resolveProviderOutgoingMessageMetaExtras').mockReturnValue({});
+    vi.spyOn(accountSettingsModule, 'bootstrapAccountSettingsContext').mockResolvedValue({
+      source: 'cache',
+      settings: {
+        connectedServicesDefaultAuthByAgentIdV1: {
+          v: 1,
+          bindingsByAgentId: {
+            claude: {
+              v: 1,
+              bindingsByServiceId: {
+                'claude-subscription': {
+                  source: 'connected',
+                  selection: 'group',
+                  groupId: 'team',
+                },
+              },
+            },
+          },
+        },
+      },
+      settingsVersion: 1,
+      loadedAtMs: Date.now(),
+      whenRefreshed: null,
+    } as any);
+    const cleanup = vi.fn();
+    const materialize = vi.spyOn(
+      directConnectedServicesModule,
+      'resolveDirectConnectedServiceEnvironment',
+    ).mockResolvedValue({
+      env: { CONNECTED_SERVICE_CLAUDE_TEST: 'selected' },
+      cleanupOnFailure: cleanup,
+      cleanupOnExit: cleanup,
+    });
+    const runSpy = vi.spyOn(runClaudeModule, 'runClaude').mockImplementation(async () => {
+      expect(process.env.CONNECTED_SERVICE_CLAUDE_TEST).toBe('selected');
+    });
+
+    await handleClaudeCliCommand({
+      args: ['claude'],
+      rawArgv: ['happier', 'claude'],
+      terminalRuntime: null,
+    } as any);
+
+    expect(materialize).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 'claude',
+      connectedServices: expect.objectContaining({
+        bindingsByServiceId: expect.objectContaining({
+          'claude-subscription': {
+            source: 'connected',
+            selection: 'group',
+            groupId: 'team',
+          },
+        }),
+      }),
+    }));
+    expect(runSpy).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(process.env.CONNECTED_SERVICE_CLAUDE_TEST).toBeUndefined();
+  });
+
   it('logs fatal run errors to the file logger before exiting', async () => {
     const fatalError = new Error('startup side effect failed');
     vi.spyOn(persistenceModule, 'readCredentials').mockResolvedValue({

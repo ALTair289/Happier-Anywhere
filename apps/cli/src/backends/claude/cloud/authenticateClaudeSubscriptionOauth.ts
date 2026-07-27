@@ -1,5 +1,10 @@
 import { randomBytes } from 'node:crypto';
 
+import {
+  CLAUDE_OAUTH_AUTHORIZE_URL,
+  CLAUDE_OAUTH_TOKEN_URL,
+} from '@happier-dev/agents';
+
 import type { CloudConnectAuthenticateOptions } from '@/cloud/connectTypes';
 import { generatePkceCodes } from '@/cloud/pkce';
 import { parseOauthRedirectPaste } from '@/cloud/parseOauthRedirectPaste';
@@ -22,8 +27,6 @@ export type ClaudeSubscriptionOauthTokens = Readonly<{
 }>;
 
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
-const TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
 const REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback';
 const SCOPE = CLAUDE_SUBSCRIPTION_OAUTH_SCOPE;
 
@@ -46,7 +49,7 @@ export function buildClaudeSubscriptionAuthorizationUrl(params: Readonly<{
     code_challenge_method: 'S256',
     state: params.state,
   });
-  return `${AUTHORIZE_URL}?${query.toString()}`;
+  return `${CLAUDE_OAUTH_AUTHORIZE_URL}?${query.toString()}`;
 }
 
 export async function exchangeClaudeSubscriptionAuthorizationCodeForTokens(params: Readonly<{
@@ -57,7 +60,7 @@ export async function exchangeClaudeSubscriptionAuthorizationCodeForTokens(param
   fetcher?: typeof fetch;
 }>): Promise<ClaudeSubscriptionOauthTokens> {
   const fetcher = params.fetcher ?? fetch;
-  const response = await fetcher(TOKEN_URL, {
+  const response = await fetcher(CLAUDE_OAUTH_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

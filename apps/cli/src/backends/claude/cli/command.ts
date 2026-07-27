@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { randomUUID } from 'node:crypto';
 import { resolveWindowsCommandInvocation } from '@happier-dev/cli-common/process';
 
 import { runClaude, type StartOptions } from '@/backends/claude/runClaude';
@@ -28,6 +29,12 @@ import { handleResumeCommand } from '@/cli/commands/resume';
 import { partitionProviderSessionArgs, type ProviderSessionArgPartitionResult } from '@/cli/providerSessionArgPartition';
 import { serializeAxiosErrorForLog } from '@/api/client/serializeAxiosErrorForLog';
 import { HAPPY_STARTING_MODE_UNIFIED } from '@/terminal/tmux/headlessTmuxArgs';
+import {
+  overlayDirectConnectedServiceEnvironment,
+  resolveDirectConnectedServiceEnvironment,
+} from '@/cli/connectedServices/resolveDirectConnectedServiceEnvironment';
+import { resolveDirectCliConnectedServiceBindings } from '@/cli/connectedServices/resolveDirectCliConnectedServiceBindings';
+import { HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY } from '@/agent/runtime/sessionConnectedServicesBindingsEnv';
 
 import type { CommandContext } from '@/cli/commandRegistry';
 
@@ -298,6 +305,11 @@ ${chalk.bold.cyan(`Claude Code Options (from \`${providerHelpCommand}\`):`)}
     }
   }
 
+  let directConnectedServiceEnvironment: Awaited<
+    ReturnType<typeof resolveDirectConnectedServiceEnvironment>
+  > = null;
+  let restoreDirectConnectedServiceEnvironment: (() => void) | null = null;
+  let runCompleted = false;
   try {
     const snapshot = await bootstrapAccountSettingsContext({
       agentId: 'claude',
@@ -319,6 +331,33 @@ ${chalk.bold.cyan(`Claude Code Options (from \`${providerHelpCommand}\`):`)}
       session: null,
     });
     options.accountSettings = effectiveSnapshot.settings;
+    if (
+      startedBy !== 'daemon'
+      && !process.env[HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY]
+    ) {
+      const connectedServices = await resolveDirectCliConnectedServiceBindings({
+        agentId: 'claude',
+        credentials,
+        accountSettings: effectiveSnapshot.settings,
+        authRaw: parsed.connectedServicesAuthRaw,
+        authJsonRaw: parsed.connectedServicesAuthJsonRaw,
+      });
+      if (connectedServices) {
+        directConnectedServiceEnvironment = await resolveDirectConnectedServiceEnvironment({
+          agentId: 'claude',
+          credentials,
+          accountSettings: effectiveSnapshot.settings,
+          directory: process.cwd(),
+          sessionId: options.existingSessionId || `direct-${randomUUID()}`,
+          connectedServices,
+        });
+        if (directConnectedServiceEnvironment) {
+          restoreDirectConnectedServiceEnvironment = overlayDirectConnectedServiceEnvironment(
+            directConnectedServiceEnvironment.env,
+          );
+        }
+      }
+    }
     if (shouldPromoteTmuxRemoteStartToUnifiedLocal({
       terminalRuntime: context.terminalRuntime,
       startedBy: options.startedBy,
@@ -351,6 +390,7 @@ ${chalk.bold.cyan(`Claude Code Options (from \`${providerHelpCommand}\`):`)}
     }
     options.terminalRuntime = context.terminalRuntime;
     await runClaude(credentials, options);
+    runCompleted = true;
   } catch (error) {
     logger.debug('[claude] Fatal command error', serializeAxiosErrorForLog(error));
     console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
@@ -358,6 +398,10 @@ ${chalk.bold.cyan(`Claude Code Options (from \`${providerHelpCommand}\`):`)}
       console.error(error);
     }
     process.exit(1);
+  } finally {
+    restoreDirectConnectedServiceEnvironment?.();
+    if (runCompleted) directConnectedServiceEnvironment?.cleanupOnExit?.();
+    else directConnectedServiceEnvironment?.cleanupOnFailure?.();
   }
 }
 

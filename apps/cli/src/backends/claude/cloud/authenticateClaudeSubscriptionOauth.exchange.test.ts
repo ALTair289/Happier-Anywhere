@@ -1,9 +1,20 @@
 import { describe, expect, it } from 'vitest';
 
-import { exchangeClaudeSubscriptionAuthorizationCodeForTokens } from './authenticateClaudeSubscriptionOauth';
+import {
+  buildClaudeSubscriptionAuthorizationUrl,
+  exchangeClaudeSubscriptionAuthorizationCodeForTokens,
+} from './authenticateClaudeSubscriptionOauth';
 
 describe('exchangeClaudeSubscriptionAuthorizationCodeForTokens', () => {
-  it('posts JSON to the Anthropic console token endpoint', async () => {
+  it('uses Claude Code current authorization endpoint', () => {
+    expect(buildClaudeSubscriptionAuthorizationUrl({
+      redirectUri: 'https://platform.claude.com/oauth/code/callback',
+      state: 'state',
+      challenge: 'challenge',
+    })).toMatch(/^https:\/\/platform\.claude\.com\/oauth\/authorize\?/);
+  });
+
+  it('posts JSON to Claude Code current token endpoint', async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
 
     const fetcher = (async (url: any, init: any) => {
@@ -29,7 +40,7 @@ describe('exchangeClaudeSubscriptionAuthorizationCodeForTokens', () => {
     expect(tokens.access_token).toBe('access');
     expect(tokens.refresh_token).toBe('refresh');
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe('https://console.anthropic.com/v1/oauth/token');
+    expect(calls[0]!.url).toBe('https://platform.claude.com/v1/oauth/token');
     expect(calls[0]!.init.method).toBe('POST');
     expect(String(calls[0]!.init.headers && (calls[0]!.init.headers as any)['Content-Type'])).toMatch(/application\/json/i);
     expect(typeof calls[0]!.init.body).toBe('string');
