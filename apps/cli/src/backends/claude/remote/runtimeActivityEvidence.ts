@@ -1,11 +1,10 @@
 import {
-    buildClaudeProviderTaskRuntimeActivitySourceId,
-    CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
-    CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
     createClaudeProviderActivityLedger,
-    normalizeClaudeAgentSdkProviderTaskId,
-    type ClaudeProviderRuntimeActivityPublisher,
+    readClaudeProviderTaskActivity,
+    readClaudeSessionHookProviderTaskActivity,
+    type ClaudeProviderTaskActivity,
 } from '@/backends/claude/providerActivity/createClaudeProviderActivityLedger';
+import type { createClaudeProviderRuntimeActivityAdapter } from '@/backends/claude/providerActivity/createClaudeProviderRuntimeActivityAdapter';
 
 type LoggerLike = Readonly<{
     debug: (message: string, ...args: unknown[]) => void;
@@ -13,24 +12,20 @@ type LoggerLike = Readonly<{
 
 export type ClaudeRuntimeActivityEvidence = {
     providerActivityLedger: ReturnType<typeof createClaudeProviderActivityLedger>;
-    liveProviderTaskIds: Set<string>;
-    publishedProviderTaskSourceIds?: Set<string>;
-    didPublishClaudeRuntimeActivity: boolean;
 };
 
 type RuntimeActivityEffectParams = Readonly<{
     evidence: ClaudeRuntimeActivityEvidence;
     logger: LoggerLike;
     logPrefix: string;
-    runtimeActivityPublisher?: ClaudeProviderRuntimeActivityPublisher | null;
+    runtimeActivityAdapter?: ReturnType<typeof createClaudeProviderRuntimeActivityAdapter> | null;
 }>;
 
-export function createClaudeRuntimeActivityEvidence(): ClaudeRuntimeActivityEvidence {
+export function createClaudeRuntimeActivityEvidence(options: Readonly<{
+    providerActivityLedger?: ReturnType<typeof createClaudeProviderActivityLedger>;
+}> = {}): ClaudeRuntimeActivityEvidence {
     return {
-        providerActivityLedger: createClaudeProviderActivityLedger(),
-        liveProviderTaskIds: new Set<string>(),
-        publishedProviderTaskSourceIds: new Set<string>(),
-        didPublishClaudeRuntimeActivity: false,
+        providerActivityLedger: options.providerActivityLedger ?? createClaudeProviderActivityLedger(),
     };
 }
 
@@ -40,14 +35,25 @@ export function isReplaySdkMessage(value: unknown): boolean {
     return record.isReplay === true || record.is_replay === true;
 }
 
-export function noteLiveProviderTaskEvidence(
-    evidence: ClaudeRuntimeActivityEvidence,
-    taskId: unknown,
-): string | null {
-    const normalizedTaskId = normalizeClaudeAgentSdkProviderTaskId(taskId);
-    if (!normalizedTaskId) return null;
-    evidence.liveProviderTaskIds.add(normalizedTaskId);
-    return normalizedTaskId;
+const CLAUDE_REQUIRED_RUNTIME_ACTIVITY_HOOK_EVENTS = new Set([
+    'PostToolUse',
+    'SubagentStart',
+    'SubagentStop',
+]);
+
+export function isClaudeLegacyRequiredHookObservationFailure(
+    value: unknown,
+    expectedSessionId: string | null | undefined,
+): boolean {
+    const sessionId = typeof expectedSessionId === 'string' ? expectedSessionId.trim() : '';
+    if (!sessionId || !value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const row = value as Record<string, unknown>;
+    if (row.isReplay === true || row.is_replay === true) return false;
+    if (row.type !== 'system' || row.subtype !== 'hook_response' || row.session_id !== sessionId) return false;
+    if (typeof row.hook_event !== 'string' || !CLAUDE_REQUIRED_RUNTIME_ACTIVITY_HOOK_EVENTS.has(row.hook_event)) {
+        return false;
+    }
+    return row.outcome === 'error' || row.outcome === 'cancelled';
 }
 
 function runRuntimeActivityEffect(
@@ -65,123 +71,56 @@ function runRuntimeActivityEffect(
     }
 }
 
-function getPublishedProviderTaskSourceIds(evidence: ClaudeRuntimeActivityEvidence): Set<string> {
-    evidence.publishedProviderTaskSourceIds ??= new Set<string>();
-    return evidence.publishedProviderTaskSourceIds;
-}
-
-export function setProviderTaskRuntimeActivityActive(
-    params: RuntimeActivityEffectParams & Readonly<{ taskId: unknown }>,
+export function publishClaudeProviderTaskRuntimeActivity(
+    params: RuntimeActivityEffectParams & Readonly<{ activity: ClaudeProviderTaskActivity }>,
 ): void {
-    const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(params.taskId);
-    if (!sourceId || !params.runtimeActivityPublisher) return;
-    params.evidence.didPublishClaudeRuntimeActivity = true;
-    getPublishedProviderTaskSourceIds(params.evidence).add(sourceId);
-    runRuntimeActivityEffect({
-        ...params,
-        label: 'set-active',
-        effect: () => params.runtimeActivityPublisher?.setSourceActive({
-            id: sourceId,
-            sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
-            providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
-        }),
-    });
-}
-
-export function observeProviderTaskRuntimeActivity(
-    params: RuntimeActivityEffectParams & Readonly<{ taskId: unknown }>,
-): void {
-    const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(params.taskId);
-    if (!sourceId || !params.runtimeActivityPublisher) return;
-    params.evidence.didPublishClaudeRuntimeActivity = true;
-    const publishedSourceIds = getPublishedProviderTaskSourceIds(params.evidence);
-    if (!publishedSourceIds.has(sourceId)) {
-        publishedSourceIds.add(sourceId);
-        runRuntimeActivityEffect({
-            ...params,
-            label: 'set-active',
-            effect: () => params.runtimeActivityPublisher?.setSourceActive({
-                id: sourceId,
-                sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
-                providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
-            }),
-        });
+    if (!params.runtimeActivityAdapter) {
+        params.evidence.providerActivityLedger.apply(params.activity);
         return;
     }
     runRuntimeActivityEffect({
         ...params,
-        label: 'observe-source',
-        effect: () => params.runtimeActivityPublisher?.observeSource({
-            id: sourceId,
-            reason: 'claude_provider_task_progress',
+        label: params.activity.type,
+        effect: () => params.runtimeActivityAdapter?.observeActivity({
+            activity: params.activity,
+            evidence: 'live',
         }),
     });
 }
 
-export function clearProviderTaskRuntimeActivity(
-    params: RuntimeActivityEffectParams & Readonly<{ taskId: unknown }>,
-): void {
-    const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(params.taskId);
-    if (!sourceId || !params.runtimeActivityPublisher) return;
-    getPublishedProviderTaskSourceIds(params.evidence).delete(sourceId);
-    runRuntimeActivityEffect({
-        ...params,
-        label: 'clear-source',
-        effect: () => params.runtimeActivityPublisher?.clearSource(
-            sourceId,
-            'claude_provider_task_terminal',
-        ),
-    });
+export function observeClaudeProviderTaskRuntimeActivityRow(
+    params: RuntimeActivityEffectParams & Readonly<{ row: unknown }>,
+): boolean {
+    if (isReplaySdkMessage(params.row)) return false;
+    const activity = readClaudeProviderTaskActivity(params.row);
+    if (!activity) return false;
+    publishClaudeProviderTaskRuntimeActivity({ ...params, activity });
+    return true;
 }
 
-export function clearClaudeRuntimeActivity(params: RuntimeActivityEffectParams & Readonly<{
+export function observeClaudeProviderTaskRuntimeActivityHook(
+    params: RuntimeActivityEffectParams & Readonly<{ hook: unknown }>,
+): boolean {
+    const activity = readClaudeSessionHookProviderTaskActivity(params.hook);
+    if (!activity) return false;
+    publishClaudeProviderTaskRuntimeActivity({ ...params, activity });
+    return true;
+}
+
+export function handleClaudeRuntimeActivityLoss(params: RuntimeActivityEffectParams & Readonly<{
     reason: string;
 }>): void {
-    if (!params.runtimeActivityPublisher || !params.evidence.didPublishClaudeRuntimeActivity) return;
+    if (!params.runtimeActivityAdapter) return;
     runRuntimeActivityEffect({
         ...params,
-        label: 'clear-provider',
-        effect: () => params.runtimeActivityPublisher?.clearProviderSources(
-            CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
-            params.reason,
-        ),
+        label: 'runtime-loss',
+        effect: () => params.runtimeActivityAdapter?.handleRuntimeLoss(params.reason),
     });
-    getPublishedProviderTaskSourceIds(params.evidence).clear();
-    params.evidence.didPublishClaudeRuntimeActivity = false;
 }
 
 export async function reconcileClaudeRuntimeActivity(params: RuntimeActivityEffectParams & Readonly<{
     reason: string;
 }>): Promise<void> {
-    const runtimeActivityPublisher = params.runtimeActivityPublisher;
-    if (!runtimeActivityPublisher) return;
-
-    const sources: Array<Readonly<{
-        id: string;
-        sourceClass: typeof CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS;
-        providerId: typeof CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID;
-    }>> = [];
-    for (const blocker of params.evidence.providerActivityLedger.getActiveProviderTaskBlockers()) {
-        if (!params.evidence.liveProviderTaskIds.has(blocker.taskId)) continue;
-        const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(blocker.taskId);
-        if (!sourceId) continue;
-        sources.push({
-            id: sourceId,
-            sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
-            providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
-        });
-    }
-
-    try {
-        await runtimeActivityPublisher.clearProviderSources(CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID, params.reason);
-        const publishedSourceIds = getPublishedProviderTaskSourceIds(params.evidence);
-        publishedSourceIds.clear();
-        for (const source of sources) {
-            await runtimeActivityPublisher.setSourceActive(source);
-            publishedSourceIds.add(source.id);
-        }
-        params.evidence.didPublishClaudeRuntimeActivity = sources.length > 0;
-    } catch (error) {
-        params.logger.debug(`${params.logPrefix} runtime activity reconcile failed (non-fatal)`, error);
-    }
+    if (!params.runtimeActivityAdapter) return;
+    await params.runtimeActivityAdapter.publishCurrent(params.reason);
 }

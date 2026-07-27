@@ -407,6 +407,94 @@ describe('claudeRemoteAgentSdk abort repair', () => {
         expect(interrupt).not.toHaveBeenCalled();
     });
 
+    it('replaces a terminal detached target with another active blocker and never reselects the terminal task', async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'happier-claude-stop-task-replacement-'));
+        const transcriptPath = join(dir, 'sess_1.jsonl');
+        await writeFile(transcriptPath, '', 'utf8');
+
+        let interruptHandler: (() => Promise<void>) | null = null;
+        const terminalYielded = createDeferred<void>();
+        const stopGate = createDeferred<void>();
+        const stopTask = vi.fn(async (_taskId: string) => {
+            stopGate.resolve(undefined);
+        });
+        const interrupt = vi.fn(async () => {
+            stopGate.resolve(undefined);
+        });
+        const createQuery = vi.fn((_params: any) => ({
+            async *[Symbol.asyncIterator]() {
+                yield {
+                    type: 'system',
+                    subtype: 'task_started',
+                    task_id: 'task_1',
+                    task_type: 'local_bash',
+                    session_id: 'sess_1',
+                } as any;
+                yield {
+                    type: 'system',
+                    subtype: 'task_started',
+                    task_id: 'task_2',
+                    task_type: 'local_bash',
+                    session_id: 'sess_1',
+                } as any;
+                yield {
+                    type: 'result',
+                    subtype: 'success',
+                    session_id: 'sess_1',
+                    result: 'Background tasks continue',
+                    is_error: false,
+                } as any;
+                yield {
+                    type: 'system',
+                    subtype: 'task_notification',
+                    task_id: 'task_2',
+                    status: 'completed',
+                    session_id: 'sess_1',
+                } as any;
+                terminalYielded.resolve(undefined);
+                await stopGate.promise;
+            },
+            stopTask,
+            interrupt,
+            close: vi.fn(),
+            setPermissionMode: vi.fn(),
+            setModel: vi.fn(),
+            setMaxThinkingTokens: vi.fn(),
+        }));
+        let didSendFirst = false;
+        const runPromise = claudeRemoteAgentSdk({
+            sessionId: 'sess_1',
+            transcriptPath,
+            path: dir,
+            claudeArgs: [],
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            isAborted: () => false,
+            nextMessage: async () => {
+                if (didSendFirst) return null;
+                didSendFirst = true;
+                return { message: 'hello', mode: makeMode({ permissionMode: 'default' } as any) };
+            },
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage: () => {},
+            setTurnInterrupt: (handler: () => Promise<void>) => {
+                interruptHandler = handler;
+            },
+            createQuery,
+        } as any);
+
+        await terminalYielded.promise;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const handler = await waitForInterruptHandler(() => interruptHandler);
+        await handler();
+        await runPromise;
+
+        expect(stopTask).toHaveBeenCalledWith('task_1');
+        expect(stopTask).not.toHaveBeenCalledWith('task_2');
+        expect(interrupt).not.toHaveBeenCalled();
+    });
+
     it('falls back to interrupt() when stopTask(taskId) throws', async () => {
         const dir = await mkdtemp(join(tmpdir(), 'happier-claude-stop-task-throws-'));
         const transcriptPath = join(dir, 'sess_1.jsonl');

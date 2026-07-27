@@ -23,6 +23,7 @@ async function runAgentSdkMessagesForRateLimitTest(params: Readonly<{
   messages: readonly unknown[];
   onMessage: (message: unknown) => void;
   onRateLimitEvent: (details: unknown) => void;
+  onQuotaEvidence?: (details: unknown) => void;
   onRuntimeAuthFailureEvent?: (error: unknown) => void;
 }>): Promise<void> {
   const createQuery = createQueryFromMessages(params.messages);
@@ -45,6 +46,7 @@ async function runAgentSdkMessagesForRateLimitTest(params: Readonly<{
     onSessionFound: () => {},
     onMessage: params.onMessage,
     onRateLimitEvent: params.onRateLimitEvent,
+    onQuotaEvidence: params.onQuotaEvidence,
     onRuntimeAuthFailureEvent: params.onRuntimeAuthFailureEvent,
     createQuery,
   });
@@ -93,6 +95,7 @@ describe('claudeRemoteAgentSdk work-state projection', () => {
 
   it('does not surface allowed rate_limit_event telemetry as a runtime limit', async () => {
     const onRateLimitEvent = vi.fn();
+    const onQuotaEvidence = vi.fn();
     const onMessage = vi.fn();
 
     await runAgentSdkMessagesForRateLimitTest({
@@ -114,9 +117,53 @@ describe('claudeRemoteAgentSdk work-state projection', () => {
       ],
       onMessage,
       onRateLimitEvent,
+      onQuotaEvidence,
     });
 
     expect(onRateLimitEvent).not.toHaveBeenCalled();
+    expect(onQuotaEvidence).not.toHaveBeenCalled();
+    expect(onMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'rate_limit_event' }));
+  });
+
+  it('harvests allowed-warning Claude rate-limit utilization as passive quota evidence', async () => {
+    const onRateLimitEvent = vi.fn();
+    const onQuotaEvidence = vi.fn();
+    const onMessage = vi.fn();
+
+    await runAgentSdkMessagesForRateLimitTest({
+      messages: [
+        {
+          type: 'rate_limit_event',
+          uuid: 'rate-limit-warning',
+          session_id: 'claude-session-warning',
+          rate_limit_info: {
+            status: 'allowed_warning',
+            resetsAt: 1_779_097_200_000,
+            rateLimitType: 'seven_day',
+            utilization: 0.92,
+          },
+        },
+        { type: 'result' },
+      ],
+      onMessage,
+      onRateLimitEvent,
+      onQuotaEvidence,
+    });
+
+    expect(onRateLimitEvent).not.toHaveBeenCalled();
+    expect(onQuotaEvidence).toHaveBeenCalledWith({
+      v: 1,
+      resetAtMs: 1_779_097_200_000,
+      retryAfterMs: null,
+      quotaScope: 'account',
+      recoverability: 'wait',
+      providerLimitId: 'seven_day',
+      planType: null,
+      utilization: 92,
+      overage: null,
+      action: null,
+      connectedService: null,
+    });
     expect(onMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'rate_limit_event' }));
   });
 

@@ -39,7 +39,7 @@ describe('repairClaudeTranscriptAfterInterrupt', () => {
                     content: [
                         {
                             type: 'tool_use',
-                            id: 'toolu_1',
+                            id: ' toolu_1\n',
                             name: 'Bash',
                             input: { command: 'sleep 1000' },
                         },
@@ -60,7 +60,12 @@ describe('repairClaudeTranscriptAfterInterrupt', () => {
 
         const updated = await readFile(transcriptPath, 'utf8');
         expect(updated).toContain('\"type\":\"tool_result\"');
-        expect(updated).toContain('\"tool_use_id\":\"toolu_1\"');
+        const appended = updated
+            .split('\n')
+            .filter(Boolean)
+            .map((line) => JSON.parse(line))
+            .find((entry) => entry?.message?.content?.some((block: any) => block?.type === 'tool_result'));
+        expect(appended?.message?.content?.[0]?.tool_use_id).toBe(' toolu_1\n');
         expect(updated).toContain('Interrupted');
     });
 

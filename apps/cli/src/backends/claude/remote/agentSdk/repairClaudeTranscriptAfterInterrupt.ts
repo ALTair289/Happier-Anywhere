@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 
 import { getProjectPath } from '@/backends/claude/utils/path';
 import { configuration } from '@/configuration';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 type TranscriptEntry = Readonly<{
     type?: string;
@@ -35,7 +36,7 @@ function extractToolUseIds(entry: TranscriptEntry): string[] {
         if (!block || typeof block !== 'object') continue;
         const record = block as Record<string, unknown>;
         if (record.type !== 'tool_use') continue;
-        const id = typeof record.id === 'string' ? record.id.trim() : '';
+        const id = readNonBlankOpaqueIdentifier(record.id) ?? '';
         if (id) out.push(id);
     }
     return out;
@@ -49,7 +50,7 @@ function extractToolResultIds(entry: TranscriptEntry): string[] {
         if (!block || typeof block !== 'object') continue;
         const record = block as Record<string, unknown>;
         if (record.type !== 'tool_result') continue;
-        const id = typeof record.tool_use_id === 'string' ? record.tool_use_id.trim() : '';
+        const id = readNonBlankOpaqueIdentifier(record.tool_use_id) ?? '';
         if (id) out.push(id);
     }
     return out;
@@ -134,7 +135,7 @@ async function waitForToolResultIdsToAppear(params: Readonly<{ transcriptPath: s
     const effectivePollIntervalMs = Number.isFinite(pollIntervalMs) && pollIntervalMs >= 10 ? pollIntervalMs : 25;
 
     const expected = params.toolUseIds
-        .map((id) => (typeof id === 'string' ? id.trim() : ''))
+        .map((id) => readNonBlankOpaqueIdentifier(id) ?? '')
         .filter((id) => id.length > 0);
     if (expected.length === 0) return;
 

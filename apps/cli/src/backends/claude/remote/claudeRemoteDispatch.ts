@@ -11,7 +11,9 @@ import { resolveClaudeRemoteSessionStartPlan } from './sessionStartPlan';
 import type {
     ClaudeRemoteProviderAcceptedPrompt,
     ClaudeRemoteProviderPromptAcceptedHandler,
+    ClaudeRemoteProviderPromptTransportFailureHandler,
 } from './providerPromptAcceptance';
+import type { ClaudeUnifiedStartupLifecycleIntent } from '../unifiedTerminal/startupLifecycle';
 
 type NextMessage = () => Promise<ClaudeRemoteProviderAcceptedPrompt<EnhancedMode> | null>;
 type ClaudeUnifiedTerminalFeatureDecision = Readonly<{ state: 'enabled' | 'disabled' | 'unsupported' | 'unknown' }>;
@@ -106,8 +108,9 @@ function readStringArray(value: unknown): string[] | undefined {
 export async function claudeRemoteDispatch<T extends { nextMessage: NextMessage }>(
     opts: T & {
         onResumeSessionAtRejected?: ResumeSessionAtRejectedHandler | null;
-        onRunnerSelected?: ((runner: ClaudeRemoteRunnerKind) => void) | null;
+        onRunnerSelected?: ((runner: ClaudeRemoteRunnerKind | null) => void) | null;
         onPromptAcceptedByProvider?: ClaudeRemoteProviderPromptAcceptedHandler | null;
+        onPromptTransportFailure?: ClaudeRemoteProviderPromptTransportFailureHandler | null;
         resumeSessionAt?: string | null;
     },
     deps?: Partial<ClaudeRemoteDispatchDependencies>,
@@ -118,6 +121,7 @@ export async function claudeRemoteDispatch<T extends { nextMessage: NextMessage 
     let consumedBeyondFirst = false;
     let didStartSession = false;
     let didEmitMessage = false;
+    let didReportPromptTransportOutcome = false;
 
     const originalOnSessionFound = (opts as any).onSessionFound as unknown;
     const onSessionFound = (...args: any[]) => {
@@ -135,7 +139,24 @@ export async function claudeRemoteDispatch<T extends { nextMessage: NextMessage 
         }
     };
 
-    const baseOpts = { ...opts, onSessionFound, onMessage };
+    const originalOnPromptAcceptedByProvider = opts.onPromptAcceptedByProvider;
+    const onPromptAcceptedByProvider: ClaudeRemoteProviderPromptAcceptedHandler = (accepted) => {
+        didReportPromptTransportOutcome = true;
+        return originalOnPromptAcceptedByProvider?.(accepted);
+    };
+    const originalOnPromptTransportFailure = opts.onPromptTransportFailure;
+    const onPromptTransportFailure: ClaudeRemoteProviderPromptTransportFailureHandler = (failure) => {
+        didReportPromptTransportOutcome = true;
+        return originalOnPromptTransportFailure?.(failure);
+    };
+
+    const baseOpts = {
+        ...opts,
+        onSessionFound,
+        onMessage,
+        onPromptAcceptedByProvider,
+        onPromptTransportFailure,
+    };
     const createNextMessage = (): NextMessage => {
         let usedFirst = false;
         return async () => {
@@ -165,6 +186,7 @@ export async function claudeRemoteDispatch<T extends { nextMessage: NextMessage 
         if (decision.state !== 'enabled') {
             throw new Error('Claude unified terminal runtime is disabled by feature policy');
         }
+        baseOpts.onRunnerSelected?.(null);
         const unifiedStartPlan = resolveClaudeRemoteSessionStartPlan({
             sessionId: readOptionalString((baseOpts as Record<string, unknown>).sessionId),
             transcriptPath: readOptionalString((baseOpts as Record<string, unknown>).transcriptPath),
@@ -175,6 +197,14 @@ export async function claudeRemoteDispatch<T extends { nextMessage: NextMessage 
         await resolvedUnifiedTerminal({
             ...baseOpts,
             sessionId: unifiedStartPlan.startFrom,
+            startupLifecycleIntent: unifiedStartPlan.startFrom
+                ? {
+                    kind: 'resume_native',
+                    providerSessionId: unifiedStartPlan.startFrom,
+                }
+                : unifiedStartPlan.shouldContinue
+                    ? { kind: 'continue_native' }
+                    : { kind: 'new_session' },
             allowFirstInputBeforeSessionStart: true,
             nextMessage: createNextMessage(),
         });
@@ -204,7 +234,10 @@ export async function claudeRemoteDispatch<T extends { nextMessage: NextMessage 
                 } as any);
                 return;
             } catch (error) {
-                const canFallback = !consumedBeyondFirst && !didStartSession && !didEmitMessage;
+                const canFallback = !consumedBeyondFirst
+                    && !didStartSession
+                    && !didEmitMessage
+                    && !didReportPromptTransportOutcome;
                 const rejectedResumeSessionAt = canFallback && !didRetryWithoutResumeSessionAt
                     ? readClaudeRejectedResumeSessionAtAnchor(error, resumeSessionAt)
                     : null;

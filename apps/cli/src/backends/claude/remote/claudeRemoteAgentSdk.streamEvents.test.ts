@@ -1,16 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 
 import { claudeRemoteAgentSdk } from './claudeRemoteAgentSdk';
 import { makeMode } from './claudeRemoteAgentSdk.testkit';
 
 describe('claudeRemoteAgentSdk stream events', () => {
-    it('confirms provider acceptance after starting the Agent SDK query with the prompt stream', async () => {
-        const onPromptAcceptedByProvider = vi.fn();
+    const runAgentSdkStreamForCompactionEvents = async (
+        streamMessages: unknown[],
+        options?: Readonly<{ initialMessage?: string }>,
+    ) => {
+        const onCompletionEvent = vi.fn();
         let didSendPrompt = false;
         const createQuery = vi.fn((_params: any) => {
             return {
                 async *[Symbol.asyncIterator]() {
-                    yield { type: 'result' } as any;
+                    for (const message of streamMessages) {
+                        yield message as any;
+                    }
                 },
                 close: vi.fn(),
                 setPermissionMode: vi.fn(),
@@ -32,6 +39,110 @@ describe('claudeRemoteAgentSdk stream events', () => {
                 if (didSendPrompt) return null;
                 didSendPrompt = true;
                 return {
+                    message: options?.initialMessage ?? 'hello',
+                    mode: makeMode({ claudeRemoteAgentSdkEnabled: true }),
+                };
+            },
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage: () => {},
+            onCompletionEvent,
+            createQuery,
+        } as any);
+
+        return onCompletionEvent.mock.calls
+            .map((call) => call[0])
+            .filter((event): event is Record<string, unknown> =>
+                Boolean(event && typeof event === 'object' && (event as { type?: unknown }).type === 'context-compaction')
+            );
+    };
+
+    it('confirms provider acceptance only after the Agent SDK exact process-transport write callback succeeds', async () => {
+        const onPromptAcceptedByProvider = vi.fn();
+        let didSendPrompt = false;
+        let acceptedAtCreateQuery = -1;
+        let confirmWrite: (() => void) | null = null;
+        let didWriteExactPrompt = false;
+        let resolveWriteObserved: (() => void) | null = null;
+        const writeObserved = new Promise<void>((resolve) => {
+            resolveWriteObserved = resolve;
+        });
+        const stdin = new EventEmitter() as EventEmitter & {
+            write: (chunk: string, callback?: (error?: Error | null) => void) => boolean;
+            end: () => void;
+            writableEnded: boolean;
+        };
+        stdin.writableEnded = false;
+        stdin.write = (chunk, callback) => {
+            didWriteExactPrompt = chunk.includes('agent-sdk-local-12') === false && chunk.includes('hello');
+            confirmWrite = () => callback?.(null);
+            resolveWriteObserved?.();
+            return true;
+        };
+        stdin.end = () => {
+            stdin.writableEnded = true;
+        };
+        const spawnedProcess = Object.assign(new EventEmitter(), {
+            stdin,
+            stdout: Readable.from([]),
+            killed: false,
+            exitCode: null,
+            kill: vi.fn(() => true),
+        });
+        const spawnClaudeCodeProcess = vi.fn(() => spawnedProcess as any);
+        const createQuery = vi.fn((params: any) => {
+            acceptedAtCreateQuery = onPromptAcceptedByProvider.mock.calls.length;
+            if (typeof params.options.spawnClaudeCodeProcess !== 'function') {
+                throw new Error('missing Agent SDK prompt transport spawn seam');
+            }
+            const process = params.options.spawnClaudeCodeProcess({
+                command: '/managed/js-runtime',
+                args: ['/resolved/claude-cli.js'],
+                cwd: '/tmp',
+                env: {},
+                signal: new AbortController().signal,
+            });
+            return {
+                async *[Symbol.asyncIterator]() {
+                    const consumed = await (params.prompt as AsyncIterable<unknown>)[Symbol.asyncIterator]().next();
+                    if (consumed.done) throw new Error('expected exact Agent SDK prompt');
+                    process.stdin.write(`${JSON.stringify({
+                        type: 'control_response',
+                        response: { request_id: 'control-before-user' },
+                    })}\n`);
+                    process.stdin.write(`${JSON.stringify(consumed.value)}\n`);
+                    await new Promise<void>((resolve) => {
+                        const poll = () => {
+                            if (onPromptAcceptedByProvider.mock.calls.length > 0) {
+                                resolve();
+                                return;
+                            }
+                            setImmediate(poll);
+                        };
+                        poll();
+                    });
+                    yield { type: 'result' } as any;
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        const run = claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath: null,
+            path: '/tmp',
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            isAborted: () => false,
+            nextMessage: async () => {
+                if (didSendPrompt) return null;
+                didSendPrompt = true;
+                return {
                     message: 'hello',
                     mode: makeMode({ claudeRemoteAgentSdkEnabled: true }),
                     maxUserMessageSeq: 12,
@@ -42,15 +153,259 @@ describe('claudeRemoteAgentSdk stream events', () => {
             onSessionFound: () => {},
             onMessage: () => {},
             onPromptAcceptedByProvider,
+            spawnClaudeCodeProcess,
             createQuery,
         } as any);
 
+        await Promise.race([
+            writeObserved,
+            run.then(
+                () => { throw new Error('Agent SDK run completed before writing the exact prompt'); },
+                (error) => { throw error; },
+            ),
+        ]);
         expect(createQuery).toHaveBeenCalledTimes(1);
+        expect(spawnClaudeCodeProcess).toHaveBeenCalledTimes(1);
+        expect(acceptedAtCreateQuery).toBe(0);
+        expect(onPromptAcceptedByProvider).not.toHaveBeenCalled();
+        expect(didWriteExactPrompt).toBe(true);
+        (confirmWrite as (() => void) | null)?.();
+        spawnedProcess.emit('error', new Error('later process failure after confirmed write'));
+        await run;
         expect(onPromptAcceptedByProvider).toHaveBeenCalledTimes(1);
         expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
             maxUserMessageSeq: 12,
             userMessageLocalIds: ['agent-sdk-local-12'],
         });
+    });
+
+    it('reports Agent SDK stdin callback failure after the write attempt as effect-ambiguous', async () => {
+        const onPromptAcceptedByProvider = vi.fn();
+        const onPromptTransportFailure = vi.fn();
+        let didSendPrompt = false;
+        const stdin = new EventEmitter() as EventEmitter & {
+            write: (chunk: string, callback?: (error?: Error | null) => void) => boolean;
+            end: () => void;
+            writableEnded: boolean;
+        };
+        stdin.writableEnded = false;
+        stdin.write = (_chunk, callback) => {
+            callback?.(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+            return true;
+        };
+        stdin.end = () => {
+            stdin.writableEnded = true;
+        };
+        const spawnedProcess = Object.assign(new EventEmitter(), {
+            stdin,
+            stdout: Readable.from([]),
+            killed: false,
+            exitCode: null,
+            kill: vi.fn(() => true),
+        });
+        const createQuery = vi.fn((params: any) => {
+            if (typeof params.options.spawnClaudeCodeProcess !== 'function') {
+                throw new Error('missing Agent SDK prompt transport spawn seam');
+            }
+            const process = params.options.spawnClaudeCodeProcess({
+                command: '/managed/js-runtime',
+                args: ['/resolved/claude-cli.js'],
+                cwd: '/tmp',
+                env: {},
+                signal: new AbortController().signal,
+            });
+            return {
+                async *[Symbol.asyncIterator]() {
+                    const consumed = await (params.prompt as AsyncIterable<unknown>)[Symbol.asyncIterator]().next();
+                    if (consumed.done) throw new Error('expected exact Agent SDK prompt');
+                    process.stdin.write(`${JSON.stringify(consumed.value)}\n`);
+                    throw new Error('Agent SDK transport failed');
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        await expect(claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath: null,
+            path: '/tmp',
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            isAborted: () => false,
+            nextMessage: async () => {
+                if (didSendPrompt) return null;
+                didSendPrompt = true;
+                return {
+                    message: 'hello',
+                    mode: makeMode({ claudeRemoteAgentSdkEnabled: true }),
+                    maxUserMessageSeq: 12,
+                    userMessageLocalIds: ['agent-sdk-local-12'],
+                };
+            },
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage: () => {},
+            onPromptAcceptedByProvider,
+            onPromptTransportFailure,
+            spawnClaudeCodeProcess: vi.fn(() => spawnedProcess as any),
+            createQuery,
+        } as any)).rejects.toThrow('Agent SDK transport failed');
+
+        expect(onPromptAcceptedByProvider).not.toHaveBeenCalled();
+        expect(onPromptTransportFailure).toHaveBeenCalledWith({
+            kind: 'effect_may_have_occurred',
+            maxUserMessageSeq: 12,
+            userMessageLocalIds: ['agent-sdk-local-12'],
+        });
+    });
+
+    it('reports a process error before the exact write callback as effect-ambiguous', async () => {
+        const onPromptAcceptedByProvider = vi.fn();
+        const onPromptTransportFailure = vi.fn();
+        let didSendPrompt = false;
+        const stdin = new EventEmitter() as EventEmitter & {
+            write: (chunk: string, callback?: (error?: Error | null) => void) => boolean;
+            end: () => void;
+            writableEnded: boolean;
+        };
+        stdin.writableEnded = false;
+        stdin.write = () => true;
+        stdin.end = () => {
+            stdin.writableEnded = true;
+        };
+        const spawnedProcess = Object.assign(new EventEmitter(), {
+            stdin,
+            stdout: Readable.from([]),
+            killed: false,
+            exitCode: null,
+            kill: vi.fn(() => true),
+        });
+        const createQuery = vi.fn((params: any) => {
+            const process = params.options.spawnClaudeCodeProcess({
+                command: '/managed/js-runtime',
+                args: ['/resolved/claude-cli.js'],
+                cwd: '/tmp',
+                env: {},
+                signal: new AbortController().signal,
+            });
+            return {
+                async *[Symbol.asyncIterator]() {
+                    const consumed = await (params.prompt as AsyncIterable<unknown>)[Symbol.asyncIterator]().next();
+                    if (consumed.done) throw new Error('expected exact Agent SDK prompt');
+                    process.stdin.write(`${JSON.stringify(consumed.value)}\n`);
+                    spawnedProcess.emit('error', new Error('process failed before write callback'));
+                    throw new Error('Agent SDK process failed');
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        await expect(claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath: null,
+            path: '/tmp',
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            isAborted: () => false,
+            nextMessage: async () => {
+                if (didSendPrompt) return null;
+                didSendPrompt = true;
+                return {
+                    message: 'hello',
+                    mode: makeMode({ claudeRemoteAgentSdkEnabled: true }),
+                    maxUserMessageSeq: 12,
+                    userMessageLocalIds: ['agent-sdk-local-12'],
+                };
+            },
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage: () => {},
+            onPromptAcceptedByProvider,
+            onPromptTransportFailure,
+            spawnClaudeCodeProcess: vi.fn(() => spawnedProcess as any),
+            createQuery,
+        } as any)).rejects.toThrow('Agent SDK process failed');
+
+        expect(onPromptAcceptedByProvider).not.toHaveBeenCalled();
+        expect(onPromptTransportFailure).toHaveBeenCalledExactlyOnceWith({
+            kind: 'effect_may_have_occurred',
+            maxUserMessageSeq: 12,
+            userMessageLocalIds: ['agent-sdk-local-12'],
+        });
+    });
+
+    it('keeps Agent SDK provider input closed when Runtime Activity observer activation rejects', async () => {
+        let providerReadSettled = false;
+        let didSendPrompt = false;
+        const readinessOrder: string[] = [];
+        const createQuery = vi.fn((params: any) => {
+            readinessOrder.push('query-installed');
+            void (params.prompt as AsyncIterable<unknown>)[Symbol.asyncIterator]().next().then(() => {
+                providerReadSettled = true;
+            });
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield { type: 'result' } as any;
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+        const runtimeActivityAdapter = {
+            activateObservation: vi.fn(async () => {
+                readinessOrder.push('runtime-offered');
+                throw new Error('observer activation failed');
+            }),
+            observeActivity: vi.fn(async () => {}),
+            publishCurrent: vi.fn(async () => {}),
+            handleRuntimeLoss: vi.fn(async () => {}),
+        };
+        const onPromptAcceptedByProvider = vi.fn();
+
+        await expect(claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath: null,
+            path: '/tmp',
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            isAborted: () => false,
+            nextMessage: async () => {
+                if (didSendPrompt) return null;
+                didSendPrompt = true;
+                return {
+                    message: 'must remain closed',
+                    mode: makeMode({ claudeRemoteAgentSdkEnabled: true }),
+                };
+            },
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage: () => {},
+            onPromptAcceptedByProvider,
+            onWorkflowActivityObserverReady: () => { readinessOrder.push('workflow-armed'); },
+            runtimeActivityAdapter,
+            createQuery,
+        })).rejects.toThrow('observer activation failed');
+
+        await Promise.resolve();
+        expect(createQuery).toHaveBeenCalledTimes(1);
+        expect(runtimeActivityAdapter.activateObservation).toHaveBeenCalledTimes(1);
+        expect(readinessOrder).toEqual(['query-installed', 'workflow-armed', 'runtime-offered']);
+        expect(providerReadSettled).toBe(false);
+        expect(onPromptAcceptedByProvider).not.toHaveBeenCalled();
     });
 
     it('streams Agent SDK stream_event text deltas through StreamedTranscriptWriter (no synthetic partial messages)', async () => {
@@ -832,7 +1187,7 @@ describe('claudeRemoteAgentSdk stream events', () => {
                         type: 'stream_event',
                         uuid: 'evt_side_start',
                         session_id: 'sess_1',
-                        parent_tool_use_id: 'tool_parent_1',
+                        parent_tool_use_id: ' tool_parent_1\n',
                         event: {
                             type: 'content_block_start',
                             content_block: { type: 'tool_use', id: 'toolu_side', name: 'Bash', input: {} },
@@ -842,10 +1197,30 @@ describe('claudeRemoteAgentSdk stream events', () => {
                         type: 'stream_event',
                         uuid: 'evt_side_delta',
                         session_id: 'sess_1',
-                        parent_tool_use_id: 'tool_parent_1',
+                        parent_tool_use_id: ' tool_parent_1\n',
                         event: {
                             type: 'content_block_delta',
                             delta: { type: 'input_json_delta', partial_json: '{\"command\":\"ls\"}' },
+                        },
+                    } as any;
+                    yield {
+                        type: 'stream_event',
+                        uuid: 'evt_alias_start',
+                        session_id: 'sess_1',
+                        parent_tool_use_id: 'tool_parent_1',
+                        event: {
+                            type: 'content_block_start',
+                            content_block: { type: 'tool_use', id: 'toolu_alias', name: 'Bash', input: {} },
+                        },
+                    } as any;
+                    yield {
+                        type: 'stream_event',
+                        uuid: 'evt_alias_delta',
+                        session_id: 'sess_1',
+                        parent_tool_use_id: 'tool_parent_1',
+                        event: {
+                            type: 'content_block_delta',
+                            delta: { type: 'input_json_delta', partial_json: '{\"command\":\"echo alias\"}' },
                         },
                     } as any;
                     yield {
@@ -858,6 +1233,13 @@ describe('claudeRemoteAgentSdk stream events', () => {
                     yield {
                         type: 'stream_event',
                         uuid: 'evt_side_stop',
+                        session_id: 'sess_1',
+                        parent_tool_use_id: ' tool_parent_1\n',
+                        event: { type: 'content_block_stop' },
+                    } as any;
+                    yield {
+                        type: 'stream_event',
+                        uuid: 'evt_alias_stop',
                         session_id: 'sess_1',
                         parent_tool_use_id: 'tool_parent_1',
                         event: { type: 'content_block_stop' },
@@ -909,7 +1291,7 @@ describe('claudeRemoteAgentSdk stream events', () => {
                 }),
             }),
             expect.objectContaining({
-                parent_tool_use_id: 'tool_parent_1',
+                parent_tool_use_id: ' tool_parent_1\n',
                 uuid: 'toolu_side',
                 message: expect.objectContaining({
                     content: [expect.objectContaining({
@@ -917,6 +1299,18 @@ describe('claudeRemoteAgentSdk stream events', () => {
                         id: 'toolu_side',
                         name: 'Bash',
                         input: { command: 'ls' },
+                    })],
+                }),
+            }),
+            expect.objectContaining({
+                parent_tool_use_id: 'tool_parent_1',
+                uuid: 'toolu_alias',
+                message: expect.objectContaining({
+                    content: [expect.objectContaining({
+                        type: 'tool_use',
+                        id: 'toolu_alias',
+                        name: 'Bash',
+                        input: { command: 'echo alias' },
                     })],
                 }),
             }),
@@ -1839,7 +2233,9 @@ describe('claudeRemoteAgentSdk stream events', () => {
                     phase: 'completed',
                 }));
             });
-            expect(onSessionFound).toHaveBeenCalledWith('sess_compacted_boundary_2', expect.anything());
+            expect(onSessionFound).toHaveBeenCalledWith('sess_compacted_boundary_2', expect.objectContaining({
+                source: 'compact',
+            }));
             expect(onCompletionEvent).toHaveBeenCalledWith(expect.objectContaining({
                 type: 'context-compaction',
                 phase: 'completed',
@@ -1869,6 +2265,85 @@ describe('claudeRemoteAgentSdk stream events', () => {
             releaseStream();
             await runnerPromise.catch(() => {});
         }
+    });
+
+    it('derives replayed compact_boundary lifecycle identity from the raw boundary evidence', async () => {
+        const firstBoundary = {
+            type: 'system',
+            subtype: 'compact_boundary',
+            session_id: 'sess_replayed_compaction',
+            uuid: 'f93ad896-fae2-4eb4-82ce-03d4b7ce356e',
+            timestamp: '2026-07-07T14:42:06.029Z',
+        };
+        const replayedBoundary = {
+            type: 'system',
+            subtype: 'compact_boundary',
+            session_id: 'sess_replayed_compaction',
+            uuid: 'e11e1611-a694-4a9d-9ebc-8e7d882fff91',
+            timestamp: '2026-07-07T14:56:33.493Z',
+        };
+
+        const firstRunEvents = await runAgentSdkStreamForCompactionEvents([
+            firstBoundary,
+            replayedBoundary,
+            { type: 'result' },
+        ]);
+        const replayRunEvents = await runAgentSdkStreamForCompactionEvents([
+            replayedBoundary,
+            { type: 'result' },
+        ]);
+
+        expect(firstRunEvents).toHaveLength(2);
+        expect(replayRunEvents).toHaveLength(1);
+        expect(firstRunEvents[1]).toMatchObject({
+            phase: 'completed',
+            providerEventId: 'claude:context-compaction:boundary:session:sess_replayed_compaction:uuid:e11e1611-a694-4a9d-9ebc-8e7d882fff91:timestamp:2026-07-07T14%3A56%3A33.493Z',
+            lifecycleId: 'claude:context-compaction:boundary:session:sess_replayed_compaction:uuid:e11e1611-a694-4a9d-9ebc-8e7d882fff91:timestamp:2026-07-07T14%3A56%3A33.493Z',
+        });
+        expect(replayRunEvents[0]).toMatchObject({
+            providerEventId: firstRunEvents[1]?.providerEventId,
+            lifecycleId: firstRunEvents[1]?.lifecycleId,
+        });
+    });
+
+    it('does not infer compaction completion from an isCompactSummary resume row alone', async () => {
+        const compactionEvents = await runAgentSdkStreamForCompactionEvents([
+            {
+                type: 'user',
+                isCompactSummary: true,
+                parentUuid: 'e11e1611-a694-4a9d-9ebc-8e7d882fff91',
+                timestamp: '2026-07-07T14:56:33.492Z',
+                message: {
+                    role: 'user',
+                    content: 'Compaction summary',
+                },
+            },
+            { type: 'result' },
+        ]);
+
+        expect(compactionEvents).toEqual([]);
+    });
+
+    it('does not collapse multiple compact_boundary events when boundary-specific evidence is missing', async () => {
+        const compactionEvents = await runAgentSdkStreamForCompactionEvents([
+            {
+                type: 'system',
+                subtype: 'compact_boundary',
+                session_id: 'sess_without_boundary_uuid',
+            },
+            {
+                type: 'system',
+                subtype: 'compact_boundary',
+                session_id: 'sess_without_boundary_uuid',
+            },
+            { type: 'result' },
+        ]);
+
+        expect(compactionEvents).toHaveLength(2);
+        expect(compactionEvents[0]?.providerEventId).toBeUndefined();
+        expect(compactionEvents[1]?.providerEventId).toBeUndefined();
+        expect(compactionEvents[0]?.lifecycleId).toBe('claude:context-compaction:sess_without_boundary_uuid:1');
+        expect(compactionEvents[1]?.lifecycleId).toBe('claude:context-compaction:sess_without_boundary_uuid:2');
     });
 
     it('allows standalone /compact compact_boundary to finish before pumping queued prompts', async () => {
@@ -1964,7 +2439,7 @@ describe('claudeRemoteAgentSdk stream events', () => {
                 providerSessionId: 'sess_manual_compacted_boundary_2',
                 tokenCountBefore: 175_000,
                 tokenCountSource: 'claude-compact-metadata.pre_tokens',
-                lifecycleId: expect.any(String),
+                lifecycleId: onCompletionEvent.mock.calls[0]?.[0]?.lifecycleId,
             }));
             expect(onThinkingChange.mock.calls.map((call) => call[0]).slice(0, 2)).toEqual([true, false]);
         } finally {

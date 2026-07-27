@@ -13,13 +13,30 @@ import { makeMode } from './claudeRemoteAgentSdk.testkit';
 import { resolveClaudeProjectId } from '../utils/path';
 
 const ORIGINAL_CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR;
-const { ensureJavaScriptRuntimeExecutableMock } = vi.hoisted(() => ({
+const {
+    ensureJavaScriptRuntimeExecutableMock,
+    refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridgeMock,
+} = vi.hoisted(() => ({
     ensureJavaScriptRuntimeExecutableMock: vi.fn(async () => '/managed/js-runtime'),
+    refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridgeMock: vi.fn(async () => ({
+        accessToken: 'fresh-claude-access',
+        anthropicAccountId: 'anthropic-account',
+        expiresAt: 123_456,
+    })),
 }));
 
 vi.mock('@/runtime/js/ensureJavaScriptRuntimeExecutable', () => ({
     ensureJavaScriptRuntimeExecutable: ensureJavaScriptRuntimeExecutableMock,
 }));
+
+vi.mock('@/daemon/controlClient', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/daemon/controlClient')>();
+    return {
+        ...actual,
+        refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridge:
+            refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridgeMock,
+    };
+});
 
 afterEach(() => {
     if (typeof ORIGINAL_CLAUDE_CONFIG_DIR === 'string') {
@@ -33,6 +50,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
     afterEach(() => {
         ensureJavaScriptRuntimeExecutableMock.mockReset();
         ensureJavaScriptRuntimeExecutableMock.mockResolvedValue('/managed/js-runtime');
+        refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridgeMock.mockClear();
     });
 
     it('yields stream-json user messages as objects (Agent SDK stringifies them)', async () => {
@@ -397,7 +415,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
         const createQuery = vi.fn((_params: any) => {
             return {
                 async *[Symbol.asyncIterator]() {
-                    yield { type: 'system', subtype: 'task_started', task_id: 'task_1' } as any;
+                    yield { type: 'system', subtype: 'task_started', task_id: 'task_1', session_id: 'sess_1' } as any;
                     await finish;
                     yield { type: 'result' } as any;
                 },
@@ -486,7 +504,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
                         event: { type: 'content_block_start', content_block: { type: 'text', text: assistantText } },
                     } as any;
 
-                    yield { type: 'system', subtype: 'task_started', task_id: 'task_1' } as any;
+                    yield { type: 'system', subtype: 'task_started', task_id: 'task_1', session_id: 'sess_1' } as any;
                     resolveAfterTaskStarted?.();
                     await continueIterator;
 
@@ -497,7 +515,13 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
                         message: { role: 'assistant', content: [{ type: 'text', text: assistantText }] },
                     } as any;
 
-                    yield { type: 'system', subtype: 'task_notification', task_id: 'task_1', status: 'stopped' } as any;
+                    yield {
+                        type: 'system',
+                        subtype: 'task_updated',
+                        task_id: 'task_1',
+                        patch: { status: 'killed' },
+                        session_id: 'sess_1',
+                    } as any;
                     yield { type: 'result' } as any;
                 },
                 stopTask,
@@ -675,7 +699,13 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
                         message: { role: 'assistant', content: [{ type: 'text', text: assistantText }] },
                     } as any;
 
-                    yield { type: 'system', subtype: 'task_notification', task_id: 'task_1', status: 'completed' } as any;
+                    yield {
+                        type: 'system',
+                        subtype: 'task_notification',
+                        task_id: 'task_1',
+                        status: 'completed',
+                        session_id: 'sess_1',
+                    } as any;
                     yield { type: 'result', subtype: 'success', result: resultText } as any;
                 },
                 stopTask: vi.fn(async () => {}),
@@ -760,7 +790,13 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
                         message: { role: 'assistant', content: [{ type: 'text', text: assistantText }] },
                     } as any;
 
-                    yield { type: 'system', subtype: 'task_notification', task_id: 'task_1', status: 'completed' } as any;
+                    yield {
+                        type: 'system',
+                        subtype: 'task_notification',
+                        task_id: 'task_1',
+                        status: 'completed',
+                        session_id: 'sess_1',
+                    } as any;
                     yield { type: 'result', subtype: 'success', result: resultText } as any;
                 },
                 stopTask: vi.fn(async () => {}),
@@ -851,7 +887,13 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
                         message: { role: 'assistant', content: [{ type: 'text', text: sidechainAssistantText }] },
                     } as any;
 
-                    yield { type: 'system', subtype: 'task_notification', task_id: 'task_1', status: 'completed' } as any;
+                    yield {
+                        type: 'system',
+                        subtype: 'task_notification',
+                        task_id: 'task_1',
+                        status: 'completed',
+                        session_id: 'sess_1',
+                    } as any;
                     yield {
                         type: 'result',
                         subtype: 'success',
@@ -944,7 +986,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             return {
                 async *[Symbol.asyncIterator]() {
                     yield { type: 'system', subtype: 'init', session_id: 'sess_1' } as any;
-                    yield { type: 'system', subtype: 'task_started', task_id: 'task_1' } as any;
+                    yield { type: 'system', subtype: 'task_started', task_id: 'task_1', session_id: 'sess_1' } as any;
                     await finish;
                     yield { type: 'result' } as any;
                 },
@@ -1680,6 +1722,266 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             else process.env.CLAUDE_CONFIG_DIR = originals.configDir;
             if (originals.selection === undefined) delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
             else process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = originals.selection;
+        }
+    });
+
+    it('passes a Claude subscription OAuth refresh callback that delegates forced refresh to the daemon bridge', async () => {
+        const originalSelection = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+        process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = JSON.stringify([{
+            kind: 'group',
+            serviceId: 'claude-subscription',
+            groupId: 'claude',
+            activeProfileId: 'primary',
+            fallbackProfileId: 'backup',
+            generation: 7,
+        }]);
+
+        let capturedOptions: any = null;
+        const createQuery = vi.fn((_params: any) => {
+            capturedOptions = _params.options;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield { type: 'result' } as any;
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        let didSendFirst = false;
+        const nextMessage = vi.fn(async () => {
+            if (didSendFirst) return null;
+            didSendFirst = true;
+            return { message: 'hello', mode: makeMode({ permissionMode: 'default' } as any) };
+        });
+
+        try {
+            await claudeRemoteAgentSdk({
+                sessionId: 'session-1',
+                transcriptPath: null,
+                path: '/tmp',
+                claudeArgs: [],
+                claudeExecutablePath: '/tmp/claude',
+                claudeSubscriptionAccessTokenRefreshSelection: {
+                    kind: 'group',
+                    serviceId: 'claude-subscription',
+                    groupId: 'claude',
+                    activeProfileId: 'primary',
+                    fallbackProfileId: 'backup',
+                    generation: 7,
+                },
+                canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+                isAborted: () => false,
+                nextMessage,
+                onReady: () => {},
+                onSessionFound: () => {},
+                onMessage: () => {},
+                createQuery,
+            } as any);
+
+            expect(capturedOptions).toBeTruthy();
+            expect(typeof capturedOptions.getOAuthToken).toBe('function');
+            await expect(capturedOptions.getOAuthToken({ signal: new AbortController().signal })).resolves.toBe('fresh-claude-access');
+            expect(refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridgeMock).toHaveBeenCalledWith({
+                sessionId: 'session-1',
+                selection: {
+                    kind: 'group',
+                    serviceId: 'claude-subscription',
+                    groupId: 'claude',
+                    activeProfileId: 'primary',
+                    fallbackProfileId: 'backup',
+                    generation: 7,
+                },
+                forceRefresh: false,
+            });
+        } finally {
+            if (originalSelection === undefined) delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+            else process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = originalSelection;
+        }
+    });
+
+    it('uses the explicit Claude subscription refresh binding instead of rereading ambient runner env', async () => {
+        const originalSelection = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+        process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = JSON.stringify([{
+            kind: 'group',
+            serviceId: 'claude-subscription',
+            groupId: 'stale',
+            activeProfileId: 'stale-profile',
+            fallbackProfileId: 'stale-fallback',
+            generation: 1,
+        }]);
+
+        let capturedOptions: any = null;
+        const createQuery = vi.fn((_params: any) => {
+            capturedOptions = _params.options;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield { type: 'result' } as any;
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        let didSendFirst = false;
+        const nextMessage = vi.fn(async () => {
+            if (didSendFirst) return null;
+            didSendFirst = true;
+            return { message: 'hello', mode: makeMode({ permissionMode: 'default' } as any) };
+        });
+
+        try {
+            await claudeRemoteAgentSdk({
+                sessionId: 'session-explicit-binding',
+                transcriptPath: null,
+                path: '/tmp',
+                claudeArgs: [],
+                claudeExecutablePath: '/tmp/claude',
+                claudeSubscriptionAccessTokenRefreshSelection: {
+                    kind: 'profile',
+                    serviceId: 'claude-subscription',
+                    profileId: 'selected-profile',
+                },
+                canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+                isAborted: () => false,
+                nextMessage,
+                onReady: () => {},
+                onSessionFound: () => {},
+                onMessage: () => {},
+                createQuery,
+            } as any);
+
+            expect(typeof capturedOptions?.getOAuthToken).toBe('function');
+            await expect(capturedOptions.getOAuthToken({ signal: new AbortController().signal })).resolves.toBe('fresh-claude-access');
+            expect(refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridgeMock).toHaveBeenCalledWith({
+                sessionId: 'session-explicit-binding',
+                selection: {
+                    kind: 'profile',
+                    serviceId: 'claude-subscription',
+                    profileId: 'selected-profile',
+                },
+                forceRefresh: false,
+            });
+        } finally {
+            if (originalSelection === undefined) delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+            else process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = originalSelection;
+        }
+    });
+
+    it('does not derive getOAuthToken from ambient runner env without an explicit connected-service binding', async () => {
+        const originalSelection = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+        process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = JSON.stringify([{
+            kind: 'profile',
+            serviceId: 'claude-subscription',
+            profileId: 'ambient-profile',
+        }]);
+
+        let capturedOptions: any = null;
+        const createQuery = vi.fn((_params: any) => {
+            capturedOptions = _params.options;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield { type: 'result' } as any;
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        let didSendFirst = false;
+        const nextMessage = vi.fn(async () => {
+            if (didSendFirst) return null;
+            didSendFirst = true;
+            return { message: 'hello', mode: makeMode({ permissionMode: 'default' } as any) };
+        });
+
+        try {
+            await claudeRemoteAgentSdk({
+                sessionId: 'ambient-env-session',
+                transcriptPath: null,
+                path: '/tmp',
+                claudeArgs: [],
+                claudeExecutablePath: '/tmp/claude',
+                canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+                isAborted: () => false,
+                nextMessage,
+                onReady: () => {},
+                onSessionFound: () => {},
+                onMessage: () => {},
+                createQuery,
+            } as any);
+
+            expect(capturedOptions).toBeTruthy();
+            expect(capturedOptions).not.toHaveProperty('getOAuthToken');
+            expect(refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridgeMock).not.toHaveBeenCalled();
+        } finally {
+            if (originalSelection === undefined) delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+            else process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = originalSelection;
+        }
+    });
+
+    it('does not provide getOAuthToken for native Claude sessions', async () => {
+        const originalSelection = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+        delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+
+        let capturedOptions: any = null;
+        const createQuery = vi.fn((_params: any) => {
+            capturedOptions = _params.options;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield { type: 'result' } as any;
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        let didSendFirst = false;
+        const nextMessage = vi.fn(async () => {
+            if (didSendFirst) return null;
+            didSendFirst = true;
+            return { message: 'hello', mode: makeMode({ permissionMode: 'default' } as any) };
+        });
+
+        try {
+            await claudeRemoteAgentSdk({
+                sessionId: 'native-session',
+                transcriptPath: null,
+                path: '/tmp',
+                claudeArgs: [],
+                claudeExecutablePath: '/tmp/claude',
+                claudeSubscriptionAccessTokenRefreshSelection: null,
+                canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+                isAborted: () => false,
+                nextMessage,
+                onReady: () => {},
+                onSessionFound: () => {},
+                onMessage: () => {},
+                createQuery,
+            } as any);
+
+            expect(capturedOptions).toBeTruthy();
+            expect(capturedOptions).not.toHaveProperty('getOAuthToken');
+            expect(refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridgeMock).not.toHaveBeenCalled();
+        } finally {
+            if (originalSelection === undefined) delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+            else process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = originalSelection;
         }
     });
 

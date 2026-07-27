@@ -25,7 +25,13 @@ export function buildClaudeAgentSdkHooks(params: Readonly<{
   cwd: string;
   claudeConfigDir: string | null;
   getMode: () => EnhancedMode;
-  onSessionFound: (sessionId: string, data: { transcript_path: string; transcriptPath: string }) => void;
+  onSessionFound: (sessionId: string, data: {
+    transcript_path: string;
+    transcriptPath: string;
+    hook_event_name?: string;
+    source?: string;
+  }) => void;
+  onSessionHook: (data: Record<string, unknown>) => void;
   canCallTool: (
     toolName: string,
     input: unknown,
@@ -43,6 +49,16 @@ export function buildClaudeAgentSdkHooks(params: Readonly<{
   hooks: Record<string, unknown>;
   canUseTool: (toolName: string, input: Record<string, unknown>, options: any) => Promise<any>;
 }> {
+  const buildObservationHook = () => ({
+    hooks: [
+      async (input: any) => {
+        if (input && typeof input === 'object' && !Array.isArray(input)) {
+          params.onSessionHook(input as Record<string, unknown>);
+        }
+        return { continue: true, suppressOutput: true };
+      },
+    ],
+  });
   const hooks = {
     SessionStart: [
       {
@@ -63,7 +79,18 @@ export function buildClaudeAgentSdkHooks(params: Readonly<{
                     : undefined;
               const transcriptPathFallback =
                 transcriptRaw ?? join(getProjectPath(params.cwd, params.claudeConfigDir), `${sessionId}.jsonl`);
-              params.onSessionFound(sessionId, { transcript_path: transcriptPathFallback, transcriptPath: transcriptPathFallback });
+              const hookEventName = typeof input.hook_event_name === 'string'
+                ? input.hook_event_name
+                : typeof input.hookEventName === 'string'
+                  ? input.hookEventName
+                  : undefined;
+              const source = typeof input.source === 'string' ? input.source : undefined;
+              params.onSessionFound(sessionId, {
+                transcript_path: transcriptPathFallback,
+                transcriptPath: transcriptPathFallback,
+                ...(hookEventName ? { hook_event_name: hookEventName } : {}),
+                ...(source ? { source } : {}),
+              });
             }
             return { continue: true };
           },
@@ -111,6 +138,9 @@ export function buildClaudeAgentSdkHooks(params: Readonly<{
         ],
       },
     ],
+    PostToolUse: [buildObservationHook()],
+    SubagentStart: [buildObservationHook()],
+    SubagentStop: [buildObservationHook()],
   };
 
   const canUseTool = async (toolName: string, input: Record<string, unknown>, options: any) => {

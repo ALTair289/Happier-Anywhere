@@ -1,5 +1,7 @@
 import type { StreamedTranscriptWriterSession } from '@/api/session/streamedTranscriptWriter';
 import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { EphemeralSendResult } from '@/api/session/ephemeralSendOutcome';
+import type { SessionTranscriptObservationProvenanceV1 } from '@happier-dev/protocol';
 
 export type ClaudeRemoteStreamedTranscriptEphemeralOptions = Readonly<{
     localId: string;
@@ -32,18 +34,22 @@ export type ClaudeRemoteStreamedTranscriptClient = Readonly<{
     enqueueAgentMessageCommitted?: (
         provider: ACPProvider,
         body: ACPMessageData,
-        opts: { localId: string; meta?: Record<string, unknown> },
+        opts: {
+            localId: string;
+            meta?: Record<string, unknown>;
+            provenance: SessionTranscriptObservationProvenanceV1;
+        },
     ) => Promise<Readonly<{ persisted: boolean; delivered: boolean }>>;
     sendAgentMessageEphemeral?: (
         provider: ACPProvider,
         body: ACPMessageData,
         opts: ClaudeRemoteStreamedTranscriptEphemeralOptions,
-    ) => void | Promise<void>;
+    ) => EphemeralSendResult;
     sendAgentMessageEphemeralDelta?: (
         provider: ACPProvider,
         body: ACPMessageData,
         opts: ClaudeRemoteStreamedTranscriptEphemeralDeltaOptions,
-    ) => void | Promise<void>;
+    ) => EphemeralSendResult;
     getEphemeralStreamConnectionEpoch?: () => number;
 }>;
 
@@ -52,12 +58,14 @@ export type ClaudeRemoteStreamedTranscriptSession = StreamedTranscriptWriterSess
         provider: ACPProvider,
         body: ACPMessageData,
         opts: ClaudeRemoteStreamedTranscriptEphemeralOptions,
-    ) => void | Promise<void>;
+    ) => EphemeralSendResult;
 }>;
 
 export function createClaudeRemoteStreamedTranscriptSession(
     client: ClaudeRemoteStreamedTranscriptClient,
 ): ClaudeRemoteStreamedTranscriptSession {
+    const sendEphemeral = client.sendAgentMessageEphemeral?.bind(client);
+    const sendEphemeralDelta = client.sendAgentMessageEphemeralDelta?.bind(client);
     return {
         sendAgentMessage: (provider, body, opts) => client.sendAgentMessage(provider, body, opts),
         ...(typeof client.sendAgentMessageCommitted === 'function'
@@ -73,19 +81,19 @@ export function createClaudeRemoteStreamedTranscriptSession(
                     ?? Promise.resolve({ persisted: false, delivered: false }),
             }
             : {}),
-        ...(typeof client.sendAgentMessageEphemeral === 'function'
+        ...(typeof sendEphemeral === 'function'
             ? {
                 sendAgentMessageEphemeral: (provider, body, opts) =>
-                    client.sendAgentMessageEphemeral?.(provider, body, opts),
+                    sendEphemeral(provider, body, opts),
             }
             : {}),
-        ...(typeof client.sendAgentMessageEphemeralDelta === 'function'
+        ...(typeof sendEphemeralDelta === 'function'
             ? {
                 sendAgentMessageEphemeralDelta: (
                     provider: ACPProvider,
                     body: ACPMessageData,
                     opts: ClaudeRemoteStreamedTranscriptEphemeralDeltaOptions,
-                ) => void client.sendAgentMessageEphemeralDelta?.(provider, body, opts),
+                ) => sendEphemeralDelta(provider, body, opts),
             }
             : {}),
         ...(typeof client.getEphemeralStreamConnectionEpoch === 'function'
