@@ -14,3 +14,61 @@ index 1494fd2..5be9070 100644
      return;
    }
  
+diff --git a/node_modules/react-native/React/Fabric/Mounting/ComponentViews/TextInput/RCTTextInputComponentView.mm b/node_modules/react-native/React/Fabric/Mounting/ComponentViews/TextInput/RCTTextInputComponentView.mm
+index 577bebe..3c152cb 100644
+--- a/node_modules/react-native/React/Fabric/Mounting/ComponentViews/TextInput/RCTTextInputComponentView.mm
++++ b/node_modules/react-native/React/Fabric/Mounting/ComponentViews/TextInput/RCTTextInputComponentView.mm
+@@ -488,6 +488,28 @@ - (void)textInputDidChange
+ 
+   [self _updateState];
+ 
++  // HAPPIER PATCH(composer-jiggle): UITextView does not scroll the caret into view when a typed
++  // character wraps onto a new line while the input height is clamped (Yoga maxHeight). Without
++  // this, the caret line stays clipped until the JS value round-trip re-applies the attributed
++  // string ~150-200ms later, whose scrollRangeToVisible then slides the text a full line late —
++  // the visible typing "jiggle". Scroll at insertion time instead, like every native editor.
++  // The reveal must be NON-animated: an animated scrollRangeToVisible is re-triggered by every
++  // subsequent keystroke while the caret is still clipped, restarting the ease curve each time,
++  // which degrades the one-line scroll into a ~1s crawl during fast typing.
++  if (_backedTextInputView.isFirstResponder && [_backedTextInputView isKindOfClass:[UIScrollView class]]) {
++    UITextRange *typingSelectedRange = _backedTextInputView.selectedTextRange;
++    if (typingSelectedRange != nil && typingSelectedRange.empty) {
++      CGRect caretRect = [_backedTextInputView caretRectForPosition:typingSelectedRange.start];
++      if (!CGRectIsNull(caretRect) && !CGRectIsInfinite(caretRect) && !isnan(caretRect.origin.y) &&
++          !isnan(caretRect.size.height)) {
++        // Reveal the caret line including the bottom text inset so the line is not half-clipped.
++        CGRect revealRect = caretRect;
++        revealRect.size.height += _backedTextInputView.textContainerInset.bottom;
++        [(UIScrollView *)_backedTextInputView scrollRectToVisible:revealRect animated:NO];
++      }
++    }
++  }
++
+   if (_eventEmitter) {
+     const auto &textInputEventEmitter = static_cast<const TextInputEventEmitter &>(*_eventEmitter);
+     textInputEventEmitter.onChange([self _textInputMetrics]);
+@@ -762,6 +784,12 @@ - (void)_setAttributedString:(NSAttributedString *)attributedString
+   }
+   UITextRange *selectedRange = _backedTextInputView.selectedTextRange;
+   NSInteger oldTextLength = _backedTextInputView.attributedText.string.length;
++  // HAPPIER PATCH(composer-jiggle): when only attributes differ (the string content is identical),
++  // this is a re-apply of text the user already sees — typically the per-keystroke echo commit
++  // after the keyboard added language/autocorrect attribute runs. Moving the scroll position for
++  // such a refresh causes late one-line jumps while typing (the composer "jiggle"), so only
++  // restore the scroll when the string content actually changed.
++  BOOL contentStringChanged = ![attributedString.string isEqualToString:_backedTextInputView.attributedText.string];
+   _backedTextInputView.attributedText = attributedString;
+   // Updating the UITextView attributedText, for example changing the lineHeight, the color or adding
+   // a new paragraph with \n, causes the cursor to move to the end of the Text and scroll.
+@@ -775,7 +803,10 @@ - (void)_setAttributedString:(NSAttributedString *)attributedString
+                                                                  offset:newOffset];
+   [_backedTextInputView setSelectedTextRange:[_backedTextInputView textRangeFromPosition:position toPosition:position]
+                               notifyDelegate:YES];
+-  [_backedTextInputView scrollRangeToVisible:NSMakeRange(offsetStart, 0)];
++  // HAPPIER PATCH(composer-jiggle): see contentStringChanged above.
++  if (contentStringChanged) {
++    [_backedTextInputView scrollRangeToVisible:NSMakeRange(offsetStart, 0)];
++  }
+ 
+   // A zero-length selection range can cause the caret position to change on iOS,
+   // and we have already updated the caret position, so we can safely ignore caret changing in this place.
