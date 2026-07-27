@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { AgentTextMessage, Message, ToolCallMessage, UserTextMessage } from '@/sync/domains/messages/messageTypes';
 import type { ChatListItem } from '@/components/sessions/chatListItems';
 
-import { buildTranscriptTurnsCached } from './buildTranscriptTurns';
+import { buildTranscriptTurnsCached, isTranscriptTurnsBuildCacheComplete } from './buildTranscriptTurns';
 import type { TranscriptTurnUnitListItem, TranscriptTurnUnitSourceItem } from './buildTranscriptTurnUnits';
 import { buildTranscriptTurnUnits } from './buildTranscriptTurnUnits';
 
@@ -160,6 +160,55 @@ describe('buildTranscriptTurnUnits', () => {
             'toolCalls:turn:u1:t1#tool:t2',
             'toolCalls:turn:u1:t1#footer',
         ]);
+    });
+
+    it('produces the same final units after suffix-window backfill as a full synchronous turn build', () => {
+        const messages: Message[] = [
+            userMessage('u1', 1, 1),
+            agentMessage('a1', 2, 2),
+            toolMessage('t1', 3, 3),
+            toolMessage('t2', 4, 4),
+            userMessage('u2', 5, 5),
+            agentMessage('a2', 6, 6),
+            userMessage('u3', 7, 7),
+            agentMessage('a3', 8, 8),
+        ];
+        const messagesById = indexMessages(messages);
+        const messageIdsOldestFirst = messages.map((message) => message.id);
+        const fullCache = buildTranscriptTurnsCached({
+            cache: null,
+            messageIdsOldestFirst,
+            messagesById,
+            groupToolCalls: true,
+            toolCallsGroupStrategy: 'consecutive_tools',
+        });
+        const buildUnits = (turns: typeof fullCache.turns) => buildTranscriptTurnUnits({
+            items: turns.map((turn) => ({ kind: 'turn' as const, id: turn.id, turn })),
+            getMessageById: lookupIn(messagesById),
+            isGroupExpanded: collapsedAlways,
+            collapsedPreviewCount: 1,
+        });
+
+        let windowedCache = buildTranscriptTurnsCached({
+            cache: null,
+            messageIdsOldestFirst,
+            messagesById,
+            groupToolCalls: true,
+            toolCallsGroupStrategy: 'consecutive_tools',
+            tailWindowMessageCount: 3,
+        });
+        while (!isTranscriptTurnsBuildCacheComplete(windowedCache)) {
+            windowedCache = buildTranscriptTurnsCached({
+                cache: windowedCache,
+                messageIdsOldestFirst,
+                messagesById,
+                groupToolCalls: true,
+                toolCallsGroupStrategy: 'consecutive_tools',
+                backfillOlderMessageCount: 2,
+            });
+        }
+
+        expect(buildUnits(windowedCache.turns)).toEqual(buildUnits(fullCache.turns));
     });
 
     it('builds message items exactly like the splitter: msg ids, createdAt/seq normalization, 0/null fallbacks', () => {

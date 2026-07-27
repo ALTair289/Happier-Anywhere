@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { AgentTextMessage, Message, ModeSwitchMessage, ToolCallMessage, UserTextMessage } from '@/sync/domains/messages/messageTypes';
 import type { PendingMessage } from '@/sync/domains/state/storageTypes';
 
-import { buildTranscriptTurns, buildTranscriptTurnsCached } from './buildTranscriptTurns';
+import { buildTranscriptTurns, buildTranscriptTurnsCached, isTranscriptTurnsBuildCacheComplete } from './buildTranscriptTurns';
 
 function userMessage(id: string, createdAt: number): UserTextMessage {
     return {
@@ -542,6 +542,115 @@ describe('buildTranscriptTurns', () => {
 });
 
 describe('buildTranscriptTurnsCached', () => {
+    it('builds a cold suffix window at turn boundaries before deferred backfill reaches full-build equivalence', () => {
+        const chronological: Message[] = [
+            userMessage('u1', 1),
+            agentMessage('a1', 2),
+            agentMessage('a2', 3),
+            toolMessage({ id: 't2', createdAt: 4, state: 'completed' }),
+            userMessage('u3', 5),
+            agentMessage('a3', 6),
+            userMessage('u4', 7),
+            agentMessage('a4', 8),
+        ];
+        const messagesById = Object.fromEntries(chronological.map((m) => [m.id, m]));
+        const messageIdsOldestFirst = chronological.map((m) => m.id);
+        const fullCache = buildTranscriptTurnsCached({
+            cache: null,
+            messageIdsOldestFirst,
+            messagesById,
+            groupToolCalls: true,
+            toolCallsGroupStrategy: 'consecutive_tools',
+        });
+
+        let cache = buildTranscriptTurnsCached({
+            cache: null,
+            messageIdsOldestFirst,
+            messagesById,
+            groupToolCalls: true,
+            toolCallsGroupStrategy: 'consecutive_tools',
+            tailWindowMessageCount: 3,
+        });
+
+        expect(isTranscriptTurnsBuildCacheComplete(cache)).toBe(false);
+        expect(cache.messageIdsOldestFirst).toEqual(['u3', 'a3', 'u4', 'a4']);
+        expect(cache.turns.map((turn) => turn.id)).toEqual(['turn:u3', 'turn:u4']);
+
+        while (!isTranscriptTurnsBuildCacheComplete(cache)) {
+            cache = buildTranscriptTurnsCached({
+                cache,
+                messageIdsOldestFirst,
+                messagesById,
+                groupToolCalls: true,
+                toolCallsGroupStrategy: 'consecutive_tools',
+                backfillOlderMessageCount: 2,
+            });
+        }
+
+        expect(cache.turns).toEqual(fullCache.turns);
+        expect(cache.messageIdsOldestFirst).toEqual(fullCache.messageIdsOldestFirst);
+    });
+
+    it('keeps append-only streaming correct while a cold suffix cache is still backfilling', () => {
+        const chronological: Message[] = [
+            userMessage('u1', 1),
+            agentMessage('a1', 2),
+            userMessage('u2', 3),
+            agentMessage('a2', 4),
+            userMessage('u3', 5),
+            agentMessage('a3', 6),
+        ];
+        const appended = agentMessage('a4', 7);
+        const messagesById = Object.fromEntries([...chronological, appended].map((m) => [m.id, m]));
+        const initialIds = chronological.map((m) => m.id);
+        const appendedIds = [...initialIds, appended.id];
+
+        let cache = buildTranscriptTurnsCached({
+            cache: null,
+            messageIdsOldestFirst: initialIds,
+            messagesById,
+            groupToolCalls: true,
+            toolCallsGroupStrategy: 'consecutive_tools',
+            tailWindowMessageCount: 2,
+        });
+        expect(isTranscriptTurnsBuildCacheComplete(cache)).toBe(false);
+        expect(cache.messageIdsOldestFirst).toEqual(['u3', 'a3']);
+
+        cache = buildTranscriptTurnsCached({
+            cache,
+            messageIdsOldestFirst: appendedIds,
+            messagesById,
+            groupToolCalls: true,
+            toolCallsGroupStrategy: 'consecutive_tools',
+            tailWindowMessageCount: 2,
+        });
+
+        expect(isTranscriptTurnsBuildCacheComplete(cache)).toBe(false);
+        expect(cache.messageIdsOldestFirst).toEqual(['u3', 'a3', 'a4']);
+        expect(cache.turns[0]?.content.flatMap((content) => content.kind === 'message' ? [content.messageId] : []))
+            .toEqual(['a3', 'a4']);
+
+        while (!isTranscriptTurnsBuildCacheComplete(cache)) {
+            cache = buildTranscriptTurnsCached({
+                cache,
+                messageIdsOldestFirst: appendedIds,
+                messagesById,
+                groupToolCalls: true,
+                toolCallsGroupStrategy: 'consecutive_tools',
+                backfillOlderMessageCount: 2,
+            });
+        }
+
+        const fullCache = buildTranscriptTurnsCached({
+            cache: null,
+            messageIdsOldestFirst: appendedIds,
+            messagesById,
+            groupToolCalls: true,
+            toolCallsGroupStrategy: 'consecutive_tools',
+        });
+        expect(cache.turns).toEqual(fullCache.turns);
+    });
+
     it('rebuilds cached turns when unresolved server pending state starts owning a committed localId', () => {
         const committedUser = {
             ...userMessage('m-user', 20),

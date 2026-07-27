@@ -23,6 +23,10 @@ export type TranscriptTurn = {
     content: TranscriptTurnContent[];
 };
 
+export type TranscriptTurnsBuildCoverage =
+    | Readonly<{ kind: 'full' }>
+    | Readonly<{ kind: 'suffix'; startIndex: number }>;
+
 export type TranscriptTurnsBuildCache = Readonly<{
     messageIdsOldestFirst: readonly string[];
     messageGroupingKeysOldestFirst: readonly string[];
@@ -30,6 +34,7 @@ export type TranscriptTurnsBuildCache = Readonly<{
     toolCallsGroupStrategy: TranscriptTurnToolCallsGroupStrategy;
     forkBoundarySignature?: string;
     turns: TranscriptTurn[];
+    coverage?: TranscriptTurnsBuildCoverage;
     // Internal: incremental builder state for the current (last) turn.
     lastTurnState: TranscriptTurnsLastTurnState;
 }>;
@@ -169,6 +174,55 @@ function isPrefix(params: Readonly<{ prefix: readonly string[]; full: readonly s
         if (params.prefix[i] !== params.full[i]) return false;
     }
     return true;
+}
+
+function isFullCoverage(cache: TranscriptTurnsBuildCache): boolean {
+    return cache.coverage == null || cache.coverage.kind === 'full';
+}
+
+export function isTranscriptTurnsBuildCacheComplete(cache: TranscriptTurnsBuildCache | null): boolean {
+    return cache == null || isFullCoverage(cache);
+}
+
+function normalizeWindowCount(value: unknown): number | null {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    return Math.max(1, Math.trunc(value));
+}
+
+function isTurnBoundaryAtIndex(params: Readonly<{
+    index: number;
+    messageIdsOldestFirst: readonly string[];
+    messagesById: Readonly<Record<string, Message>>;
+    forkBoundaryBeforeMessageIds?: ReadonlySet<string>;
+}>): boolean {
+    const id = params.messageIdsOldestFirst[params.index];
+    if (!id) return false;
+    if (params.forkBoundaryBeforeMessageIds?.has(id) === true) return true;
+    const message = params.messagesById[id];
+    return message ? isUserMessage(message) : false;
+}
+
+function alignStartIndexToTurnBoundary(params: Readonly<{
+    desiredStartIndex: number;
+    messageIdsOldestFirst: readonly string[];
+    messagesById: Readonly<Record<string, Message>>;
+    forkBoundaryBeforeMessageIds?: ReadonlySet<string>;
+}>): number {
+    const count = params.messageIdsOldestFirst.length;
+    if (count === 0) return 0;
+    let index = Math.max(0, Math.min(count - 1, Math.trunc(params.desiredStartIndex)));
+    while (index > 0) {
+        if (isTurnBoundaryAtIndex({
+            index,
+            messageIdsOldestFirst: params.messageIdsOldestFirst,
+            messagesById: params.messagesById,
+            forkBoundaryBeforeMessageIds: params.forkBoundaryBeforeMessageIds,
+        })) {
+            return index;
+        }
+        index -= 1;
+    }
+    return 0;
 }
 
 function collectTurnMessageIds(turn: TranscriptTurn): string[] {
@@ -311,6 +365,8 @@ export function buildTranscriptTurnsCached(opts: {
     forkBoundaryBeforeMessageIds?: ReadonlySet<string>;
     forkBoundarySignature?: string;
     forkMetadataByMessageId?: Readonly<Record<string, unknown>>;
+    tailWindowMessageCount?: number | null;
+    backfillOlderMessageCount?: number | null;
 }): TranscriptTurnsBuildCache {
     const contextVisibleMessageIdsOldestFirst = filterVisibleContextCompactionLifecycleMessageIds(opts.messageIdsOldestFirst, opts.messagesById);
     const visibleMessageIdsOldestFirst = filterCommittedTranscriptMessageIdsForPendingState({
@@ -320,19 +376,28 @@ export function buildTranscriptTurnsCached(opts: {
         discardedMessages: opts.discardedMessages,
     });
     const nextMessageGroupingKeysOldestFirst = visibleMessageIdsOldestFirst.map((id) => getMessageGroupingKey(opts.messagesById[id]));
+    const cache = opts.cache;
+    const cacheConfigMatches =
+        cache != null &&
+        cache.groupToolCalls === opts.groupToolCalls &&
+        cache.toolCallsGroupStrategy === opts.toolCallsGroupStrategy &&
+        cache.forkBoundarySignature === opts.forkBoundarySignature;
     const canReuse =
-        opts.cache != null &&
-        opts.cache.groupToolCalls === opts.groupToolCalls &&
-        opts.cache.toolCallsGroupStrategy === opts.toolCallsGroupStrategy &&
-        opts.cache.forkBoundarySignature === opts.forkBoundarySignature &&
-        isPrefix({ prefix: opts.cache.messageIdsOldestFirst, full: visibleMessageIdsOldestFirst }) &&
-        isPrefix({ prefix: opts.cache.messageGroupingKeysOldestFirst, full: nextMessageGroupingKeysOldestFirst });
+        cacheConfigMatches &&
+        cache != null &&
+        isFullCoverage(cache) &&
+        isPrefix({ prefix: cache.messageIdsOldestFirst, full: visibleMessageIdsOldestFirst }) &&
+        isPrefix({ prefix: cache.messageGroupingKeysOldestFirst, full: nextMessageGroupingKeysOldestFirst });
 
-    // Append-only incremental path.
-    if (canReuse && opts.cache!.messageIdsOldestFirst.length <= visibleMessageIdsOldestFirst.length) {
-        const prev = opts.cache!;
+    const appendFromCache = (params: Readonly<{
+        prev: TranscriptTurnsBuildCache;
+        nextMessageIdsOldestFirst: readonly string[];
+        nextMessageGroupingKeysOldestFirst: readonly string[];
+        coverage: TranscriptTurnsBuildCoverage;
+    }>): TranscriptTurnsBuildCache => {
+        const prev = params.prev;
         const prevLen = prev.messageIdsOldestFirst.length;
-        const nextLen = visibleMessageIdsOldestFirst.length;
+        const nextLen = params.nextMessageIdsOldestFirst.length;
         if (prevLen === nextLen) {
             return prev;
         }
@@ -361,7 +426,7 @@ export function buildTranscriptTurnsCached(opts: {
         };
 
         for (let i = prevLen; i < nextLen; i += 1) {
-            const id = visibleMessageIdsOldestFirst[i]!;
+            const id = params.nextMessageIdsOldestFirst[i]!;
             const message = opts.messagesById[id];
             if (!message) continue;
 
@@ -387,33 +452,125 @@ export function buildTranscriptTurnsCached(opts: {
         }
 
         return {
-            messageIdsOldestFirst: visibleMessageIdsOldestFirst,
-            messageGroupingKeysOldestFirst: nextMessageGroupingKeysOldestFirst,
+            messageIdsOldestFirst: params.nextMessageIdsOldestFirst,
+            messageGroupingKeysOldestFirst: params.nextMessageGroupingKeysOldestFirst,
             groupToolCalls: opts.groupToolCalls,
             toolCallsGroupStrategy: opts.toolCallsGroupStrategy,
             forkBoundarySignature: opts.forkBoundarySignature,
             turns: nextTurns,
+            coverage: params.coverage,
             lastTurnState,
         };
+    };
+
+    // Append-only incremental path for complete caches.
+    if (canReuse && opts.cache!.messageIdsOldestFirst.length <= visibleMessageIdsOldestFirst.length) {
+        return appendFromCache({
+            prev: opts.cache!,
+            nextMessageIdsOldestFirst: visibleMessageIdsOldestFirst,
+            nextMessageGroupingKeysOldestFirst,
+            coverage: { kind: 'full' },
+        });
     }
 
-    // Full rebuild.
-    const turns: TranscriptTurn[] = [];
-    let lastTurnState = createEmptyLastTurnState(opts);
+    const suffixCoverage = opts.cache?.coverage?.kind === 'suffix' ? opts.cache.coverage : null;
+    if (cacheConfigMatches && suffixCoverage) {
+        const suffixIdsOldestFirst = visibleMessageIdsOldestFirst.slice(suffixCoverage.startIndex);
+        const suffixGroupingKeysOldestFirst = nextMessageGroupingKeysOldestFirst.slice(suffixCoverage.startIndex);
+        const canReuseSuffix =
+            isPrefix({ prefix: opts.cache!.messageIdsOldestFirst, full: suffixIdsOldestFirst }) &&
+            isPrefix({ prefix: opts.cache!.messageGroupingKeysOldestFirst, full: suffixGroupingKeysOldestFirst });
+        if (canReuseSuffix && opts.cache!.messageIdsOldestFirst.length < suffixIdsOldestFirst.length) {
+            return appendFromCache({
+                prev: opts.cache!,
+                nextMessageIdsOldestFirst: suffixIdsOldestFirst,
+                nextMessageGroupingKeysOldestFirst: suffixGroupingKeysOldestFirst,
+                coverage: suffixCoverage,
+            });
+        }
+        const backfillOlderMessageCount = normalizeWindowCount(opts.backfillOlderMessageCount);
+        if (canReuseSuffix && backfillOlderMessageCount != null && suffixCoverage.startIndex > 0) {
+            const desiredStartIndex = Math.max(0, suffixCoverage.startIndex - backfillOlderMessageCount);
+            const backfillStartIndex = alignStartIndexToTurnBoundary({
+                desiredStartIndex,
+                messageIdsOldestFirst: visibleMessageIdsOldestFirst,
+                messagesById: opts.messagesById,
+                forkBoundaryBeforeMessageIds: opts.forkBoundaryBeforeMessageIds,
+            });
+            const backfillMessageIdsOldestFirst = visibleMessageIdsOldestFirst.slice(backfillStartIndex);
+            const backfillGroupingKeysOldestFirst = nextMessageGroupingKeysOldestFirst.slice(backfillStartIndex);
+            const rebuilt = buildTranscriptTurnsForVisibleIds({
+                opts,
+                visibleMessageIdsOldestFirst: backfillMessageIdsOldestFirst,
+                messageGroupingKeysOldestFirst: backfillGroupingKeysOldestFirst,
+                previousTurns: opts.cache!.turns,
+                coverage: backfillStartIndex === 0 ? { kind: 'full' } : { kind: 'suffix', startIndex: backfillStartIndex },
+            });
+            return rebuilt;
+        }
+        if (canReuseSuffix) {
+            return opts.cache!;
+        }
+    }
 
-    for (const id of visibleMessageIdsOldestFirst) {
-        const message = opts.messagesById[id];
+    const tailWindowMessageCount = normalizeWindowCount(opts.tailWindowMessageCount);
+    if (tailWindowMessageCount != null && tailWindowMessageCount < visibleMessageIdsOldestFirst.length) {
+        const desiredStartIndex = visibleMessageIdsOldestFirst.length - tailWindowMessageCount;
+        const tailStartIndex = alignStartIndexToTurnBoundary({
+            desiredStartIndex,
+            messageIdsOldestFirst: visibleMessageIdsOldestFirst,
+            messagesById: opts.messagesById,
+            forkBoundaryBeforeMessageIds: opts.forkBoundaryBeforeMessageIds,
+        });
+        if (tailStartIndex > 0) {
+            return buildTranscriptTurnsForVisibleIds({
+                opts,
+                visibleMessageIdsOldestFirst: visibleMessageIdsOldestFirst.slice(tailStartIndex),
+                messageGroupingKeysOldestFirst: nextMessageGroupingKeysOldestFirst.slice(tailStartIndex),
+                previousTurns: opts.cache?.turns ?? [],
+                coverage: { kind: 'suffix', startIndex: tailStartIndex },
+            });
+        }
+    }
+
+    return buildTranscriptTurnsForVisibleIds({
+        opts,
+        visibleMessageIdsOldestFirst,
+        messageGroupingKeysOldestFirst: nextMessageGroupingKeysOldestFirst,
+        previousTurns: opts.cache?.turns ?? [],
+        coverage: { kind: 'full' },
+    });
+}
+
+function buildTranscriptTurnsForVisibleIds(params: Readonly<{
+    opts: {
+        messagesById: Readonly<Record<string, Message>>;
+        groupToolCalls: boolean;
+        toolCallsGroupStrategy: TranscriptTurnToolCallsGroupStrategy;
+        forkBoundaryBeforeMessageIds?: ReadonlySet<string>;
+        forkBoundarySignature?: string;
+    };
+    visibleMessageIdsOldestFirst: readonly string[];
+    messageGroupingKeysOldestFirst: readonly string[];
+    previousTurns: readonly TranscriptTurn[];
+    coverage: TranscriptTurnsBuildCoverage;
+}>): TranscriptTurnsBuildCache {
+    const turns: TranscriptTurn[] = [];
+    let lastTurnState = createEmptyLastTurnState(params.opts);
+
+    for (const id of params.visibleMessageIdsOldestFirst) {
+        const message = params.opts.messagesById[id];
         if (!message) continue;
 
         if (isUserMessage(message)) {
             turns.push(createTurn({ baseId: message.id, userMessageId: message.id }));
-            lastTurnState = createEmptyLastTurnState(opts);
+            lastTurnState = createEmptyLastTurnState(params.opts);
             continue;
         }
 
-        if (turns.length === 0 || opts.forkBoundaryBeforeMessageIds?.has(id) === true) {
+        if (turns.length === 0 || params.opts.forkBoundaryBeforeMessageIds?.has(id) === true) {
             turns.push(createTurn({ baseId: message.id, userMessageId: null }));
-            lastTurnState = createEmptyLastTurnState(opts);
+            lastTurnState = createEmptyLastTurnState(params.opts);
         }
 
         const last = turns[turns.length - 1]!;
@@ -422,24 +579,25 @@ export function buildTranscriptTurnsCached(opts: {
             lastTurnState,
             messageId: message.id,
             message,
-            groupToolCalls: opts.groupToolCalls,
-            toolCallsGroupStrategy: opts.toolCallsGroupStrategy,
+            groupToolCalls: params.opts.groupToolCalls,
+            toolCallsGroupStrategy: params.opts.toolCallsGroupStrategy,
         });
         turns[turns.length - 1] = updated.turn;
         lastTurnState = updated.lastTurnState;
     }
 
-    const stickyTurns = opts.cache
-        ? applyStickyTurnIdsFromPreviousBuild({ previousTurns: opts.cache.turns, turns })
+    const stickyTurns = params.previousTurns.length > 0
+        ? applyStickyTurnIdsFromPreviousBuild({ previousTurns: params.previousTurns, turns })
         : turns;
 
     return {
-        messageIdsOldestFirst: visibleMessageIdsOldestFirst,
-        messageGroupingKeysOldestFirst: nextMessageGroupingKeysOldestFirst,
-        groupToolCalls: opts.groupToolCalls,
-        toolCallsGroupStrategy: opts.toolCallsGroupStrategy,
-        forkBoundarySignature: opts.forkBoundarySignature,
+        messageIdsOldestFirst: params.visibleMessageIdsOldestFirst,
+        messageGroupingKeysOldestFirst: params.messageGroupingKeysOldestFirst,
+        groupToolCalls: params.opts.groupToolCalls,
+        toolCallsGroupStrategy: params.opts.toolCallsGroupStrategy,
+        forkBoundarySignature: params.opts.forkBoundarySignature,
         turns: stickyTurns,
+        coverage: params.coverage,
         lastTurnState,
     };
 }
