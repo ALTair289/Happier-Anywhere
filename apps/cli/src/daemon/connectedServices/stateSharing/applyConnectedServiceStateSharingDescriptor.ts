@@ -265,24 +265,40 @@ async function materializeLinkedStateEntry(params: Readonly<{
       allowHardLinkFallback: params.allowHardLinkFallback,
     });
 
-    let destinationStat;
-    try {
-      destinationStat = await lstat(params.destinationPath);
-    } catch (error) {
-      const err = error as NodeJS.ErrnoException;
-      if (err?.code !== 'ENOENT') throw error;
-    }
+    // A live provider can recreate its state directory after the preflight/removal above but before
+    // the atomic link rename. POSIX reports that directory-vs-symlink race as EISDIR/ENOTEMPTY (and
+    // Windows commonly reports EEXIST/EPERM). Reconcile the newly appeared destination and retry
+    // the SAME prepared link; never create a competing materialization path or drop the provider directory.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let destinationStat;
+      try {
+        destinationStat = await lstat(params.destinationPath);
+      } catch (error) {
+        const err = error as NodeJS.ErrnoException;
+        if (err?.code !== 'ENOENT') throw error;
+      }
 
-    if (destinationStat) {
-      if (destinationStat.isSymbolicLink()) {
-        await rm(params.destinationPath, { recursive: true, force: true });
-      } else {
-        await moveConnectedServiceHomeEntryAside(params.destinationPath);
+      if (destinationStat) {
+        if (destinationStat.isSymbolicLink()) {
+          await rm(params.destinationPath, { recursive: true, force: true });
+        } else {
+          await moveConnectedServiceHomeEntryAside(params.destinationPath);
+        }
+      }
+      await mkdir(dirname(params.destinationPath), { recursive: true });
+      try {
+        await rename(tempLinkPath, params.destinationPath);
+        return true;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        const destinationAppeared = code === 'EISDIR'
+          || code === 'ENOTEMPTY'
+          || code === 'EEXIST'
+          || code === 'EPERM';
+        if (!destinationAppeared || attempt === 2) throw error;
       }
     }
-    await mkdir(dirname(params.destinationPath), { recursive: true });
-    await rename(tempLinkPath, params.destinationPath);
-    return true;
+    throw new Error('State-link promotion retry loop exhausted without returning or throwing');
   } catch (error) {
     await rm(tempLinkPath, { recursive: true, force: true });
     throw error;
