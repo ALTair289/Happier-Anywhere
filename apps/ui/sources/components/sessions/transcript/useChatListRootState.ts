@@ -25,6 +25,22 @@ import { useTranscriptRootRollbackActions } from '@/components/sessions/transcri
 import { useTranscriptRootThinkingState } from '@/components/sessions/transcript/thinking/useTranscriptRootThinkingState';
 import { useTranscriptRootMessages } from '@/components/sessions/transcript/items/useTranscriptRootMessages';
 import { resolveTranscriptEventEmphasisByMessageId } from '@/components/sessions/transcript/events/transcriptEventEmphasis';
+import type { Message } from '@/sync/domains/messages/messageTypes';
+import { isRecoveredHistoryTranscriptObservation } from '@/sync/domains/messages/transcriptObservationProvenance';
+
+export function resolveLatestCommittedActivityKey(params: Readonly<{
+    messageIdsOldestFirst: readonly string[];
+    messagesById: Readonly<Record<string, Message>>;
+}>): string | null {
+    for (let index = params.messageIdsOldestFirst.length - 1; index >= 0; index -= 1) {
+        const id = params.messageIdsOldestFirst[index]!;
+        const message = params.messagesById[id];
+        // A temporarily unavailable message retains the legacy live behavior. Only authenticated,
+        // explicit recovered-history provenance is allowed to suppress tail activity.
+        if (!message || !isRecoveredHistoryTranscriptObservation(message)) return id;
+    }
+    return null;
+}
 
 export function useChatListRootState(props: ChatListProps) {
     const {
@@ -89,8 +105,10 @@ export function useChatListRootState(props: ChatListProps) {
         toolCallsGroupStrategy,
     });
 
-    const latestCommittedActivityKey =
-        messageIdsOldestFirst.length > 0 ? messageIdsOldestFirst[messageIdsOldestFirst.length - 1]! : null;
+    const latestCommittedActivityKey = resolveLatestCommittedActivityKey({
+        messageIdsOldestFirst,
+        messagesById,
+    });
     const { rollbackActionsByMessageId, rollbackRanges } = useTranscriptRootRollbackActions({
         messageIdsOldestFirst,
         messagesById,
