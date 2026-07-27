@@ -52,11 +52,11 @@ Resume and structured-question behavior depend on the installed Grok Build versi
 
 ## Current capability limits
 
-- **Models:** Happier renders the models advertised by the active Grok ACP session and applies a selected model through the standard live model-switch request. Each model shows a reasoning-effort control only when that model advertises supported effort values. A single static `grok-build` entry remains the compatibility fallback when the installed CLI does not advertise a selectable model inventory or effort metadata.
+- **Models:** Happier renders only the models advertised by the active Grok ACP session and applies a selected model through the standard live model-switch request. Each model shows a reasoning-effort control only when that model advertises supported effort values. When Grok does not advertise a selectable model inventory, Happier leaves model choice to the CLI instead of inventing a fallback model ID.
 - **Model switch failures:** Grok switch errors are surfaced to the session instead of being treated as success, and the last provider-confirmed model remains authoritative.
 - **MCP tools:** native MCP delivery is experimental.
-- **Images and session media:** not currently supported through this integration. Shared ACP image prompt blocks remain post-merge work in the current runtime owner.
-- **Prompt completion compatibility:** Happier uses the standard ACP completion path. Correlated support for Grok's private completion notifications, if still required by a supported CLI, remains post-merge hardening in the current shared completion owner; this integration does not add a private fallback.
+- **Images and session media:** trusted prompt images are projected through Happier's shared ACP media path. Output media and general session-media extraction remain unsupported unless the provider advertises and the shared runtime proves those separate contracts.
+- **Prompt completion compatibility:** standard ACP completion remains primary. Happier also accepts correlated `x.ai/session/prompt_complete` and observed `_x.ai/session/prompt_complete` terminal evidence only for the current open, non-cancelled session turn; missing or stale extension notifications never delay or settle another turn.
 - **Session listing, forking, rollback, and vendor-state handoff:** not currently supported.
 - **Platforms:** the integration includes macOS, Linux, and Windows install/detection paths, but platform behavior still depends on the installed xAI CLI release.
 
