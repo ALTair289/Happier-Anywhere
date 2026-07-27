@@ -8,6 +8,7 @@ import { parseOptionalBooleanEnv, type FeatureId } from '@happier-dev/protocol';
 import { config } from '@/config';
 import { getFeatureBuildPolicyDecision } from '@/sync/domains/features/featureBuildPolicy';
 import { readStorageScopeFromEnv, scopedStorageId } from '@/utils/system/storageScope';
+import { redactSentryPublicShareTelemetry } from '@/utils/system/sentryPublicShareRedaction';
 
 declare global {
     // eslint-disable-next-line no-var
@@ -233,6 +234,10 @@ export function initializeSentryOnce(): void {
         ...(resolved.release ? { release: resolved.release } : null),
         sendDefaultPii: resolved.sendDefaultPii,
         enableLogs: resolved.enableLogs,
+        beforeSend: redactSentryPublicShareTelemetry,
+        beforeSendTransaction: redactSentryPublicShareTelemetry,
+        beforeBreadcrumb: redactSentryPublicShareTelemetry,
+        ...(resolved.enableLogs ? { beforeSendLog: redactSentryPublicShareTelemetry } : null),
         ...(resolved.enableReplay
             ? {
                   replaysSessionSampleRate: resolved.replaysSessionSampleRate,
