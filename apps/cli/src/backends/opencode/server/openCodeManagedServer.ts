@@ -59,14 +59,17 @@ function resolveOpenCodeCommand(): Readonly<{ command: string; args: readonly st
  * on the selection-identity env so NATIVE sessions (no selection identity) are a strict no-op and
  * keep loading the user's own config/plugins.
  */
-async function ensureConnectedOpenCodeBrokerAssetsBeforeSpawn(env: NodeJS.ProcessEnv): Promise<void> {
-  if (typeof env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV] !== 'string') return;
+async function ensureConnectedOpenCodeBrokerAssetsBeforeSpawn(env: NodeJS.ProcessEnv): Promise<string | null> {
+  if (typeof env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV] !== 'string') return null;
   const selections = parseOpenCodeBrokerSelections(env[OPEN_CODE_BROKER_SELECTIONS_ENV]);
   const providers = OPEN_CODE_BROKER_PROVIDERS.filter((provider) => selections[provider]);
+  let brokerLoadNonce: string | null = null;
   if (providers.length > 0) {
-    env[OPEN_CODE_BROKER_LOAD_NONCE_ENV] = randomUUID();
+    brokerLoadNonce = randomUUID();
+    env[OPEN_CODE_BROKER_LOAD_NONCE_ENV] = brokerLoadNonce;
   }
   await ensureOpenCodeBrokerPluginAssets({ providers });
+  return brokerLoadNonce;
 }
 
 /**
@@ -95,12 +98,18 @@ export async function startManagedOpenCodeServer(params: Readonly<{
   logsDir?: string;
   /** Launch fingerprint recorded in the log header for cross-server diagnostics. */
   launchFingerprint?: string;
-  onSpawned?: (started: Readonly<{ baseUrl: string; pid: number; logPath: string }>) => void | Promise<void>;
+  onSpawned?: (started: Readonly<{
+    baseUrl: string;
+    pid: number;
+    logPath: string;
+    brokerLoadNonce?: string;
+  }>) => void | Promise<void>;
 }> = {}): Promise<{
   baseUrl: string;
   pid: number;
   close: () => Promise<void>;
   logPath: string;
+  brokerLoadNonce?: string;
 }> {
   const hostname = typeof params.hostname === 'string' && params.hostname.trim().length > 0 ? params.hostname.trim() : '127.0.0.1';
   const port = typeof params.port === 'number' && Number.isFinite(params.port) && params.port > 0
@@ -123,7 +132,7 @@ export async function startManagedOpenCodeServer(params: Readonly<{
   // Connected sessions (selection identity present) are config-isolated: ensure the Happier-owned
   // empty config home exists and write the broker plugin file(s) before spawn. Native sessions have
   // no selection identity ⇒ this is a no-op ⇒ native HOME/XDG/config/plugins remain untouched.
-  await ensureConnectedOpenCodeBrokerAssetsBeforeSpawn(process.env);
+  const brokerLoadNonce = await ensureConnectedOpenCodeBrokerAssetsBeforeSpawn(process.env);
 
   const childEnv = resolveOpenCodeManagedServerChildEnv({
     baseEnv: process.env,
@@ -270,7 +279,12 @@ ${readStartupOutput()}`));
   logCapture.recordTrackedPid(trackedPid);
 
   try {
-    await params.onSpawned?.({ baseUrl, pid: trackedPid, logPath });
+    await params.onSpawned?.({
+      baseUrl,
+      pid: trackedPid,
+      logPath,
+      ...(brokerLoadNonce ? { brokerLoadNonce } : {}),
+    });
   } catch (error) {
     await close();
     throw error;
@@ -283,5 +297,11 @@ ${readStartupOutput()}`));
   }).catch(() => {});
 
   proc.unref?.();
-  return { baseUrl, pid: trackedPid, close, logPath };
+  return {
+    baseUrl,
+    pid: trackedPid,
+    close,
+    logPath,
+    ...(brokerLoadNonce ? { brokerLoadNonce } : {}),
+  };
 }

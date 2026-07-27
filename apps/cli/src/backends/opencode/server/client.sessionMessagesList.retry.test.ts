@@ -210,6 +210,29 @@ describe('createOpenCodeServerRuntimeClient sessionMessagesList managed retry', 
         ]);
     });
 
+    it('preserves a malformed raw history envelope for fail-closed foreground reconciliation', async () => {
+        process.env.HAPPIER_OPENCODE_SERVER_URL = 'http://127.0.0.1:9999';
+        globalThis.fetch = vi.fn(async (input) => {
+            const url = typeof input === 'string' ? input : String((input as Request)?.url ?? '');
+            if (url.includes('/global/health')) {
+                return jsonResponse({ healthy: true, version: '1.2.27' });
+            }
+            if (url.includes('/session/ses_malformed/message')) {
+                return jsonResponse({ messages: [] });
+            }
+            return jsonResponse({});
+        }) as typeof fetch;
+
+        const client = await createOpenCodeServerRuntimeClient({
+            directory: '/tmp',
+            messageBuffer: new MessageBuffer(),
+        });
+
+        await expect(client.sessionMessagesList({ sessionId: 'ses_malformed' })).resolves.toEqual([]);
+        await expect(client.sessionMessagesListRaw?.({ sessionId: 'ses_malformed' })).resolves.toEqual({ messages: [] });
+        await client.dispose();
+    });
+
     it('retries permission list after a transient managed-server fetch failure', async () => {
         const { ensureSharedManagedOpenCodeServerBaseUrl, readSharedManagedOpenCodeServerStateBestEffort } = await import('./sharedManagedServer');
         const ensureMock = ensureSharedManagedOpenCodeServerBaseUrl as unknown as ReturnType<typeof vi.fn>;

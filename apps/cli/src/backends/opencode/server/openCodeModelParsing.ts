@@ -1,3 +1,5 @@
+import { providers } from '@happier-dev/agents';
+
 import type { OpenCodeModelRef } from './types';
 import { asRecord, normalizeString } from './openCodeParsing';
 
@@ -6,14 +8,18 @@ type KnownUnavailableOpenCodeModel = Readonly<{
   replacementModelId: string;
 }>;
 
+// Retired Anthropic Opus-lineage models are substituted with the current flagship Claude model
+// (single source of truth), so a new Opus release never leaves this table pointing at a stale id.
+const FLAGSHIP_CLAUDE_MODEL_ID = providers.claude.CURRENT_FLAGSHIP_CLAUDE_MODEL_ID;
+
 const ANTHROPIC_KNOWN_UNAVAILABLE_MODELS: Readonly<Record<string, KnownUnavailableOpenCodeModel>> = Object.freeze({
-  'claude-2.0': { retiredAtMs: Date.UTC(2025, 6, 21), replacementModelId: 'claude-opus-4-8' },
-  'claude-2.1': { retiredAtMs: Date.UTC(2025, 6, 21), replacementModelId: 'claude-opus-4-8' },
+  'claude-2.0': { retiredAtMs: Date.UTC(2025, 6, 21), replacementModelId: FLAGSHIP_CLAUDE_MODEL_ID },
+  'claude-2.1': { retiredAtMs: Date.UTC(2025, 6, 21), replacementModelId: FLAGSHIP_CLAUDE_MODEL_ID },
   'claude-instant-1.0': { retiredAtMs: Date.UTC(2024, 10, 6), replacementModelId: 'claude-haiku-4-5-20251001' },
   'claude-instant-1.1': { retiredAtMs: Date.UTC(2024, 10, 6), replacementModelId: 'claude-haiku-4-5-20251001' },
   'claude-instant-1.2': { retiredAtMs: Date.UTC(2024, 10, 6), replacementModelId: 'claude-haiku-4-5-20251001' },
-  'claude-3-opus-20240229': { retiredAtMs: Date.UTC(2026, 0, 5), replacementModelId: 'claude-opus-4-8' },
-  'claude-3-opus-latest': { retiredAtMs: Date.UTC(2026, 0, 5), replacementModelId: 'claude-opus-4-8' },
+  'claude-3-opus-20240229': { retiredAtMs: Date.UTC(2026, 0, 5), replacementModelId: FLAGSHIP_CLAUDE_MODEL_ID },
+  'claude-3-opus-latest': { retiredAtMs: Date.UTC(2026, 0, 5), replacementModelId: FLAGSHIP_CLAUDE_MODEL_ID },
   'claude-3-sonnet-20240229': { retiredAtMs: Date.UTC(2025, 6, 21), replacementModelId: 'claude-sonnet-4-6' },
   'claude-3-sonnet-latest': { retiredAtMs: Date.UTC(2025, 6, 21), replacementModelId: 'claude-sonnet-4-6' },
   'claude-3-haiku-20240307': { retiredAtMs: Date.UTC(2026, 3, 20), replacementModelId: 'claude-haiku-4-5-20251001' },
@@ -26,7 +32,7 @@ const ANTHROPIC_KNOWN_UNAVAILABLE_MODELS: Readonly<Record<string, KnownUnavailab
   'claude-3-7-sonnet-20250219': { retiredAtMs: Date.UTC(2026, 1, 19), replacementModelId: 'claude-sonnet-4-6' },
   'claude-3-7-sonnet-latest': { retiredAtMs: Date.UTC(2026, 1, 19), replacementModelId: 'claude-sonnet-4-6' },
   'claude-sonnet-4-20250514': { retiredAtMs: Date.UTC(2026, 5, 15), replacementModelId: 'claude-sonnet-4-6' },
-  'claude-opus-4-20250514': { retiredAtMs: Date.UTC(2026, 5, 15), replacementModelId: 'claude-opus-4-8' },
+  'claude-opus-4-20250514': { retiredAtMs: Date.UTC(2026, 5, 15), replacementModelId: FLAGSHIP_CLAUDE_MODEL_ID },
 });
 
 const KNOWN_UNAVAILABLE_MODELS_BY_PROVIDER: Readonly<Record<string, Readonly<Record<string, KnownUnavailableOpenCodeModel>>>> = Object.freeze({

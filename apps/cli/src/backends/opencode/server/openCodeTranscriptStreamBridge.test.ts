@@ -245,6 +245,7 @@ describe('createOpenCodeTranscriptStreamBridge', () => {
         sendAgentMessage: () => {},
         sendAgentMessageEphemeral: (provider, body, opts) => {
           ephemeralCalls.push({ provider, body, opts });
+          return { accepted: true, epoch: 0 };
         },
       },
     });
@@ -298,6 +299,7 @@ describe('createOpenCodeTranscriptStreamBridge', () => {
   });
 
   it('forwards ephemeral stream deltas with merged base metadata and exposes the connection epoch', () => {
+    const acceptedOutcome = { accepted: true as const, epoch: 4 };
     const deltaCalls: Array<{
       provider: ACPProvider;
       body: ACPMessageData;
@@ -316,16 +318,17 @@ describe('createOpenCodeTranscriptStreamBridge', () => {
       session: {
         sendAgentMessageCommitted: async () => {},
         sendAgentMessage: () => {},
-        sendAgentMessageEphemeral: () => {},
+        sendAgentMessageEphemeral: () => acceptedOutcome,
         sendAgentMessageEphemeralDelta: (provider, body, opts) => {
           deltaCalls.push({ provider, body, opts });
+          return acceptedOutcome;
         },
         getEphemeralStreamConnectionEpoch: () => 4,
       },
     });
 
     expect(session.sendAgentMessageEphemeralDelta).toBeTypeOf('function');
-    session.sendAgentMessageEphemeralDelta?.(
+    const outcome = session.sendAgentMessageEphemeralDelta?.(
       'opencode',
       { type: 'message', message: '_DELTA' },
       { localId: 'segment-1', tick: 2, baseLength: 8, createdAt: 10, updatedAt: 20 },
@@ -345,6 +348,7 @@ describe('createOpenCodeTranscriptStreamBridge', () => {
         },
       },
     ]);
+    expect(outcome).toEqual(acceptedOutcome);
     expect(session.getEphemeralStreamConnectionEpoch?.()).toBe(4);
   });
 
@@ -354,7 +358,7 @@ describe('createOpenCodeTranscriptStreamBridge', () => {
       session: {
         sendAgentMessageCommitted: async () => {},
         sendAgentMessage: () => {},
-        sendAgentMessageEphemeral: () => {},
+        sendAgentMessageEphemeral: () => ({ accepted: true, epoch: 0 }),
       },
     });
 
@@ -362,7 +366,7 @@ describe('createOpenCodeTranscriptStreamBridge', () => {
     expect(session.getEphemeralStreamConnectionEpoch).toBeUndefined();
   });
 
-  it('routes streamed committed snapshots through the durable enqueue hook when available', async () => {
+  it('keeps prompt-dependent streamed snapshots on direct committed delivery without observation provenance', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(0));
 
@@ -377,14 +381,14 @@ describe('createOpenCodeTranscriptStreamBridge', () => {
       } as any,
     });
 
-    bridge.appendAssistantDelta({
-      deltaText: 'Hello durable outbox',
+    bridge.enableDurableCommitsForStream({
       streamKey: 'stream-1',
       remoteSessionId: 'ses_1',
       messageId: 'msg_1',
       sidechainId: null,
     });
-    bridge.enableDurableCommitsForStream({
+    bridge.appendAssistantDelta({
+      deltaText: 'Hello durable outbox',
       streamKey: 'stream-1',
       remoteSessionId: 'ses_1',
       messageId: 'msg_1',
@@ -394,8 +398,7 @@ describe('createOpenCodeTranscriptStreamBridge', () => {
     await bridge.flushAll({ reason: 'turn-end' });
     await flushTranscriptCommitMicrotasks();
 
-    expect(sendAgentMessageCommitted).not.toHaveBeenCalled();
-    expect(enqueueAgentMessageCommitted).toHaveBeenCalledWith(
+    expect(sendAgentMessageCommitted).toHaveBeenCalledWith(
       'opencode',
       { type: 'message', message: 'Hello durable outbox' },
       expect.objectContaining({
@@ -408,5 +411,6 @@ describe('createOpenCodeTranscriptStreamBridge', () => {
         }),
       }),
     );
+    expect(enqueueAgentMessageCommitted).not.toHaveBeenCalled();
   });
 });

@@ -53,7 +53,7 @@ describe('OpenCode transcript projection', () => {
   it('classifies unknown roles as unknown instead of transcript content', () => {
     const projection = classifyOpenCodeMessageForProjection({
       info: {
-        id: 'msg_system',
+        id: ' msg_system\n',
         role: 'system',
         time: { created: 12 },
       },
@@ -62,7 +62,7 @@ describe('OpenCode transcript projection', () => {
     expect(projection).toMatchObject({
       kind: 'unknown',
       role: null,
-      messageId: 'msg_system',
+      messageId: ' msg_system\n',
       createdAtMs: 12,
     });
   });

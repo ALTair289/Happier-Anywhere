@@ -186,6 +186,68 @@ describe('resolveSharedManagedOpenCodeServerBaseUrl', () => {
     expect(deps.writeState).not.toHaveBeenCalled();
   });
 
+  it('replaces a healthy brokered server whose pre-fix state has no generation nonce', async () => {
+    const commandLine = 'opencode serve --hostname=127.0.0.1 --port=1234';
+    const deps = {
+      withLock: async <T>(fn: () => Promise<T>) => await fn(),
+      readState: vi.fn(async () => ({
+        v: 2 as const,
+        baseUrl: 'http://127.0.0.1:1234',
+        pid: 111,
+        startedAtMs: 1,
+        status: 'ready' as const,
+        launchEnvFingerprint: 'scope-a',
+        ownerToken: 'owner-token-a',
+        startTimeMs: 2_500,
+        expectedCmdlineHash: hashCommandLine(commandLine),
+        activeServerDir: '/tmp/happy/servers/cloud',
+        daemonInstanceId: 'cloud',
+      })),
+      writeState: vi.fn(async (_state: unknown) => {}),
+      isPidAlive: vi.fn(() => true),
+      probeHealth: vi.fn(async () => true),
+      getProcessInfo: vi.fn(async () => ({ name: 'opencode', cmd: commandLine })),
+      readProcessStartTimeMs: vi.fn(async () => 2_501),
+      killPid: vi.fn(async () => true),
+      startServer: vi.fn(async (params?: {
+        onSpawned?: (started: {
+          baseUrl: string;
+          pid: number;
+          brokerLoadNonce?: string;
+        }) => void | Promise<void>;
+      }) => {
+        const started = {
+          baseUrl: 'http://127.0.0.1:9999',
+          pid: 222,
+          brokerLoadNonce: 'replacement-generation-nonce',
+        };
+        await params?.onSpawned?.(started);
+        return started;
+      }),
+      currentLaunchFingerprint: 'scope-a',
+      currentActiveServerDir: '/tmp/happy/servers/cloud',
+      currentDaemonInstanceId: 'cloud',
+      currentBrokerLoadNonceRequired: true,
+      nowMs: () => 5,
+    };
+
+    const out = await resolveSharedManagedOpenCodeServerBaseUrl(deps);
+
+    expect(out).toEqual({
+      baseUrl: 'http://127.0.0.1:9999',
+      didStart: true,
+      brokerLoadNonce: 'replacement-generation-nonce',
+    });
+    expect(deps.probeHealth).not.toHaveBeenCalled();
+    expect(deps.killPid).toHaveBeenCalledWith(111);
+    expect(deps.startServer).toHaveBeenCalledTimes(1);
+    expect(deps.writeState).toHaveBeenLastCalledWith(expect.objectContaining({
+      pid: 222,
+      status: 'ready',
+      brokerLoadNonce: 'replacement-generation-nonce',
+    }));
+  });
+
   it('does not reuse a healthy v2 managed server owned by a previous daemon instance', async () => {
     const commandLine = 'opencode serve --hostname=127.0.0.1 --port=1234';
     const deps = {

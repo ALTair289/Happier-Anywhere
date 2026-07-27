@@ -7,11 +7,10 @@
 import type { PermissionMode } from '@/api/types';
 import { logger } from '@/ui/logger';
 import type { Credentials } from '@/persistence';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import { formatProviderPromptErrorMessage } from '@/agent/runtime/formatProviderPromptErrorMessage';
 import { runStandardAcpProvider, type StandardAcpProviderConfig, type StandardAcpProviderRunOptions } from '@/agent/runtime/runStandardAcpProvider';
 import { updateAgentStateBestEffort } from '@/api/session/sessionWritesBestEffort';
-import { createSessionProviderPendingDrainAdapter } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
 
 import { OpenCodeTerminalDisplay } from '@/backends/opencode/ui/OpenCodeTerminalDisplay';
 
@@ -88,7 +87,7 @@ export async function runOpenCode(opts: StandardAcpProviderRunOptions & {
       mountRemoteUi = controller.mount;
       unmountRemoteUi = controller.unmount;
     },
-    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake }) => {
+    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake, providerInputConsumer }) => {
       if (backendMode === 'acp') {
         return createOpenCodeAcpRuntime({
           directory,
@@ -101,6 +100,7 @@ export async function runOpenCode(opts: StandardAcpProviderRunOptions & {
           memoryRecallGuidanceEnabled,
           getPermissionMode,
           pendingQueueDrainMaxPopPerWake,
+          providerInputConsumer,
         });
       }
 
@@ -113,9 +113,7 @@ export async function runOpenCode(opts: StandardAcpProviderRunOptions & {
         onThinkingChange: setThinking,
         getPermissionMode,
         pendingQueue: {
-          ...createSessionProviderPendingDrainAdapter(session, {
-            maxPopPerWake: pendingQueueDrainMaxPopPerWake,
-          }),
+          drainPending: (drainOpts) => providerInputConsumer.drainPending(drainOpts),
           drainAfterStartOrLoad: true,
           maxPopPerWake: pendingQueueDrainMaxPopPerWake,
         },

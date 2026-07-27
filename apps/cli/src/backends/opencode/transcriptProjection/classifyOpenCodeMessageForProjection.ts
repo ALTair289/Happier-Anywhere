@@ -8,6 +8,7 @@ import {
   readOpenCodeTimestampMs,
 } from './openCodeProjectionParsing';
 import type { OpenCodeMessageProjection, OpenCodeTranscriptRole } from './openCodeTranscriptProjectionTypes';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 function readMessageInfo(messageOrInfo: unknown): Record<string, unknown> | null {
   const rec = asOpenCodeProjectionRecord(messageOrInfo);
@@ -54,7 +55,7 @@ function isAssistantCompactionInternal(info: Record<string, unknown>, role: Open
 export function classifyOpenCodeMessageForProjection(messageOrInfo: unknown): OpenCodeMessageProjection {
   const info = readMessageInfo(messageOrInfo);
   const role = normalizeRole(info?.role);
-  const messageId = normalizeOpenCodeProjectionString(info?.id).trim();
+  const messageId = readNonBlankOpaqueIdentifier(normalizeOpenCodeProjectionString(info?.id)) ?? '';
   const createdAtMs = readCreatedAtMs(info);
 
   if (!info || !role) {

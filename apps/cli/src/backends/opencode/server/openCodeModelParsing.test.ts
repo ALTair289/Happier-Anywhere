@@ -3,13 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { getKnownUnavailableOpenCodeModel, parseOpenCodeModelId } from './openCodeModelParsing';
 
 describe('openCodeModelParsing known unavailable replacements', () => {
-  it('maps retired Anthropic legacy models to Opus 4.8', () => {
+  it('maps retired Anthropic legacy models to the current flagship Claude model', () => {
     expect(getKnownUnavailableOpenCodeModel({
       providerID: 'anthropic',
       modelID: 'claude-2.0',
       nowMs: Date.UTC(2026, 6, 1),
     })).toMatchObject({
-      replacementModelId: 'claude-opus-4-8',
+      replacementModelId: 'claude-opus-5',
     });
   });
 

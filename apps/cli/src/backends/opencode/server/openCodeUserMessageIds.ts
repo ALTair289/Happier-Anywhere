@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
+
 const BASE62_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
 export type OpenCodeUserMessageIdMapV1 = Readonly<{
@@ -18,12 +20,11 @@ export function readOpenCodeUserMessageIdMapV1(metadata: unknown): OpenCodeUserM
 }
 
 export function resolveOpenCodeUserMessageIdFromMetadata(metadata: unknown, localId: string): string | null {
-  const trimmed = typeof localId === 'string' ? localId.trim() : '';
-  if (!trimmed) return null;
+  const exactLocalId = readNonBlankOpaqueIdentifier(localId);
+  if (!exactLocalId) return null;
   const map = readOpenCodeUserMessageIdMapV1(metadata);
   if (!map) return null;
-  const candidate = (map.byLocalId as any)[trimmed];
-  return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate.trim() : null;
+  return readNonBlankOpaqueIdentifier((map.byLocalId as any)[exactLocalId]);
 }
 
 export function upsertOpenCodeUserMessageIdInMetadata(params: Readonly<{
@@ -31,13 +32,13 @@ export function upsertOpenCodeUserMessageIdInMetadata(params: Readonly<{
   localId: string;
   messageId: string;
 }>): Record<string, unknown> {
-  const localId = params.localId.trim();
-  const messageId = params.messageId.trim();
+  const localId = readNonBlankOpaqueIdentifier(params.localId);
+  const messageId = readNonBlankOpaqueIdentifier(params.messageId);
   if (!localId || !messageId) return params.metadata;
 
   const existing = readOpenCodeUserMessageIdMapV1(params.metadata);
   const byLocalId = existing?.byLocalId ? { ...(existing.byLocalId as any) } : {};
-  if (typeof byLocalId[localId] === 'string' && String(byLocalId[localId]).trim()) {
+  if (readNonBlankOpaqueIdentifier(byLocalId[localId])) {
     return params.metadata;
   }
   byLocalId[localId] = messageId;

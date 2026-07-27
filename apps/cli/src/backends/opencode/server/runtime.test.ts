@@ -5,16 +5,23 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
+import type { ProviderPromptWithMeta } from '@/agent/runtime/providerPromptSubmission';
 import { buildChangeTitleInstruction } from '@/agent/runtime/changeTitleInstruction';
 import { logger } from '@/ui/logger';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import { resetConnectedServiceRuntimeAuthFailureReportDedupeForTests } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
 import { configuration, reloadConfiguration } from '@/configuration';
 
-import { createOpenCodeServerRuntime, OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE } from './runtime';
-import { isTerminalOpenCodeToolPartStatus } from './runtime/createOpenCodeProviderActivityTracker';
+import {
+  createOpenCodeServerRuntime as createOpenCodeServerRuntimeProduction,
+  OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE,
+} from './runtime';
+import { isTerminalOpenCodeToolPartStatus } from './runtime/createOpenCodeForegroundToolTracker';
 import { OPENCODE_SERVER_RESTARTED_DURING_TURN_ISSUE_CODE } from './runtime/createOpenCodeManagedServerTurnInterruptionSupervisor';
-import { OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV } from './openCodeManagedServerEnv';
+import {
+  OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV,
+  resolveOpenCodeManagedServerLaunchFingerprint,
+} from './openCodeManagedServerEnv';
 import {
   OPEN_CODE_BROKER_SELECTIONS_ENV,
   OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
@@ -23,7 +30,15 @@ import {
   serializeOpenCodeBrokerSelections,
 } from '../brokerPlugin';
 import type { OpenCodeManagedServerIdentity, OpenCodeManagedServerIdentityChange } from './openCodeManagedServerIdentity';
-import type { OpenCodeServerRuntimeClient } from './client';
+import {
+  createOpenCodeServerRuntimeClient,
+  type OpenCodeGlobalEventDelivery,
+  type OpenCodeServerRuntimeClient,
+} from './client';
+import {
+  resolveSharedManagedOpenCodeServerBaseUrl,
+  type SharedManagedOpenCodeServerState,
+} from './sharedManagedServer';
 import type { OpenCodeGlobalEvent } from './types';
 import type { ProviderEnforcedPermissionHandler } from '@/agent/permissions/ProviderEnforcedPermissionHandler';
 
@@ -77,8 +92,17 @@ function createFakePermissionHandler() {
   } satisfies Pick<ProviderEnforcedPermissionHandler, 'handleToolCall'>;
 }
 
+function createOpenCodeServerRuntime(
+  params: Parameters<typeof createOpenCodeServerRuntimeProduction>[0],
+  deps?: Parameters<typeof createOpenCodeServerRuntimeProduction>[1],
+): ReturnType<typeof createOpenCodeServerRuntimeProduction> {
+  return createOpenCodeServerRuntimeProduction({
+    ...params,
+  }, deps);
+}
+
 type OpenCodeRuntimePromptHarness = Readonly<{
-  sendPromptWithMeta(params: { text: string; localId?: string | null; meta?: Record<string, unknown> }): Promise<void>;
+  sendPromptWithMeta(params: ProviderPromptWithMeta): Promise<void>;
 }>;
 
 type OpenCodePromptAsyncCall = Parameters<OpenCodeServerRuntimeClient['sessionPromptAsync']>[0];
@@ -90,8 +114,10 @@ type FakeManagedServerIdentity = {
   generationKey: string;
 };
 
-function createFakeClient(opts: Readonly<{ emitServerConnectedOnSubscribe?: boolean }> = {}) {
-  let onEvent: ((evt: OpenCodeGlobalEvent) => void) | null = null;
+function createFakeClient(opts: Readonly<{
+  emitServerConnectedOnSubscribe?: boolean;
+}> = {}) {
+  let onEvent: ((evt: OpenCodeGlobalEvent, delivery: OpenCodeGlobalEventDelivery) => void) | null = null;
   let directoryOverride: string | null = null;
   let statusType: string = 'idle';
   let managedServerIdentity: FakeManagedServerIdentity | null = {
@@ -100,16 +126,16 @@ function createFakeClient(opts: Readonly<{ emitServerConnectedOnSubscribe?: bool
     startedAtMs: 1,
     generationKey: 'gen-initial',
   };
-  const client = {
+  const clientBase = {
     sessionList: vi.fn(async () => ([] as unknown[])),
     sessionCreate: vi.fn<OpenCodeServerRuntimeClient['sessionCreate']>(async () => ({ id: 'ses_1' })),
     sessionGet: vi.fn(async ({ sessionId }: { sessionId: string }) => ({ id: sessionId })),
     sessionUpdate: vi.fn(async ({ sessionId }: { sessionId: string }) => ({ id: sessionId })),
-    sessionMessagesList: vi.fn(async () => ([] as unknown[])),
+    sessionMessagesList: vi.fn(async (_params: { sessionId: string }) => ([] as unknown[])),
     sessionDiff: vi.fn(async () => ([] as unknown[])),
     sessionPromptAsync: vi.fn<OpenCodeServerRuntimeClient['sessionPromptAsync']>(async () => {}),
-    sessionSummarize: vi.fn(async () => {}),
-    sessionAbort: vi.fn(async () => {}),
+    sessionSummarize: vi.fn(async (_input?: unknown) => {}),
+    sessionAbort: vi.fn(async (_input?: unknown) => {}),
     sessionFork: vi.fn(async () => ({ id: 'ses_fork' })),
     sessionTodo: vi.fn(async () => ([] as unknown[])),
     sessionStatusList: vi.fn(async () => ({ ses_1: { type: statusType } })),
@@ -138,27 +164,33 @@ function createFakeClient(opts: Readonly<{ emitServerConnectedOnSubscribe?: bool
         }) as Record<string, unknown>,
       },
     ])),
-    mcpAdd: vi.fn(async () => {}),
-    mcpDisconnect: vi.fn(async () => {}),
+    mcpAdd: vi.fn(async (_input?: unknown) => {}),
+    mcpDisconnect: vi.fn(async (_input?: unknown) => {}),
     questionReply: vi.fn(async () => true),
     questionReject: vi.fn(async () => true),
     questionList: vi.fn(async () => ([] as unknown[])),
     permissionReply: vi.fn(async () => true),
     permissionList: vi.fn(async () => ([] as unknown[])),
-    subscribeGlobalEvents: vi.fn(async ({ onEvent: cb }: { onEvent: (evt: OpenCodeGlobalEvent) => void }) => {
+    subscribeGlobalEvents: vi.fn(async ({ onEvent: cb }: {
+      signal: AbortSignal;
+      onEvent: (evt: OpenCodeGlobalEvent, delivery: OpenCodeGlobalEventDelivery) => void;
+    }) => {
       onEvent = cb;
       if (opts.emitServerConnectedOnSubscribe !== false) {
         cb({
           directory: '/tmp',
           payload: { type: 'server.connected', properties: {} },
-        });
+        }, { provenance: 'connection-boundary', connectionGeneration: 1 });
       }
     }),
     getManagedServerIdentity: () => managedServerIdentity as any,
-    dispose: vi.fn(async () => {}),
+    dispose: vi.fn(async (_input?: unknown) => {}),
     // Real OpenCode SSE subscribers do not await the callback return value.
     __emit: async (evt: OpenCodeGlobalEvent) => {
-      onEvent?.(evt);
+      onEvent?.(evt, { provenance: 'accepted-live', connectionGeneration: 1 });
+    },
+    __emitUntrusted: async (evt: OpenCodeGlobalEvent) => {
+      onEvent?.(evt, { provenance: 'untrusted-observation', connectionGeneration: 1 });
     },
     __setStatusType: (next: string) => {
       statusType = next;
@@ -167,8 +199,12 @@ function createFakeClient(opts: Readonly<{ emitServerConnectedOnSubscribe?: bool
     __setManagedServerIdentity: (next: FakeManagedServerIdentity | null) => {
       managedServerIdentity = next;
     },
-  } satisfies OpenCodeServerRuntimeClient & {
+  };
+  const client = Object.assign(clientBase, {
+    sessionMessagesListRaw: vi.fn(async (params: { sessionId: string }) => await clientBase.sessionMessagesList(params)),
+  }) satisfies OpenCodeServerRuntimeClient & {
     __emit: (evt: OpenCodeGlobalEvent) => Promise<void>;
+    __emitUntrusted: (evt: OpenCodeGlobalEvent) => Promise<void>;
     __setStatusType: (next: string) => void;
     __getDirectoryOverride: () => string | null;
     __setManagedServerIdentity: (next: FakeManagedServerIdentity | null) => void;
@@ -188,28 +224,27 @@ function readOpenCodePromptAsyncCall(
   return call[0];
 }
 
-function createFakeSession() {
+function createFakeSession(sessionId = 'happy_sess_opencode') {
   const meta: Record<string, unknown> = {};
   let lastSeq = 0;
   return {
-    sessionId: 'happy_sess_opencode',
+    sessionId,
     keepAlive: vi.fn(),
     sendAgentMessage: vi.fn(),
     sendSessionEvent: vi.fn(),
-    updateRuntimeActivityProjection: vi.fn(async () => {}),
     sessionTurnLifecycle: {
       beginTurn: vi.fn(async () => ({ turnId: 'session-turn-1' })),
-      attachProviderTurnId: vi.fn(async () => {}),
-      appendTranscriptAnchors: vi.fn(async () => {}),
-      completeTurn: vi.fn(async () => {}),
-      failTurn: vi.fn(async () => {}),
-      cancelTurn: vi.fn(async () => {}),
-      endSession: vi.fn(async () => {}),
-      markRollbackEligible: vi.fn(async () => {}),
-      markRolledBack: vi.fn(async () => {}),
+      attachProviderTurnId: vi.fn(async (_input?: unknown) => {}),
+      appendTranscriptAnchors: vi.fn(async (_input?: unknown) => {}),
+      completeTurn: vi.fn(async (_input?: unknown) => {}),
+      failTurn: vi.fn(async (_input?: unknown) => {}),
+      cancelTurn: vi.fn(async (_input?: unknown) => {}),
+      endSession: vi.fn(async (_input?: unknown) => {}),
+      markRollbackEligible: vi.fn(async (_input?: unknown) => {}),
+      markRolledBack: vi.fn(async (_input?: unknown) => {}),
     },
-    sendUserTextMessageCommitted: vi.fn(async () => {}),
-    sendAgentMessageCommitted: vi.fn(async () => {}),
+    sendUserTextMessageCommitted: vi.fn(async (_input?: unknown) => {}),
+    sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
     ensureMetadataSnapshot: vi.fn(async () => ({ ok: true })),
     getMetadataSnapshot: () => meta,
     updateMetadata: vi.fn(async (updater: (prev: any) => any) => {
@@ -478,6 +513,23 @@ describe('createOpenCodeServerRuntime', () => {
       ['in_progress', false],
       ['', false],
     ]);
+  });
+
+  it('starts a fresh provider session without an OpenCode runtime-activity producer', async () => {
+    const client = createFakeClient();
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as unknown as OpenCodeServerRuntimeClient,
+    });
+
+    await expect(runtime.startOrLoad({})).resolves.toBe('ses_1');
   });
 
   it('registers local MCP servers via the OpenCode /mcp API for the session directory', async () => {
@@ -1908,7 +1960,7 @@ describe('createOpenCodeServerRuntime', () => {
     await runtime.setSessionConfigOption('reasoning_effort', 'high');
     runtime.beginTurn();
 
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-1' });
+    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: ' local-1\n' });
 
     await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
     const firstCall = (client.sessionPromptAsync as any).mock.calls[0]?.[0] as any;
@@ -1922,7 +1974,8 @@ describe('createOpenCodeServerRuntime', () => {
     });
     expect(firstCall.config).not.toMatchObject({ variant: expect.anything() });
     expect(firstCall.messageId).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
-    expect(session.__getMetadata()?.opencodeUserMessageIdMapV1?.byLocalId?.['local-1']).toBe(firstCall.messageId);
+    expect(session.__getMetadata()?.opencodeUserMessageIdMapV1?.byLocalId?.[' local-1\n']).toBe(firstCall.messageId);
+    expect(session.__getMetadata()?.opencodeUserMessageIdMapV1?.byLocalId?.['local-1']).toBeUndefined();
 
     client.__emit({
       directory: '/tmp',
@@ -1971,6 +2024,85 @@ describe('createOpenCodeServerRuntime', () => {
     await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_accepted' });
 
     await expect(promptPromise).resolves.toBeUndefined();
+  });
+
+  it('awaits provider prompt submission handoff after prompt_async resolves before session idle', async () => {
+    const client = createFakeClient();
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as unknown as OpenCodeServerRuntimeClient,
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    const onProviderPromptSubmitted = vi.fn(async () => undefined);
+    const promptPromise = (runtime as unknown as OpenCodeRuntimePromptHarness).sendPromptWithMeta({
+      text: 'hello',
+      localId: 'local-provider-submitted',
+      onProviderPromptSubmitted,
+    });
+    const settlement = observePromiseSettlement(promptPromise);
+
+    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+    await flushTranscriptCommitMicrotasks();
+
+    expect(onProviderPromptSubmitted).toHaveBeenCalledTimes(1);
+    expect(settlement.status).toBe('pending');
+
+    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_submitted' });
+
+    await expect(promptPromise).resolves.toBeUndefined();
+  });
+
+  it('rejects attempt submission when the turn resolves before prompt_async acknowledgement', async () => {
+    const client = createFakeClient();
+    let resolvePromptAsync!: () => void;
+    const pendingPromptAsync = new Promise<void>((resolve) => {
+      resolvePromptAsync = resolve;
+    });
+    client.sessionPromptAsync = vi.fn(async () => await pendingPromptAsync);
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as unknown as OpenCodeServerRuntimeClient,
+    });
+
+    try {
+      await runtime.startOrLoad({});
+      runtime.beginTurn();
+
+      const onProviderPromptSubmitted = vi.fn(async () => undefined);
+      const promptPromise = (runtime as unknown as OpenCodeRuntimePromptHarness).sendPromptWithMeta({
+        text: 'hello',
+        localId: 'local-provider-unconfirmed',
+        onProviderPromptSubmitted,
+      });
+      void promptPromise.catch(() => undefined);
+
+      await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+      await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_unconfirmed' });
+
+      await expect(promptPromise).rejects.toThrow(/submission.*unconfirmed/i);
+      expect(client.sessionPromptAsync).toHaveBeenCalledTimes(1);
+      expect(onProviderPromptSubmitted).not.toHaveBeenCalled();
+    } finally {
+      resolvePromptAsync();
+      await runtime.reset().catch(() => undefined);
+    }
   });
 
   it('does not pass an explicit Anthropic retired model override to OpenCode prompt_async', async () => {
@@ -2520,10 +2652,8 @@ describe('createOpenCodeServerRuntime', () => {
   it('does not block the first prompt after resume behind a stale busy status snapshot', async () => {
     const prevPollInterval = process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS;
     const prevStatusPoll = process.env.HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED;
-    const prevPrePromptWaitMs = process.env.HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS;
     process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS = '25';
     process.env.HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED = '1';
-    process.env.HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS = '5000';
     try {
       const resumedSessionId = 'ses_1';
       const client = createFakeClient();
@@ -2576,8 +2706,6 @@ describe('createOpenCodeServerRuntime', () => {
       else process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS = prevPollInterval;
       if (prevStatusPoll === undefined) delete process.env.HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED;
       else process.env.HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED = prevStatusPoll;
-      if (prevPrePromptWaitMs === undefined) delete process.env.HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS;
-      else process.env.HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS = prevPrePromptWaitMs;
     }
   });
 
@@ -3663,81 +3791,81 @@ describe('createOpenCodeServerRuntime', () => {
   it.each(['resolve', 'reject'] as const)(
     'fences stale fail-closed rejection %s from a new runtime lifecycle with the same request key',
     async (retiredOutcome) => {
-    const client = createFakeClient();
-    const session = createFakeSession();
-    let resolveRetiredDelivery: (value: boolean) => void = () => {
-      throw new Error('retired question rejection delivery did not start');
-    };
-    let rejectRetiredDelivery: (error: Error) => void = () => {
-      throw new Error('retired question rejection delivery did not start');
-    };
-    let rejectNewDelivery: (error: Error) => void = () => {
-      throw new Error('new question rejection delivery did not start');
-    };
-    client.questionReject
-      .mockImplementationOnce(async () => await new Promise<boolean>((resolve, reject) => {
-        resolveRetiredDelivery = resolve;
-        rejectRetiredDelivery = reject;
-      }))
-      .mockImplementationOnce(async () => await new Promise<never>((_resolve, reject) => {
-        rejectNewDelivery = reject;
-      }))
-      .mockResolvedValueOnce(true);
-    const permissionHandler = {
-      handleToolCall: vi.fn(async () => {
-        throw new Error('invalid structured question');
-      }),
-    };
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: permissionHandler as any,
-      onThinkingChange: vi.fn(),
-    }, { createClient: async () => client as any });
-    const event = {
-      directory: '/tmp',
-      payload: {
-        type: 'question.asked',
-        properties: {
-          id: 'que_invalid_reset_race',
-          sessionID: 'ses_1',
-          questions: [{ question: 'q1', header: 'Q1', options: [], multiple: false }],
+      const client = createFakeClient();
+      const session = createFakeSession();
+      let resolveRetiredDelivery: (value: boolean) => void = () => {
+        throw new Error('retired question rejection delivery did not start');
+      };
+      let rejectRetiredDelivery: (error: Error) => void = () => {
+        throw new Error('retired question rejection delivery did not start');
+      };
+      let rejectNewDelivery: (error: Error) => void = () => {
+        throw new Error('new question rejection delivery did not start');
+      };
+      client.questionReject
+        .mockImplementationOnce(async () => await new Promise<boolean>((resolve, reject) => {
+          resolveRetiredDelivery = resolve;
+          rejectRetiredDelivery = reject;
+        }))
+        .mockImplementationOnce(async () => await new Promise<never>((_resolve, reject) => {
+          rejectNewDelivery = reject;
+        }))
+        .mockResolvedValueOnce(true);
+      const permissionHandler = {
+        handleToolCall: vi.fn(async () => {
+          throw new Error('invalid structured question');
+        }),
+      };
+      const runtime = createOpenCodeServerRuntime({
+        directory: '/tmp',
+        session,
+        messageBuffer: new MessageBuffer(),
+        mcpServers: {},
+        permissionHandler: permissionHandler as any,
+        onThinkingChange: vi.fn(),
+      }, { createClient: async () => client as any });
+      const event = {
+        directory: '/tmp',
+        payload: {
+          type: 'question.asked',
+          properties: {
+            id: 'que_invalid_reset_race',
+            sessionID: 'ses_1',
+            questions: [{ question: 'q1', header: 'Q1', options: [], multiple: false }],
+          },
         },
-      },
-    } as const;
+      } as const;
 
-    await runtime.startOrLoad({});
-    await client.__emit(event);
-    await expect.poll(() => client.questionReject.mock.calls.length).toBe(1);
+      await runtime.startOrLoad({});
+      await client.__emit(event);
+      await expect.poll(() => client.questionReject.mock.calls.length).toBe(1);
 
-    await runtime.reset();
-    await runtime.startOrLoad({});
-    await client.__emit(event);
-    await expect.poll(() => client.questionReject.mock.calls.length).toBe(2);
+      await runtime.reset();
+      await runtime.startOrLoad({});
+      await client.__emit(event);
+      await expect.poll(() => client.questionReject.mock.calls.length).toBe(2);
 
-    if (retiredOutcome === 'resolve') {
-      resolveRetiredDelivery(true);
-    } else {
-      rejectRetiredDelivery(new Error('retired lifecycle rejection delivery failure'));
-    }
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await client.__emit(event);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(permissionHandler.handleToolCall).toHaveBeenCalledTimes(2);
-    expect(client.questionReject).toHaveBeenCalledTimes(2);
+      if (retiredOutcome === 'resolve') {
+        resolveRetiredDelivery(true);
+      } else {
+        rejectRetiredDelivery(new Error('retired lifecycle rejection delivery failure'));
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await client.__emit(event);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(permissionHandler.handleToolCall).toHaveBeenCalledTimes(2);
+      expect(client.questionReject).toHaveBeenCalledTimes(2);
 
-    rejectNewDelivery(new Error('new lifecycle rejection delivery failure'));
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await client.__emit(event);
-    await expect.poll(() => client.questionReject.mock.calls.length).toBe(3);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await client.__emit(event);
-    await new Promise<void>((resolve) => setImmediate(resolve));
+      rejectNewDelivery(new Error('new lifecycle rejection delivery failure'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await client.__emit(event);
+      await expect.poll(() => client.questionReject.mock.calls.length).toBe(3);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await client.__emit(event);
+      await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(permissionHandler.handleToolCall).toHaveBeenCalledTimes(2);
-    expect(client.questionReject).toHaveBeenCalledTimes(3);
+      expect(permissionHandler.handleToolCall).toHaveBeenCalledTimes(2);
+      expect(client.questionReject).toHaveBeenCalledTimes(3);
     },
   );
 
@@ -4034,60 +4162,92 @@ describe('createOpenCodeServerRuntime', () => {
     expect(client.questionReply).toHaveBeenCalledWith({ requestId: 'que_other_combo', answers: [['Custom goal, with commas']] });
   });
 
-  it('does not double-handle questions when question.asked arrives and the control-plane poll also sees it', async () => {
-    const client = createFakeClient() as any;
-    const session = createFakeSession();
-    const permissionHandler = {
-      handleToolCall: vi.fn(async () => ({ decision: 'approved', answers: { q1: ['deep'] } })),
-    };
-
-    client.questionList = vi.fn(async () => ([
-      {
-        id: 'que_1',
-        sessionID: 'ses_1',
-        questions: [
-          { question: 'q1', header: 'Q1', options: [{ label: 'deep', description: 'Deep' }], multiple: false },
-        ],
-      },
-    ]));
-
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: permissionHandler as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
+  it('uses SSE as the sole permission/question owner while status polling remains a bounded completion fallback', async () => {
+    const restoreEnv = withEnvForTest({
+      HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS: '2000',
+      HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS: '250',
+      HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '1',
     });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(0));
+    let runtime: ReturnType<typeof createOpenCodeServerRuntime> | null = null;
+    let promptPromise: Promise<void> | null = null;
+    try {
+      const client = createFakeClient();
+      client.sessionStatusList.mockResolvedValue({ ses_1: { type: 'busy' } });
+      const permissionHandler = {
+        handleToolCall: vi.fn(async (_id: string, toolName: string) => (
+          toolName === 'AskUserQuestion'
+            ? { decision: 'approved' as const, answers: { q1: ['yes'] } }
+            : { decision: 'approved' as const }
+        )),
+      };
+      const started = await beginOpenCodePromptForTest({
+        client,
+        permissionHandler,
+        localId: 'local-sse-control-owner',
+      });
+      runtime = started.runtime;
+      promptPromise = started.promptPromise;
 
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    client.sessionPromptAsync = vi.fn(async () => {
-      client.__emit({
+      const permissionEvent: OpenCodeGlobalEvent = {
+        directory: '/tmp',
+        payload: {
+          type: 'permission.asked',
+          properties: {
+            id: 'perm_sse_owner',
+            sessionID: 'ses_1',
+            permission: 'edit',
+            patterns: ['AGENTS.md'],
+            always: ['*'],
+            metadata: {},
+            tool: { messageID: 'msg_tool_sse_owner', callID: 'call_sse_owner' },
+          },
+        },
+      };
+      const questionEvent: OpenCodeGlobalEvent = {
         directory: '/tmp',
         payload: {
           type: 'question.asked',
           properties: {
-            id: 'que_1',
+            id: 'question_sse_owner',
             sessionID: 'ses_1',
-            questions: [{ question: 'q1', header: 'Q1', options: [{ label: 'deep', description: 'Deep' }], multiple: false }],
+            questions: [{
+              question: 'Continue?',
+              header: 'Continue',
+              options: [{ label: 'yes', description: 'Continue' }],
+              multiple: false,
+            }],
           },
         },
-      });
-    });
+      };
 
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-q-dedupe' });
-    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+      await client.__emit(permissionEvent);
+      await client.__emit(permissionEvent);
+      await client.__emit(questionEvent);
+      await client.__emit(questionEvent);
+      await flushTranscriptCommitMicrotasks();
+      await advanceTimersAndFlush(1_000);
 
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_question_dedupe' });
+      expect(client.permissionList).not.toHaveBeenCalled();
+      expect(client.questionList).not.toHaveBeenCalled();
+      expect(client.sessionStatusList.mock.calls.length).toBeGreaterThan(0);
+      expect(client.sessionStatusList.mock.calls.length).toBeLessThanOrEqual(5);
+      expect(permissionHandler.handleToolCall).toHaveBeenCalledTimes(2);
+      expect(client.permissionReply).toHaveBeenCalledTimes(1);
+      expect(client.questionReply).toHaveBeenCalledTimes(1);
 
-    await expect(promptPromise).resolves.toBeUndefined();
-
-    expect(permissionHandler.handleToolCall).toHaveBeenCalledTimes(1);
-    expect(client.questionReply).toHaveBeenCalledTimes(1);
+      await emitTerminalAssistantAndIdle(client, { messageId: 'msg_sse_control_owner_done' });
+      await expect(promptPromise).resolves.toBeUndefined();
+      expect(client.permissionList).not.toHaveBeenCalled();
+      expect(client.questionList).not.toHaveBeenCalled();
+    } finally {
+      await runtime?.cancel().catch(() => {});
+      await promptPromise?.catch(() => undefined);
+      vi.useRealTimers();
+      await runtime?.reset().catch(() => {});
+      restoreEnv();
+    }
   });
 
   it('dedupes cumulative text deltas and streams transcript-vNext updates with a stable happierStreamKey per OpenCode message', async () => {
@@ -4648,8 +4808,8 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('fails an idle turn without terminal assistant evidence through the stuck-idle fallback', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
+      HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS: '10',
       HAPPIER_OPENCODE_SERVER_IDLE_WITHOUT_TERMINAL_ASSISTANT_TIMEOUT_MS: '50',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -4743,7 +4903,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('fails an idle turn after a tool-call continuation without a final assistant terminal update', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_IDLE_WITHOUT_TERMINAL_ASSISTANT_TIMEOUT_MS: '50',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
@@ -4838,7 +4997,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('cancels the stuck-idle fallback when final assistant terminal evidence arrives before timeout', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_IDLE_WITHOUT_TERMINAL_ASSISTANT_TIMEOUT_MS: '50',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
@@ -4889,9 +5047,118 @@ describe('createOpenCodeServerRuntime', () => {
     }
   });
 
-  it('does not use history assistant text backfill to satisfy idle completion', async () => {
+  it('reconciles one exact-parent terminal assistant from authoritative inventory when real SSE frames are observation-only', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000));
+    let runtime: ReturnType<typeof createOpenCodeServerRuntime> | null = null;
+    let promptPromise: Promise<void> | null = null;
+    try {
+      const client = createFakeClient();
+      let promptUserMessageId = '';
+      let promptSubmitted = false;
+      let statusReadCount = 0;
+      client.sessionPromptAsync = vi.fn(async (input) => {
+        promptUserMessageId = input.messageId ?? '';
+        promptSubmitted = true;
+      });
+      client.sessionMessagesList = vi.fn(async () => {
+        if (!promptSubmitted) return [];
+        const terminalAssistant = {
+          info: {
+            id: 'msg_exact_parent_terminal',
+            role: 'assistant',
+            sessionID: 'ses_1',
+            parentID: promptUserMessageId,
+            time: { created: 1_010, completed: 1_020 },
+            finish: 'stop',
+          },
+          parts: [{ id: 'part_exact_parent_terminal', type: 'text', text: 'EXACT_PARENT_FINAL' }],
+        };
+        return [
+          {
+            info: { id: promptUserMessageId, role: 'user', sessionID: 'ses_1', time: { created: 1_005 } },
+            parts: [{ id: 'part_current_user', type: 'text', text: 'hello' }],
+          },
+          terminalAssistant,
+          // A duplicated provider inventory row must not duplicate transcript or terminal outcome.
+          terminalAssistant,
+        ];
+      });
+      client.sessionStatusList = vi.fn(async () => {
+        if (!promptSubmitted) return {};
+        statusReadCount += 1;
+        return statusReadCount === 1 ? { ses_1: { type: 'busy' } } : {};
+      });
+
+      const started = await beginOpenCodePromptForTest({
+        client,
+        session: mirrorLifecycleMarkersForTest(createFakeSession()),
+        localId: 'local-exact-parent-inventory-reconciliation',
+        env: {
+          ...process.env,
+          HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS: '25',
+          HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS: '25',
+          HAPPIER_OPENCODE_SERVER_IDLE_WITHOUT_TERMINAL_ASSISTANT_TIMEOUT_MS: '1000',
+          HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
+        },
+      });
+      runtime = started.runtime;
+      promptPromise = started.promptPromise;
+      const outcome = observePromiseSettlement(promptPromise);
+      expect(promptUserMessageId).not.toBe('');
+
+      // Production OpenCode clients classify every post-server.connected frame this way because
+      // arrival order cannot distinguish replay. These frames therefore remain observation-only.
+      await started.client.__emitUntrusted({
+        directory: '/tmp',
+        payload: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'msg_exact_parent_terminal',
+              role: 'assistant',
+              sessionID: 'ses_1',
+              parentID: promptUserMessageId,
+              time: { completed: 1_020 },
+              finish: 'stop',
+            },
+          },
+        },
+      });
+      await started.client.__emitUntrusted({
+        directory: '/tmp',
+        payload: { type: 'session.idle', properties: { sessionID: 'ses_1' } },
+      });
+      expect(outcome.status).toBe('pending');
+      expect(getCommittedTranscriptRows(started.session, { type: 'message', sidechainId: null })).toHaveLength(0);
+
+      await advanceTimersAndFlush(25);
+
+      expect(outcome.status).toBe('resolved');
+      await expect(promptPromise).resolves.toBeUndefined();
+      const committedRows = getCommittedTranscriptRows(started.session, { type: 'message', sidechainId: null });
+      expect(committedRows.length).toBeGreaterThan(0);
+      expect(committedRows.every((row) => (
+        row.body.message === 'EXACT_PARENT_FINAL'
+        && row.meta.opencodeMessageId === 'msg_exact_parent_terminal'
+      ))).toBe(true);
+      expect(new Set(committedRows.map((row) => row.localId)).size).toBe(1);
+      expect(committedRows.at(-1)?.meta.happierStreamSegmentV1).toEqual(expect.objectContaining({
+        segmentState: 'complete',
+      }));
+      expect(sentAgentMessagesOfType(started.session, 'task_complete')).toHaveLength(1);
+      expect(sentAgentMessagesOfType(started.session, 'turn_failed')).toHaveLength(0);
+      expect(started.session.sessionTurnLifecycle.failTurn).not.toHaveBeenCalled();
+    } finally {
+      await runtime?.cancel().catch(() => {});
+      await promptPromise?.catch(() => undefined);
+      await runtime?.reset().catch(() => {});
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects stale and wrong-parent terminal inventory instead of satisfying idle completion', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_IDLE_WITHOUT_TERMINAL_ASSISTANT_TIMEOUT_MS: '50',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
@@ -4902,12 +5169,50 @@ describe('createOpenCodeServerRuntime', () => {
     let promptPromise: Promise<void> | null = null;
     try {
       const client = createFakeClient();
-      client.sessionMessagesList.mockResolvedValue([
-        {
-          info: { id: 'msg_history_only_assistant', role: 'assistant', sessionID: 'ses_1', time: { completed: 1 }, finish: 'stop' },
-          parts: [{ type: 'text', text: 'HISTORY_ONLY_SHOULD_NOT_STREAM' }],
-        },
-      ]);
+      let promptUserMessageId = '';
+      let promptSubmitted = false;
+      client.sessionPromptAsync = vi.fn(async (input) => {
+        promptUserMessageId = input.messageId ?? '';
+        promptSubmitted = true;
+      });
+      client.sessionMessagesList = vi.fn(async () => {
+        const staleAssistant = {
+          info: {
+            id: 'msg_stale_terminal',
+            role: 'assistant',
+            sessionID: 'ses_1',
+            parentID: 'msg_old_user',
+            time: { created: 1, completed: 2 },
+            finish: 'stop',
+          },
+          parts: [{ type: 'text', text: 'STALE_SHOULD_NOT_STREAM' }],
+        };
+        if (!promptSubmitted) {
+          return [
+            { info: { id: 'msg_old_user', role: 'user', sessionID: 'ses_1', time: { created: 0 } }, parts: [] },
+            staleAssistant,
+          ];
+        }
+        return [
+          { info: { id: 'msg_old_user', role: 'user', sessionID: 'ses_1', time: { created: 0 } }, parts: [] },
+          staleAssistant,
+          {
+            info: { id: promptUserMessageId, role: 'user', sessionID: 'ses_1', time: { created: 3 } },
+            parts: [{ type: 'text', text: 'hello' }],
+          },
+          {
+            info: {
+              id: 'msg_new_wrong_parent_terminal',
+              role: 'assistant',
+              sessionID: 'ses_1',
+              parentID: 'msg_unrelated_user',
+              time: { created: 4, completed: 5 },
+              finish: 'stop',
+            },
+            parts: [{ type: 'text', text: 'WRONG_PARENT_SHOULD_NOT_STREAM' }],
+          },
+        ];
+      });
       const started = await beginOpenCodePromptForTest({
         client,
         localId: 'local-no-history-backfill-completion',
@@ -4924,7 +5229,11 @@ describe('createOpenCodeServerRuntime', () => {
 
       expect(outcome.status).toBe('rejected');
       expect(sentAgentMessagesOfType(started.session, 'task_complete')).toHaveLength(0);
-      expect(JSON.stringify(started.session.sendAgentMessageCommitted.mock.calls)).not.toContain('HISTORY_ONLY_SHOULD_NOT_STREAM');
+      expect(JSON.stringify(started.session.sendAgentMessageCommitted.mock.calls)).not.toContain('STALE_SHOULD_NOT_STREAM');
+      expect(JSON.stringify(started.session.sendAgentMessageCommitted.mock.calls)).not.toContain('WRONG_PARENT_SHOULD_NOT_STREAM');
+      // The existing control loop may revisit idle resolution while the failure fallback is pending.
+      // Authoritative inventory reconciliation is one boundary read, not a new history poll.
+      expect(client.sessionMessagesListRaw).toHaveBeenCalledTimes(2);
       expect(started.session.sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
         issue: expect.objectContaining({ code: 'opencode_idle_without_terminal_assistant' }),
       }));
@@ -5035,7 +5344,6 @@ describe('createOpenCodeServerRuntime', () => {
     const { client, session, runtime, promptPromise } = await beginOpenCodePromptForTest({
       localId: 'local-context-overflow-compaction',
       env: {
-        HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
         HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
         HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
       },
@@ -5067,7 +5375,6 @@ describe('createOpenCodeServerRuntime', () => {
     const { client, session, runtime, promptPromise } = await beginOpenCodePromptForTest({
       localId: 'local-context-overflow-normal-output-resumes',
       env: {
-        HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
         HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
         HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
       },
@@ -5509,9 +5816,8 @@ describe('createOpenCodeServerRuntime', () => {
     }
   });
 
-  it('keeps no-active-turn session.next tool activity in the provider completion gate', async () => {
+  it('does not retain no-active-turn session.next tool events as foreground work', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -5558,10 +5864,6 @@ describe('createOpenCodeServerRuntime', () => {
       void promptPromise.catch(() => undefined);
       const outcome = observePromiseSettlement(promptPromise);
       await flushTranscriptCommitMicrotasks();
-      await advanceTimersAndFlush(30_000);
-
-      expect(outcome.status).toBe('pending');
-      expect(client.sessionAbort).not.toHaveBeenCalled();
 
       await client.__emit({
         directory: '/tmp',
@@ -5570,29 +5872,8 @@ describe('createOpenCodeServerRuntime', () => {
       await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_after_no_active_next_tool' });
       await flushTranscriptCommitMicrotasks();
 
-      expect(outcome.status).toBe('pending');
-      expect(sentAgentMessagesOfType(session, 'task_complete')).toHaveLength(0);
-      expect(session.sessionTurnLifecycle.completeTurn).not.toHaveBeenCalled();
-
-      await client.__emit({
-        directory: '/tmp',
-        payload: {
-          type: 'session.next.tool.success',
-          properties: {
-            sessionID: 'ses_1',
-            messageID: 'msg_no_active_next_tool',
-            callID: 'call_no_active_next_tool',
-            tool: 'bash',
-            output: 'done',
-          },
-        },
-      });
-      await client.__emit({
-        directory: '/tmp',
-        payload: { type: 'session.idle', properties: { sessionID: 'ses_1' } },
-      });
-
-      await expect(promptPromise).resolves.toBeUndefined();
+      expect(outcome.status).toBe('resolved');
+      expect(client.sessionAbort).not.toHaveBeenCalled();
       expect(sentAgentMessagesOfType(session, 'task_complete')).toHaveLength(1);
       expect(session.sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(1);
     } finally {
@@ -5780,7 +6061,7 @@ describe('createOpenCodeServerRuntime', () => {
     }
   });
 
-  it('clears provider activity after explicit cancel so a later prompt can complete', async () => {
+  it('clears foreground provider work after explicit cancel so a later prompt can complete', async () => {
     const client = createFakeClient();
     const session = mirrorLifecycleMarkersForTest(createFakeSession());
     const runtime = createOpenCodeServerRuntime({
@@ -6076,13 +6357,11 @@ describe('createOpenCodeServerRuntime', () => {
     }
   });
 
-  it('waits for the OpenCode session to become idle before sending a new prompt (avoids busy-session wedges after abort)', async () => {
+  it('dispatches through prompt_async without using provider-wide session status as foreground admission authority', async () => {
     const prevPollInterval = process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS;
     const prevStatusPoll = process.env.HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED;
-    const prevPrePromptWaitMs = process.env.HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS;
     process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS = '25';
     process.env.HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED = '1';
-    process.env.HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS = '5000';
     try {
       const client = createFakeClient() as any;
       const session = createFakeSession();
@@ -6098,9 +6377,6 @@ describe('createOpenCodeServerRuntime', () => {
       });
       client.sessionPromptAsync = vi.fn(async () => {
         callSequence.push('prompt');
-        if (statusType !== 'idle') {
-          throw new Error('session is busy');
-        }
       });
 
       const runtime = createOpenCodeServerRuntime({
@@ -6119,8 +6395,7 @@ describe('createOpenCodeServerRuntime', () => {
 
       const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-preprompt-idle' });
       await expect.poll(() => (client.sessionPromptAsync as any).mock.calls.length).toBe(1);
-      expect(callSequence.indexOf('prompt')).toBeGreaterThanOrEqual(0);
-      expect(callSequence.indexOf('prompt')).toBeGreaterThan(callSequence.findIndex((v) => v === 'status:idle'));
+      expect(callSequence.at(0)).toBe('prompt');
 
       client.__emit({
         directory: '/tmp',
@@ -6134,7 +6409,6 @@ describe('createOpenCodeServerRuntime', () => {
 
       await expect(promptPromise).resolves.toBeUndefined();
       expect((client.sessionPromptAsync as any).mock.calls.length).toBe(1);
-      expect((client.sessionStatusList as any).mock.calls.length).toBeGreaterThanOrEqual(2);
     } finally {
       if (prevPollInterval === undefined) {
         delete process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS;
@@ -6145,11 +6419,6 @@ describe('createOpenCodeServerRuntime', () => {
         delete process.env.HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED;
       } else {
         process.env.HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED = prevStatusPoll;
-      }
-      if (prevPrePromptWaitMs === undefined) {
-        delete process.env.HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS;
-      } else {
-        process.env.HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS = prevPrePromptWaitMs;
       }
     }
   });
@@ -6814,7 +7083,7 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('maps structured OpenCode usage-limit session errors into runtime issue details', async () => {
     const client = createFakeClient();
-    const session = createFakeSession();
+    const session = createFakeSession('happy_sess_opencode_usage_error');
     const runtime = createOpenCodeServerRuntime({
       directory: '/tmp',
       env: {
@@ -6860,6 +7129,10 @@ describe('createOpenCodeServerRuntime', () => {
     });
 
     await expect(promptPromise).rejects.toThrow('OpenCode account rate limit');
+    await expect.poll(
+      () => mockNotifyDaemonConnectedServiceRuntimeAuthFailure.mock.calls.length,
+      { timeout: 5_000 },
+    ).toBe(1);
 
     expect(session.sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
       provider: 'opencode',
@@ -6884,7 +7157,8 @@ describe('createOpenCodeServerRuntime', () => {
       providerTurnId: expect.any(String),
     }));
     expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalledWith({
-      sessionId: 'happy_sess_opencode',
+      reportId: expect.stringMatching(/^runtime-auth-report:/),
+      sessionId: 'happy_sess_opencode_usage_error',
       switchesThisTurn: 0,
       classification: expect.objectContaining({
         kind: 'rate_limit',
@@ -6912,7 +7186,7 @@ describe('createOpenCodeServerRuntime', () => {
   it('fails active turns when OpenCode reports a usage-limit retry over session.status SSE', async () => {
     mockNotifyDaemonConnectedServiceRuntimeAuthFailure.mockClear();
     const client = createFakeClient();
-    const session = createFakeSession();
+    const session = createFakeSession('happy_sess_opencode_status_retry');
     const retryNextAtMs = Date.now() + 60_000;
     const runtime = createOpenCodeServerRuntime({
       directory: '/tmp',
@@ -6967,6 +7241,10 @@ describe('createOpenCodeServerRuntime', () => {
 
       const outcome = await outcomePromise;
       expect(outcome).toEqual({ type: 'rejected', message: 'The usage limit has been reached' });
+      await expect.poll(
+        () => mockNotifyDaemonConnectedServiceRuntimeAuthFailure.mock.calls.length,
+        { timeout: 5_000 },
+      ).toBe(1);
 
       expect(session.sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
         provider: 'opencode',
@@ -6987,7 +7265,8 @@ describe('createOpenCodeServerRuntime', () => {
         providerTurnId: expect.any(String),
       }));
       expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalledWith({
-        sessionId: 'happy_sess_opencode',
+        reportId: expect.stringMatching(/^runtime-auth-report:/),
+        sessionId: 'happy_sess_opencode_status_retry',
         switchesThisTurn: 0,
         classification: expect.objectContaining({
           kind: 'usage_limit',
@@ -7076,7 +7355,7 @@ describe('createOpenCodeServerRuntime', () => {
       createScheduledRuntimeAuthRecoveryReport({ includeTranscriptEvent: false }),
     );
     const client = createFakeClient();
-    const session = createFakeSession();
+    const session = createFakeSession('happy_sess_opencode_projection_fallback');
     const runtime = createOpenCodeServerRuntime({
       directory: '/tmp',
       env: {
@@ -7122,6 +7401,10 @@ describe('createOpenCodeServerRuntime', () => {
         },
       });
 
+      await expect.poll(
+        () => mockNotifyDaemonConnectedServiceRuntimeAuthFailure.mock.calls.length,
+        { timeout: 5_000 },
+      ).toBe(1);
       await expect.poll(() => session.sendSessionEvent.mock.calls.length).toBe(1);
       expect(session.sendSessionEvent).toHaveBeenCalledWith({
         type: 'message',
@@ -7910,254 +8193,6 @@ describe('createOpenCodeServerRuntime', () => {
     );
   });
 
-  it('polls for pending permission requests and replies while a turn is in-flight', async () => {
-    const client = createFakeClient();
-    const session = createFakeSession();
-    const permissionHandler = { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) };
-
-    client.permissionList.mockImplementation(async () => ([
-      {
-        id: 'per_1',
-        sessionID: 'ses_1',
-        permission: 'external_directory',
-        patterns: ['/tmp/*'],
-        always: ['/tmp/*'],
-        metadata: {},
-      },
-    ]));
-
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: permissionHandler as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-4' });
-
-    await expect.poll(() => client.permissionList.mock.calls.length).toBeGreaterThan(0);
-    await expect.poll(() => client.permissionReply.mock.calls.length).toBe(1);
-    expect(permissionHandler.handleToolCall).toHaveBeenCalledWith(
-      'per_1',
-      'external_directory',
-      expect.objectContaining({
-        permissionId: 'per_1',
-        providerPermissionId: 'per_1',
-        toolCallId: 'per_1',
-        toolName: 'external_directory',
-        permission: expect.objectContaining({
-          id: 'per_1',
-          kind: 'external_directory',
-        }),
-      }),
-    );
-    expect(client.permissionReply).toHaveBeenCalledWith({ requestId: 'per_1', reply: 'once' });
-
-    // Complete the turn once permissions are cleared + idle is observed.
-    client.permissionList.mockResolvedValueOnce([]);
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_1' });
-
-    await expect(promptPromise).resolves.toBeUndefined();
-  });
-
-  it('fails closed when permission polling fails before turn completion', async () => {
-    vi.useFakeTimers();
-    process.env.HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS = '25';
-    process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS = '25';
-    process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_MAX_CONSECUTIVE_FAILURES = '1';
-    process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_FAILURE_GRACE_MS = '250';
-
-    const client = createFakeClient();
-    client.permissionList.mockImplementation(async () => {
-      throw new Error('permission list failed');
-    });
-    const session = createFakeSession();
-
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-permission-failure' });
-    const promptOutcome = promptPromise.then(
-      () => ({ status: 'resolved' as const }),
-      (error: unknown) => ({ status: 'rejected' as const, error }),
-    );
-
-    await vi.advanceTimersByTimeAsync(300);
-
-    const outcome = await promptOutcome;
-    expect(outcome.status).toBe('rejected');
-    expect(String((outcome as { error: { message?: unknown } }).error.message)).toContain('permission list failed');
-
-    vi.useRealTimers();
-    delete process.env.HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS;
-    delete process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS;
-    delete process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_MAX_CONSECUTIVE_FAILURES;
-    delete process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_FAILURE_GRACE_MS;
-  });
-
-  it('fails closed when permission polling returns a malformed request row for this session', async () => {
-    const client = createFakeClient();
-    client.permissionList.mockResolvedValue([
-      // Missing `id` => cannot be safely handled; must fail-closed.
-      { sessionID: 'ses_1', permission: 'edit', patterns: ['AGENTS.md'], always: ['*'], metadata: {} },
-    ] as any);
-    const session = createFakeSession();
-
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-permission-malformed' });
-    const promptOutcome = promptPromise.then(
-      () => ({ status: 'resolved' as const }),
-      (error: unknown) => ({ status: 'rejected' as const, error }),
-    );
-    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
-
-    client.__emit({
-      directory: '/tmp',
-      payload: { type: 'message.part.delta', properties: { sessionID: 'ses_1', messageID: 'msg_asst_1', partID: 'part_1', delta: 'hi' } },
-    });
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_parent_asst_1' });
-
-    const outcome = await promptOutcome;
-    expect(outcome.status).toBe('rejected');
-    expect((session.sendAgentMessage as any).mock.calls.some((call: any[]) =>
-      call?.[0] === 'opencode' && call?.[1]?.type === 'message'
-    )).toBe(false);
-    expect(session.sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
-      provider: 'opencode',
-    }));
-  });
-
-  it('fails closed when question polling fails before turn completion', async () => {
-    vi.useFakeTimers();
-    process.env.HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS = '25';
-    process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS = '25';
-    process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_MAX_CONSECUTIVE_FAILURES = '1';
-    process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_FAILURE_GRACE_MS = '250';
-
-    const client = createFakeClient();
-    client.questionList.mockImplementation(async () => {
-      throw new Error('question list failed');
-    });
-    const session = createFakeSession();
-
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-question-failure' });
-    const promptOutcome = promptPromise.then(
-      () => ({ status: 'resolved' as const }),
-      (error: unknown) => ({ status: 'rejected' as const, error }),
-    );
-
-    await vi.advanceTimersByTimeAsync(300);
-
-    const outcome = await promptOutcome;
-    expect(outcome.status).toBe('rejected');
-    expect(String((outcome as { error: { message?: unknown } }).error.message)).toContain('question list failed');
-
-    vi.useRealTimers();
-    delete process.env.HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS;
-    delete process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS;
-    delete process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_MAX_CONSECUTIVE_FAILURES;
-    delete process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_FAILURE_GRACE_MS;
-  });
-
-  it('fails closed when question polling repeatedly fails even if permission polling succeeds', async () => {
-    vi.useFakeTimers();
-    process.env.HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS = '25';
-    process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS = '25';
-    process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_MAX_CONSECUTIVE_FAILURES = '2';
-    process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_FAILURE_GRACE_MS = '250';
-
-    const client = createFakeClient();
-    client.permissionList.mockImplementation(async () => []);
-    client.questionList.mockImplementation(async () => {
-      throw new Error('question list failed');
-    });
-    const session = createFakeSession();
-
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-question-failure-with-perms-ok' });
-    const promptOutcome = promptPromise.then(
-      () => ({ status: 'resolved' as const }),
-      (error: unknown) => ({ status: 'rejected' as const, error }),
-    );
-
-    const outcome = await Promise.race([
-      promptOutcome,
-      (async () => {
-        await vi.advanceTimersByTimeAsync(600);
-        return { status: 'timeout' as const };
-      })(),
-    ]);
-
-    expect(outcome.status).toBe('rejected');
-    if (outcome.status === 'rejected') {
-      expect(String((outcome as { error: { message?: unknown } }).error.message)).toContain('question list failed');
-    }
-
-    vi.useRealTimers();
-    delete process.env.HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS;
-    delete process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS;
-    delete process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_MAX_CONSECUTIVE_FAILURES;
-    delete process.env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_FAILURE_GRACE_MS;
-  });
-
 	  it('emits a single tool-call when tool updates gain additional input fields (e.g. command)', async () => {
 	    const client = createFakeClient();
 	    const session = createFakeSession();
@@ -8659,612 +8694,6 @@ describe('createOpenCodeServerRuntime', () => {
     });
     await runtime.cancel().catch(() => {});
     await promptPromise.catch(() => undefined);
-  });
-
-  it('does not wait for Task sidechain import when OpenCode launches a background task', async () => {
-    const client = createFakeClient() as any;
-    let releaseChildImport!: () => void;
-    const childImportGate = new Promise<void>((resolve) => {
-      releaseChildImport = resolve;
-    });
-    client.sessionMessagesList = vi.fn(async ({ sessionId }: { sessionId: string }) => {
-      if (sessionId === 'ses_background_child') {
-        await childImportGate;
-      }
-      return [];
-    });
-
-    const session = createFakeSession();
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-background-task-launch' });
-    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
-
-    client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.updated',
-        properties: {
-          part: {
-            id: 'part_background_task',
-            type: 'tool',
-            sessionID: 'ses_1',
-            messageID: 'msg_background_task',
-            callID: 'call_background_task',
-            tool: 'task',
-            state: {
-              status: 'completed',
-              input: { description: 'Run background child', background: true },
-              output: [
-                '<task state="running" id="ses_background_child">',
-                '<summary>Background task started</summary>',
-                '<task_result>Background task started. You will be notified automatically when it finishes.</task_result>',
-                '</task>',
-              ].join('\n'),
-              title: 'Run background child',
-              metadata: { sessionId: 'ses_background_child', background: true, jobId: 'job_background_child' },
-            },
-          },
-        },
-      },
-    });
-    client.__emit({
-      directory: '/tmp',
-      payload: { type: 'message.part.updated', properties: { part: { id: 'part_parent_after_background_launch', type: 'text', sessionID: 'ses_1' } } },
-    });
-    client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_parent_after_background_launch',
-          partID: 'part_parent_after_background_launch',
-          delta: 'Parent foreground answer',
-        },
-      },
-    });
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_parent_after_background_launch' });
-
-    await expect(promptPromise).resolves.toBeUndefined();
-    expect(session.updateRuntimeActivityProjection).toHaveBeenCalledWith(expect.objectContaining({
-      runtimeActivityActiveCount: 1,
-      runtimeActivitySourceClass: 'provider_detached_task',
-    }));
-    expect(session.updateRuntimeActivityProjection).not.toHaveBeenCalledWith(expect.objectContaining({
-      runtimeActivitySourceClass: 'provider_autonomous_output',
-    }));
-    expect((client.sessionMessagesList as any).mock.calls).not.toEqual(
-      expect.arrayContaining([expect.arrayContaining([expect.objectContaining({ sessionId: 'ses_background_child' })])]),
-    );
-
-    releaseChildImport();
-    await runtime.cancel().catch(() => {});
-    expect(session.updateRuntimeActivityProjection).toHaveBeenLastCalledWith({
-      runtimeActivityActiveCount: 0,
-      runtimeActivityObservedAt: null,
-      runtimeActivityExpiresAt: null,
-      runtimeActivitySourceClass: null,
-    });
-  });
-
-  it('clears detached OpenCode runtime activity when a background wake says the work completed', async () => {
-    const client = createFakeClient() as any;
-    client.sessionMessagesList = vi.fn(async () => ([] as unknown[]));
-
-    const session = createFakeSession();
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-background-task-clear' });
-    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
-
-    client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.updated',
-        properties: {
-          part: {
-            id: 'part_background_task_clear',
-            type: 'tool',
-            sessionID: 'ses_1',
-            messageID: 'msg_background_task_clear',
-            callID: 'call_background_task_clear',
-            tool: 'task',
-            state: {
-              status: 'completed',
-              input: { background: true },
-              output: '<task state="running" id="ses_background_child_clear"></task>',
-              metadata: { sessionId: 'ses_background_child_clear', background: true },
-            },
-          },
-        },
-      },
-    });
-    await expect.poll(() => session.updateRuntimeActivityProjection.mock.calls.some((call: any[]) =>
-      call[0]?.runtimeActivityActiveCount === 1 && call[0]?.runtimeActivitySourceClass === 'provider_detached_task',
-    )).toBe(true);
-
-    client.__emit({
-      directory: '/tmp',
-      payload: { type: 'message.part.updated', properties: { part: { id: 'part_parent_after_background_clear', type: 'text', sessionID: 'ses_1' } } },
-    });
-    client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_parent_after_background_clear',
-          partID: 'part_parent_after_background_clear',
-          delta: 'Parent foreground answer',
-        },
-      },
-    });
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_parent_after_background_clear' });
-    await expect(promptPromise).resolves.toBeUndefined();
-
-    await client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_background_clear_wake',
-          partID: 'part_background_clear_wake',
-          delta: '<task state="completed" id="ses_background_child_clear"><task_result>Done</task_result></task>',
-        },
-      },
-    });
-    await expect.poll(() => session.updateRuntimeActivityProjection).toHaveBeenLastCalledWith({
-      runtimeActivityActiveCount: 0,
-      runtimeActivityObservedAt: null,
-      runtimeActivityExpiresAt: null,
-      runtimeActivitySourceClass: null,
-    });
-
-    await runtime.cancel().catch(() => {});
-  });
-
-  it('does not clear all OpenCode detached runtime activity for an unattributed single-task wake', async () => {
-    const client = createFakeClient() as any;
-    client.sessionMessagesList = vi.fn(async () => ([] as unknown[]));
-
-    const session = createFakeSession();
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-background-task-unattributed-clear' });
-    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
-
-    client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.updated',
-        properties: {
-          part: {
-            id: 'part_background_task_unattributed_clear',
-            type: 'tool',
-            sessionID: 'ses_1',
-            messageID: 'msg_background_task_unattributed_clear',
-            callID: 'call_background_task_unattributed_clear',
-            tool: 'task',
-            state: {
-              status: 'completed',
-              input: { background: true },
-              output: '<task state="running" id="ses_background_child_unattributed_clear"></task>',
-              metadata: { sessionId: 'ses_background_child_unattributed_clear', background: true },
-            },
-          },
-        },
-      },
-    });
-    await expect.poll(() => session.updateRuntimeActivityProjection.mock.calls.some((call: any[]) =>
-      call[0]?.runtimeActivityActiveCount === 1 && call[0]?.runtimeActivitySourceClass === 'provider_detached_task',
-    )).toBe(true);
-
-    client.__emit({
-      directory: '/tmp',
-      payload: { type: 'message.part.updated', properties: { part: { id: 'part_parent_after_background_unattributed_clear', type: 'text', sessionID: 'ses_1' } } },
-    });
-    client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_parent_after_background_unattributed_clear',
-          partID: 'part_parent_after_background_unattributed_clear',
-          delta: 'Parent foreground answer',
-        },
-      },
-    });
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_parent_after_background_unattributed_clear' });
-    await expect(promptPromise).resolves.toBeUndefined();
-
-    const writesBeforeUnattributedWake = session.updateRuntimeActivityProjection.mock.calls.length;
-    await client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_background_unattributed_clear_wake',
-          partID: 'part_background_unattributed_clear_wake',
-          delta: [
-            '<system-reminder>',
-            '[BACKGROUND TASK COMPLETED]',
-            '<!-- OMO_INTERNAL_INITIATOR -->',
-            '</system-reminder>',
-          ].join('\n'),
-        },
-      },
-    });
-    await flushTranscriptCommitMicrotasks();
-    expect(session.updateRuntimeActivityProjection.mock.calls.length).toBe(writesBeforeUnattributedWake);
-
-    await client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_background_all_clear_wake',
-          partID: 'part_background_all_clear_wake',
-          delta: [
-            '<system-reminder>',
-            '[ALL BACKGROUND TASKS COMPLETE]',
-            '<!-- OMO_INTERNAL_INITIATOR -->',
-            '</system-reminder>',
-          ].join('\n'),
-        },
-      },
-    });
-    await expect.poll(() => session.updateRuntimeActivityProjection).toHaveBeenLastCalledWith({
-      runtimeActivityActiveCount: 0,
-      runtimeActivityObservedAt: null,
-      runtimeActivityExpiresAt: null,
-      runtimeActivitySourceClass: null,
-    });
-
-    await runtime.cancel().catch(() => {});
-  });
-
-  it('does not publish detached runtime activity for foreground-only OpenCode tool work', async () => {
-    const client = createFakeClient() as any;
-    client.sessionMessagesList = vi.fn(async () => ([] as unknown[]));
-
-    const session = createFakeSession();
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-foreground-tool' });
-    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
-
-    client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.updated',
-        properties: {
-          part: {
-            id: 'part_foreground_tool',
-            type: 'tool',
-            sessionID: 'ses_1',
-            messageID: 'msg_foreground_tool',
-            callID: 'call_foreground_tool',
-            tool: 'read',
-            state: {
-              status: 'running',
-              input: { filePath: 'README.md' },
-              output: '',
-            },
-          },
-        },
-      },
-    });
-    await flushTranscriptCommitMicrotasks();
-    expect(session.updateRuntimeActivityProjection).not.toHaveBeenCalled();
-
-    client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.updated',
-        properties: {
-          part: {
-            id: 'part_foreground_tool',
-            type: 'tool',
-            sessionID: 'ses_1',
-            messageID: 'msg_foreground_tool',
-            callID: 'call_foreground_tool',
-            tool: 'read',
-            state: {
-              status: 'completed',
-              input: { filePath: 'README.md' },
-              output: 'ok',
-            },
-          },
-        },
-      },
-    });
-    client.__emit({
-      directory: '/tmp',
-      payload: { type: 'message.part.updated', properties: { part: { id: 'part_parent_foreground_tool', type: 'text', sessionID: 'ses_1' } } },
-    });
-    client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_parent_foreground_tool',
-          partID: 'part_parent_foreground_tool',
-          delta: 'Done',
-        },
-      },
-    });
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_parent_foreground_tool' });
-    await expect(promptPromise).resolves.toBeUndefined();
-    expect(session.updateRuntimeActivityProjection).not.toHaveBeenCalled();
-
-    await runtime.cancel().catch(() => {});
-  });
-
-  it('adopts a provider-autonomous turn for background task parent output after an oh-my-openagent wake', async () => {
-    const client = createFakeClient() as any;
-    client.sessionMessagesList = vi.fn(async () => ([] as unknown[]));
-
-    const session = createFakeSession();
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-before-omo-wake' });
-    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
-    await client.__emit({
-      directory: '/tmp',
-      payload: { type: 'message.part.updated', properties: { part: { id: 'part_initial_parent_text', type: 'text', sessionID: 'ses_1' } } },
-    });
-    await client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_initial_parent_text',
-          partID: 'part_initial_parent_text',
-          delta: 'Initial answer',
-        },
-      },
-    });
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_initial_parent_text' });
-    await expect(promptPromise).resolves.toBeUndefined();
-
-    expect(sentAgentMessagesOfType(session, 'task_started')).toHaveLength(1);
-    expect(sentAgentMessagesOfType(session, 'task_complete')).toHaveLength(1);
-
-    await client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.updated',
-        properties: {
-          part: {
-            id: 'part_omo_background_wake',
-            type: 'text',
-            sessionID: 'ses_1',
-            messageID: 'msg_omo_background_wake',
-            synthetic: true,
-            text: [
-              '<system-reminder>',
-              '[ALL BACKGROUND TASKS COMPLETE]',
-              '',
-              '- `bg_abc123` completed: inspect cache',
-              '',
-              'Use `background_output(task_id="bg_abc123")` to retrieve each result.',
-              '</system-reminder>',
-              '<!-- OMO_INTERNAL_INITIATOR -->',
-            ].join('\n'),
-          },
-        },
-      },
-    });
-    await flushTranscriptCommitMicrotasks();
-
-    expect(sentAgentMessagesOfType(session, 'task_started')).toHaveLength(1);
-    expect(session.updateRuntimeActivityProjection).not.toHaveBeenCalled();
-
-    await client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.updated',
-        properties: {
-          part: {
-            id: 'part_omo_background_output_tool',
-            type: 'tool',
-            sessionID: 'ses_1',
-            messageID: 'msg_omo_background_output_tool',
-            callID: 'call_omo_background_output',
-            tool: 'background_output',
-            state: {
-              status: 'completed',
-              input: { task_id: 'bg_abc123' },
-              output: '# Task Result\n\nResult ready',
-              title: 'Background output',
-              metadata: {
-                backgroundTaskId: 'bg_abc123',
-                sessionId: 'ses_omo_child',
-                taskId: 'ses_omo_child',
-              },
-            },
-          },
-        },
-      },
-    });
-    await client.__emit({
-      directory: '/tmp',
-      payload: { type: 'message.part.updated', properties: { part: { id: 'part_omo_parent_text', type: 'text', sessionID: 'ses_1' } } },
-    });
-    await client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_omo_parent_text',
-          partID: 'part_omo_parent_text',
-          delta: 'Processed background result',
-        },
-      },
-    });
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_omo_parent_text' });
-    await flushTranscriptCommitMicrotasks();
-
-    expect(sentAgentMessagesOfType(session, 'task_started')).toHaveLength(2);
-    expect(sentAgentMessagesOfType(session, 'tool-result')).toEqual([
-      expect.objectContaining({ callId: 'call_omo_background_output' }),
-    ]);
-    expect(sentAgentMessagesOfType(session, 'task_complete')).toHaveLength(2);
-    expect(runtime.isTurnInFlight()).toBe(false);
-    expect(JSON.stringify(getCommittedTranscriptRows(session))).not.toContain('OMO_INTERNAL_INITIATOR');
-
-    await runtime.cancel().catch(() => {});
-  });
-
-  it('adopts a provider-autonomous turn when native background task wake arrives as streamed delta', async () => {
-    const client = createFakeClient() as any;
-    client.sessionMessagesList = vi.fn(async () => ([] as unknown[]));
-
-    const session = createFakeSession();
-    const runtime = createOpenCodeServerRuntime({
-      directory: '/tmp',
-      session,
-      messageBuffer: new MessageBuffer(),
-      mcpServers: {},
-      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
-      onThinkingChange: vi.fn(),
-    }, {
-      createClient: async () => client as any,
-    });
-
-    await runtime.startOrLoad({});
-    runtime.beginTurn();
-
-    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-before-native-background-delta-wake' });
-    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
-    await client.__emit({
-      directory: '/tmp',
-      payload: { type: 'message.part.updated', properties: { part: { id: 'part_initial_native_parent_text', type: 'text', sessionID: 'ses_1' } } },
-    });
-    await client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_initial_native_parent_text',
-          partID: 'part_initial_native_parent_text',
-          delta: 'Initial answer',
-        },
-      },
-    });
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_initial_native_parent_text' });
-    await expect(promptPromise).resolves.toBeUndefined();
-
-    await client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_native_background_wake',
-          partID: 'part_native_background_wake',
-          delta: '<task state="completed" id="ses_background_child"><task_result>Done</task_result></task>',
-        },
-      },
-    });
-    await flushTranscriptCommitMicrotasks();
-
-    expect(sentAgentMessagesOfType(session, 'task_started')).toHaveLength(1);
-
-    await client.__emit({
-      directory: '/tmp',
-      payload: { type: 'message.part.updated', properties: { part: { id: 'part_native_background_parent_text', type: 'text', sessionID: 'ses_1' } } },
-    });
-    await client.__emit({
-      directory: '/tmp',
-      payload: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'ses_1',
-          messageID: 'msg_native_background_parent_text',
-          partID: 'part_native_background_parent_text',
-          delta: 'Processed native background result',
-        },
-      },
-    });
-    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_native_background_parent_text' });
-    await flushTranscriptCommitMicrotasks();
-
-    await expect.poll(() => sentAgentMessagesOfType(session, 'task_started').length).toBe(2);
-    await expect.poll(() => sentAgentMessagesOfType(session, 'task_complete').length).toBe(2);
-    expect(runtime.isTurnInFlight()).toBe(false);
-    expect(JSON.stringify(getCommittedTranscriptRows(session))).not.toContain('<task state="completed"');
-
-    await runtime.cancel().catch(() => {});
   });
 
   it('streams sidechain text as incremental deltas (avoids duplicate prefixes when OpenCode emits cumulative deltas)', async () => {
@@ -9889,18 +9318,6 @@ describe('createOpenCodeServerRuntime', () => {
       const client = createFakeClient() as any;
       const session = createFakeSession();
       const permissionHandler = { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) };
-      let pendingPermissionIds: string[] = [];
-
-      client.permissionList.mockImplementation(async () => (
-        pendingPermissionIds.map((id) => ({
-          id,
-          sessionID: 'ses_1',
-          permission: 'external_directory',
-          patterns: ['/tmp/*'],
-          always: ['/tmp/*'],
-          metadata: {},
-        }))
-      ));
 
       let releaseCommittedFlush!: () => void;
       const committedFlushPromise = new Promise<void>((resolve) => {
@@ -9925,7 +9342,6 @@ describe('createOpenCodeServerRuntime', () => {
       await runtime.startOrLoad({});
 
       runtime.beginTurn();
-      pendingPermissionIds = ['per_1'];
       const firstPromptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-turn-1' });
       await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
 
@@ -9952,8 +9368,6 @@ describe('createOpenCodeServerRuntime', () => {
           },
         },
       });
-      await expect.poll(() => client.permissionReply.mock.calls.some((call: any[]) => call?.[0]?.requestId === 'per_1')).toBe(true);
-      pendingPermissionIds = [];
       await flushTranscriptCommitMicrotasks();
       await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_1' });
 
@@ -9978,12 +9392,8 @@ describe('createOpenCodeServerRuntime', () => {
       });
 
       runtime.beginTurn();
-      pendingPermissionIds = ['per_2'];
       const secondPromptPromise = (runtime as any).sendPromptWithMeta({ text: 'second turn', localId: 'local-turn-2' });
       await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(2);
-
-      await expect.poll(() => client.permissionReply.mock.calls.some((call: any[]) => call?.[0]?.requestId === 'per_2')).toBe(true);
-      pendingPermissionIds = [];
 
       let secondTurnResolved = false;
       void secondPromptPromise.then(() => {
@@ -10273,9 +9683,8 @@ describe('createOpenCodeServerRuntime', () => {
     await runtime.reset().catch(() => {});
   });
 
-  it('keeps control-plane polling alive when status lookup throws', async () => {
+  it('keeps status polling alive when one status lookup throws', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS: '25',
       HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS: '25',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '1',
@@ -10303,46 +9712,7 @@ describe('createOpenCodeServerRuntime', () => {
       runtime = started.runtime;
       promptPromise = started.promptPromise;
 
-      await expect.poll(() => client.permissionList.mock.calls.length, { timeout: 500, interval: 25 }).toBeGreaterThan(1);
-    } finally {
-      await runtime?.cancel().catch(() => {});
-      await runtime?.reset().catch(() => {});
-      await promptPromise?.catch(() => undefined);
-      restoreEnv();
-    }
-  });
-
-  it('keeps control-plane polling alive when assistant backfill parsing throws', async () => {
-    const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
-      HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS: '25',
-      HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS: '25',
-      HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
-    });
-    let runtime: ReturnType<typeof createOpenCodeServerRuntime> | null = null;
-    let promptPromise: Promise<void> | null = null;
-    try {
-      const client = createFakeClient();
-      let messageListCount = 0;
-      client.sessionMessagesList = vi.fn(async () => {
-        messageListCount += 1;
-        if (messageListCount === 2) {
-          const row: Record<string, unknown> = { parts: [] };
-          Object.defineProperty(row, 'info', {
-            get() {
-              throw new Error('assistant backfill parsing exploded');
-            },
-          });
-          return [row];
-        }
-        return [];
-      });
-
-      const started = await beginOpenCodePromptForTest({ client, localId: 'local-backfill-throw' });
-      runtime = started.runtime;
-      promptPromise = started.promptPromise;
-
-      await expect.poll(() => client.permissionList.mock.calls.length, { timeout: 500, interval: 25 }).toBeGreaterThan(1);
+      await expect.poll(() => client.sessionStatusList.mock.calls.length, { timeout: 500, interval: 25 }).toBeGreaterThan(1);
     } finally {
       await runtime?.cancel().catch(() => {});
       await runtime?.reset().catch(() => {});
@@ -10353,7 +9723,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('honors generic retry backoff before retry timeout', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
       HAPPIER_OPENCODE_SERVER_RETRY_MAX_WAIT_MS: '60000',
@@ -10409,7 +9778,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('does not abort a long-running silent tool before it emits meaningful input', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -10455,100 +9823,63 @@ describe('createOpenCodeServerRuntime', () => {
     }
   });
 
-  it('forwards one missed terminal tool result from control-plane history after SSE reconnect', async () => {
-    const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
-      HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
-      HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
+  it('dispatches exactly once without live SSE provenance while ambiguous replay stays observation-only', async () => {
+    const client = createFakeClient();
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as unknown as OpenCodeServerRuntimeClient,
     });
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(0));
-    let runtime: ReturnType<typeof createOpenCodeServerRuntime> | null = null;
-    let promptPromise: Promise<void> | null = null;
+
     try {
-      const started = await beginOpenCodePromptForTest({ localId: 'local-reconnect-tool-reconcile' });
-      runtime = started.runtime;
-      promptPromise = started.promptPromise;
-      const { client, session } = started;
-      const outcome = observePromiseSettlement(promptPromise);
-
-      await client.__emit({
-        directory: '/tmp',
-        payload: {
-          type: 'message.part.updated',
-          properties: {
-            part: {
-              id: 'part_reconnect_tool',
-              type: 'tool',
-              sessionID: 'ses_1',
-              messageID: 'msg_tool_reconnect',
-              callID: 'call_reconnect_tool',
-              tool: 'bash',
-              state: { status: 'running', input: {} },
-            },
-          },
-        },
+      await runtime.startOrLoad({});
+      runtime.beginTurn();
+      const onProviderPromptSubmitted = vi.fn(async () => {});
+      const promptPromise = (runtime as unknown as OpenCodeRuntimePromptHarness).sendPromptWithMeta({
+        text: 'reach OpenCode through the authenticated prompt endpoint',
+        localId: 'local-live-provenance-unavailable',
+        onProviderPromptSubmitted,
       });
-      await advanceTimersAndFlush(30_000);
-      expect(outcome.status).toBe('pending');
-      expect(client.sessionAbort).not.toHaveBeenCalled();
+      await flushTranscriptCommitMicrotasks();
 
-      client.sessionMessagesList.mockResolvedValue([
-        {
-          info: {
-            id: 'msg_tool_reconnect',
-            role: 'assistant',
-            sessionID: 'ses_1',
-            time: { created: 1000 },
-          },
-          parts: [{
-            type: 'tool',
-            sessionID: 'ses_1',
-            messageID: 'msg_tool_reconnect',
-            callID: 'call_reconnect_tool',
-            tool: 'bash',
-            state: {
-              status: 'completed',
-              input: {},
-              output: 'done',
-              metadata: {},
-            },
-          }],
-        },
+      await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+      expect(onProviderPromptSubmitted).toHaveBeenCalledTimes(1);
+
+      await client.__emitUntrusted({
+        directory: '/tmp',
+        payload: { type: 'session.idle', properties: { sessionID: 'ses_1' } },
+      });
+      const replayOutcome = await Promise.race([
+        promptPromise.then(() => 'resolved' as const),
+        new Promise<'pending'>((resolve) => {
+          const timer = setTimeout(() => resolve('pending'), 25);
+          timer.unref?.();
+        }),
       ]);
 
-      await client.__emit({
-        directory: '/tmp',
-        payload: { type: 'server.connected', properties: {} },
-      });
-      await flushTranscriptCommitMicrotasks();
-      await client.__emit({
-        directory: '/tmp',
-        payload: { type: 'server.connected', properties: {} },
-      });
-      await flushTranscriptCommitMicrotasks();
-      await emitAssistantMessageUpdated(client, { messageId: 'msg_final_reconnect', finish: 'stop' });
-      await emitTerminalAssistantAndIdle(client, { messageId: 'msg_tool_delayed_final' });
+      expect(replayOutcome).toBe('pending');
+      expect(client.sessionPromptAsync).toHaveBeenCalledTimes(1);
+      expect(sentAgentMessagesOfType(session, 'tool-call')).toHaveLength(0);
+      expect(sentAgentMessagesOfType(session, 'tool-result')).toHaveLength(0);
+      expect(client.sessionAbort).not.toHaveBeenCalled();
+      expect(sentAgentMessagesOfType(session, 'task_complete')).toHaveLength(0);
 
+      await emitTerminalAssistantAndIdle(client, { messageId: 'msg_live_after_untrusted_replay' });
       await expect(promptPromise).resolves.toBeUndefined();
-      expect(outcome.status).toBe('resolved');
-      expect(client.sessionAbort).not.toHaveBeenCalled();
-      expect(sentAgentMessagesOfType(session, 'tool-result')).toEqual([
-        expect.objectContaining({ callId: 'call_reconnect_tool' }),
-      ]);
-      expect(sentAgentMessagesOfType(session, 'task_complete')).toHaveLength(1);
+      expect(client.sessionPromptAsync).toHaveBeenCalledTimes(1);
     } finally {
-      await runtime?.cancel().catch(() => {});
-      await promptPromise?.catch(() => undefined);
-      vi.useRealTimers();
-      await runtime?.reset().catch(() => {});
-      restoreEnv();
+      await runtime.reset().catch(() => {});
     }
   });
 
   it('ignores unrelated control-plane history rows when refreshing live-known reconnect state', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -10638,10 +9969,9 @@ describe('createOpenCodeServerRuntime', () => {
   });
 
   it.each(['failed', 'cancelled', 'aborted'] as const)(
-    'forwards a missed terminal %s tool result from control-plane history',
+    'reconciles a missed terminal %s tool from control-plane history without forwarding provider input',
     async (status) => {
       const restoreEnv = withEnvForTest({
-        HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
         HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
         HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
       });
@@ -10710,16 +10040,7 @@ describe('createOpenCodeServerRuntime', () => {
         });
 
         await expect(promptPromise).resolves.toBeUndefined();
-        expect(sentAgentMessagesOfType(session, 'tool-result')).toEqual([
-          expect.objectContaining({
-            callId: `call_reconnect_tool_${status}`,
-            isError: true,
-            output: expect.objectContaining({
-              status: 'failed',
-              error: `${status} from history`,
-            }),
-          }),
-        ]);
+        expect(sentAgentMessagesOfType(session, 'tool-result')).toHaveLength(0);
       } finally {
         await runtime?.cancel().catch(() => {});
         await promptPromise?.catch(() => undefined);
@@ -10732,7 +10053,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('forwards a tool result after a long silent running period', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -10808,7 +10128,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('uses a final status liveness probe before deadlock aborting a busy OpenCode session', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -10845,7 +10164,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('adds final liveness probe diagnostics to deadlock guard failures', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -10874,7 +10192,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it.each(['permission', 'question'] as const)('does not fire deadlock guard while %s waits for the user', async (kind) => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -10961,7 +10278,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('resets compaction guard state across turns', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -11024,7 +10340,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('treats session.next text reasoning and step events as guard activity', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -11077,7 +10392,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('treats session.next tool events as guard tool lifecycle', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -11136,7 +10450,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('routes session.next retried through generic retry handling', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
       HAPPIER_OPENCODE_SERVER_RETRY_MAX_WAIT_MS: '60000',
@@ -11183,7 +10496,6 @@ describe('createOpenCodeServerRuntime', () => {
 
   it('routes nested session.next retried usage-limit errors through fail-fast handling', async () => {
     const restoreEnv = withEnvForTest({
-      HAPPIER_OPENCODE_SERVER_PREPROMPT_IDLE_WAIT_MS: '0',
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',
       HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
     });
@@ -11497,6 +10809,42 @@ describe('createOpenCodeServerRuntime origin-agnostic transcript projection (Lan
     expect((session.sendUserTextMessageCommitted as any).mock.calls).toHaveLength(1);
   });
 
+  it('keeps TUI-originated history message ids distinct by exact bytes', async () => {
+    const { client, session } = await startSessionWithoutTurn();
+    (client.sessionMessagesList as any).mockResolvedValue([
+      externalUserMessage(),
+      {
+        info: { id: ' msg_tui_user\n', role: 'user', sessionID: 'ses_1', time: { created: 11 } },
+        parts: [{ id: 'p_u_alias', type: 'text', text: 'hello from the exact alias' }],
+      },
+      externalAssistantMessage(),
+    ]);
+
+    await client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.updated', properties: { info: { id: 'msg_tui_assistant', role: 'assistant', sessionID: 'ses_1', finish: 'stop', time: { completed: 12 } } } },
+    });
+    await flushTranscriptCommitMicrotasks();
+    await flushTranscriptCommitMicrotasks();
+
+    expect((session.sendUserTextMessageCommitted as any).mock.calls.map((call: any[]) => call[0])).toEqual([
+      'hello from the TUI',
+      'hello from the exact alias',
+    ]);
+
+    await client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.updated', properties: { info: { id: 'msg_tui_assistant', role: 'assistant', sessionID: 'ses_1', finish: 'stop', time: { completed: 12 } } } },
+    });
+    await flushTranscriptCommitMicrotasks();
+    await flushTranscriptCommitMicrotasks();
+
+    expect((session.sendUserTextMessageCommitted as any).mock.calls.map((call: any[]) => call[0])).toEqual([
+      'hello from the TUI',
+      'hello from the exact alias',
+    ]);
+  });
+
   it('does not mirror an in-progress (non-terminal) assistant message', async () => {
     const { client, session } = await startSessionWithoutTurn();
     (client.sessionMessagesList as any).mockResolvedValue([
@@ -11523,7 +10871,11 @@ describe('createOpenCodeServerRuntime — connected-service broker preflight (fa
     await writeFile(path, JSON.stringify({ httpPort: 1234, controlToken: 'tok' }), 'utf8');
   }
 
-  function buildConnectedEnv(overrides: Readonly<{ brokered?: boolean; daemonStatePath?: string }>): NodeJS.ProcessEnv {
+  function buildConnectedEnv(overrides: Readonly<{
+    brokered?: boolean;
+    daemonStatePath?: string;
+    brokerLoadNonce?: string;
+  }>): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       [OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]: 'opencode|connected|openai-codex:primary:',
@@ -11540,6 +10892,9 @@ describe('createOpenCodeServerRuntime — connected-service broker preflight (fa
     }
     if (typeof overrides.daemonStatePath === 'string') {
       env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV] = overrides.daemonStatePath;
+    }
+    if (typeof overrides.brokerLoadNonce === 'string') {
+      env[OPEN_CODE_BROKER_LOAD_NONCE_ENV] = overrides.brokerLoadNonce;
     }
     return env;
   }
@@ -11563,6 +10918,131 @@ describe('createOpenCodeServerRuntime — connected-service broker preflight (fa
     });
     return { client, session, runtime };
   }
+
+  it('reuses the actual managed-server generation nonce for a second connected session preflight', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'happier-opencode-runtime-broker-reuse-home-'));
+    const daemonStatePath = join(home, 'daemon.state.json');
+    const managedStatePath = join(home, 'opencode', 'managed-server-reuse-test.json');
+    const brokerSelections = serializeOpenCodeBrokerSelections({
+      openai: { serviceId: 'openai-codex', profileId: 'primary', accountId: null, planType: null },
+    });
+    const restoreHome = withEnvForTest({
+      HAPPIER_HOME_DIR: home,
+      HAPPIER_OPENCODE_SERVER_STATE_PATH: managedStatePath,
+      [OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]: 'opencode|connected|openai-codex:primary:',
+      [OPEN_CODE_BROKER_SELECTIONS_ENV]: brokerSelections,
+      [OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV]: daemonStatePath,
+      [OPEN_CODE_BROKER_LOAD_NONCE_ENV]: undefined,
+    });
+    reloadConfiguration();
+    await writeUsableDaemonState(daemonStatePath);
+    await ensureOpenCodeBrokerPluginAssets({ providers: ['openai'], happyHomeDir: configuration.happyHomeDir });
+
+    const actualSpawnNonce = 'managed-generation-nonce';
+    let managedState: SharedManagedOpenCodeServerState | null = null;
+    const startServer = vi.fn(async (params?: {
+      onSpawned?: (started: Readonly<{
+        baseUrl: string;
+        pid: number;
+        brokerLoadNonce?: string;
+      }>) => void | Promise<void>;
+    }) => {
+      const started = {
+        baseUrl: 'http://127.0.0.1:7777',
+        pid: 4242,
+        brokerLoadNonce: actualSpawnNonce,
+      } as const;
+      await params?.onSpawned?.(started);
+      return started;
+    });
+    const deps = {
+      withLock: async <T>(fn: () => Promise<T>) => await fn(),
+      readState: vi.fn(async () => managedState),
+      writeState: vi.fn(async (state: SharedManagedOpenCodeServerState) => {
+        managedState = state;
+      }),
+      isPidAlive: vi.fn(() => true),
+      probeHealth: vi.fn(async () => true),
+      startServer,
+      currentLaunchFingerprint: 'connected-openai-primary',
+      nowMs: () => 5,
+    };
+
+    try {
+      const first = await resolveSharedManagedOpenCodeServerBaseUrl(deps);
+      expect(first).toEqual({
+        baseUrl: 'http://127.0.0.1:7777',
+        didStart: true,
+        brokerLoadNonce: actualSpawnNonce,
+      });
+      expect(managedState).toEqual(expect.objectContaining({ brokerLoadNonce: actualSpawnNonce }));
+
+      const second = await resolveSharedManagedOpenCodeServerBaseUrl(deps);
+      expect(second).toEqual({
+        baseUrl: 'http://127.0.0.1:7777',
+        didStart: false,
+        brokerLoadNonce: actualSpawnNonce,
+      });
+      expect(startServer).toHaveBeenCalledTimes(1);
+
+      const launchEnvFingerprint = resolveOpenCodeManagedServerLaunchFingerprint({
+        baseEnv: process.env,
+        xdgRootDir: null,
+        isolateConfig: false,
+      });
+      const persistedManagedState = deps.writeState.mock.calls.at(-1)?.[0];
+      if (!persistedManagedState) throw new Error('Expected the first managed OpenCode spawn to persist state');
+      await writeFile(managedStatePath, JSON.stringify({
+        ...persistedManagedState,
+        pid: process.pid,
+        startedAtMs: Date.now(),
+        launchEnvFingerprint,
+      }), 'utf8');
+      const healthFetch = vi.fn(async (input: string | URL | Request) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url === 'http://127.0.0.1:7777/global/health') {
+          return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        throw new Error(`Unexpected OpenCode client request in broker reuse test: ${url}`);
+      });
+      vi.stubGlobal('fetch', healthFetch as unknown as typeof fetch);
+      const env = buildConnectedEnv({ brokered: true, daemonStatePath });
+      const productionClient = await createOpenCodeServerRuntimeClient({
+        directory: '/tmp',
+        env,
+        messageBuffer: new MessageBuffer(),
+      });
+      await productionClient.dispose();
+      expect(env[OPEN_CODE_BROKER_LOAD_NONCE_ENV]).toBe(actualSpawnNonce);
+
+      mockQueryDaemonOpenCodeBrokerLoadHandshake.mockImplementation(
+        async (_selectionIdentity: string, loadNonce: string) => loadNonce === actualSpawnNonce,
+      );
+      const { client, runtime } = startConnectedRuntime(env);
+
+      await runtime.startOrLoad({});
+      runtime.beginTurn();
+      const promptPromise = (runtime as unknown as {
+        sendPromptWithMeta: (params: { text: string; localId: string }) => Promise<void>;
+      }).sendPromptWithMeta({ text: 'hello reused broker', localId: 'local-broker-reused-generation' });
+      void promptPromise.catch(() => undefined);
+
+      await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+      expect(mockQueryDaemonOpenCodeBrokerLoadHandshake).toHaveBeenCalledWith(
+        'opencode|connected|openai-codex:primary:',
+        actualSpawnNonce,
+      );
+
+      await runtime.cancel().catch(() => {});
+      await promptPromise.catch(() => undefined);
+      await runtime.reset().catch(() => {});
+    } finally {
+      mockQueryDaemonOpenCodeBrokerLoadHandshake.mockReset();
+      vi.unstubAllGlobals();
+      restoreHome();
+      reloadConfiguration();
+    }
+  });
 
   it('waits for server.connected before evaluating connected broker readiness for the first prompt', async () => {
     const env = buildConnectedEnv({ brokered: true });
@@ -11613,7 +11093,11 @@ describe('createOpenCodeServerRuntime — connected-service broker preflight (fa
       }),
     );
 
-    const env = buildConnectedEnv({ brokered: true, daemonStatePath });
+    const env = buildConnectedEnv({
+      brokered: true,
+      daemonStatePath,
+      brokerLoadNonce: 'managed-generation-nonce',
+    });
     const { client, runtime } = startConnectedRuntime(env);
 
     try {

@@ -31,7 +31,7 @@ export type OpenCodeManagedServerTurnInterruptionDeps = Readonly<{
   isTurnActive: () => boolean;
   /** Current managed-server identity from the runtime client (null in non-managed/unknown modes). */
   getManagedServerIdentity: () => OpenCodeManagedServerIdentity | null;
-  /** Forward the active observation generation to the provider activity tracker. */
+  /** Forward the active observation generation to the foreground tool tracker. */
   setObservedGenerationKey: (generationKey: string | null) => void;
   /** Run ONE bounded reconciliation of live-known ids from the replacement server's durable history. */
   reconcileLiveKnownToolStateFromHistory: () => Promise<void>;
@@ -39,7 +39,7 @@ export type OpenCodeManagedServerTurnInterruptionDeps = Readonly<{
   hasUnreconciledActiveLiveKnownToolWork: () => boolean;
   /** Fail the active turn exactly once with the server-restart issue (no task_complete/sessionAbort/replay). */
   failActiveTurnDueToManagedServerRestart: (input: Readonly<{ sanitizedPreview: string }>) => void;
-  /** Reset all provider activity for the interrupted turn. */
+  /** Reset all foreground provider work for the interrupted turn. */
   resetProviderWorkForInterruptedTurn: () => void;
   /** Drop provider work not backed by the given (current) generation. */
   clearOrphanedProviderWork: (currentGenerationKey: string | null) => void;
@@ -117,7 +117,7 @@ export function createOpenCodeManagedServerTurnInterruptionSupervisor(
       '[OpenCodeServer] managed server restarted mid-turn with unreconciled tool work; failing turn',
       buildDiagnostics(change, 'failed_turn_interrupted'),
     );
-    // Reset provider activity for the dead turn before failing so liveness/keepalive settle cleanly.
+    // Reset foreground provider work for the dead turn before failing so liveness/keepalive settle cleanly.
     deps.resetProviderWorkForInterruptedTurn();
     deps.failActiveTurnDueToManagedServerRestart({
       sanitizedPreview: MANAGED_SERVER_RESTARTED_DURING_TURN_PREVIEW,

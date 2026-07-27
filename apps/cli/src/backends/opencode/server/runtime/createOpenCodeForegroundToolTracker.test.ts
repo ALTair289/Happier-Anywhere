@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { createOpenCodeProviderActivityTracker } from './createOpenCodeProviderActivityTracker';
+import { createOpenCodeForegroundToolTracker } from './createOpenCodeForegroundToolTracker';
 
-type ToolPartLike = Parameters<ReturnType<typeof createOpenCodeProviderActivityTracker>['observeToolPart']>[0]['part'];
+type ToolPartLike = Parameters<ReturnType<typeof createOpenCodeForegroundToolTracker>['observeToolPart']>[0]['part'];
 
 function toolPart(params: { sessionId: string; callId: string; status: string; tool?: string; messageId?: string }): ToolPartLike {
   return {
@@ -14,9 +14,9 @@ function toolPart(params: { sessionId: string; callId: string; status: string; t
   } as unknown as ToolPartLike;
 }
 
-describe('createOpenCodeProviderActivityTracker generation awareness', () => {
+describe('createOpenCodeForegroundToolTracker generation awareness', () => {
   it('stamps the current generation key on observed live tool work', () => {
-    const tracker = createOpenCodeProviderActivityTracker();
+    const tracker = createOpenCodeForegroundToolTracker();
     tracker.setObservedGenerationKey('gen-A');
 
     tracker.observeToolPart({ part: toolPart({ sessionId: 'ses_1', callId: 'call_1', status: 'running' }), source: 'live' });
@@ -34,7 +34,7 @@ describe('createOpenCodeProviderActivityTracker generation awareness', () => {
   });
 
   it('clears terminal work regardless of generation when the call id matches', () => {
-    const tracker = createOpenCodeProviderActivityTracker();
+    const tracker = createOpenCodeForegroundToolTracker();
     tracker.setObservedGenerationKey('gen-A');
     tracker.observeToolPart({ part: toolPart({ sessionId: 'ses_1', callId: 'call_1', status: 'running' }), source: 'live' });
     expect(tracker.hasActiveProviderWork()).toBe(true);
@@ -46,7 +46,7 @@ describe('createOpenCodeProviderActivityTracker generation awareness', () => {
   });
 
   it('treats orphaned old-generation work as not backed by the current generation', () => {
-    const tracker = createOpenCodeProviderActivityTracker();
+    const tracker = createOpenCodeForegroundToolTracker();
     tracker.setObservedGenerationKey('gen-A');
     tracker.observeToolPart({ part: toolPart({ sessionId: 'ses_side', callId: 'call_orphan', status: 'running' }), source: 'live' });
 
@@ -69,7 +69,7 @@ describe('createOpenCodeProviderActivityTracker generation awareness', () => {
   });
 
   it('clears all active work for turn_reset / provider_session_reset', () => {
-    const tracker = createOpenCodeProviderActivityTracker();
+    const tracker = createOpenCodeForegroundToolTracker();
     tracker.setObservedGenerationKey('gen-A');
     tracker.observeToolPart({ part: toolPart({ sessionId: 'ses_1', callId: 'call_1', status: 'running' }), source: 'live' });
     tracker.observeToolPart({ part: toolPart({ sessionId: 'ses_1', callId: 'call_2', status: 'running' }), source: 'live' });
@@ -83,7 +83,7 @@ describe('createOpenCodeProviderActivityTracker generation awareness', () => {
   });
 
   it('stamps session-next tool work with the current generation', () => {
-    const tracker = createOpenCodeProviderActivityTracker();
+    const tracker = createOpenCodeForegroundToolTracker();
     tracker.setObservedGenerationKey('gen-A');
     tracker.observeSessionNextTool({ sessionId: 'ses_1', callId: 'call_1', terminal: false, source: 'session-next' });
     expect(tracker.hasActiveProviderWorkNotOrphanedByGeneration('gen-A')).toBe(true);
@@ -91,7 +91,7 @@ describe('createOpenCodeProviderActivityTracker generation awareness', () => {
   });
 
   it('treats un-stamped work (observed before any generation was set) as live, never orphaned', () => {
-    const tracker = createOpenCodeProviderActivityTracker();
+    const tracker = createOpenCodeForegroundToolTracker();
     // No setObservedGenerationKey: work observed before a generation baseline exists.
     tracker.observeToolPart({ part: toolPart({ sessionId: 'ses_1', callId: 'call_unstamped', status: 'running' }), source: 'live' });
     expect(tracker.hasActiveProviderWork()).toBe(true);

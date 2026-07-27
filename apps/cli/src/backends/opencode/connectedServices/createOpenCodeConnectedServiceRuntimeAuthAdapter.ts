@@ -5,7 +5,6 @@ import {
   resolveOpenCodeConnectedServiceSelectionByPrecedence,
 } from './openCodeConnectedServicePrecedence';
 import { extractOpenCodeErrorText } from '@/backends/opencode/server/openCodeErrorText';
-import { releaseForAuthSwitch } from '@/backends/opencode/server/sharedManagedServer';
 import { applyBrokerBridgeRuntimeAuthSelection } from '@/daemon/connectedServices/broker/applyBrokerBridgeRuntimeAuthSelection';
 import {
   classifyProviderLimitEvidence,
@@ -150,32 +149,20 @@ export function createOpenCodeConnectedServiceRuntimeAuthAdapter(): ConnectedSer
     },
     async recoverAfterRuntimeAuthSwitch(input) {
       const selection = readRecord(input.selection);
-      const previousLaunchFingerprint = readString(selection?.previousLaunchFingerprint);
-      if (!previousLaunchFingerprint) {
+      if (!readString(selection?.brokerSelectionIdentity)) {
         return {
-          recovered: true,
+          recovered: false,
           recovery: 'restart_rematerialize',
           detached: false,
-          detachedReason: 'prior_launch_fingerprint_missing',
+          detachedReason: 'broker_selection_identity_missing',
         };
       }
 
-      const previousOwnerToken = readString(selection?.previousOwnerToken);
-      if (!previousOwnerToken) {
-        return {
-          recovered: true,
-          recovery: 'restart_rematerialize',
-          detached: false,
-          detachedReason: 'prior_owner_token_missing',
-        };
-      }
-
-      const detached = await releaseForAuthSwitch(previousLaunchFingerprint, previousOwnerToken);
       return {
         recovered: true,
-        recovery: 'restart_rematerialize',
-        detached: detached.released,
-        detachedReason: detached.reason,
+        recovery: 'provider_owned_broker_selection',
+        detached: false,
+        detachedReason: 'broker_request_time_selection_preserved',
       };
     },
     async verifyActiveAccount() {

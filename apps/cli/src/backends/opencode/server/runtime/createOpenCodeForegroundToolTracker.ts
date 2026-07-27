@@ -3,7 +3,7 @@ import type { parseOpenCodeToolPart } from '../openCodeMessageParsing';
 
 type OpenCodeToolPart = NonNullable<ReturnType<typeof parseOpenCodeToolPart>>;
 
-export type OpenCodeProviderActivitySource = 'live' | 'session-next' | 'history';
+export type OpenCodeForegroundToolSource = 'live' | 'session-next' | 'history';
 
 export type OpenCodeActiveToolSummary = Readonly<{
   key: string;
@@ -13,17 +13,17 @@ export type OpenCodeActiveToolSummary = Readonly<{
   status: string;
   messageId?: string;
   partId?: string;
-  sources: readonly OpenCodeProviderActivitySource[];
+  sources: readonly OpenCodeForegroundToolSource[];
   observedAtMs: number;
   observedGenerationKey?: string;
 }>;
 
-export type OpenCodeProviderActivityClearReason =
+export type OpenCodeForegroundToolClearReason =
   | 'provider_session_reset'
   | 'turn_reset'
   | 'managed_server_generation_replaced';
 
-export type OpenCodeProviderWorkState =
+export type OpenCodeForegroundToolState =
   | Readonly<{ active: false }>
   | Readonly<{
     active: true;
@@ -39,7 +39,7 @@ type ActiveToolRecord = {
   status: string;
   messageId?: string;
   partId?: string;
-  sources: Set<OpenCodeProviderActivitySource>;
+  sources: Set<OpenCodeForegroundToolSource>;
   observedAtMs: number;
   observedGenerationKey?: string;
 };
@@ -65,7 +65,7 @@ export function isTerminalOpenCodeToolPartStatus(status: string): boolean {
   );
 }
 
-export function createOpenCodeProviderActivityTracker() {
+export function createOpenCodeForegroundToolTracker() {
   const activeToolsByKey = new Map<string, ActiveToolRecord>();
   let providerSessionId: string | null = null;
   // The managed-server generation key under which subsequent live/session-next observations are
@@ -91,7 +91,7 @@ export function createOpenCodeProviderActivityTracker() {
 
   const observeToolPart = (params: Readonly<{
     part: OpenCodeToolPart;
-    source: OpenCodeProviderActivitySource;
+    source: OpenCodeForegroundToolSource;
     partId?: string | null;
   }>): string => {
     const status = normalizeString(params.part.state.status);
@@ -110,7 +110,7 @@ export function createOpenCodeProviderActivityTracker() {
       status,
       messageId: params.part.messageID,
       ...(params.partId ? { partId: params.partId } : {}),
-      sources: new Set<OpenCodeProviderActivitySource>(),
+      sources: new Set<OpenCodeForegroundToolSource>(),
       observedAtMs: Date.now(),
     };
     next.status = status;
@@ -127,7 +127,7 @@ export function createOpenCodeProviderActivityTracker() {
     sessionId: string;
     callId: string;
     terminal: boolean;
-    source: OpenCodeProviderActivitySource;
+    source: OpenCodeForegroundToolSource;
   }>): string => {
     const key = buildOpenCodeProviderToolCallKey(params.sessionId, params.callId);
     if (params.terminal) {
@@ -141,7 +141,7 @@ export function createOpenCodeProviderActivityTracker() {
       callId: params.callId,
       toolName: '',
       status: 'running',
-      sources: new Set<OpenCodeProviderActivitySource>(),
+      sources: new Set<OpenCodeForegroundToolSource>(),
       observedAtMs: Date.now(),
     };
     next.sources.add(params.source);
@@ -181,7 +181,7 @@ export function createOpenCodeProviderActivityTracker() {
     ...(tool.observedGenerationKey ? { observedGenerationKey: tool.observedGenerationKey } : {}),
   });
 
-  const buildWorkState = (records: readonly ActiveToolRecord[]): OpenCodeProviderWorkState => {
+  const buildWorkState = (records: readonly ActiveToolRecord[]): OpenCodeForegroundToolState => {
     if (records.length === 0) return { active: false };
     const activeToolCalls = records.map((tool) => summarizeActiveTool(tool));
     return {
@@ -191,13 +191,13 @@ export function createOpenCodeProviderActivityTracker() {
     };
   };
 
-  const getProviderWorkState = (): OpenCodeProviderWorkState =>
+  const getProviderWorkState = (): OpenCodeForegroundToolState =>
     buildWorkState(Array.from(activeToolsByKey.values()));
 
   const clearActiveWork = (params: Readonly<{
-    reason: OpenCodeProviderActivityClearReason;
+    reason: OpenCodeForegroundToolClearReason;
     generationKey?: string | null;
-  }>): OpenCodeProviderWorkState => {
+  }>): OpenCodeForegroundToolState => {
     const generationKey = params.generationKey && params.generationKey.length > 0 ? params.generationKey : null;
     const cleared: ActiveToolRecord[] = [];
     for (const [key, record] of [...activeToolsByKey.entries()]) {

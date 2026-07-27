@@ -5,10 +5,23 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  buildConnectedServiceCredentialRecord,
+  ConnectedServiceAuthGroupPolicyV1Schema,
+  type ConnectedServiceBindingsV1,
+} from '@happier-dev/protocol';
 
 import { configuration } from '@/configuration';
+import type { TrackedSession } from '@/daemon/types';
 import { prepareIsolatedDaemonTestHome, type PreparedDaemonTestHome } from '@/daemon/testkit/realIntegration.testkit';
 import { removeSessionMarker, writeSessionMarker } from '@/daemon/sessionRegistry';
+import {
+  ConnectedServiceSessionAuthSwitchLockRegistry,
+  createConnectedServiceSessionAuthSwitchCore,
+} from '@/daemon/connectedServices/runtimeAuth/connectedServiceSessionAuthSwitchCore';
+import { createSessionConnectedServiceAuthHotApply } from '@/daemon/connectedServices/sessionAuthSwitch/sessionConnectedServiceAuthHotApply';
+import { switchSessionConnectedServiceAuth } from '@/daemon/connectedServices/sessionAuthSwitch/switchSessionConnectedServiceAuth';
+import { getBrokerBridgeEffectiveSelectionForTest } from '@/daemon/connectedServices/broker/brokerBridgeEffectiveSelectionRegistry';
 import { waitForCondition } from '@/testkit/async/waitFor';
 import { spawnDetachedInlineNodeTestProcess, waitForProcessExit } from '@/testkit/process/spawn';
 
@@ -311,7 +324,7 @@ describe('OpenCode auth-switch fake-provider e2e', () => {
     );
   }, 120_000);
 
-  it('routes auth-switch detach through runtime adapter with tracked-claim gating before release', async () => {
+  it('preserves the shared managed server and its claim across broker-owned auth switches', async () => {
     const localFakeBinDir = await createFakeBinDir();
     fakeBinDir = localFakeBinDir;
     const fakeOpenCodePath = join(localFakeBinDir, 'opencode');
@@ -367,12 +380,16 @@ describe('OpenCode auth-switch fake-provider e2e', () => {
     const runtimeAdapter = createOpenCodeConnectedServiceRuntimeAuthAdapter();
     const blockedResult = await runtimeAdapter.recoverAfterRuntimeAuthSwitch({
       target: { agentId: 'opencode', targetId: 'fake-session' },
-      selection: { previousLaunchFingerprint: launchFingerprint, previousOwnerToken: ownerToken },
+      selection: {
+        brokerSelectionIdentity: 'opencode|connected|broker:1|openai-codex:account-a:',
+        previousLaunchFingerprint: launchFingerprint,
+        previousOwnerToken: ownerToken,
+      },
     }) as { detached?: boolean; detachedReason?: string; recovery?: string };
     expect(blockedResult).toMatchObject({
       detached: false,
-      detachedReason: 'tracked_session_claimed',
-      recovery: 'restart_rematerialize',
+      detachedReason: 'broker_request_time_selection_preserved',
+      recovery: 'provider_owned_broker_selection',
     });
     expect(await pathExists(statePath)).toBe(true);
     expect(isOpenCodeServerPidAlive(orphanServer.pid)).toBe(true);
@@ -381,31 +398,157 @@ describe('OpenCode auth-switch fake-provider e2e', () => {
     killPidBestEffort(markerPidB);
     await waitForProcessExit(markerPidB, { timeoutMs: 5_000 }).catch(() => false);
 
-    const releasedResult = await runtimeAdapter.recoverAfterRuntimeAuthSwitch({
-      target: { agentId: 'opencode', targetId: 'fake-session' },
-      selection: { previousLaunchFingerprint: launchFingerprint, previousOwnerToken: ownerToken },
-    }) as { detached?: boolean; detachedReason?: string; recovery?: string };
-    expect(releasedResult).toMatchObject({
-      detached: true,
-      detachedReason: 'released',
-      recovery: 'restart_rematerialize',
+    const previousBindings: ConnectedServiceBindingsV1 = {
+      v: 1,
+      bindingsByServiceId: {
+        'openai-codex': {
+          source: 'connected',
+          selection: 'group',
+          groupId: 'main',
+          profileId: 'profile-old',
+        },
+      },
+    };
+    const tracked: TrackedSession = {
+      startedBy: 'daemon',
+      happySessionId: 'tracked-release-session',
+      pid: markerPidA,
+      spawnOptions: {
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'opencode' },
+        connectedServices: previousBindings,
+      },
+    };
+    const nextRecord = buildConnectedServiceCredentialRecord({
+      now: 1,
+      serviceId: 'openai-codex',
+      profileId: 'profile-new',
+      kind: 'oauth',
+      oauth: {
+        accessToken: 'new-access',
+        refreshToken: 'new-refresh',
+        idToken: null,
+        scope: null,
+        tokenType: 'Bearer',
+        providerAccountId: 'account-b',
+        providerEmail: null,
+      },
     });
-    await waitForCondition(async () => !(await pathExists(statePath)), {
-      timeoutMs: 20_000,
-      label: 'auth-switch release state file removal',
+    const runtimeSelection = {
+      serviceId: 'openai-codex',
+      brokerSelectionIdentity: 'opencode|connected|broker:1|openai-codex:account-a:',
+      kind: 'group',
+      groupId: 'main',
+      activeProfileId: 'profile-new',
+      fallbackProfileId: 'profile-old',
+      generation: 2,
+      record: nextRecord,
+      previousLaunchFingerprint: launchFingerprint,
+      previousOwnerToken: ownerToken,
+    };
+    const hotApply = createSessionConnectedServiceAuthHotApply({
+      resolveRuntimeAuthAdapter: async () => runtimeAdapter,
     });
-    await waitForCondition(() => !isOpenCodeServerPidAlive(orphanServer.pid), {
-      timeoutMs: 20_000,
-      label: 'auth-switch release process exit',
+    const switchResult = await switchSessionConnectedServiceAuth({
+      core: createConnectedServiceSessionAuthSwitchCore({
+        locks: new ConnectedServiceSessionAuthSwitchLockRegistry(),
+      }),
+      switchReason: 'automatic_runtime_failure',
+      postSwitchVerificationMode: {
+        kind: 'disabled_for_test_only',
+        reason: 'provider composition test consumes the adapter hot-apply verification directly',
+      },
+      getChildren: () => [tracked],
+      api: {
+        listConnectedServiceProfiles: async () => ({
+          serviceId: 'openai-codex',
+          profiles: [
+            { profileId: 'profile-old', status: 'connected' },
+            { profileId: 'profile-new', status: 'connected' },
+          ],
+        }),
+        getConnectedServiceAuthGroup: async () => ({
+          v: 1,
+          serviceId: 'openai-codex',
+          groupId: 'main',
+          displayName: 'Main',
+          policy: ConnectedServiceAuthGroupPolicyV1Schema.parse({ autoSwitch: true }),
+          activeProfileId: 'profile-new',
+          generation: 2,
+          runtimeStateRevision: 0,
+          state: { v: 1 },
+          members: [
+            {
+              v: 1,
+              serviceId: 'openai-codex',
+              groupId: 'main',
+              profileId: 'profile-old',
+              priority: 1,
+              enabled: true,
+              state: {},
+              createdAt: 1,
+              updatedAt: 1,
+            },
+            {
+              v: 1,
+              serviceId: 'openai-codex',
+              groupId: 'main',
+              profileId: 'profile-new',
+              priority: 2,
+              enabled: true,
+              state: {},
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          ],
+          createdAt: 1,
+          updatedAt: 1,
+        }),
+      },
+      materializeRuntimeAuthSelection: async () => runtimeSelection,
+      resolveContinuity: async () => ({ mode: 'hot_apply' }),
+      restartSession: async () => {
+        throw new Error('broker request-time adoption must not restart OpenCode');
+      },
+      hotApply,
+      recoverAfterRuntimeAuthSwitch: async (input) => {
+        const selection = input.runtimeAuthSelectionsByServiceId?.get('openai-codex');
+        const result = await runtimeAdapter.recoverAfterRuntimeAuthSwitch({
+          target: { agentId: 'opencode', targetId: 'tracked-release-session' },
+          selection,
+        });
+        return result.recovered === true ? { ok: true } : { ok: false };
+      },
+      persistSessionBindings: async () => {},
+      registerHotApplyTargets: () => {},
+      emitSessionEvent: () => {},
+      request: {
+        sessionId: 'tracked-release-session',
+        agentId: 'opencode',
+        bindings: previousBindings,
+      },
     });
+    expect(switchResult).toMatchObject({ ok: true, action: 'hot_applied' });
+    expect(getBrokerBridgeEffectiveSelectionForTest({
+      selectionIdentity: runtimeSelection.brokerSelectionIdentity,
+      serviceId: 'openai-codex',
+    })).toMatchObject({
+      selectionEpoch: 1,
+      selection: {
+        kind: 'group',
+        groupId: 'main',
+        activeProfileId: 'profile-new',
+        fallbackProfileId: 'profile-old',
+        generation: 2,
+      },
+    });
+    expect(await pathExists(statePath)).toBe(true);
+    expect(isOpenCodeServerPidAlive(orphanServer.pid)).toBe(true);
   }, 120_000);
 
-  it('defers the auth-switch release while the sole claimant has an in-flight turn, then releases at quiescence', async () => {
-    // Lane F prevention end-to-end: a sole-claimant managed server (the switching session) must NOT
-    // be torn down while that session still has an in-flight OpenCode turn. The release should report
-    // `in_flight_turn` (server + state intact), then succeed once the turn quiesces. Exercises the
-    // real wiring: in-flight-turn registry -> session-marker scan (happySessionId) -> release guard ->
-    // runtime adapter reason passthrough.
+  it('keeps broker-owned auth adoption independent from in-flight-turn and quiescence state', async () => {
+    // Request-time broker adoption is independent from the turn boundary: neither an in-flight turn
+    // nor later quiescence is authority to release the shared server or its materialized claim.
     const localFakeBinDir = await createFakeBinDir();
     fakeBinDir = localFakeBinDir;
     const fakeOpenCodePath = join(localFakeBinDir, 'opencode');
@@ -435,8 +578,7 @@ describe('OpenCode auth-switch fake-provider e2e', () => {
     });
     await writeManagedState(statePath, state);
 
-    // A single tracked claim: the switching session itself (subtracted by allowCurrentSessionClaim,
-    // so claim count alone would permit the kill — only the in-flight-turn guard holds it back).
+    // A single tracked claim represents the switching session itself.
     const marker = spawnDetachedInlineNodeTestProcess('setInterval(() => {}, 1 << 30)', {
       stdio: ['ignore', 'ignore', 'ignore'],
     });
@@ -461,35 +603,37 @@ describe('OpenCode auth-switch fake-provider e2e', () => {
     const runtimeAdapter = createOpenCodeConnectedServiceRuntimeAuthAdapter();
     const blockedResult = await runtimeAdapter.recoverAfterRuntimeAuthSwitch({
       target: { agentId: 'opencode', targetId: 'fake-session' },
-      selection: { previousLaunchFingerprint: launchFingerprint, previousOwnerToken: ownerToken },
+      selection: {
+        brokerSelectionIdentity: 'opencode|connected|broker:1|openai-codex:account-a:',
+        previousLaunchFingerprint: launchFingerprint,
+        previousOwnerToken: ownerToken,
+      },
     }) as { detached?: boolean; detachedReason?: string; recovery?: string };
     expect(blockedResult).toMatchObject({
       detached: false,
-      detachedReason: 'in_flight_turn',
-      recovery: 'restart_rematerialize',
+      detachedReason: 'broker_request_time_selection_preserved',
+      recovery: 'provider_owned_broker_selection',
     });
     expect(await pathExists(statePath)).toBe(true);
     expect(isOpenCodeServerPidAlive(orphanServer.pid)).toBe(true);
 
-    // Turn quiesces (boundary reached / turn cancelled): the release now proceeds.
+    // Turn quiesces: request-time broker adoption still does not release the shared server.
     turnInFlightSessionIds.clear();
 
     const releasedResult = await runtimeAdapter.recoverAfterRuntimeAuthSwitch({
       target: { agentId: 'opencode', targetId: 'fake-session' },
-      selection: { previousLaunchFingerprint: launchFingerprint, previousOwnerToken: ownerToken },
+      selection: {
+        brokerSelectionIdentity: 'opencode|connected|broker:1|openai-codex:account-a:',
+        previousLaunchFingerprint: launchFingerprint,
+        previousOwnerToken: ownerToken,
+      },
     }) as { detached?: boolean; detachedReason?: string; recovery?: string };
     expect(releasedResult).toMatchObject({
-      detached: true,
-      detachedReason: 'released',
-      recovery: 'restart_rematerialize',
+      detached: false,
+      detachedReason: 'broker_request_time_selection_preserved',
+      recovery: 'provider_owned_broker_selection',
     });
-    await waitForCondition(async () => !(await pathExists(statePath)), {
-      timeoutMs: 20_000,
-      label: 'auth-switch in-flight release state file removal after quiescence',
-    });
-    await waitForCondition(() => !isOpenCodeServerPidAlive(orphanServer.pid), {
-      timeoutMs: 20_000,
-      label: 'auth-switch in-flight release process exit after quiescence',
-    });
+    expect(await pathExists(statePath)).toBe(true);
+    expect(isOpenCodeServerPidAlive(orphanServer.pid)).toBe(true);
   }, 120_000);
 });

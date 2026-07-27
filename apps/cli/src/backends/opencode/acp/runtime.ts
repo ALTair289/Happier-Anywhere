@@ -7,6 +7,7 @@ import { TurnChangeSetCollector } from '@/agent/tools/diff/turnChangeSetCollecto
 import type { ApiSessionClient } from '@/api/session/sessionClient';
 import type { PermissionMode } from '@/api/types';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 import { extractOpenCodeFileDiff } from '../utils/extractOpenCodeFileDiff';
 
 export function createOpenCodeAcpRuntime(params: {
@@ -19,6 +20,7 @@ export function createOpenCodeAcpRuntime(params: {
   onThinkingChange: (thinking: boolean) => void;
   memoryRecallGuidanceEnabled?: boolean;
   pendingQueueDrainMaxPopPerWake?: number;
+  providerInputConsumer: SessionProviderInputConsumer<unknown, unknown>;
   /**
    * Return the latest permission mode intent so the next backend spawn can apply it.
    * Used for provider-enforced permission/sandbox policies that are configured at process start.
@@ -46,6 +48,7 @@ export function createOpenCodeAcpRuntime(params: {
     },
     getPermissionMode: params.getPermissionMode,
     pendingQueueDrainMaxPopPerWake: params.pendingQueueDrainMaxPopPerWake,
+    providerInputConsumer: params.providerInputConsumer,
     hooks: {
       onBeginTurn: () => {
         turnStartSeqInclusive = params.session.getLastObservedMessageSeq?.() ?? 0;

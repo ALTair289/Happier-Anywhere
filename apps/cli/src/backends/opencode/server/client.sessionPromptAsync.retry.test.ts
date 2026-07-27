@@ -23,7 +23,7 @@ import { MessageBuffer } from '@/ui/ink/messageBuffer';
 
 import { createOpenCodeServerRuntimeClient } from './client';
 
-describe('createOpenCodeServerRuntimeClient sessionPromptAsync managed retry', () => {
+describe('createOpenCodeServerRuntimeClient sessionPromptAsync exact submission', () => {
     const originalFetch = globalThis.fetch;
     const originalServerUrl = process.env.HAPPIER_OPENCODE_SERVER_URL;
 
@@ -42,7 +42,7 @@ describe('createOpenCodeServerRuntimeClient sessionPromptAsync managed retry', (
         }
     });
 
-    it('retries prompt_async after a transient managed-server fetch failure', async () => {
+    it('does not replay prompt_async after an ambiguous managed-server fetch failure', async () => {
         const { ensureSharedManagedOpenCodeServerBaseUrl, readSharedManagedOpenCodeServerStateBestEffort } = await import('./sharedManagedServer');
         const ensureMock = ensureSharedManagedOpenCodeServerBaseUrl as unknown as ReturnType<typeof vi.fn>;
         const readMock = readSharedManagedOpenCodeServerStateBestEffort as unknown as ReturnType<typeof vi.fn>;
@@ -98,12 +98,11 @@ describe('createOpenCodeServerRuntimeClient sessionPromptAsync managed retry', (
         await expect(client.sessionPromptAsync({
             sessionId: 'ses_1',
             parts: [{ type: 'text', text: 'hello' }],
-        })).resolves.toBeUndefined();
+        })).rejects.toThrow('fetch failed');
 
         const promptUrls = fetchUrls.filter((url) => url.includes('/prompt_async'));
         expect(promptUrls).toEqual([
             expect.stringContaining('127.0.0.1:9999/session/ses_1/prompt_async'),
-            expect.stringContaining('127.0.0.1:10000/session/ses_1/prompt_async'),
         ]);
     });
 

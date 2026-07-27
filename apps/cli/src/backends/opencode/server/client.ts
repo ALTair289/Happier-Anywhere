@@ -1,5 +1,11 @@
 import { logger } from '@/ui/logger';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
+import {
+  OPEN_CODE_BROKER_LOAD_NONCE_ENV,
+  OPEN_CODE_BROKER_PROVIDERS,
+  OPEN_CODE_BROKER_SELECTIONS_ENV,
+  parseOpenCodeBrokerSelections,
+} from '@/backends/opencode/brokerPlugin';
 
 import { resolveOpenCodeServerAuthHeadersFromEnv } from './openCodeServerAuth';
 import { subscribeSseJson } from './openCodeSse';
@@ -20,6 +26,25 @@ import {
 } from './openCodeManagedServerIdentity';
 
 type PermissionReply = 'once' | 'always' | 'reject';
+
+function requiresOpenCodeBrokerLoadNonce(env: NodeJS.ProcessEnv): boolean {
+  const selections = parseOpenCodeBrokerSelections(env[OPEN_CODE_BROKER_SELECTIONS_ENV]);
+  return OPEN_CODE_BROKER_PROVIDERS.some((provider) => selections[provider]);
+}
+
+function applyManagedOpenCodeBrokerLoadNonce(
+  env: NodeJS.ProcessEnv,
+  state: SharedManagedOpenCodeServerState | null,
+): void {
+  const nonce = typeof state?.brokerLoadNonce === 'string' ? state.brokerLoadNonce.trim() : '';
+  if (nonce) {
+    env[OPEN_CODE_BROKER_LOAD_NONCE_ENV] = nonce;
+    return;
+  }
+  if (requiresOpenCodeBrokerLoadNonce(env)) {
+    delete env[OPEN_CODE_BROKER_LOAD_NONCE_ENV];
+  }
+}
 
 function normalizeBaseUrl(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, '');
@@ -145,6 +170,18 @@ function isOpenCodeSseReadIdleTimeoutError(error: unknown): boolean {
   );
 }
 
+export type OpenCodeGlobalEventDelivery = Readonly<{
+  /**
+   * `server.connected` is a route-local connection boundary, not a replay cursor. OpenCode
+   * v1.14.41 can publish replayed original bus events after that boundary without attaching replay
+   * provenance, so this client exposes those frames as observation-only. `accepted-live` remains
+   * reserved for a future provider-owned source with immutable live provenance; this client does
+   * not produce it from arrival order, SSE ids, or the connection boundary.
+   */
+  provenance: 'connection-boundary' | 'untrusted-observation' | 'accepted-live';
+  connectionGeneration: number;
+}>;
+
 export type OpenCodeServerRuntimeClient = Readonly<{
   setDirectoryOverride: (directory: string) => void;
   sessionList: () => Promise<unknown[]>;
@@ -152,6 +189,8 @@ export type OpenCodeServerRuntimeClient = Readonly<{
   sessionGet: (opts: { sessionId: string }) => Promise<OpenCodeSession>;
   sessionUpdate: (opts: { sessionId: string; permission?: unknown[]; title?: string; time?: { archived?: number } }) => Promise<OpenCodeSession>;
   sessionMessagesList: (opts: { sessionId: string }) => Promise<unknown[]>;
+  /** Raw provider envelope reserved for fail-closed authoritative inventory readers. */
+  sessionMessagesListRaw?: (opts: { sessionId: string }) => Promise<unknown>;
   sessionTodo: (opts: { sessionId: string }) => Promise<unknown[]>;
   sessionDiff: (opts: { sessionId: string; messageId?: string }) => Promise<unknown[]>;
   sessionStatusList: () => Promise<Record<string, { type?: string }>>;
@@ -182,7 +221,10 @@ export type OpenCodeServerRuntimeClient = Readonly<{
   questionReply: (opts: { requestId: string; answers: string[][] }) => Promise<boolean>;
   questionReject: (opts: { requestId: string }) => Promise<boolean>;
   permissionReply: (opts: { requestId: string; reply: PermissionReply }) => Promise<boolean>;
-  subscribeGlobalEvents: (opts: { signal: AbortSignal; onEvent: (evt: OpenCodeGlobalEvent) => void }) => Promise<void>;
+  subscribeGlobalEvents: (opts: {
+    signal: AbortSignal;
+    onEvent: (evt: OpenCodeGlobalEvent, delivery: OpenCodeGlobalEventDelivery) => void;
+  }) => Promise<void>;
   getManagedServerIdentity: () => OpenCodeManagedServerIdentity | null;
   dispose: () => Promise<void>;
 }>;
@@ -292,6 +334,7 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
       || envUrlRaw
       || await ensureSharedManagedOpenCodeServerBaseUrl({
         probeHealth,
+        requireBrokerLoadNonce: requiresOpenCodeBrokerLoadNonce(env),
       }),
   );
 
@@ -328,6 +371,7 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
     // Establish the baseline generation so a later replacement is detectable. Best-effort: a missing
     // state file simply leaves identity null until the first refresh observes a server.
     const initialState = await readSharedManagedOpenCodeServerStateBestEffort().catch(() => null);
+    applyManagedOpenCodeBrokerLoadNonce(env, initialState);
     captureManagedServerIdentityFromState(initialState, 'initial');
   }
 
@@ -338,6 +382,7 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
     if (!usingManagedServer) return;
 
     const state = await readSharedManagedOpenCodeServerStateBestEffort().catch(() => null);
+    applyManagedOpenCodeBrokerLoadNonce(env, state);
     if (state?.baseUrl && isLoopbackManagedOpenCodeBaseUrl(state.baseUrl)) {
       const normalized = normalizeBaseUrl(state.baseUrl);
       if (normalized && normalized !== baseUrl) {
@@ -376,6 +421,7 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
       baseUrl = normalizeBaseUrl(
         await ensureSharedManagedOpenCodeServerBaseUrl({
           probeHealth,
+          requireBrokerLoadNonce: requiresOpenCodeBrokerLoadNonce(env),
         }),
       );
     } catch {
@@ -385,6 +431,7 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
     // After an ensure, the managed server may have been replaced on a new port/pid. Re-read the
     // freshly written state and surface a generation change if the process identity differs.
     const stateAfterEnsure = await readSharedManagedOpenCodeServerStateBestEffort().catch(() => null);
+    applyManagedOpenCodeBrokerLoadNonce(env, stateAfterEnsure);
     captureManagedServerIdentityFromState(stateAfterEnsure, opts.reason);
   };
 
@@ -433,8 +480,17 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
   let subscription: Awaited<ReturnType<typeof subscribeSseJson<OpenCodeGlobalEvent>>> | null = null;
   let subscriptionLoop: Promise<void> | null = null;
   let subscriptionLoopAbort: AbortController | null = null;
-  let lastEventId: string | null = null;
+  let connectionGeneration = 0;
   let disposed = false;
+
+  const fetchSessionMessagesListRaw = async (sessionId: string): Promise<unknown> => (
+    await fetchJsonWithManagedServerRetry((currentBaseUrl) => fetchJson<unknown>({
+      url: buildUrl(currentBaseUrl, `/session/${encodeURIComponent(sessionId)}/message`, { directory: resolveDirectory() }),
+      method: 'GET',
+      headers,
+      timeoutMs: httpTimeoutMs,
+    }))
+  );
 
   const client: OpenCodeServerRuntimeClient = {
     setDirectoryOverride: (directory) => {
@@ -489,14 +545,10 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
       }));
     },
     sessionMessagesList: async ({ sessionId }) => {
-      const raw = await fetchJsonWithManagedServerRetry((currentBaseUrl) => fetchJson<unknown>({
-        url: buildUrl(currentBaseUrl, `/session/${encodeURIComponent(sessionId)}/message`, { directory: resolveDirectory() }),
-        method: 'GET',
-        headers,
-        timeoutMs: httpTimeoutMs,
-      }));
+      const raw = await fetchSessionMessagesListRaw(sessionId);
       return Array.isArray(raw) ? raw : [];
     },
+    sessionMessagesListRaw: async ({ sessionId }) => await fetchSessionMessagesListRaw(sessionId),
     sessionTodo: async ({ sessionId }) => {
       const raw = await fetchJsonWithManagedServerRetry((currentBaseUrl) => fetchJson<unknown>({
         url: buildUrl(currentBaseUrl, `/session/${encodeURIComponent(sessionId)}/todo`, { directory: resolveDirectory() }),
@@ -590,8 +642,10 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
     },
     sessionPromptAsync: async ({ sessionId, messageId, parts, agent, model, variant, config }) => {
       const normalizedVariant = typeof variant === 'string' ? variant.trim() : '';
-      await fetchJsonWithManagedServerRetry((currentBaseUrl) => fetchJson<void>({
-        url: buildUrl(currentBaseUrl, `/session/${encodeURIComponent(sessionId)}/prompt_async`, { directory: resolveDirectory() }),
+      // prompt_async is effectful. Once its POST is attempted, transport loss is ambiguous and
+      // must surface to the canonical Pending owner; replaying it can duplicate provider work.
+      await fetchJson<void>({
+        url: buildUrl(baseUrl, `/session/${encodeURIComponent(sessionId)}/prompt_async`, { directory: resolveDirectory() }),
         method: 'POST',
         headers,
         body: {
@@ -603,7 +657,7 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
           parts,
         },
         timeoutMs: httpTimeoutMs,
-      }));
+      });
     },
     sessionSummarize: async ({ sessionId, model, auto }) => {
       await fetchJsonWithManagedServerRetry((currentBaseUrl) => fetchJson<void>({
@@ -697,6 +751,9 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
 
         let attempt = 0;
         while (!disposed && !signal.aborted && !localAbort.signal.aborted) {
+          const currentConnectionGeneration = connectionGeneration + 1;
+          connectionGeneration = currentConnectionGeneration;
+          let providerConnectionBoundarySeen = false;
           const combinedAbort = new AbortController();
           const onAbort = () => {
             try {
@@ -711,15 +768,27 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{
           try {
             const url = buildUrl(baseUrl, '/global/event');
             const nextHeaders: Record<string, string> = { ...headers };
-            if (lastEventId) nextHeaders['Last-Event-ID'] = lastEventId;
             subscription = await subscribeSseJson<OpenCodeGlobalEvent>({
               url,
               headers: nextHeaders,
               signal: combinedAbort.signal,
               readIdleTimeoutMs,
-              onMessage: (msg, meta) => {
-                if (meta?.id) lastEventId = meta.id;
-                onEvent(msg);
+              onMessage: (msg) => {
+                if (currentConnectionGeneration !== connectionGeneration) return;
+                const eventType = typeof msg?.payload?.type === 'string' ? msg.payload.type : '';
+                if (eventType === 'server.connected') {
+                  providerConnectionBoundarySeen = true;
+                  onEvent(msg, {
+                    provenance: 'connection-boundary',
+                    connectionGeneration: currentConnectionGeneration,
+                  });
+                  return;
+                }
+                if (!providerConnectionBoundarySeen) return;
+                onEvent(msg, {
+                  provenance: 'untrusted-observation',
+                  connectionGeneration: currentConnectionGeneration,
+                });
               },
             });
             await subscription.done;

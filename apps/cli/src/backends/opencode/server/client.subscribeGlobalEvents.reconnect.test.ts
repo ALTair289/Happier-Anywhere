@@ -75,7 +75,7 @@ describe('createOpenCodeServerRuntimeClient.subscribeGlobalEvents', () => {
     }
   });
 
-  it('reconnects when the SSE stream ends unexpectedly and resumes delivering events', async () => {
+  it('keeps original bus events observation-only even when sync replay emits them after server.connected', async () => {
     const fetchSpy = vi.fn(async (url: any) => {
       if (String(url).includes('/global/health')) return createOkJsonResponse({ healthy: true, version: 'test' }) as any;
       return createOkJsonResponse({}) as any;
@@ -95,13 +95,20 @@ describe('createOpenCodeServerRuntimeClient.subscribeGlobalEvents', () => {
     subscribeMock
       .mockImplementationOnce(async (params: any) => {
         firstParams = params;
-        // Emit one event with an SSE id to seed the Last-Event-ID header on reconnect.
-        params.onMessage({ directory: '/tmp', payload: { type: 'session.status', properties: { sessionID: 'ses_1', status: { type: 'busy' } } } }, { id: 'evt_1' });
+        // A reconnecting transport may yield buffered/history-shaped frames before OpenCode's
+        // provider-owned boundary. Arrival and an SSE id are not evidence that they are live.
+        params.onMessage({ directory: '/tmp', payload: { type: 'message.part.updated', properties: { part: { id: 'part_history_1', type: 'tool' } } } }, { id: 'evt_history_1' });
+        params.onMessage({ directory: '/tmp', payload: { type: 'server.connected', properties: {} } }, { id: 'evt_boundary_1' });
+        // OpenCode v1.14.41 SyncEvent.replay publishes historical original bus events after the
+        // route-local server.connected boundary. Their original ids do not carry replay provenance.
+        params.onMessage({ directory: '/tmp', payload: { type: 'session.status', properties: { sessionID: 'ses_1', status: { type: 'busy' } } } }, { id: 'evt_original_historical_1' });
         return { close: vi.fn(), done: firstDone };
       })
       .mockImplementationOnce(async (params: any) => {
         secondParams = params;
-        params.onMessage({ directory: '/tmp', payload: { type: 'session.idle', properties: { sessionID: 'ses_1' } } }, { id: 'evt_2' });
+        params.onMessage({ directory: '/tmp', payload: { type: 'message.part.updated', properties: { part: { id: 'part_history_2', type: 'tool' } } } }, { id: 'evt_history_2' });
+        params.onMessage({ directory: '/tmp', payload: { type: 'server.connected', properties: {} } }, { id: 'evt_boundary_2' });
+        params.onMessage({ directory: '/tmp', payload: { type: 'session.idle', properties: { sessionID: 'ses_1' } } }, { id: 'evt_original_historical_2' });
         let resolveDone!: () => void;
         const done = new Promise<void>((resolve) => {
           resolveDone = resolve;
@@ -120,15 +127,24 @@ describe('createOpenCodeServerRuntimeClient.subscribeGlobalEvents', () => {
 
     expect(subscribeMock).toHaveBeenCalledTimes(1);
     expect(firstParams?.headers?.['Last-Event-ID']).toBeUndefined();
+    expect(onEvent.mock.calls).toEqual([
+      [expect.objectContaining({ payload: expect.objectContaining({ type: 'server.connected' }) }), expect.objectContaining({ provenance: 'connection-boundary' })],
+      [expect.objectContaining({ payload: expect.objectContaining({ type: 'session.status' }) }), expect.objectContaining({ provenance: 'untrusted-observation' })],
+    ]);
 
     // Simulate an SSE disconnect.
     rejectFirstDone(new Error('socket hang up'));
 
     await expect.poll(() => subscribeMock.mock.calls.length).toBeGreaterThan(1);
-    expect(secondParams?.headers?.['Last-Event-ID']).toBe('evt_1');
+    // OpenCode's global event endpoint does not define Last-Event-ID replay semantics. Reusing an
+    // opaque transport id would make an eventual replay indistinguishable from current activity.
+    expect(secondParams?.headers?.['Last-Event-ID']).toBeUndefined();
 
-    await expect.poll(() => onEvent.mock.calls.length).toBeGreaterThan(1);
-    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ type: 'session.idle' }) }));
+    await expect.poll(() => onEvent.mock.calls.length).toBe(4);
+    expect(onEvent.mock.calls.slice(2)).toEqual([
+      [expect.objectContaining({ payload: expect.objectContaining({ type: 'server.connected' }) }), expect.objectContaining({ provenance: 'connection-boundary' })],
+      [expect.objectContaining({ payload: expect.objectContaining({ type: 'session.idle' }) }), expect.objectContaining({ provenance: 'untrusted-observation' })],
+    ]);
 
     controller.abort();
     await client.dispose();

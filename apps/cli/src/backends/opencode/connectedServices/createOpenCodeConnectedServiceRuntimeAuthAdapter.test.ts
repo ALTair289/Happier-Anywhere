@@ -1,12 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-const { releaseForAuthSwitchMock } = vi.hoisted(() => ({
-  releaseForAuthSwitchMock: vi.fn(async () => ({ released: true as const, reason: 'released' as const })),
-}));
-
-vi.mock('@/backends/opencode/server/sharedManagedServer', () => ({
-  releaseForAuthSwitch: releaseForAuthSwitchMock,
-}));
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   getBrokerBridgeEffectiveSelectionForTest,
@@ -19,8 +11,6 @@ import {
 
 describe('createOpenCodeConnectedServiceRuntimeAuthAdapter', () => {
   beforeEach(() => {
-    releaseForAuthSwitchMock.mockReset();
-    releaseForAuthSwitchMock.mockResolvedValue({ released: true as const, reason: 'released' as const });
     resetBrokerBridgeEffectiveSelectionsForTests();
   });
 
@@ -28,40 +18,37 @@ describe('createOpenCodeConnectedServiceRuntimeAuthAdapter', () => {
     resetBrokerBridgeEffectiveSelectionsForTests();
   });
 
-  it('releases the prior managed server after an auth switch when prior fingerprint context is present', async () => {
+  it('preserves the managed server and claim after a broker-owned auth switch', async () => {
     const adapter = createOpenCodeConnectedServiceRuntimeAuthAdapter();
 
     await expect(adapter.recoverAfterRuntimeAuthSwitch({
       target: { agentId: 'opencode' },
       selection: {
         serviceId: 'openai-codex',
+        brokerSelectionIdentity: 'opencode|connected|broker:1|openai-codex:acct-old:',
         previousLaunchFingerprint: 'previous-fingerprint',
         previousOwnerToken: 'owner-token-1',
       },
     })).resolves.toMatchObject({
       recovered: true,
-      recovery: 'restart_rematerialize',
-      detached: true,
-      detachedReason: 'released',
+      recovery: 'provider_owned_broker_selection',
+      detached: false,
+      detachedReason: 'broker_request_time_selection_preserved',
     });
-
-    expect(releaseForAuthSwitchMock).toHaveBeenCalledWith('previous-fingerprint', 'owner-token-1');
   });
 
-  it('does not try to release managed servers when prior fingerprint context is missing', async () => {
+  it('declines recovery without the broker selection identity used for request-time adoption', async () => {
     const adapter = createOpenCodeConnectedServiceRuntimeAuthAdapter();
 
     await expect(adapter.recoverAfterRuntimeAuthSwitch({
       target: { agentId: 'opencode' },
       selection: { serviceId: 'openai-codex' },
-    })).resolves.toMatchObject({
-      recovered: true,
+    })).resolves.toEqual({
+      recovered: false,
       recovery: 'restart_rematerialize',
       detached: false,
-      detachedReason: 'prior_launch_fingerprint_missing',
+      detachedReason: 'broker_selection_identity_missing',
     });
-
-    expect(releaseForAuthSwitchMock).not.toHaveBeenCalled();
   });
 
   it('does not classify usage-limit errors as connected-service incidents without a concrete OpenCode binding', () => {
@@ -204,17 +191,34 @@ describe('createOpenCodeConnectedServiceRuntimeAuthAdapter', () => {
         activeProfileId: 'profile-new',
         fallbackProfileId: 'profile-old',
         generation: 12,
-        record: { serviceId: 'openai-codex', profileId: 'profile-new' },
+        credentialRevision: 'rev-new',
+        record: {
+          kind: 'oauth',
+          serviceId: 'openai-codex',
+          profileId: 'profile-new',
+          oauth: { accessToken: 'access-new', providerAccountId: 'acct-new' },
+        },
       },
     })).resolves.toEqual({
       applied: true,
       recovery: 'provider_owned_broker_selection',
       verification: {
-        status: 'weakly_verified',
-        proofStrength: 'weak',
+        status: 'verified',
+        proofStrength: 'exact',
+        providerAccountId: 'acct-new',
         sharedAuthSurfaceId: 'opencode|connected|broker:1|openai-codex:acct-old:',
         source: 'broker_selection_indirection',
         reason: 'daemon_broker_selection_epoch_bumped',
+        credentialRevision: 'rev-new',
+        credentialFingerprint: 'sha256:0c7be3dc',
+        generationApplication: {
+          serviceId: 'openai-codex',
+          groupId: 'main',
+          profileId: 'profile-new',
+          generation: 12,
+          credentialRevision: 'rev-new',
+          credentialFingerprint: 'sha256:0c7be3dc',
+        },
       },
     });
 
@@ -230,6 +234,8 @@ describe('createOpenCodeConnectedServiceRuntimeAuthAdapter', () => {
         activeProfileId: 'profile-new',
         fallbackProfileId: 'profile-old',
         generation: 12,
+        credentialRevision: 'rev-new',
+        credentialFingerprint: 'sha256:0c7be3dc',
       },
     });
   });

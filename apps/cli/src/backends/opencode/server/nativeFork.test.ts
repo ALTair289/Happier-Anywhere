@@ -121,7 +121,7 @@ describe('forkOpenCodeSessionNative', () => {
       sessionFork: vi.fn(async () => ({ id: 'ses_child' })),
       sessionMessagesList: vi.fn(async () => ([
         { info: { id: 'msg_local-1' } },
-        { info: { id: 'msg_next' } },
+        { info: { id: ' msg_next\n' } },
       ])),
       dispose: vi.fn(async () => {}),
     };
@@ -143,8 +143,8 @@ describe('forkOpenCodeSessionNative', () => {
       }),
     });
 
-    expect(out).toEqual({ vendorSessionId: 'ses_child', vendorMessageId: 'msg_next' });
-    expect(client.sessionFork).toHaveBeenCalledWith({ sessionId: 'ses_parent_vendor', messageId: 'msg_next' });
+    expect(out).toEqual({ vendorSessionId: 'ses_child', vendorMessageId: ' msg_next\n' });
+    expect(client.sessionFork).toHaveBeenCalledWith({ sessionId: 'ses_parent_vendor', messageId: ' msg_next\n' });
   });
 
   it('derives msg_<localId> from decrypted meta when row.localId is missing (exclusive)', async () => {
@@ -248,7 +248,10 @@ describe('forkOpenCodeSessionNative', () => {
         metadata: JSON.stringify({
           opencodeUserMessageIdMapV1: {
             v: 1,
-            byLocalId: { 'local-1': 'msg_000000000000aaaaaaaaaaaaaa' },
+            byLocalId: {
+              ' local-1\n': 'msg_000000000000aaaaaaaaaaaaaa',
+              'local-1': 'msg_trimmed_alias_must_not_win',
+            },
           },
         }),
       } as any,
@@ -260,7 +263,7 @@ describe('forkOpenCodeSessionNative', () => {
       fetchSingleHappyRow: async () => ({
         seq: 10,
         createdAt: 1,
-        localId: 'local-1',
+        localId: ' local-1\n',
         content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'hi' } } },
       }),
     });

@@ -11,8 +11,8 @@ import type { SharedManagedOpenCodeServerState } from './sharedManagedServer';
  * `openCodeManagedServerEnv.resolveOpenCodeManagedServerLaunchFingerprint`). A launch fingerprint
  * can be reused across many process generations; a generation key tracks the specific process.
  *
- * Consumers: Lane E / B2 runtime (generation-aware turn interruption supervisor + provider activity
- * tracker) compare `generationKey` to detect mid-turn server replacement.
+ * Consumers: the generation-aware turn interruption supervisor and foreground tool tracker compare
+ * `generationKey` to detect mid-turn server replacement.
  */
 export type OpenCodeManagedServerIdentity = Readonly<{
   baseUrl: string;

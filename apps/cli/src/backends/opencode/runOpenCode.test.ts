@@ -129,6 +129,48 @@ describe('runOpenCode', () => {
     });
   });
 
+  it.each([
+    ['server', undefined, createOpenCodeServerRuntimeMock],
+    ['acp', 'acp', createOpenCodeAcpRuntimeMock],
+  ] as const)(
+    'activates %s mode as Runtime Activity not-applicable without an OpenCode producer',
+    async (_mode, backendMode, expectedRuntimeFactory) => {
+      if (backendMode) process.env.HAPPIER_OPENCODE_BACKEND_MODE = backendMode;
+
+      const forbiddenOpenCodeActivityProducer = { report: vi.fn() };
+      runStandardAcpProviderMock.mockImplementationOnce(async (_opts: unknown, config: unknown) => {
+        if (!config || typeof config !== 'object') {
+          throw new Error('Expected runStandardAcpProvider config to be an object');
+        }
+        expect(config).not.toHaveProperty('runtimeActivityApplicability');
+
+        const createRuntime = (config as { createRuntime?: unknown }).createRuntime;
+        if (typeof createRuntime !== 'function') {
+          throw new Error('Expected runStandardAcpProvider config to provide createRuntime');
+        }
+        createRuntime({
+          directory: '/tmp',
+          machineId: 'machine-1',
+          metadata: { path: '/tmp' },
+          session: {},
+          messageBuffer: {},
+          mcpServers: {},
+          permissionHandler: {},
+          getPermissionMode: () => 'default',
+          setThinking: () => {},
+          providerInputConsumer: { drainPending: vi.fn() },
+          runtimeActivityContributionHandle: forbiddenOpenCodeActivityProducer,
+        });
+      });
+
+      await runOpenCode({ credentials });
+
+      expect(expectedRuntimeFactory).toHaveBeenCalledTimes(1);
+      expect(expectedRuntimeFactory.mock.calls[0]?.[0]).not.toHaveProperty('runtimeActivityContributionHandle');
+      expect(forbiddenOpenCodeActivityProducer.report).not.toHaveBeenCalled();
+    },
+  );
+
   it('does not block startup while waiting for metadata snapshot publish prerequisites', async () => {
     const ensureMetadataSnapshot = vi.fn(() => new Promise<null>(() => {}));
     const updateMetadata = vi.fn(async () => {});
