@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { PersistedSessionMessagePinV1 } from '@/sync/domains/messages/pins/sessionMessagePins';
 
-import { resolveMessagePinAvailability } from './resolveMessagePinAvailability';
+import { buildSessionMessagePinAtPressTime, resolveMessagePinAvailability } from './resolveMessagePinAvailability';
 
 function pin(overrides: Partial<PersistedSessionMessagePinV1> = {}): PersistedSessionMessagePinV1 {
     return {
@@ -27,25 +27,49 @@ describe('resolveMessagePinAvailability', () => {
             routeMessageId: 'server:message-7',
             role: 'assistant',
             pins: [],
-            nowMs: 123,
         });
 
         expect(availability.status).toBe('available');
         if (availability.status !== 'available') {
             throw new Error('Expected available message pin target');
         }
-        expect(availability.pin).toEqual({
+        expect(availability.pinTarget).toEqual({
             version: 1,
             sessionId: 's1',
             seq: 7,
             transcriptBlockIndex: 2,
             routeMessageId: 'server:message-7',
             role: 'assistant',
-            pinnedAtMs: 123,
             label: null,
         });
         expect(availability.identityKey).toBe('route-message-id|s1|server:message-7|block:2|assistant');
         expect(availability.pinned).toBe(false);
+    });
+
+    it('stamps pinnedAtMs when the pin is pressed, not when the row rendered', () => {
+        const availability = resolveMessagePinAvailability({
+            sessionId: 's1',
+            seq: 7,
+            transcriptBlockIndex: 2,
+            routeMessageId: 'server:message-7',
+            role: 'assistant',
+            pins: [],
+        });
+        if (availability.status !== 'available') {
+            throw new Error('Expected available message pin target');
+        }
+
+        expect(availability.pinTarget).not.toHaveProperty('pinnedAtMs');
+        expect(buildSessionMessagePinAtPressTime(availability.pinTarget, 4_242)).toEqual({
+            version: 1,
+            sessionId: 's1',
+            seq: 7,
+            transcriptBlockIndex: 2,
+            routeMessageId: 'server:message-7',
+            role: 'assistant',
+            pinnedAtMs: 4_242,
+            label: null,
+        });
     });
 
     it('falls back to seq, block index, and role when no stable route id is available', () => {
@@ -56,14 +80,13 @@ describe('resolveMessagePinAvailability', () => {
             routeMessageId: 'temporary-message-id',
             role: 'user',
             pins: [],
-            nowMs: 456,
         });
 
         expect(availability.status).toBe('available');
         if (availability.status !== 'available') {
             throw new Error('Expected fallback pin target');
         }
-        expect(availability.pin.routeMessageId).toBeNull();
+        expect(availability.pinTarget.routeMessageId).toBeNull();
         expect(availability.identityKey).toBe('fallback|s1|8|block:null|user');
     });
 
@@ -80,7 +103,6 @@ describe('resolveMessagePinAvailability', () => {
             routeMessageId: 'server:message-5',
             role: 'assistant',
             pins,
-            nowMs: 2_000,
         });
         const differentRow = resolveMessagePinAvailability({
             sessionId: 's1',
@@ -89,7 +111,6 @@ describe('resolveMessagePinAvailability', () => {
             routeMessageId: 'server:message-5',
             role: 'assistant',
             pins,
-            nowMs: 2_000,
         });
 
         expect(sameRow.status === 'available' ? sameRow.pinned : null).toBe(true);

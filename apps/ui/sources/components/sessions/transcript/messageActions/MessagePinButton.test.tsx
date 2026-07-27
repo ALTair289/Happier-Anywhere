@@ -17,14 +17,13 @@ function available(overrides: Partial<Extract<MessagePinAvailability, { status: 
         status: 'available',
         pinned: false,
         identityKey: 'fallback|s1|5|block:0|assistant',
-        pin: {
+        pinTarget: {
             version: 1,
             sessionId: 's1',
             seq: 5,
             transcriptBlockIndex: 0,
             routeMessageId: null,
             role: 'assistant',
-            pinnedAtMs: 1_000,
             label: null,
         },
         ...overrides,
@@ -115,7 +114,7 @@ describe('MessagePinButton', () => {
         expect(iconCalls).toEqual([expect.objectContaining({ name: 'pin-slash', color: '#0a7a4b' })]);
     });
 
-    it('passes the canonical pin record to the toggle callback', async () => {
+    it('stamps the pin record at press time and passes it to the toggle callback', async () => {
         const { MessagePinButton } = await import('./MessagePinButton');
         const target = available();
         const onToggle = vi.fn();
@@ -131,7 +130,7 @@ describe('MessagePinButton', () => {
         screen.pressByTestId('message-pin');
 
         expect(onToggle).toHaveBeenCalledTimes(1);
-        expect(onToggle).toHaveBeenCalledWith(target.pin);
+        expect(onToggle).toHaveBeenCalledWith({ ...target.pinTarget, pinnedAtMs: expect.any(Number) });
     });
 
     it('omits unavailable actions and actions without a host callback', async () => {

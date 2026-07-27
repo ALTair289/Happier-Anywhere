@@ -6,7 +6,7 @@ import { PinIcon, PinSlashIcon } from '@/components/sessions/shell/sessionPinIco
 import { t } from '@/text';
 import type { PersistedSessionMessagePinV1 } from '@/sync/domains/messages/pins/sessionMessagePins';
 
-import type { MessagePinAvailability } from './resolveMessagePinAvailability';
+import { buildSessionMessagePinAtPressTime, type MessagePinAvailability } from './resolveMessagePinAvailability';
 
 export function MessagePinButton(props: Readonly<{
     availability: MessagePinAvailability;
@@ -19,7 +19,7 @@ export function MessagePinButton(props: Readonly<{
     const { theme } = useUnistyles();
     if (props.availability.status !== 'available' || !props.onTogglePin) return null;
 
-    const { pin, pinned } = props.availability;
+    const { pinTarget, pinned } = props.availability;
     const hitSlop = Platform.OS === 'web' ? undefined : 15;
     const iconColor = pinned ? theme.colors.state.active.foreground : theme.colors.text.secondary;
     const label = pinned
@@ -27,7 +27,7 @@ export function MessagePinButton(props: Readonly<{
         : t('session.transcriptNavigation.pinMessageA11y');
 
     const handlePress = () => {
-        props.onTogglePin?.(pin);
+        props.onTogglePin?.(buildSessionMessagePinAtPressTime(pinTarget));
     };
 
     return (
