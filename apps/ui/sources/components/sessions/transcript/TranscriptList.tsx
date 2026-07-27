@@ -12,13 +12,29 @@ import {
 import { useTranscriptSessionCommon } from '@/components/sessions/transcript/transcriptSessionCommon';
 import { useOptionalTranscriptSelectionState } from '@/components/sessions/transcript/messageSelection/TranscriptMessageSelectionContext';
 import { TranscriptListShell } from '@/components/sessions/transcript/viewport/shell/TranscriptListShell';
+import {
+    resolveTranscriptListRendererBinding,
+    resolveTranscriptListRendererSelection,
+} from '@/components/sessions/transcript/viewport/shell/renderer/resolveTranscriptListRenderer';
 import { resolveReadOnlyTranscriptListShellFrame } from '@/components/sessions/transcript/viewport/shell/transcriptListShellCapabilities';
 import { deriveTranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
+import { deriveTranscriptForkCommonForInteraction } from '@/components/sessions/transcript/transcriptSessionCommon';
+import { TranscriptMotionProvider } from '@/components/sessions/transcript/motion/TranscriptMotionProvider';
+import { useTranscriptMotionConfig } from '@/components/sessions/transcript/motion/useTranscriptMotionConfig';
+import { createWebDomScrollObservation } from '@/components/sessions/transcript/viewport/driver/webDomObservation';
+import { TranscriptRowLayoutMutationProvider } from '@/components/sessions/transcript/measurement/TranscriptRowLayoutMutationContext';
+import { useRendererOwnedTranscriptRowLayoutMutation } from '@/components/sessions/transcript/viewport/shell/useRendererOwnedTranscriptRowLayoutMutation';
+import {
+    registerWebTranscriptKeyboardOwner,
+    type WebTranscriptKeyboardVerticalDirection,
+} from '@/components/sessions/transcript/viewport/lifecycle/webTranscriptKeyboardOwner';
 
 export type TranscriptBottomNotice = {
     title: string;
     body: string;
 };
+
+const EMPTY_THINKING_EXPANSION_OVERRIDES: ReadonlyMap<string, boolean> = new Map();
 
 const ListHeader = React.memo((props: { isLoading?: boolean }) => {
     return (
@@ -44,49 +60,119 @@ const PUBLIC_READ_ONLY_TRANSCRIPT_INTERACTION = deriveTranscriptInteraction({
 
 export const TranscriptList = React.memo((props: {
     sessionId: string;
+    datasetKey: string;
     metadata: Metadata | null;
     messages: Message[];
     bottomNotice?: TranscriptBottomNotice | null;
     isLoaded?: boolean;
 }) => {
+    const { motionConfig } = useTranscriptMotionConfig();
+    const syncTuning = sync.getSyncTuning();
     const transcriptSessionCommon = useTranscriptSessionCommon(props.sessionId);
+    const publicForkCommon = React.useMemo(
+        () => deriveTranscriptForkCommonForInteraction(
+            transcriptSessionCommon.fork,
+            PUBLIC_READ_ONLY_TRANSCRIPT_INTERACTION,
+        ),
+        [transcriptSessionCommon.fork],
+    );
     const transcriptMessageSelection = useOptionalTranscriptSelectionState();
+    const webDomObservation = React.useMemo(() => createWebDomScrollObservation(), []);
+    const {
+        listRef,
+        prepareRowLayoutMutation,
+    } = useRendererOwnedTranscriptRowLayoutMutation<Message>();
     const sessionThinkingDisplayMode = transcriptSessionCommon.messageDisplay.sessionThinkingDisplayMode;
     const sessionThinkingInlinePresentation = transcriptSessionCommon.messageDisplay.sessionThinkingInlinePresentation;
-    const shellFrame = React.useMemo(() => resolveReadOnlyTranscriptListShellFrame({
-        accessKind: 'public',
-        bottomNoticeVisible: props.bottomNotice != null,
+    const rendererSelection = React.useMemo(() => resolveTranscriptListRendererSelection({
         platformOS: Platform.OS,
-    }), [props.bottomNotice]);
+        transcriptLegendListSpikeSurface: syncTuning.transcriptLegendListSpikeSurface,
+    }), [syncTuning.transcriptLegendListSpikeSurface]);
+    const rendererBinding = React.useMemo(() => resolveTranscriptListRendererBinding({
+        frame: resolveReadOnlyTranscriptListShellFrame({
+            accessKind: 'public',
+            bottomNoticeVisible: props.bottomNotice != null,
+            platformOS: Platform.OS,
+            rendererKind: rendererSelection.renderer.kind,
+        }),
+        selection: rendererSelection,
+    }), [props.bottomNotice, rendererSelection]);
+    const resolveWebKeyboardScroller = React.useCallback((): HTMLElement | null => {
+        const rendererNode = listRef.current?.getScrollableNode?.();
+        return typeof HTMLElement !== 'undefined' && rendererNode instanceof HTMLElement
+            ? rendererNode
+            : null;
+    }, []);
+    const recordWebKeyboardViewportInput = React.useCallback((
+        verticalDirection: WebTranscriptKeyboardVerticalDirection,
+    ): void => {
+        listRef.current?.notifyViewportInput?.({ kind: 'keyboard', verticalDirection });
+    }, []);
+    React.useEffect(() => {
+        if (rendererBinding.frame.platform !== 'web' || typeof document === 'undefined') return;
+        return registerWebTranscriptKeyboardOwner({
+            document,
+            onViewportKeyboardInput: recordWebKeyboardViewportInput,
+            resolveScroller: resolveWebKeyboardScroller,
+        });
+    }, [
+        recordWebKeyboardViewportInput,
+        rendererBinding.frame.platform,
+        resolveWebKeyboardScroller,
+    ]);
     const listData = React.useMemo(() => {
-        if (shellFrame.dataOrder === 'newest-first') {
+        if (rendererBinding.frame.dataOrder === 'newest-first') {
             // Inverted lists expect newest-first input.
             return [...props.messages].reverse();
         }
         return props.messages;
-    }, [props.messages, shellFrame.dataOrder]);
+    }, [props.messages, rendererBinding.frame.dataOrder]);
 
     const thinkingDefaultExpanded =
         sessionThinkingDisplayMode === 'inline' && sessionThinkingInlinePresentation === 'full';
-    const [thinkingExpandedByMessageId, setThinkingExpandedByMessageId] = React.useState<ReadonlyMap<string, boolean>>(
-        () => new Map<string, boolean>(),
-    );
+    const [thinkingExpansionState, setThinkingExpansionState] = React.useState<Readonly<{
+        datasetKey: string;
+        values: ReadonlyMap<string, boolean>;
+    }>>(() => ({
+        datasetKey: props.datasetKey,
+        values: EMPTY_THINKING_EXPANSION_OVERRIDES,
+    }));
+    const thinkingExpandedByMessageId = thinkingExpansionState.datasetKey === props.datasetKey
+        ? thinkingExpansionState.values
+        : EMPTY_THINKING_EXPANSION_OVERRIDES;
     const resolveThinkingExpanded = React.useCallback((messageId: string): boolean => {
         return thinkingExpandedByMessageId.get(messageId) ?? thinkingDefaultExpanded;
     }, [thinkingDefaultExpanded, thinkingExpandedByMessageId]);
     const setThinkingExpanded = React.useCallback((messageId: string, expanded: boolean) => {
-        setThinkingExpandedByMessageId((prev) => {
-            const prevValue = prev.get(messageId);
-            if (prevValue === expanded) return prev;
-            const next = new Map(prev);
+        if (resolveThinkingExpanded(messageId) !== expanded) {
+            prepareRowLayoutMutation({
+                reason: expanded ? 'expand' : 'collapse',
+                sourceId: messageId,
+            });
+        }
+        setThinkingExpansionState((prev) => {
+            const prevValues = prev.datasetKey === props.datasetKey
+                ? prev.values
+                : EMPTY_THINKING_EXPANSION_OVERRIDES;
+            const prevValue = prevValues.get(messageId);
+            if (prev.datasetKey === props.datasetKey && prevValue === expanded) return prev;
+            const next = new Map(prevValues);
             if (expanded === thinkingDefaultExpanded) {
                 next.delete(messageId);
             } else {
                 next.set(messageId, expanded);
             }
-            return next;
+            return {
+                datasetKey: props.datasetKey,
+                values: next,
+            };
         });
-    }, [thinkingDefaultExpanded]);
+    }, [
+        prepareRowLayoutMutation,
+        props.datasetKey,
+        resolveThinkingExpanded,
+        thinkingDefaultExpanded,
+    ]);
 
     const keyExtractor = React.useCallback((item: Message) => item.id, []);
     const getItemType = React.useCallback((item: Message): string => item.kind, []);
@@ -101,7 +187,7 @@ export const TranscriptList = React.memo((props: {
                 metadata={props.metadata}
                 sessionId={props.sessionId}
                 interaction={PUBLIC_READ_ONLY_TRANSCRIPT_INTERACTION}
-                forkCommon={transcriptSessionCommon.fork}
+                forkCommon={publicForkCommon}
                 messageDisplayCommon={transcriptSessionCommon.messageDisplay}
                 toolChromeCommon={transcriptSessionCommon.toolChrome}
                 toolRouteCommon={transcriptSessionCommon.toolRoute}
@@ -115,23 +201,30 @@ export const TranscriptList = React.memo((props: {
         resolveThinkingExpanded,
         sessionThinkingDisplayMode,
         setThinkingExpanded,
-        transcriptSessionCommon.fork,
+        publicForkCommon,
         transcriptSessionCommon.messageDisplay,
         transcriptSessionCommon.toolChrome,
         transcriptSessionCommon.toolRoute,
     ]);
 
     return (
-        <TranscriptListShell<Message>
-            data={listData}
-            dataKey={props.sessionId}
-            extraData={transcriptMessageSelection.selectionVersion}
-            keyExtractor={keyExtractor}
-            getItemType={getItemType}
-            renderItem={renderItem}
-            frame={shellFrame}
-            header={<ListHeader isLoading={props.isLoaded === false} />}
-            footer={<ListFooter bottomNotice={props.bottomNotice ?? null} />}
-        />
+        <TranscriptMotionProvider key={props.datasetKey} sessionKey={props.datasetKey} config={motionConfig}>
+            <TranscriptRowLayoutMutationProvider value={prepareRowLayoutMutation}>
+                <TranscriptListShell<Message>
+                    key={props.datasetKey}
+                    ref={listRef}
+                    data={listData}
+                    dataKey={props.datasetKey}
+                    extraData={transcriptMessageSelection.selectionVersion}
+                    keyExtractor={keyExtractor}
+                    getItemType={getItemType}
+                    renderItem={renderItem}
+                    rendererBinding={rendererBinding}
+                    webDomObservation={webDomObservation}
+                    header={<ListHeader isLoading={props.isLoaded === false} />}
+                    footer={<ListFooter bottomNotice={props.bottomNotice ?? null} />}
+                />
+            </TranscriptRowLayoutMutationProvider>
+        </TranscriptMotionProvider>
     );
 });

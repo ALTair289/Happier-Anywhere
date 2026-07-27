@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { act } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { renderScreen } from '@/dev/testkit';
+import { createCapturingLegendListMock, renderScreen } from '@/dev/testkit';
 import {
     installTranscriptCommonModuleMocks,
     resetTranscriptCommonModuleMockState,
@@ -13,6 +13,58 @@ import {
 const settingValues: Record<string, any> = {};
 let renderedMessageViewProps: any[] = [];
 let renderedMessageViewWithCommonProps: any[] = [];
+let localForkSupportSource: any = null;
+let nestedToolSetExpanded: ((expanded: boolean) => void) | null = null;
+let transcriptCollapsibleComponent: React.ComponentType<any> | null = null;
+let rowMutationEvents: string[] = [];
+let legendListDetached = false;
+const transcriptRendererAxis = vi.hoisted(() => ({
+    transcriptLegendListSpikeSurface: 'off' as 'flashList' | 'off',
+}));
+const capturingLegendListMock = createCapturingLegendListMock({
+    resolveState: () => {
+        rowMutationEvents.push('anchor-read');
+        return {
+            contentLength: 360,
+            end: 1,
+            isAtEnd: !legendListDetached,
+            isNearEnd: !legendListDetached,
+            isWithinMaintainScrollAtEndThreshold: !legendListDetached,
+            positionAtIndex: (index: number) => index * 120,
+            scroll: 20,
+            scrollLength: 240,
+            sizeAtIndex: () => 120,
+            start: 0,
+        };
+    },
+});
+
+function VisibleNestedToolContent() {
+    rowMutationEvents.push('tool-visible');
+    return React.createElement('VisibleNestedToolContent');
+}
+
+function NestedToolMessage(props: { messageId: string; createdAt: number }) {
+    const [expanded, setExpanded] = React.useState(false);
+    nestedToolSetExpanded = setExpanded;
+    const TranscriptCollapsible = transcriptCollapsibleComponent;
+    if (!TranscriptCollapsible) return null;
+    return (
+        <TranscriptCollapsible
+            id={props.messageId}
+            createdAt={props.createdAt}
+            expanded={expanded}
+        >
+            <VisibleNestedToolContent />
+        </TranscriptCollapsible>
+    );
+}
+
+vi.mock('@/sync/sync', () => ({
+    sync: {
+        getSyncTuning: () => transcriptRendererAxis,
+    },
+}));
 
 vi.mock('@shopify/flash-list', () => ({
   FlashList: () => null,
@@ -24,11 +76,12 @@ vi.mock('@/components/ui/lists/flashListCompat/FlashListCompat', async () => {
 });
 
 installTranscriptCommonModuleMocks({
+    legendList: () => capturingLegendListMock.module,
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
         return createReactNativeWebMock({
             Platform: {
-                OS: 'web',
+                OS: 'ios',
             },
             View: (props: any) => React.createElement('View', props, props.children),
             ActivityIndicator: () => React.createElement('ActivityIndicator'),
@@ -48,7 +101,7 @@ installTranscriptCommonModuleMocks({
         const { createStorageModuleStub } = await import('@/dev/testkit/mocks/storage');
         return createStorageModuleStub({
             useSetting: (key: string) => settingValues[key],
-            useSessionForkSupportSource: () => null,
+            useSessionForkSupportSource: () => localForkSupportSource,
             useSessionMessagesById: () => ({}),
             useSessionMessagesReducerState: () => null,
             useSessionWorkspacePath: () => null,
@@ -79,6 +132,15 @@ vi.mock('@/components/sessions/transcript/MessageView', () => ({
   },
   MessageViewWithSessionCommon: (props: any) => {
     renderedMessageViewWithCommonProps.push(props);
+    if (props.thinkingExpanded === true) {
+      rowMutationEvents.push('thinking-visible');
+    }
+    if (props.message?.kind === 'tool-call') {
+      return React.createElement(NestedToolMessage, {
+        messageId: props.message.id,
+        createdAt: props.message.createdAt,
+      });
+    }
     return React.createElement('MessageViewWithSessionCommon', props);
   },
 }));
@@ -93,12 +155,19 @@ describe('TranscriptList (thinking expansion controlled)', () => {
     for (const k of Object.keys(settingValues)) delete settingValues[k];
     renderedMessageViewProps = [];
     renderedMessageViewWithCommonProps = [];
+    localForkSupportSource = null;
+    nestedToolSetExpanded = null;
+    transcriptCollapsibleComponent = null;
+    rowMutationEvents = [];
+    legendListDetached = false;
+    capturingLegendListMock.state.reset();
   });
 
   it('controls inline thinking expansion via list-owned state', async () => {
     settingValues.transcriptListImplementation = 'flash_v2';
     settingValues.sessionThinkingDisplayMode = 'inline';
     settingValues.sessionThinkingInlinePresentation = 'summary';
+    localForkSupportSource = { metadata: { machineId: 'same-id-local-machine' } };
 
     const thinkingMessage = { kind: 'agent-text', id: 't1', localId: null, createdAt: 1, text: 'think', isThinking: true };
     const normalMessage = { kind: 'agent-text', id: 'a1', localId: null, createdAt: 2, text: 'answer', isThinking: false };
@@ -106,17 +175,20 @@ describe('TranscriptList (thinking expansion controlled)', () => {
     const { TranscriptList } = await import('./TranscriptList');
     await renderScreen(<TranscriptList
           sessionId="s1"
+          datasetKey="public:s1:1"
           metadata={null}
           messages={[thinkingMessage as any, normalMessage as any]}
         />);
 
     const firstThinkingProps = getRenderedMessageProps().find((p) => p?.message?.id === 't1');
-    expect(firstThinkingProps?.interaction).toEqual({
+    expect(firstThinkingProps?.interaction).toEqual(expect.objectContaining({
       canApprovePermissions: false,
+      canFork: false,
       canSendMessages: false,
       disableToolNavigation: true,
       permissionDisabledReason: 'public',
-    });
+    }));
+    expect(firstThinkingProps?.forkCommon.sessionForkSupportSource).toBeNull();
     expect(firstThinkingProps?.thinkingExpanded).toBe(false);
     expect(typeof firstThinkingProps?.onThinkingExpandedChange).toBe('function');
 
@@ -151,6 +223,7 @@ describe('TranscriptList (thinking expansion controlled)', () => {
     const { TranscriptList } = await import('./TranscriptList');
     await renderScreen(<TranscriptList
       sessionId="s1"
+      datasetKey="public:s1:1"
       metadata={null}
       messages={[message as any]}
     />);
@@ -167,5 +240,112 @@ describe('TranscriptList (thinking expansion controlled)', () => {
         }),
       }),
     ]);
+  });
+
+  it('resets public row state when the logical dataset changes for the same session', async () => {
+    settingValues.sessionThinkingDisplayMode = 'inline';
+    settingValues.sessionThinkingInlinePresentation = 'summary';
+    const thinkingMessage = {
+      kind: 'agent-text',
+      id: 't1',
+      localId: null,
+      createdAt: 1,
+      text: 'think',
+      isThinking: true,
+    };
+
+    const { TranscriptList } = await import('./TranscriptList');
+    const screen = await renderScreen(<TranscriptList
+      sessionId="same-session"
+      datasetKey="public:same-session:1"
+      metadata={null}
+      messages={[thinkingMessage as any]}
+    />);
+    const firstThinkingProps = getRenderedMessageProps().find((props) => props?.message?.id === 't1');
+    await act(async () => {
+      firstThinkingProps.onThinkingExpandedChange(true);
+    });
+    expect([...getRenderedMessageProps()].reverse().find((props) => props?.message?.id === 't1')?.thinkingExpanded).toBe(true);
+
+    await screen.update(<TranscriptList
+      sessionId="same-session"
+      datasetKey="public:same-session:2"
+      metadata={null}
+      messages={[thinkingMessage as any]}
+    />);
+
+    expect([...getRenderedMessageProps()].reverse().find((props) => props?.message?.id === 't1')?.thinkingExpanded).toBe(false);
+    expect(capturingLegendListMock.state.props?.dataKey).toBe('public:same-session:2');
+  });
+
+  it('arms the renderer anchor before public thinking and nested tool rows become visible', async () => {
+    settingValues.sessionThinkingDisplayMode = 'inline';
+    settingValues.sessionThinkingInlinePresentation = 'summary';
+    const thinkingMessage = {
+      kind: 'agent-text',
+      id: 'thinking-message',
+      localId: null,
+      createdAt: 1,
+      text: 'think',
+      isThinking: true,
+    };
+    const toolMessage = {
+      kind: 'tool-call',
+      id: 'tool-message',
+      localId: null,
+      createdAt: 2,
+      tool: {
+        name: 'Read',
+        state: 'completed',
+        input: {},
+        createdAt: 2,
+        startedAt: 2,
+        completedAt: 3,
+        description: null,
+      },
+      children: [],
+    };
+    transcriptCollapsibleComponent = (await import('./motion/TranscriptCollapsible')).TranscriptCollapsible;
+
+    const { TranscriptList } = await import('./TranscriptList');
+    await renderScreen(<TranscriptList
+      sessionId="same-session"
+      datasetKey="public:same-session:1"
+      metadata={null}
+      messages={[thinkingMessage as any, toolMessage as any]}
+    />);
+
+    const detachFromTail = async () => {
+      legendListDetached = true;
+      await act(async () => {
+        capturingLegendListMock.state.props?.onScrollBeginDrag?.({
+          nativeEvent: {
+            contentOffset: { x: 0, y: 20 },
+            contentSize: { width: 320, height: 360 },
+            layoutMeasurement: { width: 320, height: 120 },
+          },
+        });
+      });
+    };
+
+    await detachFromTail();
+    rowMutationEvents = [];
+    const thinkingProps = [...getRenderedMessageProps()]
+      .reverse()
+      .find((props) => props?.message?.id === 'thinking-message');
+    await act(async () => {
+      thinkingProps.onThinkingExpandedChange(true);
+    });
+    expect(rowMutationEvents.indexOf('anchor-read')).toBeGreaterThanOrEqual(0);
+    expect(rowMutationEvents.indexOf('anchor-read')).toBeLessThan(rowMutationEvents.indexOf('thinking-visible'));
+
+    await detachFromTail();
+    rowMutationEvents = [];
+    expect(nestedToolSetExpanded).not.toBeNull();
+    await act(async () => {
+      nestedToolSetExpanded?.(true);
+    });
+    expect(rowMutationEvents.indexOf('anchor-read')).toBeGreaterThanOrEqual(0);
+    expect(rowMutationEvents.indexOf('anchor-read')).toBeLessThan(rowMutationEvents.indexOf('tool-visible'));
   });
 });

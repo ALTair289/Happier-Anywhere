@@ -22,7 +22,14 @@ export type ChatListBottomNotice = {
 
 export type TranscriptViewportChangeState = Readonly<{
     isPinned: boolean;
-    offsetY: number;
+    /**
+     * Distance metadata for observed viewports. Omitted (or non-finite) means
+     * "position unknown": the emit carries pin/detach intent only, and the sync
+     * boundary preserves the previously stored offset metadata instead of
+     * treating the emit as a measured position.
+     */
+    offsetY?: number;
+    shouldPersistViewport?: boolean;
     shouldRestoreViewport: boolean;
     anchor?: SessionViewportAnchorSnapshot | null;
 }>;

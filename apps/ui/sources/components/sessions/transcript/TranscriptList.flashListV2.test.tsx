@@ -1,7 +1,7 @@
 import * as React from 'react';
 
-import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { renderScreen } from '@/dev/testkit';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createCapturingLegendListMock, renderScreen, standardCleanup } from '@/dev/testkit';
 import {
     installTranscriptCommonModuleMocks,
     resetTranscriptCommonModuleMockState,
@@ -18,6 +18,20 @@ let platformOs: 'web' | 'ios' = 'web';
 let headerHeightState = 0;
 let safeAreaTopState = 0;
 let renderedMessageViewProps: any[] = [];
+const canonicalLegendListMock = createCapturingLegendListMock();
+const CapturingLegendList = React.forwardRef<any, any>((props, ref) => {
+    capturedLegendListProps = props;
+    return React.createElement(canonicalLegendListMock.module.LegendList, { ...props, ref });
+});
+const transcriptRendererAxis = vi.hoisted(() => ({
+    transcriptLegendListSpikeSurface: 'flashList' as 'flashList' | 'off',
+}));
+
+vi.mock('@/sync/sync', () => ({
+    sync: {
+        getSyncTuning: () => transcriptRendererAxis,
+    },
+}));
 
 vi.mock('@shopify/flash-list', () => ({
     FlashList: (props: any) => {
@@ -52,40 +66,8 @@ vi.mock('@shopify/flash-list', () => ({
     },
 }));
 
-vi.mock('@legendapp/list/react-native', () => ({
-    LegendList: (props: any) => {
-        capturedLegendListProps = props;
-        const data = Array.isArray(props.data) ? props.data : [];
-        const header =
-            props.ListHeaderComponent
-                ? (typeof props.ListHeaderComponent === 'function'
-                    ? props.ListHeaderComponent()
-                    : props.ListHeaderComponent)
-                : null;
-        const footer =
-            props.ListFooterComponent
-                ? (typeof props.ListFooterComponent === 'function'
-                    ? props.ListFooterComponent()
-                    : props.ListFooterComponent)
-                : null;
-        return React.createElement(
-            'LegendList',
-            props,
-            header,
-            data.map((item: any, index: number) => {
-                const key =
-                    typeof props.keyExtractor === 'function'
-                        ? props.keyExtractor(item, index)
-                        : (item?.id ?? String(index));
-                const child = typeof props.renderItem === 'function' ? props.renderItem({ item, index }) : null;
-                return React.createElement('LegendListItem', { key }, child);
-            }),
-            footer,
-        );
-    },
-}));
-
 installTranscriptCommonModuleMocks({
+    legendList: () => ({ LegendList: CapturingLegendList }),
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
         return createReactNativeWebMock({
@@ -133,6 +115,8 @@ vi.mock('./ChatFooter', () => ({
 }));
 
 describe('TranscriptList (FlashList v2)', () => {
+    afterEach(standardCleanup);
+
     beforeEach(() => {
         resetTranscriptCommonModuleMockState();
         capturedFlashListProps = null;
@@ -143,6 +127,7 @@ describe('TranscriptList (FlashList v2)', () => {
         headerHeightState = 0;
         safeAreaTopState = 0;
         renderedMessageViewProps = [];
+        transcriptRendererAxis.transcriptLegendListSpikeSurface = 'flashList';
         vi.unstubAllGlobals();
         vi.stubGlobal('window', {
             localStorage: {
@@ -158,6 +143,7 @@ describe('TranscriptList (FlashList v2)', () => {
         const { TranscriptList } = await import('./TranscriptList');
         await renderScreen(<TranscriptList
                     sessionId="s1"
+                    datasetKey="public:s1:1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
                 />);
@@ -165,28 +151,23 @@ describe('TranscriptList (FlashList v2)', () => {
         expect(renderedFlatListCount).toBe(0);
         expect(capturedFlashListProps).not.toBeNull();
         expect(capturedFlashListProps.maintainVisibleContentPosition?.startRenderingFromBottom).toBe(true);
-        expect(renderedMessageViewProps[0]?.interaction).toEqual({
+        expect(renderedMessageViewProps[0]?.interaction).toEqual(expect.objectContaining({
             canApprovePermissions: false,
+            canFork: false,
             canSendMessages: false,
             disableToolNavigation: true,
             permissionDisabledReason: 'public',
-        });
+        }));
         expect(capturedLegendListProps).toBeNull();
     });
 
     it('routes public read-only transcripts to Legend only when the internal read-only flag is enabled', async () => {
-        vi.stubGlobal('window', {
-            localStorage: {
-                getItem: (key: string) =>
-                    key === 'HAPPIER_SYNC_TUNING_JSON'
-                        ? JSON.stringify({ transcriptLegendListSpikeSurface: 'readOnly' })
-                        : null,
-            },
-        });
+        transcriptRendererAxis.transcriptLegendListSpikeSurface = 'off';
 
         const { TranscriptList } = await import('./TranscriptList');
         await renderScreen(<TranscriptList
                     sessionId="public-session"
+                    datasetKey="public:public-session:1"
                     metadata={null}
                     messages={[
                         { kind: 'user-text', id: 'oldest', localId: null, createdAt: 1, text: 'first' } as any,
@@ -197,7 +178,7 @@ describe('TranscriptList (FlashList v2)', () => {
         expect(capturedFlashListProps).toBeNull();
         expect(capturedLegendListProps).toMatchObject({
             alignItemsAtEnd: true,
-            dataKey: 'public-session',
+            dataKey: 'public:public-session:1',
             initialScrollAtEnd: true,
             maintainScrollAtEnd: { animated: false },
             maintainVisibleContentPosition: { data: true, size: true },
@@ -209,6 +190,7 @@ describe('TranscriptList (FlashList v2)', () => {
         const { TranscriptList } = await import('./TranscriptList');
         await renderScreen(<TranscriptList
                     sessionId="s1"
+                    datasetKey="public:s1:1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
                 />);
@@ -223,6 +205,7 @@ describe('TranscriptList (FlashList v2)', () => {
         const { TranscriptList } = await import('./TranscriptList');
         await renderScreen(<TranscriptList
                     sessionId="s1"
+                    datasetKey="public:s1:1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
                 />);
@@ -237,6 +220,7 @@ describe('TranscriptList (FlashList v2)', () => {
         const { TranscriptList } = await import('./TranscriptList');
         await renderScreen(<TranscriptList
                     sessionId="s1"
+                    datasetKey="public:s1:1"
                     metadata={null}
                     messages={[
                         { kind: 'user-text', id: 'oldest', localId: null, createdAt: 1, text: 'first' } as any,
@@ -256,6 +240,7 @@ describe('TranscriptList (FlashList v2)', () => {
         const { TranscriptList } = await import('./TranscriptList');
         await renderScreen(<TranscriptList
                     sessionId="s1"
+                    datasetKey="public:s1:1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
                 />);
@@ -272,6 +257,7 @@ describe('TranscriptList (FlashList v2)', () => {
         const { TranscriptList } = await import('./TranscriptList');
         const screen = await renderScreen(<TranscriptList
                     sessionId="s1"
+                    datasetKey="public:s1:1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
                 />);
@@ -291,6 +277,7 @@ describe('TranscriptList (FlashList v2)', () => {
         const { TranscriptList } = await import('./TranscriptList');
         const screen = await renderScreen(<TranscriptList
                     sessionId="s1"
+                    datasetKey="public:s1:1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
                 />);
