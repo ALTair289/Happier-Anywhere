@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { accountSettingsParse } from './accountSettings.js';
+import { accountSettingsParse, isExpoPushNotificationChannelEnabled } from './accountSettings.js';
 import { resolveConnectedServicesProviderStateSharingPolicyV1 } from './connectedServicesSettings.js';
 import { isActionEnabledByActionsSettings } from '../../actions/actionSettings.js';
 
@@ -772,5 +772,43 @@ describe('accountSettings', () => {
     expect(isActionEnabledByActionsSettings('session.message.send' as any, parsed.actionsSettingsV1, { surface: 'session_agent' } as any)).toBe(true);
     expect(parsed.actionsSettingsV1.actions['session.message.send' as any]?.approvalRequiredSurfaces).toEqual(['cli']);
     expect(isActionEnabledByActionsSettings('session.stop' as any, parsed.actionsSettingsV1, { surface: 'session_agent' } as any)).toBe(false);
+  });
+});
+
+describe('isExpoPushNotificationChannelEnabled', () => {
+  it('treats an account with no notification settings as push-enabled', () => {
+    expect(isExpoPushNotificationChannelEnabled({})).toBe(true);
+  });
+
+  it('honors the legacy pushEnabled flag when no explicit channels exist', () => {
+    expect(isExpoPushNotificationChannelEnabled({
+      notificationsSettingsV1: { v: 1, pushEnabled: false },
+    })).toBe(false);
+  });
+
+  it('reads the explicit expo push channel when channels are configured', () => {
+    expect(isExpoPushNotificationChannelEnabled({
+      notificationsSettingsV1: { v: 1, pushEnabled: true },
+      notificationChannelsV1: [
+        { v: 1, id: 'builtin:expo_push', kind: 'expo_push', enabled: false },
+      ],
+    })).toBe(false);
+  });
+
+  it('does not treat an enabled webhook channel as Expo push enablement', () => {
+    expect(isExpoPushNotificationChannelEnabled({
+      notificationChannelsV1: [
+        { v: 1, id: 'hook', kind: 'webhook', enabled: true, url: 'https://example.com/hook' },
+      ],
+    })).toBe(false);
+  });
+
+  it('is enabled when at least one expo push channel is enabled', () => {
+    expect(isExpoPushNotificationChannelEnabled({
+      notificationChannelsV1: [
+        { v: 1, id: 'builtin:expo_push', kind: 'expo_push', enabled: false },
+        { v: 1, id: 'secondary', kind: 'expo_push', enabled: true },
+      ],
+    })).toBe(true);
   });
 });

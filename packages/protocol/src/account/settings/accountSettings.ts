@@ -412,6 +412,19 @@ export function resolveNotificationChannelsV1FromAccountSettings(settingsLike: u
   return [deriveExpoPushNotificationChannelFromLegacySettings(getNotificationsSettingsV1FromAccountSettings(rec))];
 }
 
+/**
+ * Canonical answer to "may this account receive Expo push notifications at all".
+ *
+ * Both the client (token registration and OS permission prompting) and any surface that reports
+ * the account-level push state must consume this, so the reported setting and the behavior it
+ * describes cannot diverge. An enabled webhook channel is a different delivery channel and does
+ * not enable Expo push.
+ */
+export function isExpoPushNotificationChannelEnabled(settingsLike: unknown): boolean {
+  return resolveNotificationChannelsV1FromAccountSettings(settingsLike)
+    .some((channel) => channel.kind === 'expo_push' && channel.enabled === true);
+}
+
 export { BUILT_IN_EXPO_PUSH_NOTIFICATION_CHANNEL_ID };
 export type {
   ConnectedServicesDefaultAuthByAgentIdV1,

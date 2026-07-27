@@ -417,6 +417,7 @@ export {
 } from './account/settings/notificationChannels.js';
 
 export {
+  isExpoPushNotificationChannelEnabled,
   resolveNotificationChannelsV1FromAccountSettings,
 } from './account/settings/accountSettings.js';
 
