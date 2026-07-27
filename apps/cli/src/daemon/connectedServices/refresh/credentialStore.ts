@@ -2,12 +2,14 @@ import {
   ConnectedServiceCredentialRecordV1Schema,
   sealConnectedServiceCredentialCiphertext,
   type ConnectedServiceCredentialRecordV1,
+  type ConnectedServiceCredentialRevisionBoundaryV1,
 } from '@happier-dev/protocol';
 import { randomBytes } from 'node:crypto';
 
 import type { ApiClient } from '@/api/api';
 import type { Credentials } from '@/persistence';
 import { resolveConnectedServiceAccountMode } from '@/cloud/connectedServices/resolveConnectedServiceAccountMode';
+import { assertConnectedServiceCredentialRecordBinding } from '@/cloud/connectedServices/resolveConnectedServiceCredentials';
 import {
   openConnectedServiceRecord,
 } from './oauthCredentialRecords';
@@ -15,6 +17,14 @@ import type {
   BoundProfile,
   ConnectedServiceCredentialSource,
 } from './refreshTypes';
+
+function credentialRevisionBoundary(
+  value: ConnectedServiceCredentialRevisionBoundaryV1,
+): ConnectedServiceCredentialRevisionBoundaryV1 {
+  return value.revisionSemantics === 'revisioned'
+    ? { revisionSemantics: 'revisioned', credentialRevision: value.credentialRevision }
+    : { revisionSemantics: 'legacy_unfenced', credentialRevision: null };
+}
 
 export async function readCredentialForRefresh(input: Readonly<{
   api: ApiClient;
@@ -33,7 +43,14 @@ export async function readCredentialForRefresh(input: Readonly<{
           profileId: input.binding.profileId,
         });
     if (plain) {
-      return { mode: 'plain', record: ConnectedServiceCredentialRecordV1Schema.parse(plain.content.v) };
+      return {
+        mode: 'plain',
+        record: assertConnectedServiceCredentialRecordBinding({
+          binding: input.binding,
+          record: ConnectedServiceCredentialRecordV1Schema.parse(plain.content.v),
+        }),
+        ...credentialRevisionBoundary(plain),
+      };
     }
     if (accountMode === 'plain') return null;
   }
@@ -47,23 +64,34 @@ export async function readCredentialForRefresh(input: Readonly<{
     credentials: input.credentials,
     ciphertext: sealed.sealed.ciphertext,
   });
-  return { mode: 'sealed', record, metadata: sealed.metadata };
+  return {
+    mode: 'sealed',
+    record: assertConnectedServiceCredentialRecordBinding({ binding: input.binding, record }),
+    metadata: sealed.metadata,
+    ...credentialRevisionBoundary(sealed),
+  };
 }
 
 export async function persistRefreshedCredential(input: Readonly<{
   api: ApiClient;
   credentials: Credentials;
   binding: BoundProfile;
-  source: ConnectedServiceCredentialSource;
+  source: Extract<ConnectedServiceCredentialSource, { revisionSemantics: 'revisioned' }>;
   updated: ConnectedServiceCredentialRecordV1;
-}>): Promise<void> {
+  refreshLeaseOwnerId: string;
+}>): Promise<{ success: true; credentialRevision: string } | { error: 'connect_credential_mutation_superseded'; reason: 'revision_mismatch' | 'refresh_lease_lost'; credentialRevision: string | null }> {
   if (input.source.mode === 'plain') {
-    await input.api.registerConnectedServiceCredentialPlain({
+    const result = await input.api.registerConnectedServiceCredentialPlain({
       serviceId: input.binding.serviceId,
       profileId: input.binding.profileId,
       content: { t: 'plain', v: input.updated },
+      expectedCredentialRevision: input.source.credentialRevision,
+      refreshLeaseOwnerId: input.refreshLeaseOwnerId,
     });
-    return;
+    if (!('error' in result) && !('credentialRevision' in result)) {
+      throw new Error('Revisioned credential refresh received an unfenced mutation response');
+    }
+    return result;
   }
 
   const sealedCiphertext = sealConnectedServiceCredentialCiphertext({
@@ -75,7 +103,7 @@ export async function persistRefreshedCredential(input: Readonly<{
     randomBytes: (length) => randomBytes(length),
   });
 
-  await input.api.registerConnectedServiceCredentialSealed({
+  const result = await input.api.registerConnectedServiceCredentialSealed({
     serviceId: input.binding.serviceId,
     profileId: input.binding.profileId,
     sealed: { format: 'account_scoped_v1', ciphertext: sealedCiphertext },
@@ -85,5 +113,11 @@ export async function persistRefreshedCredential(input: Readonly<{
       providerAccountId: input.updated.kind === 'oauth' ? input.updated.oauth.providerAccountId : null,
       expiresAt: input.updated.expiresAt,
     },
+    expectedCredentialRevision: input.source.credentialRevision,
+    refreshLeaseOwnerId: input.refreshLeaseOwnerId,
   });
+  if (!('error' in result) && !('credentialRevision' in result)) {
+    throw new Error('Revisioned credential refresh received an unfenced mutation response');
+  }
+  return result;
 }

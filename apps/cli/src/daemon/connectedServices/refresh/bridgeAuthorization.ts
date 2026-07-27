@@ -71,7 +71,8 @@ export function resolveCurrentBridgeSelectionForTarget(
       activeProfileId: binding.profileId,
       fallbackProfileId: binding.profileId,
       generation: binding.generation ?? 0,
+      credentialRevision: null,
     };
   }
-  return { kind: 'profile', serviceId, profileId: binding.profileId };
+  return { kind: 'profile', serviceId, profileId: binding.profileId, credentialRevision: null };
 }

@@ -145,11 +145,11 @@ export async function persistCredentialHealthForRefreshResult(input: Readonly<{
   api: ApiClient;
   result: ConnectedServiceCredentialRefreshResult;
   now: number;
-}>): Promise<void> {
+}>): Promise<boolean> {
   const { api, result, now } = input;
-  if (result.status !== 'refreshed' && result.status !== 'refresh_failed') return;
+  if (result.status !== 'refreshed' && result.status !== 'refresh_failed') return false;
   const updateHealth = api.updateConnectedServiceCredentialHealth;
-  if (typeof updateHealth !== 'function') return;
+  if (typeof updateHealth !== 'function') return false;
 
   const diagnostic = result.diagnostic;
   const health = result.status === 'refreshed'
@@ -157,11 +157,14 @@ export async function persistCredentialHealthForRefreshResult(input: Readonly<{
     : buildFailureCredentialHealth(diagnostic, now);
 
   try {
-    await updateHealth.call(api, {
+    const settlement = await updateHealth.call(api, {
       serviceId: diagnostic.serviceId,
       profileId: diagnostic.profileId,
       health,
+      ...(result.credentialRevision ? { expectedCredentialRevision: result.credentialRevision } : {}),
     });
+    if (settlement && 'error' in settlement) return false;
+    return true;
   } catch (error) {
     logger.warn('[DAEMON RUN] Failed to update connected-service credential health after refresh', {
       serviceId: diagnostic.serviceId,
@@ -170,6 +173,7 @@ export async function persistCredentialHealthForRefreshResult(input: Readonly<{
       category: diagnostic.category ?? null,
       error: serializeAxiosErrorForLog(error),
     });
+    return false;
   }
 }
 

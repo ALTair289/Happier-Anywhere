@@ -34,6 +34,8 @@ function buildCapabilities(
 function oauthSource(accessToken: string): ConnectedServiceCredentialSource {
   return {
     mode: 'plain',
+    revisionSemantics: 'revisioned',
+    credentialRevision: 'csr_abcdefghijklmnopqrstuv',
     record: buildConnectedServiceCredentialRecord({
       now: 1_000,
       serviceId: 'claude-subscription',
@@ -57,6 +59,8 @@ describe('createClaudeSubscriptionBridgeRefreshHooks', () => {
   it('short-circuits a setup-token as non-refreshable (provider-owned quirk)', async () => {
     const source: ConnectedServiceCredentialSource = {
       mode: 'plain',
+      revisionSemantics: 'revisioned',
+      credentialRevision: 'csr_abcdefghijklmnopqrstuv',
       record: buildConnectedServiceCredentialRecord({
         now: 1_000,
         serviceId: 'claude-subscription',
@@ -105,12 +109,44 @@ describe('createCodexChatGptBridgeRefreshHooks', () => {
 
     const response = await hooks.finalizeRefreshedResponse({
       binding: { serviceId: 'openai-codex', profileId: 'primary' },
-      selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'primary' },
+      selection: {
+        kind: 'profile',
+        serviceId: 'openai-codex',
+        profileId: 'primary',
+        credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+      },
       credential,
+      credentialRevision: 'csr_bcdefghijklmnopqrstuvw',
     });
 
     expect(rematerializeTargets).toHaveBeenCalledTimes(1);
-    expect(response).toEqual({ accessToken: 'rotated-access', chatgptAccountId: 'acct', chatgptPlanType: 'pro' });
+    expect(response).toEqual({
+      accessToken: 'rotated-access',
+      chatgptAccountId: 'acct',
+      chatgptPlanType: 'pro',
+      credentialRevision: 'csr_bcdefghijklmnopqrstuvw',
+    });
+  });
+
+  it('carries the canonical revision when adopting the current Codex token', async () => {
+    const source = oauthSource('valid-access');
+    const hooks = createCodexChatGptBridgeRefreshHooks({
+      chatgptPlanType: 'plus',
+      capabilities: buildCapabilities({
+        readCredentialSource: async () => source,
+        isOauthSourceStillValid: () => true,
+      }),
+    });
+
+    const probe = await hooks.probeCurrentToken({ serviceId: 'openai-codex', profileId: 'primary' });
+    expect(probe.kind).toBe('adoptable');
+    if (probe.kind !== 'adoptable') throw new Error('unreachable');
+    expect(probe.buildResponse()).toEqual({
+      accessToken: 'valid-access',
+      chatgptAccountId: 'acct',
+      chatgptPlanType: 'plus',
+      credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+    });
   });
 
   it('needs a refresh when the current oauth source is not still valid', async () => {

@@ -67,5 +67,6 @@ export type ConnectedServiceBridgeRefreshProfileHooks<TResponse> = Readonly<{
     binding: BoundProfile;
     selection: ConnectedServiceChildSelection;
     credential: OauthConnectedServiceCredentialRecord;
+    credentialRevision: string;
   }>) => Promise<TResponse>;
 }>;

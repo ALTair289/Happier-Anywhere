@@ -165,16 +165,30 @@ describe('serviceRefreshers', () => {
     process.env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL = 'https://example.test/anthropic/token';
     process.env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_CLIENT_ID = 'client-123';
 
-    const fetchMock = vi.fn(async (_input: unknown, _init?: unknown) => ({
-      ok: true,
-      json: async () => ({
-        access_token: 'new-access',
-        refresh_token: 'new-refresh',
-        expires_in: 123,
-        scope: 'user:inference user:profile user:sessions:claude_code',
-        token_type: 'Bearer',
-      }),
-    }));
+    const fetchMock = vi.fn(async (input: unknown, _init?: unknown) => {
+      if (String(input).endsWith('/api/oauth/profile')) {
+        return {
+          ok: true,
+          json: async () => ({
+            account: { has_claude_max: true },
+            organization: {
+              organization_type: 'claude_max',
+              rate_limit_tier: 'default_claude_max_20x',
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          access_token: 'new-access',
+          refresh_token: 'new-refresh',
+          expires_in: 123,
+          scope: 'user:inference user:profile user:sessions:claude_code',
+          token_type: 'Bearer',
+        }),
+      };
+    });
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
 
     const now = 2000;
@@ -184,7 +198,7 @@ describe('serviceRefreshers', () => {
         now,
       });
 
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(fetchMock.mock.calls[0]?.[0]).toBe('https://example.test/anthropic/token');
 
       const init: unknown = fetchMock.mock.calls[0]?.[1];
@@ -200,6 +214,12 @@ describe('serviceRefreshers', () => {
       expect(refreshed.expiresAt).toBe(now + 123 * 1000);
       expect(refreshed.scope).toBe('user:inference user:profile user:sessions:claude_code');
       expect(refreshed.tokenType).toBe('Bearer');
+      expect(refreshed.raw).toEqual({
+        claudeAiOauth: {
+          subscriptionType: 'max',
+          rateLimitTier: 'default_claude_max_20x',
+        },
+      });
     } finally {
       process.env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL = previousTokenUrl;
       process.env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_CLIENT_ID = previousClientId;

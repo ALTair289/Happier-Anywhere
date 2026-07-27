@@ -26,11 +26,13 @@ describe('createConnectedServicesAuthUpdatedRestartHandler', () => {
     pid: number;
     sessionId: string;
     startedBy?: TrackedSession['startedBy'];
+    spawnOptions?: TrackedSession['spawnOptions'];
   }>): TrackedSession {
     return {
       pid: input.pid,
       startedBy: input.startedBy ?? 'daemon',
       happySessionId: input.sessionId,
+      ...(input.spawnOptions ? { spawnOptions: input.spawnOptions } : {}),
     };
   }
 
@@ -44,6 +46,7 @@ describe('createConnectedServicesAuthUpdatedRestartHandler', () => {
     return {
       providerId: agentId,
       serviceIds: ['claude-subscription'],
+      generationApplicationScope: 'per_session_runtime',
       spawnPreflightOauthRefresh: { mode: 'expiry_window' },
       refreshedCredentialApplication: {
         mode,
@@ -110,6 +113,171 @@ describe('createConnectedServicesAuthUpdatedRestartHandler', () => {
     }));
   });
 
+  it('stops a live target on credential deletion instead of applying restart policy', async () => {
+    const tracked = createTrackedSession({ pid: 1, sessionId: 's1' });
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const stopSessionForCredentialDeletion = vi.fn(async () => ({ status: 'stopped' as const }));
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids: new Set<number>(),
+      pidToTrackedSession: new Map([[1, tracked]]),
+      resolveLifecycleDescriptor: async (agentId) => createLifecycleDescriptor(agentId, 'no_restart_required'),
+      resolveProcessGroupPid: (session) => session.pid,
+      requestRestartSignal,
+      stopSessionForCredentialDeletion,
+      restartSignalDelayMs: 250,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [{ pid: 1, agentId: 'claude' }],
+      mutation: 'deleted',
+      trigger: 'reconnect_propagation',
+    });
+
+    expect(stopSessionForCredentialDeletion).toHaveBeenCalledWith({
+      tracked,
+      target: { pid: 1, agentId: 'claude' },
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+    });
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+  });
+
+  it('rejects credential deletion acknowledgement when canonical stop reports incomplete termination', async () => {
+    const tracked = createTrackedSession({ pid: 1, sessionId: 's1' });
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const stopSessionForCredentialDeletion = vi.fn(async () => ({
+      status: 'incomplete' as const,
+      reason: 'runner_exit_timeout' as const,
+    }));
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids: new Set<number>(),
+      pidToTrackedSession: new Map([[1, tracked]]),
+      resolveLifecycleDescriptor: async (agentId) => createLifecycleDescriptor(agentId, 'no_restart_required'),
+      resolveProcessGroupPid: (session) => session.pid,
+      requestRestartSignal,
+      stopSessionForCredentialDeletion,
+      restartSignalDelayMs: 250,
+    } satisfies RestartHandlerParams);
+
+    await expect(handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [{ pid: 1, agentId: 'claude' }],
+      mutation: 'deleted',
+      trigger: 'reconnect_propagation',
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceCredentialDeletionNotSettledError',
+      stopResult: {
+        status: 'incomplete',
+        reason: 'runner_exit_timeout',
+      },
+    });
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+  });
+
+  it('rejects credential deletion acknowledgement while canonical stop is only requested', async () => {
+    const tracked = createTrackedSession({ pid: 1, sessionId: 's1' });
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const stopSessionForCredentialDeletion = vi.fn(async () => ({ status: 'requested' as const }));
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids: new Set<number>(),
+      pidToTrackedSession: new Map([[1, tracked]]),
+      resolveLifecycleDescriptor: async (agentId) => createLifecycleDescriptor(agentId, 'no_restart_required'),
+      resolveProcessGroupPid: (session) => session.pid,
+      requestRestartSignal,
+      stopSessionForCredentialDeletion,
+      restartSignalDelayMs: 250,
+    } satisfies RestartHandlerParams);
+
+    await expect(handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [{ pid: 1, agentId: 'claude' }],
+      mutation: 'deleted',
+      trigger: 'reconnect_propagation',
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceCredentialDeletionNotSettledError',
+      stopResult: { status: 'requested' },
+    });
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+  });
+
+  it('acknowledges not_found only after the canonical lifecycle owner removed the tracked target', async () => {
+    const tracked = createTrackedSession({ pid: 1, sessionId: 's1' });
+    const pidToTrackedSession = new Map([[1, tracked]]);
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const stopSessionForCredentialDeletion = vi.fn(async () => {
+      pidToTrackedSession.delete(1);
+      return { status: 'not_found' as const };
+    });
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids: new Set<number>(),
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: async (agentId) => createLifecycleDescriptor(agentId, 'no_restart_required'),
+      resolveProcessGroupPid: (session) => session.pid,
+      requestRestartSignal,
+      stopSessionForCredentialDeletion,
+      restartSignalDelayMs: 250,
+    } satisfies RestartHandlerParams);
+
+    await expect(handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [{ pid: 1, agentId: 'claude' }],
+      mutation: 'deleted',
+      trigger: 'reconnect_propagation',
+    })).resolves.toBeUndefined();
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+  });
+
+  it('rejects not_found when the tracked target still survives', async () => {
+    const tracked = createTrackedSession({ pid: 1, sessionId: 's1' });
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const stopSessionForCredentialDeletion = vi.fn(async () => ({ status: 'not_found' as const }));
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids: new Set<number>(),
+      pidToTrackedSession: new Map([[1, tracked]]),
+      resolveLifecycleDescriptor: async (agentId) => createLifecycleDescriptor(agentId, 'no_restart_required'),
+      resolveProcessGroupPid: (session) => session.pid,
+      requestRestartSignal,
+      stopSessionForCredentialDeletion,
+      restartSignalDelayMs: 250,
+    } satisfies RestartHandlerParams);
+
+    await expect(handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [{ pid: 1, agentId: 'claude' }],
+      mutation: 'deleted',
+      trigger: 'reconnect_propagation',
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceCredentialDeletionNotSettledError',
+      stopResult: { status: 'not_found' },
+    });
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+  });
+
+  it('uses the gated restart path for a demonstrably surviving reattached runner', async () => {
+    const restartRequestedPids = new Set<number>();
+    const tracked = {
+      ...createTrackedSession({ pid: 41, sessionId: 'reattached-session' }),
+      reattachedFromDiskMarker: true,
+    } satisfies TrackedSession;
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession: new Map([[tracked.pid, tracked]]),
+      resolveLifecycleDescriptor: async (agentId) => createLifecycleDescriptor(agentId, 'restart_required'),
+      resolveProcessGroupPid: () => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work', groupId: 'team', generation: 7 },
+      affectedTargets: [{ pid: tracked.pid, agentId: 'claude' }],
+    });
+
+    expect(requestRestartSignal).toHaveBeenCalledOnce();
+    expect(restartRequestedPids).toContain(tracked.pid);
+  });
+
   it('does not request a restart for a target that can refresh Claude subscription access tokens through the SDK callback', async () => {
     const restartRequestedPids = new Set<number>();
     const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
@@ -135,7 +303,7 @@ describe('createConnectedServicesAuthUpdatedRestartHandler', () => {
         {
           pid: 1,
           agentId: 'claude',
-          accessTokenRefresh: { mode: 'daemon_callback' },
+          accessTokenRefresh: { mode: 'daemon_callback', serviceIds: ['claude-subscription'] },
         },
       ],
     });
@@ -206,6 +374,131 @@ describe('createConnectedServicesAuthUpdatedRestartHandler', () => {
     });
 
     expect(requestRestartSignal).toHaveBeenCalledWith(expect.objectContaining({ pid: 1 }));
+    expect(restartRequestedPids.has(1)).toBe(true);
+  });
+
+  it('does not let a stale callback marker for another service suppress restart', async () => {
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const pidToTrackedSession = new Map<number, TrackedSession>([
+      [1, createTrackedSession({ pid: 1, sessionId: 's1' })],
+    ]);
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: async (agentId) => createLifecycleDescriptor(agentId, 'restart_required', {
+        noRestartRequiredWhenAccessTokenCallbackServiceIds: ['claude-subscription'],
+      }),
+      resolveProcessGroupPid: (tracked) => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [{
+        pid: 1,
+        agentId: 'claude',
+        accessTokenRefresh: { mode: 'daemon_callback', serviceIds: ['openai-codex'] },
+      }],
+    });
+
+    expect(requestRestartSignal).toHaveBeenCalledWith(expect.objectContaining({ pid: 1 }));
+  });
+
+  it('fails toward a tracked-session deferral when authoritative callback proof cannot be resolved', async () => {
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const onRestartBlocked = vi.fn();
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession: new Map<number, TrackedSession>(),
+      resolveLifecycleDescriptor: async (agentId) => createLifecycleDescriptor(agentId, 'restart_required', {
+        noRestartRequiredWhenAccessTokenCallbackServiceIds: ['claude-subscription'],
+      }),
+      resolveProcessGroupPid: (tracked) => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+      onRestartBlocked,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [{
+        pid: 1,
+        agentId: 'claude',
+        accessTokenRefresh: { mode: 'daemon_callback', serviceIds: ['openai-codex'] },
+      }],
+    });
+
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+    expect(onRestartBlocked).toHaveBeenCalledWith(expect.objectContaining({
+      pid: 1,
+      reason: 'tracked_session_missing',
+    }));
+  });
+
+  it('uses the registered Codex callback fact to preserve app-server sessions across same-account OAuth refreshes', async () => {
+    const { resolveConnectedServiceCredentialLifecycleDescriptor } = await import('@/backends/catalog');
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const pidToTrackedSession = new Map<number, TrackedSession>([
+      [1, createTrackedSession({
+        pid: 1,
+        sessionId: 'codex-app-server',
+        spawnOptions: { directory: '/tmp/codex-app-server', codexBackendMode: 'appServer' },
+      })],
+    ]);
+
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: resolveConnectedServiceCredentialLifecycleDescriptor,
+      resolveProcessGroupPid: (tracked) => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'openai-codex', profileId: 'work', groupId: 'team', generation: 7 },
+      affectedTargets: [{
+        pid: 1,
+        agentId: 'codex',
+        accessTokenRefresh: { mode: 'daemon_callback', serviceIds: ['openai-codex'] },
+      }],
+    });
+
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+    expect(restartRequestedPids.has(1)).toBe(false);
+  });
+
+  it('keeps the REAL Codex lifecycle restart fallback for runtimes without the app-server token callback', async () => {
+    const { resolveConnectedServiceCredentialLifecycleDescriptor } = await import('@/backends/catalog');
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const pidToTrackedSession = new Map<number, TrackedSession>([
+      [1, createTrackedSession({
+        pid: 1,
+        sessionId: 'codex-acp',
+        spawnOptions: { directory: '/tmp/codex-acp', codexBackendMode: 'acp' },
+      })],
+    ]);
+
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: resolveConnectedServiceCredentialLifecycleDescriptor,
+      resolveProcessGroupPid: (tracked) => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'openai-codex', profileId: 'work', groupId: 'team', generation: 7 },
+      affectedTargets: [{ pid: 1, agentId: 'codex' }],
+    });
+
+    expect(requestRestartSignal).toHaveBeenCalledTimes(1);
     expect(restartRequestedPids.has(1)).toBe(true);
   });
 

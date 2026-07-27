@@ -35,6 +35,7 @@ export function buildUpdatedOauthRecord(params: Readonly<{
     providerAccountId?: string | null;
     providerEmail?: string | null;
     expiresAt: number | null;
+    raw?: (ConnectedServiceCredentialRecordV1 & { kind: 'oauth' })['oauth']['raw'];
   }>;
 }>): ConnectedServiceCredentialRecordV1 {
   return ConnectedServiceCredentialRecordV1Schema.parse({
@@ -50,6 +51,7 @@ export function buildUpdatedOauthRecord(params: Readonly<{
       tokenType: params.next.tokenType ?? params.record.oauth.tokenType,
       providerAccountId: params.next.providerAccountId ?? params.record.oauth.providerAccountId,
       providerEmail: params.next.providerEmail ?? params.record.oauth.providerEmail,
+      raw: params.next.raw ?? params.record.oauth.raw,
     },
   });
 }
@@ -65,4 +67,17 @@ export function hasObservedOauthCredentialChanged(
     || before.oauth.idToken !== after.oauth.idToken
     || before.oauth.scope !== after.oauth.scope
     || before.oauth.tokenType !== after.oauth.tokenType;
+}
+
+export function isChangedUsableOauthCredentialRevision(input: Readonly<{
+  before: ConnectedServiceCredentialRecordV1 & { kind: 'oauth' };
+  after: ConnectedServiceCredentialRecordV1 & { kind: 'oauth' };
+  authoritativeExpiresAt: number | null;
+  now: number;
+}>): boolean {
+  return hasObservedOauthCredentialChanged(input.before, input.after)
+    && input.after.oauth.accessToken.trim().length > 0
+    && typeof input.authoritativeExpiresAt === 'number'
+    && Number.isFinite(input.authoritativeExpiresAt)
+    && input.authoritativeExpiresAt > input.now;
 }

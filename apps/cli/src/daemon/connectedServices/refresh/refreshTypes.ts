@@ -1,5 +1,6 @@
 import type {
   ConnectedServiceCredentialRecordV1,
+  ConnectedServiceCredentialRevisionBoundaryV1,
   ConnectedServiceId,
 } from '@happier-dev/protocol';
 
@@ -14,12 +15,12 @@ import type {
 export type BoundProfile = Readonly<{ serviceId: ConnectedServiceId; profileId: string }>;
 
 export type ConnectedServiceCredentialSource =
-  | Readonly<{ mode: 'plain'; record: ConnectedServiceCredentialRecordV1 }>
-  | Readonly<{
+  | (Readonly<{ mode: 'plain'; record: ConnectedServiceCredentialRecordV1 }> & ConnectedServiceCredentialRevisionBoundaryV1)
+  | (Readonly<{
     mode: 'sealed';
     record: ConnectedServiceCredentialRecordV1;
     metadata: { kind: 'oauth' | 'token'; expiresAt?: number | null };
-  }>;
+  }> & ConnectedServiceCredentialRevisionBoundaryV1);
 
 export type ConnectedServiceCredentialRefreshStatus =
   | 'refreshed'
@@ -47,6 +48,7 @@ export type ConnectedServiceCredentialRefreshResult = Readonly<{
   status: ConnectedServiceCredentialRefreshStatus;
   credential: ConnectedServiceCredentialRecordV1 | null;
   diagnostic: ConnectedServiceCredentialRefreshDiagnostic;
+  credentialRevision?: string;
 }>;
 
 /**

@@ -144,7 +144,7 @@ describe('ConnectedServiceRefreshCoordinator.refreshClaudeSubscriptionTokensForB
         accessToken: 'old-claude-access',
         refreshToken: 'old-claude-refresh',
         idToken: null,
-        scope: 'user:inference',
+        scope: 'user:inference user:profile user:sessions:claude_code',
         tokenType: 'Bearer',
         providerAccountId: 'anthropic-acct',
         providerEmail: 'claude@example.com',
@@ -156,19 +156,42 @@ describe('ConnectedServiceRefreshCoordinator.refreshClaudeSubscriptionTokensForB
       payload: record,
       randomBytes: (length) => randomBytes(length),
     });
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ access_token: 'fresh-claude-access', refresh_token: 'rotated-claude-refresh', expires_in: 3600 }),
-    }));
+    let credentialRevision = 'csr_aaaaaaaaaaaaaaaaaaaaaa';
+    const fetchMock = vi.fn(async (input: unknown) => (
+      String(input).endsWith('/api/oauth/profile')
+        ? {
+            ok: true,
+            json: async () => ({
+              account: { has_claude_max: true },
+              organization: {
+                organization_type: 'claude_max',
+                rate_limit_tier: 'default_claude_max_20x',
+              },
+            }),
+          }
+        : {
+            ok: true,
+            json: async () => ({ access_token: 'fresh-claude-access', refresh_token: 'rotated-claude-refresh', expires_in: 3600 }),
+          }
+    ));
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
     const api = {
       getConnectedServiceCredentialSealed: vi.fn(async () => ({
         sealed: { format: 'account_scoped_v1', ciphertext: sealedCiphertext },
         metadata: { kind: 'oauth', providerEmail: 'claude@example.com', providerAccountId: 'anthropic-acct', expiresAt: now + 60_000 },
+        revisionSemantics: 'revisioned' as const,
+        credentialRevision,
       })),
-      acquireConnectedServiceRefreshLease: vi.fn(async () => ({ acquired: true, leaseUntil: now + 60_000 })),
+      acquireConnectedServiceRefreshLease: vi.fn(async () => ({
+        acquired: true,
+        leaseUntil: now + 60_000,
+        ownerId: 'm1:d',
+        credentialRevision,
+      })),
       registerConnectedServiceCredentialSealed: vi.fn(async (params: { sealed: { ciphertext: string } }) => {
         sealedCiphertext = params.sealed.ciphertext;
+        credentialRevision = 'csr_bbbbbbbbbbbbbbbbbbbbbb';
+        return { success: true as const, credentialRevision };
       }),
     } as unknown as ApiClient;
 
@@ -228,7 +251,7 @@ describe('ConnectedServiceRefreshCoordinator.refreshClaudeSubscriptionTokensForB
         accessToken: 'current-valid-access',
         refreshToken: 'current-refresh-MUST-NOT-ROTATE',
         idToken: null,
-        scope: 'user:inference',
+        scope: 'user:inference user:profile user:sessions:claude_code',
         tokenType: 'Bearer',
         providerAccountId: 'anthropic-acct',
         providerEmail: 'claude@example.com',
@@ -392,7 +415,7 @@ describe('ConnectedServiceRefreshCoordinator.refreshClaudeSubscriptionTokensForB
         accessToken: 'stale-access',
         refreshToken: 'old-refresh',
         idToken: null,
-        scope: 'user:inference',
+        scope: 'user:inference user:profile user:sessions:claude_code',
         tokenType: 'Bearer',
         providerAccountId: 'anthropic-acct',
         providerEmail: 'claude@example.com',
@@ -404,19 +427,42 @@ describe('ConnectedServiceRefreshCoordinator.refreshClaudeSubscriptionTokensForB
       payload: record,
       randomBytes: (length) => randomBytes(length),
     });
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ access_token: 'rotated-access', refresh_token: 'rotated-refresh', expires_in: 3600 }),
-    }));
+    let credentialRevision = 'csr_cccccccccccccccccccccc';
+    const fetchMock = vi.fn(async (input: unknown) => (
+      String(input).endsWith('/api/oauth/profile')
+        ? {
+            ok: true,
+            json: async () => ({
+              account: { has_claude_max: true },
+              organization: {
+                organization_type: 'claude_max',
+                rate_limit_tier: 'default_claude_max_20x',
+              },
+            }),
+          }
+        : {
+            ok: true,
+            json: async () => ({ access_token: 'rotated-access', refresh_token: 'rotated-refresh', expires_in: 3600 }),
+          }
+    ));
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
     const api = {
       getConnectedServiceCredentialSealed: vi.fn(async () => ({
         sealed: { format: 'account_scoped_v1', ciphertext: sealedCiphertext },
         metadata: { kind: 'oauth', providerEmail: 'claude@example.com', providerAccountId: 'anthropic-acct', expiresAt: now + 60 * 60_000 },
+        revisionSemantics: 'revisioned' as const,
+        credentialRevision,
       })),
-      acquireConnectedServiceRefreshLease: vi.fn(async () => ({ acquired: true, leaseUntil: now + 60_000 })),
+      acquireConnectedServiceRefreshLease: vi.fn(async () => ({
+        acquired: true,
+        leaseUntil: now + 60_000,
+        ownerId: 'm1:d',
+        credentialRevision,
+      })),
       registerConnectedServiceCredentialSealed: vi.fn(async (params: { sealed: { ciphertext: string } }) => {
         sealedCiphertext = params.sealed.ciphertext;
+        credentialRevision = 'csr_dddddddddddddddddddddd';
+        return { success: true as const, credentialRevision };
       }),
     } as unknown as ApiClient;
 

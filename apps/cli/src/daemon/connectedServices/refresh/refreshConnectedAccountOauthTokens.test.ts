@@ -38,6 +38,91 @@ describe('refreshConnectedAccountOauthTokens', () => {
     }
   });
 
+  it('rejects a Claude refresh when the provider profile endpoint rejects the new access token', async () => {
+    const mod = await import('./serviceRefreshers');
+    const previousTokenUrl = process.env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL;
+    process.env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL = 'https://example.test/anthropic/token';
+
+    const fetchMock = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input) === 'https://example.test/anthropic/token') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: 'provider-rejected-access',
+            refresh_token: 'rotated-refresh',
+            expires_in: 28_800,
+          }),
+        };
+      }
+      return {
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        json: async () => ({}),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    try {
+      await expect(mod.refreshConnectedAccountOauthTokens({
+        serviceId: 'claude-subscription',
+        refreshToken: 'previous-refresh',
+        now: 2_000,
+      })).rejects.toMatchObject({
+        name: 'ConnectedServiceOauthRefreshError',
+        category: 'provider_401',
+        status: 401,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      process.env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL = previousTokenUrl;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not reject a Claude refresh only because optional profile evidence is temporarily unavailable', async () => {
+    const mod = await import('./serviceRefreshers');
+    const previousTokenUrl = process.env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL;
+    process.env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL = 'https://example.test/anthropic/token';
+
+    const fetchMock = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input) === 'https://example.test/anthropic/token') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: 'accepted-access',
+            refresh_token: 'rotated-refresh',
+            expires_in: 28_800,
+          }),
+        };
+      }
+      return {
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: async () => ({}),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    try {
+      await expect(mod.refreshConnectedAccountOauthTokens({
+        serviceId: 'claude-subscription',
+        refreshToken: 'previous-refresh',
+        now: 2_000,
+      })).resolves.toMatchObject({
+        accessToken: 'accepted-access',
+        refreshToken: 'rotated-refresh',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      process.env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL = previousTokenUrl;
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('extracts openai-codex account identity from the refresh id_token via the descriptor hook', async () => {
     const mod = await import('./serviceRefreshers');
     const claims = { chatgpt_account_id: 'chatgpt-acct-1', email: 'codex@example.test' };
