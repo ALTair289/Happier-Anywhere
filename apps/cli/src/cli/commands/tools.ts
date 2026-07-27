@@ -6,7 +6,7 @@ import type { Credentials } from '@/persistence';
 import { readCredentials } from '@/persistence';
 import { wantsJson, printJsonEnvelope } from '@/cli/output/jsonEnvelope';
 import { bootstrapAccountSettingsContext } from '@/settings/accountSettings/bootstrapAccountSettingsContext';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import { initializeBackendApiContext } from '@/agent/runtime/initializeBackendApiContext';
 import { listBuiltInHappierTools } from '@/agent/tools/happierTools/listBuiltInHappierTools';
 import { callBuiltInHappierTool } from '@/agent/tools/happierTools/callBuiltInHappierTool';
