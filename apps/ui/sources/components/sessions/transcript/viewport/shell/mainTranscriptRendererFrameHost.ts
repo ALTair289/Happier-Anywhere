@@ -6,11 +6,15 @@ import type { TranscriptBottomFollowMode } from '@/components/sessions/transcrip
 import type { TranscriptViewportTelemetryMvcpPolicy } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
 import {
     resolveMainTranscriptListShellFrame,
-    type TranscriptListShellFrame,
 } from '@/components/sessions/transcript/viewport/shell/transcriptListShellCapabilities';
+import { resolveTranscriptListRendererBinding } from '@/components/sessions/transcript/viewport/shell/renderer/resolveTranscriptListRenderer';
+import type {
+    TranscriptListRendererBinding,
+    TranscriptListRendererSelection,
+} from '@/components/sessions/transcript/viewport/shell/renderer/types';
 
 export type MainTranscriptRendererFrameHost = Readonly<{
-    frame: TranscriptListShellFrame;
+    binding: TranscriptListRendererBinding;
     maintainVisibleContentPosition: TranscriptFlashListBottomMaintenanceResult;
     pauseOffsetCorrection: boolean;
     telemetryMvcpPolicy: TranscriptViewportTelemetryMvcpPolicy;
@@ -45,8 +49,39 @@ export function resolveMainTranscriptRendererFrameHost(params: Readonly<{
     pinEnabled: boolean;
     pinThresholdPx: number;
     platformOS: string;
+    rendererSelection: TranscriptListRendererSelection;
+    /**
+     * Render-time session-entry snapshot intent. Legend's initial tail placement (and the
+     * adapter's held-'end' seed) must consume THIS basis, not the live bottom-follow mode:
+     * on a warm-instance session switch the mode ref still carries the previous session's
+     * 'following' during the next session's first render, which mounted detached-anchored
+     * entries at the tail and started a scroll war against the entry restore.
+     */
+    sessionEntryShouldFollowBottom: boolean;
     targetWindowActive?: boolean;
 }>): MainTranscriptRendererFrameHost {
+    if (params.rendererSelection.renderer.kind === 'legendList') {
+        return {
+            binding: resolveTranscriptListRendererBinding({
+                frame: resolveMainTranscriptListShellFrame({
+                    legendInitialScrollAtEnd: params.sessionEntryShouldFollowBottom,
+                    listLayoutHeight: params.layoutHeight,
+                    maintainScrollAtEndThreshold: resolveLegendMaintainScrollAtEndThreshold({
+                        layoutHeight: params.layoutHeight,
+                        pinThresholdPx: params.pinThresholdPx,
+                    }),
+                    nativeID: params.nativeID,
+                    platformOS: params.platformOS,
+                    rendererKind: 'legendList',
+                }),
+                selection: params.rendererSelection,
+            }),
+            maintainVisibleContentPosition: undefined,
+            pauseOffsetCorrection: false,
+            telemetryMvcpPolicy: 'none',
+        };
+    }
+
     const bottomMaintenance = resolveTranscriptFlashListBottomMaintenanceDecision({
         autoFollowWhenPinned: params.autoFollowWhenPinned,
         bottomFollowMode: params.bottomFollowMode,
@@ -62,17 +97,22 @@ export function resolveMainTranscriptRendererFrameHost(params: Readonly<{
     const maintainVisibleContentPosition = bottomMaintenance.maintainVisibleContentPosition;
 
     return {
-        frame: resolveMainTranscriptListShellFrame({
-            configuredDrawDistance: params.configuredDrawDistance,
-            listLayoutHeight: params.layoutHeight,
-            maintainScrollAtEndThreshold: resolveLegendMaintainScrollAtEndThreshold({
-                layoutHeight: params.layoutHeight,
-                pinThresholdPx: params.pinThresholdPx,
+        binding: resolveTranscriptListRendererBinding({
+            frame: resolveMainTranscriptListShellFrame({
+                configuredDrawDistance: params.configuredDrawDistance,
+                legendInitialScrollAtEnd: params.sessionEntryShouldFollowBottom,
+                listLayoutHeight: params.layoutHeight,
+                maintainScrollAtEndThreshold: resolveLegendMaintainScrollAtEndThreshold({
+                    layoutHeight: params.layoutHeight,
+                    pinThresholdPx: params.pinThresholdPx,
+                }),
+                maintainVisibleContentPosition,
+                nativeID: params.nativeID,
+                pauseOffsetCorrection: bottomMaintenance.pauseOffsetCorrection,
+                platformOS: params.platformOS,
+                rendererKind: 'flashList',
             }),
-            maintainVisibleContentPosition,
-            nativeID: params.nativeID,
-            pauseOffsetCorrection: bottomMaintenance.pauseOffsetCorrection,
-            platformOS: params.platformOS,
+            selection: params.rendererSelection,
         }),
         maintainVisibleContentPosition,
         pauseOffsetCorrection: bottomMaintenance.pauseOffsetCorrection,

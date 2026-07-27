@@ -1,33 +1,42 @@
-import { loadSyncTuning, type SyncTuning } from '@/sync/runtime/syncTuning';
+import type { SyncTuning } from '@/sync/runtime/syncTuning';
 
 import { flashListRenderer } from './flashListRenderer';
 import { legendListRenderer } from './legendListRenderer';
-import { resolveTranscriptRendererSurface } from './transcriptRendererSurface';
-import type { TranscriptListRenderer } from './types';
-import type { TranscriptListShellFrame } from '@/components/sessions/transcript/viewport/shell/transcriptListShellCapabilities';
+import type {
+    TranscriptListRendererBinding,
+    TranscriptListRendererSelection,
+} from './types';
 
-export function resolveTranscriptListRendererKind(params: Readonly<{
-    frameSurface: ReturnType<typeof resolveTranscriptRendererSurface>;
-    transcriptLegendListSpikeSurface?: SyncTuning['transcriptLegendListSpikeSurface'];
-}>): TranscriptListRenderer['kind'] {
-    const requestedSurface =
-        params.transcriptLegendListSpikeSurface ?? loadSyncTuning().transcriptLegendListSpikeSurface;
+export function resolveTranscriptListRendererSelection(params: Readonly<{
+    platformOS: string;
+    transcriptLegendListSpikeSurface: SyncTuning['transcriptLegendListSpikeSurface'];
+}>): TranscriptListRendererSelection {
+    const renderer =
+        params.transcriptLegendListSpikeSurface === 'flashList'
+            ? flashListRenderer
+            : legendListRenderer;
+    const positioningOwner = renderer.kind === 'flashList' ? 'app' : 'renderer';
 
-    if (requestedSurface === 'flashList') return 'flashList';
-    if (requestedSurface !== 'off' && requestedSurface === params.frameSurface) return 'legendList';
-    return 'legendList';
+    return {
+        ownerPolicy: {
+            continuousFollow: positioningOwner,
+            initialBottomPosition: positioningOwner,
+            localHeightChangeRestore: positioningOwner,
+            prependRestore: positioningOwner,
+            usesNativeFlashListBottomMaintenance:
+                renderer.kind === 'flashList' && params.platformOS !== 'web',
+        },
+        renderer,
+    };
 }
 
-export function resolveTranscriptListRenderer(params: Readonly<{
-    frame: TranscriptListShellFrame;
-    platformOS?: string;
-    transcriptLegendListSpikeSurface?: SyncTuning['transcriptLegendListSpikeSurface'];
-}>): TranscriptListRenderer {
-    const frameSurface = resolveTranscriptRendererSurface(params.frame);
-    const rendererKind = resolveTranscriptListRendererKind({
-        frameSurface,
-        transcriptLegendListSpikeSurface: params.transcriptLegendListSpikeSurface,
-    });
-
-    return rendererKind === 'flashList' ? flashListRenderer : legendListRenderer;
+export function resolveTranscriptListRendererBinding(params: Readonly<{
+    frame: TranscriptListRendererBinding['frame'];
+    selection: TranscriptListRendererSelection;
+}>): TranscriptListRendererBinding {
+    return {
+        frame: params.frame,
+        ownerPolicy: params.selection.ownerPolicy,
+        renderer: params.selection.renderer,
+    };
 }

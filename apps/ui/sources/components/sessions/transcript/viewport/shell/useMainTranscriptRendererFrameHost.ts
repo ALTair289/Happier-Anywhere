@@ -4,6 +4,7 @@ import type { TranscriptViewportTelemetryMvcpPolicy } from '@/components/session
 import {
     resolveMainTranscriptRendererFrameHost,
 } from '@/components/sessions/transcript/viewport/shell/mainTranscriptRendererFrameHost';
+import type { TranscriptListRendererSelection } from '@/components/sessions/transcript/viewport/shell/renderer/types';
 
 type MutableRef<T> = { current: T };
 
@@ -24,6 +25,8 @@ export function useMainTranscriptRendererFrameHost(params: Readonly<{
     pinEnabled: boolean;
     pinThresholdPx: number;
     platformOS: string;
+    rendererSelection: TranscriptListRendererSelection;
+    sessionEntryShouldFollowBottom: boolean;
     shouldUseNativeHotColdSplit: boolean;
     targetWindowActive: boolean;
 }>) {
@@ -44,9 +47,12 @@ export function useMainTranscriptRendererFrameHost(params: Readonly<{
         pinEnabled,
         pinThresholdPx,
         platformOS,
+        rendererSelection,
+        sessionEntryShouldFollowBottom,
         shouldUseNativeHotColdSplit,
         targetWindowActive,
     } = params;
+    const flashBinding = rendererSelection.renderer.kind === 'flashList';
     const mainTranscriptRendererFrameHost = React.useMemo(() => {
         const bottomFollowModeState = bottomFollowModeStateRef.current;
         return resolveMainTranscriptRendererFrameHost({
@@ -62,28 +68,42 @@ export function useMainTranscriptRendererFrameHost(params: Readonly<{
             pinEnabled,
             pinThresholdPx,
             platformOS,
+            rendererSelection,
+            sessionEntryShouldFollowBottom,
             targetWindowActive,
         });
     }, [
-        autoFollowWhenPinned,
-        bottomFollowModeRevision,
-        bottomFollowModeStateRef,
+        flashBinding ? autoFollowWhenPinned : undefined,
+        flashBinding ? bottomFollowModeRevision : undefined,
+        flashBinding ? bottomFollowModeStateRef : undefined,
         chatListNativeId,
-        configuredFlashListDrawDistance,
-        hasOpenEntryRestoreTransactionForSession,
-        hasOpenNativePrependTransactionForSession,
+        flashBinding ? configuredFlashListDrawDistance : undefined,
+        flashBinding ? hasOpenEntryRestoreTransactionForSession : undefined,
+        flashBinding ? hasOpenNativePrependTransactionForSession : undefined,
         layoutHeight,
-        nativeEntryShouldUseBottomMaintenance,
-        nativeInitialViewportPendingObservation,
-        nativePrependTransactionRevision,
-        pinEnabled,
+        flashBinding ? nativeEntryShouldUseBottomMaintenance : undefined,
+        flashBinding ? nativeInitialViewportPendingObservation : undefined,
+        flashBinding ? nativePrependTransactionRevision : undefined,
+        flashBinding ? pinEnabled : undefined,
         pinThresholdPx,
         platformOS,
-        shouldUseNativeHotColdSplit,
-        targetWindowActive,
+        rendererSelection,
+        sessionEntryShouldFollowBottom,
+        flashBinding ? shouldUseNativeHotColdSplit : undefined,
+        flashBinding ? targetWindowActive : undefined,
     ]);
-    nativeFlashListMvcpPolicyRef.current = mainTranscriptRendererFrameHost.telemetryMvcpPolicy;
-    nativeFlashListPauseOffsetCorrectionRef.current = mainTranscriptRendererFrameHost.pauseOffsetCorrection;
+    React.useInsertionEffect(() => {
+        if (!flashBinding) return;
+        nativeFlashListMvcpPolicyRef.current = mainTranscriptRendererFrameHost.telemetryMvcpPolicy;
+        nativeFlashListPauseOffsetCorrectionRef.current =
+            mainTranscriptRendererFrameHost.pauseOffsetCorrection;
+    }, [
+        flashBinding,
+        mainTranscriptRendererFrameHost.pauseOffsetCorrection,
+        mainTranscriptRendererFrameHost.telemetryMvcpPolicy,
+        nativeFlashListMvcpPolicyRef,
+        nativeFlashListPauseOffsetCorrectionRef,
+    ]);
 
-    return mainTranscriptRendererFrameHost.frame;
+    return mainTranscriptRendererFrameHost.binding;
 }

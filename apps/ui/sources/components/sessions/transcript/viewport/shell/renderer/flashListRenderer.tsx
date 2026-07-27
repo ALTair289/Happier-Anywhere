@@ -12,6 +12,7 @@ import type {
     TranscriptListRenderer,
     TranscriptListRendererProps,
     TranscriptListShellRef,
+    TranscriptRendererVisibleSourceIndexRange,
 } from './types';
 
 const FLASH_LIST_STYLE = { flex: 1, minHeight: 0 } as const;
@@ -38,37 +39,83 @@ function resolveScrollerOverrideProps(
     };
 }
 
+/**
+ * FlashList's recycler answers the visible window from its own layout manager and
+ * THROWS while that manager is uninitialized. Both "threw" and "surface does not
+ * implement it" mean the same thing to navigation visibility: no measurement yet.
+ * Never `{0, 0}` — that would read as "viewing the first turn".
+ */
+function readFlashListVisibleSourceIndexRange<TItem>(
+    list: FlashListRef<TItem> | null,
+): TranscriptRendererVisibleSourceIndexRange | null {
+    let window: { startIndex: number; endIndex: number } | undefined;
+    try {
+        window = list?.computeVisibleIndices?.();
+    } catch {
+        return null;
+    }
+    if (!window) return null;
+    const { startIndex, endIndex } = window;
+    if (!Number.isFinite(startIndex) || !Number.isFinite(endIndex)) return null;
+    return { startIndex, endIndex };
+}
+
+/**
+ * The compat handle type covers the members the app's own code declares; FlashList
+ * itself also exposes `scrollToEnd`. Narrowing here (instead of widening the compat
+ * type) keeps the extra surface knowledge inside the renderer that consumes it.
+ */
+type FlashListTailScrollCapableRef = Readonly<{
+    scrollToEnd?: (params?: { animated?: boolean }) => void;
+}>;
+
 function FlashListTranscriptRendererInner<TItem>(
     props: TranscriptListRendererProps<TItem>,
     ref: React.ForwardedRef<TranscriptListShellRef<TItem>>,
 ): React.ReactElement {
-    const flashListOptions = props.frame.rendererOptions.flashList;
+    const rendererOptions = props.frame.rendererOptions;
+    // The renderer owns its shell handle rather than leaking the library ref:
+    // the shell contract is the seam, and only the renderer knows how to answer
+    // it from FlashList's recycler state.
+    const listRef = React.useRef<FlashListRef<TItem> | null>(null);
+    React.useImperativeHandle(ref, () => ({
+        scrollToIndex: (params) => listRef.current?.scrollToIndex(params),
+        scrollToOffset: (params) => listRef.current?.scrollToOffset(params),
+        scrollToEnd: (params) => (listRef.current as FlashListTailScrollCapableRef | null)?.scrollToEnd?.(params),
+        clearLayoutCacheOnUpdate: () => listRef.current?.clearLayoutCacheOnUpdate?.(),
+        computeVisibleIndices: () => listRef.current?.computeVisibleIndices?.() ?? { startIndex: 0, endIndex: 0 },
+        readVisibleSourceIndexRange: () => readFlashListVisibleSourceIndexRange(listRef.current),
+        getAbsoluteLastScrollOffset: () => listRef.current?.getAbsoluteLastScrollOffset?.() ?? 0,
+        getFirstVisibleIndex: () => listRef.current?.getFirstVisibleIndex?.() ?? 0,
+        getLayout: (index) => listRef.current?.getLayout?.(index),
+        getScrollableNode: () => listRef.current?.getScrollableNode?.(),
+    }), []);
 
     return (
         <LayoutCommitObserver onCommitLayoutEffect={props.onCommitLayoutEffect}>
             <FlashList
-                ref={ref as React.ForwardedRef<FlashListRef<TItem>>}
+                ref={listRef}
                 {...props.platformInteractionProps}
                 style={FLASH_LIST_STYLE}
                 data={props.data}
                 extraData={props.extraData}
-                testID={flashListOptions.testID}
-                nativeID={flashListOptions.nativeID}
-                inverted={flashListOptions.inverted ? true : undefined}
-                drawDistance={flashListOptions.drawDistance}
+                testID={rendererOptions.identity.testID}
+                nativeID={rendererOptions.identity.nativeID}
+                inverted={props.frame.dataOrder === 'newest-first' ? true : undefined}
+                drawDistance={rendererOptions.virtualization?.renderAheadDistancePx}
                 keyExtractor={props.keyExtractor}
                 getItemType={props.getItemType}
                 renderItem={props.renderItem}
                 overrideProps={resolveScrollerOverrideProps(
                     props.overrideProps,
-                    flashListOptions.disableBrowserScrollAnchoring === true,
+                    rendererOptions.browserScrollAnchoring === 'disabled',
                 )}
-                scrollEventThrottle={flashListOptions.scrollEventThrottle}
-                keyboardShouldPersistTaps={flashListOptions.keyboardShouldPersistTaps}
-                keyboardDismissMode={flashListOptions.keyboardDismissMode}
-                happierPauseOffsetCorrection={flashListOptions.pauseOffsetCorrection === true}
+                scrollEventThrottle={rendererOptions.interaction.scrollEventThrottle}
+                keyboardShouldPersistTaps={rendererOptions.interaction.keyboardShouldPersistTaps}
+                keyboardDismissMode={rendererOptions.interaction.keyboardDismissMode}
+                happierPauseOffsetCorrection={rendererOptions.offsetCorrection === 'paused'}
                 maintainVisibleContentPosition={
-                    flashListOptions.maintainVisibleContentPosition as FlashListPropsCompat<TItem>['maintainVisibleContentPosition']
+                    rendererOptions.visibleContentMaintenance as FlashListPropsCompat<TItem>['maintainVisibleContentPosition']
                 }
                 onLoad={props.onLoad}
                 onLayout={props.onLayout}

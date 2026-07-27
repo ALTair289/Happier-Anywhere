@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { View } from 'react-native';
 
-import { resolveTranscriptListRenderer } from './renderer/resolveTranscriptListRenderer';
 import type {
     TranscriptListShellProps,
     TranscriptListShellRef,
@@ -20,20 +19,23 @@ function TranscriptListShellInner<TItem>(
     props: TranscriptListShellProps<TItem>,
     ref: React.ForwardedRef<TranscriptListShellRef<TItem>>,
 ): React.ReactElement {
-    const renderer = resolveTranscriptListRenderer({
-        frame: props.frame,
-        transcriptLegendListSpikeSurface: props.transcriptLegendListSpikeSurface,
-    });
-    const Renderer = renderer.Component;
+    const {
+        catchUpOverlay,
+        olderLoadOverlay,
+        rendererBinding,
+        ...rendererProps
+    } = props;
+    const Renderer = rendererBinding.renderer.Component;
 
     return (
         <View style={TRANSCRIPT_LIST_SHELL_STYLE}>
             <Renderer
                 ref={ref}
-                {...props}
+                {...rendererProps}
+                frame={rendererBinding.frame}
             />
-            {props.olderLoadOverlay ?? null}
-            {props.catchUpOverlay ?? null}
+            {olderLoadOverlay ?? null}
+            {catchUpOverlay ?? null}
         </View>
     );
 }

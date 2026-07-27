@@ -24,16 +24,20 @@ export async function applySidechainOlderPageLoad(params: Readonly<{
     waitForVisualUpdate: () => Promise<void>;
     webDomObservation: WebDomScrollObservation;
     webPrependAnchor?: WebTranscriptScrollMetrics | null;
+    isOperationCurrent?: () => boolean;
 }>): Promise<SidechainOlderPageLoadResult | null> {
     if (!params.loadOlder) return null;
     if (params.isLoadingOlder) return null;
     if (params.hasMoreOlder === false) return null;
 
+    const isOperationCurrent = params.isOperationCurrent ?? (() => true);
     params.setLoadingOlder(true);
     try {
         const result = await params.loadOlder();
+        if (!isOperationCurrent()) return null;
         if (params.webPrependAnchor && result.loaded > 0) {
             await params.waitForVisualUpdate();
+            if (!isOperationCurrent()) return null;
             applySidechainWebPrependGrowthRestore({
                 capturedMetrics: params.webPrependAnchor,
                 webDomObservation: params.webDomObservation,
@@ -44,7 +48,9 @@ export async function applySidechainOlderPageLoad(params: Readonly<{
         }
         return result;
     } finally {
-        params.setLoadingOlder(false);
+        if (isOperationCurrent()) {
+            params.setLoadingOlder(false);
+        }
     }
 }
 

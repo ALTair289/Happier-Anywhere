@@ -1,12 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
+    applySidechainCommittedLayoutObservation,
     applySidechainOlderLoadObservation,
     buildSidechainOlderLoadScrollObservedTelemetryEvent,
     resolveSidechainOlderLoadEdgeReachedObservation,
     resolveSidechainOlderLoadObservation,
     resolveSidechainOlderLoadScrollEventObservation,
 } from './sidechainOlderLoadObservation';
+import { createNativeInvertedFlashListFactSource } from '@/components/sessions/transcript/viewport/driver/nativeInvertedFlashListFacts';
+import { createNativeStandardListFactSource } from '@/components/sessions/transcript/viewport/driver/nativeStandardListFacts';
 
 const webMetrics = {
     clientHeight: 400,
@@ -38,6 +41,64 @@ describe('resolveSidechainOlderLoadObservation', () => {
             },
             webElement: target,
         });
+    });
+
+    it('bridges a Legend layout commit through the existing sidechain observation ingress', () => {
+        const onObservation = vi.fn();
+        const target = {
+            clientHeight: 400,
+            scrollHeight: 1200,
+            scrollTop: 0,
+        };
+
+        expect(applySidechainCommittedLayoutObservation({
+            nativeObservedOffset: null,
+            onObservation,
+            platformOS: 'web',
+            viewportGuardThresholdPx: 80,
+            webElement: target,
+        })).toBe(true);
+        expect(onObservation).toHaveBeenCalledWith(expect.objectContaining({
+            offsetY: 0,
+            webObservation: expect.objectContaining({
+                offsetY: 0,
+                scrollable: true,
+                trigger: 'layout-committed',
+            }),
+        }));
+    });
+
+    it('bridges known native commit offsets and ignores unknown native geometry', () => {
+        const onObservation = vi.fn();
+        const nativeObservedOffset = {
+            canonicalOffsetY: 0,
+            distanceFromLiveTailPx: 800,
+            isAtRawLiveTail: false,
+            rawOffsetY: 0,
+        };
+        const common = {
+            onObservation,
+            platformOS: 'ios',
+            viewportGuardThresholdPx: 80,
+            webElement: null,
+        };
+
+        expect(applySidechainCommittedLayoutObservation({
+            ...common,
+            nativeObservedOffset,
+        })).toBe(true);
+        expect(onObservation).toHaveBeenCalledWith({
+            nativeObservedOffset,
+            offsetY: 0,
+            trigger: 'layout-committed',
+        });
+
+        onObservation.mockClear();
+        expect(applySidechainCommittedLayoutObservation({
+            ...common,
+            nativeObservedOffset: null,
+        })).toBe(false);
+        expect(onObservation).not.toHaveBeenCalled();
     });
 
     it('falls scroll-event ingress back to native content offset facts', () => {
@@ -106,6 +167,8 @@ describe('resolveSidechainOlderLoadObservation', () => {
                 isAtRawLiveTail: false,
                 rawOffsetY: 201,
             },
+            reachedEdge: 'start',
+            resolveReachedEdge: (edge) => edge === 'start' ? 'older' : 'newer',
             viewportGuardThresholdPx: 80,
             webElement,
         })).toMatchObject({
@@ -128,6 +191,8 @@ describe('resolveSidechainOlderLoadObservation', () => {
                 isAtRawLiveTail: false,
                 rawOffsetY: 1072,
             },
+            reachedEdge: 'start',
+            resolveReachedEdge: (edge) => edge === 'start' ? 'older' : 'newer',
             viewportGuardThresholdPx: 80,
             webElement: null,
         })).toEqual({
@@ -146,8 +211,51 @@ describe('resolveSidechainOlderLoadObservation', () => {
         });
     });
 
+    it('accepts only the physical edge classified as older by the active renderer fact source', () => {
+        const readers = {
+            readContentHeight: () => 1_600,
+            readLayoutHeight: () => 400,
+            readRawScrollOffset: () => 0,
+        };
+        const standardFacts = createNativeStandardListFactSource(readers);
+        const invertedFacts = createNativeInvertedFlashListFactSource(readers);
+        const standardObservedOffset = standardFacts.resolveObservedOffset(0);
+        const invertedObservedOffset = invertedFacts.resolveObservedOffset(0);
+
+        expect(resolveSidechainOlderLoadEdgeReachedObservation({
+            nativeObservedOffset: standardObservedOffset,
+            reachedEdge: 'start',
+            resolveReachedEdge: standardFacts.resolveReachedEdge,
+            viewportGuardThresholdPx: 80,
+            webElement: null,
+        })).toMatchObject({ ok: true });
+        expect(resolveSidechainOlderLoadEdgeReachedObservation({
+            nativeObservedOffset: standardObservedOffset,
+            reachedEdge: 'end',
+            resolveReachedEdge: standardFacts.resolveReachedEdge,
+            viewportGuardThresholdPx: 80,
+            webElement: null,
+        })).toEqual({ ok: false, reason: 'not_older_edge' });
+        expect(resolveSidechainOlderLoadEdgeReachedObservation({
+            nativeObservedOffset: invertedObservedOffset,
+            reachedEdge: 'end',
+            resolveReachedEdge: invertedFacts.resolveReachedEdge,
+            viewportGuardThresholdPx: 80,
+            webElement: null,
+        })).toMatchObject({ ok: true });
+        expect(resolveSidechainOlderLoadEdgeReachedObservation({
+            nativeObservedOffset: invertedObservedOffset,
+            reachedEdge: 'start',
+            resolveReachedEdge: invertedFacts.resolveReachedEdge,
+            viewportGuardThresholdPx: 80,
+            webElement: null,
+        })).toEqual({ ok: false, reason: 'not_older_edge' });
+    });
+
     it('ignores edge-reached ingress when native edge reads fail', () => {
         expect(resolveSidechainOlderLoadEdgeReachedObservation({
+            reachedEdge: 'start',
+            resolveReachedEdge: (edge) => edge === 'start' ? 'older' : 'newer',
             viewportGuardThresholdPx: 80,
             webElement: null,
         })).toEqual({ ok: false, reason: 'missing_offset' });
@@ -177,6 +285,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
         })).toEqual({
             ok: true,
             pagination: {
+                itemsToOlderEdge: null,
                 offsetY: 0,
                 scrollable: false,
                 trigger: 'edge-reached',
@@ -206,6 +315,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
         })).toMatchObject({
             ok: true,
             pagination: {
+                itemsToOlderEdge: null,
                 offsetY: 200,
                 scrollable: true,
                 trigger: 'scroll',
@@ -243,6 +353,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
         })).toMatchObject({
             ok: true,
             pagination: {
+                itemsToOlderEdge: null,
                 offsetY: 50,
                 scrollable: true,
                 trigger: 'edge-reached',
@@ -275,6 +386,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
         })).toMatchObject({
             ok: true,
             pagination: {
+                itemsToOlderEdge: null,
                 offsetY: 50,
                 scrollable: true,
                 trigger: 'edge-reached',
@@ -321,6 +433,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
         })).toMatchObject({
             ok: true,
             pagination: {
+                itemsToOlderEdge: null,
                 offsetY: 1200,
                 scrollable: false,
                 trigger: 'edge-reached',
@@ -345,6 +458,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
         })).toMatchObject({
             ok: true,
             pagination: {
+                itemsToOlderEdge: null,
                 offsetY: 560,
                 scrollable: false,
                 trigger: 'scroll',
@@ -378,6 +492,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
         })).toEqual({
             ok: true,
             pagination: {
+                itemsToOlderEdge: null,
                 offsetY: 80,
                 scrollable: true,
                 trigger: 'edge-reached',
@@ -406,6 +521,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
                 suspendedReasons: ['negative-offset'],
             },
             platformOS: 'web',
+            rendererKind: 'legendList',
             sessionId: 'session-1',
             telemetry: {
                 contentHeightPx: 1200,
@@ -429,7 +545,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
             flashListLayoutHeight: 500,
             hotCount: 0,
             layoutHeight: 400,
-            listImplementation: 'flash_v2',
+            listImplementation: 'legend',
             mode: 'user-unpinned',
             offsetY: 80,
             paginationPhase: 'armed',
@@ -465,6 +581,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
                 dispatches.push(metrics);
             },
             platformOS: 'ios',
+            rendererKind: 'legendList',
             recordTelemetry: (event) => {
                 records.push(event);
             },
@@ -475,6 +592,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
 
         expect(applied).toBe(true);
         expect(dispatches).toEqual([{
+            itemsToOlderEdge: null,
             offsetY: 200,
             scrollable: true,
             trigger: 'scroll',
@@ -516,12 +634,14 @@ describe('resolveSidechainOlderLoadObservation', () => {
             onScrollObservation: (metrics) => {
                 order.push('dispatch');
                 expect(metrics).toEqual({
+                    itemsToOlderEdge: null,
                     offsetY: 80,
                     scrollable: true,
                     trigger: 'edge-reached',
                 });
             },
             platformOS: 'web',
+            rendererKind: 'legendList',
             recordTelemetry: (event) => {
                 order.push('record');
                 records.push(event);
@@ -544,7 +664,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
             flashListLayoutHeight: 500,
             hotCount: 0,
             layoutHeight: 400,
-            listImplementation: 'flash_v2',
+            listImplementation: 'legend',
             mode: 'user-unpinned',
             offsetY: 80,
             paginationPhase: 'cooldown',
@@ -583,6 +703,7 @@ describe('resolveSidechainOlderLoadObservation', () => {
                 dispatches.push(metrics);
             },
             platformOS: 'web',
+            rendererKind: 'flashList',
             recordTelemetry: (event) => {
                 records.push(event);
             },

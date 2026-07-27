@@ -1,5 +1,6 @@
 import type { TranscriptOlderPaginationSnapshot } from '@/components/sessions/transcript/pagination/useTranscriptOlderPagination';
 import {
+    resolveTranscriptViewportTelemetryRendererFacts,
     resolveTranscriptViewportTelemetryPlatform,
     type TranscriptViewportTelemetryEvent,
 } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
@@ -18,6 +19,7 @@ export function buildSidechainWebLocalHeightRestoreTelemetryEvent(params: Readon
     itemCount: number;
     paginationSnapshot: TranscriptOlderPaginationSnapshot;
     platformOS: string;
+    rendererKind: 'flashList' | 'legendList';
     result: Extract<WebDomLocalHeightChangeResult, Readonly<{ ok: true }>>;
     timestampMs: number;
 }>): Extract<TranscriptViewportTelemetryEvent, Readonly<{ type: 'scroll-write' }>> {
@@ -28,7 +30,10 @@ export function buildSidechainWebLocalHeightRestoreTelemetryEvent(params: Readon
         reason: 'content-size-change',
         sessionId: params.anchor.sessionId,
         platform: resolveTranscriptViewportTelemetryPlatform(params.platformOS),
-        listImplementation: 'flash_v2',
+        listImplementation: resolveTranscriptViewportTelemetryRendererFacts({
+            platformOS: params.platformOS,
+            rendererKind: params.rendererKind,
+        }).listImplementation,
         mode: params.anchor.mode === 'follow-bottom' ? 'follow-bottom' : 'restore-anchor',
         targetOffsetY: params.result.targetScrollTop,
         previousOffsetY: params.result.previousScrollTop,
@@ -64,6 +69,7 @@ export function applySidechainWebLocalHeightRestore(params: Readonly<{
     itemCount: number;
     paginationSnapshot: TranscriptOlderPaginationSnapshot;
     platformOS: string;
+    rendererKind: 'flashList' | 'legendList';
     recordTelemetry: (event: Extract<TranscriptViewportTelemetryEvent, Readonly<{ type: 'scroll-write' }>>) => void;
     timestampMs: number;
     webDomObservation: WebDomScrollObservation;
@@ -82,6 +88,7 @@ export function applySidechainWebLocalHeightRestore(params: Readonly<{
         itemCount: params.itemCount,
         paginationSnapshot: params.paginationSnapshot,
         platformOS: params.platformOS,
+        rendererKind: params.rendererKind,
         result,
         timestampMs: params.timestampMs,
     }));
