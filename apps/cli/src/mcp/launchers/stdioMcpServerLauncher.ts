@@ -109,7 +109,9 @@ export async function runStdioMcpServerLauncher(): Promise<void> {
   });
 }
 
-runStdioMcpServerLauncher().catch((err) => {
-  writeStderr(`[happier-mcp-stdio-launcher] Fatal: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+if (process.env.HAPPIER_CLI_DIST_INTEGRITY_PROBE !== '1') {
+  runStdioMcpServerLauncher().catch((err) => {
+    writeStderr(`[happier-mcp-stdio-launcher] Fatal: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}

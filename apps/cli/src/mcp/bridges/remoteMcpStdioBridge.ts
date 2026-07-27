@@ -136,7 +136,9 @@ async function main(): Promise<void> {
   });
 }
 
-main().catch((err) => {
-  writeStderr(`[happier-mcp-remote-bridge] Fatal: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+if (process.env.HAPPIER_CLI_DIST_INTEGRITY_PROBE !== '1') {
+  main().catch((err) => {
+    writeStderr(`[happier-mcp-remote-bridge] Fatal: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}

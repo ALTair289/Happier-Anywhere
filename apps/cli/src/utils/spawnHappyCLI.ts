@@ -50,11 +50,21 @@
  */
 
 import { spawn, SpawnOptions, type ChildProcess } from 'child_process';
-import { basename, dirname, join } from 'node:path';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { projectPath } from '@/projectPath';
 import { logger } from '@/ui/logger';
-import { existsSync } from 'node:fs';
 import { isBun } from './runtime';
 import { createRequire } from 'node:module';
 import { resolveJavaScriptRuntimeExecutable } from '@/runtime/js/resolveJavaScriptRuntimeExecutable';
@@ -62,6 +72,26 @@ import { buildMissingJavaScriptRuntimeMessage } from '@/runtime/js/buildMissingJ
 import { resolvePackagedRuntimeEntrypoint } from '@/runtime/resolvePackagedRuntimeEntrypoint';
 import { parseOptionalBooleanEnv } from '@happier-dev/protocol';
 import { isEmbeddedBunBundlePath } from '@/runtime/js/isEmbeddedBunBundlePath';
+import {
+  decidePinnedRunnerSnapshotPrune,
+  type LiveRunnerSnapshotFingerprints,
+} from './pinnedRunnerSnapshotPrune';
+
+const STACK_RUNTIME_STATE_PATH_ENV = 'HAPPIER_CLI_SUBPROCESS_STACK_RUNTIME_STATE_PATH';
+const STACK_DIST_ENTRYPOINT_ENV = 'HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT';
+const DAEMON_DIST_CLOSURE_FINGERPRINT_ENV = 'HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT';
+const RUNTIME_BACKED_SUBPROCESS_ENV = 'HAPPIER_CLI_SUBPROCESS_RUNTIME_BACKED';
+const CLI_DIST_BUILD_MANIFEST = '.build-manifest.json';
+const PINNED_RUNNER_DIST_DIR = '.runner-snapshots';
+const PINNED_RUNNER_REQUIRED_ASSET_RELATIVE_PATHS = [
+  ['scripts', 'terminal_launch_spec_runner.cjs'],
+  ['scripts', 'claude_local_launcher.cjs'],
+  ['scripts', 'claude_remote_launcher.cjs'],
+  ['scripts', 'claude_launcher_runtime.cjs'],
+  ['scripts', 'childProcessOptions.cjs'],
+  ['scripts', 'ripgrep_launcher.cjs'],
+  ['scripts', 'node_pty_relay.cjs'],
+] as const;
 
 function getSubprocessRuntime(): 'node' | 'bun' {
   const override = process.env.HAPPIER_CLI_SUBPROCESS_RUNTIME;
@@ -132,14 +162,18 @@ function shouldAllowDevTsxFallback(): boolean {
   const explicit = parseOptionalBooleanEnv(process.env.HAPPIER_CLI_SUBPROCESS_ALLOW_TSX_FALLBACK);
   if (explicit !== null) return explicit;
   const isDevVariant = process.env.HAPPIER_VARIANT === 'dev';
-  const hasStackContext = Boolean(
-    process.env.HAPPIER_STACK_REPO_DIR ||
-      process.env.HAPPIER_STACK_CLI_ROOT_DIR ||
-      process.env.HAPPIER_STACK_STACK
-  );
+  const hasStackContext = hasStackSubprocessContext();
   const hasDevSourceEntrypoint = existsSync(join(projectPath(), 'src', 'index.ts'));
   if (!isDevVariant && !hasStackContext && !hasDevSourceEntrypoint) return false;
   return true;
+}
+
+function hasStackSubprocessContext(env: Readonly<NodeJS.ProcessEnv> = process.env): boolean {
+  return Boolean(
+    env.HAPPIER_STACK_REPO_DIR ||
+      env.HAPPIER_STACK_CLI_ROOT_DIR ||
+      env.HAPPIER_STACK_STACK
+  );
 }
 
 function shouldPreferDevTsxSubprocess(): boolean {
@@ -148,17 +182,29 @@ function shouldPreferDevTsxSubprocess(): boolean {
   }
   const explicitPreference = parseOptionalBooleanEnv(process.env.HAPPIER_CLI_SUBPROCESS_PREFER_TSX);
   if (explicitPreference !== null) return explicitPreference;
-  return process.env.HAPPIER_VARIANT === 'dev' || Boolean(
-    process.env.HAPPIER_STACK_REPO_DIR ||
-    process.env.HAPPIER_STACK_CLI_ROOT_DIR ||
-    process.env.HAPPIER_STACK_STACK
-  );
+  return process.env.HAPPIER_VARIANT === 'dev' || hasStackSubprocessContext();
 }
 
 export type HappyCliSubprocessRuntime = 'node' | 'bun' | 'binary';
 
 export type HappyCliSubprocessLaunchOptions = Readonly<{
   preferWindowsPackagedBinary?: boolean;
+  allowAdmittedDaemonStartupClosure?: boolean;
+  environment?: Readonly<NodeJS.ProcessEnv>;
+  runtimeDecision?: HappyCliSubprocessRuntimeDecision;
+  /**
+   * Fingerprints of snapshot dirs referenced by LIVE session runners. Passed by the daemon spawn
+   * path (the only caller that can enumerate live runners) so pinned-snapshot pruning never evicts
+   * a snapshot out from under a running runner. Absent/unreliable => pruning fails closed and
+   * deletes nothing (see `pinnedRunnerSnapshotPrune`).
+   */
+  liveRunnerSnapshotFingerprints?: LiveRunnerSnapshotFingerprints;
+}>;
+
+export type HappyCliSubprocessRuntimeDecision = Readonly<{
+  runtime: 'node';
+  argvPrefix: readonly string[];
+  env?: Readonly<Record<string, string>>;
 }>;
 
 export type HappyCliSubprocessRuntimeInvocation = {
@@ -311,6 +357,317 @@ function readInheritedNodeLaunchFlags(): string[] {
   return [...inherited];
 }
 
+type CliDistBuildManifest = Readonly<{
+  ok: boolean;
+  reason: string;
+  fingerprint: string | null;
+}>;
+
+function readNonEmptyEnv(
+  name: string,
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string | null {
+  const value = String(env[name] ?? '').trim();
+  return value ? value : null;
+}
+
+function isRuntimeBackedSubprocess(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): boolean {
+  return parseOptionalBooleanEnv(env[RUNTIME_BACKED_SUBPROCESS_ENV]) === true;
+}
+
+export class HappyCliImmutableRuntimeClosureError extends Error {
+  readonly code = 'EIMMUTABLERUNNERCLOSURE' as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'HappyCliImmutableRuntimeClosureError';
+  }
+}
+
+function readCliDistBuildManifest(entrypoint: string): CliDistBuildManifest {
+  const normalizedEntrypoint = String(entrypoint ?? '').trim();
+  if (!normalizedEntrypoint || !existsSync(normalizedEntrypoint)) {
+    return { ok: false, reason: 'missing_entrypoint', fingerprint: null };
+  }
+  try {
+    const manifest = JSON.parse(readFileSync(join(dirname(normalizedEntrypoint), CLI_DIST_BUILD_MANIFEST), 'utf8')) as {
+      fingerprint?: unknown;
+    };
+    const fingerprint = String(manifest?.fingerprint ?? '').trim().toLowerCase();
+    if (!/^[a-f0-9]{16}$/.test(fingerprint)) {
+      return { ok: false, reason: 'invalid_build_manifest_fingerprint', fingerprint: null };
+    }
+    return { ok: true, reason: 'manifest', fingerprint };
+  } catch {
+    return { ok: false, reason: 'missing_or_invalid_build_manifest', fingerprint: null };
+  }
+}
+
+function resolveStackRuntimeStatePath(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string | null {
+  const explicit = readNonEmptyEnv(STACK_RUNTIME_STATE_PATH_ENV, env);
+  if (explicit) return explicit;
+
+  const stackEnvFile = readNonEmptyEnv('HAPPIER_STACK_ENV_FILE', env);
+  if (stackEnvFile) return join(dirname(stackEnvFile), 'stack.runtime.json');
+
+  const homeDir = readNonEmptyEnv('HAPPIER_HOME_DIR', env) ?? readNonEmptyEnv('HAPPIER_STACK_CLI_HOME_DIR', env);
+  if (homeDir && basename(homeDir) === 'cli') {
+    return join(dirname(homeDir), 'stack.runtime.json');
+  }
+
+  const storageDir = readNonEmptyEnv('HAPPIER_STACK_STORAGE_DIR', env);
+  const stackName = readNonEmptyEnv('HAPPIER_STACK_STACK', env);
+  if (storageDir && stackName) return join(storageDir, stackName, 'stack.runtime.json');
+
+  return null;
+}
+
+function readRuntimeStateDistClosureFingerprint(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string | null {
+  const runtimeStatePath = resolveStackRuntimeStatePath(env);
+  if (!runtimeStatePath) return null;
+  try {
+    const runtimeState = JSON.parse(readFileSync(runtimeStatePath, 'utf8')) as {
+      daemon?: { distClosureFingerprint?: unknown };
+    };
+    const fingerprint = String(runtimeState?.daemon?.distClosureFingerprint ?? '').trim();
+    return fingerprint ? fingerprint : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveStackDistEntrypoint(
+  defaultEntrypoint: string,
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string {
+  return readNonEmptyEnv(STACK_DIST_ENTRYPOINT_ENV, env) ?? defaultEntrypoint;
+}
+
+function isRelativePathInsideRoot(relativePath: string): boolean {
+  return Boolean(
+    relativePath &&
+      relativePath !== '..' &&
+      !relativePath.startsWith('../') &&
+      !relativePath.startsWith('..\\') &&
+      !relativePath.startsWith('/') &&
+      !relativePath.startsWith('\\'),
+  );
+}
+
+function readPinnedSnapshotReadyMarker(snapshotRoot: string, fingerprint: string): boolean {
+  try {
+    return readFileSync(join(snapshotRoot, '.fingerprint'), 'utf8').trim() === fingerprint;
+  } catch {
+    return false;
+  }
+}
+
+function copyDirectoryContents(sourceDir: string, targetDir: string, options: { skipNames?: ReadonlySet<string> } = {}): void {
+  if (!existsSync(sourceDir)) return;
+  mkdirSync(targetDir, { recursive: true });
+  for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
+    if (options.skipNames?.has(entry.name)) continue;
+    const sourcePath = join(sourceDir, entry.name);
+    const targetPath = join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryContents(sourcePath, targetPath, options);
+      continue;
+    }
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+    mkdirSync(dirname(targetPath), { recursive: true });
+    copyFileSync(sourcePath, targetPath);
+  }
+}
+
+function copyCliRuntimeAssetsToPinnedSnapshot(runtimeRoot: string, snapshotRoot: string): void {
+  for (const assetDir of ['scripts', 'tools']) {
+    copyDirectoryContents(join(runtimeRoot, assetDir), join(snapshotRoot, assetDir));
+  }
+}
+
+function hasPinnedSnapshotRuntimeAssets(snapshotRoot: string): boolean {
+  return PINNED_RUNNER_REQUIRED_ASSET_RELATIVE_PATHS.every((relativePath) => (
+    existsSync(join(snapshotRoot, ...relativePath))
+  ));
+}
+
+function ensurePinnedSnapshotRuntimeAssets(runtimeRoot: string, snapshotRoot: string): boolean {
+  if (!hasPinnedSnapshotRuntimeAssets(snapshotRoot)) {
+    copyCliRuntimeAssetsToPinnedSnapshot(runtimeRoot, snapshotRoot);
+  }
+  return hasPinnedSnapshotRuntimeAssets(snapshotRoot);
+}
+
+let warnedOnceAboutUnreliableSnapshotLiveness = false;
+
+/**
+ * Liveness-aware retention for pinned runner dist snapshots.
+ *
+ * Deletion is gated on a reliable set of LIVE-runner fingerprints (`live`). Absent/unreliable
+ * liveness fails closed (deletes nothing) because evicting a snapshot referenced by a running
+ * runner turns its next bundled-tool spawn into an ENOENT — the 2026-07-10 session-killer.
+ */
+function prunePinnedRunnerSnapshots(
+  snapshotsDir: string,
+  keepFingerprint: string,
+  live: LiveRunnerSnapshotFingerprints | null | undefined,
+  keepCount = 8,
+): void {
+  try {
+    if (!existsSync(snapshotsDir)) return;
+    const entries = readdirSync(snapshotsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map((entry) => {
+        const fullPath = join(snapshotsDir, entry.name);
+        let mtimeMs = 0;
+        try {
+          mtimeMs = Number(statSync(fullPath).mtimeMs) || 0;
+        } catch {
+          mtimeMs = 0;
+        }
+        return { name: entry.name, fullPath, mtimeMs };
+      });
+
+    const decision = decidePinnedRunnerSnapshotPrune({
+      entries: entries.map((entry) => ({ name: entry.name, mtimeMs: entry.mtimeMs })),
+      keepFingerprint,
+      live,
+      keepCount,
+    });
+
+    if (decision.skipped === 'live_data_unreliable' && !warnedOnceAboutUnreliableSnapshotLiveness) {
+      warnedOnceAboutUnreliableSnapshotLiveness = true;
+      logger.warn(
+        '[SPAWN HAPPIER CLI] Skipping pinned dist runner snapshot pruning: live-runner fingerprints unavailable/unreliable; retaining all snapshots to avoid evicting a live runner.',
+      );
+    }
+    if (decision.deletable.length < 1) return;
+
+    const fullPathByName = new Map(entries.map((entry) => [entry.name, entry.fullPath]));
+    for (const name of decision.deletable) {
+      const fullPath = fullPathByName.get(name);
+      if (fullPath) rmSync(fullPath, { recursive: true, force: true });
+    }
+  } catch (error) {
+    logger.debug(`[SPAWN HAPPIER CLI] Could not prune pinned dist runner snapshots: ${String(error)}`);
+  }
+}
+
+function copyCliDistToPinnedSnapshot(
+  entrypoint: string,
+  fingerprint: string,
+  live: LiveRunnerSnapshotFingerprints | null | undefined,
+): string | null {
+  const distRoot = dirname(entrypoint);
+  const entrypointRelativePath = relative(distRoot, entrypoint);
+  if (!isRelativePathInsideRoot(entrypointRelativePath)) return null;
+
+  const runtimeRoot = dirname(distRoot);
+  const snapshotsDir = join(runtimeRoot, PINNED_RUNNER_DIST_DIR);
+  const snapshotRoot = join(snapshotsDir, fingerprint);
+  const snapshotEntrypoint = join(snapshotRoot, entrypointRelativePath);
+  if (readPinnedSnapshotReadyMarker(snapshotRoot, fingerprint) && existsSync(snapshotEntrypoint)) {
+    prunePinnedRunnerSnapshots(snapshotsDir, fingerprint, live);
+    return ensurePinnedSnapshotRuntimeAssets(runtimeRoot, snapshotRoot) ? snapshotEntrypoint : null;
+  }
+
+  const tmpRoot = join(snapshotsDir, `.${fingerprint}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    mkdirSync(snapshotsDir, { recursive: true });
+    rmSync(tmpRoot, { recursive: true, force: true });
+    mkdirSync(tmpRoot, { recursive: true });
+
+    copyDirectoryContents(distRoot, tmpRoot, { skipNames: new Set([PINNED_RUNNER_DIST_DIR]) });
+
+    copyCliRuntimeAssetsToPinnedSnapshot(runtimeRoot, tmpRoot);
+    writeFileSync(join(tmpRoot, '.fingerprint'), `${fingerprint}\n`, 'utf8');
+    try {
+      renameSync(tmpRoot, snapshotRoot);
+    } catch {
+      if (
+        !readPinnedSnapshotReadyMarker(snapshotRoot, fingerprint)
+        || !existsSync(snapshotEntrypoint)
+        || !ensurePinnedSnapshotRuntimeAssets(runtimeRoot, snapshotRoot)
+      ) {
+        throw new Error(`pinned dist snapshot was not ready: ${snapshotRoot}`);
+      }
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+
+    const ready = readPinnedSnapshotReadyMarker(snapshotRoot, fingerprint)
+      && existsSync(snapshotEntrypoint)
+      && ensurePinnedSnapshotRuntimeAssets(runtimeRoot, snapshotRoot);
+    if (ready) {
+      prunePinnedRunnerSnapshots(snapshotsDir, fingerprint, live);
+      return snapshotEntrypoint;
+    }
+    return null;
+  } catch (error) {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    logger.debug(`[SPAWN HAPPIER CLI] Could not prepare pinned dist runner closure: ${String(error)}`);
+    return null;
+  }
+}
+
+function buildCurrentStackDistSubprocessInvocation(
+  args: string[],
+  defaultEntrypoint: string,
+  options: HappyCliSubprocessLaunchOptions | undefined,
+): HappyCliSubprocessInvocation | null {
+  const env = options?.environment ?? process.env;
+  if (!hasStackSubprocessContext(env)) return null;
+  const runtimeBacked = isRuntimeBackedSubprocess(env);
+  const daemonFingerprint = readNonEmptyEnv(DAEMON_DIST_CLOSURE_FINGERPRINT_ENV, env);
+  if (!daemonFingerprint) return null;
+  if (!runtimeBacked) {
+    const runtimeFingerprint = readRuntimeStateDistClosureFingerprint(env);
+    const isInitialDaemonStartup = (
+      options?.allowAdmittedDaemonStartupClosure === true
+      && args[0] === 'daemon'
+      && args[1] === 'start-sync'
+    );
+    if (
+      (!runtimeFingerprint || runtimeFingerprint !== daemonFingerprint)
+      && !isInitialDaemonStartup
+    ) {
+      return null;
+    }
+  }
+
+  const distEntrypoint = resolveStackDistEntrypoint(defaultEntrypoint, env);
+  const distManifest = readCliDistBuildManifest(distEntrypoint);
+  if (!distManifest.ok || !distManifest.fingerprint || distManifest.fingerprint !== daemonFingerprint) {
+    return null;
+  }
+  const pinnedEntrypoint = copyCliDistToPinnedSnapshot(
+    distEntrypoint,
+    distManifest.fingerprint,
+    options?.liveRunnerSnapshotFingerprints,
+  );
+  if (!pinnedEntrypoint) return null;
+
+  // Source daemons intentionally keep hot-reload correctness: once the stack records
+  // a different dist fingerprint, this fast path stops and tsx runs source until the
+  // next daemon env carries the new fingerprint. Each child uses a copied closure so
+  // a concurrent dist replacement cannot mix old and new files during boot.
+  return {
+    runtime: 'node',
+    argv: [
+      ...readInheritedNodeLaunchFlags(),
+      '--no-warnings',
+      '--no-deprecation',
+      pinnedEntrypoint,
+      ...args,
+    ],
+  };
+}
+
 function buildDevTsxSubprocessInvocation(args: string[], entrypoint: string): HappyCliSubprocessInvocation | null {
   const tsxEntrypoint = resolveDevTsxFallbackEntrypoint(entrypoint);
   if (!existsSync(tsxEntrypoint)) return null;
@@ -331,12 +688,46 @@ export function buildHappyCliSubprocessInvocation(
   args: string[],
   options?: HappyCliSubprocessLaunchOptions,
 ): HappyCliSubprocessInvocation {
+  if (options?.runtimeDecision) {
+    return {
+      runtime: options.runtimeDecision.runtime,
+      argv: [...options.runtimeDecision.argvPrefix, ...args],
+      ...(options.runtimeDecision.env ? { env: { ...options.runtimeDecision.env } } : {}),
+    };
+  }
+
   const entrypoint = resolveSubprocessEntrypoint();
   const runtime = getSubprocessRuntime();
 
   if (runtime === 'node' && shouldPreferDevTsxSubprocess()) {
+    const environment = options?.environment ?? process.env;
+    const explicitTsxPreference = parseOptionalBooleanEnv(environment.HAPPIER_CLI_SUBPROCESS_PREFER_TSX);
+    if (explicitTsxPreference !== true) {
+      const currentStackDistInvocation = buildCurrentStackDistSubprocessInvocation(args, entrypoint, options);
+      if (currentStackDistInvocation) return currentStackDistInvocation;
+      if (
+        options?.allowAdmittedDaemonStartupClosure === true
+        && args[0] === 'daemon'
+        && args[1] === 'start-sync'
+      ) {
+        throw new HappyCliImmutableRuntimeClosureError(
+          'Stack daemon startup could not prepare its admitted immutable dist closure.',
+        );
+      }
+    }
+    if (isRuntimeBackedSubprocess()) {
+      throw new HappyCliImmutableRuntimeClosureError(
+        'Runtime-backed Happier CLI runner requires its admitted immutable dist closure; mutable source fallback is disabled.',
+      );
+    }
     const tsxInvocation = buildDevTsxSubprocessInvocation(args, entrypoint);
     if (tsxInvocation) return tsxInvocation;
+  }
+
+  if (isRuntimeBackedSubprocess()) {
+    throw new HappyCliImmutableRuntimeClosureError(
+      'Runtime-backed Happier CLI runner could not resolve its admitted immutable dist closure.',
+    );
   }
 
   if (runtime === 'node') {
@@ -387,6 +778,23 @@ export function buildHappyCliSubprocessInvocation(
 
   const argv = runtime === 'node' ? nodeArgs : [entrypoint, ...args];
   return { runtime, argv };
+}
+
+export function resolveHappyCliSubprocessRuntimeDecision(
+  options?: Omit<HappyCliSubprocessLaunchOptions, 'runtimeDecision'>,
+): HappyCliSubprocessRuntimeDecision | null {
+  if (!isRuntimeBackedSubprocess()) return null;
+  const invocation = buildHappyCliSubprocessInvocation([], options);
+  if (invocation.runtime !== 'node') {
+    throw new HappyCliImmutableRuntimeClosureError(
+      'Runtime-backed Happier CLI runner did not resolve to the admitted Node.js closure.',
+    );
+  }
+  return {
+    runtime: 'node',
+    argvPrefix: [...invocation.argv],
+    ...(invocation.env ? { env: { ...invocation.env } } : {}),
+  };
 }
 
 export function buildHappyCliSubprocessLaunchSpec(
