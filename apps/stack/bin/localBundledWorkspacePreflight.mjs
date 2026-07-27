@@ -19,20 +19,25 @@ export async function refreshLocalBundledWorkspacePackages(cliRootDir) {
   if (!repoRoot) return;
   const syncModulePath = resolveBundledWorkspaceSyncModulePath(cliRoot);
   if (syncModulePath) {
-    await withWorkspaceBundleLock(async () => {
-      const { syncBundledWorkspacePackages } = await import(pathToFileURL(syncModulePath).href);
-      syncBundledWorkspacePackages({
-        repoRoot,
-        hostApps: ['stack'],
-        replaceExisting: false,
+    try {
+      await withWorkspaceBundleLock(async () => {
+        const { syncBundledWorkspacePackages } = await import(pathToFileURL(syncModulePath).href);
+        syncBundledWorkspacePackages({
+          repoRoot,
+          hostApps: ['stack'],
+          replaceExisting: false,
+        });
+      }, {
+        lockPath: resolveWorkspaceBundleLockPath(repoRoot),
+        timeoutMs: 240_000,
+        pollIntervalMs: 250,
+        staleAfterMs: 240_000,
       });
-    }, {
-      lockPath: resolveWorkspaceBundleLockPath(repoRoot),
-      timeoutMs: 240_000,
-      pollIntervalMs: 250,
-      staleAfterMs: 240_000,
-    });
-    return;
+      return;
+    } catch {
+      // A fresh source checkout can lack build output required by the fast sync.
+      // The canonical bundler below owns building that output before publication.
+    }
   }
 
   const { bundleWorkspaceDeps } = await import('../scripts/bundleWorkspaceDeps.mjs');

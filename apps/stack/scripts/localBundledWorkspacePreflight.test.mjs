@@ -94,6 +94,89 @@ test('local bundled workspace preflight falls back to bundleWorkspaceDeps when t
   }
 });
 
+test('local bundled workspace preflight builds missing source dist when the fast sync cannot publish it', async () => {
+  const rootDir = stackRootDirFromMeta(import.meta.url);
+  const repoRoot = coerceHappyMonorepoRootFromPath(rootDir);
+  assert.ok(repoRoot, `expected monorepo root for ${rootDir}`);
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'local-bundled-preflight-missing-dist-'));
+  try {
+    const markerPath = join(fixtureDir, 'bundle.json');
+    const bundleStubPath = join(fixtureDir, 'bundleWorkspaceDeps.mjs');
+    const syncStubPath = join(fixtureDir, 'syncBundledWorkspacePackages.mjs');
+    const resolveSyncModulePathStubPath = join(fixtureDir, 'resolveBundledWorkspaceSyncModulePath.mjs');
+    const loaderPath = join(fixtureDir, 'loader.mjs');
+
+    writeFileSync(
+      bundleStubPath,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        'export async function bundleWorkspaceDeps(opts) {',
+        `  writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify(opts), 'utf8');`,
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    writeFileSync(
+      syncStubPath,
+      [
+        'export function syncBundledWorkspacePackages() {',
+        '  throw new Error("Missing bundled workspace package dist: /repo/packages/agents/dist");',
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    writeFileSync(
+      resolveSyncModulePathStubPath,
+      [
+        'export function resolveBundledWorkspaceSyncModulePath() {',
+        `  return ${JSON.stringify(syncStubPath)};`,
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    writeFileSync(
+      loaderPath,
+      [
+        "import { pathToFileURL } from 'node:url';",
+        '',
+        'export async function resolve(specifier, context, defaultResolve) {',
+        "  if (specifier === '../scripts/bundleWorkspaceDeps.mjs') {",
+        `    return { url: pathToFileURL(${JSON.stringify(bundleStubPath)}).href, shortCircuit: true };`,
+        '  }',
+        "  if (specifier === '../scripts/runtime/resolveBundledWorkspaceSyncModulePath.mjs') {",
+        `    return { url: pathToFileURL(${JSON.stringify(resolveSyncModulePathStubPath)}).href, shortCircuit: true };`,
+        '  }',
+        '  return defaultResolve(specifier, context, defaultResolve);',
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const modulePath = join(rootDir, 'bin', 'localBundledWorkspacePreflight.mjs');
+    const res = await runNodeCapture(
+      ['--input-type=module', '-e', `import { refreshLocalBundledWorkspacePackages } from ${JSON.stringify(modulePath)}; await refreshLocalBundledWorkspacePackages(${JSON.stringify(rootDir)});`],
+      {
+        cwd: rootDir,
+        env: {
+          ...process.env,
+          NODE_OPTIONS: `--experimental-loader=${loaderPath}`,
+        },
+      },
+    );
+
+    assert.equal(res.code, 0, `expected exit 0, got ${res.code}\nstderr:\n${res.stderr}\nstdout:\n${res.stdout}`);
+    const options = JSON.parse(readFileSync(markerPath, 'utf8'));
+    assert.equal(options.repoRoot, repoRoot);
+    assert.equal(options.stackDir, rootDir);
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test('local bundled workspace preflight is importable from a published stack package outside a monorepo', async () => {
   const rootDir = stackRootDirFromMeta(import.meta.url);
   const packageRoot = mkdtempSync(join(tmpdir(), 'happier-stack-published-preflight-'));
