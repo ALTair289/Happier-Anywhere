@@ -4,6 +4,11 @@ import { t } from '@/text';
 import type { AgentInputExtraActionChip } from '@/components/sessions/agentInput/agentInputContracts';
 import type { AgentInputContentPopoverRenderArgs } from '@/components/sessions/agentInput/components/AgentInputContentPopover';
 import { createConnectedServicesAuthActionChip } from '@/components/sessions/agentInput/definitions/createConnectedServicesAuthActionChip';
+import {
+  readConnectedServiceProfileKindFromServices,
+  resolveConnectedServiceProfileActionRoute,
+  type ConnectedServiceProfileActionRoute,
+} from '@/sync/domains/connectedServices/resolveConnectedServiceProfileActionRoute';
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { useProfile } from '@/sync/store/hooks';
 import type { ConnectedServiceId } from '@happier-dev/agents';
@@ -36,19 +41,13 @@ function resolveDefaultAuthWarningLabel(warningCode: ConnectedServicesAuthWarnin
   return key ? t(key) : undefined;
 }
 
-function buildConnectedServiceProfileSettingsPath(params: Readonly<{
-  kind: 'oauth' | 'token';
-  serviceId: string;
-  profileId: string;
-}>): string {
+function buildConnectedServiceProfileSettingsPath(route: ConnectedServiceProfileActionRoute): string {
+  if (!('params' in route)) return route.pathname;
   const searchParams = new URLSearchParams({
-    serviceId: params.serviceId,
-    profileId: params.profileId,
+    serviceId: route.params.serviceId,
+    profileId: route.params.profileId,
   });
-  const route = params.kind === 'token'
-    ? '/settings/connected-services/profile'
-    : '/settings/connected-services/oauth';
-  return `${route}?${searchParams.toString()}`;
+  return `${route.pathname}?${searchParams.toString()}`;
 }
 
 export function useNewSessionConnectedServices(params: Readonly<{
@@ -209,17 +208,23 @@ export function useNewSessionConnectedServices(params: Readonly<{
       }}
       onReconnectProfile={(serviceId, profileId) => {
         const profile = connectedServiceProfileOptionsByServiceId[serviceId]?.find((option) => option.profileId === profileId);
-        router.push(buildConnectedServiceProfileSettingsPath({
-          kind: profile?.kind === 'token' ? 'token' : 'oauth',
+        const profileKind = readConnectedServiceProfileKindFromServices({
+          connectedServicesV2: accountProfile?.connectedServicesV2 ?? null,
           serviceId,
           profileId,
-        }));
+        }) ?? profile?.kind;
+        router.push(buildConnectedServiceProfileSettingsPath(resolveConnectedServiceProfileActionRoute({
+          serviceId,
+          profileId,
+          profileKind,
+        })));
       }}
       requestClose={requestClose}
       maxHeight={maxHeight}
     />
   ), [
     authLabel,
+    accountProfile?.connectedServicesV2,
     accountGroupSwitchingEnabled,
     connectedServiceProfileOptionsByServiceId,
     connectedServiceAccountGroupOptionsByServiceId,

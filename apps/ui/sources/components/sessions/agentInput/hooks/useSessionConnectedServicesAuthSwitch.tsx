@@ -26,7 +26,7 @@ import { buildConnectedServiceUxDiagnosticAlertButtons } from '@/components/sess
 import {
     readConnectedServiceProfileKindFromServices,
     resolveConnectedServiceProfileActionRoute,
-} from '@/components/sessions/connectedServices/actions/resolveConnectedServiceProfileActionRoute';
+} from '@/sync/domains/connectedServices/resolveConnectedServiceProfileActionRoute';
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { Modal } from '@/modal';
 import {

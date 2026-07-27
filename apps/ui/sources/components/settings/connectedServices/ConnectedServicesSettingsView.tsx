@@ -27,6 +27,10 @@ import { connectedServiceProfileKey, resolveConnectedServiceDefaultProfileId } f
 import { resolveConnectedServiceBrandIconXml } from '@/agents/registry/resolveConnectedServiceBrandIconXml';
 import { deriveAccountHealth, type AccountHealth } from '@/sync/domains/connectedServices/deriveAccountHealth';
 import { resolveConnectedServiceCredentialHealthStatus } from '@/sync/domains/connectedServices/resolveConnectedServiceCredentialHealthStatus';
+import {
+  readConnectedServiceProfileKindFromServices,
+  resolveConnectedServiceProfileActionRoute,
+} from '@/sync/domains/connectedServices/resolveConnectedServiceProfileActionRoute';
 import { resolveAccountHealthDotColor } from './account/accountBlockModel';
 import { resolveConnectedServiceDisplayName } from './model/resolveConnectedServiceDisplayName';
 import { ConnectedServicesDefaultAuthRow } from './ConnectedServicesDefaultAuthRow';
@@ -308,10 +312,17 @@ export const ConnectedServicesSettingsView = React.memo(function ConnectedServic
                 pathname: '/settings/connected-services/[serviceId]',
                 params: { serviceId },
               })}
-              onReconnectConnectedServiceProfile={(serviceId, profileId) => router.push({
-                pathname: '/settings/connected-services/profile',
-                params: { serviceId, profileId },
-              })}
+              onReconnectConnectedServiceProfile={(serviceId, profileId) => router.push(
+                resolveConnectedServiceProfileActionRoute({
+                  serviceId,
+                  profileId,
+                  profileKind: readConnectedServiceProfileKindFromServices({
+                    connectedServicesV2: services,
+                    serviceId,
+                    profileId,
+                  }),
+                }),
+              )}
               dismissedPoolAdoptionSuggestionKeys={poolAdoptionDismissedByKey}
               onDismissPoolAdoptionSuggestion={dismissPoolAdoptionSuggestion}
             />

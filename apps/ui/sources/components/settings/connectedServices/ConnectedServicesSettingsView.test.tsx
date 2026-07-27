@@ -239,7 +239,7 @@ describe('ConnectedServicesSettingsView', () => {
         expect(row?.props?.subtitle).toBe('2 connected');
     });
 
-    it('opens the profile recovery flow for default-auth reauth selections', async () => {
+    it('opens the OAuth recovery flow for default-auth OAuth reauth selections', async () => {
         useFeatureEnabledSpy.mockImplementation((featureId: string) =>
             featureId === 'connectedServices' || featureId === 'connectedServices.accountGroups'
         );
@@ -261,7 +261,7 @@ describe('ConnectedServicesSettingsView', () => {
         });
 
         expect(connectedServicesModuleState.routerPushSpy).toHaveBeenCalledWith({
-            pathname: '/settings/connected-services/profile',
+            pathname: '/settings/connected-services/oauth',
             params: { serviceId: 'openai-codex', profileId: 'work' },
         });
     });

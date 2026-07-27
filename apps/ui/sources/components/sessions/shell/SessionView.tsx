@@ -279,7 +279,7 @@ import {
 import {
     readConnectedServiceProfileKindFromServices,
     resolveConnectedServiceProfileActionRoute,
-} from '@/components/sessions/connectedServices/actions/resolveConnectedServiceProfileActionRoute';
+} from '@/sync/domains/connectedServices/resolveConnectedServiceProfileActionRoute';
 import { resolveConnectedServiceUxDiagnosticPresentation } from '@/components/sessions/connectedServices/diagnostics/connectedServiceUxDiagnostics';
 import { useWorkspaceScopeForSession } from '@/sync/domains/session/resolveWorkspaceScopeForSession';
 import { tryBuildWorkspaceCacheKey } from '@/sync/domains/workspaces/workspaceScope';
