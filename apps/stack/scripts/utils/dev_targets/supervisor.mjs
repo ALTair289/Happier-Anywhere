@@ -405,18 +405,7 @@ export async function startStackDevTargets(
       }
     };
 
-    await Promise.all(targets.map(startTarget));
-    if (
-      workersByTarget.size === 0
-      && targetFailuresByTarget.size > 0
-      && [...targetFailuresByTarget.values()].every(({ phase }) => phase === 'sync')
-    ) {
-      throw [...targetFailuresByTarget.values()].at(-1).error;
-    }
-
-    for (const [index, target] of targets.entries()) {
-      const initialWorker = workersByTarget.get(target.name);
-      const initialTunnel = tunnelsByTarget.get(target.name);
+    const startTargetLifecycle = (target, index, initialWorker, initialTunnel) => {
       lifecycleTasks.push((async () => {
         let worker = initialWorker;
         let tunnel = initialTunnel;
@@ -464,6 +453,28 @@ export async function startStackDevTargets(
           }
         }
       })());
+    };
+
+    const syncFailedTargets = [];
+    await Promise.all(targets.map(async (target, index) => {
+      const initialWorker = await startTarget(target, index);
+      const initialTunnel = tunnelsByTarget.get(target.name) ?? null;
+      const initialFailure = targetFailuresByTarget.get(target.name);
+      if (!initialWorker && initialFailure?.phase === 'sync') {
+        syncFailedTargets.push({ target, index, initialWorker, initialTunnel });
+        return;
+      }
+      startTargetLifecycle(target, index, initialWorker, initialTunnel);
+    }));
+    if (
+      workersByTarget.size === 0
+      && targetFailuresByTarget.size > 0
+      && [...targetFailuresByTarget.values()].every(({ phase }) => phase === 'sync')
+    ) {
+      throw [...targetFailuresByTarget.values()].at(-1).error;
+    }
+    for (const { target, index, initialWorker, initialTunnel } of syncFailedTargets) {
+      startTargetLifecycle(target, index, initialWorker, initialTunnel);
     }
 
     return {

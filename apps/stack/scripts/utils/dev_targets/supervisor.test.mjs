@@ -673,6 +673,98 @@ test('a slow target preparation does not delay another target worker', async () 
   }
 });
 
+test('a failed target retries while another target is still preparing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-dev-target-parallel-retry-'));
+  let releaseWindowsPreparation;
+  let markWindowsPreparationStarted;
+  let markLinuxWorkerStarted;
+  let linuxProbeAttempts = 0;
+  const windowsPreparationPending = new Promise((resolve) => {
+    releaseWindowsPreparation = resolve;
+  });
+  const windowsPreparationStarted = new Promise((resolve) => {
+    markWindowsPreparationStarted = resolve;
+  });
+  const linuxWorkerStarted = new Promise((resolve) => {
+    markLinuxWorkerStarted = resolve;
+  });
+  const credentialPath = join(root, 'access.key');
+  await writeFile(credentialPath, '{"token":"secret"}\n', { mode: 0o600 });
+  let controller;
+  try {
+    const startup = startStackDevTargets(
+      {
+        stackName: 'repo-test',
+        stackBaseDir: join(root, 'stack'),
+        sourceDir: '/source/happier',
+        localServerPort: 3005,
+        activeServerId: 'stack_repo-test__id_default',
+        credentialPath,
+        targets: [
+          {
+            name: 'windows',
+            platform: 'windows',
+            ssh: 'windows-ssh',
+            repoDir: 'C:/Users/dev/happier',
+            cliHomeDir: 'C:/Users/dev/.happier/windows',
+          },
+          {
+            name: 'linux',
+            platform: 'posix',
+            ssh: 'linux-ssh',
+            repoDir: '/home/dev/happier',
+            cliHomeDir: '/home/dev/.happier/linux',
+          },
+        ],
+        env: {},
+      },
+      {
+        runProcess: async ({ command, args }) => {
+          if (command === 'ssh' && args.includes('windows-ssh')) {
+            markWindowsPreparationStarted();
+            return await windowsPreparationPending;
+          }
+          if (
+            command === 'ssh'
+            && args.some((arg) => String(arg).includes('/dev/tcp/127.0.0.1/'))
+          ) {
+            linuxProbeAttempts += 1;
+            if (linuxProbeAttempts === 1) return { code: 1 };
+          }
+          return { code: 0 };
+        },
+        spawnProcess: ({ label, command, args, env }) => {
+          const worker = { label, command, args, env, exitCode: null };
+          if (label === 'remote:linux' && !args.includes('-N')) markLinuxWorkerStarted();
+          return worker;
+        },
+        stopProcess: async (worker) => {
+          worker.exitCode = 0;
+        },
+        waitForRetry: async () => {},
+        logger: { error() {} },
+      },
+    );
+
+    await windowsPreparationStarted;
+    const retriedBeforeWindowsFinished = await Promise.race([
+      linuxWorkerStarted.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    releaseWindowsPreparation({ code: 0 });
+    controller = await startup;
+    assert.equal(
+      retriedBeforeWindowsFinished,
+      true,
+      'the failed Linux target should not wait for the unrelated Windows preparation',
+    );
+  } finally {
+    releaseWindowsPreparation?.({ code: 0 });
+    await controller?.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('dev target supervisor owns Mutagen publication, remote bootstrap, auth seed, worker, and teardown order', async () => {
   const root = await mkdtemp(join(tmpdir(), 'hstack-dev-targets-'));
   const calls = [];
