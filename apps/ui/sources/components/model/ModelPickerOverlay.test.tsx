@@ -141,8 +141,31 @@ describe('ModelPickerOverlay', () => {
         });
 
         expect(screen.findByTestId('model-picker-overlay-custom-save')).toBeNull();
-        expect(onSubmitCustomModel).toHaveBeenCalledWith('custom-model');
+        expect(onSubmitCustomModel).toHaveBeenCalledWith('  custom-model  ');
         expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it('matches model identifiers as exact opaque values', async () => {
+        const { ModelPickerOverlay } = await import('./ModelPickerOverlay');
+        const screen = await renderScreen(
+            <ModelPickerOverlay
+                title="Models"
+                effectiveLabel="Spaced"
+                notes={[]}
+                options={[
+                    { value: ' model-a ', label: 'Spaced' },
+                ]}
+                selectedValue=" model-a "
+                emptyText="No models"
+                onSelect={() => {}}
+                canEnterCustomModel
+                customLabel="Custom model"
+                onSubmitCustomModel={() => {}}
+            />,
+        );
+
+        expect(screen.findByTestId('model-picker-overlay-custom-input')).toBeNull();
+        expect(screen.findByTestId('model-picker-overlay-option-selected-indicator: model-a ')).toBeTruthy();
     });
 
     it('keeps the custom editor open across parent rerenders while the selected listed model has not changed yet', async () => {
