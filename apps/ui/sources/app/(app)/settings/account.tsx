@@ -20,7 +20,6 @@ import { useConnectAccount } from '@/hooks/auth/useConnectAccount';
 import { getDisplayName } from '@/sync/domains/profiles/profile';
 import { AgentIcon } from '@/agents/registry/AgentIcon';
 import { useHappyAction } from '@/hooks/ui/useHappyAction';
-import { disconnectVendorToken } from '@/sync/api/account/apiVendorTokens';
 import { getAgentCore, resolveAgentIdFromConnectedServiceId } from '@/agents/catalog/catalog';
 import { HappyError } from '@/utils/errors/errors';
 import { setAccountUsername } from '@/sync/api/account/apiUsername';
@@ -137,29 +136,6 @@ export default React.memo(() => {
             throw e;
         }
     });
-
-    // Service disconnection
-    const [disconnectingService, setDisconnectingService] = useState<string | null>(null);
-    const handleDisconnectService = async (service: string, displayName: string) => {
-        if (!auth.credentials) return;
-        const confirmed = await Modal.confirm(
-            t('modals.disconnectService', { service: displayName }),
-            t('modals.disconnectServiceConfirm', { service: displayName }),
-            { confirmText: t('modals.disconnect'), destructive: true }
-        );
-        if (confirmed) {
-            setDisconnectingService(service);
-            try {
-                await disconnectVendorToken(auth.credentials, service);
-                await sync.refreshProfile();
-                // The profile will be updated via sync
-            } catch (error) {
-                Modal.alert(t('common.error'), t('errors.disconnectServiceFailed', { service: displayName }));
-            } finally {
-                setDisconnectingService(null);
-            }
-        }
-    };
 
     const handleShowSecret = () => {
         setShowSecret(!showSecret);
@@ -294,17 +270,15 @@ export default React.memo(() => {
                     return (
                         <ItemGroup title={t('settings.connectedAccounts')}>
                             {displayServices.map(service => {
-                                const isDisconnecting = disconnectingService === service.serviceId;
                                 return (
                                     <Item
                                         key={service.serviceId}
                                         title={service.name}
                                         detail={t('settingsAccount.statusActive')}
-                                        subtitle={t('settingsAccount.tapToDisconnect')}
-                                        onPress={() => handleDisconnectService(service.serviceId, service.name)}
-                                        loading={isDisconnecting}
-                                        disabled={isDisconnecting}
-                                        showChevron={false}
+                                        onPress={() => router.push({
+                                            pathname: '/settings/connected-services/[serviceId]',
+                                            params: { serviceId: service.serviceId },
+                                        })}
                                         icon={
                                             <AgentIcon agentId={service.agentId} size={29} />
                                         }

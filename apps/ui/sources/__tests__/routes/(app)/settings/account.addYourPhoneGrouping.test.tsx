@@ -49,6 +49,7 @@ installSessionSettingsEntryModuleMocks({
                     linkedProviders: [],
                     connectedServices: [],
                     connectedServicesV2: [],
+                    connectedServiceCredentialRevisionsV1: [],
                 }),
             },
         });

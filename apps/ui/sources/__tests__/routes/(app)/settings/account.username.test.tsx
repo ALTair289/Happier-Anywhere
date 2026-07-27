@@ -72,6 +72,10 @@ vi.mock('@/components/account/ProviderIdentityItems', () => ({
     ProviderIdentityItems: () => null,
 }));
 
+vi.mock('@/agents/registry/AgentIcon', () => ({
+    AgentIcon: () => null,
+}));
+
 describe('Settings → Account (username)', () => {
     afterEach(() => {
         vi.restoreAllMocks();
@@ -129,4 +133,23 @@ describe('Settings → Account (username)', () => {
             expect.objectContaining({ method: 'POST' }),
         );
     }, 40_000);
+
+    it('opens the canonical connected-service detail instead of deleting through the legacy projection', async () => {
+        storage.getState().applyProfile({
+            ...profileDefaults,
+            linkedProviders: [],
+            connectedServices: ['anthropic'],
+        });
+
+        const { default: AccountScreen } = await import('@/app/(app)/settings/account');
+        const screen = await renderSettingsView(<AccountScreen />);
+        expect(screen.findRowByTitle('Claude Code')).toBeTruthy();
+
+        await screen.pressRowByTitle('Claude Code');
+
+        expect(routerMockRef.current.spies.push).toHaveBeenCalledWith({
+            pathname: '/settings/connected-services/[serviceId]',
+            params: { serviceId: 'anthropic' },
+        });
+    });
 });
