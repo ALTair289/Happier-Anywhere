@@ -7,7 +7,7 @@
 import type { PermissionMode } from '@/api/types';
 import { logger } from '@/ui/logger';
 import type { Credentials } from '@/persistence';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import { formatProviderPromptErrorMessage } from '@/agent/runtime/formatProviderPromptErrorMessage';
 import { runStandardAcpProvider, type StandardAcpProviderRunOptions } from '@/agent/runtime/runStandardAcpProvider';
 
@@ -28,7 +28,7 @@ export async function runKilo(opts: StandardAcpProviderRunOptions & {
     machineMetadata: initialMachineMetadata,
     terminalDisplay: KiloTerminalDisplay,
     resolveRuntimeDirectory: ({ session, metadata }) => session.getMetadataSnapshot()?.path ?? metadata.path,
-    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake }) => createKiloAcpRuntime({
+    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake, providerInputConsumer }) => createKiloAcpRuntime({
       directory,
       machineId,
       session,
@@ -39,6 +39,7 @@ export async function runKilo(opts: StandardAcpProviderRunOptions & {
       memoryRecallGuidanceEnabled,
       getPermissionMode,
       pendingQueueDrainMaxPopPerWake,
+      providerInputConsumer,
     }),
     onAttachMetadataSnapshotMissing: (error) => {
       logger.debug(

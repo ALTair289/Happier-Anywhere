@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { CatalogAcpRuntimeCreateCall } from '@/testkit/backends/catalogAcpRuntime';
-import { createCatalogAcpBackendSpy, createMessageBufferFixture } from '@/testkit/backends/catalogAcpRuntime';
+import { createCatalogAcpBackendSpy, createMessageBufferFixture, createSessionProviderInputConsumerFixture } from '@/testkit/backends/catalogAcpRuntime';
 import { createApprovedPermissionHandler } from '@/testkit/backends/permissionHandler';
 import { createApiSessionClientFixture } from '@/testkit/backends/sessionFixtures';
 import { createKimiAcpRuntime } from './runtime';
@@ -23,6 +23,7 @@ describe('Kimi ACP runtime backend lifecycle', () => {
       mcpServers: {},
       permissionHandler: createApprovedPermissionHandler(),
       onThinkingChange() {},
+      providerInputConsumer: createSessionProviderInputConsumerFixture(),
     });
 
     await runtime.startOrLoad({});

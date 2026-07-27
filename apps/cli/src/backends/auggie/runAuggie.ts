@@ -7,7 +7,7 @@
 import type { PermissionMode } from '@/api/types';
 import { logger } from '@/ui/logger';
 import type { Credentials } from '@/persistence';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import { runStandardAcpProvider, type StandardAcpProviderRunOptions } from '@/agent/runtime/runStandardAcpProvider';
 import { formatProviderPromptErrorMessage } from '@/agent/runtime/formatProviderPromptErrorMessage';
 
@@ -35,7 +35,7 @@ export async function runAuggie(opts: StandardAcpProviderRunOptions & {
     beforeInitializeSession: ({ metadata }) => {
       (metadata as any).auggieAllowIndexing = allowIndexingFromEnv;
     },
-    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake }) => {
+    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake, providerInputConsumer }) => {
       const metadataSnapshot = session.getMetadataSnapshot?.() ?? null;
       const allowIndexing = allowIndexingFromEnv || metadataSnapshot?.auggieAllowIndexing === true;
       return createAuggieAcpRuntime({
@@ -50,6 +50,7 @@ export async function runAuggie(opts: StandardAcpProviderRunOptions & {
         allowIndexing,
         getPermissionMode,
         pendingQueueDrainMaxPopPerWake,
+        providerInputConsumer,
       });
     },
     onAttachMetadataSnapshotMissing: (error) => {

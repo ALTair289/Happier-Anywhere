@@ -7,7 +7,7 @@
 import type { PermissionMode } from '@/api/types';
 import { logger } from '@/ui/logger';
 import type { Credentials } from '@/persistence';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import { runStandardAcpProvider, type StandardAcpProviderRunOptions } from '@/agent/runtime/runStandardAcpProvider';
 
 import { QwenTerminalDisplay } from '@/backends/qwen/ui/QwenTerminalDisplay';
@@ -27,7 +27,7 @@ export async function runQwen(opts: StandardAcpProviderRunOptions & {
     agentMessageType: 'qwen',
     machineMetadata: initialMachineMetadata,
     terminalDisplay: QwenTerminalDisplay,
-    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake }) => createQwenAcpRuntime({
+    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake, providerInputConsumer }) => createQwenAcpRuntime({
       directory,
       machineId,
       session,
@@ -38,6 +38,7 @@ export async function runQwen(opts: StandardAcpProviderRunOptions & {
       memoryRecallGuidanceEnabled,
       getPermissionMode,
       pendingQueueDrainMaxPopPerWake,
+      providerInputConsumer,
     }),
     onAttachMetadataSnapshotMissing: (error) => {
       logger.debug(

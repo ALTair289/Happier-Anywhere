@@ -7,6 +7,7 @@ import type { KimiBackendOptions } from '@/backends/kimi/acp/backend';
 
 import type { PermissionMode } from '@/api/types';
 import type { KimiAcpPythonSelector } from '@happier-dev/agents';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 
 export function createKimiAcpRuntime(params: {
   directory: string;
@@ -20,6 +21,7 @@ export function createKimiAcpRuntime(params: {
   getPermissionMode?: () => PermissionMode | null | undefined;
   kimiAcpPythonSelector?: KimiAcpPythonSelector;
   pendingQueueDrainMaxPopPerWake?: number;
+  providerInputConsumer: SessionProviderInputConsumer<unknown, unknown>;
 }) {
   return createCatalogProviderAcpRuntime<KimiBackendOptions>({
     provider: 'kimi',
@@ -38,6 +40,7 @@ export function createKimiAcpRuntime(params: {
     },
     getPermissionMode: params.getPermissionMode,
     pendingQueueDrainMaxPopPerWake: params.pendingQueueDrainMaxPopPerWake,
+    providerInputConsumer: params.providerInputConsumer,
     resolvePermissionMode: ({ getPermissionMode, session }) =>
       getPermissionMode?.() ?? session.getMetadataSnapshot?.()?.permissionMode,
   });

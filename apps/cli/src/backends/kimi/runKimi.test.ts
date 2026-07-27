@@ -71,6 +71,7 @@ describe('runKimi', () => {
       setThinking: vi.fn(),
       memoryRecallGuidanceEnabled: false,
       turnAssistantPreviewTracker: {} as never,
+      providerInputConsumer: {} as never,
     });
 
     expect(createKimiAcpRuntimeMock).toHaveBeenCalledWith(expect.objectContaining({

@@ -1,6 +1,7 @@
 import type { McpServerConfig } from '@/agent';
 import type { AcpPermissionHandler } from '@/agent/acp/AcpBackend';
 import { createCatalogProviderAcpRuntime } from '@/agent/acp/runtime/createCatalogProviderAcpRuntime';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 import type { ApiSessionClient } from '@/api/session/sessionClient';
 import type { PermissionMode } from '@/api/types';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
@@ -17,6 +18,7 @@ export function createKiloAcpRuntime(params: {
   memoryRecallGuidanceEnabled?: boolean;
   getPermissionMode?: () => PermissionMode | null | undefined;
   pendingQueueDrainMaxPopPerWake?: number;
+  providerInputConsumer: SessionProviderInputConsumer<unknown, unknown>;
 }) {
   return createCatalogProviderAcpRuntime({
     provider: 'kilo',
@@ -34,5 +36,6 @@ export function createKiloAcpRuntime(params: {
     },
     getPermissionMode: params.getPermissionMode,
     pendingQueueDrainMaxPopPerWake: params.pendingQueueDrainMaxPopPerWake,
+    providerInputConsumer: params.providerInputConsumer,
   });
 }

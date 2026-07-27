@@ -7,7 +7,7 @@
 import type { PermissionMode } from '@/api/types';
 import { logger } from '@/ui/logger';
 import type { Credentials } from '@/persistence';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import { runStandardAcpProvider, type StandardAcpProviderRunOptions } from '@/agent/runtime/runStandardAcpProvider';
 import { formatProviderPromptErrorMessage } from '@/agent/runtime/formatProviderPromptErrorMessage';
 import type { KimiAcpPythonSelector } from '@happier-dev/agents';
@@ -32,7 +32,7 @@ export async function runKimi(opts: StandardAcpProviderRunOptions & {
     supportsMcpServers: false,
     machineMetadata: initialMachineMetadata,
     terminalDisplay: KimiTerminalDisplay,
-    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake }) => createKimiAcpRuntime({
+    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake, providerInputConsumer }) => createKimiAcpRuntime({
       directory,
       machineId,
       session,
@@ -44,6 +44,7 @@ export async function runKimi(opts: StandardAcpProviderRunOptions & {
       getPermissionMode,
       kimiAcpPythonSelector: opts.kimiAcpPythonSelector,
       pendingQueueDrainMaxPopPerWake,
+      providerInputConsumer,
     }),
     onAttachMetadataSnapshotMissing: (error) => {
       logger.debug(

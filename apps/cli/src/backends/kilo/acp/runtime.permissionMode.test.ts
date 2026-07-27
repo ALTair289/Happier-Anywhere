@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PermissionMode } from '@/api/types';
 import type { CatalogAcpRuntimeCreateCall } from '@/testkit/backends/catalogAcpRuntime';
-import { createCatalogAcpBackendSpy, createMessageBufferFixture } from '@/testkit/backends/catalogAcpRuntime';
+import { createCatalogAcpBackendSpy, createMessageBufferFixture, createSessionProviderInputConsumerFixture } from '@/testkit/backends/catalogAcpRuntime';
 import { createApprovedPermissionHandler } from '@/testkit/backends/permissionHandler';
 import { createApiSessionClientFixture } from '@/testkit/backends/sessionFixtures';
 
@@ -28,6 +28,7 @@ describe('Kilo ACP runtime permission mode wiring', () => {
       permissionHandler: createApprovedPermissionHandler(),
       onThinkingChange: () => {},
       getPermissionMode: () => permissionMode,
+      providerInputConsumer: createSessionProviderInputConsumerFixture(),
     });
 
     await runtime.startOrLoad({});

@@ -4,6 +4,7 @@ import { createCatalogProviderAcpRuntime } from '@/agent/acp/runtime/createCatal
 import type { ApiSessionClient } from '@/api/session/sessionClient';
 import type { PermissionMode } from '@/api/types';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 
 import type { AuggieBackendOptions } from '@/backends/auggie/acp/backend';
 
@@ -19,6 +20,7 @@ export function createAuggieAcpRuntime(params: {
   allowIndexing: boolean;
   getPermissionMode?: () => PermissionMode | null | undefined;
   pendingQueueDrainMaxPopPerWake?: number;
+  providerInputConsumer: SessionProviderInputConsumer<unknown, unknown>;
 }) {
   return createCatalogProviderAcpRuntime<AuggieBackendOptions>({
     provider: 'auggie',
@@ -36,6 +38,7 @@ export function createAuggieAcpRuntime(params: {
     },
     getPermissionMode: params.getPermissionMode,
     pendingQueueDrainMaxPopPerWake: params.pendingQueueDrainMaxPopPerWake,
+    providerInputConsumer: params.providerInputConsumer,
     backendOptions: {
       allowIndexing: params.allowIndexing,
     },
