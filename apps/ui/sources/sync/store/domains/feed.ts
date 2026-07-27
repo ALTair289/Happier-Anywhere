@@ -1,5 +1,8 @@
 import type { FeedItem } from '../../domains/social/feedTypes';
+import { loadSyncTuning } from '../../runtime/syncTuning';
 import type { StoreGet, StoreSet } from './_shared';
+
+const FEED_ITEMS_RETENTION_MAX_COUNT = loadSyncTuning().feedItemsRetentionMaxCount;
 
 export type FeedDomain = {
   feedItems: FeedItem[];
@@ -69,12 +72,13 @@ export function createFeedDomain<S extends FeedDomain & { friendsLoaded: boolean
 
         // Sort by counter (desc - newest first)
         updatedItems.sort((a, b) => b.counter - a.counter);
+        const retainedItems = updatedItems.slice(0, FEED_ITEMS_RETENTION_MAX_COUNT);
 
         return {
           ...state,
-          feedItems: updatedItems,
-          feedHead: head,
-          feedTail: tail,
+          feedItems: retainedItems,
+          feedHead: retainedItems[0]?.cursor ?? head,
+          feedTail: retainedItems.at(-1)?.cursor ?? tail,
           feedLoaded: true, // Mark as loaded after first fetch
         };
       }),
@@ -90,4 +94,3 @@ export function createFeedDomain<S extends FeedDomain & { friendsLoaded: boolean
       })),
   };
 }
-

@@ -1,5 +1,8 @@
 import type { DecryptedArtifact } from '../../domains/artifacts/artifactTypes';
+import { loadSyncTuning } from '../../runtime/syncTuning';
 import type { StoreGet, StoreSet } from './_shared';
+
+const ARTIFACT_HEADS_RETENTION_MAX_COUNT = loadSyncTuning().artifactHeadsRetentionMaxCount;
 
 export type ArtifactsDomain = {
   artifacts: Record<string, DecryptedArtifact>;
@@ -8,6 +11,25 @@ export type ArtifactsDomain = {
   updateArtifact: (artifact: DecryptedArtifact) => void;
   deleteArtifact: (artifactId: string) => void;
 };
+
+function compareArtifactsNewestFirst(left: DecryptedArtifact, right: DecryptedArtifact): number {
+  if (right.updatedAt !== left.updatedAt) return right.updatedAt - left.updatedAt;
+  if (right.seq !== left.seq) return right.seq - left.seq;
+  if (right.createdAt !== left.createdAt) return right.createdAt - left.createdAt;
+  return right.id.localeCompare(left.id);
+}
+
+function retainArtifactHeads(
+  artifacts: Record<string, DecryptedArtifact>,
+): Record<string, DecryptedArtifact> {
+  const values = Object.values(artifacts);
+  if (values.length <= ARTIFACT_HEADS_RETENTION_MAX_COUNT) return artifacts;
+  const retained: Record<string, DecryptedArtifact> = {};
+  for (const artifact of values.sort(compareArtifactsNewestFirst).slice(0, ARTIFACT_HEADS_RETENTION_MAX_COUNT)) {
+    retained[artifact.id] = artifact;
+  }
+  return retained;
+}
 
 export function createArtifactsDomain<S extends ArtifactsDomain>({
   set,
@@ -26,7 +48,7 @@ export function createArtifactsDomain<S extends ArtifactsDomain>({
 
         return {
           ...state,
-          artifacts: mergedArtifacts,
+          artifacts: retainArtifactHeads(mergedArtifacts),
         };
       }),
     addArtifact: (artifact) =>
@@ -38,7 +60,7 @@ export function createArtifactsDomain<S extends ArtifactsDomain>({
 
         return {
           ...state,
-          artifacts: updatedArtifacts,
+          artifacts: retainArtifactHeads(updatedArtifacts),
         };
       }),
     updateArtifact: (artifact) =>
@@ -50,7 +72,7 @@ export function createArtifactsDomain<S extends ArtifactsDomain>({
 
         return {
           ...state,
-          artifacts: updatedArtifacts,
+          artifacts: retainArtifactHeads(updatedArtifacts),
         };
       }),
     deleteArtifact: (artifactId) =>
@@ -64,4 +86,3 @@ export function createArtifactsDomain<S extends ArtifactsDomain>({
       }),
   };
 }
-

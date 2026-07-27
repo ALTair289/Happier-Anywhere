@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { loadSyncTuning } from '@/sync/runtime/syncTuning';
+
 import { createAutomationsDomain } from './automations';
 
 type Automation = {
@@ -99,6 +101,22 @@ describe('createAutomationsDomain', () => {
         );
         expect(harness.get().automationRunsByAutomationId.a1?.map((entry) => entry.id)).toEqual(['r2', 'r3', 'r1']);
         expect(harness.get().automationRunsByAutomationId.a1?.[0]?.state).toBe('succeeded');
+    });
+
+    it('retains only the newest configured runs per automation', () => {
+        const cap = (loadSyncTuning() as { automationRunsRetentionMaxPerAutomation?: number }).automationRunsRetentionMaxPerAutomation ?? 200;
+        const harness = createHarness();
+
+        harness.get().setAutomationRuns(
+            'a1',
+            Array.from({ length: cap + 2 }, (_, index) =>
+                run({ id: `r${index + 1}`, automationId: 'a1', scheduledAt: index + 1 }),
+            ) as any,
+        );
+
+        expect(harness.get().automationRunsByAutomationId.a1).toHaveLength(cap);
+        expect(harness.get().automationRunsByAutomationId.a1?.[0]?.id).toBe(`r${cap + 2}`);
+        expect(harness.get().automationRunsByAutomationId.a1?.at(-1)?.id).toBe('r3');
     });
 
     it('removes run cache when automation is removed', () => {

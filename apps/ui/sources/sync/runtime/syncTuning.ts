@@ -41,6 +41,9 @@ export type SyncTuning = Readonly<{
     messageCatchUpConcurrencyLimit: number;
     sessionListHydrationConcurrencyLimit: number;
     machineDisplayHydrationConcurrencyLimit: number;
+    feedItemsRetentionMaxCount: number;
+    artifactHeadsRetentionMaxCount: number;
+    automationRunsRetentionMaxPerAutomation: number;
     sessionListEagerHydrationCount: number;
     sessionListAppendEagerHydrationCount: number;
     sessionListBackgroundHydrationConcurrencyLimit: number;
@@ -286,6 +289,9 @@ export function loadSyncTuning(opts?: {
         messageCatchUpConcurrencyLimit: 1,
         sessionListHydrationConcurrencyLimit: 4,
         machineDisplayHydrationConcurrencyLimit: 4,
+        feedItemsRetentionMaxCount: 500,
+        artifactHeadsRetentionMaxCount: 1000,
+        automationRunsRetentionMaxPerAutomation: 200,
         sessionListEagerHydrationCount: 4,
         sessionListAppendEagerHydrationCount: 50,
         sessionListBackgroundHydrationConcurrencyLimit: 1,
@@ -392,6 +398,9 @@ export function loadSyncTuning(opts?: {
         messageCatchUpConcurrencyLimit: readNumber(merged, 'messageCatchUpConcurrencyLimit', { min: 1, max: 10 }) ?? defaults.messageCatchUpConcurrencyLimit,
         sessionListHydrationConcurrencyLimit: readNumber(merged, 'sessionListHydrationConcurrencyLimit', { min: 1, max: 20 }) ?? defaults.sessionListHydrationConcurrencyLimit,
         machineDisplayHydrationConcurrencyLimit: readNumber(merged, 'machineDisplayHydrationConcurrencyLimit', { min: 1, max: 20 }) ?? defaults.machineDisplayHydrationConcurrencyLimit,
+        feedItemsRetentionMaxCount: readNumber(merged, 'feedItemsRetentionMaxCount', { min: 1, max: 10_000 }) ?? defaults.feedItemsRetentionMaxCount,
+        artifactHeadsRetentionMaxCount: readNumber(merged, 'artifactHeadsRetentionMaxCount', { min: 1, max: 10_000 }) ?? defaults.artifactHeadsRetentionMaxCount,
+        automationRunsRetentionMaxPerAutomation: readNumber(merged, 'automationRunsRetentionMaxPerAutomation', { min: 1, max: 10_000 }) ?? defaults.automationRunsRetentionMaxPerAutomation,
         sessionListEagerHydrationCount: readNumber(merged, 'sessionListEagerHydrationCount', { min: 0, max: 200 }) ?? defaults.sessionListEagerHydrationCount,
         sessionListAppendEagerHydrationCount: readNumber(merged, 'sessionListAppendEagerHydrationCount', { min: 0, max: 200 }) ?? defaults.sessionListAppendEagerHydrationCount,
         sessionListBackgroundHydrationConcurrencyLimit: readNumber(merged, 'sessionListBackgroundHydrationConcurrencyLimit', { min: 1, max: 20 }) ?? defaults.sessionListBackgroundHydrationConcurrencyLimit,
