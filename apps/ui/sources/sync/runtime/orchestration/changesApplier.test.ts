@@ -331,8 +331,9 @@ describe('changesApplier', () => {
         expect(invalidateScmStatusForSession).toHaveBeenCalledWith('s1');
     });
 
-    it('requires session-list hydration only for loaded catch-up sessions', async () => {
+    it('requires session-shell hydration for every changed session while limiting transcript catch-up to loaded sessions', async () => {
         const invalidateSessions = vi.fn(async () => {});
+        const invalidateMessagesForSession = vi.fn(async () => {});
 
         await applyPlannedChangeActions({
             planned: buildPlanned({
@@ -344,15 +345,47 @@ describe('changesApplier', () => {
             invalidate: {
                 sessions: invalidateSessions,
             },
-            invalidateMessagesForSession: async () => {},
+            invalidateMessagesForSession,
             invalidateScmStatusForSession: () => {},
             applyTodoSocketUpdates: async () => {},
             kvBulkGet: async () => ({ values: [] }),
         });
 
         expect(invalidateSessions).toHaveBeenCalledWith({
-            requiredHydrationSessionIds: ['loaded'],
-            prioritizeSessionIds: ['loaded'],
+            requiredHydrationSessionIds: ['loaded', 'unloaded'],
+            prioritizeSessionIds: ['loaded', 'unloaded'],
+        });
+        expect(invalidateMessagesForSession).toHaveBeenCalledTimes(1);
+        expect(invalidateMessagesForSession).toHaveBeenCalledWith('loaded');
+    });
+
+    it('does not checkpoint an unloaded-transcript session change when its session-shell refresh fails', async () => {
+        const result = await applyPlannedChangeActions({
+            planned: buildPlanned({
+                changes: [
+                    buildChange({ cursor: 1, kind: 'session', entityId: 'unloaded' }),
+                ],
+                sessionIdsToCatchUp: ['unloaded'],
+                invalidate: { sessions: true },
+            }),
+            credentials,
+            isSessionMessagesLoaded: () => false,
+            invalidate: {
+                sessions: async () => {
+                    throw new Error('session shell unavailable');
+                },
+            },
+            invalidateMessagesForSession: async () => {},
+            invalidateScmStatusForSession: () => {},
+            applyTodoSocketUpdates: async () => {},
+            kvBulkGet: async () => ({ values: [] }),
+        });
+
+        expect(result).toMatchObject({
+            status: 'partial',
+            safeAdvanceCursor: null,
+            blockedCursor: '1',
+            blockedReason: 'partial-materialization',
         });
     });
 

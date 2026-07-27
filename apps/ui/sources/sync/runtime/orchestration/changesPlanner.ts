@@ -33,7 +33,6 @@ export type UnsupportedChangeMarker = {
 
 export type ChangeCheckpointDecision =
     | 'critical'
-    | 'intentionally-skipped-by-explicit-policy'
     | 'unsupported';
 
 export type ChangeCheckpointBlockedReason =
@@ -193,7 +192,7 @@ export function getChangeTargetMessageSeq(change: ApiChangeEntry): number | null
 
 export function classifyChangeForCheckpoint(
     change: ApiChangeEntry,
-    clientState: ChangeCheckpointClientState,
+    _clientState: ChangeCheckpointClientState,
 ): ChangeCheckpointClassification {
     const kind = String(change.kind);
     const cursor = String(change.cursor);
@@ -226,30 +225,16 @@ export function classifyChangeForCheckpoint(
         };
     }
 
-    if (kind === 'session' || kind === 'share') {
-        if (hasPendingHint(change)) {
-            return {
-                kind,
-                cursor,
-                entityId,
-                decision: 'critical',
-                plannerOwner: coverage.plannerOwner,
-                snapshotDomain: coverage.snapshotDomain,
-                materializationProof: 'pending-queue-convergence',
-            };
-        }
-
-        if (!clientState.isSessionMessagesLoaded(entityId)) {
-            return {
-                kind,
-                cursor,
-                entityId,
-                decision: 'intentionally-skipped-by-explicit-policy',
-                plannerOwner: coverage.plannerOwner,
-                snapshotDomain: coverage.snapshotDomain,
-                materializationProof: 'session-open-catch-up',
-            };
-        }
+    if ((kind === 'session' || kind === 'share') && hasPendingHint(change)) {
+        return {
+            kind,
+            cursor,
+            entityId,
+            decision: 'critical',
+            plannerOwner: coverage.plannerOwner,
+            snapshotDomain: coverage.snapshotDomain,
+            materializationProof: 'pending-queue-convergence',
+        };
     }
 
     return {

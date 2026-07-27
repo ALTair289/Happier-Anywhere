@@ -77,9 +77,10 @@ export async function applyPlannedChangeActions(params: {
     const loadedCatchUpSessionIds = planned.sessionIdsToCatchUp.filter((sessionId) =>
         params.isSessionMessagesLoaded(sessionId),
     );
+    const changedSessionIds = planned.sessionIdsToCatchUp;
     const sessionListInvalidationContext: SessionListInvalidationContext = {
-        requiredHydrationSessionIds: loadedCatchUpSessionIds,
-        prioritizeSessionIds: loadedCatchUpSessionIds,
+        requiredHydrationSessionIds: changedSessionIds,
+        prioritizeSessionIds: changedSessionIds,
     };
 
     let sessionsInvalidationFailed = false;
@@ -237,12 +238,6 @@ export async function applyPlannedChangeActions(params: {
                 processedChanges,
                 blockedChanges: planned.changes.length - processedChanges,
             };
-        }
-
-        if (classification.decision === 'intentionally-skipped-by-explicit-policy') {
-            safeAdvanceCursor = classification.cursor;
-            processedChanges += 1;
-            continue;
         }
 
         if (
