@@ -2899,10 +2899,10 @@
     "@jridgewell/resolve-uri" "^3.1.0"
     "@jridgewell/sourcemap-codec" "^1.4.14"
 
-"@legendapp/list@3.3.2":
-  version "3.3.2"
-  resolved "https://registry.npmjs.org/@legendapp/list/-/list-3.3.2.tgz#ee3329255a143e6cb64de712a6a52960f85cac9e"
-  integrity sha512-wAw961e9PjWECXne68IVIWCUgPGrJGJySojEUFuVNICSqXKqzYSN7tA4r7SI3KVquto30Xb7PE+ZgdRZjwsOOQ==
+"@legendapp/list@3.3.3":
+  version "3.3.3"
+  resolved "https://registry.npmjs.org/@legendapp/list/-/list-3.3.3.tgz#219531d71d0020a8e521827f072002224df8cfaa"
+  integrity sha512-p3g4xG6f//s4XQKhuus2189GCQgOHEIbJXHePqeDxj+6UQQQyij4YBjyArNSCgqoP0c03sxDPSOuCFB128Ql6g==
   dependencies:
     use-sync-external-store "^1.5.0"
 
