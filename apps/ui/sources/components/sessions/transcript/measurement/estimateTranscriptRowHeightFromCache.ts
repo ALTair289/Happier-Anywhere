@@ -96,7 +96,7 @@ export function estimateTranscriptRowHeightFromContent(params: Readonly<{
     if (item.kind === 'pending-queue') {
         let total = 0;
         for (const message of [...item.pendingMessages, ...item.discardedMessages]) {
-            total += estimateTextBlockPx(message.text);
+            total += estimateTextBlockPx(message.displayText ?? message.text);
         }
         return Math.min(ESTIMATE_MAX_ROW_PX, Math.max(ESTIMATE_COMPACT_ROW_PX, total));
     }

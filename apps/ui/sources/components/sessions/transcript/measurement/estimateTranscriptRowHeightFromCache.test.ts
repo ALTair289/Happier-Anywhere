@@ -194,6 +194,29 @@ describe('estimateTranscriptRowHeightFromContent', () => {
         expect(estimate).toBeGreaterThan(350);
     });
 
+    it('estimates a pending message from the string the row actually renders (displayText)', () => {
+        // `PendingMessagesTranscriptBlock` renders `displayText ?? text`. A message whose stored
+        // text is a short command but whose display form is long (or vice versa) must be sized
+        // from the DISPLAYED string, or the estimate is wrong for exactly the rows it covers.
+        const estimate = estimateTranscriptRowHeightFromContent({
+            getMessageById: () => null,
+            item: {
+                kind: 'pending-queue',
+                id: 'pending-queue',
+                pendingMessages: [{
+                    id: 'p1',
+                    localId: null,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    text: 'hi',
+                    displayText: 'z'.repeat(600),
+                }],
+                discardedMessages: [],
+            } as unknown as TranscriptRowShellItem,
+        });
+        expect(estimate).toBeGreaterThan(150);
+    });
+
     it('returns undefined for unknown item shapes so the renderer fallback applies', () => {
         const estimate = estimateTranscriptRowHeightFromContent({
             getMessageById: () => null,
