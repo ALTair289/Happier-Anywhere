@@ -11,7 +11,12 @@ import {
 } from '@/components/ui/text/webStartEllipsisTextStyles';
 import { Avatar } from '@/components/ui/avatar/Avatar';
 import { AgentIcon } from '@/agents/registry/AgentIcon';
-import { DEFAULT_AGENT_ID, getAgentCore, resolveAgentIdFromFlavor } from '@/agents/catalog/catalog';
+import {
+    DEFAULT_AGENT_ID,
+    getAgentCore,
+    getAgentPickerIconScale,
+    resolveAgentIdFromFlavor,
+} from '@/agents/catalog/catalog';
 import { resolveAgentIdFromSessionMetadata } from '@happier-dev/agents';
 import { Typography } from '@/constants/Typography';
 import { formatPendingCountBadge } from '@/components/sessions/pendingBadge';
@@ -1209,6 +1214,7 @@ const SessionItemContent = React.memo(
                                 agentId={agentLogoId}
                                 size={agentLogoSize}
                                 color={sessionTitleColor}
+                                style={{ transform: [{ scale: getAgentPickerIconScale(agentLogoId) }] }}
                                 testID={`session-list-agent-logo-${resolvedSession.id}`}
                             />
                         )}

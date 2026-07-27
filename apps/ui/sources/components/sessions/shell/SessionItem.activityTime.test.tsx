@@ -35,6 +35,7 @@ const AgentIconMock = 'AgentIcon' as unknown as React.ComponentType<{
     size?: number;
     testID?: string;
     color?: string;
+    style?: unknown;
 }>;
 let platformOs: 'ios' | 'android' | 'web' = 'web';
 let isTabletDevice = false;
@@ -115,7 +116,8 @@ vi.mock('@/agents/registry/AgentIcon', () => ({
 
 vi.mock('@/agents/catalog/catalog', () => ({
     DEFAULT_AGENT_ID: 'codex',
-    resolveAgentIdFromFlavor: (flavor: string | null | undefined) => flavor === 'claude' ? 'claude' : null,
+    resolveAgentIdFromFlavor: (flavor: string | null | undefined) => flavor === 'claude' || flavor === 'grok' ? flavor : null,
+    getAgentPickerIconScale: (agentId: string) => agentId === 'grok' ? 1.25 : 1,
 }));
 
 vi.mock('@/components/ui/status/StatusDot', () => ({
@@ -850,7 +852,7 @@ describe('SessionItem activity time', () => {
 
         const screen = await renderScreen(
             <SessionItem
-                session={createSession('sess_agent_logo_narrow', { flavor: 'claude' } as any)}
+                session={createSession('sess_agent_logo_narrow', { flavor: 'grok' } as any)}
                 serverId="server_a"
                 pinned={false}
                 selected={false}
@@ -865,8 +867,9 @@ describe('SessionItem activity time', () => {
 
         expect(screen.findAllByType(AvatarMock)).toHaveLength(0);
         expect(screen.findAllByType(AgentIconMock)[0].props).toMatchObject({
-            agentId: 'claude',
+            agentId: 'grok',
             size: 14,
+            style: { transform: [{ scale: 1.25 }] },
             testID: 'session-list-agent-logo-sess_agent_logo_narrow',
         });
         expect(findRowContentStyle(screen, 'sess_agent_logo_narrow').marginLeft).toBe(8);
