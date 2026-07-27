@@ -3,6 +3,17 @@ import { describe, expect, it } from 'vitest';
 import { buildClaudeAgentState } from './buildClaudeAgentState';
 
 describe('buildClaudeAgentState', () => {
+  it('does not advertise user-message handler readiness until explicitly ready', () => {
+    expect(buildClaudeAgentState({
+      currentState: {},
+      mode: 'remote',
+      claudeUnifiedTerminalEnabled: false,
+      localPermissionBridgeEnabled: false,
+    }).capabilities).toMatchObject({
+      userMessageHandlerReady: false,
+    });
+  });
+
   it('publishes unified terminal sessions as shared and remote-writable instead of locally controlled', () => {
     expect(buildClaudeAgentState({
       currentState: {
@@ -13,6 +24,7 @@ describe('buildClaudeAgentState', () => {
       mode: 'remote',
       claudeUnifiedTerminalEnabled: true,
       localPermissionBridgeEnabled: true,
+      userMessageHandlerReady: true,
     })).toMatchObject({
       controlledByUser: false,
       localControl: {
@@ -29,6 +41,7 @@ describe('buildClaudeAgentState', () => {
         askUserQuestionAnswersInPermission: true,
         localPermissionBridgeInLocalMode: true,
         permissionsInUiWhileLocal: true,
+        userMessageHandlerReady: true,
       },
     });
   });
@@ -40,6 +53,7 @@ describe('buildClaudeAgentState', () => {
       claudeUnifiedTerminalEnabled: true,
       localPermissionBridgeEnabled: false,
       tuiRuntimeControlEnabled: true,
+      userMessageHandlerReady: true,
     });
     expect(withControl.capabilities).toMatchObject({ inFlightConfigApplySupported: true });
 
@@ -49,6 +63,7 @@ describe('buildClaudeAgentState', () => {
       claudeUnifiedTerminalEnabled: true,
       localPermissionBridgeEnabled: false,
       tuiRuntimeControlEnabled: false,
+      userMessageHandlerReady: true,
     });
     expect((withoutControl.capabilities as Record<string, unknown>).inFlightConfigApplySupported).toBeUndefined();
 

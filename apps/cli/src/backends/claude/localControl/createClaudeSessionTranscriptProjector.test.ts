@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Metadata } from '@/api/types';
 
 import type { Session } from '../session';
+import { createClaudeStatuslineApplier } from '../statusline/applyClaudeStatuslineUpdate';
 import type { RawJSONLines } from '../types';
 import type { ClaudeWorkflowActivitySource } from '../workflows/claudeWorkflowActivitySource';
 import { createClaudeSessionTranscriptProjector } from './createClaudeSessionTranscriptProjector';
@@ -27,9 +28,12 @@ function createWorkflowActivitySourceFake(
       observed.push(message);
     },
     getWorkflowOwnedAgentToolUseIds: () => new Set(ownedToolUseIds),
+    isWorkflowOwnedProviderTaskId: () => false,
+    isWorkflowOwnedTaskReference: () => false,
     flush: async () => {
       flushCount += 1;
     },
+    reconcileStartupInterruptedRuns: async () => {},
     dispose: () => {
       disposeCount += 1;
     },
@@ -74,19 +78,25 @@ function createSessionFixture(): Readonly<{
   session: Session;
   getMetadata: () => Metadata;
   getUpdateMetadataCallCount: () => number;
+  getSessionEventCalls: () => readonly Readonly<{ event: unknown; id: string | undefined }>[];
 }> {
   // The Claude transcript session id lives in metadata (`claudeSessionId`), mirroring production
   // where `session.sessionId` is the HAPPIER id. The goal source matches goal_status against
   // `metadata.claudeSessionId` (read via `getMetadataSnapshot`), so the fixture seeds it here.
   let metadata: Metadata = { claudeSessionId: 'claude-session-id' } as Metadata;
   let updateMetadataCallCount = 0;
+  const sessionEventCalls: Array<Readonly<{ event: unknown; id: string | undefined }>> = [];
   const session = {
     sessionId: 'happy-session-id',
+    transcriptPath: '/tmp/transcript.jsonl',
+    reconcileClaudeRuntimeFromStatusline: vi.fn(),
     client: {
       sessionId: 'happy-session-id',
       getMetadataSnapshot: () => metadata,
       sendClaudeSessionMessage: vi.fn(),
-      sendSessionEvent: vi.fn(),
+      sendSessionEvent: vi.fn((event: unknown, id?: string) => {
+        sessionEventCalls.push({ event, id });
+      }),
       updateMetadata: (updater: (current: Metadata) => Metadata) => {
         updateMetadataCallCount += 1;
         metadata = updater(metadata);
@@ -97,6 +107,7 @@ function createSessionFixture(): Readonly<{
     session,
     getMetadata: () => metadata,
     getUpdateMetadataCallCount: () => updateMetadataCallCount,
+    getSessionEventCalls: () => sessionEventCalls,
   };
 }
 
@@ -118,6 +129,58 @@ function buildAssistantRow(params: Readonly<{
     },
   } as RawJSONLines;
 }
+
+describe('createClaudeSessionTranscriptProjector compaction events', () => {
+  it('derives replayed compact_boundary lifecycle identity from the raw boundary evidence', () => {
+    const firstBoundary = {
+      type: 'system',
+      subtype: 'compact_boundary',
+      session_id: 'sess_replayed_compaction',
+      uuid: 'f93ad896-fae2-4eb4-82ce-03d4b7ce356e',
+      timestamp: '2026-07-07T14:42:06.029Z',
+    } as RawJSONLines;
+    const replayedBoundary = {
+      type: 'system',
+      subtype: 'compact_boundary',
+      session_id: 'sess_replayed_compaction',
+      uuid: 'e11e1611-a694-4a9d-9ebc-8e7d882fff91',
+      timestamp: '2026-07-07T14:56:33.493Z',
+    } as RawJSONLines;
+
+    const firstFixture = createSessionFixture();
+    const firstProjector = createClaudeSessionTranscriptProjector({
+      session: firstFixture.session,
+      logPrefix: '[test]',
+    });
+    firstProjector.observe(firstBoundary);
+    firstProjector.observe(replayedBoundary);
+
+    const replayFixture = createSessionFixture();
+    const replayProjector = createClaudeSessionTranscriptProjector({
+      session: replayFixture.session,
+      logPrefix: '[test]',
+    });
+    replayProjector.observe(replayedBoundary);
+
+    const firstEvents = (firstFixture.session.client.sendSessionEvent as unknown as ReturnType<typeof vi.fn>)
+      .mock.calls.map((call) => call[0]);
+    const replayEvents = (replayFixture.session.client.sendSessionEvent as unknown as ReturnType<typeof vi.fn>)
+      .mock.calls.map((call) => call[0]);
+
+    expect(firstEvents).toHaveLength(2);
+    expect(replayEvents).toHaveLength(1);
+    expect(firstEvents[1]).toMatchObject({
+      type: 'context-compaction',
+      phase: 'completed',
+      providerEventId: 'claude:context-compaction:boundary:session:sess_replayed_compaction:uuid:e11e1611-a694-4a9d-9ebc-8e7d882fff91:timestamp:2026-07-07T14%3A56%3A33.493Z',
+      lifecycleId: 'claude:context-compaction:boundary:session:sess_replayed_compaction:uuid:e11e1611-a694-4a9d-9ebc-8e7d882fff91:timestamp:2026-07-07T14%3A56%3A33.493Z',
+    });
+    expect(replayEvents[0]).toMatchObject({
+      providerEventId: firstEvents[1]?.providerEventId,
+      lifecycleId: firstEvents[1]?.lifecycleId,
+    });
+  });
+});
 
 describe('createClaudeSessionTranscriptProjector model adoption', () => {
   it('adopts the effective model from non-sidechain assistant transcript rows into session models metadata', () => {
@@ -165,6 +228,57 @@ describe('createClaudeSessionTranscriptProjector model adoption', () => {
     expect(fixture.getMetadata().sessionModelsV1).toMatchObject({
       provider: 'claude',
       currentModelId: 'claude-sonnet-4-6',
+    });
+  });
+
+  it('emits one visible session event for a transcript assistant model delta', () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    projector.observe(buildAssistantRow({ uuid: 'a-1', model: 'claude-fable-5' }));
+    projector.observe(buildAssistantRow({ uuid: 'a-2', model: 'claude-opus-4-8' }));
+    projector.observe(buildAssistantRow({ uuid: 'a-3', model: 'claude-opus-4-8' }));
+
+    expect(fixture.getMetadata().sessionModelsV1).toMatchObject({
+      provider: 'claude',
+      currentModelId: 'claude-opus-4-8',
+    });
+    expect(fixture.getSessionEventCalls()).toEqual([
+      {
+        event: { type: 'message', message: 'Model changed to claude-opus-4-8' },
+        id: 'claude:model-changed:claude-fable-5:claude-opus-4-8',
+      },
+    ]);
+  });
+
+  it('dedupes a model transition reported by both statusline and transcript evidence', () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+    const applier = createClaudeStatuslineApplier({ logPrefix: '[test]' });
+
+    projector.observe(buildAssistantRow({ uuid: 'a-1', model: 'claude-fable-5' }));
+    applier.apply(fixture.session, {
+      session_id: 'claude-session-id',
+      transcript_path: '/tmp/transcript.jsonl',
+      model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' },
+    });
+    projector.observe(buildAssistantRow({ uuid: 'a-2', model: 'claude-opus-4-8' }));
+
+    expect(fixture.getSessionEventCalls()).toEqual([
+      {
+        event: { type: 'message', message: 'Model changed to Opus 4.8' },
+        id: 'claude:model-changed:claude-fable-5:claude-opus-4-8',
+      },
+    ]);
+    expect(fixture.getMetadata().sessionModelsV1).toMatchObject({
+      provider: 'claude',
+      currentModelId: 'claude-opus-4-8',
     });
   });
 

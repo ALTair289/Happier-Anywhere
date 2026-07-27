@@ -18,11 +18,12 @@ import { filterWorkflowOwnedWorkStateItems } from '../workflows/claudeWorkflowOw
 import { mapClaudeRateLimitEventToUsageDetails, type NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
 import { surfaceClaudeRateLimitRuntimeIssue } from '../connectedServices/surfaceClaudeRuntimeIssues';
 import {
+  buildClaudeCompactBoundaryEventIdentity,
   buildClaudeCompactionCompletedEvent,
   buildClaudeCompactionLifecycleId,
   buildClaudeCompactionStartedEvent,
 } from '../contextCompactionEvents';
-import { buildClaudeSessionModelsMetadataWithCurrentModelId } from '../remote/buildClaudeSessionModelsMetadataFromSupportedModels';
+import { applyClaudeEffectiveModelUpdate } from '../sessionModels/effectiveModelUpdate';
 
 type ClaudeLocalWorkStateSnapshot = ReturnType<typeof buildClaudeTodoWriteWorkState>
   & Readonly<{ ownedSourceFamilies?: readonly string[] }>;
@@ -45,6 +46,26 @@ function readString(value: unknown): string | null {
  */
 function readClaudeSessionIdFromSession(session: Session): string | null {
   return readString(session.client.getMetadataSnapshot?.()?.claudeSessionId);
+}
+
+/**
+ * Read the last-published Claude goal work-state item from the session metadata snapshot (G-3/E
+ * restart continuity). Returns the `goal:claude` item (with its `status`/`tokensUsed`/`timeUsedSeconds`
+ * as persisted) or null when there is no work-state / goal item yet. Best-effort + shape-tolerant: the
+ * goal source validates the fields it needs.
+ */
+function readLastPublishedClaudeGoalItem(
+  session: Session,
+): Readonly<{ status?: unknown; tokensUsed?: unknown; timeUsedSeconds?: unknown; updatedAt?: unknown }> | null {
+  const snapshot = readRecord(session.client.getMetadataSnapshot?.());
+  const workState = readRecord(snapshot?.sessionWorkStateV1);
+  const items = workState && Array.isArray(workState.items) ? workState.items : null;
+  if (!items) return null;
+  for (const candidate of items) {
+    const item = readRecord(candidate);
+    if (item && item.id === CLAUDE_GOAL_WORK_STATE_ITEM_ID) return item;
+  }
+  return null;
 }
 
 type CompactCommandMarkerKind = 'local-command' | 'plain';
@@ -100,7 +121,10 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
   workflowActivitySource?: ClaudeWorkflowActivitySource | null;
 }>): Readonly<{
   observe(message: RawJSONLines): void;
-  observeRaw(value: unknown): void;
+  observeRaw(
+    value: unknown,
+    observation?: Readonly<{ historicalReplay?: boolean }>,
+  ): void;
   /**
    * Remove the published Claude goal work-state item (used by the active-session clear effector,
    * since Claude's `/goal clear` emits no `goal_status`). Idempotent.
@@ -113,6 +137,11 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
   recordGoalSetIntent(): void;
   /** Drain pending workflow-activity writes immediately (turn end / stream close / finalize). No-op without a source. */
   flushWorkflowActivity(): Promise<void>;
+  /**
+   * G-6: on graceful session teardown, if the Claude goal is still active/unmet, republish it with
+   * `statusReason:'interrupted'` (status stays active). No-op when there is no active goal.
+   */
+  finalizeInterruptedGoal(): void;
   reset(): void;
 }> {
   const workflowActivitySource = params.workflowActivitySource ?? null;
@@ -173,6 +202,13 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
     getCurrentClaudeSessionId: () => readClaudeSessionIdFromSession(params.session),
     logPrefix: params.logPrefix,
   });
+  // G-3/E restart continuity: seed the live-usage accumulator from the last-published Claude goal
+  // item in metadata (written by folds during the prior run) so a restart continues the running total
+  // instead of restarting mid-run usage from zero. The floor survives the transcript replay's
+  // re-observation of the same active goal_status.
+  goalWorkStateSource.reseedActiveGoalUsageFromPublishedItem(
+    readLastPublishedClaudeGoalItem(params.session),
+  );
   const maybeProjectWorkState = (message: RawJSONLines): void => {
     const updatedAt = Date.now();
     const messageRecord = readRecord((message as Record<string, unknown>).message);
@@ -201,23 +237,15 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
   // the only place the EFFECTIVE model id is visible. Mirroring the SDK launcher's
   // `runtime_model_update` adoption keeps session models metadata (and therefore UI context-window
   // resolution) correct for terminal sessions.
-  let lastAdoptedModelId: string | null = null;
   const maybeAdoptEffectiveModel = (message: RawJSONLines): void => {
     const modelId = readMainChainAssistantModelId(message);
-    if (!modelId || modelId === lastAdoptedModelId) return;
-    lastAdoptedModelId = modelId;
-    updateMetadataBestEffort(
-      params.session.client,
-      (metadata) => ({
-        ...metadata,
-        ...(buildClaudeSessionModelsMetadataWithCurrentModelId({
-          currentModelId: modelId,
-          metadata,
-        }) ?? {}),
-      }),
-      params.logPrefix,
-      'runtime_model_update',
-    );
+    if (!modelId) return;
+    applyClaudeEffectiveModelUpdate({
+      client: params.session.client,
+      modelId,
+      source: 'transcript',
+      logPrefix: params.logPrefix,
+    });
   };
   let compactionSequence = 0;
   let activeCompactionLifecycleId: string | null = null;
@@ -228,13 +256,20 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
   });
   const maybeEmitCompactionEvents = (message: RawJSONLines): void => {
     if (readSystemSubtype(message) === 'compact_boundary') {
-      const lifecycleId = activeCompactionLifecycleId ?? nextCompactionLifecycleId();
+      const messageRecord = message as Record<string, unknown>;
+      const providerSessionId = readString(messageRecord.session_id);
+      const providerEventId = buildClaudeCompactBoundaryEventIdentity({
+        providerSessionId,
+        uuid: readString(messageRecord.uuid),
+        timestamp: readString(messageRecord.timestamp),
+      });
+      const lifecycleId = activeCompactionLifecycleId ?? providerEventId ?? nextCompactionLifecycleId();
       activeCompactionLifecycleId = null;
       suppressNextLocalCommandCompactStart = true;
-      const providerSessionId = readString((message as Record<string, unknown>).session_id);
       params.session.client.sendSessionEvent(buildClaudeCompactionCompletedEvent({
         lifecycleId,
         source: 'provider-event',
+        ...(providerEventId ? { providerEventId } : {}),
         ...(providerSessionId ? { providerSessionId } : {}),
       }));
       return;
@@ -275,17 +310,20 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
     // (`goal_status`) and `system` (`slash_commands`) records — dropped from
     // `observe` — reach the goal source. `routeClaudeAttachment` + the source
     // already tolerate raw objects. This NEVER emits to the visible transcript.
-    observeRaw(value) {
+    observeRaw(value, observation) {
       goalWorkStateSource.observeTranscriptMessage(value);
       // The Claude workflow ACTIVITY source rides the SAME raw transcript channel as the goal source
       // (workflow `task_started`/`task_progress`/`task_completed` rows). One wiring, one channel.
-      workflowActivitySource?.observeTranscriptMessage(value);
+      workflowActivitySource?.observeTranscriptMessage(value, observation);
     },
     clearGoalWorkState() {
       goalWorkStateSource.clearGoalWorkState();
     },
     recordGoalSetIntent() {
       goalWorkStateSource.recordGoalSetIntent();
+    },
+    finalizeInterruptedGoal() {
+      goalWorkStateSource.finalizeInterruptedGoalOnShutdown();
     },
     async flushWorkflowActivity() {
       if (!workflowActivitySource) return;

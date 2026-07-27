@@ -1,37 +1,138 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createLocalTurnLifecycleController, type LocalTurnLifecycleSnapshot } from '@/agent/localControl/turnLifecycle';
-import { STANDARD_CONTINUATION_RESUME_PROMPT } from '@/daemon/connectedServices/continuation/continuationResumePrompt';
-import type { SessionRuntimeActivityPublisher } from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
+import { GENERIC_CONTINUATION_RESUME_PROMPT } from '@/daemon/connectedServices/continuation/continuationResumePrompt';
+import type {
+  SessionRuntimeActivityContribution,
+  SessionRuntimeActivityContributionHandle,
+} from '@/session/runtimeActivity/types';
+import { createClaudeProviderActivityLedger } from '../providerActivity/createClaudeProviderActivityLedger';
+import { createClaudeProviderRuntimeActivityAdapter } from '../providerActivity/createClaudeProviderRuntimeActivityAdapter';
+import type { ClaudeWorkflowTaskReference } from '../workflows/claudeWorkflowTaskReference';
 import type { RawJSONLines } from '../types';
 import { createClaudeLocalLifecycleTracker } from './claudeLocalLifecycleTracker';
 
-function createRuntimeActivityPublisherHarness() {
-  const publisher: SessionRuntimeActivityPublisher = {
-    setSourceActive: vi.fn(async () => {}),
-    observeSource: vi.fn(async () => {}),
-    observeAmbientLiveness: vi.fn(async () => {}),
-    clearSource: vi.fn(async () => {}),
-    clearProviderSources: vi.fn(async () => {}),
-    clearAll: vi.fn(async () => {}),
-    reconcileSources: vi.fn(async () => {}),
-    getProjection: vi.fn(() => ({
-      runtimeActivityActiveCount: 0,
-      runtimeActivityObservedAt: null,
-      runtimeActivityExpiresAt: null,
-      runtimeActivitySourceClass: null,
-    })),
-    getSnapshot: vi.fn(() => ({
-      v: 1 as const,
-      observedAtMs: 0,
-      activeCount: 0,
-      sources: [],
-    })),
-  };
-  return { publisher };
-}
-
 describe('createClaudeLocalLifecycleTracker', () => {
+  it('keeps presentation replay inert and uses only exact-session live JSONL for provider Activity', async () => {
+    const lifecycle = createLocalTurnLifecycleController({ completionQuiescenceMs: 0 });
+    const reports: SessionRuntimeActivityContribution[] = [];
+    const handle = {
+      report: vi.fn(async (contribution: SessionRuntimeActivityContribution) => { reports.push(contribution); }),
+      markUnknown: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } satisfies SessionRuntimeActivityContributionHandle;
+    const providerActivityLedger = createClaudeProviderActivityLedger();
+    const runtimeActivityAdapter = createClaudeProviderRuntimeActivityAdapter({
+      contributionHandle: handle,
+      providerActivityLedger,
+    });
+    await runtimeActivityAdapter.activateObservation('test-observer-installed');
+    reports.splice(0);
+    const tracker = createClaudeLocalLifecycleTracker({
+      lifecycle,
+      runtimeActivityAdapter,
+      providerActivityLedger,
+    });
+
+    const started = {
+      type: 'system',
+      subtype: 'task_started',
+      session_id: 'provider-session',
+      task_id: 'agent_target',
+      task_type: 'local_bash',
+    } as unknown as RawJSONLines;
+    tracker.observeTranscript(started);
+    await Promise.resolve();
+    expect(reports).toEqual([]);
+
+    tracker.observeLiveProviderActivityRow(started, 'wrong-session');
+    await Promise.resolve();
+    expect(reports).toEqual([]);
+
+    tracker.observeLiveProviderActivityRow(started, 'provider-session');
+    await vi.waitFor(() => expect(reports).toEqual([{
+      state: 'active',
+      activeCount: 1,
+    }]));
+
+    tracker.observeLiveProviderActivityRow({
+      type: 'queue-operation',
+      operation: 'enqueue',
+      content: '<task-notification><task-id>unknown-sibling</task-id></task-notification>',
+    } as unknown as RawJSONLines, 'provider-session');
+    expect(reports).toHaveLength(1);
+    expect(handle.markUnknown).not.toHaveBeenCalled();
+
+    tracker.observeLiveProviderActivityRow({
+      type: 'system',
+      subtype: 'task_updated',
+      session_id: 'provider-session',
+      task_id: 'agent_target',
+      patch: { status: 'killed' },
+    } as unknown as RawJSONLines, 'provider-session');
+    await vi.waitFor(() => expect(reports).toHaveLength(2));
+    expect(reports.at(-1)).toEqual({ state: 'idle', activeCount: 0 });
+    expect(handle.markUnknown).not.toHaveBeenCalled();
+    expect(providerActivityLedger.hasActiveProviderTasks()).toBe(false);
+
+    tracker.observeProcessExit();
+    await Promise.resolve();
+    expect(providerActivityLedger.hasActiveProviderTasks()).toBe(false);
+    expect(reports).toHaveLength(2);
+    expect(handle.markUnknown).toHaveBeenCalledTimes(1);
+    lifecycle.dispose();
+  });
+
+  it('routes authenticated Agent hook evidence through the one provider ledger', async () => {
+    const lifecycle = createLocalTurnLifecycleController({ completionQuiescenceMs: 0 });
+    const reports: SessionRuntimeActivityContribution[] = [];
+    const providerActivityLedger = createClaudeProviderActivityLedger();
+    const runtimeActivityAdapter = createClaudeProviderRuntimeActivityAdapter({
+      providerActivityLedger,
+      contributionHandle: {
+        report: vi.fn(async (value) => { reports.push(value); }),
+        markUnknown: vi.fn(async () => {}),
+        dispose: vi.fn(async () => {}),
+      },
+    });
+    await runtimeActivityAdapter.activateObservation('test-observer-installed');
+    reports.splice(0);
+    const tracker = createClaudeLocalLifecycleTracker({
+      lifecycle,
+      runtimeActivityAdapter,
+      providerActivityLedger,
+    });
+
+    tracker.observeHook({
+      hook_event_name: 'PostToolUse',
+      session_id: 'provider-session',
+      tool_name: 'Agent',
+      tool_response: { status: 'async_launched', agentId: 'agent-1' },
+    });
+    await vi.waitFor(() => expect(reports).toEqual([{ state: 'active', activeCount: 1 }]));
+
+    tracker.observeHook({
+      hook_event_name: 'PostToolUse',
+      session_id: 'provider-session',
+      tool_name: 'TaskOutput',
+      tool_input: { task_id: 'agent-1' },
+      tool_response: {
+        retrieval_status: 'success',
+        task: { task_id: 'agent-1', status: 'running' },
+      },
+    });
+    await Promise.resolve();
+    expect(reports).toHaveLength(1);
+
+    tracker.observeHook({
+      hook_event_name: 'SubagentStop',
+      session_id: 'provider-session',
+      agent_id: 'agent-1',
+    });
+    await vi.waitFor(() => expect(reports.at(-1)).toEqual({ state: 'idle', activeCount: 0 }));
+    lifecycle.dispose();
+  });
+
   it('translates lifecycle hooks and transcript continuation into safe handoff timing', async () => {
     vi.useFakeTimers();
     const lifecycle = createLocalTurnLifecycleController({ completionQuiescenceMs: 500 });
@@ -83,7 +184,7 @@ describe('createClaudeLocalLifecycleTracker', () => {
       isMeta: true,
       message: {
         role: 'user',
-        content: STANDARD_CONTINUATION_RESUME_PROMPT,
+        content: GENERIC_CONTINUATION_RESUME_PROMPT,
       },
     } satisfies RawJSONLines);
     tracker.observeTranscript({
@@ -384,262 +485,92 @@ describe('createClaudeLocalLifecycleTracker', () => {
     lifecycle.dispose();
   });
 
-  it('publishes detached transcript activity and clears it without reopening the foreground lifecycle', async () => {
-    const lifecycle = createLocalTurnLifecycleController({ completionQuiescenceMs: 0 });
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const tracker = createClaudeLocalLifecycleTracker({
-      lifecycle,
-      runtimeActivityPublisher: runtimeActivity.publisher,
+  it('opens exactly one foreground turn when Claude reacts to a live primary task notification', () => {
+    const observedEvents: string[] = [];
+    const lifecycle = createLocalTurnLifecycleController({
+      completionQuiescenceMs: 0,
+      onStateChange: (_snapshot, event) => {
+        observedEvents.push(`${event.type}:${event.source}`);
+      },
     });
+    const tracker = createClaudeLocalLifecycleTracker({ lifecycle });
 
     tracker.observeHook({ session_id: 'sid', hook_event_name: 'UserPromptSubmit' });
-    tracker.observeTranscript({
-      type: 'user',
-      uuid: 'launch-detached-agent',
-      message: {
-        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Async agent launched successfully.' }],
-      },
-      toolUseResult: { isAsync: true, status: 'async_launched', agentId: 'agent_1' },
-    } as any);
-    tracker.observeTranscript({
-      type: 'assistant',
-      uuid: 'foreground-answer-complete',
-      message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Foreground answer is ready.' }] },
-    } as any);
-    tracker.observeTranscript({
-      type: 'user',
-      uuid: 'agent-progress',
-      origin: { kind: 'task-notification', taskId: 'agent_1', status: 'running' },
-      message: { content: '<task-notification><task-id>agent_1</task-id><status>running</status></task-notification>' },
-    } as any);
-    tracker.observeTranscript({
-      type: 'user',
-      uuid: 'agent-completed',
-      origin: { kind: 'task-notification', taskId: 'agent_1', status: 'completed' },
-      message: { content: '<task-notification><task-id>agent_1</task-id><status>completed</status></task-notification>' },
-    } as any);
-
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.setSourceActive).toHaveBeenCalledWith({
-        id: 'claude:provider-task:agent_1',
-        sourceClass: 'provider_detached_task',
-        providerId: 'claude',
-      });
-      expect(runtimeActivity.publisher.clearSource).toHaveBeenCalledWith(
-        'claude:provider-task:agent_1',
-        'claude_provider_task_terminal',
-      );
-    });
-    expect(runtimeActivity.publisher.observeAmbientLiveness).not.toHaveBeenCalled();
-    expect(lifecycle.snapshot()).toMatchObject({
-      active: false,
-      terminal: true,
-      lastTerminalReason: 'completed',
-    });
-    lifecycle.dispose();
-  });
-
-  it('publishes Bash background command runtime activity from bare backgroundTaskId tool results', async () => {
-    const lifecycle = createLocalTurnLifecycleController({ completionQuiescenceMs: 0 });
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const tracker = createClaudeLocalLifecycleTracker({
-      lifecycle,
-      runtimeActivityPublisher: runtimeActivity.publisher,
-    });
-
-    tracker.observeHook({ session_id: 'sid', hook_event_name: 'UserPromptSubmit' });
-    tracker.observeTranscript({
-      type: 'user',
-      uuid: 'bash-background-launch',
-      message: {
-        content: [{
-          type: 'tool_result',
-          tool_use_id: 'toolu_bash',
-          content:
-            'Command running in background with ID: b9c3fz9oq. Output is being written to: /tmp/b9c3fz9oq.output.',
-          is_error: false,
-        }],
-      },
-      toolUseResult: {
-        stdout: '',
-        stderr: '',
-        interrupted: false,
-        isImage: false,
-        noOutputExpected: false,
-        backgroundTaskId: 'b9c3fz9oq',
-      },
-    } as any);
-    tracker.observeTranscript({
-      type: 'assistant',
-      uuid: 'foreground-answer-complete',
-      message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Foreground answer is ready.' }] },
-    } as any);
-
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.setSourceActive).toHaveBeenCalledWith({
-        id: 'claude:provider-task:b9c3fz9oq',
-        sourceClass: 'provider_detached_task',
-        providerId: 'claude',
-      });
-    });
-    expect(lifecycle.snapshot()).toMatchObject({
-      active: false,
-      terminal: true,
-      lastTerminalReason: 'completed',
-    });
-    lifecycle.dispose();
-  });
-
-  it('publishes detached transcript activity when the first evidence is a non-terminal task notification', async () => {
-    const lifecycle = createLocalTurnLifecycleController({ completionQuiescenceMs: 0 });
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const tracker = createClaudeLocalLifecycleTracker({
-      lifecycle,
-      runtimeActivityPublisher: runtimeActivity.publisher,
-    });
-
-    tracker.observeHook({ session_id: 'sid', hook_event_name: 'UserPromptSubmit' });
-    tracker.observeTranscript({
-      type: 'assistant',
-      uuid: 'foreground-answer-complete',
-      message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Foreground answer is ready.' }] },
-    } as any);
-    tracker.observeTranscript({
-      type: 'user',
-      uuid: 'agent-progress-first',
-      origin: { kind: 'task-notification', taskId: 'agent_progress_first', status: 'running' },
-      message: {
-        content: '<task-notification><task-id>agent_progress_first</task-id><status>running</status></task-notification>',
-      },
-    } as any);
-
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.setSourceActive).toHaveBeenCalledWith({
-        id: 'claude:provider-task:agent_progress_first',
-        sourceClass: 'provider_detached_task',
-        providerId: 'claude',
-      });
-    });
-    expect(runtimeActivity.publisher.observeSource).not.toHaveBeenCalledWith({
-      id: 'claude:provider-task:agent_progress_first',
-      reason: 'claude_provider_task_progress',
-    });
-    expect(lifecycle.snapshot()).toMatchObject({
-      active: false,
-      terminal: true,
-      lastTerminalReason: 'completed',
-    });
-    lifecycle.dispose();
-  });
-
-  it('clears Claude runtime activity on process exit and Stop hook no-background evidence', async () => {
-    const lifecycle = createLocalTurnLifecycleController({ completionQuiescenceMs: 0 });
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const tracker = createClaudeLocalLifecycleTracker({
-      lifecycle,
-      runtimeActivityPublisher: runtimeActivity.publisher,
-    });
-
-    tracker.observeTranscript({
-      type: 'user',
-      uuid: 'launch-detached-agent',
-      message: {
-        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Async agent launched successfully.' }],
-      },
-      toolUseResult: { isAsync: true, status: 'async_launched', agentId: 'agent_1' },
-    } as any);
     tracker.observeHook({ session_id: 'sid', hook_event_name: 'Stop', background_tasks: [] });
-    tracker.observeProcessExit();
-
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.clearProviderSources).toHaveBeenCalledWith(
-        'claude',
-        'claude_hook_no_background_tasks',
-      );
-      expect(runtimeActivity.publisher.clearProviderSources).toHaveBeenCalledWith(
-        'claude',
-        'claude_process_exit',
-      );
-    });
-    lifecycle.dispose();
-  });
-
-  it('reconciles named Stop hook background tasks without renewing surviving sources', async () => {
-    const lifecycle = createLocalTurnLifecycleController({ completionQuiescenceMs: 0 });
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const tracker = createClaudeLocalLifecycleTracker({
-      lifecycle,
-      runtimeActivityPublisher: runtimeActivity.publisher,
-    });
-
-    tracker.observeTranscript({
-      type: 'user',
-      uuid: 'launch-1',
-      message: {
-        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Async agent launched successfully.' }],
-      },
-      toolUseResult: { isAsync: true, status: 'async_launched', agentId: 'agent_1' },
-    } as any);
-    tracker.observeTranscript({
-      type: 'user',
-      uuid: 'launch-2',
-      message: {
-        content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: 'Async agent launched successfully.' }],
-      },
-      toolUseResult: { isAsync: true, status: 'async_launched', agentId: 'agent_2' },
-    } as any);
+    observedEvents.length = 0;
 
     tracker.observeHook({
       session_id: 'sid',
-      hook_event_name: 'Stop',
-      background_tasks: [{ task_id: 'agent_2' }],
+      hook_event_name: 'UserPromptSubmit',
+      prompt_id: 'notification-prompt',
+      prompt: [
+        '<task-notification>',
+        '<task-id>agent_1</task-id>',
+        '<tool-use-id>toolu_1</tool-use-id>',
+        '<status>completed</status>',
+        '</task-notification>',
+      ].join('\n'),
     });
+    expect(observedEvents).toEqual([]);
 
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.clearSource).toHaveBeenCalledWith(
-        'claude:provider-task:agent_1',
-        'claude_hook_background_tasks_reconciled',
-      );
-    });
-    expect(runtimeActivity.publisher.clearSource).not.toHaveBeenCalledWith(
-      'claude:provider-task:agent_2',
-      expect.any(String),
-    );
-    expect(runtimeActivity.publisher.observeSource).not.toHaveBeenCalled();
-    expect(runtimeActivity.publisher.clearProviderSources).not.toHaveBeenCalled();
-    lifecycle.dispose();
-  });
+    tracker.observeTranscript({
+      type: 'user',
+      uuid: 'notification-row',
+      promptId: 'notification-prompt',
+      sessionId: 'sid',
+      isSidechain: false,
+      origin: { kind: 'task-notification' },
+      message: {
+        content: '<task-notification><task-id>agent_1</task-id><status>completed</status></task-notification>',
+      },
+    } as any);
+    expect(observedEvents).toEqual([]);
 
-  it('publishes workflow background tasks reported by Stop hooks without keeping the foreground turn open', async () => {
-    const lifecycle = createLocalTurnLifecycleController({ completionQuiescenceMs: 0 });
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const tracker = createClaudeLocalLifecycleTracker({
-      lifecycle,
-      runtimeActivityPublisher: runtimeActivity.publisher,
-    });
+    tracker.observeTranscript({
+      type: 'assistant',
+      uuid: 'wrong-session-reaction',
+      parentUuid: 'notification-row',
+      session_id: 'other-session',
+      isSidechain: false,
+      message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'wrong-tool' }] },
+    } as any);
+    tracker.observeTranscript({
+      type: 'assistant',
+      uuid: 'replayed-reaction',
+      parentUuid: 'notification-row',
+      session_id: 'sid',
+      isSidechain: false,
+      isReplay: true,
+      message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'replayed-tool' }] },
+    } as any);
+    expect(observedEvents).toEqual([]);
 
-    tracker.observeHook({ session_id: 'sid', hook_event_name: 'UserPromptSubmit' });
+    tracker.observeTranscript({
+      type: 'assistant',
+      uuid: 'reaction-row',
+      parentUuid: 'notification-row',
+      session_id: 'sid',
+      isSidechain: false,
+      message: {
+        stop_reason: 'tool_use',
+        content: [{ type: 'tool_use', id: 'toolu_2', name: 'Bash', input: {} }],
+      },
+    } as any);
     tracker.observeHook({
       session_id: 'sid',
-      hook_event_name: 'Stop',
-      background_tasks: [
-        {
-          id: 'workflow_1',
-          type: 'workflow',
-          status: 'running',
-          name: 'long-running-workflow',
-        },
-      ],
+      hook_event_name: 'PostToolUse',
+      tool_use_id: 'toolu_2',
     });
 
-    await vi.waitFor(() => {
-      expect(runtimeActivity.publisher.setSourceActive).toHaveBeenCalledWith({
-        id: 'claude:provider-task:workflow_1',
-        sourceClass: 'provider_detached_task',
-        providerId: 'claude',
-      });
+    expect(observedEvents.filter((event) => event.startsWith('turn_started:'))).toEqual([
+      'turn_started:claude_task_notification_reaction_assistant',
+    ]);
+    expect(lifecycle.snapshot()).toMatchObject({
+      active: true,
+      terminal: false,
     });
-    expect(runtimeActivity.publisher.observeSource).not.toHaveBeenCalled();
+
+    tracker.observeHook({ session_id: 'sid', hook_event_name: 'Stop', background_tasks: [] });
     expect(lifecycle.snapshot()).toMatchObject({
       active: false,
       terminal: true,
@@ -741,39 +672,6 @@ describe('createClaudeLocalLifecycleTracker', () => {
     // Main-agent terminal evidence still terminalizes (control).
     tracker.observeHook({ session_id: 'sid', hook_event_name: 'StopFailure' });
     expect(lifecycle.snapshot()).toMatchObject({ terminal: true, lastTerminalReason: 'failed' });
-    lifecycle.dispose();
-  });
-
-  it('ignores sidechain-attributed hooks because runtime activity is owned by the session hook boundary', async () => {
-    const lifecycle = createLocalTurnLifecycleController({ completionQuiescenceMs: 0 });
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const tracker = createClaudeLocalLifecycleTracker({
-      lifecycle,
-      runtimeActivityPublisher: runtimeActivity.publisher,
-    });
-
-    tracker.observeTranscript({
-      type: 'user',
-      uuid: 'launch-detached-agent',
-      message: {
-        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Async agent launched successfully.' }],
-      },
-      toolUseResult: { isAsync: true, status: 'async_launched', agentId: 'agent_sidechain_1' },
-    } as any);
-    vi.mocked(runtimeActivity.publisher.setSourceActive).mockClear();
-
-    tracker.observeHook({
-      session_id: 'sid',
-      hook_event_name: 'PostToolUse',
-      agent_id: 'agent_sidechain_1',
-      agent_type: 'general-purpose',
-      tool_name: 'Bash',
-    } as any);
-
-    await Promise.resolve();
-    expect(runtimeActivity.publisher.setSourceActive).not.toHaveBeenCalled();
-    expect(runtimeActivity.publisher.observeSource).not.toHaveBeenCalled();
-    expect(lifecycle.snapshot()).toMatchObject({ active: false, terminal: false });
     lifecycle.dispose();
   });
 

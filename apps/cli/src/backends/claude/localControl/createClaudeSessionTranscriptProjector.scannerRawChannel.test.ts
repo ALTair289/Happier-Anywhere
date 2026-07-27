@@ -11,6 +11,7 @@ import type { RawJSONLines } from '../types';
 import { createSessionScanner } from '../utils/sessionScanner';
 import { getProjectPath } from '../utils/path';
 import { createClaudeSessionTranscriptProjector } from './createClaudeSessionTranscriptProjector';
+import { wireClaudeWorkflowActivitySource } from '../workflows/wireClaudeWorkflowActivitySource';
 
 // INTEGRATION (plan H7): the native Claude `/goal` signal is a `goal_status`
 // transcript ATTACHMENT. The session scanner DELIBERATELY drops `attachment`
@@ -119,7 +120,7 @@ describe('Claude goal source — scanner raw-channel integration (H7)', () => {
       // visible-transcript projector; the raw channel (which preserves attachments)
       // drives the goal source.
       onMessage: (message) => projector.observe(message),
-      onRawJsonlValue: (value) => projector.observeRaw(value),
+      onRawJsonlValue: (value, observation) => projector.observeRaw(value, observation),
     });
   }
 
@@ -184,5 +185,84 @@ describe('Claude goal source — scanner raw-channel integration (H7)', () => {
     await waitFor(() => readGoalItem(fixture.getMetadata())?.status === 'complete');
 
     expect(readGoalItem(fixture.getMetadata())).toMatchObject({ id: 'goal:claude', status: 'complete' });
+  });
+
+  it('does not treat workflow rows from the startup JSONL snapshot as live crash-recovery evidence', async () => {
+    const claudeSessionId = 'integration-claude-session-workflow-replay';
+    const sessionFile = join(projectDir, `${claudeSessionId}.jsonl`);
+    await writeFile(sessionFile, `${JSON.stringify({
+      type: 'assistant',
+      session_id: claudeSessionId,
+      uuid: 'uuid-toolu_replayed',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'toolu_replayed',
+          name: 'Workflow',
+          input: { script: "meta: { name: 'replayed workflow' }" },
+        }],
+      },
+    })}\n`);
+    let metadata = {
+      sessionWorkflowActivityHeadlineV1: {
+        v: 1,
+        backendId: 'claude',
+        updatedAt: 1_000,
+        primaryRunId: 'toolu_replayed',
+        activeRuns: [{
+          runId: 'toolu_replayed',
+          workflowToolUseId: 'toolu_replayed',
+          title: 'replayed workflow',
+          status: 'active',
+          updatedAt: 1_000,
+          recordRevision: '1',
+          recordUpdatedAt: 1_000,
+          totalAgents: 0,
+          completedAgents: 0,
+        }],
+      },
+    } as Metadata;
+    const fixture = createSessionFixture(claudeSessionId);
+    const workflowSource = wireClaudeWorkflowActivitySource({
+      backendId: 'claude',
+      startupReconcileGraceMs: 20,
+      binding: {
+        sessionId: 'happy-session-id',
+        metadataWriter: {
+          updateMetadata: (updater) => { metadata = updater(metadata); },
+          getMetadataSnapshot: () => metadata,
+        },
+        upsertSystemRecord: async () => {},
+        resolveEncryption: async () => ({ mode: 'plain' }),
+        getCurrentClaudeSessionId: () => claudeSessionId,
+      },
+    });
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[workflow-replay-integration]',
+      workflowActivitySource: workflowSource,
+    });
+
+    scanner = await createSessionScanner({
+      sessionId: claudeSessionId,
+      transcriptPath: sessionFile,
+      workingDirectory: testDir,
+      onMessage: (message) => projector.observe(message),
+      onRawJsonlValue: (value, observation) => projector.observeRaw(value, observation),
+    });
+    workflowSource.armStartupReconciliation();
+
+    await waitFor(() => {
+      const headline = metadata.sessionWorkflowActivityHeadlineV1 as {
+        recentRuns?: Array<{ runId: string; status: string; statusReason?: string }>;
+      };
+      return headline.recentRuns?.some((run) => (
+        run.runId === 'toolu_replayed'
+        && run.status === 'stopped'
+        && run.statusReason === 'interrupted'
+      )) === true;
+    });
+
+    workflowSource.dispose();
   });
 });

@@ -1,41 +1,4 @@
-import {
-    isTerminalClaudeAgentSdkProviderTaskStatus,
-    normalizeClaudeAgentSdkProviderTaskId,
-    normalizeClaudeAgentSdkProviderTaskStatus,
-    readClaudeAgentSdkProviderTaskStatus,
-} from '@happier-dev/protocol';
-import type { SessionRuntimeActivityPublisher } from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
-import { logger } from '@/ui/logger';
-
-export const CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID = 'claude';
-export const CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS = 'provider_detached_task';
-
-/**
- * Backstop TTL (W-3) for a provider task in the "is the session still working?" ledger. A dropped
- * terminal `task_updated` (connection gap / mode switch) would otherwise keep the session pinned
- * "working" until the process restarts. A task with no progress/terminal event within this window
- * stops blocking `hasActiveProviderTasks()`. Hook reconciliation stays the canonical clearer; this
- * is only the safety net for the case where no event ever arrives.
- */
-export const CLAUDE_PROVIDER_TASK_ACTIVITY_TTL_MS = 10 * 60_000;
-
-export type ClaudeProviderRuntimeActivityPublisher = Pick<
-    SessionRuntimeActivityPublisher,
-    'setSourceActive' | 'observeSource' | 'clearSource' | 'clearProviderSources'
->;
-
-export type ClaudeProviderTaskActivity =
-    | Readonly<{ type: 'background'; taskId: string }>
-    | Readonly<{ type: 'started'; taskId: string }>
-    | Readonly<{ type: 'progress'; taskId: string }>
-    | Readonly<{ type: 'terminal'; taskId: string }>;
-
-export type ClaudeProviderActivitySource =
-    | 'assistant-auto-backgrounded-tool-result'
-    | 'system-task-progress'
-    | 'system-task-started'
-    | 'transcript-async-agent-launch';
-
+import { normalizeClaudeAgentSdkProviderTaskId } from '@happier-dev/protocol';
 export {
     isTerminalClaudeAgentSdkProviderTaskStatus,
     normalizeClaudeAgentSdkProviderTaskId,
@@ -43,242 +6,358 @@ export {
     readClaudeAgentSdkProviderTaskStatus,
 } from '@happier-dev/protocol';
 
-export type ClaudeProviderTaskBlocker = {
+export const CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID = 'claude';
+
+export type ClaudeProviderTaskIdentity = Readonly<{ sessionId: string; taskId: string }>;
+export type ClaudeProviderTaskActivity =
+    | (ClaudeProviderTaskIdentity & Readonly<{
+        type: 'started';
+        admission?: 'known-only';
+        source?: ClaudeProviderTaskActivitySource;
+    }>)
+    | (ClaudeProviderTaskIdentity & Readonly<{ type: 'progress' }>)
+    | (ClaudeProviderTaskIdentity & Readonly<{
+        type: 'terminal';
+        terminalStatus?: 'completed' | 'failed' | 'stopped';
+        rememberIfUnknown?: true;
+    }>);
+export type ClaudeProviderTaskActivitySource =
+    | 'hook-agent-launch'
+    | 'hook-agent-resume'
+    | 'system-task-started'
+    | 'system-task-progress';
+export type ClaudeProviderTaskBlocker = ClaudeProviderTaskIdentity & Readonly<{
+    sources: readonly ClaudeProviderTaskActivitySource[];
+}>;
+export type ClaudeProviderTaskInterruptTargetEvidence = Readonly<{
+    type: 'active' | 'terminal';
     taskId: string;
-    sources: ClaudeProviderActivitySource[];
-};
-
-type ProviderTaskEntry = {
-    taskId: string;
-    sources: Set<ClaudeProviderActivitySource>;
-    /** Wall-clock ms of the most recent event for this task; drives the TTL backstop (W-3). */
-    lastEventAt: number;
-};
-
-/** Cancel handle for a scheduled expiry re-check. */
-type CancelTimer = () => void;
-
-export type ClaudeProviderActivityLedgerOptions = Readonly<{
-    /** Injectable clock (default `Date.now`); tests advance it deterministically. */
-    now?: () => number;
-    /** Per-task inactivity TTL in ms (default {@link CLAUDE_PROVIDER_TASK_ACTIVITY_TTL_MS}). */
-    ttlMs?: number;
-    /**
-     * Invoked after a TTL sweep drops one or more tasks, so the owner can re-check idle emission
-     * (the session may have gone completely silent with no further events to trigger the check).
-     */
-    onActiveTasksExpired?: () => void;
-    /**
-     * Injectable proactive-expiry scheduler (default `setTimeout` with `unref`). Tests pass a
-     * manual scheduler so the sweep fires deterministically without real timers.
-     */
-    setExpiryTimer?: (fn: () => void, delayMs: number) => CancelTimer;
+}>;
+export type ClaudeProviderTaskEventFacts = Readonly<{
+    activity: ClaudeProviderTaskActivity | null;
+    interruptTarget: ClaudeProviderTaskInterruptTargetEvidence | null;
 }>;
 
-function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
-    return value && typeof value === 'object' && !Array.isArray(value)
+function record(value: unknown): Readonly<Record<string, unknown>> | null {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
         ? value as Readonly<Record<string, unknown>>
         : null;
 }
 
-function readProviderTaskId(value: unknown): string | null {
-    const record = readRecord(value);
-    if (!record) return null;
+function normalizedString(value: unknown): string | null {
+    return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+function exactTerminalStatus(value: unknown): 'completed' | 'failed' | 'stopped' | null {
+    return value === 'completed' || value === 'failed' || value === 'stopped' ? value : null;
+}
+
+function isTerminalTaskStatus(value: unknown): boolean {
+    return value === 'completed' || value === 'failed' || value === 'stopped' || value === 'killed';
+}
+
+function isFailedToolResponse(value: Readonly<Record<string, unknown>>): boolean {
+    if (value.success === false || value.is_error === true || value.isError === true) return true;
+    if (value.error !== null && value.error !== undefined) return true;
+    const status = normalizedString(value.status)?.toLowerCase();
+    return status === 'failed' || status === 'error' || status === 'denied' || status === 'rejected';
+}
+
+function readTaskId(value: unknown): string | null {
+    const row = record(value);
     return normalizeClaudeAgentSdkProviderTaskId(
-        record.task_id
-        ?? record.taskId
-        ?? record.agent_id
-        ?? record.agentId,
+        row?.task_id
+        ?? row?.taskId
+        ?? row?.agent_id
+        ?? row?.agentId,
     );
 }
 
-export function buildClaudeProviderTaskRuntimeActivitySourceId(taskId: unknown): string | null {
-    const normalizedTaskId = normalizeClaudeAgentSdkProviderTaskId(taskId);
-    return normalizedTaskId ? `claude:provider-task:${normalizedTaskId}` : null;
-}
+/**
+ * Reads only the typed Claude SDK task lifecycle contract. Transcript prose,
+ * tool results, hook snapshots and status aliases are deliberately inert.
+ */
+export function normalizeClaudeProviderTaskEvent(value: unknown): ClaudeProviderTaskEventFacts {
+    const row = record(value);
+    if (!row) return { activity: null, interruptTarget: null };
 
-export function readClaudeBackgroundProviderTaskId(value: unknown): string | null {
-    const record = readRecord(value);
-    if (!record) return null;
-    const taskResultRecord = readRecord(record.tool_use_result ?? record.toolUseResult);
-    if (!taskResultRecord) return null;
-    const explicitBackgroundTaskId = normalizeClaudeAgentSdkProviderTaskId(
-        taskResultRecord.backgroundTaskId
-        ?? taskResultRecord.background_task_id,
-    );
-    if (explicitBackgroundTaskId) return explicitBackgroundTaskId;
-
-    const status = normalizeClaudeAgentSdkProviderTaskStatus(taskResultRecord.status);
-    const launchedAsync = taskResultRecord.assistantAutoBackgrounded === true
-        || taskResultRecord.assistant_auto_backgrounded === true
-        || taskResultRecord.isAsync === true
-        || status === 'async_launched';
-    if (!launchedAsync) return null;
-
-    return normalizeClaudeAgentSdkProviderTaskId(
-        taskResultRecord.taskId
-        ?? taskResultRecord.task_id
-        ?? taskResultRecord.agentId
-        ?? taskResultRecord.agent_id,
-    );
-}
-
-export function readClaudeProviderTaskActivity(value: unknown): ClaudeProviderTaskActivity | null {
-    const backgroundTaskId = readClaudeBackgroundProviderTaskId(value);
-    if (backgroundTaskId) {
-        return { type: 'background', taskId: backgroundTaskId };
+    if (row.type === 'user') {
+        const toolResult = record(row.toolUseResult ?? row.tool_use_result);
+        const status = normalizedString(toolResult?.status);
+        if (status !== 'async_launched' && status !== 'remote_launched') {
+            return { activity: null, interruptTarget: null };
+        }
+        const taskId = normalizeClaudeAgentSdkProviderTaskId(
+            toolResult?.taskId
+            ?? toolResult?.task_id
+            ?? toolResult?.agentId
+            ?? toolResult?.agent_id,
+        );
+        return {
+            activity: null,
+            interruptTarget: taskId ? { type: 'active', taskId } : null,
+        };
     }
 
-    const record = readRecord(value);
-    if (!record || record.type !== 'system') return null;
-    const taskId = readProviderTaskId(record);
-    if (!taskId) return null;
+    if (row.type !== 'system') return { activity: null, interruptTarget: null };
+    const sessionId = normalizedString(row.session_id);
+    const taskId = normalizeClaudeAgentSdkProviderTaskId(row.task_id);
+    if (!taskId) return { activity: null, interruptTarget: null };
+    const interruptTarget = row.subtype === 'task_started' || row.subtype === 'task_progress'
+        ? { type: 'active' as const, taskId }
+        : row.subtype === 'task_notification' || row.subtype === 'task_updated'
+            ? { type: 'terminal' as const, taskId }
+            : null;
+    if (!sessionId) return { activity: null, interruptTarget };
 
-    const status = readClaudeAgentSdkProviderTaskStatus(record);
-    const isTerminalStatus = isTerminalClaudeAgentSdkProviderTaskStatus(status);
-
-    switch (record.subtype) {
-        case 'task_started':
-            return isTerminalStatus
-                ? { type: 'terminal', taskId }
-                : { type: 'started', taskId };
-        case 'task_progress':
-        case 'task_updated':
-            return isTerminalStatus
-                ? { type: 'terminal', taskId }
-                : { type: 'progress', taskId };
-        case 'task_notification':
-            return isTerminalStatus
-                ? { type: 'terminal', taskId }
-                : { type: 'progress', taskId };
-        default:
-            return null;
+    if (row.subtype === 'task_started') {
+        const taskType = normalizedString(row.task_type ?? row.taskType);
+        const providerProvesBackground = taskType === 'local_bash' || taskType === 'local_workflow';
+        return {
+            activity: {
+                type: 'started',
+                sessionId,
+                taskId,
+                ...(providerProvesBackground
+                    ? {}
+                    : { admission: 'known-only' as const }),
+            },
+            interruptTarget,
+        };
     }
+    if (row.subtype === 'task_progress') {
+        return {
+            activity: { type: 'progress', sessionId, taskId },
+            interruptTarget,
+        };
+    }
+    const notificationStatus = exactTerminalStatus(row.status);
+    if (row.subtype === 'task_notification' && notificationStatus) {
+        return {
+            activity: { type: 'terminal', terminalStatus: notificationStatus, sessionId, taskId },
+            interruptTarget,
+        };
+    }
+    const taskUpdatedStatus = record(row.patch)?.status;
+    if (
+        row.subtype === 'task_updated'
+        && (
+            taskUpdatedStatus === 'completed'
+            || taskUpdatedStatus === 'failed'
+            || taskUpdatedStatus === 'killed'
+        )
+    ) {
+        return {
+            activity: {
+                type: 'terminal',
+                terminalStatus: taskUpdatedStatus === 'killed' ? 'stopped' : taskUpdatedStatus,
+                sessionId,
+                taskId,
+            },
+            interruptTarget,
+        };
+    }
+    return { activity: null, interruptTarget: null };
 }
 
-const defaultExpiryTimer = (fn: () => void, delayMs: number): CancelTimer => {
-    const timer = setTimeout(fn, delayMs);
-    timer.unref?.();
-    return () => clearTimeout(timer);
-};
+export function readClaudeProviderTaskActivity(
+    value: unknown,
+): ClaudeProviderTaskActivity | null {
+    return normalizeClaudeProviderTaskEvent(value).activity;
+}
 
-export function createClaudeProviderActivityLedger(options?: ClaudeProviderActivityLedgerOptions) {
-    const activeProviderTasks = new Map<string, ProviderTaskEntry>();
-    const now = options?.now ?? Date.now;
-    const ttlMs = options?.ttlMs ?? CLAUDE_PROVIDER_TASK_ACTIVITY_TTL_MS;
-    const onActiveTasksExpired = options?.onActiveTasksExpired;
-    const setExpiryTimer = options?.setExpiryTimer ?? defaultExpiryTimer;
-    let cancelExpiryTimer: CancelTimer | null = null;
+/**
+ * Normalizes one authenticated current-runtime Claude hook into a ledger fact.
+ * The hook transport owns authentication; this adapter owns only exact evidence
+ * admission and never retains membership of its own.
+ */
+export function readClaudeSessionHookProviderTaskActivity(
+    value: unknown,
+): ClaudeProviderTaskActivity | null {
+    const row = record(value);
+    if (!row) return null;
+    const sessionId = normalizedString(row.session_id ?? row.sessionId);
+    if (!sessionId) return null;
+    const hookEventName = normalizedString(row.hook_event_name ?? row.hookEventName);
+    const sidechainAgentId = normalizeClaudeAgentSdkProviderTaskId(row.agent_id ?? row.agentId);
 
-    /** Drop tasks whose last event is older than the TTL. Returns the dropped task ids. */
-    const pruneExpiredProviderTasks = (): string[] => {
-        const nowMs = now();
-        const expired: string[] = [];
-        for (const [taskId, entry] of activeProviderTasks) {
-            if (entry.lastEventAt + ttlMs <= nowMs) {
-                activeProviderTasks.delete(taskId);
-                expired.push(taskId);
+    if (hookEventName === 'StopFailure') {
+        return sidechainAgentId
+            ? {
+                type: 'terminal',
+                terminalStatus: 'failed',
+                sessionId,
+                taskId: sidechainAgentId,
+                rememberIfUnknown: true,
             }
-        }
-        if (expired.length > 0) {
-            logger.debug(
-                `[claude-provider-activity] dropped ${expired.length} stale provider task(s) after ${ttlMs}ms TTL: ${expired.join(', ')}`,
+            : null;
+    }
+    if (hookEventName === 'SubagentStart') {
+        return sidechainAgentId
+            ? { type: 'progress', sessionId, taskId: sidechainAgentId }
+            : null;
+    }
+    if (hookEventName === 'SubagentStop') {
+        return sidechainAgentId
+            ? { type: 'terminal', sessionId, taskId: sidechainAgentId, rememberIfUnknown: true }
+            : null;
+    }
+    if (hookEventName !== 'PostToolUse') return null;
+    if (sidechainAgentId) {
+        return { type: 'progress', sessionId, taskId: sidechainAgentId };
+    }
+
+    const toolName = normalizedString(row.tool_name ?? row.toolName);
+    const toolInput = record(row.tool_input ?? row.toolInput);
+    const toolResponse = record(
+        row.tool_response
+        ?? row.toolResponse
+        ?? row.tool_use_result
+        ?? row.toolUseResult,
+    );
+    if (!toolName || !toolResponse) return null;
+
+    if (toolName === 'Agent') {
+        if (toolResponse.status === 'async_launched') {
+            const taskId = normalizeClaudeAgentSdkProviderTaskId(
+                toolResponse.agentId ?? toolResponse.agent_id,
             );
+            return taskId
+                ? { type: 'started', sessionId, taskId }
+                : null;
         }
-        return expired;
-    };
-
-    const clearExpiryTimer = (): void => {
-        if (cancelExpiryTimer) {
-            cancelExpiryTimer();
-            cancelExpiryTimer = null;
+        if (toolResponse.status === 'remote_launched') {
+            const taskId = normalizeClaudeAgentSdkProviderTaskId(
+                toolResponse.taskId ?? toolResponse.task_id,
+            );
+            return taskId
+                ? { type: 'started', sessionId, taskId }
+                : null;
         }
-    };
+        return null;
+    }
 
-    /** (Re)arm a single proactive sweep at the earliest task deadline so a silent session still idles. */
-    const rescheduleExpiryTimer = (): void => {
-        clearExpiryTimer();
-        if (activeProviderTasks.size === 0) return;
-        const nowMs = now();
-        let earliestDeadline = Infinity;
-        for (const entry of activeProviderTasks.values()) {
-            earliestDeadline = Math.min(earliestDeadline, entry.lastEventAt + ttlMs);
+    if (toolName === 'Workflow') {
+        const taskId = normalizeClaudeAgentSdkProviderTaskId(toolResponse.taskId);
+        return (toolResponse.status === 'async_launched' || toolResponse.status === 'remote_launched') && taskId
+            ? { type: 'started', sessionId, taskId }
+            : null;
+    }
+
+    if (toolName === 'SendMessage') {
+        if (isFailedToolResponse(toolResponse)) return null;
+        const taskId = normalizeClaudeAgentSdkProviderTaskId(
+            toolResponse.resumedAgentId ?? toolResponse.resumed_agent_id,
+        );
+        return taskId
+            ? { type: 'started', sessionId, taskId, source: 'hook-agent-resume' }
+            : null;
+    }
+
+    if (toolName !== 'TaskOutput' && toolName !== 'TaskStop') return null;
+    const requestedTaskId = readTaskId(toolInput);
+    if (!requestedTaskId) return null;
+    const nestedTask = record(toolResponse.task);
+    const confirmedTask = nestedTask ?? toolResponse;
+    const confirmedTaskId = readTaskId(confirmedTask);
+    if (confirmedTaskId !== requestedTaskId || !isTerminalTaskStatus(confirmedTask.status)) return null;
+    if (
+        toolName === 'TaskOutput'
+        && toolResponse.retrieval_status !== 'success'
+        && toolResponse.retrievalStatus !== 'success'
+    ) return null;
+    return { type: 'terminal', sessionId, taskId: requestedTaskId };
+}
+
+function keyOf(identity: ClaudeProviderTaskIdentity): string {
+    return JSON.stringify([identity.sessionId, identity.taskId]);
+}
+
+export function createClaudeProviderActivityLedger() {
+    type ProviderTaskRecord =
+        | Readonly<{
+            phase: 'active';
+            identity: ClaudeProviderTaskIdentity;
+            sources: Set<ClaudeProviderTaskActivitySource>;
+        }>
+        | Readonly<{
+            phase: 'terminal-before-confirmation';
+            identity: ClaudeProviderTaskIdentity;
+        }>;
+    const tasks = new Map<string, ProviderTaskRecord>();
+
+    const noteActive = (
+        identity: ClaudeProviderTaskIdentity,
+        source: ClaudeProviderTaskActivitySource,
+    ): boolean => {
+        const key = keyOf(identity);
+        const current = tasks.get(key);
+        if (current?.phase === 'terminal-before-confirmation') {
+            if (source !== 'hook-agent-resume') return false;
+            tasks.set(key, { phase: 'active', identity, sources: new Set([source]) });
+            return true;
         }
-        const delayMs = Math.max(0, earliestDeadline - nowMs);
-        cancelExpiryTimer = setExpiryTimer(() => {
-            cancelExpiryTimer = null;
-            const expired = pruneExpiredProviderTasks();
-            rescheduleExpiryTimer();
-            if (expired.length > 0) onActiveTasksExpired?.();
-        }, delayMs);
-    };
-
-    const noteProviderTask = (
-        taskId: unknown,
-        source: ClaudeProviderActivitySource,
-    ): string | null => {
-        const normalizedTaskId = normalizeClaudeAgentSdkProviderTaskId(taskId);
-        if (!normalizedTaskId) return null;
-
-        const nowMs = now();
-        const existing = activeProviderTasks.get(normalizedTaskId);
-        if (existing) {
-            existing.sources.add(source);
-            existing.lastEventAt = nowMs;
-        } else {
-            activeProviderTasks.set(normalizedTaskId, {
-                taskId: normalizedTaskId,
-                sources: new Set([source]),
-                lastEventAt: nowMs,
-            });
+        if (current?.phase === 'active') {
+            current.sources.add(source);
+            return false;
         }
-        rescheduleExpiryTimer();
-        return normalizedTaskId;
+        tasks.set(key, { phase: 'active', identity, sources: new Set([source]) });
+        return true;
     };
 
     return {
-        getActiveProviderTaskBlockers: (): ClaudeProviderTaskBlocker[] => {
-            pruneExpiredProviderTasks();
-            return Array.from(activeProviderTasks.values())
-                .map((entry) => ({
-                    taskId: entry.taskId,
-                    sources: Array.from(entry.sources),
-                }));
+        apply(activity: ClaudeProviderTaskActivity): boolean {
+            const key = keyOf(activity);
+            const current = tasks.get(key);
+            if (activity.type === 'terminal') {
+                if (current?.phase === 'active') {
+                    tasks.set(key, {
+                        phase: 'terminal-before-confirmation',
+                        identity: { sessionId: activity.sessionId, taskId: activity.taskId },
+                    });
+                    return true;
+                }
+                if (!current && (activity.rememberIfUnknown === true || activity.terminalStatus !== undefined)) {
+                    tasks.set(key, {
+                        phase: 'terminal-before-confirmation',
+                        identity: { sessionId: activity.sessionId, taskId: activity.taskId },
+                    });
+                }
+                return false;
+            }
+            if (activity.type === 'progress') {
+                if (current?.phase === 'active') current.sources.add('system-task-progress');
+                return false;
+            }
+            if (activity.admission === 'known-only') {
+                if (current?.phase === 'active') current.sources.add('system-task-progress');
+                return false;
+            }
+            return noteActive(
+                { sessionId: activity.sessionId, taskId: activity.taskId },
+                activity.source ?? 'system-task-started',
+            );
+        },
+        getActiveProviderTaskBlockers(): ClaudeProviderTaskBlocker[] {
+            return [...tasks.values()]
+                .filter((entry): entry is Extract<ProviderTaskRecord, { phase: 'active' }> => entry.phase === 'active')
+                .map(({ identity, sources }) => ({ ...identity, sources: [...sources] }));
         },
         getActiveProviderTaskCount: (): number => {
-            pruneExpiredProviderTasks();
-            return activeProviderTasks.size;
+            let count = 0;
+            for (const entry of tasks.values()) {
+                if (entry.phase === 'active') count += 1;
+            }
+            return count;
         },
         hasActiveProviderTasks: (): boolean => {
-            pruneExpiredProviderTasks();
-            return activeProviderTasks.size > 0;
+            for (const entry of tasks.values()) {
+                if (entry.phase === 'active') return true;
+            }
+            return false;
         },
-        noteBackgroundProviderTask: (taskId: unknown): string | null => noteProviderTask(
-            taskId,
-            'assistant-auto-backgrounded-tool-result',
+        hasActiveProviderTask: (identity: ClaudeProviderTaskIdentity): boolean => (
+            tasks.get(keyOf(identity))?.phase === 'active'
         ),
-        noteTranscriptAsyncAgentTask: (taskId: unknown): string | null => noteProviderTask(
-            taskId,
-            'transcript-async-agent-launch',
-        ),
-        noteProviderTaskFinished: (taskId: unknown): string | null => {
-            const normalizedTaskId = normalizeClaudeAgentSdkProviderTaskId(taskId);
-            if (!normalizedTaskId) return null;
-            activeProviderTasks.delete(normalizedTaskId);
-            rescheduleExpiryTimer();
-            return normalizedTaskId;
-        },
-        noteProviderTaskProgress: (taskId: unknown): string | null => noteProviderTask(
-            taskId,
-            'system-task-progress',
-        ),
-        noteProviderTaskStarted: (taskId: unknown): string | null => noteProviderTask(
-            taskId,
-            'system-task-started',
-        ),
-        clearProviderTasks: (): void => {
-            activeProviderTasks.clear();
-            clearExpiryTimer();
-        },
     };
 }

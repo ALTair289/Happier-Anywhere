@@ -4,7 +4,7 @@ import type { RawJSONLines } from '@/backends/claude/types';
 import { readClaudeTranscriptProviderActivity } from './readClaudeTranscriptProviderActivity';
 
 describe('readClaudeTranscriptProviderActivity', () => {
-  it('detects async workflow launches from toolUseResult.taskId', () => {
+  it('leaves async workflow launches to the workflow runtime-activity owner', () => {
     expect(readClaudeTranscriptProviderActivity({
       type: 'user',
       sessionId: 'claude-session-1',
@@ -21,13 +21,10 @@ describe('readClaudeTranscriptProviderActivity', () => {
         taskId: 'wyix5fc6b',
         taskType: 'local_workflow',
       },
-    } as unknown as RawJSONLines)).toEqual({
-      type: 'async_agent_started',
-      taskId: 'wyix5fc6b',
-    });
+    } as unknown as RawJSONLines)).toBeNull();
   });
 
-  it('detects Bash background command launches from bare toolUseResult.backgroundTaskId', () => {
+  it('does not infer Activity from Bash tool results', () => {
     expect(readClaudeTranscriptProviderActivity({
       type: 'user',
       sessionId: 'claude-session-1',
@@ -49,10 +46,7 @@ describe('readClaudeTranscriptProviderActivity', () => {
         noOutputExpected: false,
         backgroundTaskId: ' b9c3fz9oq ',
       },
-    } as unknown as RawJSONLines)).toEqual({
-      type: 'async_agent_started',
-      taskId: 'b9c3fz9oq',
-    });
+    } as unknown as RawJSONLines)).toBeNull();
   });
 
   it('detects terminal task notifications from queue-operation content XML', () => {
@@ -65,6 +59,7 @@ describe('readClaudeTranscriptProviderActivity', () => {
     } as unknown as RawJSONLines)).toEqual({
       type: 'task_notification',
       taskId: 'task_1',
+      toolUseId: 'toolu_wf',
       terminal: true,
     });
   });
@@ -82,6 +77,7 @@ describe('readClaudeTranscriptProviderActivity', () => {
     })).toEqual({
       type: 'task_notification',
       taskId: 'task_1',
+      toolUseId: 'toolu_wf',
       terminal: true,
     });
   });
@@ -107,7 +103,32 @@ describe('readClaudeTranscriptProviderActivity', () => {
     } as unknown as RawJSONLines)).toEqual({
       type: 'task_notification',
       taskId: 'agent_1',
+      toolUseId: null,
       terminal: true,
+    });
+  });
+
+  it('preserves missing task-notification status as unknown instead of inventing running', () => {
+    expect(readClaudeTranscriptProviderActivity({
+      type: 'queue-operation',
+      operation: 'enqueue',
+      content: '<task-notification><task-id>task-unknown</task-id></task-notification>',
+    } as unknown as RawJSONLines)).toEqual({
+      type: 'task_notification_unknown',
+      taskId: 'task-unknown',
+      toolUseId: null,
+    });
+  });
+
+  it('preserves a tool-use-only task notification so workflow ownership can be classified', () => {
+    expect(readClaudeTranscriptProviderActivity({
+      type: 'queue-operation',
+      operation: 'enqueue',
+      content: '<task-notification><tool-use-id>toolu-workflow</tool-use-id></task-notification>',
+    } as unknown as RawJSONLines)).toEqual({
+      type: 'task_notification_unknown',
+      taskId: null,
+      toolUseId: 'toolu-workflow',
     });
   });
 });
