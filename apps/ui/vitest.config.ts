@@ -186,7 +186,7 @@ export default defineConfig({
             // `react-native-gesture-handler` imports React Native internals (Flow syntax) in node.
             { find: 'react-native-gesture-handler', replacement: resolve('./sources/dev/reactNativeGestureHandlerStub.ts') },
             // `react-native-webview` depends on RN native modules and internals.
-            { find: 'react-native-webview', replacement: resolve('./sources/dev/reactNativeWebviewStub.ts') },
+            { find: /^react-native-webview$/, replacement: resolve('./sources/dev/reactNativeWebviewStub.ts') },
             // Some dependencies accidentally pull in `expo` (which expects bundler-only runtime modules).
             { find: /^expo$/, replacement: resolve('./sources/dev/expoStub.ts') },
             // `expo-notifications` executes side-effectful native registration at import time.
@@ -216,6 +216,10 @@ export default defineConfig({
             { find: 'react-native-purchases', replacement: resolve('./sources/dev/reactNativePurchasesStub.ts') },
             { find: 'react-native-purchases-ui', replacement: resolve('./sources/dev/reactNativePurchasesUiStub.ts') },
             { find: '@shopify/flash-list', replacement: resolve('./sources/dev/shopifyFlashListStub.ts') },
+            // The pure web streaming-reveal module stays REAL under the stub below: it is the
+            // shared word classifier for both streaming surfaces and its gate tests must
+            // exercise the patched package logic, not a stub.
+            { find: 'react-native-enriched-markdown/lib/module/web/streamingReveal.js', replacement: resolve('./node_modules/react-native-enriched-markdown/lib/module/web/streamingReveal.js') },
             { find: 'react-native-enriched-markdown', replacement: resolve('./sources/dev/reactNativeEnrichedMarkdownStub.tsx') },
             { find: 'react-native-mmkv', replacement: resolve('./sources/dev/reactNativeMmkvStub.ts') },
             // Use libsodium-wrappers in tests instead of the RN native binding.

@@ -51,33 +51,36 @@ export function normalizeMarkdownLinkUrl(raw: string): string | null {
 
 const autolinkTargetPattern = /^(?:[A-Za-z][A-Za-z0-9+.-]*:|www\.)/;
 
-function findClosingDelimiter(
-    value: string,
-    start: number,
-    delimiters: Readonly<{ open: string; close: string }>,
-): number {
-    let depth = 0;
+function indexClosingMarkdownDelimiters(value: string): ReadonlyMap<number, number> {
+    const closingByOpening = new Map<number, number>();
+    const squareBracketStack: number[] = [];
+    const parenthesisStack: number[] = [];
 
-    for (let index = start; index < value.length; index += 1) {
+    for (let index = 0; index < value.length; index += 1) {
         const char = value[index];
         if (char === '\\') {
             index += 1;
             continue;
         }
-        if (char === delimiters.open) {
-            depth += 1;
+        if (char === '[') {
+            squareBracketStack.push(index);
             continue;
         }
-        if (char !== delimiters.close) {
+        if (char === '(') {
+            parenthesisStack.push(index);
             continue;
         }
-        depth -= 1;
-        if (depth === 0) {
-            return index;
+        if (char === ']') {
+            const opening = squareBracketStack.pop();
+            if (opening != null) closingByOpening.set(opening, index);
+            continue;
         }
+        if (char !== ')') continue;
+        const opening = parenthesisStack.pop();
+        if (opening != null) closingByOpening.set(opening, index);
     }
 
-    return -1;
+    return closingByOpening;
 }
 
 function extractMarkdownLinkDestination(raw: string): Readonly<{
@@ -128,6 +131,7 @@ function extractMarkdownLinkDestination(raw: string): Readonly<{
 
 function normalizeExplicitMarkdownLinks(markdown: string): string {
     let out = '';
+    const closingDelimiters = indexClosingMarkdownDelimiters(markdown);
 
     for (let index = 0; index < markdown.length; index += 1) {
         const char = markdown[index];
@@ -136,14 +140,14 @@ function normalizeExplicitMarkdownLinks(markdown: string): string {
             continue;
         }
 
-        const labelEnd = findClosingDelimiter(markdown, index, { open: '[', close: ']' });
+        const labelEnd = closingDelimiters.get(index) ?? -1;
         if (labelEnd < 0 || markdown[labelEnd + 1] !== '(') {
             out += char;
             continue;
         }
 
         const destinationStart = labelEnd + 1;
-        const destinationEnd = findClosingDelimiter(markdown, destinationStart, { open: '(', close: ')' });
+        const destinationEnd = closingDelimiters.get(destinationStart) ?? -1;
         if (destinationEnd < 0) {
             out += char;
             continue;
@@ -168,6 +172,77 @@ function normalizeExplicitMarkdownLinks(markdown: string): string {
     return out;
 }
 
+/**
+ * Transcript Markdown images fail closed. Structured session media is the only
+ * current image path with an authenticated owner, size bounds, and an explicit
+ * preview grant; arbitrary Markdown destinations never reach the package image
+ * renderer. Keep the alt text so the content remains readable and accessible.
+ */
+export function applyEnrichedMarkdownImagePolicy(markdown: string): string {
+    const closingDelimiters = indexClosingMarkdownDelimiters(markdown);
+    const chunks: string[] = [];
+    const frames: Array<{
+        cursor: number;
+        end: number;
+    }> = [{
+        cursor: 0,
+        end: markdown.length,
+    }];
+
+    while (frames.length > 0) {
+        const frame = frames[frames.length - 1]!;
+        if (frame.cursor >= frame.end) {
+            frames.pop();
+            continue;
+        }
+
+        const imageStart = frame.cursor;
+        if (markdown[imageStart] !== '!' || markdown[imageStart + 1] !== '[') {
+            chunks.push(markdown[imageStart]!);
+            frame.cursor += 1;
+            continue;
+        }
+
+        const labelStart = imageStart + 1;
+        const labelEnd = closingDelimiters.get(labelStart) ?? -1;
+        if (labelEnd < 0 || labelEnd >= frame.end) {
+            chunks.push(markdown[imageStart]!);
+            frame.cursor += 1;
+            continue;
+        }
+
+        const destinationStart = labelEnd + 1;
+        let imageEnd = labelEnd;
+        if (markdown[destinationStart] === '(') {
+            const destinationEnd = closingDelimiters.get(destinationStart) ?? -1;
+            if (destinationEnd < 0 || destinationEnd >= frame.end) {
+                chunks.push(markdown[imageStart]!);
+                frame.cursor += 1;
+                continue;
+            }
+            imageEnd = destinationEnd;
+        }
+
+        if (markdown[destinationStart] === '[') {
+            const referenceEnd = closingDelimiters.get(destinationStart) ?? -1;
+            if (referenceEnd >= 0 && referenceEnd < frame.end) {
+                imageEnd = referenceEnd;
+            }
+        }
+
+        // CommonMark shortcut references (`![alt]`) can resolve through a later
+        // definition, so a complete image label must also fail closed when no
+        // explicit destination immediately follows it.
+        frame.cursor = imageEnd + 1;
+        frames.push({
+            cursor: labelStart + 1,
+            end: labelEnd,
+        });
+    }
+
+    return chunks.join('');
+}
+
 function normalizeMarkdownAutolinks(markdown: string): string {
     return markdown.replace(/<([^>\n]+)>/g, (fullMatch, rawTarget: string) => {
         if (!autolinkTargetPattern.test(rawTarget)) {
@@ -180,7 +255,7 @@ function normalizeMarkdownAutolinks(markdown: string): string {
 }
 
 export function sanitizeEnrichedMarkdownLinkTargets(markdown: string): string {
-    const value = String(markdown ?? '');
+    const value = applyEnrichedMarkdownImagePolicy(String(markdown ?? ''));
     return normalizeMarkdownAutolinks(normalizeExplicitMarkdownLinks(value));
 }
 

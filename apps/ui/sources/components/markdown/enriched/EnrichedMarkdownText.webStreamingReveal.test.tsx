@@ -614,6 +614,16 @@ describe('EnrichedMarkdownText web streaming reveal', () => {
         expect(builtWasmModule).toContain('export default createMd4cModule');
     });
 
+    it('keeps the single-file parser inside the owning web runtime module', () => {
+        const sourceParser = readPatchedPackageFile('src/web/parseMarkdown.ts');
+        const builtParser = readPatchedPackageFile('lib/module/web/parseMarkdown.js');
+
+        expect(sourceParser).toContain("import createMd4cModule from './wasm/md4c.js'");
+        expect(builtParser).toContain("import createMd4cModule from './wasm/md4c.js'");
+        expect(sourceParser).not.toContain("import('./wasm/md4c");
+        expect(builtParser).not.toContain("import('./wasm/md4c");
+    });
+
     it('keeps the generated web parser compatible with Metro module bundling', () => {
         const sourceWasmModule = readPatchedPackageFile('src/web/wasm/md4c.js');
         const builtWasmModule = readPatchedPackageFile('lib/module/web/wasm/md4c.js');

@@ -9,7 +9,7 @@ import {
 } from './rendering/MarkdownRenderingProfile';
 import { MarkdownViewRenderer } from './rendering/MarkdownViewRenderer';
 import type { StreamingTextRevealPreset } from './streaming/streamingTextRevealConfig';
-import type { MarkdownStreamingMode } from './streaming/useStreamingMarkdownBlocks';
+import type { MarkdownStreamingMode } from './streaming/usePreparedStreamingMarkdown';
 
 export type { Option };
 export type { OptionLongPressHandler };

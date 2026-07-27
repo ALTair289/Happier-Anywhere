@@ -262,4 +262,61 @@ describe('MarkdownView (enriched renderer)', () => {
             'unsafe',
         ].join('\n'));
     });
+
+    it.each([
+        { raw: 'javascript:alert(1)', rendered: 'target', callbackUrl: null },
+        { raw: 'data:text/html,hello', rendered: 'target', callbackUrl: null },
+        { raw: 'README.md', rendered: 'target', callbackUrl: null },
+        { raw: './README.md', rendered: '[target](./README.md)', callbackUrl: './README.md' },
+        { raw: 'mailto:test@example.com', rendered: '[target](mailto:test@example.com)', callbackUrl: 'mailto:test@example.com' },
+        { raw: 'https://example.com/path', rendered: '[target](https://example.com/path)', callbackUrl: 'https://example.com/path' },
+        { raw: 'http://example.com/path', rendered: '[target](http://example.com/path)', callbackUrl: 'http://example.com/path' },
+    ])('validates $raw before exposing a destination to the renderer or callback', async ({ raw, rendered, callbackUrl }) => {
+        const { MarkdownView } = await import('./MarkdownView');
+        const onLinkPress = vi.fn();
+        const screen = await renderScreen(
+            <MarkdownView markdown={`[target](${raw})`} onLinkPress={onLinkPress} profile="transcript" />,
+        );
+        const enrichedRun = screen.findByType('EnrichedMarkdownText');
+
+        expect(enrichedRun.props.markdown).toBe(rendered);
+        if (callbackUrl == null) {
+            expect(enrichedRun.props.markdown).not.toContain(raw);
+            expect(onLinkPress).not.toHaveBeenCalled();
+            return;
+        }
+
+        enrichedRun.props.onLinkPress({ url: callbackUrl });
+        expect(onLinkPress).toHaveBeenCalledWith(callbackUrl);
+    });
+
+    it('fails Markdown images closed before the enriched renderer can mount a tracking pixel', async () => {
+        const { MarkdownView } = await import('./MarkdownView');
+        const trackingPixel = 'https://tracker.example/pixel.gif?secret=transcript-known';
+        const screen = await renderScreen(
+            <MarkdownView
+                markdown={`before ![architecture diagram](${trackingPixel}) after`}
+                profile="transcript"
+            />,
+        );
+        const enrichedRun = screen.findByType('EnrichedMarkdownText');
+
+        expect(enrichedRun.props.markdown).toBe('before architecture diagram after');
+        expect(enrichedRun.props.markdown).not.toContain(trackingPixel);
+    });
+
+    it('fails reference-style Markdown images closed before rendering', async () => {
+        const { MarkdownView } = await import('./MarkdownView');
+        const trackingPixel = 'https://tracker.example/reference.gif';
+        const screen = await renderScreen(
+            <MarkdownView
+                markdown={`![diagram][tracking]\n\n![shortcut]\n\n[tracking]: ${trackingPixel}\n[shortcut]: ${trackingPixel}`}
+                profile="transcript"
+            />,
+        );
+        const enrichedRun = screen.findByType('EnrichedMarkdownText');
+
+        expect(enrichedRun.props.markdown).toBe(`diagram\n\nshortcut\n\n[tracking]: ${trackingPixel}\n[shortcut]: ${trackingPixel}`);
+        expect(enrichedRun.props.markdown).not.toContain('![');
+    });
 });

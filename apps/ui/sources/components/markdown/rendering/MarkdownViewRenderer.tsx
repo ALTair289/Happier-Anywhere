@@ -4,16 +4,18 @@ import { Platform, View } from 'react-native';
 
 import type { Option, OptionLongPressHandler } from '../MarkdownBlockView';
 import type { MarkdownSourceRange, MarkdownSourceRangeAction } from '../MarkdownView';
-import type { MarkdownStreamingMode } from '../streaming/useStreamingMarkdownBlocks';
-import { usePreparedStreamingMarkdown } from '../streaming/usePreparedStreamingMarkdown';
+import { usePreparedStreamingMarkdown, type MarkdownStreamingMode } from '../streaming/usePreparedStreamingMarkdown';
 import type { StreamingTextRevealPreset } from '../streaming/streamingTextRevealConfig';
 import type { MarkdownRenderingProfile } from './MarkdownRenderingProfile';
 import type { MarkdownRenderSegment } from './markdownRenderSegmentTypes';
 import { MarkdownSegmentView } from './MarkdownSegmentView';
+import {
+    readMarkdownRenderSegmentsCache,
+    writeMarkdownRenderSegmentsCache,
+} from './markdownRenderSegmentsCache';
 import { splitMarkdownRenderSegments } from './splitMarkdownRenderSegments';
 import { StaticMarkdownRenderPlaceholder } from './StaticMarkdownRenderPlaceholder';
 import { useDelayedStaticMarkdownRenderPlaceholder } from './useDelayedStaticMarkdownRenderPlaceholder';
-import { LruMap } from '@/utils/cache/lruMap';
 
 type MarkdownViewRendererProps = Readonly<{
     testID?: string;
@@ -34,13 +36,9 @@ type MarkdownViewRendererProps = Readonly<{
     highlightSourceRange?: MarkdownSourceRange | null;
 }>;
 
-const STREAMING_SEGMENT_CACHE_MAX_ENTRIES = 64;
-const streamingSegmentCache = new LruMap<string, readonly MarkdownRenderSegment[]>({
-    maxEntries: STREAMING_SEGMENT_CACHE_MAX_ENTRIES,
-});
-
 function readStreamingSegmentCache(params: Readonly<{
     parseCacheKey: string | null | undefined;
+    preparedMarkdown: string;
     streamingMode: MarkdownStreamingMode;
     splitEnrichedSourceRanges: boolean;
 }>): readonly MarkdownRenderSegment[] | null {
@@ -50,14 +48,15 @@ function readStreamingSegmentCache(params: Readonly<{
         ? params.parseCacheKey
         : null;
     if (!key) return null;
-    return streamingSegmentCache.get(key) ?? null;
+    return readMarkdownRenderSegmentsCache(`stream:${key}`, params.preparedMarkdown);
 }
 
 function writeStreamingSegmentCache(params: Readonly<{
     parseCacheKey: string | null | undefined;
+    preparedMarkdown: string;
     streamingMode: MarkdownStreamingMode;
     splitEnrichedSourceRanges: boolean;
-    segments: readonly MarkdownRenderSegment[];
+    segments: MarkdownRenderSegment[];
 }>): void {
     if (params.streamingMode !== 'streaming') return;
     if (params.splitEnrichedSourceRanges) return;
@@ -65,7 +64,7 @@ function writeStreamingSegmentCache(params: Readonly<{
         ? params.parseCacheKey
         : null;
     if (!key) return;
-    streamingSegmentCache.set(key, params.segments);
+    writeMarkdownRenderSegmentsCache(`stream:${key}`, params.preparedMarkdown, params.segments);
 }
 
 export const MarkdownViewRenderer = React.memo((props: MarkdownViewRendererProps) => {
@@ -81,6 +80,7 @@ export const MarkdownViewRenderer = React.memo((props: MarkdownViewRendererProps
     const segments = React.useMemo(() => {
         const cached = readStreamingSegmentCache({
             parseCacheKey: props.streamingParseCacheKey,
+            preparedMarkdown,
             streamingMode: props.streamingMode,
             splitEnrichedSourceRanges: sourceRangeInteractionsActive,
         });
@@ -94,6 +94,7 @@ export const MarkdownViewRenderer = React.memo((props: MarkdownViewRendererProps
         });
         writeStreamingSegmentCache({
             parseCacheKey: props.streamingParseCacheKey,
+            preparedMarkdown,
             streamingMode: props.streamingMode,
             splitEnrichedSourceRanges: sourceRangeInteractionsActive,
             segments: nextSegments,

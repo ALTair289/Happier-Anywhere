@@ -13,16 +13,16 @@ const markdownParseState = vi.hoisted(() => ({
 }));
 
 vi.mock('./rendering/splitMarkdownRenderSegments', () => ({
-    splitMarkdownRenderSegments: (params: unknown) => {
+    splitMarkdownRenderSegments: (params: { markdown: string }) => {
         markdownParseState.splitCalls.push(params);
         return [{
             type: 'enriched-markdown',
             key: 'segment:0',
             sourceStart: 0,
-            sourceLength: 5,
+            sourceLength: params.markdown.length,
             sourceHash: 'hash',
             sourceRange: { startLine: 1, endLine: 1 },
-            markdown: 'hello',
+            markdown: params.markdown,
             first: true,
             last: true,
         }];
@@ -62,5 +62,30 @@ describe('MarkdownView streaming parse cache', () => {
         );
 
         expect(markdownParseState.splitCalls).toHaveLength(1);
+    });
+
+    it('never reuses an earlier paced frame when prepared content changes under one revision key', async () => {
+        const { MarkdownView } = await import('./MarkdownView');
+        const common = {
+            profile: 'transcript',
+            streamingMode: 'streaming',
+            streamingParseCacheKey: 'message:m-paced:revision:7',
+        } as const;
+
+        const screen = await renderScreen(
+            <MarkdownView {...common} markdown="Hello" />,
+        );
+        expect(screen.findByType('EnrichedMarkdownTextAdapter').props.markdown).toBe('Hello');
+
+        await screen.update(
+            <MarkdownView {...common} markdown="Hello paced world" />,
+        );
+        expect(screen.findByType('EnrichedMarkdownTextAdapter').props.markdown).toBe('Hello paced world');
+
+        await screen.update(
+            <MarkdownView {...common} markdown="Hello rewrite" />,
+        );
+        expect(screen.findByType('EnrichedMarkdownTextAdapter').props.markdown).toBe('Hello rewrite');
+        expect(markdownParseState.splitCalls).toHaveLength(3);
     });
 });
