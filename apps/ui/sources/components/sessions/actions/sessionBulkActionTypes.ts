@@ -52,6 +52,7 @@ export type SessionBulkMutationResult = Readonly<{
     success: boolean;
     message?: string;
     code?: string;
+    recovery?: 'wait_for_inactive' | 'upgrade_runtime';
 }>;
 
 export type SessionBulkOperation<T = SessionBulkMutationResult> = (

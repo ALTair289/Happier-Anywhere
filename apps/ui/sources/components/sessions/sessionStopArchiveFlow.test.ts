@@ -96,6 +96,85 @@ describe('stopSessionAndMaybeArchive', () => {
         expect(archiveSpy).not.toHaveBeenCalled();
     });
 
+    it('treats accepted Stop as pending success and observes until Archive can commit', async () => {
+        const stopSpy = vi.fn(async () => ({
+            success: false,
+            message: 'Stop requested; waiting for the session to become inactive',
+            code: 'session_stop_requested',
+            recovery: 'wait_for_inactive' as const,
+        }));
+        const archiveSpy = vi.fn()
+            .mockResolvedValueOnce({
+                success: false,
+                message: 'Cannot archive an active session',
+                code: 'session_active',
+            })
+            .mockResolvedValueOnce({ success: true });
+        process.env.EXPO_PUBLIC_HAPPIER_SESSION_ARCHIVE_AFTER_STOP_RETRY_MS = '0';
+
+        const { stopSessionAndMaybeArchive } = await import('./sessionStopArchiveFlow');
+
+        await expect(stopSessionAndMaybeArchive({
+            sessionId: 'session_requested',
+            hideInactiveSessions: false,
+            isPinned: false,
+            archiveAfterStop: 'always',
+            stopSession: stopSpy,
+            archiveSession: archiveSpy,
+            stopErrorMessage: 'stop failed',
+            archiveErrorMessage: 'archive failed',
+        })).resolves.toBeUndefined();
+        expect(archiveSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('treats accepted asynchronous Stop-only as pending success', async () => {
+        const stopSpy = vi.fn(async () => ({
+            success: false,
+            message: 'Stop requested; waiting for the session to become inactive',
+            code: 'session_stop_requested',
+            recovery: 'wait_for_inactive' as const,
+        }));
+        const archiveSpy = vi.fn(async () => ({ success: true }));
+
+        const { stopSessionAndMaybeArchive } = await import('./sessionStopArchiveFlow');
+
+        await expect(stopSessionAndMaybeArchive({
+            sessionId: 'session_requested_stop_only',
+            hideInactiveSessions: false,
+            isPinned: false,
+            archiveAfterStop: 'never',
+            stopSession: stopSpy,
+            archiveSession: archiveSpy,
+            stopErrorMessage: 'stop failed',
+            archiveErrorMessage: 'archive failed',
+        })).resolves.toBeUndefined();
+        expect(archiveSpy).not.toHaveBeenCalled();
+    });
+
+    it('surfaces actionable upgrade recovery when the runtime cannot stop the session', async () => {
+        const stopSpy = vi.fn(async () => ({
+            success: false,
+            message: 'RPC method not available',
+            code: 'session_stop_unsupported',
+            recovery: 'upgrade_runtime' as const,
+        }));
+
+        const { stopSessionAndMaybeArchive } = await import('./sessionStopArchiveFlow');
+
+        await expect(stopSessionAndMaybeArchive({
+            sessionId: 'session_upgrade',
+            hideInactiveSessions: false,
+            isPinned: false,
+            archiveAfterStop: 'never',
+            stopSession: stopSpy,
+            archiveSession: vi.fn(async () => ({ success: true })),
+            stopErrorMessage: 'stop failed',
+            archiveErrorMessage: 'archive failed',
+        })).rejects.toMatchObject({
+            message: 'sessionInfo.stopSessionUpgradeRequired',
+        });
+    });
+
     it('does not preserve visibility for stop-only sessions hidden by settings', async () => {
         const stopSpy = vi.fn(async () => ({ success: true }));
         const archiveSpy = vi.fn(async () => ({ success: true }));

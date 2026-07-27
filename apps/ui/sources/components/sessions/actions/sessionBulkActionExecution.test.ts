@@ -189,6 +189,28 @@ describe('executeSessionBulkAction', () => {
         expect(result.succeeded.map((entry) => entry.target.sessionId)).toEqual(['active', 'inactive']);
     });
 
+    it('preserves actionable Stop upgrade recovery in bulk results', async () => {
+        const result = await executeSessionBulkAction({
+            action: { id: SESSION_BULK_ACTION_IDS.stop },
+            targets: [target({ key: 'server-a:upgrade', sessionId: 'upgrade', active: true })],
+            context: {
+                stopSession: vi.fn(async () => ({
+                    success: false,
+                    message: 'RPC method not available',
+                    code: 'session_stop_unsupported',
+                    recovery: 'upgrade_runtime' as const,
+                })),
+            },
+        });
+
+        expect(result.failed).toEqual([
+            expect.objectContaining({
+                reasonCode: 'session_stop_unsupported',
+                reason: 'Update Happier on the session machine, then try stopping again.',
+            }),
+        ]);
+    });
+
     it('skips lifecycle actions for targets without matching permissions', async () => {
         const stopSession = vi.fn(async () => ({ success: true }));
         const archiveSession = vi.fn(async () => ({ success: true }));

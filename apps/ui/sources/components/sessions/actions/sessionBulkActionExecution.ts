@@ -1,4 +1,5 @@
 import { runTasksWithLimit } from '@/sync/runtime/orchestration/runTasksWithLimit';
+import { resolveSessionStopFailureMessage } from '@/components/sessions/sessionStopArchiveFlow';
 
 import {
     createSessionBulkActionProgressTracker,
@@ -313,11 +314,12 @@ async function executeStopAction(params: Readonly<{
                     reason: PERMISSION_DENIED_REASON,
                 });
             }
-            return resultFromMutation(
-                target,
-                await stopSession(target),
-                DEFAULT_STOP_ERROR_MESSAGE,
-            );
+            const result = await stopSession(target);
+            if (result.success) return createTargetResult(target, 'succeeded');
+            return createTargetResult(target, 'failed', {
+                reasonCode: result.code,
+                reason: resolveSessionStopFailureMessage(result, DEFAULT_STOP_ERROR_MESSAGE),
+            });
         },
     });
 }
