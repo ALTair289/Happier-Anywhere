@@ -34,7 +34,7 @@ function makeWindowsCmdExecutable(params: { dir: string; name: string; content: 
 describe('cli.kilo capability (ACP)', () => {
   it('detects session/load support via a deterministic ACP shim binary', async () => {
     const require = createRequire(import.meta.url);
-    const acpModulePath = require.resolve('@agentclientprotocol/sdk/dist/acp.js');
+    const acpModulePath = require.resolve('@agentclientprotocol/sdk');
     const acpModuleUrl = pathToFileURL(acpModulePath).href;
 
     const workDir = makeTempDir('happier-kilo-acp-probe-');
@@ -49,16 +49,17 @@ describe('cli.kilo capability (ACP)', () => {
           `import * as acp from ${JSON.stringify(acpModuleUrl)};`,
           'import { Readable, Writable } from "node:stream";',
           '',
-          'class ProbeAgent {',
-          '  async initialize() {',
-          '    return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true } };',
-          '  }',
-          '}',
+          'const app = acp.agent({ name: "happier-kilo-capability-test-agent" })',
+          '  .onRequest("initialize", async () => ({',
+          '    protocolVersion: acp.PROTOCOL_VERSION,',
+          '    agentCapabilities: { loadSession: true }',
+          '  }));',
           '',
           'const input = Writable.toWeb(process.stdout);',
           'const output = Readable.toWeb(process.stdin);',
           'const stream = acp.ndJsonStream(input, output);',
-          'new acp.AgentSideConnection(() => new ProbeAgent(), stream);',
+          'const connection = app.connect(stream);',
+          'await connection.closed;',
           '',
         ].join('\n'),
         'utf8',
@@ -86,6 +87,7 @@ describe('cli.kilo capability (ACP)', () => {
             codex: makeUnavailableCliEntry(),
             opencode: makeUnavailableCliEntry(),
             gemini: makeUnavailableCliEntry(),
+            grok: makeUnavailableCliEntry(),
             auggie: makeUnavailableCliEntry(),
             qwen: makeUnavailableCliEntry(),
             kimi: makeUnavailableCliEntry(),
@@ -95,7 +97,6 @@ describe('cli.kilo capability (ACP)', () => {
             pi: makeUnavailableCliEntry(),
             copilot: makeUnavailableCliEntry(),
             cursor: makeUnavailableCliEntry(),
-            grok: makeUnavailableCliEntry(),
           },
           tmux: { available: false },
           windowsTerminal: { available: false },
