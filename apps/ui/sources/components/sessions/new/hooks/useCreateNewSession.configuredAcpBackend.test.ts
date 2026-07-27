@@ -204,6 +204,8 @@ async function setupHarness() {
             captured.value = opts;
             return { type: 'error', errorCode: 'unexpected', errorMessage: 'stop' };
         }),
+        completeMachineSpawnAttemptCustody: vi.fn(async () => true),
+        resetMachineSpawnAttemptCustody: vi.fn(async () => true),
     }));
 
     const { useCreateNewSession } = await import('./useCreateNewSession');
@@ -237,6 +239,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -302,6 +305,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -365,6 +369,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -425,6 +430,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -495,6 +501,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -597,6 +604,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',

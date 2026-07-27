@@ -23,6 +23,7 @@ export type NewSessionLaunchAttempt = Readonly<{
     attemptId: string;
     spawnNonce: string;
     scopeKey: string;
+    spawnTargetFingerprint: string | null;
     createdSessionId: string | null;
     firstTurnLocalId: string;
     attachmentMessageLocalId: string;
@@ -40,6 +41,8 @@ type CreateNewSessionLaunchAttemptParams = Readonly<{
     displayText: string;
     scopeKey: string;
     meta?: unknown;
+    attemptId?: string | null;
+    spawnNonce?: string | null;
     createId?: (prefix: string) => string;
 }>;
 
@@ -49,10 +52,17 @@ function defaultCreateId(prefix: string): string {
 
 export function createNewSessionLaunchAttempt(params: CreateNewSessionLaunchAttemptParams): NewSessionLaunchAttempt {
     const createId = params.createId ?? defaultCreateId;
+    const attemptId = typeof params.attemptId === 'string' && params.attemptId.trim().length > 0
+        ? params.attemptId.trim()
+        : createId('attempt');
+    const spawnNonce = typeof params.spawnNonce === 'string' && params.spawnNonce.trim().length > 0
+        ? params.spawnNonce.trim()
+        : createId('spawn');
     return {
-        attemptId: createId('attempt'),
-        spawnNonce: createId('spawn'),
+        attemptId,
+        spawnNonce,
         scopeKey: params.scopeKey,
+        spawnTargetFingerprint: null,
         firstTurnLocalId: createId('first-turn'),
         attachmentMessageLocalId: createId('attachment-message'),
         createdSessionId: null,
@@ -63,6 +73,29 @@ export function createNewSessionLaunchAttempt(params: CreateNewSessionLaunchAtte
             meta: params.meta ?? null,
         },
         phaseErrors: {},
+    };
+}
+
+export function adoptNewSessionLaunchAttemptCustody(
+    attempt: NewSessionLaunchAttempt,
+    params: Readonly<{
+        userAttemptId: string;
+        spawnNonce: string;
+        createdSessionId: string | null;
+        firstTurnLocalId: string;
+        attachmentMessageLocalId: string;
+        targetFingerprint: string;
+    }>,
+): NewSessionLaunchAttempt {
+    return {
+        ...attempt,
+        attemptId: params.userAttemptId,
+        spawnNonce: params.spawnNonce,
+        spawnTargetFingerprint: params.targetFingerprint,
+        createdSessionId: params.createdSessionId ?? attempt.createdSessionId,
+        firstTurnLocalId: params.firstTurnLocalId || attempt.firstTurnLocalId,
+        attachmentMessageLocalId: params.attachmentMessageLocalId || attempt.attachmentMessageLocalId,
+        ...(params.createdSessionId ? { status: 'created' as const } : {}),
     };
 }
 

@@ -323,6 +323,8 @@ async function setupUseCreateNewSessionHarness() {
     vi.doMock('@/sync/ops', () => ({
         machineSpawnNewSession: (...args: unknown[]) => machineSpawnNewSessionSpy(...args),
         machineBash: (...args: unknown[]) => machineBashSpy(...args),
+        completeMachineSpawnAttemptCustody: vi.fn(async () => true),
+        resetMachineSpawnAttemptCustody: vi.fn(async () => true),
     }));
     vi.doMock('@/components/sessions/new/modules/materializeNewSessionCheckout', () => ({
         materializeNewSessionCheckout: materializeNewSessionCheckoutSpy,
@@ -403,6 +405,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -462,6 +465,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -524,6 +528,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -591,6 +596,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -656,6 +662,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -727,6 +734,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -793,6 +801,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -854,6 +863,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -919,6 +929,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -984,6 +995,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -1066,6 +1078,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: routerReplace },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -1151,6 +1164,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: routerReplace },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -1230,6 +1244,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: routerReplace },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -1315,6 +1330,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: routerPush, replace: routerReplace },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -1455,6 +1471,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: routerPush, replace: routerReplace },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -1550,6 +1567,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test(props: Readonly<{ automationDraft: NewSessionAutomationDraft }>) {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router,
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -1651,6 +1669,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test(props: Readonly<{ automationDraft: NewSessionAutomationDraft }>) {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router,
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -1760,6 +1779,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: routerReplace },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -1828,6 +1848,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: routerReplace },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -1919,6 +1940,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -2008,6 +2030,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: routerReplace },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',
@@ -2077,6 +2100,7 @@ describe('useCreateNewSession permission seeding', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
                 selectedPath: '/tmp',

@@ -184,7 +184,11 @@ async function setupHarness(options?: Readonly<{
   });
   vi.doMock('@/agents/runtime/resumeCapabilities', () => ({ canAgentResume: vi.fn(() => false) }));
   vi.doMock('@/components/sessions/new/modules/formatResumeSupportDetailCode', () => ({ formatResumeSupportDetailCode: vi.fn(() => '') }));
-  vi.doMock('@/sync/ops', () => ({ machineSpawnNewSession: machineSpawnNewSessionSpy }));
+  vi.doMock('@/sync/ops', () => ({
+    machineSpawnNewSession: machineSpawnNewSessionSpy,
+    completeMachineSpawnAttemptCustody: vi.fn(async () => true),
+    resetMachineSpawnAttemptCustody: vi.fn(async () => true),
+  }));
   vi.doMock('@/sync/runtime/orchestration/serverScopedRpc/followUpSpawnedSession', () => ({
     followUpSpawnedSessionWithServerScope: followUpSpawnedSessionWithServerScopeSpy,
   }));
@@ -227,6 +231,7 @@ describe('useCreateNewSession (ACP mode seeding)', () => {
 
     function Test() {
       const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
         selectedPath: '/tmp',
@@ -290,6 +295,7 @@ describe('useCreateNewSession (ACP mode seeding)', () => {
 
     function Test() {
       const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
         selectedPath: '/tmp',
@@ -350,6 +356,7 @@ describe('useCreateNewSession (ACP mode seeding)', () => {
 
     function Test() {
       const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
         selectedPath: '/tmp',
@@ -410,6 +417,7 @@ describe('useCreateNewSession (ACP mode seeding)', () => {
 
     function Test() {
       const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
         selectedPath: '/tmp',
@@ -488,6 +496,7 @@ describe('useCreateNewSession (ACP mode seeding)', () => {
 
     function Test() {
       const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
         selectedPath: '/tmp',
@@ -577,6 +586,7 @@ describe('useCreateNewSession (ACP mode seeding)', () => {
 
     function Test() {
       const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
         selectedPath: '/tmp',
@@ -675,6 +685,7 @@ describe('useCreateNewSession (ACP mode seeding)', () => {
 
     function Test() {
       const hook = useCreateNewSession({
+        launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
         selectedPath: '/tmp',

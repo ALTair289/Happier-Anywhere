@@ -184,6 +184,8 @@ vi.mock('@/sync/ops/workspaces', () => ({
 vi.mock('@/sync/ops', () => ({
     machineSpawnNewSession: machineSpawnNewSessionMock,
     machineBash: machineBashMock,
+    completeMachineSpawnAttemptCustody: vi.fn(async () => true),
+    resetMachineSpawnAttemptCustody: vi.fn(async () => true),
 }));
 
 vi.mock('@/components/sessions/new/modules/materializeNewSessionCheckout', () => ({
@@ -217,7 +219,19 @@ vi.mock('@/sync/sync', () => ({
         refreshSessions: vi.fn(async () => {}),
         ensureSessionVisibleForMessageRoute: ensureSessionVisibleForMessageRouteMock,
         refreshMachines: vi.fn(async () => {}),
-        sendMessage: vi.fn(async () => {}),
+        enqueuePendingMessage: vi.fn(async (
+            _sessionId: string,
+            _message: string,
+            _displayText?: string,
+            _metaOverrides?: Record<string, unknown>,
+            options?: Readonly<{
+                localId?: string | null;
+                requestedAction: import('@happier-dev/protocol').PendingRequestedActionV1;
+            }>,
+        ) => ({
+            localId: options?.localId ?? 'pending-local-id',
+            accepted: true,
+        })),
         createAutomation: vi.fn(async () => ({})),
         publishSessionAcpSessionModeOverrideToMetadata: vi.fn(async () => {}),
     },
@@ -360,6 +374,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -419,6 +434,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const routerReplace = vi.fn();
         const disableDraftPersistence = vi.fn();
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -487,6 +503,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -569,6 +586,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -635,6 +653,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo/packages/app',
@@ -696,6 +715,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const disableDraftPersistence = vi.fn();
         const setIsCreating = vi.fn();
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -766,6 +786,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const routerReplace = vi.fn();
         const setIsCreating = vi.fn();
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -823,6 +844,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         } as any));
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -893,6 +915,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         } as any));
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -961,6 +984,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const typecheck = useCreateNewSession;
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -1030,6 +1054,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         } as any));
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -1106,6 +1131,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -1164,6 +1190,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         saveWorkspaceLocationMock.mockRejectedValueOnce(new Error('attach failed'));
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -1232,6 +1259,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         machineSpawnNewSessionMock.mockRejectedValueOnce(new Error('spawn exploded'));
 
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -1310,6 +1338,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const disableDraftPersistence = vi.fn();
         const setIsCreating = vi.fn();
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -1398,6 +1427,7 @@ describe('useCreateNewSession (worktree gating)', () => {
             agentState: null,
         } as Session;
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -1483,6 +1513,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const disableDraftPersistence = vi.fn();
         const setIsCreating = vi.fn();
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',
@@ -1582,6 +1613,7 @@ describe('useCreateNewSession (worktree gating)', () => {
             })
             .mockResolvedValueOnce(undefined);
         const params = {
+            launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
             selectedPath: '/repo',

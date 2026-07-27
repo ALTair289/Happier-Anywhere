@@ -123,6 +123,7 @@ function createTestLaunchAttempt(
         attemptId: 'attempt-test',
         spawnNonce: 'spawn-test',
         scopeKey: 'machine:m1|server:server-a|path:/tmp|profiles:off|profile:',
+        spawnTargetFingerprint: 'new-session.launch:test',
         createdSessionId: 'session-1',
         firstTurnLocalId: 'first-turn-test',
         attachmentMessageLocalId,
