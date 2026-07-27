@@ -32,7 +32,7 @@ describe('daemon control server: /stop', () => {
       machineId: 'machine_local',
       stopSession: async (sessionId: string) => {
         calls.push(`stop:${sessionId}`);
-        return true;
+        return { status: 'stopped' as const };
       },
       spawnSession: async () => ({ type: 'success', sessionId: 'happy-test-123' } as const),
       beforeShutdown: async () => {
@@ -83,7 +83,7 @@ describe('daemon control server: /stop', () => {
       machineId: 'machine_local',
       stopSession: async (sessionId) => {
         calls.push(`stop:${sessionId}`);
-        return true;
+        return { status: 'stopped' as const };
       },
       spawnSession: async () => ({ type: 'success', sessionId: 'happy-test-123' }),
       requestShutdown: () => {
@@ -125,7 +125,7 @@ describe('daemon control server: /stop', () => {
       machineId: 'machine_local',
       stopSession: async (sessionId) => {
         calls.push(`stop:${sessionId}`);
-        return true;
+        return { status: 'stopped' as const };
       },
       prepareStopSession: async (child) => {
         calls.push(`prepare:${child.happySessionId ?? `PID-${child.pid}`}`);
@@ -166,7 +166,7 @@ describe('daemon control server: /stop', () => {
       machineId: 'machine_local',
       stopSession: async (sessionId) => {
         calls.push(`stop:${sessionId}`);
-        return true;
+        return { status: 'stopped' as const };
       },
       spawnSession: async () => ({ type: 'success', sessionId: 'happy-test-123' }),
       requestShutdown: () => {

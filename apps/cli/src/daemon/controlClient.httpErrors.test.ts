@@ -18,7 +18,6 @@ const LEGACY_SPAWN_ALLOWLIST_FIELDS = [
   'directory',
   'sessionId',
   'existingSessionId',
-  'initialPrompt',
   'backendTarget',
   'experimentalCodexAcp',
   'environmentVariables',
@@ -140,61 +139,6 @@ describe('daemon control client (HTTP error responses)', () => {
     }
   });
 
-  it('posts manual auth group generation apply requests to the daemon control route', async () => {
-    let observedUrl: string | undefined;
-    let observedBody: Record<string, unknown> | null = null;
-
-    const server = http.createServer((req, res) => {
-      observedUrl = req.url;
-      let rawBody = '';
-      req.setEncoding('utf8');
-      req.on('data', (chunk) => {
-        rawBody += chunk;
-      });
-      req.on('end', () => {
-        observedBody = JSON.parse(rawBody) as Record<string, unknown>;
-        res.statusCode = 200;
-        res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ ok: true, result: { ok: true, appliedSessionCount: 1 } }));
-      });
-    });
-
-    try {
-      const { port } = await listen(server);
-
-      tmpHomeDir = await createTempDir('happier-daemon-client-test-');
-      envScope.patch({ HAPPIER_HOME_DIR: tmpHomeDir });
-      reloadConfiguration();
-      writeDaemonState({
-        pid: process.pid,
-        httpPort: port,
-        startedAt: Date.now(),
-        startedWithCliVersion: 'test',
-        controlToken: 'test-token',
-      });
-
-      const { requestDaemonConnectedServiceAuthGroupGenerationApply } = await import('./controlClient');
-      await expect(requestDaemonConnectedServiceAuthGroupGenerationApply({
-        serviceId: 'claude-subscription',
-        groupId: 'claude',
-        activeProfileId: 'leeroy_bat',
-        generation: 222,
-        switchReason: 'manual',
-      })).resolves.toEqual({ ok: true, appliedSessionCount: 1 });
-
-      expect(observedUrl).toBe('/connected-service-auth/group-generation/apply');
-      expect(observedBody).toEqual({
-        serviceId: 'claude-subscription',
-        groupId: 'claude',
-        activeProfileId: 'leeroy_bat',
-        generation: 222,
-        switchReason: 'manual',
-      });
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-  });
-
   it('posts connected-service turn lifecycle events to the daemon control route', async () => {
     let observedUrl: string | undefined;
     let observedBody: Record<string, unknown> | null = null;
@@ -231,6 +175,7 @@ describe('daemon control client (HTTP error responses)', () => {
       await expect(notifyDaemonConnectedServiceTurnLifecycle({
         sessionId: 'sess_1',
         event: 'prompt_or_steer',
+        turnId: 'session-turn:exact-1',
       })).resolves.toEqual({
         ok: true,
         result: { ok: true },
@@ -240,6 +185,7 @@ describe('daemon control client (HTTP error responses)', () => {
       expect(observedBody).toEqual({
         sessionId: 'sess_1',
         event: 'prompt_or_steer',
+        turnId: 'session-turn:exact-1',
       });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -445,7 +391,10 @@ describe('daemon control client (HTTP error responses)', () => {
         directory: '/tmp',
         spawnNonce: 'spawn-nonce-legacy-compat',
         backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
-        initialPrompt: 'keep initial prompt behavior',
+        pendingFirstInput: {
+          text: 'commit through Pending after session creation',
+          localId: 'spawn-first:legacy-compat',
+        },
         transcriptStorage: 'direct',
         mcpSelection: {
           v: 1,
@@ -467,13 +416,15 @@ describe('daemon control client (HTTP error responses)', () => {
         directory: '/tmp',
         spawnNonce: 'spawn-nonce-legacy-compat',
         backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
-        initialPrompt: 'keep initial prompt behavior',
+        pendingFirstInput: {
+          text: 'commit through Pending after session creation',
+          localId: 'spawn-first:legacy-compat',
+        },
         transcriptStorage: 'direct',
       }));
       expect(parsedLegacyBody).toEqual({
         directory: '/tmp',
         backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
-        initialPrompt: 'keep initial prompt behavior',
       });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -588,8 +539,8 @@ describe('daemon control client (HTTP error responses)', () => {
         },
         chatgptPlanType: 'plus',
       });
-      expect(observedAuthToken).toBe(deriveConnectedServiceBrokerRefreshToken('test-token'));
-      expect(observedAuthToken).not.toBe('test-token');
+      expect(observedAuthToken).toBe('test-token');
+      expect(observedAuthToken).not.toBe(deriveConnectedServiceBrokerRefreshToken('test-token'));
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -669,8 +620,8 @@ describe('daemon control client (HTTP error responses)', () => {
         },
         forceRefresh: true,
       });
-      expect(observedAuthToken).toBe(deriveConnectedServiceBrokerRefreshToken('test-token'));
-      expect(observedAuthToken).not.toBe('test-token');
+      expect(observedAuthToken).toBe('test-token');
+      expect(observedAuthToken).not.toBe(deriveConnectedServiceBrokerRefreshToken('test-token'));
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

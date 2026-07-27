@@ -120,7 +120,7 @@ describe('daemon control server: /continue-with-replay (integration)', () => {
         const app = createDaemonControlApp({
             getChildren: () => [],
             machineId: 'machine_local',
-            stopSession: async () => false,
+            stopSession: async () => ({ status: 'not_found' as const }),
             spawnSession: async (options) => {
                 observedSpawn = options;
                 return { type: 'success', sessionId: createdSessionId };
@@ -268,7 +268,7 @@ describe('daemon control server: /continue-with-replay (integration)', () => {
         const app = createDaemonControlApp({
             getChildren: () => [],
             machineId: 'machine_local',
-            stopSession: async () => false,
+            stopSession: async () => ({ status: 'not_found' as const }),
             spawnSession,
             requestShutdown: () => {},
             onHappySessionWebhook: () => {},

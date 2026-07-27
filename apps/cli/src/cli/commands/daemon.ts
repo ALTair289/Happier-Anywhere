@@ -217,8 +217,8 @@ export async function handleDaemonCliCommand(context: CommandContext): Promise<v
     }
 
     try {
-      const success = await stopDaemonSession(sessionId);
-      console.log(success ? 'Session stopped' : 'Failed to stop session');
+      const result = await stopDaemonSession(sessionId);
+      console.log(result.status === 'stopped' ? 'Session stopped' : 'Failed to stop session');
     } catch {
       console.log('No daemon running');
     }

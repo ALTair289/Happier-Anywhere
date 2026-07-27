@@ -8,7 +8,7 @@ function createBaseControlApp(overrides: Partial<Parameters<typeof createDaemonC
   return createDaemonControlApp({
     getChildren: () => [],
     machineId: 'machine_local',
-    stopSession: async () => false,
+    stopSession: async () => ({ status: 'not_found' as const }),
     spawnSession: async () => ({ type: 'success', sessionId: 'happy-test-123' }),
     requestShutdown: () => {},
     onHappySessionWebhook: () => {},
@@ -20,6 +20,30 @@ function createBaseControlApp(overrides: Partial<Parameters<typeof createDaemonC
 describe('daemon control server: session runner planned restart', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('preserves a typed incomplete physical stop outcome at the local control boundary', async () => {
+    const stopSession = vi.fn(async () => ({
+      status: 'incomplete' as const,
+      reason: 'runner_exit_timeout' as const,
+    }));
+    const app = createBaseControlApp({ stopSession });
+
+    try {
+      await app.ready();
+      const response = await app.inject({
+        method: 'POST',
+        url: '/stop-session',
+        headers: { 'Content-Type': 'application/json', 'x-happier-daemon-token': 'test-token' },
+        payload: JSON.stringify({ sessionId: 'sess_1' }),
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ status: 'incomplete', reason: 'runner_exit_timeout' });
+      expect(stopSession).toHaveBeenCalledWith('sess_1');
+    } finally {
+      await app.close();
+    }
   });
 
   it('requires the daemon control token for bulk planned restarts', async () => {
@@ -224,7 +248,7 @@ describe('daemon control server: session runner planned restart', () => {
     const server = await startDaemonControlServer({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async () => ({ type: 'success', sessionId: 'happy-test-123' }),
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},

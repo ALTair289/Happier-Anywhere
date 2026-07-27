@@ -146,7 +146,7 @@ describe('happier session stop (integration)', () => {
     stopDaemonSessionMock.mockImplementation(async (requestedSessionId: string) => {
       expect(requestedSessionId).toBe(sessionId);
       sessionActive = false;
-      return true;
+      return { status: 'stopped' } as const;
     });
 
     const socket = createApiSessionSocketStub({
@@ -191,7 +191,7 @@ describe('happier session stop (integration)', () => {
       const cb = args[2];
       if (typeof cb === 'function') cb();
     });
-    stopDaemonSessionMock.mockResolvedValue(false);
+    stopDaemonSessionMock.mockResolvedValue({ status: 'not_found' });
 
     const socket = createApiSessionSocketStub({
       emit: (event: string, args: unknown[]) => emitSpy(event, ...args),
@@ -220,7 +220,7 @@ describe('happier session stop (integration)', () => {
 
       expect(stopDaemonSessionMock).toHaveBeenCalledWith(sessionId);
       expect(emitSpy).not.toHaveBeenCalled();
-      expect(sessionStatusFetchCount).toBeGreaterThanOrEqual(2);
+      expect(sessionStatusFetchCount).toBeGreaterThanOrEqual(1);
 
       const parsed = output.json();
       expect(parsed.ok).toBe(true);
@@ -234,14 +234,14 @@ describe('happier session stop (integration)', () => {
     }
   });
 
-  it('falls back to marker-backed process stop when the daemon stop path is unavailable', async () => {
+  it('does not signal a marker-backed runner without committed terminal topology proof', async () => {
     const sessionId = 'sess_integration_stop_marker_fallback';
     const markerPid = 12345;
     const emitSpy = vi.fn((...args: any[]) => {
       const cb = args[2];
       if (typeof cb === 'function') cb();
     });
-    stopDaemonSessionMock.mockResolvedValue(false);
+    stopDaemonSessionMock.mockResolvedValue({ status: 'not_found' });
     listSessionMarkersMock.mockResolvedValue([
       {
         pid: markerPid,
@@ -287,21 +287,18 @@ describe('happier session stop (integration)', () => {
       });
 
       expect(stopDaemonSessionMock).toHaveBeenCalledWith(sessionId);
-      expect(listSessionMarkersMock).toHaveBeenCalledTimes(2);
-      expect(isPidSafeHappySessionProcessMock).toHaveBeenCalledWith({
-        pid: markerPid,
-        expectedProcessCommandHash: 'a'.repeat(64),
-      });
-      expect(processKillSpy).toHaveBeenCalledWith(markerPid, 'SIGTERM');
-      expect(removeSessionMarkerMock).toHaveBeenCalledWith(markerPid);
+      expect(listSessionMarkersMock).toHaveBeenCalledTimes(1);
+      expect(isPidSafeHappySessionProcessMock).not.toHaveBeenCalled();
+      expect(processKillSpy).not.toHaveBeenCalled();
+      expect(removeSessionMarkerMock).not.toHaveBeenCalled();
       expect(emitSpy).not.toHaveBeenCalled();
-      expect(sessionStatusFetchCount).toBeGreaterThanOrEqual(2);
+      expect(sessionStatusFetchCount).toBeGreaterThanOrEqual(1);
 
       const parsed = output.json();
       expect(parsed.ok).toBe(true);
       expect(parsed.kind).toBe('session_stop');
       expect(parsed.data?.sessionId).toBe(sessionId);
-      expect(parsed.data?.stopped).toBe(true);
+      expect(parsed.data?.stopped).toBe(false);
     } finally {
       delete process.env.HAPPIER_SESSION_STOP_TIMEOUT_MS;
       delete process.env.HAPPIER_SESSION_STOP_POLL_INTERVAL_MS;
@@ -315,7 +312,7 @@ describe('happier session stop (integration)', () => {
     stopDaemonSessionMock.mockImplementation(async (requestedSessionId: string) => {
       expect(requestedSessionId).toBe(sessionId);
       sessionStatusShouldFail = true;
-      return true;
+      return { status: 'stopped' } as const;
     });
 
     const socket = createApiSessionSocketStub();

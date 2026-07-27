@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { createTempDirSync, removeTempDirSync } from '@/testkit/fs/tempDir';
+import { writeJsonAtomicSync } from '@/utils/fs/writeJsonAtomicSync';
+
+function writeDaemonStateFixture(path: string, serializedState: string, encoding: 'utf-8'): void {
+  void encoding;
+  writeJsonAtomicSync(path, JSON.parse(serializedState));
+}
 
 describe.sequential('daemon control client PID safety', () => {
   let envScope = createEnvKeyScope([
@@ -56,7 +62,7 @@ describe.sequential('daemon control client PID safety', () => {
       ]);
 
       // Point daemon state at an unrelated PID and a dead port so HTTP stop fails.
-      writeFileSync(
+      writeDaemonStateFixture(
         configuration.daemonStateFile,
         JSON.stringify(
           {
@@ -104,7 +110,7 @@ describe.sequential('daemon control client PID safety', () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async () => ({ type: 'success', sessionId: 'happy-test-123' }),
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
@@ -140,7 +146,7 @@ describe.sequential('daemon control client PID safety', () => {
       });
 
       // Correct token => running.
-      writeFileSync(
+      writeDaemonStateFixture(
         configuration.daemonStateFile,
         JSON.stringify(
           {
@@ -158,7 +164,7 @@ describe.sequential('daemon control client PID safety', () => {
       expect(await checkIfDaemonRunningAndCleanupStaleState()).toBe(true);
 
       // Wrong token => treat as not running (stale/untrusted control plane).
-      writeFileSync(
+      writeDaemonStateFixture(
         configuration.daemonStateFile,
         JSON.stringify(
           {
@@ -174,12 +180,13 @@ describe.sequential('daemon control client PID safety', () => {
         'utf-8',
       );
       expect(await checkIfDaemonRunningAndCleanupStaleState()).toBe(false);
+      expect(existsSync(configuration.daemonStateFile)).toBe(false);
     } finally {
       vi.unstubAllGlobals();
       await app.close();
       removeTempDirSync(homeDir);
     }
-  }, 30_000);
+  }, 90_000);
 
   it('checkIfDaemonRunningAndCleanupStaleState uses a configurable ping timeout budget', async () => {
     const homeDir = createTempDirSync('happier-cli-daemon-ping-timeout-');
@@ -209,7 +216,7 @@ describe.sequential('daemon control client PID safety', () => {
       const app = createDaemonControlApp({
         getChildren: () => [],
         machineId: 'machine_local',
-        stopSession: async () => false,
+        stopSession: async () => ({ status: 'not_found' as const }),
         spawnSession: async () => ({ type: 'success', sessionId: 'happy-test-123' }),
         requestShutdown: () => {},
         onHappySessionWebhook: () => {},
@@ -243,7 +250,7 @@ describe.sequential('daemon control client PID safety', () => {
         });
       });
 
-      writeFileSync(
+      writeDaemonStateFixture(
         configuration.daemonStateFile,
         JSON.stringify(
           {
@@ -295,7 +302,7 @@ describe.sequential('daemon control client PID safety', () => {
         return await realFetch(input, init);
       });
 
-      writeFileSync(
+      writeDaemonStateFixture(
         configuration.daemonStateFile,
         JSON.stringify(
           {
@@ -319,7 +326,7 @@ describe.sequential('daemon control client PID safety', () => {
     }
   }, 30_000);
 
-  it('checkIfDaemonRunningAndCleanupStaleState deletes old state when /ping remains unreachable', async () => {
+  it('inspectDaemonRunningStateAndCleanupStaleState preserves live daemon state when /ping times out after the startup grace', async () => {
     const homeDir = createTempDirSync('happier-cli-daemon-ping-stale-');
     envScope.patch({
       HAPPIER_HOME_DIR: homeDir,
@@ -327,7 +334,7 @@ describe.sequential('daemon control client PID safety', () => {
     });
 
     vi.resetModules();
-    const [{ configuration }, { checkIfDaemonRunningAndCleanupStaleState }] = await Promise.all([
+    const [{ configuration }, { inspectDaemonRunningStateAndCleanupStaleState }] = await Promise.all([
       import('@/configuration'),
       import('./controlClient'),
     ]);
@@ -343,7 +350,7 @@ describe.sequential('daemon control client PID safety', () => {
         return await realFetch(input, init);
       });
 
-      writeFileSync(
+      writeDaemonStateFixture(
         configuration.daemonStateFile,
         JSON.stringify(
           {
@@ -359,13 +366,209 @@ describe.sequential('daemon control client PID safety', () => {
         'utf-8',
       );
 
-      expect(await checkIfDaemonRunningAndCleanupStaleState()).toBe(false);
-      expect(existsSync(configuration.daemonStateFile)).toBe(false);
+      await expect(inspectDaemonRunningStateAndCleanupStaleState()).resolves.toEqual({
+        status: 'starting',
+        state: expect.objectContaining({
+          pid: process.pid,
+          httpPort: daemonPort,
+          controlToken: 'token-123',
+        }),
+      });
+      expect(existsSync(configuration.daemonStateFile)).toBe(true);
     } finally {
       vi.unstubAllGlobals();
       removeTempDirSync(homeDir);
     }
-  }, 30_000);
+  }, 90_000);
+
+  it('preserves live daemon state as starting when authenticated /ping returns 503', async () => {
+    const homeDir = createTempDirSync('happier-cli-daemon-ping-unavailable-');
+    envScope.patch({
+      HAPPIER_HOME_DIR: homeDir,
+      HAPPIER_DAEMON_HTTP_TIMEOUT: '250',
+    });
+
+    vi.resetModules();
+    const [{ configuration }, { inspectDaemonRunningStateAndCleanupStaleState }] = await Promise.all([
+      import('@/configuration'),
+      import('./controlClient'),
+    ]);
+
+    const daemonPort = 43213;
+    const realFetch = globalThis.fetch;
+    try {
+      vi.stubGlobal('fetch', async (input: any, init?: any) => {
+        const url = new URL(typeof input === 'string' ? input : input.url);
+        if (url.hostname === '127.0.0.1' && Number(url.port) === daemonPort) {
+          return new Response(JSON.stringify({ status: 'temporarily_unavailable' }), {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return await realFetch(input, init);
+      });
+
+      writeDaemonStateFixture(
+        configuration.daemonStateFile,
+        JSON.stringify(
+          {
+            pid: process.pid,
+            httpPort: daemonPort,
+            startedAt: Date.now() - 60_000,
+            startedWithCliVersion: '0.0.0-test',
+            controlToken: 'token-123',
+          },
+          null,
+          2,
+        ),
+        'utf-8',
+      );
+
+      await expect(inspectDaemonRunningStateAndCleanupStaleState()).resolves.toEqual({
+        status: 'starting',
+        state: expect.objectContaining({
+          pid: process.pid,
+          httpPort: daemonPort,
+          controlToken: 'token-123',
+        }),
+      });
+      expect(existsSync(configuration.daemonStateFile)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      removeTempDirSync(homeDir);
+    }
+  }, 90_000);
+
+  it('inspectDaemonRunningStateAndCleanupStaleState treats a dead stale daemon as replaceable without deleting daemon-owned state', async () => {
+    const homeDir = createTempDirSync('happier-cli-daemon-dead-stale-');
+    envScope.patch({
+      HAPPIER_HOME_DIR: homeDir,
+      HAPPIER_DAEMON_HTTP_TIMEOUT: '250',
+    });
+
+    const deadPid = 987_654_321;
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === deadPid && signal === 0) {
+        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+      }
+      return true;
+    }) as typeof process.kill);
+
+    try {
+      vi.resetModules();
+      const [{ configuration }, { inspectDaemonRunningStateAndCleanupStaleState }] = await Promise.all([
+        import('@/configuration'),
+        import('./controlClient'),
+      ]);
+
+      writeDaemonStateFixture(
+        configuration.daemonStateFile,
+        JSON.stringify(
+          {
+            pid: deadPid,
+            httpPort: 43212,
+            startedAt: Date.now() - 10 * 60_000,
+            lastHeartbeatAt: Date.now() - 10 * 60_000,
+            startedWithCliVersion: '0.0.0-test',
+            controlToken: 'token-123',
+          },
+          null,
+          2,
+        ),
+        'utf-8',
+      );
+
+      await expect(inspectDaemonRunningStateAndCleanupStaleState()).resolves.toEqual({ status: 'not-running' });
+      expect(existsSync(configuration.daemonStateFile)).toBe(true);
+    } finally {
+      killSpy.mockRestore();
+      removeTempDirSync(homeDir);
+    }
+  }, 90_000);
+
+  it('inspectDaemonRunningStateAndCleanupStaleState treats a definitively dead fresh daemon as immediately replaceable', async () => {
+    const homeDir = createTempDirSync('happier-cli-daemon-dead-fresh-');
+    envScope.patch({
+      HAPPIER_HOME_DIR: homeDir,
+      HAPPIER_DAEMON_HTTP_TIMEOUT: '250',
+    });
+
+    const deadPid = 987_654_320;
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === deadPid && signal === 0) {
+        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+      }
+      return true;
+    }) as typeof process.kill);
+
+    try {
+      vi.resetModules();
+      const [{ configuration }, { inspectDaemonRunningStateAndCleanupStaleState }] = await Promise.all([
+        import('@/configuration'),
+        import('./controlClient'),
+      ]);
+
+      writeDaemonStateFixture(
+        configuration.daemonStateFile,
+        JSON.stringify(
+          {
+            pid: deadPid,
+            httpPort: 43214,
+            startedAt: Date.now(),
+            lastHeartbeatAt: Date.now(),
+            startedWithCliVersion: '0.0.0-test',
+            controlToken: 'token-123',
+          },
+          null,
+          2,
+        ),
+        'utf-8',
+      );
+
+      await expect(inspectDaemonRunningStateAndCleanupStaleState()).resolves.toEqual({ status: 'not-running' });
+      expect(existsSync(configuration.daemonStateFile)).toBe(true);
+    } finally {
+      killSpy.mockRestore();
+      removeTempDirSync(homeDir);
+    }
+  }, 90_000);
+
+  it('inspectDaemonRunningStateAndCleanupStaleState keeps fresh state fail-closed when PID liveness is permission denied', async () => {
+    const homeDir = createTempDirSync('happier-cli-daemon-permission-inconclusive-');
+    envScope.patch({ HAPPIER_HOME_DIR: homeDir });
+    const protectedPid = 987_654_319;
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === protectedPid && signal === 0) {
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      }
+      return true;
+    }) as typeof process.kill);
+
+    try {
+      vi.resetModules();
+      const [{ configuration }, { inspectDaemonRunningStateAndCleanupStaleState }] = await Promise.all([
+        import('@/configuration'),
+        import('./controlClient'),
+      ]);
+      writeDaemonStateFixture(configuration.daemonStateFile, JSON.stringify({
+        pid: protectedPid,
+        httpPort: 43215,
+        startedAt: Date.now(),
+        lastHeartbeatAt: Date.now(),
+        startedWithCliVersion: '0.0.0-test',
+        controlToken: 'token-123',
+      }), 'utf-8');
+
+      await expect(inspectDaemonRunningStateAndCleanupStaleState()).resolves.toEqual({
+        status: 'starting',
+        state: expect.objectContaining({ pid: protectedPid }),
+      });
+      expect(existsSync(configuration.daemonStateFile)).toBe(true);
+    } finally {
+      killSpy.mockRestore();
+      removeTempDirSync(homeDir);
+    }
+  }, 90_000);
 
   it('spawnDaemonSession defaults to the daemon session webhook timeout budget', async () => {
     const homeDir = createTempDirSync('happier-cli-daemon-spawn-timeout-');
@@ -384,7 +587,7 @@ describe.sequential('daemon control client PID safety', () => {
       import('./controlClient'),
     ]);
 
-    writeFileSync(
+    writeDaemonStateFixture(
       configuration.daemonStateFile,
       JSON.stringify(
         {

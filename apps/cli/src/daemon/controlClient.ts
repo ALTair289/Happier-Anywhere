@@ -9,6 +9,7 @@ import { Metadata } from '@/api/types';
 import { projectPath } from '@/projectPath';
 import { existsSync, readFileSync, statSync } from 'fs';
 import { configuration } from '@/configuration';
+import { probeDaemonAuthenticatedControl } from './controlLiveness';
 import type { SpawnDaemonSessionRequest } from '@/rpc/handlers/spawnSessionOptionsContract';
 import { DEFAULT_SESSION_WEBHOOK_TIMEOUT_MS } from '@/daemon/spawn/waitForSessionWebhook';
 import {
@@ -32,6 +33,7 @@ import {
   EXECUTION_RUN_CONNECTED_SERVICE_RELEASE_PATH,
   ExecutionRunConnectedServiceMaterializeResponseSchema,
   ExecutionRunConnectedServiceReleaseResponseSchema,
+  type ExecutionRunConnectedServiceMaterializeResponseWire,
 } from '@/daemon/connectedServices/runsBridge/contract';
 import { resolveComparableCliVersion } from './resolveComparableCliVersion';
 import {
@@ -51,6 +53,11 @@ import {
   type SessionRunnerRuntimeStateV1,
   type SessionRunnerStatusGetRequestV1,
 } from '@happier-dev/protocol';
+import {
+  StopSessionResultSchema,
+  type StopSessionResult,
+} from './sessions/stopSessionContract';
+import { readProcessRunState } from './processRunState';
 
 export type DaemonControlRequestOptions = {
   timeoutMs?: number;
@@ -69,6 +76,7 @@ const DEFAULT_DAEMON_STOP_WAIT_FOR_DEATH_TIMEOUT_MS = 12_000;
 const DEFAULT_DAEMON_SHUTDOWN_SPAWN_DRAIN_GRACE_MS = 10_000;
 const DAEMON_STATE_FRESHNESS_GRACE_MS = 60_000;
 const DAEMON_LOCK_UNCLASSIFIED_STARTUP_GRACE_MS = 60_000;
+const admittedDaemonStartupLocks = new Map<number, number>();
 const DAEMON_HTTP_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_HTTP_TIMEOUT';
 const DAEMON_SPAWN_HTTP_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_SPAWN_HTTP_TIMEOUT';
 const DAEMON_PING_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_PING_TIMEOUT_MS';
@@ -109,16 +117,21 @@ function resolveDaemonStateAgeMs(state: unknown): number | null {
   return null;
 }
 
-function resolveDaemonLockAgeMs(): number | null {
+function resolveDaemonLockMtimeMs(): number | null {
   try {
     const stat = statSync(configuration.daemonLockFile);
     if (Number.isFinite(stat.mtimeMs)) {
-      return Math.max(0, Date.now() - stat.mtimeMs);
+      return stat.mtimeMs;
     }
   } catch {
     // ignore
   }
   return null;
+}
+
+function resolveDaemonLockAgeMs(): number | null {
+  const mtimeMs = resolveDaemonLockMtimeMs();
+  return mtimeMs === null ? null : Math.max(0, Date.now() - mtimeMs);
 }
 
 function resolvePositiveIntValue(
@@ -202,6 +215,7 @@ async function inspectDaemonLockStartupProgress(): Promise<DaemonRunningInspecti
   try {
     process.kill(lockPid, 0);
   } catch {
+    admittedDaemonStartupLocks.delete(lockPid);
     return null;
   }
 
@@ -209,7 +223,21 @@ async function inspectDaemonLockStartupProgress(): Promise<DaemonRunningInspecti
   const proc = await findHappyProcessByPid(lockPid).catch(() => null);
   const safeToTreatAsStarting = proc?.type === 'daemon' || proc?.type === 'dev-daemon';
   if (!safeToTreatAsStarting) {
-    if (proc) return null;
+    if (proc) {
+      admittedDaemonStartupLocks.delete(lockPid);
+      return null;
+    }
+
+    const lockMtimeMs = resolveDaemonLockMtimeMs();
+    if (lockMtimeMs !== null && admittedDaemonStartupLocks.get(lockPid) === lockMtimeMs) {
+      const runState = await readProcessRunState(lockPid);
+      if (runState === 'dead' || runState === 'zombie') {
+        admittedDaemonStartupLocks.delete(lockPid);
+        return null;
+      }
+      logger.debug('[DAEMON RUN] Daemon lock is held by a previously admitted live daemon before state was written, treating startup as in progress');
+      return { status: 'starting', pid: lockPid };
+    }
 
     const lockAgeMs = resolveDaemonLockAgeMs();
     if (lockAgeMs !== null && lockAgeMs <= DAEMON_LOCK_UNCLASSIFIED_STARTUP_GRACE_MS) {
@@ -221,6 +249,8 @@ async function inspectDaemonLockStartupProgress(): Promise<DaemonRunningInspecti
     return null;
   }
 
+  const lockMtimeMs = resolveDaemonLockMtimeMs();
+  if (lockMtimeMs !== null) admittedDaemonStartupLocks.set(lockPid, lockMtimeMs);
   logger.debug('[DAEMON RUN] Daemon lock is held by a live daemon before state was written, treating startup as in progress');
   return { status: 'starting', pid: lockPid };
 }
@@ -241,16 +271,40 @@ export async function inspectDaemonRunningStateAndCleanupStaleState(): Promise<D
 
   try {
     process.kill(state.pid, 0);
-    if (state.controlToken) {
-      const ping = await daemonPost('/ping', undefined, { timeoutMs: resolveDaemonPingTimeoutMs() });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') {
+      logger.debug('[DAEMON RUN] Daemon PID is definitively not running, leaving daemon-owned state for startup replacement');
+      return { status: 'not-running' };
+    }
 
-      if (ping && typeof ping === 'object' && (ping as any).success === false) {
+    const ageMs = resolveDaemonStateAgeMs(state);
+    if (ageMs !== null && ageMs < DAEMON_STATE_FRESHNESS_GRACE_MS) {
+      logger.debug('[DAEMON RUN] Daemon PID liveness is inconclusive and state heartbeat is fresh, keeping state as startup in progress');
+      return { status: 'starting', state };
+    }
+
+    logger.debug('[DAEMON RUN] Daemon PID liveness is inconclusive and state is stale, keeping state fail-closed');
+    return { status: 'starting', state };
+  }
+
+  try {
+    if (state.controlToken) {
+      const liveness = await probeDaemonAuthenticatedControl({
+        pid: state.pid,
+        httpPort: state.httpPort,
+        controlToken: state.controlToken,
+        timeoutMs: resolveDaemonPingTimeoutMs(),
+      });
+      if (liveness === 'unauthorized') {
         logger.debug('[DAEMON RUN] Daemon /ping rejected control token, cleaning up state');
         await cleanupDaemonState();
         return { status: 'not-running' };
       }
-
-      if (ping?.error) {
+      if (liveness === 'pid_not_running') {
+        logger.debug('[DAEMON RUN] Daemon PID stopped during authenticated liveness probe, leaving daemon-owned state for startup replacement');
+        return { status: 'not-running' };
+      }
+      if (liveness === 'unreachable') {
         logger.debug('[DAEMON RUN] Daemon /ping unreachable while PID is alive, treating daemon as starting or busy and keeping state');
         return { status: 'starting', state };
       }
@@ -364,7 +418,7 @@ export async function notifyDaemonSessionStarted(
 ): Promise<{ error?: string } | any> {
   return await daemonPost('/session-started', {
     sessionId,
-    metadata
+    metadata,
   }, options);
 }
 
@@ -406,47 +460,9 @@ export async function requestDaemonSessionConnectedServiceAuthSwitch(
  * apply kept running (observed live 2026-07-10 16:29) — the UI then reported a divergence for a
  * switch that succeeded. Bound the ack with deferral + restart margin instead.
  */
-const DAEMON_CONNECTED_SERVICE_GROUP_APPLY_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_CONNECTED_SERVICE_GROUP_APPLY_HTTP_TIMEOUT_MS';
-const DEFAULT_DAEMON_CONNECTED_SERVICE_GROUP_APPLY_TIMEOUT_MS = 150_000;
-
-export function resolveDaemonConnectedServiceGroupGenerationApplyTimeoutMs(
-  env: NodeJS.ProcessEnv = process.env,
-): number {
-  return resolvePositiveIntValue(
-    env[DAEMON_CONNECTED_SERVICE_GROUP_APPLY_TIMEOUT_ENV_KEY],
-    DEFAULT_DAEMON_CONNECTED_SERVICE_GROUP_APPLY_TIMEOUT_MS,
-    { min: 1_000, max: 300_000 },
-  );
-}
-
-export async function requestDaemonConnectedServiceAuthGroupGenerationApply(
-  body: Readonly<{
-    serviceId: ConnectedServiceId;
-    groupId: string;
-    activeProfileId: string;
-    generation: number;
-    switchReason: 'manual';
-  }>,
-  options: DaemonControlRequestOptions = {},
-): Promise<unknown> {
-  const result = await daemonPost('/connected-service-auth/group-generation/apply', {
-    serviceId: body.serviceId,
-    groupId: body.groupId,
-    activeProfileId: body.activeProfileId,
-    generation: body.generation,
-    switchReason: body.switchReason,
-  }, {
-    timeoutMs: resolveDaemonConnectedServiceGroupGenerationApplyTimeoutMs(),
-    ...options,
-  });
-  if (result?.error) {
-    throw new Error(String(result.error));
-  }
-  return (result as { result?: unknown } | null)?.result;
-}
-
 export async function notifyDaemonConnectedServiceRuntimeAuthFailure(
   body: Readonly<{
+    reportId?: string;
     sessionId: string;
     switchesThisTurn?: number;
     classification: unknown;
@@ -455,6 +471,7 @@ export async function notifyDaemonConnectedServiceRuntimeAuthFailure(
   options: DaemonControlRequestOptions = {},
 ): Promise<{ error?: string } | any> {
   return await daemonPost('/connected-service-runtime-auth/failure', {
+    ...(body.reportId ? { reportId: body.reportId } : {}),
     sessionId: body.sessionId,
     switchesThisTurn: body.switchesThisTurn ?? 0,
     classification: body.classification,
@@ -468,6 +485,7 @@ export async function notifyDaemonConnectedServiceTurnLifecycle(
     event: 'prompt_or_steer' | 'task_started' | 'assistant_message_end' | 'turn_cancelled';
     // REV-1: distinguishes completed from failed turns on `assistant_message_end`.
     terminalStatus?: 'completed' | 'failed';
+    turnId?: string;
   }>,
   options: DaemonControlRequestOptions = {},
 ): Promise<{ error?: string } | any> {
@@ -475,6 +493,7 @@ export async function notifyDaemonConnectedServiceTurnLifecycle(
     sessionId: body.sessionId,
     event: body.event,
     ...(body.terminalStatus ? { terminalStatus: body.terminalStatus } : {}),
+    ...(body.turnId ? { turnId: body.turnId } : {}),
   }, options);
 }
 
@@ -484,11 +503,12 @@ export async function notifyDaemonConnectedServiceTurnLifecycle(
  * stores) is cancelled too. Best-effort local control call.
  */
 export async function notifyDaemonConnectedServiceUsageLimitWaitResumeCancel(
-  body: Readonly<{ sessionId: string }>,
+  body: Readonly<{ sessionId: string; attemptId: string }>,
   options: DaemonControlRequestOptions = {},
 ): Promise<{ error?: string } | any> {
   return await daemonPost('/connected-service-usage-limit/wait-resume-cancel', {
     sessionId: body.sessionId,
+    attemptId: body.attemptId,
   }, options);
 }
 
@@ -499,6 +519,8 @@ export async function notifyDaemonConnectedServiceQuotaSnapshot(
     groupId?: string | null;
     groupGeneration?: number | null;
     sourceProviderAccountId?: string | null;
+    credentialFingerprint?: string | null;
+    policyDisposition?: 'evidence_only';
     snapshot: unknown;
   }>,
   options: DaemonControlRequestOptions = {},
@@ -509,6 +531,8 @@ export async function notifyDaemonConnectedServiceQuotaSnapshot(
     ...(body.groupId !== undefined ? { groupId: body.groupId } : {}),
     ...(body.groupGeneration !== undefined ? { groupGeneration: body.groupGeneration } : {}),
     ...(body.sourceProviderAccountId !== undefined ? { sourceProviderAccountId: body.sourceProviderAccountId } : {}),
+    ...(body.credentialFingerprint !== undefined ? { credentialFingerprint: body.credentialFingerprint } : {}),
+    ...(body.policyDisposition ? { policyDisposition: body.policyDisposition } : {}),
     snapshot: body.snapshot,
   }, options);
 }
@@ -629,7 +653,7 @@ export async function materializeDaemonConnectedServicesForExecutionRun(
     sessionId?: string;
   }>,
   options: DaemonControlRequestOptions = {},
-): Promise<Readonly<{ env: Record<string, string> }>> {
+): Promise<ExecutionRunConnectedServiceMaterializeResponseWire> {
   const result = await daemonPost(EXECUTION_RUN_CONNECTED_SERVICE_MATERIALIZE_PATH, {
     runId: body.runId,
     agentId: body.agentId,
@@ -699,9 +723,9 @@ export async function listDaemonSessions(): Promise<any[]> {
   return result.children || [];
 }
 
-export async function stopDaemonSession(sessionId: string): Promise<boolean> {
+export async function stopDaemonSession(sessionId: string): Promise<StopSessionResult> {
   const result = await daemonPost('/stop-session', { sessionId });
-  return result.success || false;
+  return StopSessionResultSchema.parse(result);
 }
 
 export async function spawnDaemonSession(directory: string, sessionId?: string): Promise<any>;

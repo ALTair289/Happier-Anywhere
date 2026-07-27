@@ -6,7 +6,8 @@ function createBaseApp(overrides: Partial<Parameters<typeof createDaemonControlA
   return createDaemonControlApp({
     getChildren: () => [],
     machineId: 'machine_local',
-    stopSession: async () => true,
+    runtimeId: 'runtime-test',
+    stopSession: async () => ({ status: 'stopped' as const }),
     spawnSession: async () => ({ type: 'success', sessionId: 'happy-test-123' }),
     requestShutdown: () => {},
     onHappySessionWebhook: () => {},
@@ -130,6 +131,93 @@ describe('daemon control server: /restart', () => {
       expect(res.json()).toEqual({ status: 'unsupported_restart_options' });
       expect(requestSelfRestart).not.toHaveBeenCalled();
     } finally {
+      await app.close();
+    }
+  });
+
+  it('passes a validated successor dist fingerprint to self-restart', async () => {
+    const requestSelfRestart = vi.fn(async () => {});
+    const app = createBaseApp({ requestSelfRestart } as Partial<Parameters<typeof createDaemonControlApp>[0]>);
+    try {
+      await app.ready();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/restart',
+        headers: { 'x-happier-daemon-token': 'test-token' },
+        payload: { successorDistClosureFingerprint: 'abcdef1234567890' },
+      });
+
+      expect(res.statusCode).toBe(202);
+      await vi.waitFor(() => expect(requestSelfRestart).toHaveBeenCalledWith({
+        successorDistClosureFingerprint: 'abcdef1234567890',
+      }));
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects malformed successor dist fingerprints before self-restart', async () => {
+    const requestSelfRestart = vi.fn(async () => {});
+    const app = createBaseApp({ requestSelfRestart } as Partial<Parameters<typeof createDaemonControlApp>[0]>);
+    try {
+      await app.ready();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/restart',
+        headers: { 'x-happier-daemon-token': 'test-token' },
+        payload: { successorDistClosureFingerprint: '../arbitrary-env' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(requestSelfRestart).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects arbitrary environment transport fields before self-restart', async () => {
+    const requestSelfRestart = vi.fn(async () => {});
+    const app = createBaseApp({ requestSelfRestart } as Partial<Parameters<typeof createDaemonControlApp>[0]>);
+    try {
+      await app.ready();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/restart',
+        headers: { 'x-happier-daemon-token': 'test-token' },
+        payload: {
+          env: { HAPPIER_SERVER_URL: 'https://attacker.invalid' },
+        },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(requestSelfRestart).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('reports the daemon dist fingerprint from the authenticated successor environment', async () => {
+    const envKey = 'HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT';
+    const previous = process.env[envKey];
+    process.env[envKey] = 'abcdef1234567890';
+    const app = createBaseApp();
+    try {
+      await app.ready();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/ping',
+        headers: { 'x-happier-daemon-token': 'test-token' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        status: 'ok',
+        runtimeId: 'runtime-test',
+        distClosureFingerprint: 'abcdef1234567890',
+      });
+    } finally {
+      if (previous === undefined) delete process.env[envKey];
+      else process.env[envKey] = previous;
       await app.close();
     }
   });

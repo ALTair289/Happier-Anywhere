@@ -34,11 +34,18 @@ const RELEASE_PAYLOAD = {
   materializationKey: 'execution_run:run_1',
 };
 
+const MATERIALIZATION_PROOF = {
+  v: 1 as const,
+  agentId: MATERIALIZE_PAYLOAD.agentId,
+  materializationKey: MATERIALIZE_PAYLOAD.materializationKey,
+  connectedServicesBindings: MATERIALIZE_PAYLOAD.connectedServicesBindingsRaw,
+};
+
 function buildApp(handlers: Record<string, unknown> = {}) {
   return createDaemonControlApp({
     getChildren: () => [],
     machineId: 'machine',
-    stopSession: async () => false,
+    stopSession: async () => ({ status: 'not_found' as const }),
     spawnSession: async () => ({
       type: 'error',
       errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
@@ -115,6 +122,7 @@ describe('control server execution-run connected-services routes (A2 auth pins)'
   it('dispatches to the wired handlers with the run-scope token', async () => {
     const handleExecutionRunConnectedServiceMaterialize = vi.fn(async () => ({
       env: { CODEX_HOME: '/run/root/codex/codex-home' },
+      proof: MATERIALIZATION_PROOF,
     }));
     const handleExecutionRunConnectedServiceRelease = vi.fn(async () => ({ released: true }));
     const app = buildApp({
@@ -131,7 +139,10 @@ describe('control server execution-run connected-services routes (A2 auth pins)'
       expect(materialize.statusCode).toBe(200);
       expect(materialize.json()).toMatchObject({
         ok: true,
-        result: { env: { CODEX_HOME: '/run/root/codex/codex-home' } },
+        result: {
+          env: { CODEX_HOME: '/run/root/codex/codex-home' },
+          proof: MATERIALIZATION_PROOF,
+        },
       });
       expect(handleExecutionRunConnectedServiceMaterialize).toHaveBeenCalledWith(expect.objectContaining({
         runId: 'run_1',

@@ -2,6 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDaemonControlApp } from './controlServer';
 import { SPAWN_SESSION_ERROR_CODES, type SpawnSessionErrorDetail } from '@/rpc/handlers/registerSessionHandlers';
 import { SPAWN_SESSION_ERROR_DETAIL_KINDS } from '@happier-dev/protocol';
+import {
+  buildSessionRunnerRespawnDescriptorV1FromSpawnOptions,
+  buildSpawnSessionOptionsFromRespawnDescriptorV1,
+} from './processSupervision/sessionRunnerRespawnDescriptor';
+import { abandonSpawnedSessionUntilCompleted } from '@/session/services/awaitSpawnedSessionId';
 
 describe('daemon control server: /spawn-session', () => {
   afterEach(() => {
@@ -12,7 +17,7 @@ describe('daemon control server: /spawn-session', () => {
     expect(() => createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async () => ({ type: 'success', sessionId: 'happy-test-123' }),
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
@@ -24,7 +29,7 @@ describe('daemon control server: /spawn-session', () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async () => ({ type: 'success', sessionId: 'happy-test-123' }),
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
@@ -52,7 +57,7 @@ describe('daemon control server: /spawn-session', () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async (options: any) => {
         observed = options;
         return { type: 'success', sessionId: 'happy-test-123' };
@@ -145,7 +150,7 @@ describe('daemon control server: /spawn-session', () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async (options: any) => {
         observed = options;
         return { type: 'success', sessionId: 'happy-test-123' };
@@ -186,7 +191,7 @@ describe('daemon control server: /spawn-session', () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async (options: any) => {
         observed = options;
         return { type: 'success', sessionId: 'happy-test-123' };
@@ -227,7 +232,7 @@ describe('daemon control server: /spawn-session', () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async () => {
         throw new Error('boom');
       },
@@ -274,7 +279,7 @@ describe('daemon control server: /spawn-session', () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async () => ({
         type: 'error',
         errorCode: SPAWN_SESSION_ERROR_CODES.SPAWN_VALIDATION_FAILED,
@@ -318,7 +323,7 @@ describe('daemon control server: /spawn-session', () => {
         } as any,
       ],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async () => ({ type: 'success', sessionId: 'unused' }),
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
@@ -345,11 +350,101 @@ describe('daemon control server: /spawn-session', () => {
     }
   });
 
+  it('resolves and positively abandons a spawn from reattached persisted nonce custody after daemon restart', async () => {
+    const descriptor = buildSessionRunnerRespawnDescriptorV1FromSpawnOptions({
+      directory: '/tmp',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      spawnNonce: 'nonce-after-restart',
+      pendingFirstInput: {
+        text: 'Promote this first prompt only in the original runner.',
+        localId: 'spawn-first:nonce-after-restart',
+      },
+    });
+    if (!descriptor) throw new Error('Expected a respawn descriptor');
+    const reattachedSpawnOptions = buildSpawnSessionOptionsFromRespawnDescriptorV1(descriptor);
+    expect(reattachedSpawnOptions).not.toHaveProperty('pendingFirstInput');
+    const reattachedChild = {
+      startedBy: 'daemon',
+      pid: 124,
+      happySessionId: 'PID-124',
+      spawnOptions: reattachedSpawnOptions,
+    } as any;
+    const spawnSession = vi.fn(async () => ({ type: 'success' as const, sessionId: 'duplicate-session' }));
+    const app = createDaemonControlApp({
+      getChildren: () => [reattachedChild],
+      machineId: 'machine_local',
+      stopSession: async () => ({ status: 'not_found' as const }),
+      spawnSession,
+      requestShutdown: () => {},
+      onHappySessionWebhook: () => {},
+      controlToken: 'test-token',
+    });
+    const archiveSession = vi.fn(async () => true);
+
+    try {
+      await app.ready();
+      const pendingResolve = await app.inject({
+        method: 'POST',
+        url: '/spawn-session/resolve',
+        headers: { 'Content-Type': 'application/json', 'x-happier-daemon-token': 'test-token' },
+        payload: JSON.stringify({ spawnNonce: 'nonce-after-restart' }),
+      });
+      expect(pendingResolve.json()).toEqual({ success: true, status: 'pending' });
+
+      const duplicateWhilePending = await app.inject({
+        method: 'POST',
+        url: '/spawn-session',
+        headers: { 'Content-Type': 'application/json', 'x-happier-daemon-token': 'test-token' },
+        payload: JSON.stringify({
+          directory: '/tmp',
+          spawnNonce: 'nonce-after-restart',
+          pendingFirstInput: {
+            text: 'Promote this first prompt only in the original runner.',
+            localId: 'spawn-first:nonce-after-restart',
+          },
+        }),
+      });
+      expect(duplicateWhilePending.statusCode).toBe(202);
+      expect(duplicateWhilePending.json()).toEqual({
+        success: false,
+        status: 'pending',
+        errorCode: SPAWN_SESSION_ERROR_CODES.SESSION_WEBHOOK_TIMEOUT,
+      });
+      expect(spawnSession).not.toHaveBeenCalled();
+
+      reattachedChild.happySessionId = 'sess-after-restart';
+      await expect(abandonSpawnedSessionUntilCompleted({
+        spawnNonce: 'nonce-after-restart',
+        resolveSpawnSessionByNonce: async (spawnNonce) => {
+          const response = await app.inject({
+            method: 'POST',
+            url: '/spawn-session/resolve',
+            headers: { 'Content-Type': 'application/json', 'x-happier-daemon-token': 'test-token' },
+            payload: JSON.stringify({ spawnNonce }),
+          });
+          const body = response.json() as { status: 'success' | 'pending' | 'not_found'; sessionId?: string };
+          if (body.status === 'success' && body.sessionId) {
+            return { status: 'success' as const, sessionId: body.sessionId };
+          }
+          return body.status === 'pending'
+            ? { status: 'pending' as const }
+            : { status: 'not_found' as const };
+        },
+        archiveSession,
+      })).resolves.toEqual({ status: 'completed', sessionId: 'sess-after-restart' });
+      expect(archiveSession).toHaveBeenCalledOnce();
+      expect(archiveSession).toHaveBeenCalledWith('sess-after-restart');
+      expect(spawnSession).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it('keeps deterministic spawn nonce correlation after spawn response even when tracked children are gone', async () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async () => ({ type: 'success', sessionId: 'sess-from-response' }),
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
@@ -399,7 +494,7 @@ describe('daemon control server: /spawn-session', () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession,
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
@@ -460,7 +555,7 @@ describe('daemon control server: /spawn-session', () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession,
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
@@ -512,12 +607,16 @@ describe('daemon control server: /spawn-session', () => {
     }
   });
 
-  it('clears a pending spawn nonce when spawn reports success without a session id', async () => {
+  it('returns pending acceptance when spawn starts but canonical session id is not known yet', async () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
-      spawnSession: async () => ({ type: 'success', sessionId: '' }),
+      stopSession: async () => ({ status: 'not_found' as const }),
+      spawnSession: async () => ({
+        type: 'success',
+        spawnNonce: 'nonce-missing-session-id',
+        sessionIdStatus: 'pending',
+      }),
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
       controlToken: 'test-token',
@@ -534,7 +633,14 @@ describe('daemon control server: /spawn-session', () => {
           spawnNonce: 'nonce-missing-session-id',
         }),
       });
-      expect(spawnRes.statusCode).toBe(500);
+      expect(spawnRes.statusCode).toBe(200);
+      expect(spawnRes.json()).toEqual({
+        success: true,
+        status: 'pending',
+        spawnNonce: 'nonce-missing-session-id',
+        sessionIdStatus: 'pending',
+        approvedNewDirectoryCreation: true,
+      });
 
       const resolveRes = await app.inject({
         method: 'POST',
@@ -545,7 +651,7 @@ describe('daemon control server: /spawn-session', () => {
       expect(resolveRes.statusCode).toBe(200);
       expect(resolveRes.json()).toEqual({
         success: true,
-        status: 'not_found',
+        status: 'pending',
       });
     } finally {
       await app.close();
@@ -563,7 +669,7 @@ describe('daemon control server: /spawn-session', () => {
         } as any,
       ],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async () => ({ type: 'success', sessionId: 'unused' }),
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
@@ -606,7 +712,7 @@ describe('daemon control server: /spawn-session', () => {
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine_local',
-      stopSession: async () => false,
+      stopSession: async () => ({ status: 'not_found' as const }),
       spawnSession: async (options: any) => {
         observed = options;
         return { type: 'success', sessionId: 'happy-test-123' };

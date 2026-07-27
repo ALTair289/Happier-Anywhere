@@ -125,6 +125,44 @@ describe('daemon control client startup lock inspection', () => {
     }
   });
 
+  it('keeps a previously classified live startup after the freshness window', async () => {
+    const homeDir = createTempDirSync('happier-cli-daemon-slow-classified-lock-');
+    envScope.patch({ HAPPIER_HOME_DIR: homeDir });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const findHappyProcessByPid = vi.fn()
+      .mockResolvedValueOnce({ type: 'dev-daemon' })
+      .mockResolvedValueOnce(null);
+    vi.doMock('@/daemon/doctor', () => ({ findHappyProcessByPid }));
+    vi.doMock('@/daemon/processRunState', () => ({
+      readProcessRunState: vi.fn(async () => 'servable'),
+    }));
+
+    try {
+      vi.resetModules();
+      const [{ configuration }, { inspectDaemonRunningStateAndCleanupStaleState }] = await Promise.all([
+        import('@/configuration'),
+        import('./controlClient'),
+      ]);
+      mkdirSync(dirname(configuration.daemonLockFile), { recursive: true });
+      writeFileSync(configuration.daemonLockFile, '424245', 'utf-8');
+      const stale = new Date(Date.now() - 10 * 60_000);
+      utimesSync(configuration.daemonLockFile, stale, stale);
+
+      await expect(inspectDaemonRunningStateAndCleanupStaleState()).resolves.toEqual({
+        status: 'starting',
+        pid: 424245,
+      });
+      await expect(inspectDaemonRunningStateAndCleanupStaleState()).resolves.toEqual({
+        status: 'starting',
+        pid: 424245,
+      });
+    } finally {
+      killSpy.mockRestore();
+      vi.doUnmock('@/daemon/processRunState');
+      removeTempDirSync(homeDir);
+    }
+  }, 120_000);
+
   it('does not stop a fresh live daemon startup lock before state is written', async () => {
     const homeDir = createTempDirSync('happier-cli-daemon-stop-starting-lock-');
     envScope.patch({
