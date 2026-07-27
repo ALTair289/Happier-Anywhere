@@ -411,6 +411,7 @@ const SESSION_RUNTIME_CONTROL_KEYS = [
     'cancelUsageLimitWaitResume',
     'checkUsageLimitRecoveryNow',
     'clearTerminalComposer',
+    'interruptPendingInputAndRun',
     'handleUserMessage',
     'wakePendingMaterialization',
     'isPendingMaterializationAvailable',

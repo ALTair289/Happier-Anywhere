@@ -1596,7 +1596,7 @@ describe('ApiSessionClient connection handling', () => {
         });
     });
 
-    it('registers terminal composer runtime controls without clobbering existing controls', async () => {
+    it('registers terminal prompt runtime controls without clobbering existing controls', async () => {
         const client = createClient('fake-token', mockSession);
         const invalidateConnectedServiceAuthTransports = vi.fn(async () => undefined);
         const clearTerminalComposer = vi.fn(async () => ({
@@ -1604,11 +1604,19 @@ describe('ApiSessionClient connection handling', () => {
             status: 'cleared',
             sessionId: mockSession.id,
         }));
+        const interruptPendingInputAndRun = vi.fn(async () => ({
+            ok: true,
+            status: 'interrupted',
+            sessionId: mockSession.id,
+            localId: 'pending-local',
+        }));
         const composerClearMethod = SESSION_RPC_METHODS.SESSION_TERMINAL_COMPOSER_CLEAR;
+        const interruptAndRunMethod = SESSION_RPC_METHODS.SESSION_PENDING_INPUT_INTERRUPT_AND_RUN;
 
         client.setSessionRuntimeControls({ invalidateConnectedServiceAuthTransports });
         const unregisterComposerControls = client.registerSessionRuntimeControls({
             clearTerminalComposer,
+            interruptPendingInputAndRun,
         });
 
         await expect(
@@ -1622,6 +1630,18 @@ describe('ApiSessionClient connection handling', () => {
             sessionId: mockSession.id,
         });
         await expect(
+            client.rpcHandlerManager.invokeLocal(interruptAndRunMethod, {
+                sessionId: mockSession.id,
+                localId: 'pending-local',
+                expectedStateAtMs: 1_700_000_000_001,
+            }),
+        ).resolves.toEqual({
+            ok: true,
+            status: 'interrupted',
+            sessionId: mockSession.id,
+            localId: 'pending-local',
+        });
+        await expect(
             client.rpcHandlerManager.invokeLocal(
                 SESSION_RPC_METHODS.SESSION_CONNECTED_SERVICE_AUTH_INVALIDATE_TRANSPORTS,
                 {},
@@ -1631,6 +1651,11 @@ describe('ApiSessionClient connection handling', () => {
         expect(clearTerminalComposer).toHaveBeenCalledWith({
             sessionId: mockSession.id,
             expectedStateAtMs: 1_700_000_000_000,
+        });
+        expect(interruptPendingInputAndRun).toHaveBeenCalledWith({
+            sessionId: mockSession.id,
+            localId: 'pending-local',
+            expectedStateAtMs: 1_700_000_000_001,
         });
         expect(invalidateConnectedServiceAuthTransports).toHaveBeenCalledTimes(1);
 
@@ -1644,6 +1669,19 @@ describe('ApiSessionClient connection handling', () => {
             sessionId: mockSession.id,
             errorCode: 'unsupported_session_runtime_method',
             error: `unsupported_session_runtime_method:${composerClearMethod}`,
+        });
+        await expect(
+            client.rpcHandlerManager.invokeLocal(interruptAndRunMethod, {
+                sessionId: mockSession.id,
+                localId: 'pending-local',
+            }),
+        ).resolves.toEqual({
+            ok: false,
+            status: 'unsupported',
+            sessionId: mockSession.id,
+            localId: 'pending-local',
+            errorCode: 'unsupported_session_runtime_method',
+            error: `unsupported_session_runtime_method:${interruptAndRunMethod}`,
         });
         await expect(
             client.rpcHandlerManager.invokeLocal(
