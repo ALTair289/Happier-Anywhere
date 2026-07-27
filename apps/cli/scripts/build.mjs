@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
-import { readdir, rm } from 'node:fs/promises';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { cp, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -24,6 +24,37 @@ async function reclaimAbandonedCliDistStagingDirs(packageRoot, activeOutputDir) 
     .map((entry) => resolve(packageRoot, entry.name))
     .filter((entryPath) => entryPath !== activeOutputPath)
     .map((entryPath) => rm(entryPath, { recursive: true, force: true })));
+}
+
+async function createImmutableBuildSource({ packageRoot }) {
+  if (!existsSync(join(packageRoot, 'src'))) {
+    return {
+      packageRoot,
+      packageJsonPath: join(packageRoot, 'package.json'),
+      async cleanup() {},
+    };
+  }
+
+  // Keep the immutable generation under the physical package root so Node and
+  // TypeScript retain the package-local node_modules resolution ancestry.
+  const snapshotRoot = await mkdtemp(join(packageRoot, '.tmp.hstack-cli-build-source.'));
+  try {
+    for (const relativePath of ['package.json', 'tsconfig.json', 'tsconfig.build.json', 'src']) {
+      const sourcePath = join(packageRoot, relativePath);
+      if (!existsSync(sourcePath)) continue;
+      await cp(sourcePath, join(snapshotRoot, relativePath), { recursive: true });
+    }
+  } catch (error) {
+    await rm(snapshotRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+  return {
+    packageRoot: snapshotRoot,
+    packageJsonPath: join(snapshotRoot, 'package.json'),
+    async cleanup() {
+      await rm(snapshotRoot, { recursive: true, force: true });
+    },
+  };
 }
 
 function runNodeScript(scriptPath, args, options = {}) {
@@ -102,7 +133,6 @@ async function buildCliDistUnlocked(options = {}) {
     ...(options.env ?? {}),
   };
   const { outputDir, builderOwned: builderOwnsOutput } = resolveBuildOutput(env);
-  const resolvedOutputDir = resolve(packageRoot, outputDir);
   env.HAPPIER_CLI_BUILD_OUTPUT_DIR = outputDir;
   const expectedCurrentFingerprint = readCliDistBuildManifestFingerprint(join(packageRoot, 'dist'));
   const rmDistImpl = options.rmDistImpl ?? rmDist;
@@ -112,6 +142,16 @@ async function buildCliDistUnlocked(options = {}) {
   const probeDistRuntimeImportImpl = options.probeDistRuntimeImportImpl ?? probeDistRuntimeImport;
   const resolveDistRuntimeEntrypointsImpl = options.resolveDistRuntimeEntrypointsImpl ?? resolveDistRuntimeEntrypoints;
   const finalizeDistImpl = options.finalizeDistImpl ?? finalizeDist;
+  const immutableSource = builderOwnsOutput
+    ? await (options.createImmutableBuildSourceImpl ?? createImmutableBuildSource)({
+        packageRoot,
+      })
+    : {
+        packageRoot,
+        packageJsonPath: join(packageRoot, 'package.json'),
+        async cleanup() {},
+      };
+  const resolvedOutputDir = resolve(immutableSource.packageRoot, outputDir);
   try {
     await reclaimAbandonedCliDistStagingDirs(packageRoot, outputDir);
     await rmDistImpl(['node', 'rmDist.mjs', outputDir], {
@@ -125,18 +165,18 @@ async function buildCliDistUnlocked(options = {}) {
       skipLock: true,
     });
 
-    runTypecheckImpl(resolveTypeScriptCliPathImpl({ cwd: packageRoot }), ['-p', 'tsconfig.build.json', '--noEmit'], {
-      cwd: packageRoot,
+    runTypecheckImpl(resolveTypeScriptCliPathImpl({ cwd: immutableSource.packageRoot }), ['-p', 'tsconfig.build.json', '--noEmit'], {
+      cwd: immutableSource.packageRoot,
       env,
     });
     runPkgrollBuildImpl({
-      packageJsonPath: resolve(packageRoot, 'package.json'),
+      packageJsonPath: immutableSource.packageJsonPath,
       outputDir,
       env,
     });
-    for (const entrypoint of resolveDistRuntimeEntrypointsImpl(packageRoot, outputDir)) {
+    for (const entrypoint of resolveDistRuntimeEntrypointsImpl(immutableSource.packageRoot, outputDir)) {
       probeDistRuntimeImportImpl(entrypoint, {
-        cwd: packageRoot,
+        cwd: immutableSource.packageRoot,
         env,
       });
     }
@@ -150,6 +190,7 @@ async function buildCliDistUnlocked(options = {}) {
       promoted: true,
     };
   } finally {
+    await immutableSource.cleanup().catch(() => {});
     if (builderOwnsOutput) {
       await rm(resolvedOutputDir, { recursive: true, force: true }).catch(() => {});
     }
