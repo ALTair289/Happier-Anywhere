@@ -101,8 +101,7 @@ export function findRealConfigOption(
   configOptions: ReadonlyArray<SessionConfigOption>,
   configId: string,
 ): SessionConfigOption | undefined {
-  const normalized = normalizeToken(configId);
-  return configOptions.find((option) => normalizeToken(option.id) === normalized && !isCursorModelConfigOption(option));
+  return configOptions.find((option) => option.id === configId && !isCursorModelConfigOption(option));
 }
 
 export function findRealConfigOptionByControlId(
@@ -134,8 +133,7 @@ export function normalizeSessionConfigUpdateValue(
   value: string | number | boolean | null,
 ): string | number | boolean | null | undefined {
   if (typeof value === 'string') {
-    const trimmed = value.trim();
-    return trimmed ? trimmed : undefined;
+    return value.trim().length > 0 ? value : undefined;
   }
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
   if (typeof value === 'boolean' || value === null) return value;

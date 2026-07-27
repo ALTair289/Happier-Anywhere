@@ -100,9 +100,8 @@ function mergeModelOptions(
   const options: SessionConfigOption[] = [];
   const seenIds = new Set<string>();
   for (const option of [...generatedOptions, ...realModelScopedOptions]) {
-    const id = option.id.trim();
-    if (!id || seenIds.has(id)) continue;
-    seenIds.add(id);
+    if (!option.id.trim() || seenIds.has(option.id)) continue;
+    seenIds.add(option.id);
     options.push(option);
   }
   return options.length > 0 ? options : undefined;

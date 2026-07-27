@@ -1,7 +1,7 @@
 import { createCursorAcpRuntime } from '@/backends/cursor/acp/runtime';
 import { CursorTerminalDisplay } from '@/backends/cursor/ui/CursorTerminalDisplay';
 import type { PermissionMode } from '@/api/types';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import { formatProviderPromptErrorMessage } from '@/agent/runtime/formatProviderPromptErrorMessage';
 import { runStandardAcpProvider, type StandardAcpProviderRunOptions } from '@/agent/runtime/runStandardAcpProvider';
 import type { Credentials } from '@/persistence';
@@ -47,7 +47,7 @@ export async function runCursor(opts: StandardAcpProviderRunOptions & {
     machineMetadata: initialMachineMetadata,
     terminalDisplay: CursorTerminalDisplay,
     resolveRuntimeDirectory: ({ session, metadata }) => session.getMetadataSnapshot()?.path ?? metadata.path,
-    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, startupOverrides, pendingQueueDrainMaxPopPerWake }) => createCursorAcpRuntime({
+    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, startupOverrides, pendingQueueDrainMaxPopPerWake, providerInputConsumer }) => createCursorAcpRuntime({
       directory,
       machineId,
       session,
@@ -60,6 +60,7 @@ export async function runCursor(opts: StandardAcpProviderRunOptions & {
       env: runtimeEnv,
       startupOverrides,
       pendingQueueDrainMaxPopPerWake,
+      providerInputConsumer,
     }),
     onAttachMetadataSnapshotMissing: (error) => {
       logger.debug(

@@ -30,6 +30,7 @@ import {
   pickCursorReasoningParamKey,
   toDisplayModelId,
 } from './cursorModelConfigControls';
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 
 function resolveExactParameterizedChoice(params: Readonly<{
   choices: NonNullable<SessionConfigOption['options']>;
@@ -115,7 +116,7 @@ export function resolveCursorSessionConfigOptionUpdate(params: Readonly<{
   value: string | number | boolean | null;
   configOptions: ReadonlyArray<SessionConfigOption> | null;
 }>): CursorSessionConfigOptionUpdate {
-  const configId = params.configId.trim();
+  const configId = readNonBlankSessionControlIdentifier(params.configId) ?? '';
   const value = normalizeSessionConfigUpdateValue(params.value);
   if (!params.configOptions || params.configOptions.length === 0 || !configId || value === undefined) {
     return { configId, value: value ?? null };
@@ -151,7 +152,7 @@ export function resolveCursorSessionModelConfigUpdate(params: Readonly<{
   modelId: string;
   configOptions: ReadonlyArray<SessionConfigOption> | null;
 }>): CursorSessionModelConfigUpdate {
-  const requestedModelId = params.modelId.trim();
+  const requestedModelId = readNonBlankSessionControlIdentifier(params.modelId) ?? '';
   if (!requestedModelId || !params.configOptions || params.configOptions.length === 0) {
     return { modelId: requestedModelId };
   }

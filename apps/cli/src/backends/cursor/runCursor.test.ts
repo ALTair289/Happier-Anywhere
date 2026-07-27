@@ -73,6 +73,7 @@ describe('runCursor', () => {
       setThinking: vi.fn(),
       memoryRecallGuidanceEnabled: false,
       turnAssistantPreviewTracker: {} as never,
+      providerInputConsumer: {} as never,
     });
 
     expect(createCursorAcpRuntimeMock).toHaveBeenCalledWith(expect.objectContaining({

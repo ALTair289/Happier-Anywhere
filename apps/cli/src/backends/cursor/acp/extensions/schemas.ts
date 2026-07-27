@@ -1,11 +1,16 @@
 import { z } from 'zod';
 
-const id = z.string().trim().min(1).max(512);
+const opaqueId = z.string().min(1).max(512).refine((value) => value.trim().length > 0, {
+  message: 'Identifier must not be blank',
+});
+const id = opaqueId;
 const shortText = z.string().max(16_384);
 const longText = z.string().max(1_048_576);
+const taskPrompt = z.string().max(65_536);
+const uri = z.string().max(16_384).url();
 
 const questionOption = z.object({
-  id: id.optional(),
+  id,
   label: shortText,
 }).strip();
 
@@ -31,7 +36,7 @@ const phase = z.object({
 export const cursorAskQuestionRequestSchema = z.object({
   toolCallId: id.optional(),
   title: shortText.optional(),
-  questions: z.array(question).max(256),
+  questions: z.array(question).min(1).max(256),
 }).strip();
 
 export const cursorCreatePlanRequestSchema = z.object({
@@ -51,22 +56,23 @@ export const cursorUpdateTodosRequestSchema = z.object({
 }).strip();
 
 export const cursorTaskNotificationSchema = z.object({
-  toolCallId: id.optional(),
+  toolCallId: opaqueId.optional(),
   description: shortText.optional(),
-  prompt: longText.optional(),
-  subagentType: shortText.optional(),
-  customSubagentType: shortText.optional(),
+  prompt: taskPrompt.optional(),
+  subagentType: z.union([
+    shortText,
+    z.object({ custom: shortText }).strip(),
+  ]).optional(),
   model: shortText.optional(),
   agentId: id.optional(),
-  durationMs: z.number().finite().nonnegative().optional(),
+  durationMs: z.number().finite().nonnegative().max(2_592_000_000).optional(),
 }).strip();
 
 export const cursorGenerateImageNotificationSchema = z.object({
   toolCallId: id.optional(),
-  path: longText.optional(),
+  filePath: shortText.optional(),
   description: longText.optional(),
-  generationId: id.optional(),
-  referenceImages: z.array(longText).max(64).optional(),
+  referenceImagePaths: z.array(shortText).max(64).optional(),
 }).strip();
 
 export const cursorAskQuestionResponseSchema = z.object({
@@ -85,7 +91,7 @@ export const cursorAskQuestionResponseSchema = z.object({
 
 export const cursorCreatePlanResponseSchema = z.object({
   outcome: z.discriminatedUnion('outcome', [
-    z.object({ outcome: z.literal('accepted'), planUri: longText.optional() }).strip(),
+    z.object({ outcome: z.literal('accepted'), planUri: uri.optional() }).strip(),
     z.object({ outcome: z.literal('rejected'), reason: shortText.optional() }).strip(),
     z.object({ outcome: z.literal('cancelled') }).strip(),
   ]),
@@ -94,5 +100,7 @@ export const cursorCreatePlanResponseSchema = z.object({
 export type CursorAskQuestionRequest = z.infer<typeof cursorAskQuestionRequestSchema>;
 export type CursorCreatePlanRequest = z.infer<typeof cursorCreatePlanRequestSchema>;
 export type CursorUpdateTodosRequest = z.infer<typeof cursorUpdateTodosRequestSchema>;
+export type CursorTaskNotification = z.infer<typeof cursorTaskNotificationSchema>;
+export type CursorGenerateImageNotification = z.infer<typeof cursorGenerateImageNotificationSchema>;
 export type CursorAskQuestionResponse = z.infer<typeof cursorAskQuestionResponseSchema>;
 export type CursorCreatePlanResponse = z.infer<typeof cursorCreatePlanResponseSchema>;

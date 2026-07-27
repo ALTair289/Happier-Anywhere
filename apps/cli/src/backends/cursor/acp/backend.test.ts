@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import type { ClientApp } from '@agentclientprotocol/sdk';
+import type { AgentMessage } from '@/agent/core';
 
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { writeExecutableShimSync } from '@/testkit/fs/executableShim';
@@ -36,10 +38,7 @@ describe('buildCursorAcpBackendOptions', () => {
 
     const options = buildCursorAcpBackendOptions({ cwd: '/tmp', env: {} });
 
-    expect(options.authentication).toEqual({
-      kind: 'static',
-      methodId: 'cursor_login',
-    });
+    expect(options.authentication).toEqual({ kind: 'static', methodId: 'cursor_login' });
   });
 
   it('does not negotiate the Cursor parameterized model picker for normal runtime sessions', () => {
@@ -122,5 +121,48 @@ describe('buildCursorAcpBackendOptions', () => {
 
   it('does not synthesize tool-call timeouts for Cursor ACP turns', () => {
     expect(cursorTransport.getToolCallTimeout('tool-call-1', 'execute')).toBeNull();
+  });
+
+  it('relays generated-media extension messages through the provider backend event seam', async () => {
+    process.env.PATH = '';
+    process.env.HAPPIER_CURSOR_PATH = createFakeCursorAgent();
+    const emitted: AgentMessage[] = [];
+    const options = buildCursorAcpBackendOptions({
+      cwd: '/tmp',
+      env: {},
+      permissionHandler: { async handleToolCall() { return { decision: 'approved' }; } },
+    }, {
+      emit: (message) => emitted.push(message),
+    });
+    const registration = options.extensionHandlers?.find(({ kind, method }) => (
+      kind === 'request' && method === 'cursor/generate_image'
+    ));
+    if (!registration) throw new Error('missing Cursor generated-media request handler');
+    let callback: ((context: Readonly<{ params: unknown; signal: AbortSignal }>) => unknown) | null = null;
+    const app = {
+      onRequest: (_method: string, _parser: unknown, handler: typeof callback) => {
+        callback = handler;
+        return app;
+      },
+      onNotification: () => app,
+    };
+    registration.register(app as unknown as ClientApp, () => ({
+      method: 'cursor/generate_image',
+      sessionId: 'cursor-session-1',
+      signal: new AbortController().signal,
+      agentName: 'cursor',
+    }));
+    const invoke = callback as unknown as (context: Readonly<{ params: unknown; signal: AbortSignal }>) => Promise<unknown>;
+
+    await invoke({
+      params: { toolCallId: 'image-1', filePath: '/tmp/generated.png' },
+      signal: new AbortController().signal,
+    });
+
+    expect(emitted).toMatchObject([{
+      type: 'session-media',
+      source: 'cursor-generate-image',
+      media: [{ origin: { agentId: 'cursor', toolCallId: 'image-1' } }],
+    }]);
   });
 });

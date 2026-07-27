@@ -15,11 +15,21 @@ export class CursorTransport extends DefaultTransport {
     return sanitizeCursorDiffContent(update);
   }
 
-  // Cursor delivers plans/todos via the cursor/create_plan + cursor/update_todos extension methods
-  // (markdown + structured todos + phases), so the redundant standard ACP `plan` update is dropped
-  // to avoid rendering a duplicate checklist.
-  override suppressAcpPlanUpdate(): boolean {
-    return true;
+  override determineToolName(
+    toolName: string,
+    _toolCallId: string,
+    input: Record<string, unknown>,
+  ): string {
+    const cursorToolName = typeof input._toolName === 'string' ? input._toolName : '';
+    if (cursorToolName === 'task') return 'Task';
+    if (cursorToolName === 'createPlan') return 'ExitPlanMode';
+    const acp = input._acp && typeof input._acp === 'object' && !Array.isArray(input._acp)
+      ? input._acp as Record<string, unknown>
+      : null;
+    const title = typeof acp?.title === 'string' ? acp.title.trim().toLowerCase() : '';
+    if (title === 'task' || title.startsWith('task ')) return 'Task';
+    if (title === 'create plan') return 'ExitPlanMode';
+    return toolName;
   }
 }
 

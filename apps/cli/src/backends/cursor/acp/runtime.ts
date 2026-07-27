@@ -10,6 +10,9 @@ import {
   resolveCursorSessionModelConfigUpdate,
 } from '@/backends/cursor/acp/cursorModelConfig';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
+
+import { resolveCursorGeneratedMediaRoot } from './resolveCursorGeneratedMediaRoot';
 
 export function createCursorAcpRuntime(params: {
   directory: string;
@@ -24,6 +27,7 @@ export function createCursorAcpRuntime(params: {
   env?: NodeJS.ProcessEnv;
   startupOverrides?: Parameters<typeof createCatalogProviderAcpRuntime>[0]['startupOverrides'];
   pendingQueueDrainMaxPopPerWake?: number;
+  providerInputConsumer: SessionProviderInputConsumer<unknown, unknown>;
 }) {
   return createCatalogProviderAcpRuntime<CursorBackendOptions>({
     provider: 'cursor',
@@ -43,8 +47,13 @@ export function createCursorAcpRuntime(params: {
     startupOverrides: params.startupOverrides,
     getPermissionMode: params.getPermissionMode,
     pendingQueueDrainMaxPopPerWake: params.pendingQueueDrainMaxPopPerWake,
+    providerInputConsumer: params.providerInputConsumer,
     resolveSessionModelConfigUpdate: resolveCursorSessionModelConfigUpdate,
     deriveSessionModelsFromConfigOptions: buildCursorSessionModelsFromConfigOptions,
     resolveSessionConfigOptionUpdate: resolveCursorSessionConfigOptionUpdate,
+    sessionMediaProviderRoots: [resolveCursorGeneratedMediaRoot({
+      directory: params.directory,
+      env: params.env,
+    })],
   });
 }

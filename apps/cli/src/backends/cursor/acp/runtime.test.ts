@@ -7,6 +7,7 @@ import { writeAcpTestAgentScript } from '@/agent/acp/testkit/subprocessHarness';
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
 import { createApprovedPermissionHandler } from '@/testkit/backends/permissionHandler';
 import { createApiSessionClientFixture } from '@/testkit/backends/sessionFixtures';
+import { createSessionProviderInputConsumerFixture } from '@/testkit/backends/catalogAcpRuntime';
 import { withTempDir } from '@/testkit/fs/tempDir';
 
 import { createCursorAcpRuntime } from './runtime';
@@ -132,6 +133,7 @@ describe('createCursorAcpRuntime', () => {
             updatedAt: 123,
           },
         },
+        providerInputConsumer: createSessionProviderInputConsumerFixture(),
       });
 
       try {
