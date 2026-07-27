@@ -318,9 +318,7 @@ describe('createPtyTerminalHostAdapter', () => {
       ptyProvider: fake.provider,
       inputStabilityDelayMs: 0,
       postWriteLivenessDelayMs: 0,
-      promptSubmitVerification: createClaudePromptSubmitVerificationPolicy({
-        verifySingleLineAfterSubmit: true,
-      }),
+      promptSubmitVerification: createClaudePromptSubmitVerificationPolicy(),
     });
     const handle = await adapter.createOrAttachHost({
       sessionName: 'happier-claude-windows',

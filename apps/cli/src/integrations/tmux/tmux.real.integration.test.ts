@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'no
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { TmuxUtilities } from '@/integrations/tmux';
+import { createTmuxTerminalHostAdapter, TmuxUtilities } from '@/integrations/tmux';
 
 function isTmuxInstalled(): boolean {
     const result = spawnSync('tmux', ['-V'], { encoding: 'utf8' });
@@ -241,6 +241,65 @@ describe.skipIf(!shouldRunTmuxIntegration())('tmux (real) integration tests (opt
         } finally {
             // Kill only the isolated server (never touch the user's default tmux server).
             killIsolatedTmuxServer(socketPath);
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('creates and disposes an owned terminal host as one exact tmux session', async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'happier-cli-tmux-owned-it-'));
+        const socketPath = join(dir, 'tmux.sock');
+        const utils = new TmuxUtilities('happy', undefined, socketPath);
+        const adapter = createTmuxTerminalHostAdapter({ tmux: utils });
+
+        try {
+            const scriptPath = writeDumpScript(dir);
+            const outFile = join(dir, 'owned.json');
+            const sessionName = `happy-owned-it-${process.pid}-${Date.now()}`;
+            const handle = await adapter.createOrAttachHost({
+                sessionName,
+                workingDirectory: dir,
+                spawnArgv: [process.execPath, scriptPath, outFile, '5000', 'owned-host'],
+                spawnEnv: { FOO: 'owned-value' },
+                isolatedEnv: true,
+            });
+
+            await waitForFile(outFile, 2_000);
+            const payload = readDumpPayload(outFile);
+            expect(payload.argv).toEqual(['owned-host']);
+            expect(payload.env?.FOO).toBe('owned-value');
+
+            const windows = runTmux(['-S', socketPath, 'list-windows', '-t', sessionName, '-F', '#{window_name}']);
+            expect(windows.status).toBe(0);
+            expect(windows.stdout.trim().split('\n')).toEqual([sessionName]);
+            expect(handle.attachMetadata.topology).toBe('exclusive');
+
+            await expect(adapter.createOrAttachHost({
+                sessionName,
+                workingDirectory: dir,
+                spawnArgv: [process.execPath, scriptPath, join(dir, 'duplicate.json'), '5000', 'duplicate-host'],
+                spawnEnv: {},
+                isolatedEnv: true,
+            })).rejects.toThrow(/Failed to create tmux session/);
+            const afterDuplicateRefusal = runTmux([
+                '-S',
+                socketPath,
+                'list-windows',
+                '-t',
+                sessionName,
+                '-F',
+                '#{window_name}',
+            ]);
+            expect(afterDuplicateRefusal.status).toBe(0);
+            expect(afterDuplicateRefusal.stdout.trim().split('\n')).toEqual([sessionName]);
+
+            await adapter.dispose(handle);
+
+            const afterDispose = runTmux(['-S', socketPath, 'has-session', '-t', sessionName]);
+            expect(afterDispose.status).not.toBe(0);
+        } finally {
+            if (runTmux(['-S', socketPath, 'list-sessions']).status === 0) {
+                killIsolatedTmuxServer(socketPath);
+            }
             rmSync(dir, { recursive: true, force: true });
         }
     });

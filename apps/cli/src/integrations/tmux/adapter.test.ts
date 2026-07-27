@@ -70,25 +70,38 @@ describe('createTmuxTerminalHostAdapter', () => {
     });
     const adapter = createTmuxTerminalHostAdapter({ tmux });
 
-    await expect(adapter.createOrAttachHost({
+    const handle = await adapter.createOrAttachHost({
       sessionName: 'happy',
       workingDirectory: '/workspace/project',
       spawnArgv: ['/managed/node', 'claude_local_launcher.cjs'],
       spawnEnv: { HAPPIER_CLAUDE_PATH: '/opt/claude/cli.js' },
       isolatedEnv: true,
-    })).resolves.toMatchObject({
+    });
+    expect(handle).toMatchObject({
       kind: 'tmux',
       sessionName: 'happy',
       paneId: 'claude.1',
       attachMetadata: {
         attachStrategy: 'terminal_host',
-        topology: 'shared',
+        topology: 'exclusive',
         locality: 'same_machine',
         maxClients: null,
         requiresLocalAttachmentInfo: true,
         liveProbe: 'required',
       },
     });
+    expect(handle.attachmentId).toEqual(expect.any(String));
+    expect(handle.attachmentId).not.toHaveLength(0);
+    expect(tmux.spawnInTmux).toHaveBeenCalledWith(
+      ['/managed/node', 'claude_local_launcher.cjs'],
+      {
+        sessionName: 'happy',
+        windowName: 'happy',
+        cwd: '/workspace/project',
+        requireNewSession: true,
+      },
+      { HAPPIER_CLAUDE_PATH: '/opt/claude/cli.js' },
+    );
   });
 
   it('adopts an existing live tmux host without spawning a new window', async () => {
@@ -107,72 +120,49 @@ describe('createTmuxTerminalHostAdapter', () => {
     expect(spawnInTmux).not.toHaveBeenCalled();
   });
 
-  it('relaunches an existing tmux host by replacing the old window with a fresh command', async () => {
-    const tmux = new TmuxUtilities();
-    vi.spyOn(tmux, 'executeTmuxCommand').mockResolvedValue({
-      returncode: 0,
-      stdout: '0\t12345\tclaude\n',
-      stderr: '',
-      command: [],
-    });
-    const killWindow = vi.spyOn(tmux, 'killWindow').mockResolvedValue(true);
-    const spawnInTmux = vi.spyOn(tmux, 'spawnInTmux').mockResolvedValue({
-      success: true,
-      sessionName: 'happy',
-      windowName: 'fresh-window',
-    });
-    const adapter = createTmuxTerminalHostAdapter({ tmux });
-
-    await expect(adapter.relaunchExistingHost?.(TMUX_HANDLE, {
-      sessionName: 'ignored-fresh-name',
-      workingDirectory: '/workspace/project',
-      spawnArgv: ['/managed/node', 'terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
-      spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/claude-home' },
-      isolatedEnv: true,
-    })).resolves.toMatchObject({
-      kind: 'tmux',
-      sessionName: 'happy',
-      paneId: 'fresh-window',
-    });
-
-    expect(killWindow).toHaveBeenCalledWith('happy:claude.1');
-    expect(spawnInTmux).toHaveBeenCalledWith(
-      ['/managed/node', 'terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
-      {
-        sessionName: 'happy',
-        windowName: 'happy',
-        cwd: '/workspace/project',
-      },
-      { CLAUDE_CONFIG_DIR: '/tmp/claude-home' },
-    );
+  it('does not expose a destructive live-host relaunch operation', () => {
+    const adapter = createTmuxTerminalHostAdapter({ tmux: new TmuxUtilities() });
+    expect('relaunchExistingHost' in adapter).toBe(false);
   });
 
-  it('does not relaunch into an existing tmux host when the old window was not killed', async () => {
+  it('destroys only the owned tmux window for shared topology', async () => {
     const tmux = new TmuxUtilities();
-    vi.spyOn(tmux, 'executeTmuxCommand').mockResolvedValue({
+    const killWindow = vi.spyOn(tmux, 'killWindow').mockResolvedValue(true);
+    const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand');
+    const adapter = createTmuxTerminalHostAdapter({ tmux });
+
+    await adapter.dispose(TMUX_HANDLE);
+
+    expect(killWindow).toHaveBeenCalledWith('happy:claude.1');
+    expect(executeTmuxCommand).not.toHaveBeenCalledWith(['kill-session'], expect.anything());
+  });
+
+  it('destroys the owned tmux session for exclusive topology', async () => {
+    const tmux = new TmuxUtilities();
+    const killWindow = vi.spyOn(tmux, 'killWindow').mockResolvedValue(true);
+    const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockResolvedValue({
       returncode: 0,
-      stdout: '0\t12345\tclaude\n',
+      stdout: '',
       stderr: '',
-      command: [],
-    });
-    const killWindow = vi.spyOn(tmux, 'killWindow').mockResolvedValue(false);
-    const spawnInTmux = vi.spyOn(tmux, 'spawnInTmux').mockResolvedValue({
-      success: true,
-      sessionName: 'happy',
-      windowName: 'fresh-window',
+      command: ['kill-session'],
     });
     const adapter = createTmuxTerminalHostAdapter({ tmux });
 
-    await expect(adapter.relaunchExistingHost?.(TMUX_HANDLE, {
-      sessionName: 'ignored-fresh-name',
-      workingDirectory: '/workspace/project',
-      spawnArgv: ['/managed/node', 'terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
-      spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/claude-home' },
-      isolatedEnv: true,
-    })).rejects.toThrow('Failed to kill existing tmux terminal host before relaunch');
+    await adapter.dispose({
+      ...TMUX_HANDLE,
+      attachMetadata: { ...TMUX_HANDLE.attachMetadata, topology: 'exclusive' },
+    });
 
-    expect(killWindow).toHaveBeenCalledWith('happy:claude.1');
-    expect(spawnInTmux).not.toHaveBeenCalled();
+    expect(executeTmuxCommand).toHaveBeenCalledWith(['kill-session'], 'happy');
+    expect(killWindow).not.toHaveBeenCalled();
+  });
+
+  it('does not report shared tmux destruction when the owned window was not removed', async () => {
+    const tmux = new TmuxUtilities();
+    vi.spyOn(tmux, 'killWindow').mockResolvedValue(false);
+    const adapter = createTmuxTerminalHostAdapter({ tmux });
+
+    await expect(adapter.dispose(TMUX_HANDLE)).rejects.toThrow(/owned tmux window/i);
   });
 
   it('pastes prompt text through a tmux buffer and submits with carriage return', async () => {
@@ -217,6 +207,44 @@ describe('createTmuxTerminalHostAdapter', () => {
       ['send-keys', '-t', 'happy:claude.1', 'C-m'],
     ]);
     expect(calls[3]?.[5]).toBe('queued prompt');
+  });
+
+  it('does not claim a single-line Claude prompt was injected while it remains in the composer', async () => {
+    const tmux = new TmuxUtilities();
+    const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => ({
+      returncode: 0,
+      stdout: args[0] === 'display-message' ? '0\t12345\tclaude\n' : '',
+      stderr: '',
+      command: [...args],
+    }));
+    const captureCurrentInput = vi.spyOn(tmux, 'captureCurrentInput').mockResolvedValue([
+      'Please run /login · API Error: 401 Invalid authentication credentials',
+      '❯ continue',
+      '▶▶ auto mode on',
+    ].join('\n'));
+    const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
+
+    await expect(
+      adapter.injectUserPrompt(
+        TMUX_HANDLE,
+        {
+          text: 'continue',
+          multiline: false,
+          origin: { kind: 'ui_pending', nonce: 'nonce-single-line-stuck' },
+          scheduling: {},
+        },
+      ),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      phase: 'after_enter_unknown',
+      duplicateRisk: 'possible',
+    });
+
+    expect(executeTmuxCommand.mock.calls.map((call) => call[0]).filter((args) => args[0] === 'send-keys')).toEqual([
+      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+    ]);
+    expect(captureCurrentInput).toHaveBeenCalledTimes(2);
   });
 
   it('pastes multiline prompts without sending tmux newline keys before submit', async () => {

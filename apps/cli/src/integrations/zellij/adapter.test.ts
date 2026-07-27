@@ -139,6 +139,8 @@ describe('createZellijTerminalHostAdapter', () => {
       `run:session-a:${socketDir}::/managed/node|claude_local_launcher.cjs|--model|sonnet:/opt/claude/cli.js`,
     ]);
     expect(handle.paneId).toBe('terminal_42');
+    expect(handle.attachmentId).toEqual(expect.any(String));
+    expect(handle.attachmentId).not.toHaveLength(0);
     expect(handle.attachMetadata).toEqual({
       attachStrategy: 'terminal_host',
       topology: 'shared',
@@ -198,79 +200,14 @@ describe('createZellijTerminalHostAdapter', () => {
     expect(calls).toEqual([]);
   });
 
-  it('relaunches an existing zellij host by closing the old pane and running a fresh command in the same session', async () => {
-    const calls: string[] = [];
-    let listCount = 0;
-    const actions: ZellijActions = {
-      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-      runCommand: async (params) => {
-        calls.push(`run:${params.sessionName}:${params.command.join(' ')}`);
-        return { exitCode: 0, stdout: 'terminal_2\n', stderr: '' };
-      },
-      writeBytesChunked: async () => undefined,
-      sendEnter: async () => undefined,
-      sendEscape: async () => undefined,
-      closePane: async (params) => {
-        calls.push(`close:${params.paneId}`);
-      },
-      listPanes: async () => {
-        listCount += 1;
-        if (listCount === 1) {
-          return [
-            { id: 1, is_plugin: false, terminal_command: '/managed/node terminal_launch_spec_runner.cjs /tmp/old.json' },
-          ];
-        }
-        if (listCount === 2) {
-          return [
-            { id: 0, is_plugin: true, terminal_command: null },
-          ];
-        }
-        return [
-          { id: 0, is_plugin: true, terminal_command: null },
-          { id: 2, is_plugin: false, terminal_command: '/managed/node terminal_launch_spec_runner.cjs /tmp/fresh.json' },
-        ];
-      },
-      dumpScreen: async () => '',
-      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-      deleteSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-    };
+  it('does not expose a destructive live-host relaunch operation', () => {
+    // Boundary fixture: no zellij action is invoked while inspecting the adapter surface.
     const adapter = createZellijTerminalHostAdapter({
       zellijBinary: '/tools/zellij',
       happyHomeDir: '/home/happier',
-      actions,
+      actions: {} as ZellijActions,
     });
-
-    await expect(adapter.relaunchExistingHost?.({
-      kind: 'zellij',
-      sessionName: 'session-a',
-      paneId: 'terminal_1',
-      expectedCommandFragments: ['/managed/node', 'terminal_launch_spec_runner.cjs', '/tmp/old.json'],
-      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
-    }, {
-      sessionName: 'ignored-fresh-name',
-      workingDirectory: '/workspace/project',
-      spawnArgv: ['/managed/node', 'terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
-      spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/claude-home' },
-      isolatedEnv: true,
-    })).resolves.toMatchObject({
-      kind: 'zellij',
-      sessionName: 'session-a',
-      paneId: 'terminal_2',
-    });
-
-    expect(calls).toEqual([
-      'close:terminal_1',
-      'run:session-a:/managed/node terminal_launch_spec_runner.cjs /tmp/fresh.json',
-    ]);
-    expect(recordTerminalHostKillAudit).toHaveBeenCalledWith(expect.objectContaining({
-      actor: 'zellij.adapter',
-      reason: 'relaunch-existing-host',
-      sessionId: null,
-      runnerPid: process.pid,
-      zellijName: 'session-a',
-      signal: 'close-pane',
-      callSite: 'integrations.zellij.adapter.relaunchExistingHost',
-    }));
+    expect('relaunchExistingHost' in adapter).toBe(false);
   });
 
   it('reports conclusive pane death without a client probe when the session socket is absent', async () => {
@@ -484,51 +421,6 @@ describe('createZellijTerminalHostAdapter', () => {
       name: 'TerminalHostStartupError',
       reason: 'startup_action_timeout',
       diagnostics: expect.objectContaining({ action: 'list-panes', sessionName: 'session-a' }),
-    });
-  });
-
-  it('wraps relaunch close timeouts as startup-attempt failures', async () => {
-    const actions: ZellijActions = {
-      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-      runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-      writeBytesChunked: async () => undefined,
-      sendEnter: async () => undefined,
-      sendEscape: async () => undefined,
-      closePane: async () => {
-        throw new ZellijActionTimeoutError('close-pane');
-      },
-      listPanes: async () => [{
-        id: 1,
-        is_plugin: false,
-        terminal_command: '/managed/node terminal_launch_spec_runner.cjs /tmp/old.json',
-      }],
-      dumpScreen: async () => '',
-      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-      deleteSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-    };
-    const adapter = createZellijTerminalHostAdapter({
-      zellijBinary: '/tools/zellij',
-      happyHomeDir: '/home/happier',
-      actions,
-      actionTimeoutMs: 123,
-    });
-
-    await expect(adapter.relaunchExistingHost?.({
-      kind: 'zellij',
-      sessionName: 'session-a',
-      paneId: 'terminal_1',
-      expectedCommandFragments: ['/managed/node', 'terminal_launch_spec_runner.cjs', '/tmp/old.json'],
-      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
-    }, {
-      sessionName: 'ignored-fresh-name',
-      workingDirectory: '/workspace/project',
-      spawnArgv: ['/managed/node', 'terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
-      spawnEnv: {},
-      isolatedEnv: true,
-    })).rejects.toMatchObject({
-      name: 'TerminalHostStartupError',
-      reason: 'startup_action_timeout',
-      diagnostics: expect.objectContaining({ action: 'close-pane', sessionName: 'session-a' }),
     });
   });
 
@@ -2324,13 +2216,86 @@ describe('createZellijTerminalHostAdapter', () => {
       spawnEnv: {},
       isolatedEnv: true,
     });
-    await adapter.dispose(handle);
+    await adapter.dispose({
+      ...handle,
+      attachMetadata: { ...handle.attachMetadata, topology: 'exclusive' },
+    });
 
     expect(observedTimeouts).toEqual({ attach: 321, run: 321, kill: 321, delete: 321 });
     expect(calls).toEqual(['kill', 'delete']);
   });
 
-  it('treats zellij disposal action timeouts as non-fatal best-effort cleanup', async () => {
+  it('destroys only the exact owned pane for shared zellij topology', async () => {
+    const calls: string[] = [];
+    const actions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      writeBytesChunked: async () => undefined,
+      sendEnter: async () => undefined,
+      sendEscape: async () => undefined,
+      listPanes: async () => [],
+      dumpScreen: async () => '',
+      closePane: async (params: { paneId: string }) => {
+        calls.push(`close:${params.paneId}`);
+      },
+      killSession: async () => {
+        calls.push('kill');
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+      deleteSession: async () => {
+        calls.push('delete');
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    } as ZellijActions;
+    const adapter = createZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+    });
+
+    await adapter.dispose({
+      kind: 'zellij',
+      sessionName: 'shared-session',
+      paneId: 'terminal_9',
+      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+    });
+
+    expect(calls).toEqual(['close:terminal_9']);
+  });
+
+  it('parks shared zellij destruction when the owned pane is missing', async () => {
+    const closePane = vi.fn(async () => undefined);
+    const killSession = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const deleteSession = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    const actions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      writeBytesChunked: async () => undefined,
+      sendEnter: async () => undefined,
+      sendEscape: async () => undefined,
+      listPanes: async () => [],
+      dumpScreen: async () => '',
+      closePane,
+      killSession,
+      deleteSession,
+    } as ZellijActions;
+    const adapter = createZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+    });
+
+    await expect(adapter.dispose({
+      kind: 'zellij',
+      sessionName: 'shared-session',
+      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+    })).rejects.toThrow(/pane/i);
+    expect(closePane).not.toHaveBeenCalled();
+    expect(killSession).not.toHaveBeenCalled();
+    expect(deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('parks committed exclusive zellij destruction when teardown times out', async () => {
     const calls: string[] = [];
     const actions = {
       attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
@@ -2366,8 +2331,8 @@ describe('createZellijTerminalHostAdapter', () => {
       kind: 'zellij',
       sessionName: 'session-a',
       paneId: 'terminal_1',
-      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
-    })).resolves.toBeUndefined();
+      attachMetadata: { attachStrategy: 'terminal_host', topology: 'exclusive' },
+    })).rejects.toThrow(/owned zellij session/i);
     expect(calls).toEqual(['kill', 'delete']);
     expect(loggerWarn).toHaveBeenCalledTimes(2);
     expect(loggerWarn).toHaveBeenNthCalledWith(1, expect.stringContaining('kill-session'), expect.objectContaining({
@@ -3507,8 +3472,8 @@ describe('createZellijTerminalHostAdapter', () => {
       kind: 'zellij',
       sessionName: 'session-a',
       paneId: 'terminal_1',
-      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
-    })).resolves.toBeUndefined();
+      attachMetadata: { attachStrategy: 'terminal_host', topology: 'exclusive' },
+    })).rejects.toThrow(/owned zellij session/i);
     expect(calls).toEqual(['kill', 'delete']);
   });
 
@@ -3549,7 +3514,7 @@ describe('createZellijTerminalHostAdapter', () => {
       kind: 'zellij',
       sessionName: 'session-a',
       paneId: 'terminal_1',
-      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      attachMetadata: { attachStrategy: 'terminal_host', topology: 'exclusive' },
     })).resolves.toBeUndefined();
     expect(recordTerminalHostKillAudit).toHaveBeenCalledWith(expect.objectContaining({
       actor: 'zellij.adapter',

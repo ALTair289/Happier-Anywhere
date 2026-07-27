@@ -163,7 +163,7 @@ describe('TmuxUtilities.spawnInTmux', () => {
             }
 
             if (cmd[0] === 'has-session') return { returncode: 0, stdout: '', stderr: '', command: cmd };
-            if (cmd[0] === 'new-session') return { returncode: 0, stdout: '', stderr: '', command: cmd };
+            if (cmd[0] === 'new-session') return { returncode: 0, stdout: '4242\n', stderr: '', command: cmd };
             if (cmd[0] === 'new-window') return { returncode: 0, stdout: '4242\n', stderr: '', command: cmd };
             return { returncode: 0, stdout: '', stderr: '', command: cmd };
         }
@@ -220,6 +220,77 @@ describe('TmuxUtilities.spawnInTmux', () => {
         const detachedIndex = newWindowCall.cmd.indexOf('-d');
         expect(detachedIndex).toBeGreaterThanOrEqual(0);
         expect(detachedIndex).toBeLessThan(commandIndex);
+    });
+
+    it('creates an exclusive session with the provider as its initial window', async () => {
+        const tmux = new FakeTmuxUtilities();
+
+        const result = await tmux.spawnInTmux(
+            ['echo', 'hello'],
+            {
+                sessionName: 'owned-session',
+                windowName: 'provider',
+                cwd: '/tmp',
+                requireNewSession: true,
+            },
+            {},
+        );
+
+        expect(result).toMatchObject({
+            success: true,
+            sessionName: 'owned-session',
+            windowName: 'provider',
+            pid: 4242,
+        });
+        const createSessionCall = tmux.calls.find((call) => call.cmd[0] === 'new-session');
+        expect(createSessionCall?.cmd).toEqual(expect.arrayContaining([
+            'new-session',
+            '-d',
+            '-P',
+            '-F',
+            '#{pane_pid}',
+            '-s',
+            'owned-session',
+            '-n',
+            'provider',
+            '-c',
+            '/tmp',
+            "'echo' 'hello'",
+        ]));
+        expect(tmux.calls.some((call) => call.cmd[0] === 'has-session')).toBe(false);
+        expect(tmux.calls.some((call) => call.cmd[0] === 'new-window')).toBe(false);
+    });
+
+    it('fails without adding a window when an exclusive session name already exists', async () => {
+        class ExistingSessionTmuxUtilities extends FakeTmuxUtilities {
+            override async executeTmuxCommand(cmd: string[], session?: string): Promise<TmuxCommandResult | null> {
+                this.calls.push({ cmd, session });
+                if (cmd[0] === 'new-session') {
+                    return {
+                        returncode: 1,
+                        stdout: '',
+                        stderr: 'duplicate session: owned-session',
+                        command: cmd,
+                    };
+                }
+                return super.executeTmuxCommand(cmd, session);
+            }
+        }
+        const tmux = new ExistingSessionTmuxUtilities();
+
+        const result = await tmux.spawnInTmux(
+            ['echo', 'hello'],
+            {
+                sessionName: 'owned-session',
+                windowName: 'provider',
+                requireNewSession: true,
+            },
+            {},
+        );
+
+        expect(result).toMatchObject({ success: false });
+        expect(tmux.calls.filter((call) => call.cmd[0] === 'new-session')).toHaveLength(1);
+        expect(tmux.calls.some((call) => call.cmd[0] === 'new-window')).toBe(false);
     });
 
     it('quotes command arguments for tmux shell command safely', async () => {

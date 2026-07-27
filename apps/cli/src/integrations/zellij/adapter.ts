@@ -1,4 +1,5 @@
 import { basename } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 import { recordTerminalHostKillAudit } from '@/daemon/sessionKillAudit';
 import { logger } from '@/ui/logger';
@@ -1350,6 +1351,7 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
       });
     }
     return {
+      attachmentId: randomUUID() as TerminalHostHandle['attachmentId'],
       kind: 'zellij',
       sessionName: activeSessionName,
       ...(paneId ? { paneId } : {}),
@@ -1392,47 +1394,6 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
           sessionName: handle.sessionName,
           actionTimeoutMs,
           action: 'adopt',
-        });
-      }
-    },
-    async relaunchExistingHost(handle, opts) {
-      try {
-        const inspection = await inspectLiveness(handle);
-        if (inspection.probeError !== undefined) throw inspection.probeError;
-        if (!inspection.liveness.paneAlive || !inspection.targetPaneId) {
-          throw new TerminalHostStartupError({
-            hostKind: 'zellij',
-            reason: 'startup_action_failed',
-            message: 'Cannot relaunch zellij terminal host because the target pane is not alive',
-            diagnostics: {
-              action: 'relaunch',
-              sessionName: handle.sessionName,
-              timeoutMs: actionTimeoutMs,
-            },
-          });
-        }
-        recordTerminalHostKillAudit({
-          actor: 'zellij.adapter',
-          reason: 'relaunch-existing-host',
-          sessionId: null,
-          runnerPid: process.pid,
-          zellijName: handle.sessionName,
-          signal: 'close-pane',
-          callSite: 'integrations.zellij.adapter.relaunchExistingHost',
-        });
-        await actions.closePane({
-          zellijBinary: params.zellijBinary,
-          env: sessionEnv(env, handle.sessionName),
-          paneId: inspection.targetPaneId,
-          timeoutMs: actionTimeoutMs,
-        });
-        return createOrAttachHost({ ...opts, sessionName: handle.sessionName });
-      } catch (error) {
-        throw normalizeZellijStartupError({
-          error,
-          sessionName: handle.sessionName,
-          actionTimeoutMs,
-          action: 'relaunch',
         });
       }
     },
@@ -1647,13 +1608,38 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
       });
     },
     async dispose(handle: TerminalHostHandle): Promise<void> {
-      await disposeZellijSession({
+      if (handle.attachMetadata.topology === 'shared') {
+        const paneId = handle.paneId?.trim();
+        if (!paneId) {
+          throw new Error('Cannot destroy shared zellij terminal host without its owned pane id');
+        }
+        recordTerminalHostKillAudit({
+          actor: 'zellij.adapter',
+          reason: 'destroy-owned-host',
+          sessionId: null,
+          runnerPid: process.pid,
+          zellijName: handle.sessionName,
+          signal: 'close-pane',
+          callSite: 'integrations.zellij.adapter.dispose',
+        });
+        await actions.closePane({
+          zellijBinary: params.zellijBinary,
+          env: sessionEnv(env, handle.sessionName),
+          paneId,
+          timeoutMs: actionTimeoutMs,
+        });
+        return;
+      }
+      const disposed = await disposeZellijSession({
         actions,
         zellijBinary: params.zellijBinary,
         env,
         sessionName: handle.sessionName,
         actionTimeoutMs,
       });
+      if (!disposed.killCompleted || !disposed.deleteCompleted) {
+        throw new Error(`Failed to destroy owned zellij session ${handle.sessionName}`);
+      }
     },
   };
 }

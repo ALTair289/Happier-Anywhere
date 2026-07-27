@@ -105,17 +105,19 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
       sessionName: opts.sessionName,
       windowName: opts.sessionName,
       cwd: opts.workingDirectory,
+      requireNewSession: true,
     }, { ...opts.spawnEnv });
     if (!result.success) {
       throw new Error(result.error ?? 'Failed to create tmux terminal host');
     }
     return {
+      attachmentId: randomUUID() as TerminalHostHandle['attachmentId'],
       kind: 'tmux',
       sessionName: result.sessionName ?? opts.sessionName,
       paneId: result.windowName,
       attachMetadata: {
         attachStrategy: 'terminal_host',
-        topology: 'shared',
+        topology: 'exclusive',
         locality: 'same_machine',
         maxClients: null,
         requiresLocalAttachmentInfo: true,
@@ -133,17 +135,6 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
         throw new Error('Cannot adopt tmux terminal host because the target pane is not alive');
       }
       return handle;
-    },
-    async relaunchExistingHost(handle, opts) {
-      const liveness = await evaluateLiveness(handle);
-      if (!liveness.paneAlive) {
-        throw new Error('Cannot relaunch tmux terminal host because the target pane is not alive');
-      }
-      const killed = await tmux.killWindow(targetFromHandle(handle));
-      if (!killed) {
-        throw new Error('Failed to kill existing tmux terminal host before relaunch');
-      }
-      return createOrAttachHost({ ...opts, sessionName: handle.sessionName });
     },
     async injectUserPrompt(
       handle: TerminalHostHandle,
@@ -273,7 +264,20 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
       });
     },
     async dispose(handle: TerminalHostHandle) {
-      await tmux.killWindow(targetFromHandle(handle));
+      if (handle.attachMetadata.topology === 'exclusive') {
+        const result = await tmux.executeTmuxCommand(['kill-session'], handle.sessionName);
+        if (!result || result.returncode !== 0) {
+          throw new Error(`Failed to destroy owned tmux session ${handle.sessionName}`);
+        }
+        return;
+      }
+      if (!handle.paneId?.trim()) {
+        throw new Error('Cannot destroy shared tmux terminal host without its owned window id');
+      }
+      const removed = await tmux.killWindow(targetFromHandle(handle));
+      if (!removed) {
+        throw new Error(`Failed to destroy owned tmux window ${targetFromHandle(handle)}`);
+      }
     },
   };
 }

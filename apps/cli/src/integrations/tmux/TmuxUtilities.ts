@@ -43,6 +43,8 @@ export interface TmuxSpawnOptions extends Omit<SpawnOptions, 'env'> {
   createWindow?: boolean;
   /** Window name for new windows */
   windowName?: string;
+  /** Create a new owned session whose initial window runs the command; fail if the name exists. */
+  requireNewSession?: boolean;
   // Note: env is intentionally excluded from this interface.
   // It's passed as a separate parameter to spawnInTmux() for clarity
   // and efficiency - only variables that differ from the tmux server
@@ -514,15 +516,19 @@ export class TmuxUtilities {
 
       const windowName = options.windowName || `happy-${Date.now()}`;
 
-      // Ensure session exists
-      await this.ensureSessionExists(sessionName);
+      const requireNewSession = options.requireNewSession === true;
+      if (!requireNewSession) {
+        await this.ensureSessionExists(sessionName);
+      }
 
       // Build command to execute in the new window
       const fullCommand = buildPosixShellCommand(args);
 
       // Create new window in session with command and environment variables
       // IMPORTANT: Don't manually add -t here - executeTmuxCommand handles it via parameters
-      const baseCreateWindowArgs = ['new-window', '-d', '-P', '-F', '#{pane_pid}', '-n', windowName];
+      const baseCreateWindowArgs = requireNewSession
+        ? ['new-session', '-d', '-P', '-F', '#{pane_pid}', '-s', sessionName, '-n', windowName]
+        : ['new-window', '-d', '-P', '-F', '#{pane_pid}', '-n', windowName];
 
       // Add working directory if specified
       if (options.cwd) {
@@ -530,8 +536,10 @@ export class TmuxUtilities {
         baseCreateWindowArgs.push('-c', cwdPath);
       }
 
-      // Add target session explicitly so option ordering is correct.
-      baseCreateWindowArgs.push('-t', sessionName);
+      if (!requireNewSession) {
+        // Add target session explicitly so option ordering is correct.
+        baseCreateWindowArgs.push('-t', sessionName);
+      }
 
       // Add environment variables using -e flag (sets them in the window's environment)
       // Note: tmux windows inherit environment from tmux server, but we need to ensure
@@ -576,8 +584,11 @@ export class TmuxUtilities {
       // Note: tmux can fail with `create window failed: index N in use` when multiple
       // clients concurrently create windows in the same session (tmux does not always
       // auto-retry the window index allocation). Retry a few times to make concurrent
-      // session starts robust.
-      const maxAttempts = readPositiveIntegerEnv('HAPPIER_CLI_TMUX_CREATE_WINDOW_MAX_ATTEMPTS', 3);
+      // session starts robust. An exclusive new-session attempt is atomic and never retries
+      // into an existing session: a duplicate name belongs to another live/recoverable owner.
+      const maxAttempts = requireNewSession
+        ? 1
+        : readPositiveIntegerEnv('HAPPIER_CLI_TMUX_CREATE_WINDOW_MAX_ATTEMPTS', 3);
       const retryDelayMs = readNonNegativeIntegerEnv('HAPPIER_CLI_TMUX_CREATE_WINDOW_RETRY_DELAY_MS', 25);
 
       const withExplicitTargetWindowIndex = (args: string[], target: string): string[] => {
@@ -644,7 +655,8 @@ export class TmuxUtilities {
       if (!createResult || createResult.returncode !== 0) {
         const tIndex = createWindowArgsForAttempt.indexOf('-t');
         const target = tIndex >= 0 ? createWindowArgsForAttempt[tIndex + 1] : sessionName;
-        throw new Error(`Failed to create tmux window (target=${target}): ${createResult?.stderr}`);
+        const resourceKind = requireNewSession ? 'session' : 'window';
+        throw new Error(`Failed to create tmux ${resourceKind} (target=${target}): ${createResult?.stderr}`);
       }
 
       // Extract the PID from the output
