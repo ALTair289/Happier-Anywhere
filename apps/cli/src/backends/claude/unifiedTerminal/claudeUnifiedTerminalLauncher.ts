@@ -949,7 +949,6 @@ export async function claudeUnifiedTerminalLauncher(
       providerActivityLedger: session.getProviderTaskActivityLedger() ?? undefined,
       registerTerminalComposerClearRuntimeControl: (clearTerminalComposer) =>
         session.client.registerSessionRuntimeControls?.({ clearTerminalComposer }) ?? (() => undefined),
-      enablePendingInputInterruptAndRun: false,
       onPendingInputInterruptAndRunLocalIdChange:
         inFlightSteerCapabilityPublisher.publishPendingInputInterruptAndRunLocalId,
       registerPendingInputInterruptAndRunRuntimeControl: (interruptPendingInputAndRun) =>

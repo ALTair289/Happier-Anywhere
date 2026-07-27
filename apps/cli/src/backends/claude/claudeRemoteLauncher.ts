@@ -1906,7 +1906,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             onTerminalInjectionFailure: surfaceGenerationUnifiedTerminalRuntimeIssue,
                             registerTerminalComposerClearRuntimeControl: (clearTerminalComposer) =>
                                 session.client.registerSessionRuntimeControls?.({ clearTerminalComposer }) ?? (() => undefined),
-                            enablePendingInputInterruptAndRun: false,
                             onPendingInputInterruptAndRunLocalIdChange:
                                 inFlightSteerCapabilityPublisher.publishPendingInputInterruptAndRunLocalId,
                             registerPendingInputInterruptAndRunRuntimeControl: (interruptPendingInputAndRun) =>

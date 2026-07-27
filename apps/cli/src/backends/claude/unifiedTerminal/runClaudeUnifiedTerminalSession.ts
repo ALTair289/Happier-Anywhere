@@ -36,6 +36,7 @@ import { createClaudeUnifiedHostLivenessBridge } from './createClaudeUnifiedHost
 import { assertClaudeUnifiedHookActivationBeforeTranscriptFallback } from './claudeUnifiedHookActivation';
 import { createClaudeUnifiedInputArbiter } from './createClaudeUnifiedInputArbiter';
 import { interruptClaudeUnifiedQueuedPrompt } from './interruptClaudeUnifiedQueuedPrompt';
+import { isClaudeUnifiedPendingInputInterruptAndRunEnabled } from './pendingInputInterruptAndRunActivation';
 import {
   createClaudeGoalRuntimeControls,
   type ClaudeGoalCommandDelivery,
@@ -376,8 +377,6 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
       request: Readonly<SessionTerminalComposerClearRequestV1>,
     ) => Promise<SessionTerminalComposerClearResultV1>,
   ) => (() => void) | void) | undefined;
-  /** Enables only on a host/build combination backed by a current real-Claude probe. */
-  enablePendingInputInterruptAndRun?: boolean | undefined;
   onPendingInputInterruptAndRunLocalIdChange?: ((localId: string | null) => void) | undefined;
   registerPendingInputInterruptAndRunRuntimeControl?: ((
     interruptPendingInputAndRun: (
@@ -1686,6 +1685,8 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         return result;
       },
     };
+    const pendingInputInterruptAndRunEnabled =
+      isClaudeUnifiedPendingInputInterruptAndRunEnabled(hostResolution.adapter.kind);
 
     // Preserve the public custom-controller seam: custom controllers still receive the same gated
     // TerminalInputInjectionV1. The default controller gives the prompt injector the raw host writer
@@ -1850,7 +1851,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         isPromptDeliveryAccepted: opts.isPromptDeliveryAccepted,
         onPendingInputInterruptAndRunLocalIdChange: (localId) => {
           opts.onPendingInputInterruptAndRunLocalIdChange?.(
-            opts.enablePendingInputInterruptAndRun === true ? localId : null,
+            pendingInputInterruptAndRunEnabled ? localId : null,
           );
         },
         onInjectionFailure: async (failure) => {
@@ -1948,7 +1949,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       }
       arbiterForPromptCustody = arbiter;
       if (
-        opts.enablePendingInputInterruptAndRun === true
+        pendingInputInterruptAndRunEnabled
         && opts.registerPendingInputInterruptAndRunRuntimeControl
         && hostResolution.adapter.captureInputState
       ) {
