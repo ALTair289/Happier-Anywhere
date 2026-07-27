@@ -11,6 +11,7 @@ import {
   type ConnectedServiceCredentialHealthV1,
   type ConnectedServiceCredentialHealthStatusV1,
   type ConnectedServiceCredentialRecordV1,
+  type ConnectedServiceCredentialRevisionV1,
   type ConnectedServiceId,
   type ConnectedServiceUsageSourceV1,
   type ProviderAccountUsageRecordKeyV1,
@@ -205,7 +206,8 @@ export type QuotaApi = Readonly<{
     serviceId: ConnectedServiceId;
     profileId: string;
     health: ConnectedServiceCredentialHealthV1;
-  }>) => Promise<void>;
+    expectedCredentialRevision?: string;
+  }>) => Promise<unknown>;
   getConnectedServiceAuthGroup?: (args: Readonly<{
     serviceId: ConnectedServiceId;
     groupId: string;
@@ -214,6 +216,7 @@ export type QuotaApi = Readonly<{
     serviceId: ConnectedServiceId;
     groupId: string;
     expectedGeneration: number;
+    expectedRuntimeStateRevision: number;
     memberStates: ReadonlyArray<Readonly<ConnectedServiceAuthGroupRuntimeStatePatchRequestV1['memberStates'][number]>>;
   }>) => Promise<ConnectedServiceAuthGroupV1>;
 }>;
@@ -332,20 +335,16 @@ export function normalizeConnectedServiceQuotaGeneration(value: number | null | 
     : null;
 }
 
-export function buildConnectedServiceUsageSourceKey(input: Readonly<{
-  serviceId: ConnectedServiceId;
-  profileId: string;
-  bindingKind: ConnectedServiceUsageSourceV1['bindingKind'];
-  groupId?: string | null;
-  groupGeneration?: number | null;
-}>): string {
-  return [
-    input.serviceId,
-    input.profileId.trim(),
-    input.bindingKind,
-    input.groupId?.trim() ?? '',
-    normalizeConnectedServiceQuotaGeneration(input.groupGeneration) ?? '',
-  ].join('\u0000');
+export function buildConnectedServiceUsageSourceKey(input: ConnectedServiceUsageSourceV1): string {
+  return input.bindingKind === 'profile'
+    ? ['profile', input.serviceId, input.profileId.trim()].join('\u0000')
+    : [
+      'group_member',
+      input.serviceId,
+      input.profileId.trim(),
+      input.groupId.trim(),
+      normalizeConnectedServiceQuotaGeneration(input.groupGeneration) ?? '',
+    ].join('\u0000');
 }
 
 export type ConnectedServiceQuotaRecoveryCreditConsumeResult =
@@ -414,19 +413,22 @@ export type AuthGroupSwitchCoordinator = Readonly<{
     observedProfileId?: string | null;
     deferUntilTurnBoundary?: boolean;
   }>): Promise<unknown>;
-}>;
-export type SoftSwitchRecoveryGuardResult =
-  | Readonly<{ status: 'allow' }>
-  | Readonly<{ status: 'suppress' | 'fold'; reason: string }>;
-export type ConnectedServiceQuotaSoftSwitchRecoveryGuard = (
-  input: Readonly<{
+  applyCommittedGeneration?(input: Readonly<{
     sessionId: string;
-    serviceId: ConnectedServiceId;
+    serviceId: string;
     groupId: string;
     activeProfileId: string;
-    reason: 'soft_threshold';
-  }>,
-) => SoftSwitchRecoveryGuardResult | Promise<SoftSwitchRecoveryGuardResult>;
+    generation: number;
+    credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
+    reason: string;
+    fromProfileId?: string | null;
+  }>): Promise<Readonly<{
+    status: string;
+    activeProfileId?: string | null;
+    generation: number;
+    errorCode?: string;
+  }>>;
+}>;
 export type ConnectedServiceSameAccountFanoutStrategyResolver = (input: Readonly<{
   sourceSessionId: string;
   serviceId: ConnectedServiceId;

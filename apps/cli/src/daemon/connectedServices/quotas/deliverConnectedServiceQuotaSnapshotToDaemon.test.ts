@@ -25,11 +25,16 @@ describe('deliverConnectedServiceQuotaSnapshotToDaemon', () => {
       groupId: 'main',
       groupGeneration: 3,
       sourceProviderAccountId: 'acct-provider-123',
+      credentialFingerprint: 'sha256:abcdef12',
       snapshot,
     });
 
     expect(notifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenCalledWith(
-      expect.objectContaining({ sourceProviderAccountId: 'acct-provider-123', serviceId: 'openai-codex' }),
+      expect.objectContaining({
+        sourceProviderAccountId: 'acct-provider-123',
+        credentialFingerprint: 'sha256:abcdef12',
+        serviceId: 'openai-codex',
+      }),
     );
   });
 });
@@ -47,12 +52,16 @@ describe('createCodexQuotaSnapshotDeliveryOutboxForNotify (no explicit notify)',
       groupId: 'main',
       groupGeneration: 3,
       sourceProviderAccountId: 'acct-provider-123',
+      credentialFingerprint: 'sha256:abcdef12',
       snapshot,
     });
 
     expect(notifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenCalledTimes(1);
     expect(notifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenCalledWith(
-      expect.objectContaining({ sourceProviderAccountId: 'acct-provider-123' }),
+      expect.objectContaining({
+        sourceProviderAccountId: 'acct-provider-123',
+        credentialFingerprint: 'sha256:abcdef12',
+      }),
     );
   });
 });

@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '../connectedServiceChildEnvironment';
 import { ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore } from '../accountGroups/quotas/ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore';
 import { recordConnectedServiceRuntimeQuotaSnapshotForSession } from './recordConnectedServiceRuntimeQuotaSnapshotForSession';
-import { createConnectedServiceQuotaSnapshotDeliveryOutbox } from './connectedServiceQuotaSnapshotDeliveryOutbox';
+import {
+  createConnectedServiceQuotaSnapshotDeliveryOutbox,
+  type ConnectedServiceQuotaSnapshotDeliveryInput,
+} from './connectedServiceQuotaSnapshotDeliveryOutbox';
 
 function quotaSnapshot(overrides: Partial<{
   serviceId: 'openai-codex' | 'claude-subscription';
@@ -105,7 +108,7 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
         serviceId: 'openai-codex',
         groupId: 'main',
         activeAccountId: 'acct_latest',
-        attemptCount: 2,
+        attemptCount: 1,
         reason: 'daemon_quota_snapshot_delivery_failed',
       }),
     ]));
@@ -411,6 +414,67 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
 
     expect(deliver).toHaveBeenCalledTimes(3);
     expect(outbox.pendingCount()).toBe(0);
+  });
+
+  it('stops automatic retry at the bound while retaining the latest snapshot for a reconnect flush', async () => {
+    vi.useFakeTimers();
+    const deliver = vi.fn(async (): Promise<unknown> => ({ error: 'daemon offline' }));
+    const outbox = createConnectedServiceQuotaSnapshotDeliveryOutbox({
+      deliver,
+      maxAttempts: 2,
+      retryDelayMs: 10,
+    });
+
+    await outbox.enqueueAndFlush({
+      sessionId: 'sess_1',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 7,
+      snapshot: quotaSnapshot({ activeAccountId: 'acct_live', fetchedAt: 1_000 }),
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(outbox.pendingCount()).toBe(1);
+
+    deliver.mockResolvedValueOnce({ ok: true });
+    await outbox.flushPending({ reason: 'daemon_reconnect' });
+
+    expect(deliver).toHaveBeenCalledTimes(3);
+    expect(outbox.pendingCount()).toBe(0);
+  });
+
+  it('does not spend an exhausted slot again when a different new snapshot flushes initially', async () => {
+    const deliver = vi.fn(async (_input: ConnectedServiceQuotaSnapshotDeliveryInput) => ({
+      error: 'daemon offline',
+    }));
+    const outbox = createConnectedServiceQuotaSnapshotDeliveryOutbox({
+      deliver,
+      maxAttempts: 1,
+    });
+
+    await outbox.enqueueAndFlush({
+      sessionId: 'sess_1',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 1,
+      snapshot: quotaSnapshot({ activeAccountId: 'acct_exhausted' }),
+    });
+    await outbox.enqueueAndFlush({
+      sessionId: 'sess_1',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 2,
+      snapshot: quotaSnapshot({ activeAccountId: 'acct_new' }),
+    });
+
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver.mock.calls.map((call) => call[0].snapshot.activeAccountId)).toEqual([
+      'acct_exhausted',
+      'acct_new',
+    ]);
   });
 
   it('reports overflow drops in the next flush result', async () => {

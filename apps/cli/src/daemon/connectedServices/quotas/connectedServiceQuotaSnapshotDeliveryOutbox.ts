@@ -13,6 +13,12 @@ export type ConnectedServiceQuotaSnapshotDeliveryInput = ConnectedServiceQuotaSn
   groupId?: string | null;
   groupGeneration?: number | null;
   sourceProviderAccountId?: string | null;
+  credentialFingerprint?: string | null;
+  /**
+   * The snapshot was read only to preserve evidence after an already-surfaced hard failure.
+   * Missing means ordinary predictive quota evaluation for compatibility with older runners.
+   */
+  policyDisposition?: 'evidence_only';
 }>;
 
 export type ConnectedServiceQuotaSnapshotDeliveryFlushReason =
@@ -207,7 +213,11 @@ export function createConnectedServiceQuotaSnapshotDeliveryOutbox(params: Readon
   };
 
   const scheduleRetry = (): void => {
-    if (retryDelayMs === null || pending.size === 0 || retryTimer) return;
+    if (
+      retryDelayMs === null
+      || retryTimer
+      || !Array.from(pending.values()).some((entry) => entry.attempts < maxAttempts)
+    ) return;
     retryTimer = setTimeout(() => {
       retryTimer = null;
       void flushPending({ reason: 'periodic_retry' });
@@ -217,10 +227,11 @@ export function createConnectedServiceQuotaSnapshotDeliveryOutbox(params: Readon
 
   const enqueue = (input: ConnectedServiceQuotaSnapshotDeliveryInput): void => {
     const key = slotKey(input);
-    const existing = pending.get(key);
     pending.set(key, {
       input,
-      attempts: existing?.attempts ?? 0,
+      // A newly observed snapshot is a meaningful delivery trigger. It supersedes the
+      // retained payload and receives its own bounded automatic retry budget.
+      attempts: 0,
       lastError: null,
     });
     enforceMaxPendingEntries();
@@ -238,6 +249,10 @@ export function createConnectedServiceQuotaSnapshotDeliveryOutbox(params: Readon
     let delivered = 0;
     for (const [key, entry] of Array.from(pending.entries())) {
       if (options.sessionId && entry.input.sessionId !== options.sessionId) continue;
+      if (
+        (flushReason === 'initial' || flushReason === 'periodic_retry')
+        && entry.attempts >= maxAttempts
+      ) continue;
       const attemptCount = entry.attempts + 1;
       attempted += 1;
       try {

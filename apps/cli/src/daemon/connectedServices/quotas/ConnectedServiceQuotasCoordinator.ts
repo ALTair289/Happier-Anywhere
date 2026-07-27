@@ -1,5 +1,8 @@
 import {
   ConnectedServiceIdSchema,
+  ConnectedServiceCredentialRecordV1Schema,
+  ConnectedServiceCredentialRevisionV1Schema,
+  ConnectedServiceUsageSourceV1Schema,
   isConnectedServiceCredentialHealthStatusUsable,
   type ConnectedServiceAuthGroupRuntimeStatePatchRequestV1,
   type ConnectedServiceAuthGroupV1,
@@ -20,6 +23,8 @@ import {
 } from '@happier-dev/protocol';
 
 import type { Credentials } from '@/persistence';
+import { ConnectedServiceAuthGroupRuntimeStateRevisionConflictError } from '@/api/connectedServices/connectedServiceCredentialApi';
+import { assertConnectedServiceCredentialRecordBinding } from '@/cloud/connectedServices/resolveConnectedServiceCredentials';
 import {
   invalidateConnectedServiceAccountMode,
   resolveConnectedServiceAccountMode,
@@ -51,10 +56,7 @@ import {
   type ConnectedServiceUsageSourceRecordRef,
 } from '../accountGroups/switching/buildConnectedServiceAuthGroupSwitchStateFromAccountUsage';
 import {
-  hasConnectedServiceAuthGroupCandidateEvidenceForSwitchReason,
-  isConnectedServiceAuthGroupSoftSwitchCandidateMeaningfullyBetter,
   resolveConnectedServiceAuthGroupSoftSwitchSourceEvidence,
-  selectConnectedServiceAuthGroupCandidate,
   type ConnectedServiceAuthGroupMemberRuntimeState,
 } from '../accountGroups/selection/selectConnectedServiceAuthGroupCandidate';
 import { reconcileMemberRuntimeStateWithFreshQuotaEvidence } from '../accountGroups/memberRuntimeState';
@@ -95,11 +97,13 @@ import type {
   RuntimeAccountIdentityProbeResult,
   RuntimeAccountIdentityRecordInput,
   RuntimeAccountIdentityRecordResult,
+  RuntimeAccountIdentitySelection,
   RuntimeAccountIdentitySelectionInput,
   RuntimeAccountIdentitySource,
 } from './identity/runtimeAccountIdentityTypes';
 import {
   resolveQuotaProbeFreshProof,
+  type QuotaProbeAppliedIdentity,
   type QuotaProbeFreshProofResult,
 } from './proof/quotaProbeFreshProof';
 import type { ConnectedServiceRuntimeAuthApplyCapability } from '../credentials/lifecycleTypes';
@@ -107,6 +111,13 @@ import {
   evaluateConnectedServiceSwitchApplyPolicy,
   runtimeAuthApplyRequiresLiveIdentityProbe,
 } from '../accountGroups/switching/predictiveSoftSwitchPolicy';
+import {
+  buildConnectedServiceAuthGroupCommittedGenerationFact,
+  buildConnectedServiceAuthGroupTargetEpochIdentity,
+  type ConnectedServiceAuthGroupCommittedGenerationFact,
+} from '../sessionAuthSwitch/connectedServiceAuthSwitchOutcome';
+import type { ConnectedServiceAuthGroupGenerationConsumptionOutcome } from '../accountGroups/generation/ConnectedServiceAuthGroupGenerationConsumer';
+import { hasExactAcceptedConnectedServiceTargetAdoptionProof } from '../accountTransitions/acceptedConnectedServiceAccountVerification';
 import {
   ConnectedServiceRuntimeRegistry,
   type ConnectedServiceRuntimeQuotaTarget,
@@ -126,6 +137,7 @@ import {
 } from '../accountUsage/record';
 import { computeProviderAccountUsageSnapshotFingerprint } from '../accountUsage/fingerprint';
 import { recordFetchedQuotaSnapshotAsAccountUsage } from './accountUsage/recordFetchedQuotaSnapshotAsAccountUsage';
+
 import {
   annotateSnapshotAsStale,
   buildConnectedServiceUsageSourceKey,
@@ -161,7 +173,6 @@ import {
   type ConnectedServiceQuotaPersistenceFlushResult,
   type ConnectedServiceQuotaRecoveryCreditConsumeResult,
   type ConnectedServiceQuotaSoftSwitchPolicyGuard,
-  type ConnectedServiceQuotaSoftSwitchRecoveryGuard,
   type ConnectedServiceRuntimeAuthApplyCapabilityResolver,
   type ConnectedServiceSameAccountFanoutStrategyResolver,
   type ConnectedServicesBindingsV1Like,
@@ -181,8 +192,18 @@ import {
   type SameAccountFanoutDecisionTrace,
   type SameAccountFanoutProofSource,
   type SoftSwitchPolicyGuardResult,
-  type SoftSwitchRecoveryGuardResult,
 } from './coordinator/support';
+
+export type ConsumeCommittedAuthGroupGeneration = (input: Readonly<{
+  committedGeneration: ConnectedServiceAuthGroupCommittedGenerationFact;
+  switchReason: 'pre_turn_group_policy' | 'automatic_runtime_failure';
+  sessions: ReadonlyArray<Readonly<{
+    sessionId: string;
+    activity: 'live';
+    fromProfileId: string | null;
+  }>>;
+  executionAuthority: 'runtime_recovery';
+}>) => Promise<Readonly<{ outcome: ConnectedServiceAuthGroupGenerationConsumptionOutcome }>>;
 
 export type {
   ConnectedServiceInBandQuotaSnapshotRecordResult,
@@ -192,10 +213,10 @@ export type {
   ConnectedServiceQuotaPersistenceFlushResult,
   ConnectedServiceQuotaRecoveryCreditConsumeResult,
   ConnectedServiceQuotaSoftSwitchPolicyGuard,
-  ConnectedServiceQuotaSoftSwitchRecoveryGuard,
 } from './coordinator/support';
 
 export class ConnectedServiceQuotasCoordinator {
+  private static readonly MAX_STARTUP_CURRENT_SOURCE_REFRESHES = 256;
   private readonly api: QuotaApi;
   private readonly credentials: Credentials;
   private readonly quotaFetchersByServiceId: Map<ConnectedServiceId, ConnectedServiceQuotaFetcher>;
@@ -224,8 +245,8 @@ export class ConnectedServiceQuotasCoordinator {
   private readonly quotaFingerprintKeyMaterial: Uint8Array;
   private quotaFingerprintHmacKey: Uint8Array;
   private readonly authGroupSwitchCoordinator: AuthGroupSwitchCoordinator | null;
+  private readonly consumeCommittedAuthGroupGeneration: ConsumeCommittedAuthGroupGeneration | null;
   private readonly softSwitchPolicyGuard: ConnectedServiceQuotaSoftSwitchPolicyGuard | null;
-  private readonly softSwitchRecoveryGuard: ConnectedServiceQuotaSoftSwitchRecoveryGuard | null;
   private readonly sameAccountFanoutStrategyResolver: ConnectedServiceSameAccountFanoutStrategyResolver | null;
   private readonly refreshConnectedServiceCredentialForQuota: RefreshConnectedServiceCredentialForQuota | null;
   private readonly runtimeAuthApplyCapabilityResolver: ConnectedServiceRuntimeAuthApplyCapabilityResolver | null;
@@ -252,6 +273,7 @@ export class ConnectedServiceQuotasCoordinator {
   private readonly quotaLifecycleStateByGroupKey = new Map<string, ConnectedServiceAuthGroupQuotaLifecycleState>();
   private readonly recoveryCreditConsumeResultsByKey = new Map<string, ConnectedServiceQuotaRecoveryCreditConsumeResult>();
   private readonly recoveryCreditConsumeInFlightByKey = new Map<string, Promise<ConnectedServiceQuotaRecoveryCreditConsumeResult>>();
+  private readonly startupCurrentSourceRefreshByKey = new Map<string, ConnectedServiceUsageSourceV1>();
   private lastDiscoveryAt = 0;
 
   public constructor(params: Readonly<{
@@ -291,8 +313,8 @@ export class ConnectedServiceQuotasCoordinator {
     quotaPersistenceMinFreshnessRefreshMs?: number;
     quotaPersistenceMaxConsecutiveFailures?: number;
     authGroupSwitchCoordinator?: AuthGroupSwitchCoordinator | null;
+    consumeCommittedAuthGroupGeneration?: ConsumeCommittedAuthGroupGeneration | null;
     softSwitchPolicyGuard?: ConnectedServiceQuotaSoftSwitchPolicyGuard | null;
-    softSwitchRecoveryGuard?: ConnectedServiceQuotaSoftSwitchRecoveryGuard | null;
     sameAccountFanoutStrategyResolver?: ConnectedServiceSameAccountFanoutStrategyResolver | null;
     runtimeAuthApplyCapabilityResolver?: ConnectedServiceRuntimeAuthApplyCapabilityResolver | null;
     readRuntimeAccountIdentity?: RuntimeAccountIdentityReader | null;
@@ -348,8 +370,8 @@ export class ConnectedServiceQuotasCoordinator {
         : 5_000;
     this.sleepMs = params.sleepMs ?? defaultSleepMs;
     this.authGroupSwitchCoordinator = params.authGroupSwitchCoordinator ?? null;
+    this.consumeCommittedAuthGroupGeneration = params.consumeCommittedAuthGroupGeneration ?? null;
     this.softSwitchPolicyGuard = params.softSwitchPolicyGuard ?? null;
-    this.softSwitchRecoveryGuard = params.softSwitchRecoveryGuard ?? null;
     this.sameAccountFanoutStrategyResolver = params.sameAccountFanoutStrategyResolver ?? null;
     this.refreshConnectedServiceCredentialForQuota = params.refreshConnectedServiceCredentialForQuota ?? null;
     this.runtimeAuthApplyCapabilityResolver = params.runtimeAuthApplyCapabilityResolver ?? null;
@@ -645,7 +667,7 @@ export class ConnectedServiceQuotasCoordinator {
     groupGeneration: number;
     recordId: string;
     snapshot: ProviderAccountUsageSnapshotV1;
-    source?: 'poll' | 'in_band';
+    source?: 'poll' | 'in_band' | 'evidence_only';
   }>): Promise<void> {
     void input.recordId;
     const listener = this.onQuotaLifecycleTransition;
@@ -665,7 +687,18 @@ export class ConnectedServiceQuotasCoordinator {
     // soft-switch check (`source: 'poll'`), so suppress the reactive re-check there to avoid a
     // double-request. Best-effort; the poll remains the backstop.
     const changedProfileId = input.profileId.trim();
-    if (input.source !== 'poll' && changedProfileId) {
+    if (input.source === 'evidence_only') {
+      this.recordDiagnostic?.({
+        event: 'quota_work_suppressed',
+        phase: 'soft_switch',
+        reason: 'post_hard_limit_snapshot_evidence_only',
+        sessionId: input.sessionId,
+        serviceId: input.serviceId,
+        groupId,
+        activeProfileId: changedProfileId,
+      });
+    }
+    if (input.source === 'in_band' && changedProfileId) {
       await this.maybeRequestActiveGroupSwitchForSnapshot({
         now: this.now(),
         targets: [{
@@ -737,6 +770,8 @@ export class ConnectedServiceQuotasCoordinator {
     sourceGroupGeneration?: number | null;
     resetAtMs: number | null;
     reason: 'usage_limit';
+    committedGeneration?: ConnectedServiceAuthGroupCommittedGenerationFact | null;
+    sourceRequiresConvergence?: boolean;
     resolvedFanoutStrategy?: ConnectedServiceSameAccountFanoutStrategy;
   }>): Promise<Readonly<{
     status: 'recorded';
@@ -746,6 +781,20 @@ export class ConnectedServiceQuotasCoordinator {
     void input.reason;
     const authGroupSwitchCoordinator = this.authGroupSwitchCoordinator;
     if (!authGroupSwitchCoordinator) {
+      return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 };
+    }
+    const committedGeneration = input.committedGeneration ?? null;
+    const committedTarget = committedGeneration?.decisionCommittedTarget ?? null;
+    if (
+      !committedGeneration
+      || committedTarget?.serviceId !== input.serviceId
+      || committedTarget.groupId !== input.groupId
+    ) {
+      this.recordDiagnostic?.({
+        event: 'quota_work_suppressed',
+        phase: 'same_account_fanout',
+        reason: 'hard_limit_committed_generation_missing',
+      });
       return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 };
     }
     const fanoutStrategy = input.resolvedFanoutStrategy
@@ -809,13 +858,20 @@ export class ConnectedServiceQuotasCoordinator {
     });
     const candidates = this.mergeSameAccountFanoutCandidates(reconciledIndexedCandidates, coldReconciliation.candidates);
     if (candidates.length === 0) {
-      const targetEligibility = await this.resolveSameAccountFanoutTargetEligibility({
-        serviceId: input.serviceId,
-        groupId: input.groupId,
-      });
-      if (targetEligibility.status === 'no_eligible_target') {
-        this.recordNoEligibleSameAccountFanoutTarget(targetEligibility);
-      } else if (indexedCandidates.length === 0 && coldReconciliation.activeCandidateCount === 0) {
+      if (input.sourceRequiresConvergence === true) {
+        const fanoutRequests = await this.applyCommittedAuthGroupGeneration({
+          committedGeneration,
+          reason: 'same_provider_account_exhausted',
+          targets: [{
+            sessionId: input.sourceSessionId,
+            serviceId: input.serviceId,
+            groupId: input.groupId,
+            fromProfileId: input.exhaustedProfileId,
+          }],
+        });
+        return { status: 'recorded', fanoutCandidates: 0, fanoutRequests };
+      }
+      if (indexedCandidates.length === 0 && coldReconciliation.activeCandidateCount === 0) {
         this.recordDiagnostic?.({
           event: 'quota_work_suppressed',
           phase: 'same_account_fanout',
@@ -823,14 +879,6 @@ export class ConnectedServiceQuotasCoordinator {
         });
       }
       return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 };
-    }
-    const targetEligibility = await this.resolveSameAccountFanoutTargetEligibility({
-      serviceId: input.serviceId,
-      groupId: input.groupId,
-    });
-    if (targetEligibility.status === 'no_eligible_target') {
-      this.recordNoEligibleSameAccountFanoutTarget(targetEligibility);
-      return { status: 'recorded', fanoutCandidates: candidates.length, fanoutRequests: 0 };
     }
     if (this.isSameAccountFanoutCoalesced(input)) {
       this.recordDiagnostic?.({
@@ -841,22 +889,15 @@ export class ConnectedServiceQuotasCoordinator {
       return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 };
     }
 
-    let fanoutRequests = 0;
+    const generationTargets: Array<Readonly<{
+      sessionId: string;
+      serviceId: ConnectedServiceId;
+      groupId: string;
+      fromProfileId: string;
+    }>> = [];
     for (const candidate of candidates) {
       const runtime = 'runtime' in candidate ? candidate.runtime ?? null : null;
       this.runtimeRegistry.invalidateRuntimeAccountIdentity(candidate.sessionId);
-      if (runtime?.inProviderTurn === false && candidate.source !== 'group_switch_selection') {
-        this.recordDiagnostic?.({
-          event: 'quota_work_suppressed',
-          phase: 'same_account_fanout',
-          reason: 'same_account_fanout_candidate_idle_deferred_to_next_spawn',
-          sessionId: candidate.sessionId,
-          serviceId: candidate.serviceId,
-          groupId: candidate.groupId ?? input.groupId,
-          activeProfileId: candidate.profileId,
-        });
-        continue;
-      }
       const runtimeAuthApply = await this.resolveRuntimeAuthApplyCapability({
         sourceSessionId: input.sourceSessionId,
         targetSessionId: candidate.sessionId,
@@ -882,24 +923,133 @@ export class ConnectedServiceQuotasCoordinator {
           reason: 'same_account_fanout_candidate_deferred_until_turn_boundary',
         });
       }
-      await authGroupSwitchCoordinator.switchBeforeTurn({
+      generationTargets.push({
         sessionId: candidate.sessionId,
         serviceId: candidate.serviceId,
         groupId: candidate.groupId ?? input.groupId,
-        reason: 'same_provider_account_exhausted',
-        observedProfileId: candidate.profileId,
-        ...(deferUntilTurnBoundary ? { deferUntilTurnBoundary: true } : {}),
-      }).then(() => {
-        fanoutRequests += 1;
-      }).catch(() => {
-        // Best-effort sibling protection. The sibling's own runtime failure remains authoritative.
+        fromProfileId: candidate.profileId,
       });
     }
+    if (input.sourceRequiresConvergence !== false) {
+      generationTargets.push({
+        sessionId: input.sourceSessionId,
+        serviceId: input.serviceId,
+        groupId: input.groupId,
+        fromProfileId: input.exhaustedProfileId,
+      });
+    }
+    const fanoutRequests = await this.applyCommittedAuthGroupGeneration({
+      committedGeneration,
+      reason: 'same_provider_account_exhausted',
+      targets: generationTargets,
+    });
     return {
       status: 'recorded',
       fanoutCandidates: candidates.length,
       fanoutRequests,
     };
+  }
+
+  private async decideAndApplyAuthGroupGeneration(input: Readonly<{
+    reason: 'soft_threshold';
+    observedProfileId: string;
+    targets: ReadonlyArray<Readonly<{
+      sessionId: string;
+      serviceId: ConnectedServiceId;
+      groupId: string;
+      fromProfileId: string;
+    }>>;
+  }>): Promise<number> {
+    const coordinator = this.authGroupSwitchCoordinator;
+    const decisionTarget = input.targets[0];
+    if (!coordinator || !decisionTarget) return 0;
+    const rawDecision = await coordinator.switchBeforeTurn({
+      sessionId: decisionTarget.sessionId,
+      serviceId: decisionTarget.serviceId,
+      groupId: decisionTarget.groupId,
+      reason: input.reason,
+      observedProfileId: input.observedProfileId,
+    }).catch(() => null);
+    if (!rawDecision || typeof rawDecision !== 'object' || Array.isArray(rawDecision)) return 1;
+    const decision = rawDecision as Readonly<Record<string, unknown>>;
+    const activeProfileId = typeof decision.activeProfileId === 'string' && decision.activeProfileId.trim()
+      ? decision.activeProfileId.trim()
+      : null;
+    const generation = typeof decision.generation === 'number' && Number.isInteger(decision.generation) && decision.generation >= 0
+      ? decision.generation
+      : null;
+    const credentialRevisionParsed = ConnectedServiceCredentialRevisionV1Schema.safeParse(decision.credentialRevision);
+    const status = typeof decision.status === 'string' ? decision.status : '';
+    if (!activeProfileId || generation === null || ![
+      'switched',
+      'observed_generation',
+      'superseded_after_apply',
+    ].includes(status)) return 1;
+
+    const decisionCommittedTarget = {
+      serviceId: decisionTarget.serviceId,
+      groupId: decisionTarget.groupId,
+      profileId: activeProfileId,
+      generation,
+      credentialRevision: credentialRevisionParsed.success ? credentialRevisionParsed.data : null,
+    } as const;
+    const committedGeneration = buildConnectedServiceAuthGroupCommittedGenerationFact({
+      decisionId: buildConnectedServiceAuthGroupTargetEpochIdentity(decisionCommittedTarget),
+      provenance: 'soft_threshold',
+      requestedTarget: { profileId: activeProfileId },
+      decisionCommittedTarget,
+    });
+    return await this.applyCommittedAuthGroupGeneration({
+      committedGeneration,
+      reason: input.reason,
+      targets: input.targets,
+      ...(hasExactAcceptedConnectedServiceTargetAdoptionProof({
+        verificationByServiceId: decision.verificationByServiceId,
+        target: decisionCommittedTarget,
+      }) ? { skipInitialSessionId: decisionTarget.sessionId } : {}),
+    });
+  }
+
+  private async applyCommittedAuthGroupGeneration(input: Readonly<{
+    committedGeneration: ConnectedServiceAuthGroupCommittedGenerationFact;
+    reason: 'soft_threshold' | 'same_provider_account_exhausted';
+    targets: ReadonlyArray<Readonly<{
+      sessionId: string;
+      serviceId: ConnectedServiceId;
+      groupId: string;
+      fromProfileId: string;
+    }>>;
+    skipInitialSessionId?: string;
+  }>): Promise<number> {
+    const coordinator = this.authGroupSwitchCoordinator;
+    if (!coordinator || input.targets.length === 0) return 0;
+    const recipients = input.targets.filter((recipient) => recipient.sessionId !== input.skipInitialSessionId);
+    if (recipients.length === 0) return 0;
+    if (this.consumeCommittedAuthGroupGeneration) {
+      const consumption = await this.consumeCommittedAuthGroupGeneration({
+        committedGeneration: input.committedGeneration,
+        switchReason: input.reason === 'soft_threshold' ? 'pre_turn_group_policy' : 'automatic_runtime_failure',
+        executionAuthority: 'runtime_recovery',
+        sessions: recipients.map((recipient) => ({
+          sessionId: recipient.sessionId,
+          activity: 'live',
+          fromProfileId: recipient.fromProfileId,
+        })),
+      });
+      if (consumption.outcome === 'adopted_current') return recipients.length;
+      this.recordDiagnostic?.({
+        event: 'quota_work_suppressed',
+        phase: 'same_account_fanout',
+        reason: `committed_generation_${consumption.outcome}`,
+      });
+      return 0;
+    }
+    this.recordDiagnostic?.({
+      event: 'quota_work_suppressed',
+      phase: 'same_account_fanout',
+      reason: 'durable_generation_consumer_unavailable',
+    });
+    return 0;
   }
 
   public async recordRuntimeUsageLimitExhaustionAndFanout(input: Readonly<{
@@ -911,6 +1061,8 @@ export class ConnectedServiceQuotasCoordinator {
     sourceGroupGeneration?: number | null;
     sourceProviderAccountId?: string | null;
     sourceAccountLabel?: string | null;
+    committedGeneration?: ConnectedServiceAuthGroupCommittedGenerationFact | null;
+    sourceRequiresConvergence?: boolean;
   }>): Promise<Readonly<{
     status: 'recorded';
     fanoutCandidates: number;
@@ -936,6 +1088,8 @@ export class ConnectedServiceQuotasCoordinator {
         sourceGroupGeneration: input.sourceGroupGeneration,
         resetAtMs: input.resetAtMs,
         reason: 'usage_limit',
+        committedGeneration: input.committedGeneration,
+        sourceRequiresConvergence: input.sourceRequiresConvergence,
         resolvedFanoutStrategy: fanoutStrategy,
       });
     }
@@ -970,6 +1124,8 @@ export class ConnectedServiceQuotasCoordinator {
         sourceGroupGeneration,
         resetAtMs: input.resetAtMs,
         reason: 'usage_limit',
+        committedGeneration: input.committedGeneration,
+        sourceRequiresConvergence: input.sourceRequiresConvergence,
       });
     }
     const indexedSourceIdentity = this.runtimeRegistry.readRuntimeAccountIdentity(input.sourceSessionId);
@@ -990,6 +1146,8 @@ export class ConnectedServiceQuotasCoordinator {
         sourceGroupGeneration,
         resetAtMs: input.resetAtMs,
         reason: 'usage_limit',
+        committedGeneration: input.committedGeneration,
+        sourceRequiresConvergence: input.sourceRequiresConvergence,
       });
     }
 
@@ -1027,17 +1185,16 @@ export class ConnectedServiceQuotasCoordinator {
       sourceGroupGeneration,
       resetAtMs: input.resetAtMs,
       reason: 'usage_limit',
+      committedGeneration: input.committedGeneration,
+      sourceRequiresConvergence: input.sourceRequiresConvergence,
     });
   }
 
   public resolveQuotaProbeFreshProof(input: Readonly<{
     serviceId: ConnectedServiceId;
     profileId: string;
-    groupId: string | null;
-    expectedGroupGeneration: number | null;
-    currentGroupGeneration: number | null;
-    expectedMaterialFingerprint: string | null;
-    snapshotMaterialFingerprint: string | null;
+    expectedAppliedIdentity: QuotaProbeAppliedIdentity | null;
+    snapshotAppliedIdentity: QuotaProbeAppliedIdentity | null;
     snapshot: ConnectedServiceQuotaSnapshotV1;
     maxAgeMs?: number;
   }>): QuotaProbeFreshProofResult {
@@ -1046,11 +1203,8 @@ export class ConnectedServiceQuotasCoordinator {
       maxAgeMs: input.maxAgeMs ?? this.quotaLifecycleFreshnessMs,
       serviceId: input.serviceId,
       profileId: input.profileId,
-      groupId: input.groupId,
-      expectedGroupGeneration: input.expectedGroupGeneration,
-      currentGroupGeneration: input.currentGroupGeneration,
-      expectedMaterialFingerprint: input.expectedMaterialFingerprint,
-      snapshotMaterialFingerprint: input.snapshotMaterialFingerprint,
+      expectedAppliedIdentity: input.expectedAppliedIdentity,
+      snapshotAppliedIdentity: input.snapshotAppliedIdentity,
       snapshot: input.snapshot,
     });
   }
@@ -1274,8 +1428,6 @@ export class ConnectedServiceQuotasCoordinator {
   private async resolveGroupSwitchTargetEligibility(input: Readonly<{
     serviceId: ConnectedServiceId;
     groupId: string;
-    activeProfileId?: string | null;
-    purpose: 'same_account_fanout' | 'soft_switch';
   }>): Promise<GroupSwitchTargetEligibility> {
     if (typeof this.api.getConnectedServiceAuthGroup !== 'function') {
       return { status: 'unknown', reason: 'missing_group_reader' };
@@ -1290,7 +1442,7 @@ export class ConnectedServiceQuotasCoordinator {
     const accountUsageSwitchState = this.accountUsageStore
       ? this.buildSwitchStateFromAccountUsage({ group })
       : null;
-    // Proactive fanout/soft-switch policy must read canonical source-backed account usage only.
+    // Proactive soft-switch policy must read canonical source-backed account usage only.
     // A provisional switch state (cold PAU, no source-backed records) carries no canonical
     // evidence, so it must not drive eligibility — treat it as source usage unavailable rather
     // than falling back to non-canonical snapshot-derived state.
@@ -1300,141 +1452,71 @@ export class ConnectedServiceQuotasCoordinator {
     if (!switchState) {
       return { status: 'unknown', reason: 'source_account_usage_unavailable' };
     }
-    const activeProfileId = input.activeProfileId?.trim() || switchState.activeProfileId;
-    let softSwitchSourceEvidence: Extract<
-      ReturnType<typeof resolveConnectedServiceAuthGroupSoftSwitchSourceEvidence>,
-      { status: 'at_or_below_threshold' }
-    > | null = null;
-    if (input.purpose === 'soft_switch') {
-      // Preemptive burn projection: the poll-driven soft-switch cannot see a session burning from
-      // healthy to exhausted inside one ~30-minute poll window. Feed the recent consumption velocity
-      // (from the in-band runtime snapshots) so a projected-below-threshold active member triggers the
-      // soft-switch BEFORE the hard limit. Horizon reuses the existing `probeIfSnapshotOlderThanMs`
-      // (the next check window) — no new policy knob.
-      const recentBurn = activeProfileId
-        ? this.runtimeQuotaSnapshots?.getRecentBurn({
-          serviceId: input.serviceId,
-          groupId: input.groupId,
-          profileId: activeProfileId,
-        }) ?? null
-        : null;
-      const burnHorizonMs = switchState.policy.probeIfSnapshotOlderThanMs;
-      const sourceEvidence = resolveConnectedServiceAuthGroupSoftSwitchSourceEvidence({
-        activeProfileId,
-        policy: switchState.policy,
-        memberStatesByProfileId: switchState.memberStatesByProfileId,
+    const activeProfileId = switchState.activeProfileId;
+    // Preemptive burn projection: the poll-driven soft-switch cannot see a session burning from
+    // healthy to exhausted inside one ~30-minute poll window. Feed the recent consumption velocity
+    // (from the in-band runtime snapshots) so a projected-below-threshold active member triggers the
+    // soft-switch BEFORE the hard limit. Horizon reuses the existing `probeIfSnapshotOlderThanMs`
+    // (the next check window) — no new policy knob.
+    const burnHorizonMs = switchState.policy.probeIfSnapshotOlderThanMs;
+    const activeQuotaSnapshot = activeProfileId
+      ? switchState.memberStatesByProfileId.get(activeProfileId)?.quotaSnapshot ?? null
+      : null;
+    const recentBurn = activeProfileId
+      && typeof burnHorizonMs === 'number'
+      && Number.isFinite(burnHorizonMs)
+      && burnHorizonMs > 0
+      ? this.runtimeQuotaSnapshots?.getRecentBurn({
+        serviceId: input.serviceId,
+        groupId: input.groupId,
+        profileId: activeProfileId,
+        groupGeneration: group.generation,
         nowMs: now,
-        quotaFreshnessMs: this.quotaLifecycleFreshnessMs,
-        burnProjection: recentBurn && typeof burnHorizonMs === 'number' && Number.isFinite(burnHorizonMs) && burnHorizonMs > 0
-          ? { remainingPercentPerMs: recentBurn.remainingPercentPerMs, horizonMs: burnHorizonMs }
-          : null,
-      });
-      if (sourceEvidence.status === 'unknown') {
-        return {
-          status: 'unknown',
-          reason: 'source_quota_unavailable',
-          decisionTrace: {
-            activeProfileId,
-            reason: 'source_quota_unavailable',
-          },
-        };
-      }
-      if (sourceEvidence.status === 'above_threshold') {
-        return {
-          status: 'no_meaningfully_better_target',
-          retryAfterMs: null,
-          decisionTrace: {
-            activeProfileId,
-            reason: 'source_above_threshold',
-          },
-        };
-      }
-      softSwitchSourceEvidence = sourceEvidence;
-    }
-    const selection = selectConnectedServiceAuthGroupCandidate({
-      nowMs: now,
-      quotaFreshnessMs: this.quotaLifecycleFreshnessMs,
+        maxAgeMs: burnHorizonMs,
+        currentQuotaSnapshot: activeQuotaSnapshot,
+      }) ?? null
+      : null;
+    const sourceEvidence = resolveConnectedServiceAuthGroupSoftSwitchSourceEvidence({
       activeProfileId,
       policy: switchState.policy,
-      members: switchState.members,
       memberStatesByProfileId: switchState.memberStatesByProfileId,
+      nowMs: now,
+      quotaFreshnessMs: this.quotaLifecycleFreshnessMs,
+      burnProjection: recentBurn && typeof burnHorizonMs === 'number' && Number.isFinite(burnHorizonMs) && burnHorizonMs > 0
+        ? { remainingPercentPerMs: recentBurn.remainingPercentPerMs, horizonMs: burnHorizonMs }
+        : null,
     });
-    if (selection.selected) {
-      if (this.accountUsageStore && !hasConnectedServiceAuthGroupCandidateEvidenceForSwitchReason({
-        reason: input.purpose === 'soft_switch' ? 'soft_threshold' : 'same_provider_account_exhausted',
-        profileId: selection.selected.profileId,
-        nowMs: now,
-        quotaFreshnessMs: this.quotaLifecycleFreshnessMs,
-        memberStatesByProfileId: switchState.memberStatesByProfileId,
-      })) {
-        return {
-          status: 'unknown',
-          reason: 'selection_unknown',
-          decisionTrace: selection.decisionTrace,
-        };
-      }
-      if (
-        input.purpose === 'soft_switch'
-        && !isConnectedServiceAuthGroupSoftSwitchCandidateMeaningfullyBetter({
-          activeProfileId,
-          candidate: selection.selected,
-          policy: switchState.policy,
-        })
-      ) {
-        const retryAtMs = switchState.memberStatesByProfileId.get(selection.selected.profileId)?.providerResetsAtMs ?? null;
-        return {
-          status: 'no_meaningfully_better_target',
-          retryAfterMs: typeof retryAtMs === 'number' && Number.isFinite(retryAtMs) && retryAtMs > now
-            ? Math.max(0, retryAtMs - now)
-            : null,
-          decisionTrace: selection.decisionTrace,
-        };
-      }
-      return {
-        status: 'eligible',
-        ...(input.purpose === 'soft_switch'
-          ? {
-              sourceProfileId: activeProfileId,
-              sourceRemainingPercent: softSwitchSourceEvidence?.remainingPercent,
-              sourceThresholdPercent: softSwitchSourceEvidence?.thresholdPercent,
-              // PS-1: preemptive (burn-projected) vs reactive (observed at/below threshold) switches
-              // must stay distinguishable downstream — the evidence carries `projected` only for the
-              // projection-tripped case.
-              sourceProjected: softSwitchSourceEvidence?.projected === true,
-              selectedProfileId: selection.selected.profileId,
-              selectedRemainingPercent: selection.selected.leastLimitedScore,
-              decisionTrace: selection.decisionTrace,
-            }
-          : { decisionTrace: selection.decisionTrace }),
-      };
-    }
-    if (selection.reason !== 'no_eligible_members') {
+    if (sourceEvidence.status === 'unknown') {
       return {
         status: 'unknown',
-        reason: 'selection_unknown',
-        decisionTrace: selection.decisionTrace,
+        reason: 'source_quota_unavailable',
+        decisionTrace: {
+          activeProfileId,
+          reason: 'source_quota_unavailable',
+        },
       };
     }
-
-    const retryAtMs = selection.excluded
-      .map((exclusion) => exclusion.retryAtMs)
-      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > now)
-      .sort((left, right) => left - right)[0] ?? null;
+    if (sourceEvidence.status === 'above_threshold') {
+      return {
+        status: 'no_meaningfully_better_target',
+        retryAfterMs: null,
+        decisionTrace: {
+          activeProfileId,
+          reason: 'source_above_threshold',
+        },
+      };
+    }
     return {
-      status: 'no_eligible_target',
-      retryAfterMs: retryAtMs === null ? null : Math.max(0, retryAtMs - now),
-      decisionTrace: selection.decisionTrace,
+      status: 'eligible',
+      sourceProfileId: activeProfileId,
+      sourceRemainingPercent: sourceEvidence.remainingPercent,
+      sourceThresholdPercent: sourceEvidence.thresholdPercent,
+      sourceProjected: sourceEvidence.projected === true,
+      decisionTrace: {
+        activeProfileId,
+        reason: 'source_at_or_below_threshold',
+      },
     };
-  }
-
-  private async resolveSameAccountFanoutTargetEligibility(input: Readonly<{
-    serviceId: ConnectedServiceId;
-    groupId: string;
-  }>): Promise<GroupSwitchTargetEligibility> {
-    return this.resolveGroupSwitchTargetEligibility({
-      ...input,
-      purpose: 'same_account_fanout',
-    });
   }
 
   private buildCurrentGroupGenerationBySessionId(input: Readonly<{
@@ -1467,7 +1549,7 @@ export class ConnectedServiceQuotasCoordinator {
   private recordRuntimeAccountIdentitySelections(input: Readonly<{
     sessionId: string;
     bindings: ReadonlyArray<ActiveConnectedServiceBinding>;
-    selections: ReadonlyArray<RuntimeAccountIdentitySelectionInput>;
+    selections: ReadonlyArray<RuntimeAccountIdentitySelection>;
   }>): void {
     for (const selection of input.selections) {
       const matchesActiveBinding = input.bindings.some((binding) => activeBindingMatchesRuntimeIdentity(binding, selection));
@@ -1493,9 +1575,14 @@ export class ConnectedServiceQuotasCoordinator {
 
   private recordRuntimeAccountIdentitySelection(input: Readonly<{
     sessionId: string;
-    selection: RuntimeAccountIdentitySelectionInput;
+    selection: RuntimeAccountIdentitySelection;
   }>): RuntimeAccountIdentityRecordResult {
-    const identity = readCredentialAccountIdentity(input.selection.record);
+    const identity = 'providerAccountId' in input.selection
+      ? {
+          providerAccountId: input.selection.providerAccountId,
+          accountLabel: input.selection.accountLabel,
+        }
+      : readCredentialAccountIdentity(input.selection.record);
     if (!identity) {
       return { status: 'suppressed', reason: 'missing_provider_account_id' };
     }
@@ -2299,8 +2386,6 @@ export class ConnectedServiceQuotasCoordinator {
     if (!this.runtimeQuotaSnapshots) return null;
     if (typeof this.api.updateConnectedServiceAuthGroupRuntimeState !== 'function') return null;
 
-    const member = input.group.members.find((candidate) => candidate.profileId === input.profileId) ?? null;
-    if (!member) return null;
     const runtimeState = this.runtimeQuotaSnapshots.buildMemberStates({
       serviceId: input.serviceId,
       groupId: input.groupId,
@@ -2309,23 +2394,39 @@ export class ConnectedServiceQuotasCoordinator {
     const quotaSnapshot = runtimeState?.quotaSnapshot ?? null;
     if (!quotaSnapshot) return null;
 
-    const reconciledState = reconcileMemberRuntimeStateWithFreshQuotaEvidence({
-      state: member.state as ConnectedServiceAuthGroupMemberRuntimeState,
-      quotaSnapshot,
-      policy: normalizeConnectedServiceAuthGroupPolicy(input.group.policy),
-      nowMs: input.now,
-    });
-    if (!reconciledState || reconciledState === member.state) return null;
-
-    return await this.api.updateConnectedServiceAuthGroupRuntimeState({
-      serviceId: input.serviceId,
-      groupId: input.groupId,
-      expectedGeneration: input.group.generation,
-      memberStates: [{
-        profileId: input.profileId,
-        state: reconciledState,
-      }],
-    }).catch(() => null);
+    let group = input.group;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const member = group.members.find((candidate) => candidate.profileId === input.profileId) ?? null;
+      if (!member) return null;
+      const reconciledState = reconcileMemberRuntimeStateWithFreshQuotaEvidence({
+        state: member.state as ConnectedServiceAuthGroupMemberRuntimeState,
+        quotaSnapshot,
+        policy: normalizeConnectedServiceAuthGroupPolicy(group.policy),
+        nowMs: input.now,
+      });
+      if (!reconciledState || reconciledState === member.state) return null;
+      try {
+        return await this.api.updateConnectedServiceAuthGroupRuntimeState({
+          serviceId: input.serviceId,
+          groupId: input.groupId,
+          expectedGeneration: group.generation,
+          expectedRuntimeStateRevision: group.runtimeStateRevision,
+          memberStates: [{
+            profileId: input.profileId,
+            state: reconciledState,
+          }],
+        });
+      } catch (error) {
+        if (!(error instanceof ConnectedServiceAuthGroupRuntimeStateRevisionConflictError) || attempt === 1) return null;
+        const latest = await this.api.getConnectedServiceAuthGroup?.({
+          serviceId: input.serviceId,
+          groupId: input.groupId,
+        }).catch(() => null);
+        if (!latest || latest.generation !== group.generation) return null;
+        group = latest;
+      }
+    }
+    return null;
   }
 
   private resolveActiveSessionIdsForGroup(serviceId: ConnectedServiceId, groupId: string): string[] {
@@ -2371,7 +2472,7 @@ export class ConnectedServiceQuotasCoordinator {
   }
 
   private makeGroupSwitchCheckKey(input: ActiveGroupQuotaSwitchTarget): string {
-    return `${input.serviceId}\u0000${input.groupId}\u0000${input.activeProfileId}`;
+    return `${input.serviceId}\u0000${input.groupId}`;
   }
 
   private collectActiveGroupTargetsForBinding(input: Readonly<{
@@ -2469,32 +2570,7 @@ export class ConnectedServiceQuotasCoordinator {
       }
     }
 
-    const guard = this.softSwitchRecoveryGuard;
-    if (!guard) return true;
-    let result: SoftSwitchRecoveryGuardResult;
-    try {
-      result = await guard({
-        sessionId: target.sessionId,
-        serviceId: target.serviceId,
-        groupId: target.groupId,
-        activeProfileId: target.activeProfileId,
-        reason: 'soft_threshold',
-      });
-    } catch {
-      this.recordDiagnostic?.({
-        event: 'quota_work_suppressed',
-        phase: 'soft_switch',
-        reason: 'quota_soft_switch_recovery_guard_failed',
-      });
-      return false;
-    }
-    if (result.status === 'allow') return true;
-    this.recordDiagnostic?.({
-      event: 'quota_work_suppressed',
-      phase: 'soft_switch',
-      reason: result.reason.trim() || 'quota_soft_switch_suppressed_recovery_pending',
-    });
-    return false;
+    return true;
   }
 
   private async persistCredentialHealthForQuotaFailure(input: Readonly<{
@@ -2570,8 +2646,6 @@ export class ConnectedServiceQuotasCoordinator {
       const targetEligibility = await this.resolveGroupSwitchTargetEligibility({
         serviceId: firstTarget.serviceId,
         groupId: firstTarget.groupId,
-        activeProfileId: firstTarget.activeProfileId,
-        purpose: 'soft_switch',
       });
       if (targetEligibility.status === 'no_eligible_target') {
         this.recordNoEligibleSoftSwitchTarget(targetEligibility);
@@ -2589,6 +2663,14 @@ export class ConnectedServiceQuotasCoordinator {
       }
       if (targetEligibility.status === 'unknown') {
         this.recordUnknownSoftSwitchTargetEligibility(targetEligibility);
+        continue;
+      }
+      const observedProfileId = targetEligibility.sourceProfileId?.trim() ?? '';
+      if (!observedProfileId) {
+        this.recordUnknownSoftSwitchTargetEligibility({
+          status: 'unknown',
+          reason: 'selection_unknown',
+        });
         continue;
       }
       const allowedTargets: ActiveGroupQuotaSwitchTarget[] = [];
@@ -2629,17 +2711,16 @@ export class ConnectedServiceQuotasCoordinator {
           allowedTargetCount: allowedTargets.length,
         });
       }
-      await Promise.all(allowedTargets.map((target) =>
-        authGroupSwitchCoordinator.switchBeforeTurn({
+      await this.decideAndApplyAuthGroupGeneration({
+        reason: 'soft_threshold',
+        observedProfileId,
+        targets: allowedTargets.map((target) => ({
           sessionId: target.sessionId,
           serviceId: target.serviceId,
           groupId: target.groupId,
-          reason: 'soft_threshold',
-          observedProfileId: target.activeProfileId,
-        }).catch(() => {
-          // Best-effort only. Runtime failure recovery remains the authoritative fallback.
-        }),
-      ));
+          fromProfileId: target.activeProfileId,
+        })),
+      });
     }
   }
 
@@ -2670,14 +2751,50 @@ export class ConnectedServiceQuotasCoordinator {
       : undefined;
   }
 
-  public async hydratePersistedQuotaSnapshotsForGroup(input: Readonly<{
+  public scheduleCurrentSourceRefresh(
+    sources: readonly ConnectedServiceUsageSourceV1[],
+  ): Readonly<{ accepted: number; ignored: number }> {
+    let accepted = 0;
+    let ignored = 0;
+    for (const candidate of sources) {
+      const parsed = ConnectedServiceUsageSourceV1Schema.safeParse(candidate);
+      if (!parsed.success || !this.quotaFetchersByServiceId.has(parsed.data.serviceId)) {
+        ignored += 1;
+        continue;
+      }
+      const key = buildConnectedServiceUsageSourceKey(parsed.data);
+      if (
+        this.startupCurrentSourceRefreshByKey.has(key)
+        || this.startupCurrentSourceRefreshByKey.size
+          >= ConnectedServiceQuotasCoordinator.MAX_STARTUP_CURRENT_SOURCE_REFRESHES
+      ) {
+        ignored += 1;
+        continue;
+      }
+      this.startupCurrentSourceRefreshByKey.set(key, parsed.data);
+      accepted += 1;
+    }
+    return { accepted, ignored };
+  }
+
+  private listScheduledCurrentSourceRefreshesForBinding(input: Readonly<{
     serviceId: ConnectedServiceId;
-    groupId: string;
-    profileIds: ReadonlyArray<string>;
-  }>): Promise<void> {
-    if (this.checkQuotaWorkGate('hydrate_group').status !== 'open') return;
-    if (!this.runtimeQuotaSnapshots) return;
-    void input;
+    profileId: string;
+  }>): ConnectedServiceUsageSourceV1[] {
+    return [...this.startupCurrentSourceRefreshByKey.values()].filter((source) => (
+      source.serviceId === input.serviceId && source.profileId === input.profileId
+    ));
+  }
+
+  private clearScheduledCurrentSourceRefreshesForBinding(input: Readonly<{
+    serviceId: ConnectedServiceId;
+    profileId: string;
+  }>): void {
+    for (const [key, source] of this.startupCurrentSourceRefreshByKey.entries()) {
+      if (source.serviceId === input.serviceId && source.profileId === input.profileId) {
+        this.startupCurrentSourceRefreshByKey.delete(key);
+      }
+    }
   }
 
   public async probeGroupQuotaSnapshots(input: Readonly<{
@@ -2724,6 +2841,7 @@ export class ConnectedServiceQuotasCoordinator {
               serviceId,
               groupId,
               profileId,
+              groupGeneration: group?.generation ?? null,
               snapshot: observedSnapshot,
             });
             await this.recordFetchedQuotaSnapshotAsAccountUsage({
@@ -2766,6 +2884,7 @@ export class ConnectedServiceQuotasCoordinator {
           serviceId,
           groupId,
           profileId,
+          groupGeneration: group?.generation ?? null,
           snapshot,
         });
         const recordedAccountUsage = await this.recordFetchedQuotaSnapshotAsAccountUsage({
@@ -2891,7 +3010,13 @@ export class ConnectedServiceQuotasCoordinator {
       }).catch(() => null);
       const record = plain?.content?.t === 'plain' ? plain.content.v : null;
       if (record) {
-        return { storageMode: 'plain', record };
+        return {
+          storageMode: 'plain',
+          record: assertConnectedServiceCredentialRecordBinding({
+            binding: input,
+            record: ConnectedServiceCredentialRecordV1Schema.parse(record),
+          }),
+        };
       }
       if (input.accountMode === 'plain') {
         return { storageMode: 'plain', record: null };
@@ -2911,7 +3036,12 @@ export class ConnectedServiceQuotasCoordinator {
     });
     return {
       storageMode: 'e2ee',
-      record: (opened?.value as ConnectedServiceCredentialRecordV1 | null | undefined) ?? null,
+      record: opened?.value
+        ? assertConnectedServiceCredentialRecordBinding({
+            binding: input,
+            record: ConnectedServiceCredentialRecordV1Schema.parse(opened.value),
+          })
+        : null,
     };
   }
 
@@ -3041,7 +3171,10 @@ export class ConnectedServiceQuotasCoordinator {
     now: number;
     idempotencyKey: string;
     providerCreditId?: string;
-  }>): Promise<Readonly<{ type: 'timeout' } | { type: 'result' }>> {
+  }>): Promise<Readonly<
+    { type: 'timeout' }
+    | { type: 'result'; outcome: Exclude<ConnectedServiceQuotaRecoveryCreditConsumeReceiptV1['status'], 'unknown_after_timeout'> }
+  >> {
     if (!input.fetcher.consumeRecoveryCredit) {
       throw new ConnectedServiceQuotaFetchError(
         'Connected service quota recovery credit consume is unsupported',
@@ -3074,7 +3207,7 @@ export class ConnectedServiceQuotasCoordinator {
 
     const raced = await Promise.race([
       consumePromise.then(
-        () => ({ type: 'result' as const }),
+        (outcome) => ({ type: 'result' as const, outcome }),
         (error) => ({ type: 'error' as const, error }),
       ),
       timeoutPromise,
@@ -3094,7 +3227,14 @@ export class ConnectedServiceQuotasCoordinator {
     now: number;
     idempotencyKey: string;
     providerCreditId?: string;
-  }>): Promise<Readonly<{ type: 'timeout' } | { type: 'result'; record: ConnectedServiceCredentialRecordV1 }>> {
+  }>): Promise<Readonly<
+    { type: 'timeout' }
+    | {
+      type: 'result';
+      record: ConnectedServiceCredentialRecordV1;
+      outcome: Exclude<ConnectedServiceQuotaRecoveryCreditConsumeReceiptV1['status'], 'unknown_after_timeout'>;
+    }
+  >> {
     const consumed = await this.runRecoveryCreditConsumerWithTimeout({
       fetcher: input.fetcher,
       record: input.record,
@@ -3104,7 +3244,7 @@ export class ConnectedServiceQuotasCoordinator {
     });
     return consumed.type === 'timeout'
       ? consumed
-      : { type: 'result', record: input.record };
+      : { type: 'result', record: input.record, outcome: consumed.outcome };
   }
 
   private async fetchQuotaSnapshot(input: Readonly<{
@@ -3274,10 +3414,24 @@ export class ConnectedServiceQuotasCoordinator {
           }),
         };
       }
+      if (
+        consumed.outcome !== 'consumed'
+        && consumed.outcome !== 'already_consumed'
+        && consumed.outcome !== 'not_available'
+        && consumed.outcome !== 'nothing_to_reset'
+      ) {
+        throw new ConnectedServiceQuotaFetchError(
+          'Connected service quota recovery credit consumer returned an invalid outcome',
+          {
+            quotaFetchErrorCode: 'malformed',
+            providerCode: 'connected_service_quota_recovery_credit_invalid_outcome',
+          },
+        );
+      }
       consumedReceipt = this.buildRecoveryCreditConsumeReceipt({
         idempotencyKey,
         ...(providerCreditId ? { providerCreditId } : {}),
-        status: 'consumed',
+        status: consumed.outcome,
       });
 
       const refreshed = await this.fetchQuotaSnapshot({
@@ -3409,8 +3563,45 @@ export class ConnectedServiceQuotasCoordinator {
         if (!isMember) continue;
         addContext({ groupId: target.groupId, groupGeneration: target.groupGeneration });
       }
+      for (const source of this.listScheduledCurrentSourceRefreshesForBinding(input)) {
+        if (source.bindingKind !== 'group_member') continue;
+        const groupId = source.groupId?.trim();
+        const groupGeneration = source.groupGeneration;
+        if (!groupId || typeof groupGeneration !== 'number') {
+          this.startupCurrentSourceRefreshByKey.delete(buildConnectedServiceUsageSourceKey(source));
+          continue;
+        }
+        const group = await this.readCurrentQuotaGroupForContext({
+          serviceId: source.serviceId,
+          groupId,
+        });
+        const isCurrentMember = group !== null
+          && group.generation === groupGeneration
+          && group.members.some((member) => (
+            member.enabled && member.profileId.trim() === source.profileId
+          ));
+        if (!isCurrentMember) {
+          this.startupCurrentSourceRefreshByKey.delete(buildConnectedServiceUsageSourceKey(source));
+          continue;
+        }
+        addContext({
+          groupId,
+          groupGeneration,
+        });
+      }
       return out;
     };
+
+    for (const source of this.startupCurrentSourceRefreshByKey.values()) {
+      const profileId = source.profileId.trim();
+      if (!profileId || !this.quotaFetchersByServiceId.has(source.serviceId)) continue;
+      const existing = bindingsByServiceId.get(source.serviceId);
+      if (existing) {
+        existing.add(profileId);
+      } else {
+        bindingsByServiceId.set(source.serviceId, new Set([profileId]));
+      }
+    }
 
     for (const target of this.runtimeRegistry.listQuotaTargets()) {
       const activeBindings: ReadonlyArray<ActiveConnectedServiceBinding> = target.activeBindings.length > 0
@@ -3509,7 +3700,8 @@ export class ConnectedServiceQuotasCoordinator {
             directTargets: directGroupTargets,
           });
           const existing = await this.readExistingQuotaSnapshot({ accountMode, serviceId, profileId });
-          const forcedRefresh = this.shouldForceQuotaRefresh(existing.existing);
+          const forcedRefresh = this.shouldForceQuotaRefresh(existing.existing)
+            || this.listScheduledCurrentSourceRefreshesForBinding({ serviceId, profileId }).length > 0;
 
           const failureState = this.failureStateByBindingKey.get(bindingKey);
           if (failureState && now < failureState.nextAllowedAt) {
@@ -3518,6 +3710,7 @@ export class ConnectedServiceQuotasCoordinator {
 
           if (this.isExistingQuotaSnapshotFresh({ existing: existing.existing, now, fetcher, forcedRefresh })) {
             this.failureStateByBindingKey.delete(bindingKey);
+            this.clearScheduledCurrentSourceRefreshesForBinding({ serviceId, profileId });
             continue;
           }
 
@@ -3564,6 +3757,7 @@ export class ConnectedServiceQuotasCoordinator {
               });
               pendingSoftSwitchTargets.push(...directGroupTargets);
               this.failureStateByBindingKey.delete(bindingKey);
+              this.clearScheduledCurrentSourceRefreshesForBinding({ serviceId, profileId });
             }
             continue;
           }
@@ -3616,6 +3810,7 @@ export class ConnectedServiceQuotasCoordinator {
           pendingSoftSwitchTargets.push(...directGroupTargets);
           void recordedAccountUsage;
           this.failureStateByBindingKey.delete(bindingKey);
+          this.clearScheduledCurrentSourceRefreshesForBinding({ serviceId, profileId });
         } catch (error) {
           const bindingKey = this.makeBindingKey({ serviceId, profileId });
           const credentialHealthStatus = await this.persistCredentialHealthForQuotaFailure({

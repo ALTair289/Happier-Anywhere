@@ -1,4 +1,5 @@
 import {
+  ConnectedServiceCredentialRevisionV1Schema,
   SessionConnectedServiceAuthReadRuntimeIdentityResponseV1Schema,
   type ConnectedServiceId,
 } from '@happier-dev/protocol';
@@ -57,15 +58,18 @@ function buildExpected(input: Readonly<{
   groupId: string | null;
   profileId: string;
   expectedGroupGeneration: number | null;
+  credentialRevision?: string | null;
 }>): Readonly<{
   groupId?: string;
   profileId?: string;
   generation?: number;
+  credentialRevision?: string;
 }> {
   return {
     ...(input.groupId ? { groupId: input.groupId } : {}),
     ...(input.profileId ? { profileId: input.profileId } : {}),
     ...(input.expectedGroupGeneration === null ? {} : { generation: input.expectedGroupGeneration }),
+    ...(input.credentialRevision ? { credentialRevision: input.credentialRevision } : {}),
   };
 }
 
@@ -76,6 +80,7 @@ export async function readConnectedServiceRuntimeIdentityForQuotaFanout(input: R
   groupId: string | null;
   profileId: string;
   expectedGroupGeneration: number | null;
+  credentialRevision?: string | null;
   callSessionRpc?: CallSessionRpc;
   resolveSessionTransportContext?: ResolveSessionTransportContext;
   timeoutMs?: number;
@@ -140,6 +145,9 @@ export async function readConnectedServiceRuntimeIdentityForQuotaFanout(input: R
   const profileId = readNonEmptyString(parsed.data.runtime?.profileId);
   const groupId = readNonEmptyString(parsed.data.runtime?.groupId);
   const groupGeneration = readGeneration(parsed.data.runtime?.generation);
+  const credentialRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(
+    parsed.data.runtime?.credentialRevision,
+  );
 
   return {
     status: 'verified',
@@ -152,6 +160,7 @@ export async function readConnectedServiceRuntimeIdentityForQuotaFanout(input: R
     ...(profileId ? { profileId } : {}),
     ...(groupId ? { groupId } : {}),
     ...(groupGeneration === null ? {} : { groupGeneration }),
+    ...(credentialRevision.success ? { credentialRevision: credentialRevision.data } : {}),
     runtime: {
       safeToApply: readBoolean(parsed.data.runtime?.safeToApply),
       inProviderTurn: readBoolean(parsed.data.runtime?.inProviderTurn),

@@ -5,11 +5,6 @@ import { createDaemonConnectedServiceAuthGroupSwitchCoordinator } from '../runti
 type DaemonSwitchCoordinatorParams = Parameters<typeof createDaemonConnectedServiceAuthGroupSwitchCoordinator>[0];
 
 type QuotaDrivenSnapshotCoordinator = Readonly<{
-  hydratePersistedQuotaSnapshotsForGroup(input: Readonly<{
-    serviceId: ConnectedServiceId;
-    groupId: string;
-    profileIds: ReadonlyArray<string>;
-  }>): Promise<void>;
   probeGroupQuotaSnapshots(input: Readonly<{
     serviceId: ConnectedServiceId;
     groupId: string;
@@ -19,7 +14,7 @@ type QuotaDrivenSnapshotCoordinator = Readonly<{
 }>;
 
 type CreateQuotaDrivenConnectedServiceAuthGroupSwitchCoordinatorParams =
-  Omit<DaemonSwitchCoordinatorParams, 'hydratePersistedQuotaSnapshotsForGroup' | 'probeQuotaSnapshotsForGroup'>
+  Omit<DaemonSwitchCoordinatorParams, 'probeQuotaSnapshotsForGroup'>
   & Readonly<{
     quotaCoordinator?: QuotaDrivenSnapshotCoordinator | null;
   }>;
@@ -29,10 +24,7 @@ export function createQuotaDrivenConnectedServiceAuthGroupSwitchCoordinator(
 ): ReturnType<typeof createDaemonConnectedServiceAuthGroupSwitchCoordinator> {
   return createDaemonConnectedServiceAuthGroupSwitchCoordinator({
     ...params,
-    switchReasonForApplyGeneration: 'pre_turn_group_policy',
-    hydratePersistedQuotaSnapshotsForGroup: async (input) => {
-      await params.quotaCoordinator?.hydratePersistedQuotaSnapshotsForGroup(input);
-    },
+    switchReasonForApplyGeneration: params.switchReasonForApplyGeneration ?? 'pre_turn_group_policy',
     probeQuotaSnapshotsForGroup: async (input) => {
       await params.quotaCoordinator?.probeGroupQuotaSnapshots(input);
     },

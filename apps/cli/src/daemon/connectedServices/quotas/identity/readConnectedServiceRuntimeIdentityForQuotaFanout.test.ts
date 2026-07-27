@@ -24,6 +24,10 @@ describe('readConnectedServiceRuntimeIdentityForQuotaFanout', () => {
       runtime: {
         safeToApply: false,
         inProviderTurn: true,
+        profileId: 'primary',
+        groupId: 'team',
+        generation: 4,
+        credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
       },
     }));
     const resolveSessionTransportContext = vi.fn(async () => ({
@@ -43,6 +47,7 @@ describe('readConnectedServiceRuntimeIdentityForQuotaFanout', () => {
       groupId: 'team',
       profileId: 'primary',
       expectedGroupGeneration: 4,
+      credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
       callSessionRpc,
       resolveSessionTransportContext,
       timeoutMs: 1_500,
@@ -53,6 +58,10 @@ describe('readConnectedServiceRuntimeIdentityForQuotaFanout', () => {
       accountLabel: 'person@example.test',
       proofStrength: 'exact',
       source: 'runtime_identity_probe',
+      profileId: 'primary',
+      groupId: 'team',
+      groupGeneration: 4,
+      credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
       runtime: {
         safeToApply: false,
         inProviderTurn: true,
@@ -81,6 +90,7 @@ describe('readConnectedServiceRuntimeIdentityForQuotaFanout', () => {
           groupId: 'team',
           profileId: 'primary',
           generation: 4,
+          credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
         },
       },
     });

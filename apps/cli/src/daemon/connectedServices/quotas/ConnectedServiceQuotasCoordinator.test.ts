@@ -27,6 +27,48 @@ import type { RuntimeAccountIdentityProbeResult } from './identity/runtimeAccoun
 import { ConnectedServiceQuotaFetchError, type ConnectedServiceQuotaFetcher } from './types';
 import { DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1 } from '../accountGroups/selection/selectConnectedServiceAuthGroupCandidate';
 import { ConnectedServiceRuntimeRegistry } from '../runtimeRegistry/registry';
+import { buildConnectedServiceAuthGroupCommittedGenerationFact } from '../sessionAuthSwitch/connectedServiceAuthSwitchOutcome';
+
+type AccountExhaustionInput = Parameters<ConnectedServiceQuotasCoordinator['recordAccountExhaustionAndFanout']>[0];
+type RuntimeUsageLimitInput = Parameters<ConnectedServiceQuotasCoordinator['recordRuntimeUsageLimitExhaustionAndFanout']>[0];
+
+function hardLimitCommittedGenerationForTest(input: Readonly<{
+  serviceId: AccountExhaustionInput['serviceId'];
+  groupId: string;
+}>) {
+  return buildConnectedServiceAuthGroupCommittedGenerationFact({
+    decisionId: `test-hard-limit\0${input.serviceId}\0${input.groupId}`,
+    provenance: 'hard_limit',
+    decisionCommittedTarget: {
+      serviceId: input.serviceId,
+      groupId: input.groupId,
+      profileId: 'backup',
+      generation: 2,
+    },
+  });
+}
+
+function recordAccountExhaustionAndFanoutForTest(
+  coordinator: ConnectedServiceQuotasCoordinator,
+  input: AccountExhaustionInput,
+) {
+  const owner = coordinator;
+  return owner.recordAccountExhaustionAndFanout({
+    ...input,
+    committedGeneration: input.committedGeneration ?? hardLimitCommittedGenerationForTest(input),
+  });
+}
+
+function recordRuntimeUsageLimitExhaustionAndFanoutForTest(
+  coordinator: ConnectedServiceQuotasCoordinator,
+  input: RuntimeUsageLimitInput,
+) {
+  const owner = coordinator;
+  return owner.recordRuntimeUsageLimitExhaustionAndFanout({
+    ...input,
+    committedGeneration: input.committedGeneration ?? hardLimitCommittedGenerationForTest(input),
+  });
+}
 
 type QuotaApi = ConstructorParameters<typeof ConnectedServiceQuotasCoordinator>[0]['api'];
 type ProviderUsageRegisterArgs = Parameters<NonNullable<QuotaApi['registerProviderAccountUsageSnapshotSealed']>>[0];
@@ -208,6 +250,7 @@ function createSoftSwitchEligibilityFixture(input: Readonly<{
     displayName: 'Team',
     activeProfileId,
     generation: 1,
+    runtimeStateRevision: 0,
     policy: {
       ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
       autoSwitch: true,
@@ -431,11 +474,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
 
     const fetcher: ConnectedServiceQuotaFetcher = {
       serviceId: 'openai-codex',
-      consumeRecoveryCredit: vi.fn(async ({ record: inputRecord }) => ({
-        ok: true,
-        serviceId: inputRecord.serviceId,
-        profileId: inputRecord.profileId,
-      })),
+      consumeRecoveryCredit: vi.fn(async () => 'consumed' as const),
       fetch: vi.fn(async ({ record: inputRecord }: FetchArgs): Promise<ConnectedServiceQuotaSnapshotV1 | null> => ({
         v: 1,
         serviceId: inputRecord.serviceId,
@@ -523,6 +562,84 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         },
       ],
     });
+  });
+
+  it.each([
+    ['consumed', 'consumed'],
+    ['already_consumed', 'already_consumed'],
+    ['not_available', 'not_available'],
+    ['nothing_to_reset', 'nothing_to_reset'],
+  ] as const)('preserves the %s provider-neutral recovery-credit outcome in the RPC receipt', async (providerOutcome, expectedStatus) => {
+    const now = 1_000_000;
+    const record = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      kind: 'oauth',
+      expiresAt: now + 60_000,
+      oauth: {
+        accessToken: 'access', refreshToken: 'refresh', idToken: null, scope: null,
+        tokenType: null, providerAccountId: 'acct', providerEmail: null,
+      },
+    });
+    const api = {
+      getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
+      getConnectedServiceCredentialPlain: vi.fn(async () => ({ content: { t: 'plain' as const, v: record } })),
+      getConnectedServiceQuotaSnapshotPlain: vi.fn(async () => null),
+      getConnectedServiceQuotaSnapshotSealed: vi.fn(async () => null),
+      getConnectedServiceCredentialSealed: vi.fn(async () => null),
+    } as unknown as QuotaApi;
+    const fetcher: ConnectedServiceQuotaFetcher = {
+      serviceId: 'openai-codex',
+      consumeRecoveryCredit: vi.fn(async () => providerOutcome),
+      fetch: vi.fn(async () => null),
+    };
+    const coordinator = new ConnectedServiceQuotasCoordinator({
+      api,
+      credentials: { token: 'happy-token', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) } },
+      quotaFetchers: [fetcher],
+      now: () => now,
+      randomBytes: (length: number) => randomBytes(length),
+    });
+
+    await expect(coordinator.consumeRecoveryCreditForProfile({
+      serviceId: 'openai-codex', profileId: 'work', idempotencyKey: `req-${providerOutcome}`,
+    })).resolves.toEqual(expect.objectContaining({
+      ok: true,
+      receipt: { idempotencyKey: `req-${providerOutcome}`, status: expectedStatus },
+    }));
+  });
+
+  it('fails closed when a quota fetcher returns no recovery-credit outcome', async () => {
+    const now = 1_000_000;
+    const record = buildConnectedServiceCredentialRecord({
+      now, serviceId: 'openai-codex', profileId: 'work', kind: 'oauth', expiresAt: now + 60_000,
+      oauth: { accessToken: 'access', refreshToken: 'refresh', idToken: null, scope: null, tokenType: null, providerAccountId: 'acct', providerEmail: null },
+    });
+    const api = {
+      getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
+      getConnectedServiceCredentialPlain: vi.fn(async () => ({ content: { t: 'plain' as const, v: record } })),
+      getConnectedServiceQuotaSnapshotPlain: vi.fn(async () => null),
+      getConnectedServiceQuotaSnapshotSealed: vi.fn(async () => null),
+      getConnectedServiceCredentialSealed: vi.fn(async () => null),
+    } as unknown as QuotaApi;
+    const fetcher = {
+      serviceId: 'openai-codex',
+      consumeRecoveryCredit: vi.fn(async () => undefined),
+      fetch: vi.fn(async () => null),
+    } as unknown as ConnectedServiceQuotaFetcher;
+    const coordinator = new ConnectedServiceQuotasCoordinator({
+      api,
+      credentials: { token: 'happy-token', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) } },
+      quotaFetchers: [fetcher], now: () => now, randomBytes: (length: number) => randomBytes(length),
+    });
+
+    await expect(coordinator.consumeRecoveryCreditForProfile({
+      serviceId: 'openai-codex', profileId: 'work', idempotencyKey: 'req-void',
+    })).resolves.toEqual(expect.objectContaining({
+      ok: false,
+      errorCode: 'connected_service_quota_recovery_credit_invalid_outcome',
+    }));
   });
 
   it('does not refresh near-expiry OAuth credentials before recovery credit consumption', async () => {
@@ -1780,7 +1897,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         }]),
       },
     });
-
     await coordinator.tickOnce();
 
     expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
@@ -1805,14 +1921,85 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       sourceThresholdPercent: 15,
       // PS-1: reactive at-threshold switch — the source was observed below threshold, not projected.
       sourceProjected: false,
-      selectedProfileId: 'backup',
-      selectedRemainingPercent: 90,
       targetCount: 1,
       allowedTargetCount: 1,
     }));
   });
 
-  it('suppresses proactive soft-threshold switching when no different group member is eligible', async () => {
+  it('uses canonical group truth when an in-band sibling still reports a predecessor profile', async () => {
+    const now = 1_000_000;
+    const softSwitchEligibility = createSoftSwitchEligibilityFixture({
+      serviceId: 'openai-codex',
+      now,
+      memberProfileIds: ['stale-predecessor'],
+    });
+    recordGroupMemberAccountUsageFixture(softSwitchEligibility.accountUsageStore, {
+      snapshot: buildProviderAccountUsageSnapshotFixture({
+        serviceId: 'openai-codex',
+        groupId: 'team',
+        profileId: 'active',
+        groupGeneration: 1,
+        now,
+        remainingPct: 5,
+      }),
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'active',
+      groupGeneration: 1,
+    });
+    const switchBeforeTurn = vi.fn(async () => ({
+      status: 'switched' as const,
+      activeProfileId: 'backup',
+      generation: 2,
+    }));
+    const coordinator = new ConnectedServiceQuotasCoordinator({
+      api: {
+        getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
+        getConnectedServiceAuthGroup: softSwitchEligibility.getConnectedServiceAuthGroup,
+      } as unknown as QuotaApi,
+      credentials: {
+        token: 'happy-token',
+        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) },
+      },
+      quotaFetchers: [],
+      now: () => now,
+      randomBytes: (length: number) => randomBytes(length),
+      discoveryEnabled: false,
+      runtimeQuotaSnapshots: softSwitchEligibility.runtimeQuotaSnapshots,
+      accountUsageStore: softSwitchEligibility.accountUsageStore,
+      authGroupSwitchCoordinator: { switchBeforeTurn },
+      groupSwitchCheckMinIntervalMs: 0,
+    });
+
+    await coordinator.handleAccountUsageChanged({
+      sessionId: 'stale-sibling',
+      serviceId: 'openai-codex',
+      profileId: 'stale-predecessor',
+      groupId: 'team',
+      groupGeneration: 1,
+      recordId: 'pau_stale',
+      snapshot: buildProviderAccountUsageSnapshotFixture({
+        serviceId: 'openai-codex',
+        groupId: 'team',
+        profileId: 'stale-predecessor',
+        groupGeneration: 1,
+        now,
+        remainingPct: 90,
+      }),
+      source: 'in_band',
+    });
+
+    expect(switchBeforeTurn).toHaveBeenCalledOnce();
+    expect(switchBeforeTurn).toHaveBeenCalledWith({
+      sessionId: 'stale-sibling',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      reason: 'soft_threshold',
+      observedProfileId: 'active',
+    });
+  });
+
+  it('delegates no-eligible-member decisions to the authoritative coordinator', async () => {
     let now = 1_000_000;
     const resetAtMs = now + 600_000;
     const runtimeQuotaSnapshots = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
@@ -1959,18 +2146,12 @@ describe('ConnectedServiceQuotasCoordinator', () => {
 
     await coordinator.tickOnce();
 
-    expect(switchBeforeTurn).not.toHaveBeenCalled();
-    expect(recordDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
-      event: 'quota_work_suppressed',
-      phase: 'soft_switch',
-      reason: 'group_exhausted_no_eligible_target',
-      retryAfterMs: resetAtMs - now,
-    }));
+    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
 
     now = resetAtMs - 1;
     memberStates.set('backup', {});
     await coordinator.tickOnce();
-    expect(switchBeforeTurn).not.toHaveBeenCalled();
+    expect(switchBeforeTurn).toHaveBeenCalledTimes(2);
 
     now = resetAtMs + 1;
     runtimeQuotaSnapshots.recordSnapshot({
@@ -2017,7 +2198,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       }),
     });
     await coordinator.tickOnce();
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
+    expect(switchBeforeTurn).toHaveBeenCalledTimes(3);
     expect(switchBeforeTurn).toHaveBeenCalledWith({
       sessionId: 'session-1',
       serviceId: 'openai-codex',
@@ -2027,7 +2208,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     });
   });
 
-  it('suppresses proactive soft-threshold switching when the only different target is not meaningfully better', async () => {
+  it('delegates candidate quality to the authoritative coordinator after quota evidence trips', async () => {
     let now = 1_000_000;
     const resetAtMs = now + 600_000;
     const runtimeQuotaSnapshots = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
@@ -2198,12 +2379,9 @@ describe('ConnectedServiceQuotasCoordinator', () => {
 
     await coordinator.tickOnce();
 
-    expect(switchBeforeTurn).not.toHaveBeenCalled();
-    expect(recordDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
-      event: 'quota_work_suppressed',
-      phase: 'soft_switch',
+    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
+    expect(recordDiagnostic).not.toHaveBeenCalledWith(expect.objectContaining({
       reason: 'soft_switch_no_meaningfully_better_target',
-      retryAfterMs: resetAtMs - now,
     }));
 
     now = resetAtMs + 1;
@@ -2250,7 +2428,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     });
     await coordinator.tickOnce();
 
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
+    expect(switchBeforeTurn).toHaveBeenCalledTimes(2);
     expect(switchBeforeTurn).toHaveBeenCalledWith({
       sessionId: 'session-1',
       serviceId: 'openai-codex',
@@ -2836,7 +3014,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     }));
   });
 
-  it('does not let stale legacy runtime quota snapshots drive proactive switching when canonical account usage is empty', async () => {
+  it('does not use stale legacy target snapshots before delegating selection to the coordinator', async () => {
     const now = 1_000_000;
     const credentials: Credentials = {
       token: 'happy-token',
@@ -2937,12 +3115,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
 
     await coordinator.tickOnce();
 
-    expect(switchBeforeTurn).not.toHaveBeenCalled();
-    expect(recordDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
-      event: 'quota_work_suppressed',
-      phase: 'soft_switch',
-      reason: 'soft_switch_target_eligibility_unknown',
-    }));
+    expect(switchBeforeTurn).toHaveBeenCalledOnce();
   });
 
   it('reactively soft-switches on an in-band usage change when the active member is projected to burn below the threshold before the next window', async () => {
@@ -2956,13 +3129,19 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       serviceId: 'openai-codex',
       groupId: 'team',
       profileId: 'active',
-      snapshot: buildQuotaSnapshotFixture({ serviceId: 'openai-codex', profileId: 'active', now: now - 30_000, remainingPct: 60 }),
+      groupGeneration: 1,
+      snapshot: buildQuotaSnapshotFixture({
+        serviceId: 'openai-codex', profileId: 'active', now: now - 30_000, remainingPct: 60, resetsAt: now + 600_000,
+      }),
     });
     softSwitchEligibility.runtimeQuotaSnapshots.recordSnapshot({
       serviceId: 'openai-codex',
       groupId: 'team',
       profileId: 'active',
-      snapshot: buildQuotaSnapshotFixture({ serviceId: 'openai-codex', profileId: 'active', now, remainingPct: 40 }),
+      groupGeneration: 1,
+      snapshot: buildQuotaSnapshotFixture({
+        serviceId: 'openai-codex', profileId: 'active', now, remainingPct: 40, resetsAt: now + 600_000,
+      }),
     });
 
     // Canonical source-backed account usage: active is at 40% (ABOVE the 15% threshold — a poll-only
@@ -2970,6 +3149,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     const accountUsageStore = createProviderAccountUsageStore();
     const activeUsageSnapshot = buildProviderAccountUsageSnapshotFixture({
       serviceId: 'openai-codex', groupId: 'team', profileId: 'active', groupGeneration: 1, now, remainingPct: 40,
+      resetsAt: now + 600_000,
     });
     recordGroupMemberAccountUsageFixture(accountUsageStore, {
       snapshot: activeUsageSnapshot, serviceId: 'openai-codex', groupId: 'team', profileId: 'active', groupGeneration: 1,
@@ -3005,6 +3185,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       groupGeneration: 1,
       recordId: activeUsageSnapshot.recordId,
       snapshot: activeUsageSnapshot,
+      source: 'in_band',
     });
 
     expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
@@ -3025,7 +3206,89 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     }));
   });
 
-  it('does not reactively soft-switch on a poll-sourced usage change (the poll runs its own check)', async () => {
+  it('does not combine a newer replenished canonical snapshot with an older in-band burn projection', async () => {
+    const burnObservedAt = 1_000_000;
+    const canonicalObservedAt = burnObservedAt + 1;
+    const softSwitchEligibility = createSoftSwitchEligibilityFixture({
+      serviceId: 'openai-codex',
+      now: canonicalObservedAt,
+    });
+    softSwitchEligibility.runtimeQuotaSnapshots.recordSnapshot({
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'active',
+      groupGeneration: 1,
+      snapshot: buildQuotaSnapshotFixture({
+        serviceId: 'openai-codex',
+        profileId: 'active',
+        now: burnObservedAt - 30_000,
+        remainingPct: 60,
+        resetsAt: burnObservedAt + 600_000,
+      }),
+    });
+    softSwitchEligibility.runtimeQuotaSnapshots.recordSnapshot({
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'active',
+      groupGeneration: 1,
+      snapshot: buildQuotaSnapshotFixture({
+        serviceId: 'openai-codex',
+        profileId: 'active',
+        now: burnObservedAt,
+        remainingPct: 40,
+        resetsAt: burnObservedAt + 600_000,
+      }),
+    });
+
+    const replenishedUsage = buildProviderAccountUsageSnapshotFixture({
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'active',
+      groupGeneration: 1,
+      now: canonicalObservedAt,
+      remainingPct: 100,
+      resetsAt: burnObservedAt + 600_000,
+    });
+    recordGroupMemberAccountUsageFixture(softSwitchEligibility.accountUsageStore, {
+      snapshot: replenishedUsage,
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'active',
+      groupGeneration: 1,
+    });
+
+    const switchBeforeTurn = vi.fn(async () => ({
+      status: 'switched' as const,
+      activeProfileId: 'backup',
+      generation: 2,
+    }));
+    const coordinator = new ConnectedServiceQuotasCoordinator({
+      api: { getConnectedServiceAuthGroup: softSwitchEligibility.getConnectedServiceAuthGroup } as unknown as QuotaApi,
+      credentials: { token: 'happy-token', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) } },
+      quotaFetchers: [],
+      now: () => canonicalObservedAt,
+      randomBytes: (length: number) => randomBytes(length),
+      discoveryEnabled: false,
+      runtimeQuotaSnapshots: softSwitchEligibility.runtimeQuotaSnapshots,
+      accountUsageStore: softSwitchEligibility.accountUsageStore,
+      authGroupSwitchCoordinator: { switchBeforeTurn },
+      groupSwitchCheckMinIntervalMs: 0,
+    });
+
+    await coordinator.handleAccountUsageChanged({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      profileId: 'active',
+      groupId: 'team',
+      groupGeneration: 1,
+      recordId: replenishedUsage.recordId,
+      snapshot: replenishedUsage,
+    });
+
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
+  });
+
+  it('does not reactively soft-switch evidence-only or poll-sourced usage changes', async () => {
     const now = 1_000_000;
     const softSwitchEligibility = createSoftSwitchEligibilityFixture({ serviceId: 'openai-codex', now });
     softSwitchEligibility.runtimeQuotaSnapshots.recordSnapshot({
@@ -3044,6 +3307,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       snapshot: activeUsageSnapshot, serviceId: 'openai-codex', groupId: 'team', profileId: 'active', groupGeneration: 1,
     });
     const switchBeforeTurn = vi.fn(async () => ({ status: 'switched' as const, activeProfileId: 'backup', generation: 2 }));
+    const diagnostics: unknown[] = [];
     const coordinator = new ConnectedServiceQuotasCoordinator({
       api: { getConnectedServiceAuthGroup: softSwitchEligibility.getConnectedServiceAuthGroup } as unknown as QuotaApi,
       credentials: { token: 'happy-token', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) } },
@@ -3055,6 +3319,42 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       accountUsageStore,
       authGroupSwitchCoordinator: { switchBeforeTurn },
       groupSwitchCheckMinIntervalMs: 0,
+      recordDiagnostic: (event: unknown) => diagnostics.push(event),
+    });
+
+    // An omitted or future source classification cannot inherit predictive switching authority.
+    await coordinator.handleAccountUsageChanged({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      profileId: 'active',
+      groupId: 'team',
+      groupGeneration: 1,
+      recordId: activeUsageSnapshot.recordId,
+      snapshot: activeUsageSnapshot,
+    });
+
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
+
+    await coordinator.handleAccountUsageChanged({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      profileId: 'active',
+      groupId: 'team',
+      groupGeneration: 1,
+      recordId: activeUsageSnapshot.recordId,
+      snapshot: activeUsageSnapshot,
+      source: 'evidence_only',
+    });
+
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
+    expect(diagnostics).toContainEqual({
+      event: 'quota_work_suppressed',
+      phase: 'soft_switch',
+      reason: 'post_hard_limit_snapshot_evidence_only',
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      activeProfileId: 'active',
     });
 
     await coordinator.handleAccountUsageChanged({
@@ -3069,107 +3369,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     });
 
     expect(switchBeforeTurn).not.toHaveBeenCalled();
-  });
-
-  it('does not fall back to runtime quota snapshots for same-account fanout eligibility when canonical account usage is cold', async () => {
-    const now = 1_000_000;
-    const softSwitchEligibility = createSoftSwitchEligibilityFixture({
-      serviceId: 'openai-codex',
-      now,
-    });
-    const coordinator = new ConnectedServiceQuotasCoordinator({
-      api: {
-        getConnectedServiceAuthGroup: softSwitchEligibility.getConnectedServiceAuthGroup,
-      } as unknown as QuotaApi,
-      credentials: {
-        token: 'happy-token',
-        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) },
-      },
-      quotaFetchers: [],
-      runtimeQuotaSnapshots: softSwitchEligibility.runtimeQuotaSnapshots,
-      accountUsageStore: createProviderAccountUsageStore(),
-      now: () => now,
-      randomBytes: (length: number) => randomBytes(length),
-      discoveryEnabled: false,
-    });
-    const resolveGroupSwitchTargetEligibility = (coordinator as unknown as {
-      resolveGroupSwitchTargetEligibility(input: Readonly<{
-        serviceId: 'openai-codex';
-        groupId: string;
-        purpose: 'same_account_fanout';
-      }>): Promise<Readonly<{ status: string; reason?: string }>>;
-    }).resolveGroupSwitchTargetEligibility.bind(coordinator);
-
-    await expect(resolveGroupSwitchTargetEligibility({
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      purpose: 'same_account_fanout',
-    })).resolves.toMatchObject({
-      status: 'unknown',
-      reason: 'source_account_usage_unavailable',
-    });
-  });
-
-  it('allows same-account fanout to choose a credential-valid fallback with unknown target quota when canonical source usage exists', async () => {
-    const now = 1_000_000;
-    const accountUsageStore = createProviderAccountUsageStore();
-    recordGroupMemberAccountUsageFixture(accountUsageStore, {
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      profileId: 'active',
-      groupGeneration: 1,
-      snapshot: buildProviderAccountUsageSnapshotFixture({
-        serviceId: 'openai-codex',
-        groupId: 'team',
-        profileId: 'active',
-        groupGeneration: 1,
-        now,
-        remainingPct: 0,
-        resetsAt: now + 60_000,
-      }),
-    });
-    const softSwitchEligibility = createSoftSwitchEligibilityFixture({
-      serviceId: 'openai-codex',
-      now,
-    });
-    const coordinator = new ConnectedServiceQuotasCoordinator({
-      api: {
-        getConnectedServiceAuthGroup: softSwitchEligibility.getConnectedServiceAuthGroup,
-      } as unknown as QuotaApi,
-      credentials: {
-        token: 'happy-token',
-        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) },
-      },
-      quotaFetchers: [],
-      accountUsageStore,
-      now: () => now,
-      randomBytes: (length: number) => randomBytes(length),
-      discoveryEnabled: false,
-    });
-    const resolveGroupSwitchTargetEligibility = (coordinator as unknown as {
-      resolveGroupSwitchTargetEligibility(input: Readonly<{
-        serviceId: 'openai-codex';
-        groupId: string;
-        purpose: 'same_account_fanout';
-      }>): Promise<Readonly<{ status: string; reason?: string; decisionTrace?: unknown }>>;
-    }).resolveGroupSwitchTargetEligibility.bind(coordinator);
-
-    await expect(resolveGroupSwitchTargetEligibility({
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      purpose: 'same_account_fanout',
-    })).resolves.toMatchObject({
-      status: 'eligible',
-      decisionTrace: {
-        candidates: expect.arrayContaining([
-          expect.objectContaining({
-            profileId: 'backup',
-            decision: 'selected',
-            quotaEvidence: { status: 'stale_or_missing' },
-          }),
-        ]),
-      },
-    });
   });
 
   it('records polling snapshots as canonical account usage before evaluating proactive switching', async () => {
@@ -3460,7 +3659,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     });
   });
 
-  it('does not use generationless account-usage group-member aliases as soft-switch target evidence', async () => {
+  it('leaves generation-qualified target evidence evaluation to the authoritative coordinator', async () => {
     const now = 1_000_000;
     const accountUsageStore = createProviderAccountUsageStore();
     accountUsageStore.recordSnapshot(buildProviderAccountUsageSnapshotFixture({
@@ -3569,10 +3768,10 @@ describe('ConnectedServiceQuotasCoordinator', () => {
 
     await coordinator.tickOnce();
 
-    expect(switchBeforeTurn).not.toHaveBeenCalled();
+    expect(switchBeforeTurn).toHaveBeenCalledOnce();
   });
 
-  it('suppresses proactive soft-threshold switching for a session with matching pending recovery', async () => {
+  it('does not require per-session recovery permission for the canonical proactive group switch', async () => {
     const now = 1_000_000;
 
     const credentials: Credentials = {
@@ -3636,10 +3835,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       })),
     };
     const switchBeforeTurn = vi.fn(async () => ({ status: 'switched' as const, activeProfileId: 'backup', generation: 2 }));
-    const softSwitchRecoveryGuard = vi.fn(async () => ({
-      status: 'suppress' as const,
-      reason: 'quota_soft_switch_suppressed_recovery_pending',
-    }));
     const recordDiagnostic = vi.fn();
     const coordinator = new ConnectedServiceQuotasCoordinator({
       api,
@@ -3652,7 +3847,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       accountUsageStore: softSwitchEligibility.accountUsageStore,
       authGroupSwitchCoordinator: { switchBeforeTurn },
       groupSwitchCheckMinIntervalMs: 0,
-      softSwitchRecoveryGuard,
       recordDiagnostic,
     });
 
@@ -3683,19 +3877,11 @@ describe('ConnectedServiceQuotasCoordinator', () => {
 
     await coordinator.tickOnce();
 
-    expect(softSwitchRecoveryGuard).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      activeProfileId: 'active',
-      reason: 'soft_threshold',
-    });
-    expect(switchBeforeTurn).not.toHaveBeenCalled();
-    expect(recordDiagnostic).toHaveBeenCalledWith({
+    expect(switchBeforeTurn).toHaveBeenCalledOnce();
+    expect(recordDiagnostic).not.toHaveBeenCalledWith(expect.objectContaining({
       event: 'quota_work_suppressed',
       phase: 'soft_switch',
-      reason: 'quota_soft_switch_suppressed_recovery_pending',
-    });
+    }));
   });
 
   it('uses the canonical reported session id for proactive soft-threshold policy guards', async () => {
@@ -3828,7 +4014,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     });
   });
 
-  it('keeps proactive soft-threshold switching active for sessions without matching pending recovery', async () => {
+  it('keeps proactive soft-threshold switching active without per-session recovery permission', async () => {
     const now = 1_000_000;
 
     const credentials: Credentials = {
@@ -3892,7 +4078,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       })),
     };
     const switchBeforeTurn = vi.fn(async () => ({ status: 'switched' as const, activeProfileId: 'backup', generation: 2 }));
-    const softSwitchRecoveryGuard = vi.fn(async () => ({ status: 'allow' as const }));
     const coordinator = new ConnectedServiceQuotasCoordinator({
       api,
       credentials,
@@ -3904,7 +4089,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       accountUsageStore: softSwitchEligibility.accountUsageStore,
       authGroupSwitchCoordinator: { switchBeforeTurn },
       groupSwitchCheckMinIntervalMs: 0,
-      softSwitchRecoveryGuard,
     });
 
     coordinator.registerSpawnTarget({
@@ -3934,13 +4118,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
 
     await coordinator.tickOnce();
 
-    expect(softSwitchRecoveryGuard).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      activeProfileId: 'active',
-      reason: 'soft_threshold',
-    });
     expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
     expect(switchBeforeTurn).toHaveBeenCalledWith({
       sessionId: 'session-1',
@@ -4008,11 +4185,27 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         groupDecisionCount++;
         await Promise.resolve();
         groupDecisionInFlight = false;
-        return { status: 'switched' as const, activeProfileId: 'backup', generation: 2 };
+        return {
+          status: 'switched' as const,
+          activeProfileId: 'backup',
+          generation: 2,
+          credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+        };
       }
       await Promise.resolve();
-      return { status: 'observed_generation' as const, activeProfileId: 'backup', generation: 2 };
+      return {
+        status: 'observed_generation' as const,
+        activeProfileId: 'backup',
+        generation: 2,
+        credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+      };
     });
+    const applyCommittedGeneration = vi.fn(async () => ({
+      status: 'observed_generation' as const,
+      activeProfileId: 'backup',
+      generation: 2,
+    }));
+    const consumeCommittedAuthGroupGeneration = vi.fn(async () => ({ outcome: 'adopted_current' as const }));
     const coordinator = new ConnectedServiceQuotasCoordinator({
       api,
       credentials,
@@ -4022,7 +4215,8 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       discoveryEnabled: false,
       runtimeQuotaSnapshots: softSwitchEligibility.runtimeQuotaSnapshots,
       accountUsageStore: softSwitchEligibility.accountUsageStore,
-      authGroupSwitchCoordinator: { switchBeforeTurn },
+      authGroupSwitchCoordinator: { switchBeforeTurn, applyCommittedGeneration },
+      consumeCommittedAuthGroupGeneration,
       groupSwitchCheckMinIntervalMs: 0,
     });
 
@@ -4057,29 +4251,32 @@ describe('ConnectedServiceQuotasCoordinator', () => {
 
     expect(fetcher.fetch).toHaveBeenCalledTimes(1);
     expect(groupDecisionCount).toBe(1);
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(2);
-    const calls = switchBeforeTurn.mock.calls
-      .map((call) => call[0])
-      .sort((a, b) => String(a.sessionId).localeCompare(String(b.sessionId)));
-    expect(calls).toEqual([
-      {
-        sessionId: 'session-1',
-        serviceId: 'openai-codex',
-        groupId: 'team',
-        reason: 'soft_threshold',
-        observedProfileId: 'active',
-      },
-      {
-        sessionId: 'session-2',
-        serviceId: 'openai-codex',
-        groupId: 'team',
-        reason: 'soft_threshold',
-        observedProfileId: 'active',
-      },
-    ]);
+    expect(switchBeforeTurn).toHaveBeenCalledOnce();
+    expect(switchBeforeTurn).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      reason: 'soft_threshold',
+      observedProfileId: 'active',
+    });
+    expect(consumeCommittedAuthGroupGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      committedGeneration: expect.objectContaining({
+        decisionCommittedTarget: expect.objectContaining({
+          profileId: 'backup',
+          generation: 2,
+          credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+        }),
+      }),
+      executionAuthority: 'runtime_recovery',
+      sessions: [
+        expect.objectContaining({ sessionId: 'session-1', activity: 'live' }),
+        expect.objectContaining({ sessionId: 'session-2', activity: 'live' }),
+      ],
+    }));
+    expect(applyCommittedGeneration).not.toHaveBeenCalled();
   });
 
-  it('keeps proactive soft-threshold checks independent for distinct active profiles in the same group', async () => {
+  it('coalesces proactive soft-threshold checks onto canonical truth for one shared group', async () => {
     const now = 1_000_000;
 
     const credentials: Credentials = {
@@ -4180,15 +4377,14 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     await coordinator.tickOnce();
 
     expect(fetcher.fetch).toHaveBeenCalledTimes(2);
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(2);
-    const calledSessionIds = switchBeforeTurn.mock.calls
-      .map((call) => (call[0] as Readonly<{ sessionId?: string }>).sessionId)
-      .sort();
-    expect(calledSessionIds).toEqual(['session-1', 'session-2']);
-    const calledObservedProfileIds = switchBeforeTurn.mock.calls
-      .map((call) => (call[0] as Readonly<{ observedProfileId?: string }>).observedProfileId)
-      .sort();
-    expect(calledObservedProfileIds).toEqual(['active-a', 'active-b']);
+    expect(switchBeforeTurn).toHaveBeenCalledOnce();
+    expect(switchBeforeTurn).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      reason: 'soft_threshold',
+      observedProfileId: 'active-a',
+    });
   });
 
   it('uses deterministic bounded jitter when scheduling the next proactive soft-threshold check', async () => {
@@ -4528,7 +4724,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     });
   });
 
-  it('hot-applies only sibling sessions proven on the same live provider account after account exhaustion', async () => {
+  it('fails closed after proving siblings when recipient generation apply is unavailable', async () => {
     const now = 1_000_000;
     const credentials: Credentials = {
       token: 'happy-token',
@@ -4622,7 +4818,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       groupGeneration: 4,
     });
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -4633,17 +4829,10 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
 
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'same-account',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'primary',
-    });
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
   });
 
   it('does not fan out through stale snapshot identity whose active profile no longer matches the group binding', async () => {
@@ -4715,7 +4904,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       groupGeneration: 4,
     });
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -4796,7 +4985,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordRuntimeUsageLimitExhaustionAndFanout({
+    await expect(recordRuntimeUsageLimitExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -4805,15 +4994,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
-    });
-
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'same-account',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'primary',
+      fanoutRequests: 0,
     });
   });
 
@@ -4914,7 +5095,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       groupGeneration: 4,
     });
 
-    await expect(coordinator.recordRuntimeUsageLimitExhaustionAndFanout({
+    await expect(recordRuntimeUsageLimitExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -4925,7 +5106,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
 
     expect(readRuntimeAccountIdentity).toHaveBeenCalledTimes(1);
@@ -4935,13 +5116,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       groupId: 'team',
       profileId: 'primary',
       expectedGroupGeneration: 4,
-    });
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'same-account',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'primary',
     });
   });
 
@@ -5004,7 +5178,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       },
     });
 
-    await expect(coordinator.recordRuntimeUsageLimitExhaustionAndFanout({
+    await expect(recordRuntimeUsageLimitExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -5137,7 +5311,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         }),
       });
 
-      await expect(harness.coordinator.recordAccountExhaustionAndFanout({
+      await expect(recordAccountExhaustionAndFanoutForTest(harness.coordinator, {
         sourceSessionId: 'source',
         serviceId: 'openai-codex',
         groupId: 'team',
@@ -5145,12 +5319,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         providerAccountId: 'acct-a',
         resetAtMs: null,
         reason: 'usage_limit',
-      })).resolves.toEqual({ status: 'recorded', fanoutCandidates: 1, fanoutRequests: 1 });
-
-      expect(harness.switchBeforeTurn).toHaveBeenCalledWith(expect.objectContaining({
-        sessionId: 'same-account',
-        reason: 'same_provider_account_exhausted',
-      }));
+      })).resolves.toEqual({ status: 'recorded', fanoutCandidates: 1, fanoutRequests: 0 });
       expect(harness.diagnostics).toContainEqual(expect.objectContaining({
         event: 'quota_work_deferred',
         phase: 'same_account_fanout',
@@ -5180,7 +5349,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         }),
       });
 
-      await expect(harness.coordinator.recordAccountExhaustionAndFanout({
+      await expect(recordAccountExhaustionAndFanoutForTest(harness.coordinator, {
         sourceSessionId: 'source',
         serviceId: 'openai-codex',
         groupId: 'team',
@@ -5203,7 +5372,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         readPersistedSessionAccountIdentity: async () => null,
       });
 
-      await expect(harness.coordinator.recordAccountExhaustionAndFanout({
+      await expect(recordAccountExhaustionAndFanoutForTest(harness.coordinator, {
         sourceSessionId: 'source',
         serviceId: 'openai-codex',
         groupId: 'team',
@@ -5313,7 +5482,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -5324,7 +5493,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
 
     expect(readRuntimeAccountIdentity).toHaveBeenCalledTimes(1);
@@ -5335,14 +5504,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       profileId: 'primary',
       expectedGroupGeneration: 4,
     });
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'same-account',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'primary',
-    });
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
     expect(diagnostics).not.toContainEqual(expect.objectContaining({
       event: 'quota_work_deferred',
       phase: 'same_account_fanout',
@@ -5433,7 +5595,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -5444,20 +5606,13 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
 
     // The daemon-authoritative candidate is switched (cross-account applied via broker), NOT stranded,
     // and its runtime is never probed for identity.
     expect(readRuntimeAccountIdentity).not.toHaveBeenCalled();
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'same-account',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'primary',
-    });
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
     expect(diagnostics).not.toContainEqual(expect.objectContaining({
       event: 'quota_work_suppressed',
       reason: 'unsupported_session_runtime_method',
@@ -5546,7 +5701,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     registerGroupSession('same-account', 502, 'acct-a');
     registerGroupSession('different-account', 503, 'acct-b');
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -5557,17 +5712,10 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
 
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'same-account',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'primary',
-    });
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
   });
 
   it('seeds exact runtime account identity from direct registry spawn selection writes', async () => {
@@ -5628,22 +5776,8 @@ describe('ConnectedServiceQuotasCoordinator', () => {
           groupId: 'team',
           groupGeneration: 4,
           source: 'spawn_selection',
-          record: buildConnectedServiceCredentialRecord({
-            now,
-            serviceId: 'openai-codex',
-            profileId: 'primary',
-            kind: 'oauth',
-            expiresAt: now + 60_000,
-            oauth: {
-              accessToken: 'access',
-              refreshToken: 'refresh',
-              idToken: null,
-              scope: null,
-              tokenType: null,
-              providerAccountId,
-              providerEmail: `${sessionId}@example.com`,
-            },
-          }),
+          providerAccountId,
+          accountLabel: `${sessionId}@example.com`,
         }],
       });
     };
@@ -5652,7 +5786,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     registerGroupSession('same-account', 512, 'acct-a');
     registerGroupSession('different-account', 513, 'acct-b');
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -5663,17 +5797,10 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
 
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'same-account',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'primary',
-    });
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
   });
 
   it('keeps exact hot-apply runtime identity authoritative when a group session spawn env still names the previous profile', async () => {
@@ -5771,7 +5898,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       providerAccountId: 'acct-a',
     });
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -5782,17 +5909,10 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
 
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'same-account',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'runtime-current',
-    });
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
   });
 
   it('fails closed when provisional spawn identity cannot be re-proven by live runtime identity', async () => {
@@ -5882,7 +6002,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     registerProvisionalGroupSession('source', 511, 'acct-a');
     registerProvisionalGroupSession('same-account', 512, 'acct-a');
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -5998,7 +6118,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         groupGeneration: 4,
       });
 
-      await expect(coordinator.recordAccountExhaustionAndFanout({
+      await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
         sourceSessionId: `${testCase.name}-source`,
         serviceId: 'openai-codex',
         groupId: 'team',
@@ -6107,7 +6227,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -6118,7 +6238,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
 
     expect(readRuntimeAccountIdentity).toHaveBeenCalledTimes(2);
@@ -6128,13 +6248,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       groupId: 'team',
       profileId: 'primary',
       expectedGroupGeneration: 4,
-    });
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'same-account',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'primary',
     });
     expect(diagnostics).toContainEqual(expect.objectContaining({
       event: 'quota_work_suppressed',
@@ -6234,7 +6347,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -6245,7 +6358,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
 
     expect(readRuntimeAccountIdentity).toHaveBeenCalledWith({
@@ -6254,13 +6367,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       groupId: 'team',
       profileId: 'stale-daemon-profile',
       expectedGroupGeneration: 4,
-    });
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'same-account',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'runtime-current',
     });
     expect(diagnostics).toContainEqual(expect.objectContaining({
       event: 'quota_work_suppressed',
@@ -6333,7 +6439,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -6417,7 +6523,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'claude-subscription',
       groupId: 'team',
@@ -6427,15 +6533,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
-    });
-
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'shared-sibling',
-      serviceId: 'claude-subscription',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'stale-daemon-profile',
+      fanoutRequests: 0,
     });
     expect(readRuntimeAccountIdentity).not.toHaveBeenCalled();
     expect(diagnostics).toContainEqual(expect.objectContaining({
@@ -6448,6 +6546,113 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         proofKind: 'runtime_identity_index',
       }),
     }));
+  });
+
+  it('does not create a second generation consumer when durable consumption is unavailable', async () => {
+    const now = 1_000_000;
+    const credentials: Credentials = {
+      token: 'happy-token',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) },
+    };
+    const api = {
+      getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
+      getConnectedServiceQuotaSnapshotPlain: vi.fn(async () => null),
+      getConnectedServiceCredentialPlain: vi.fn(async () => null),
+      getConnectedServiceQuotaSnapshotSealed: vi.fn(async () => null),
+      getConnectedServiceCredentialSealed: vi.fn(async () => null),
+    } as unknown as QuotaApi;
+    const switchBeforeTurn = vi.fn(async () => ({
+      status: 'switched' as const,
+      activeProfileId: 'backup',
+      generation: 9,
+    }));
+    const sourceCommittedGeneration = buildConnectedServiceAuthGroupCommittedGenerationFact({
+      decisionId: 'source-hard-limit-decision',
+      provenance: 'hard_limit',
+      decisionCommittedTarget: {
+        serviceId: 'claude-subscription',
+        groupId: 'team',
+        profileId: 'backup',
+        generation: 9,
+      },
+    });
+    const applyCommittedGeneration = vi.fn(async (input: Readonly<{
+      sessionId: string;
+      serviceId: string;
+      groupId: string;
+      activeProfileId: string;
+      generation: number;
+      reason: string;
+    }>) => input.sessionId === 'sibling-2' && input.generation === 9
+      ? {
+          status: 'superseded_after_apply' as const,
+          activeProfileId: 'backup-c',
+          generation: 10,
+        }
+      : {
+          status: 'observed_generation' as const,
+          activeProfileId: input.activeProfileId,
+          generation: input.generation,
+          mode: 'hot_apply' as const,
+          providerApplication: 'applied' as const,
+          verificationByServiceId: {
+            'claude-subscription': {
+              status: 'verified' as const,
+              proofStrength: 'exact' as const,
+              sharedAuthSurfaceId: 'claude-team-surface',
+              source: 'shared_auth_surface',
+            },
+          },
+        });
+    const coordinator = new ConnectedServiceQuotasCoordinator({
+      api,
+      credentials,
+      quotaFetchers: [],
+      now: () => now,
+      randomBytes: (length: number) => randomBytes(length),
+      authGroupSwitchCoordinator: { switchBeforeTurn, applyCommittedGeneration },
+      groupSwitchCheckMinIntervalMs: 0,
+      sameAccountFanoutStrategyResolver: () => 'shared_group_auth_surface',
+      readRuntimeAccountIdentity: async () => {
+        throw new Error('shared group fanout must not runtime-probe siblings');
+      },
+    });
+    for (const [index, sessionId] of ['source', 'sibling-1', 'sibling-2', 'sibling-3', 'sibling-4'].entries()) {
+      coordinator.registerSpawnTarget({
+        pid: 8_000 + index,
+        sessionId,
+        connectedServicesBindingsRaw: {
+          v: 1,
+          bindingsByServiceId: {
+            'claude-subscription': { source: 'connected', selection: 'group', groupId: 'team' },
+          },
+        },
+        connectedServiceSelectionsEnv: {
+          [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+            kind: 'group',
+            serviceId: 'claude-subscription',
+            groupId: 'team',
+            activeProfileId: 'primary',
+            fallbackProfileId: 'backup',
+            generation: 8,
+          }]),
+        },
+      });
+    }
+
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
+      sourceSessionId: 'source',
+      serviceId: 'claude-subscription',
+      groupId: 'team',
+      exhaustedProfileId: 'primary',
+      resetAtMs: null,
+      reason: 'usage_limit',
+      committedGeneration: sourceCommittedGeneration,
+      sourceRequiresConvergence: false,
+    })).resolves.toEqual({ status: 'recorded', fanoutCandidates: 4, fanoutRequests: 0 });
+
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
+    expect(applyCommittedGeneration).not.toHaveBeenCalled();
   });
 
   it('fans out runtime usage-limit reports for shared auth surfaces without source provider account ids', async () => {
@@ -6505,7 +6710,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordRuntimeUsageLimitExhaustionAndFanout({
+    await expect(recordRuntimeUsageLimitExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'claude-subscription',
       groupId: 'team',
@@ -6514,15 +6719,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
-    });
-
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'shared-sibling',
-      serviceId: 'claude-subscription',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'stale-daemon-profile',
+      fanoutRequests: 0,
     });
     expect(readRuntimeAccountIdentity).not.toHaveBeenCalled();
   });
@@ -6583,7 +6780,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       },
     });
 
-    await expect(coordinator.recordRuntimeUsageLimitExhaustionAndFanout({
+    await expect(recordRuntimeUsageLimitExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source-absent-from-registry',
       serviceId: 'claude-subscription',
       groupId: 'team',
@@ -6593,15 +6790,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
-    });
-
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'shared-sibling',
-      serviceId: 'claude-subscription',
-      groupId: 'team',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'edison_bat',
+      fanoutRequests: 0,
     });
     expect(readRuntimeAccountIdentity).not.toHaveBeenCalled();
     expect(diagnostics).toContainEqual(expect.objectContaining({
@@ -6677,7 +6866,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'claude-subscription',
       groupId: 'team',
@@ -6707,7 +6896,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     }));
   });
 
-  it('defers runtime-idle same-account fanout to next spawn without per-session switch', async () => {
+  it('applies a committed same-account generation to an exact live idle sibling', async () => {
     const now = 1_000_000;
     const credentials: Credentials = {
       token: 'happy-token',
@@ -6733,6 +6922,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       },
     }));
     const diagnostics: unknown[] = [];
+    const consumeCommittedAuthGroupGeneration = vi.fn(async () => ({ outcome: 'adopted_current' as const }));
     const coordinator = new ConnectedServiceQuotasCoordinator({
       api,
       credentials,
@@ -6742,6 +6932,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       authGroupSwitchCoordinator: { switchBeforeTurn },
       sameAccountFanoutStrategyResolver: () => 'provider_account_id',
       readRuntimeAccountIdentity,
+      consumeCommittedAuthGroupGeneration,
       recordDiagnostic: (event) => diagnostics.push(event),
     });
 
@@ -6784,7 +6975,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -6795,22 +6986,30 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 0,
+      fanoutRequests: 2,
     });
 
     expect(switchBeforeTurn).not.toHaveBeenCalled();
-    expect(diagnostics).toContainEqual(expect.objectContaining({
-      event: 'quota_work_suppressed',
-      phase: 'same_account_fanout',
+    expect(consumeCommittedAuthGroupGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      sessions: [
+        {
+          sessionId: 'idle-sibling',
+          activity: 'live',
+          fromProfileId: 'member-a',
+        },
+        {
+          sessionId: 'source',
+          activity: 'live',
+          fromProfileId: 'member-a',
+        },
+      ],
+    }));
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
       reason: 'same_account_fanout_candidate_idle_deferred_to_next_spawn',
-      sessionId: 'idle-sibling',
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      activeProfileId: 'member-a',
     }));
   });
 
-  it('diagnoses group-wide exhaustion and applies fanout after target eligibility recovers', async () => {
+  it('does not re-evaluate member eligibility after the source commits a hard-limit generation', async () => {
     let now = 1_000_000;
     const resetAtMs = now + 600_000;
     const runtimeQuotaSnapshots = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
@@ -6840,6 +7039,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       displayName: 'Team',
       activeProfileId: 'primary',
       generation: 4,
+      runtimeStateRevision: 0,
       policy: {
         v: 1,
         autoSwitch: true,
@@ -6951,7 +7151,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       groupGeneration: 4,
     });
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -6965,11 +7165,8 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       fanoutRequests: 0,
     });
     expect(switchBeforeTurn).not.toHaveBeenCalled();
-    expect(diagnostics).toContainEqual(expect.objectContaining({
-      event: 'quota_work_suppressed',
-      phase: 'same_account_fanout',
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
       reason: 'group_exhausted_no_eligible_target',
-      retryAfterMs: resetAtMs - now,
     }));
     expect(diagnostics).not.toContainEqual(expect.objectContaining({
       event: 'quota_work_suppressed',
@@ -6980,7 +7177,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     now = resetAtMs + 1;
     memberStates.set('backup', {});
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -6991,9 +7188,9 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
   });
 
   it('suppresses same-account exhaustion fanout unless the provider strategy opts into exact account proof', async () => {
@@ -7058,7 +7255,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -7138,7 +7335,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       groupGeneration: 4,
     });
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -7149,11 +7346,11 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 1,
-      fanoutRequests: 1,
+      fanoutRequests: 0,
     });
 
     now += 1_000;
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -7166,7 +7363,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       fanoutCandidates: 0,
       fanoutRequests: 0,
     });
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
   });
 
   it('invalidates runtime account identity on pid transfer before same-account fanout', async () => {
@@ -7236,7 +7433,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
 
     coordinator.transferPid(132, 232);
 
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -7318,7 +7515,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await coordinator.recordAccountExhaustionAndFanout({
+    await recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -7340,7 +7537,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       proofStrength: 'exact',
       groupGeneration: 4,
     });
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -7354,7 +7551,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       fanoutRequests: 0,
     });
 
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
     expect(diagnostics).toContainEqual(expect.objectContaining({
       event: 'quota_work_suppressed',
       phase: 'same_account_fanout',
@@ -7413,7 +7610,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     };
     registerGroupSession('source', 301);
-    await expect(coordinator.recordAccountExhaustionAndFanout({
+    await expect(recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -7441,7 +7638,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       proofStrength: 'exact',
       groupGeneration: 4,
     });
-    await coordinator.recordAccountExhaustionAndFanout({
+    await recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source',
       serviceId: 'openai-codex',
       groupId: 'team',
@@ -7451,7 +7648,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       reason: 'usage_limit',
     });
 
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
   });
 
   it('does not coalesce same-account exhaustion fanout across independent groups', async () => {
@@ -7526,7 +7723,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       });
     }
 
-    await coordinator.recordAccountExhaustionAndFanout({
+    await recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source-a',
       serviceId: 'openai-codex',
       groupId: 'team-a',
@@ -7536,7 +7733,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       reason: 'usage_limit',
     });
     now += 10_000;
-    await coordinator.recordAccountExhaustionAndFanout({
+    await recordAccountExhaustionAndFanoutForTest(coordinator, {
       sourceSessionId: 'source-b',
       serviceId: 'openai-codex',
       groupId: 'team-b',
@@ -7546,21 +7743,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       reason: 'usage_limit',
     });
 
-    expect(switchBeforeTurn).toHaveBeenCalledTimes(2);
-    expect(switchBeforeTurn).toHaveBeenNthCalledWith(1, {
-      sessionId: 'same-account-a',
-      serviceId: 'openai-codex',
-      groupId: 'team-a',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'primary',
-    });
-    expect(switchBeforeTurn).toHaveBeenNthCalledWith(2, {
-      sessionId: 'same-account-b',
-      serviceId: 'openai-codex',
-      groupId: 'team-b',
-      reason: 'same_provider_account_exhausted',
-      observedProfileId: 'primary',
-    });
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
   });
 
   it('exposes fresh quota snapshots as central quota_probe_fresh proof without account-adoption proof', () => {
@@ -7588,11 +7771,22 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     expect(coordinator.resolveQuotaProbeFreshProof({
       serviceId: 'openai-codex',
       profileId: 'backup',
-      groupId: 'team',
-      expectedGroupGeneration: 8,
-      currentGroupGeneration: 8,
-      expectedMaterialFingerprint: 'credential-fingerprint',
-      snapshotMaterialFingerprint: 'credential-fingerprint',
+      expectedAppliedIdentity: {
+        serviceId: 'openai-codex',
+        profileId: 'backup',
+        groupId: 'team',
+        groupGeneration: 8,
+        providerAccountId: 'acct-provider-a',
+        materialFingerprint: 'credential-fingerprint',
+      },
+      snapshotAppliedIdentity: {
+        serviceId: 'openai-codex',
+        profileId: 'backup',
+        groupId: 'team',
+        groupGeneration: 8,
+        providerAccountId: 'acct-provider-a',
+        materialFingerprint: 'credential-fingerprint',
+      },
       snapshot: {
         v: 1,
         serviceId: 'openai-codex',
@@ -7816,6 +8010,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       displayName: 'Team',
       activeProfileId: 'primary',
       generation: 4,
+      runtimeStateRevision: 0,
       policy: {
         ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
         autoSwitch: true,
@@ -7926,11 +8121,13 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     const memberState = patch?.memberStates?.[0]?.state as Record<string, unknown> | undefined;
     expect(memberState?.quotaExhaustedUntilMs).toBeUndefined();
     expect(memberState?.lastFailureKind).toBeUndefined();
-    expect(memberState?.providerResetsAtMs).toBe(now + 500_000);
+    // Fresh usable matching quota supersedes the stale reset marker together with the
+    // quota blocker; retaining it would let old quota state influence later selection.
+    expect(memberState?.providerResetsAtMs).toBeUndefined();
     expect(memberState?.lastObservedAtMs).toBeUndefined();
   });
 
-  it('does not emit quota lifecycle transitions from cold hydrate or probe state', async () => {
+  it('does not emit quota lifecycle transitions from probe state', async () => {
     const now = Date.parse('2026-06-11T10:00:00.000Z');
     const resetAtMs = now + 500_000;
     const runtimeQuotaSnapshots = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
@@ -7982,6 +8179,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       displayName: 'Team',
       activeProfileId: 'primary',
       generation: 4,
+      runtimeStateRevision: 0,
       policy: {
         ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
         autoSwitch: true,
@@ -8140,13 +8338,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         }]),
       },
     });
-    const hydratePersistedQuotaSnapshotsForGroup = (coordinator as unknown as {
-      hydratePersistedQuotaSnapshotsForGroup: (input: Readonly<{
-        serviceId: 'openai-codex';
-        groupId: string;
-        profileIds: ReadonlyArray<string>;
-      }>) => Promise<void>;
-    }).hydratePersistedQuotaSnapshotsForGroup;
     const probeGroupQuotaSnapshots = (coordinator as unknown as {
       probeGroupQuotaSnapshots: (input: Readonly<{
         serviceId: 'openai-codex';
@@ -8154,13 +8345,6 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         profileIds: ReadonlyArray<string>;
       }>) => Promise<void>;
     }).probeGroupQuotaSnapshots;
-
-    await hydratePersistedQuotaSnapshotsForGroup.call(coordinator, {
-      serviceId: 'openai-codex',
-      groupId: 'team',
-      profileIds: ['primary', 'backup'],
-    });
-    expect(onQuotaLifecycleTransition).not.toHaveBeenCalled();
 
     await probeGroupQuotaSnapshots.call(coordinator, {
       serviceId: 'openai-codex',
@@ -8186,6 +8370,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       displayName: 'Team',
       activeProfileId: 'primary',
       generation: 4,
+      runtimeStateRevision: 0,
       policy: {
         ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
         autoSwitch: true,
@@ -8360,6 +8545,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       displayName: 'Team',
       activeProfileId: 'primary',
       generation: 4,
+      runtimeStateRevision: 0,
       policy: {
         ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
         autoSwitch: true,
@@ -8618,7 +8804,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     }).get('idle-backup')).toBeUndefined();
   });
 
-  it('does not hydrate persisted connected-service quota snapshots for explicit auth-group members on demand', async () => {
+  it('does not expose the obsolete persisted auth-group quota hydrator', () => {
     const now = 1_000_000;
     const runtimeQuotaSnapshots = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
     const accountUsageStore = createProviderAccountUsageStore();
@@ -8669,20 +8855,15 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       now: () => now,
       randomBytes: (length: number) => randomBytes(length),
     });
-    const quotaHydrator = coordinator as unknown as {
-      hydratePersistedQuotaSnapshotsForGroup(input: Readonly<{
+    const hydratePersistedQuotaSnapshotsForGroup = (coordinator as unknown as {
+      hydratePersistedQuotaSnapshotsForGroup?: (input: Readonly<{
         serviceId: 'openai-codex';
         groupId: string;
         profileIds: ReadonlyArray<string>;
-      }>): Promise<void>;
-    };
+      }>) => Promise<void>;
+    }).hydratePersistedQuotaSnapshotsForGroup;
 
-    await quotaHydrator.hydratePersistedQuotaSnapshotsForGroup({
-      serviceId: 'openai-codex',
-      groupId: 'main',
-      profileIds: ['primary', 'backup'],
-    });
-
+    expect(hydratePersistedQuotaSnapshotsForGroup).toBeUndefined();
     expect(api.getConnectedServiceQuotaSnapshotPlain).not.toHaveBeenCalled();
     expect(runtimeQuotaSnapshots.getSnapshot({
       serviceId: 'openai-codex',

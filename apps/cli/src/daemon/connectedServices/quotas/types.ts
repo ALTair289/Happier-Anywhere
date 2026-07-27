@@ -1,8 +1,14 @@
 import type {
   ConnectedServiceCredentialRecordV1,
   ConnectedServiceId,
+  ConnectedServiceQuotaRecoveryCreditConsumeReceiptStatusV1,
   ConnectedServiceQuotaSnapshotV1,
 } from '@happier-dev/protocol';
+
+export type ConnectedServiceQuotaRecoveryCreditConsumeOutcome = Exclude<
+  ConnectedServiceQuotaRecoveryCreditConsumeReceiptStatusV1,
+  'unknown_after_timeout'
+>;
 
 export type ConnectedServiceQuotaFetcher = Readonly<{
   serviceId: ConnectedServiceId;
@@ -21,7 +27,7 @@ export type ConnectedServiceQuotaFetcher = Readonly<{
     idempotencyKey: string;
     providerCreditId?: string;
     signal: AbortSignal;
-  }>) => Promise<unknown>;
+  }>) => Promise<ConnectedServiceQuotaRecoveryCreditConsumeOutcome>;
 }>;
 
 export type ConnectedServiceQuotaFetcherHostParams = Readonly<{

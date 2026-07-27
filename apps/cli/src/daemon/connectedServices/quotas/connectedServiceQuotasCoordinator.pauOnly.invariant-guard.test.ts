@@ -94,6 +94,7 @@ function buildGroup(): ConnectedServiceAuthGroupV1 {
     displayName: 'Team',
     activeProfileId: 'active',
     generation: 1,
+    runtimeStateRevision: 0,
     policy: {
       ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
       autoSwitch: true,
@@ -151,21 +152,19 @@ describe('ConnectedServiceQuotasCoordinator PAU-only invariant guard', () => {
       resolveGroupSwitchTargetEligibility(input: Readonly<{
         serviceId: 'openai-codex';
         groupId: string;
-        purpose: 'same_account_fanout';
       }>): Promise<Readonly<{ status: string; reason?: string }>>;
     }).resolveGroupSwitchTargetEligibility.bind(coordinator);
 
     await expect(resolveGroupSwitchTargetEligibility({
       serviceId: 'openai-codex',
       groupId: 'team',
-      purpose: 'same_account_fanout',
     })).resolves.toEqual({
       status: 'unknown',
       reason: 'source_account_usage_unavailable',
     });
   });
 
-  it('allows eligibility only after source-backed provider-account-usage exists', async () => {
+  it('allows soft-switch eligibility only after source-backed provider-account-usage exists', async () => {
     const now = 1_000_000;
     const accountUsageStore = createProviderAccountUsageStore();
     accountUsageStore.recordSnapshot(buildProviderAccountUsageSnapshot({
@@ -199,23 +198,26 @@ describe('ConnectedServiceQuotasCoordinator PAU-only invariant guard', () => {
       resolveGroupSwitchTargetEligibility(input: Readonly<{
         serviceId: 'openai-codex';
         groupId: string;
-        purpose: 'same_account_fanout';
-      }>): Promise<Readonly<{ status: string; reason?: string }>>;
+      }>): Promise<Readonly<{
+        status: string;
+        sourceProfileId?: string;
+        sourceRemainingPercent?: number;
+        decisionTrace?: unknown;
+      }>>;
     }).resolveGroupSwitchTargetEligibility.bind(coordinator);
 
     await expect(resolveGroupSwitchTargetEligibility({
       serviceId: 'openai-codex',
       groupId: 'team',
-      purpose: 'same_account_fanout',
-    })).resolves.toMatchObject({
+    })).resolves.toEqual({
       status: 'eligible',
+      sourceProfileId: 'active',
+      sourceRemainingPercent: 0,
+      sourceThresholdPercent: 15,
+      sourceProjected: false,
       decisionTrace: {
-        candidates: expect.arrayContaining([
-          expect.objectContaining({
-            profileId: 'backup',
-            decision: 'selected',
-          }),
-        ]),
+        activeProfileId: 'active',
+        reason: 'source_at_or_below_threshold',
       },
     });
   });
