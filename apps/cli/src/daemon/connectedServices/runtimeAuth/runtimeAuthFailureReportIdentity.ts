@@ -7,6 +7,7 @@ type StableRuntimeAuthFailureClassificationIdentity = Readonly<{
   profileId: string | null;
   groupId: string | null;
   groupGeneration: number | null;
+  credentialRevision: string | null;
   activeProfileId: string | null;
   credentialHealthStatus: string | null;
   identityProofVersion: number | null;
@@ -48,6 +49,7 @@ export function readStableRuntimeAuthFailureClassificationIdentity(
     profileId: parsed.profileId,
     groupId: parsed.groupId,
     groupGeneration: parsed.groupGeneration ?? null,
+    credentialRevision: parsed.credentialRevision ?? null,
     activeProfileId: parsed.activeProfileId ?? null,
     credentialHealthStatus: parsed.credentialHealthStatus ?? null,
     identityProofVersion: parsed.identityProofVersion ?? null,

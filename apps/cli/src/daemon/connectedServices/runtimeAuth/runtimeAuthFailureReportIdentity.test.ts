@@ -43,4 +43,17 @@ describe('runtimeAuthFailureReportIdentity', () => {
     expect(first).toBeTruthy();
     expect(repeat).toBe(first);
   });
+
+  it('distinguishes otherwise-identical reports from different credential revisions', () => {
+    const buildRevisionKey = (credentialRevision: string) => buildStableRuntimeAuthFailureReportDedupeKey({
+      sessionId: 'sess-1',
+      switchesThisTurn: 0,
+      resumePromptMode: null,
+      classification: { ...baseClassification, credentialRevision },
+    });
+
+    expect(buildRevisionKey('csr_aaaaaaaaaaaaaaaaaaaaaa')).not.toBe(
+      buildRevisionKey('csr_bbbbbbbbbbbbbbbbbbbbbb'),
+    );
+  });
 });

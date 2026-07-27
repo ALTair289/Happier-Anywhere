@@ -37,6 +37,23 @@ describe('shouldCommitAutomaticGroupApplySessionEvent', () => {
     }, { commitAccountSwitchEvents: false })).toBe(true);
   });
 
+  it('keeps passive projection reconciliation out of the user transcript', () => {
+    expect(shouldCommitAutomaticGroupApplySessionEvent({
+      type: 'connected_service_account_switch_attempt',
+      serviceId: 'openai-codex',
+    }, {
+      commitAccountSwitchEvents: true,
+      executionAuthority: 'passive_projection',
+    })).toBe(false);
+    expect(shouldCommitAutomaticGroupApplySessionEvent({
+      type: 'connected_service_account_switch',
+      serviceId: 'openai-codex',
+    }, {
+      commitAccountSwitchEvents: true,
+      executionAuthority: 'passive_projection',
+    })).toBe(false);
+  });
+
   it('keeps non-switch events untouched', () => {
     expect(shouldCommitAutomaticGroupApplySessionEvent(
       { type: 'message' },

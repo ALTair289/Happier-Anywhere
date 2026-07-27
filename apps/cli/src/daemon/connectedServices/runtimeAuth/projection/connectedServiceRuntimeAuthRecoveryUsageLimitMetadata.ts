@@ -3,13 +3,11 @@ import {
   SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
   SessionUsageLimitRecoveryV1Schema,
   SessionUsageLimitRecoveryResumePromptModeV1Schema,
-  resolveSessionUsageLimitRecoveryResumePromptModeV1,
   type SessionUsageLimitRecoveryV1,
   type SessionUsageLimitRecoveryResumePromptModeV1,
 } from '@happier-dev/protocol';
 
 import type { Metadata } from '@/api/types';
-import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 import { deriveUsageLimitRecoveryTiming } from '@/session/usageLimitRecoveryControls/deriveUsageLimitRecoveryTiming';
 import type { ConnectedServiceRuntimeAuthFailureDaemonReport } from '../reportConnectedServiceRuntimeAuthFailureToDaemon';
 import type { ConnectedServiceRuntimeFailureClassification } from '../types';
@@ -274,8 +272,6 @@ export function buildRuntimeAuthUsageLimitRecoveryMetadataUpdater(input: Readonl
   report: ConnectedServiceRuntimeAuthFailureDaemonReport;
   classification: ConnectedServiceRuntimeFailureClassification;
   nowMs?: () => number;
-  /** Boundary seam over the process-global account-settings snapshot (tests only). */
-  readAccountSettings?: () => unknown;
 }>): ((metadata: Metadata) => Metadata) | null {
   if (input.classification.kind !== 'usage_limit') return null;
 
@@ -287,8 +283,6 @@ export function buildRuntimeAuthUsageLimitRecoveryMetadataUpdater(input: Readonl
 
   const recoveryRecord = readRecoveryRecord(readOuterResult(input.report.report));
   const now = input.nowMs?.() ?? Date.now();
-  const readAccountSettings = input.readAccountSettings
-    ?? (() => getActiveAccountSettingsSnapshot()?.settings ?? null);
 
   return (metadata: Metadata): Metadata => {
     const nextMetadataBase = (metadata ?? {}) as Metadata;
@@ -317,6 +311,9 @@ export function buildRuntimeAuthUsageLimitRecoveryMetadataUpdater(input: Readonl
       armedAtMs,
       nowMs: now,
     });
+    const runtimeAuthRecoveryAttemptId = readString(recoveryRecord?.attemptId)
+      ?? readString(input.report.recoveryReceipt?.attemptId)
+      ?? current?.runtimeAuthRecoveryAttemptId;
 
     return {
       ...nextMetadataBase,
@@ -325,23 +322,16 @@ export function buildRuntimeAuthUsageLimitRecoveryMetadataUpdater(input: Readonl
         status: projectedState.status,
         issueFingerprint,
         armedAtMs,
+        ...(runtimeAuthRecoveryAttemptId ? { runtimeAuthRecoveryAttemptId } : {}),
         resetAtMs,
         nextCheckAtMs,
         attemptCount,
         maxAttempts,
         lastProbeError: projectedState.lastProbeError,
-        // Precedence tiers (Lane K): explicit action request, then the RAW stored record
-        // (not the Zod-parsed
-        // intent, whose .default('standard') would mask absent values) so a
-        // legacy intent without resumePromptMode stays a silent tier, then the
-        // account setting, then the provider default. Group-policy/provider
-        // tiers stay owned by the routed manual operations (async loaders);
-        // this projection runs synchronously inside provider runtimes.
-        resumePromptMode: resolveSessionUsageLimitRecoveryResumePromptModeV1({
-          explicit: readResumePromptMode(input.report.resumePromptMode) ?? undefined,
-          existingIntent: readRecord(nextMetadataBase[SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]),
-          accountSettings: readAccountSettings(),
-        }),
+        // Prompt policy is resolved by the async daemon owner before the durable
+        // attempt/report is written. Projection is synchronous and may only read
+        // that immutable fact; legacy/malformed records fail closed to standard.
+        resumePromptMode: readResumePromptMode(input.report.resumePromptMode) ?? 'standard',
         selectedAuth,
       } satisfies SessionUsageLimitRecoveryV1,
     };

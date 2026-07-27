@@ -4,6 +4,28 @@ import axios from 'axios';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 
 describe('commitConnectedServiceRuntimeAuthRecoverySessionEvent', () => {
+  it('uses durable attempt and transition identity for deterministic replay-safe local ids', async () => {
+    const module = await import('./commitConnectedServiceRuntimeAuthRecoverySessionEvent') as typeof import('./commitConnectedServiceRuntimeAuthRecoverySessionEvent') & {
+      buildRuntimeAuthRecoveryAttemptTransitionLocalId: (input: { attemptId: string; transition: string }) => string;
+    };
+    const first = module.buildRuntimeAuthRecoveryAttemptTransitionLocalId({
+      attemptId: `runtime-auth-attempt:${'opaque-segment-'.repeat(80)}A`,
+      transition: 'scheduled',
+    });
+    const replay = module.buildRuntimeAuthRecoveryAttemptTransitionLocalId({
+      attemptId: `runtime-auth-attempt:${'opaque-segment-'.repeat(80)}A`,
+      transition: 'scheduled',
+    });
+    const distinct = module.buildRuntimeAuthRecoveryAttemptTransitionLocalId({
+      attemptId: `runtime-auth-attempt:${'opaque-segment-'.repeat(80)}B`,
+      transition: 'scheduled',
+    });
+
+    expect(replay).toBe(first);
+    expect(distinct).not.toBe(first);
+    expect(first).toMatch(/^connected-service-runtime-auth-recovery:/);
+    expect(first.length).toBeLessThan(200);
+  });
   let envScope = createEnvKeyScope(['HAPPIER_SERVER_URL']);
 
   afterEach(() => {
@@ -11,6 +33,53 @@ describe('commitConnectedServiceRuntimeAuthRecoverySessionEvent', () => {
     envScope = createEnvKeyScope(['HAPPIER_SERVER_URL']);
     vi.restoreAllMocks();
     vi.resetModules();
+  });
+
+  it('rejects a missing session snapshot so durable delivery remains pending without an HTTP commit ACK', async () => {
+    process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
+    vi.resetModules();
+    const {
+      commitConnectedServiceRuntimeAuthRecoverySessionEvent,
+    } = await import('./commitConnectedServiceRuntimeAuthRecoverySessionEvent');
+
+    vi.spyOn(axios, 'get').mockResolvedValueOnce({
+      status: 404,
+      data: { error: 'Session not found' },
+    });
+    const postSpy = vi.spyOn(axios, 'post');
+
+    await expect(commitConnectedServiceRuntimeAuthRecoverySessionEvent({
+      credentials: {
+        token: 'token-1',
+        encryption: { type: 'legacy', secret: new Uint8Array([1, 2, 3, 4]) },
+      },
+      sessionId: 'sess-missing',
+      attemptId: 'runtime-auth-attempt:missing-session',
+      transition: 'scheduled',
+      event: {
+        type: 'connected-service-runtime-auth-recovery',
+        status: 'retry_scheduled',
+        serviceId: 'openai-codex',
+        profileId: 'primary',
+        groupId: 'team-pool',
+        attempt: 1,
+        nextRetryAtMs: 2_000_000,
+        terminal: false,
+        reason: 'provider_capacity',
+        diagnostic: {
+          code: 'recovery_retry_scheduled',
+          failurePhase: 'runtime_auth_recovery',
+          source: 'runtime_auth_recovery',
+          serviceId: 'openai-codex',
+          profileId: 'primary',
+          groupId: 'team-pool',
+          retryable: true,
+          suggestedActions: ['retry'],
+        },
+      },
+    })).rejects.toMatchObject({ code: 'runtime_auth_recovery_session_not_found' });
+
+    expect(postSpy).not.toHaveBeenCalled();
   });
 
   it('commits typed runtime-auth recovery dead-letter events through the session event outbox owner', async () => {
@@ -64,6 +133,8 @@ describe('commitConnectedServiceRuntimeAuthRecoverySessionEvent', () => {
         encryption: { type: 'legacy', secret: new Uint8Array([1, 2, 3, 4]) },
       },
       sessionId: 'sess-recovery',
+      attemptId: 'runtime-auth-attempt:dead-letter-1',
+      transition: 'terminal',
       event: {
         type: 'connected-service-runtime-auth-recovery',
         status: 'dead_lettered',
@@ -81,7 +152,11 @@ describe('commitConnectedServiceRuntimeAuthRecoverySessionEvent', () => {
     expect(postSpy).toHaveBeenCalledWith(
       expect.stringMatching(/\/v2\/sessions\/sess-recovery\/messages$/),
       expect.objectContaining({
-        localId: expect.stringMatching(/^connected-service-runtime-auth-recovery:openai-codex:team-pool:primary:dead_lettered:/),
+        localId: (await import('./commitConnectedServiceRuntimeAuthRecoverySessionEvent'))
+          .buildRuntimeAuthRecoveryAttemptTransitionLocalId({
+            attemptId: 'runtime-auth-attempt:dead-letter-1',
+            transition: 'terminal',
+          }),
         messageRole: 'event',
         content: expect.objectContaining({
           t: 'plain',

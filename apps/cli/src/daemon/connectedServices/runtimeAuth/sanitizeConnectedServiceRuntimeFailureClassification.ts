@@ -1,5 +1,6 @@
 import {
   ConnectedServiceCredentialHealthStatusV1Schema,
+  ConnectedServiceCredentialRevisionV1Schema,
   ProviderAccountUsageRecordIdSchema,
   readConnectedServiceLimitCategoryV1,
 } from '@happier-dev/protocol';
@@ -162,6 +163,7 @@ export function sanitizeConnectedServiceRuntimeFailureClassification(
   const providerAccountUsageRecordId = readProviderAccountUsageRecordId(value.providerAccountUsageRecordId);
   const action = readSafeAction(value.action);
   const recoveryAction = readRecoveryAction(value.recoveryAction);
+  const credentialRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(value.credentialRevision);
 
   return {
     kind,
@@ -170,6 +172,9 @@ export function sanitizeConnectedServiceRuntimeFailureClassification(
     profileId: readNullableString(value.profileId),
     groupId: readNullableString(value.groupId),
     ...(value.groupGeneration === undefined ? {} : { groupGeneration: readNullableNonNegativeInt(value.groupGeneration) }),
+    ...(value.credentialRevision === undefined
+      ? {}
+      : { credentialRevision: credentialRevision.success ? credentialRevision.data : null }),
     ...(value.activeProfileId === undefined ? {} : { activeProfileId }),
     ...(value.credentialHealthStatus === undefined ? {} : { credentialHealthStatus }),
     ...(value.identityProofVersion === undefined

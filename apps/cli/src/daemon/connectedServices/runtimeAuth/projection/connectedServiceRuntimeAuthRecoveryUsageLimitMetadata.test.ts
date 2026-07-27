@@ -49,26 +49,37 @@ function readWrittenResumePromptMode(metadata: Record<string, unknown>): unknown
   return intent.resumePromptMode;
 }
 
-const accountSettingsWithOff = {
-  usageLimitRecoverySettingsV1: {
-    v: 1,
-    mode: 'auto_wait',
-    promptMode: 'standard',
-    resumePromptMode: 'off',
-  },
-};
-
 describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater resume-prompt precedence (automatic path)', () => {
-  it('uses the account-setting tier for a first-time automatic intent', () => {
+  it('projects the immutable runtime-auth attempt id into usage-limit metadata', () => {
+    const updater = buildRuntimeAuthUsageLimitRecoveryMetadataUpdater({
+      report: {
+        ...waitingReport,
+        report: {
+          ok: true,
+          result: {
+            status: 'recovery_retry_scheduled',
+            recovery: { attemptId: 'runtime-auth-attempt:exact-1' },
+          },
+        },
+      } as ConnectedServiceRuntimeAuthFailureDaemonReport,
+      classification,
+    });
+    expect(updater?.(asMetadata({}))).toMatchObject({
+      sessionUsageLimitRecoveryV1: {
+        runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
+      },
+    });
+  });
+
+  it('uses safe standard for a legacy automatic report without a durable mode', () => {
     const updater = buildRuntimeAuthUsageLimitRecoveryMetadataUpdater({
       report: waitingReport,
       classification,
-      readAccountSettings: () => accountSettingsWithOff,
     });
     expect(updater).not.toBeNull();
 
     const next = updater!(asMetadata({}));
-    expect(readWrittenResumePromptMode(next as Record<string, unknown>)).toBe('off');
+    expect(readWrittenResumePromptMode(next as Record<string, unknown>)).toBe('standard');
   });
 
   it('uses explicit daemon report resumePromptMode over account settings for action-triggered recovery', () => {
@@ -78,7 +89,6 @@ describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater resume-prompt preced
         resumePromptMode: 'custom',
       },
       classification,
-      readAccountSettings: () => accountSettingsWithOff,
     });
     expect(updater).not.toBeNull();
 
@@ -86,26 +96,24 @@ describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater resume-prompt preced
     expect(readWrittenResumePromptMode(next as Record<string, unknown>)).toBe('custom');
   });
 
-  it('ignores malformed daemon report resumePromptMode and falls back to account settings', () => {
+  it('fails malformed durable resumePromptMode closed to standard', () => {
     const updater = buildRuntimeAuthUsageLimitRecoveryMetadataUpdater({
       report: {
         ...waitingReport,
         resumePromptMode: 'later',
       } as unknown as ConnectedServiceRuntimeAuthFailureDaemonReport,
       classification,
-      readAccountSettings: () => accountSettingsWithOff,
     });
     expect(updater).not.toBeNull();
 
     const next = updater!(asMetadata({}));
-    expect(readWrittenResumePromptMode(next as Record<string, unknown>)).toBe('off');
+    expect(readWrittenResumePromptMode(next as Record<string, unknown>)).toBe('standard');
   });
 
-  it('treats a legacy stored intent without resumePromptMode as a silent tier (account setting wins)', () => {
+  it('treats a legacy stored intent without resumePromptMode as safe standard', () => {
     const updater = buildRuntimeAuthUsageLimitRecoveryMetadataUpdater({
       report: waitingReport,
       classification,
-      readAccountSettings: () => accountSettingsWithOff,
     });
 
     const next = updater!(asMetadata({
@@ -128,14 +136,13 @@ describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater resume-prompt preced
         },
       },
     }));
-    expect(readWrittenResumePromptMode(next as Record<string, unknown>)).toBe('off');
+    expect(readWrittenResumePromptMode(next as Record<string, unknown>)).toBe('standard');
   });
 
-  it('keeps a stored intent mode over the account setting (tier 2 over tier 3)', () => {
+  it('does not reuse an older stored intent mode when the durable report is legacy', () => {
     const updater = buildRuntimeAuthUsageLimitRecoveryMetadataUpdater({
       report: waitingReport,
       classification,
-      readAccountSettings: () => accountSettingsWithOff,
     });
 
     const next = updater!(asMetadata({
@@ -149,7 +156,7 @@ describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater resume-prompt preced
         attemptCount: 1,
         maxAttempts: 3,
         lastProbeError: null,
-        resumePromptMode: 'standard',
+        resumePromptMode: 'off',
         selectedAuth: {
           kind: 'group',
           serviceId: 'openai-codex',
@@ -165,7 +172,6 @@ describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater resume-prompt preced
     const updater = buildRuntimeAuthUsageLimitRecoveryMetadataUpdater({
       report: waitingReport,
       classification,
-      readAccountSettings: () => null,
     });
 
     const next = updater!(asMetadata({}));
@@ -195,6 +201,12 @@ describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater non-group action-req
       },
       statusCode: 'recovery_action_required',
       statusMessage: null,
+      recoveryReceipt: {
+        reportId: 'runtime-auth-report:action-required-1',
+        attemptId: 'runtime-auth-attempt:action-required-1',
+        transition: 'working',
+        eventLocalId: 'runtime-auth-recovery:action-required-1',
+      },
       projection: {
         handled: true,
         statusCode: 'recovery_action_required',
@@ -211,7 +223,6 @@ describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater non-group action-req
     const updater = buildRuntimeAuthUsageLimitRecoveryMetadataUpdater({
       report: buildActionRequiredReport({ actionKind: 'connected_service_required', reason: 'usage_limit' }),
       classification: { ...classification, groupId: null },
-      readAccountSettings: () => null,
     });
     expect(updater).not.toBeNull();
 
@@ -219,6 +230,7 @@ describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater non-group action-req
     expect(next[SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]).toMatchObject({
       status: 'waiting',
       nextCheckAtMs: 1_700_000_060_000,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:action-required-1',
     });
   });
 
@@ -226,7 +238,6 @@ describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater non-group action-req
     const updater = buildRuntimeAuthUsageLimitRecoveryMetadataUpdater({
       report: buildActionRequiredReport({ actionKind: 'reconnect_profile', reason: 'auth_expired' }),
       classification: { ...classification, groupId: null },
-      readAccountSettings: () => null,
     });
     expect(updater).not.toBeNull();
 
@@ -241,7 +252,6 @@ describe('buildRuntimeAuthUsageLimitRecoveryMetadataUpdater non-group action-req
     const updater = buildRuntimeAuthUsageLimitRecoveryMetadataUpdater({
       report: buildActionRequiredReport({ actionKind: 'connected_service_required', reason: 'usage_limit' }),
       classification: { ...classification, groupId: null, resetsAtMs: null },
-      readAccountSettings: () => null,
     });
     expect(updater).not.toBeNull();
 

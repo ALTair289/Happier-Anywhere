@@ -1,15 +1,16 @@
 import { notifyDaemonConnectedServiceRuntimeAuthFailure } from '@/daemon/controlClient';
-import { isRetryableConnectedServiceRuntimeAuthFailureReportDelivery } from '../resolveConnectedServiceRuntimeAuthFailureStatusMessage';
 
 import {
   drainRuntimeAuthFailureReportOutboxItems,
 } from './runtimeAuthFailureReportOutbox';
+import { resolveRuntimeAuthFailureReportOutboxDelivery } from './resolveRuntimeAuthFailureReportOutboxDelivery';
 import type {
   DrainRuntimeAuthFailureReportOutboxItemsResult,
   RuntimeAuthFailureReportOutboxItem,
 } from './runtimeAuthFailureReportOutboxTypes';
 
 type RuntimeAuthFailureReportOutboxDaemonNotify = (body: Readonly<{
+  reportId: string;
   sessionId: string;
   switchesThisTurn: number;
   resumePromptMode?: RuntimeAuthFailureReportOutboxItem['resumePromptMode'];
@@ -31,14 +32,18 @@ export async function drainRuntimeAuthFailureReportOutboxToDaemon(input: Readonl
     ...(input.maxItemAgeMs === undefined ? {} : { maxItemAgeMs: input.maxItemAgeMs }),
     deliver: async (item) => {
       const response = await notify({
+        reportId: item.reportId,
         sessionId: item.sessionId,
         switchesThisTurn: item.switchesThisTurn,
         ...(item.resumePromptMode ? { resumePromptMode: item.resumePromptMode } : {}),
         classification: item.classification,
       });
-      return isRetryableConnectedServiceRuntimeAuthFailureReportDelivery(response)
-        ? { status: 'retry' as const }
-        : { status: 'delivered' as const };
+      return {
+        status: resolveRuntimeAuthFailureReportOutboxDelivery({
+          expectedReportId: item.reportId,
+          response,
+        }),
+      };
     },
   });
 }

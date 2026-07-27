@@ -33,7 +33,7 @@ function readNonEmptyString(value: unknown): string | null {
   return normalized.length > 0 ? normalized : null;
 }
 
-export function connectedServiceRuntimeAuthRecoveryCanOwnTurnFailure(recoveryReport: unknown): boolean {
+export function connectedServiceRuntimeAuthRecoveryWillContinue(recoveryReport: unknown): boolean {
   const report = readRecord(recoveryReport);
   if (!report) return false;
   if (report.handled !== true) return false;
@@ -63,13 +63,14 @@ export function projectConnectedServiceRuntimeAuthRecoveryReport(input: Readonly
   let typedProjectionCommitted = false;
   let usageLimitMetadataCommitted = false;
 
-  if (statusMessage) {
+  const hasTypedProjection = Boolean(projection?.uxDiagnostic || projection?.transcriptEvent);
+  const daemonHandledTranscriptProjection = Boolean(input.report.handled && projection?.transcriptEvent);
+
+  if (statusMessage && !daemonHandledTranscriptProjection) {
     const result = input.addStatusMessage?.(statusMessage);
     statusMessageAdded = result === false ? false : Boolean(input.addStatusMessage);
   }
 
-  const hasTypedProjection = Boolean(projection?.uxDiagnostic || projection?.transcriptEvent);
-  const daemonHandledTranscriptProjection = Boolean(input.report.handled && projection?.transcriptEvent);
   if (projection && hasTypedProjection && input.commitTypedProjection && !daemonHandledTranscriptProjection) {
     const result = input.commitTypedProjection(projection);
     typedProjectionCommitted = typeof result === 'boolean'
@@ -83,7 +84,7 @@ export function projectConnectedServiceRuntimeAuthRecoveryReport(input: Readonly
       classification: input.classification,
     })
     : null;
-  if (usageLimitMetadataUpdater && input.commitUsageLimitRecoveryMetadata) {
+  if (usageLimitMetadataUpdater && input.commitUsageLimitRecoveryMetadata && !daemonHandledTranscriptProjection) {
     const result = input.commitUsageLimitRecoveryMetadata(usageLimitMetadataUpdater);
     usageLimitMetadataCommitted = result === false ? false : true;
   }

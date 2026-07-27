@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type {
   ConnectedServiceCredentialHealthStatusV1,
+  ConnectedServiceCredentialRevisionV1,
   ConnectedServiceLimitCategoryV1,
   ProviderAccountUsageRecordId,
 } from '@happier-dev/protocol';
@@ -42,6 +43,7 @@ export type ConnectedServiceRuntimeFailureClassification = Readonly<{
   profileId: string | null;
   groupId: string | null;
   groupGeneration?: number | null;
+  credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
   activeProfileId?: string | null;
   credentialHealthStatus?: ConnectedServiceCredentialHealthStatusV1 | null;
   identityProofVersion?: number | null;

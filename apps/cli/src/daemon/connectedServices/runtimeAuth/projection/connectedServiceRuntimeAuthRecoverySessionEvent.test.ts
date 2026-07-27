@@ -4,7 +4,7 @@ import { SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY } from '@happier-dev/protocol
 
 import type { ConnectedServiceRuntimeAuthFailureDaemonReport } from '../reportConnectedServiceRuntimeAuthFailureToDaemon';
 import {
-  connectedServiceRuntimeAuthRecoveryCanOwnTurnFailure,
+  connectedServiceRuntimeAuthRecoveryWillContinue,
   projectConnectedServiceRuntimeAuthRecoveryReport,
 } from './connectedServiceRuntimeAuthRecoverySessionEvent';
 
@@ -21,7 +21,7 @@ const uxDiagnostic = {
 } satisfies ConnectedServiceUxDiagnosticV1;
 
 describe('projectConnectedServiceRuntimeAuthRecoveryReport', () => {
-  it('lets nonterminal retryable recovery own the turn failure surface', () => {
+  it('identifies nonterminal retryable recovery that will continue after the turn failure settles', () => {
     const report = {
       handled: true,
       report: { ok: true },
@@ -37,10 +37,10 @@ describe('projectConnectedServiceRuntimeAuthRecoveryReport', () => {
       },
     } satisfies ConnectedServiceRuntimeAuthFailureDaemonReport;
 
-    expect(connectedServiceRuntimeAuthRecoveryCanOwnTurnFailure(report)).toBe(true);
+    expect(connectedServiceRuntimeAuthRecoveryWillContinue(report)).toBe(true);
   });
 
-  it('does not let terminal recovery own the turn failure surface', () => {
+  it('does not identify terminal recovery as continuing', () => {
     const report = {
       handled: true,
       report: {
@@ -63,7 +63,7 @@ describe('projectConnectedServiceRuntimeAuthRecoveryReport', () => {
       },
     } satisfies ConnectedServiceRuntimeAuthFailureDaemonReport;
 
-    expect(connectedServiceRuntimeAuthRecoveryCanOwnTurnFailure(report)).toBe(false);
+    expect(connectedServiceRuntimeAuthRecoveryWillContinue(report)).toBe(false);
   });
 
   it('emits the generic fallback when typed projection commit does not surface a uxDiagnostic-only report', () => {
@@ -147,16 +147,16 @@ describe('projectConnectedServiceRuntimeAuthRecoveryReport', () => {
       commitTypedProjection,
     });
 
-    expect(addStatusMessage).toHaveBeenCalledWith(report.statusMessage);
+    expect(addStatusMessage).not.toHaveBeenCalled();
     expect(commitTypedProjection).not.toHaveBeenCalled();
     expect(sendGenericStatusMessage).not.toHaveBeenCalled();
     expect(result).toMatchObject({
-      statusMessageAdded: true,
+      statusMessageAdded: false,
       typedProjectionCommitted: false,
       usageLimitMetadataCommitted: false,
       genericMessageEmitted: false,
       requiresFallback: false,
-      emitted: true,
+      emitted: false,
     });
   });
 
@@ -323,5 +323,41 @@ describe('projectConnectedServiceRuntimeAuthRecoveryReport', () => {
         lastProbeError: 'no_eligible_member',
       },
     });
+  });
+
+  it('does not let a provider become a second metadata writer after the daemon handled recovery', () => {
+    const commitUsageLimitRecoveryMetadata = vi.fn();
+    const report = {
+      handled: true,
+      report: { ok: true, result: { status: 'switch_attempted', result: { status: 'no_eligible_member' } } },
+      statusCode: 'switch_attempted_no_eligible_member',
+      statusMessage: 'Waiting for recovery.',
+      projection: {
+        handled: true,
+        statusCode: 'switch_attempted_no_eligible_member',
+        statusMessage: 'Waiting for recovery.',
+        terminal: false,
+        transcriptEvent: {} as never,
+      },
+    } as unknown as ConnectedServiceRuntimeAuthFailureDaemonReport;
+
+    const result = projectConnectedServiceRuntimeAuthRecoveryReport({
+      report,
+      classification: {
+        kind: 'usage_limit',
+        serviceId: 'openai-codex',
+        profileId: 'primary',
+        groupId: 'codex-main',
+        resetsAtMs: null,
+        retryAfterMs: null,
+        planType: null,
+        rateLimits: null,
+        source: 'structured_provider_error',
+      },
+      commitUsageLimitRecoveryMetadata,
+    });
+
+    expect(commitUsageLimitRecoveryMetadata).not.toHaveBeenCalled();
+    expect(result.usageLimitMetadataCommitted).toBe(false);
   });
 });
