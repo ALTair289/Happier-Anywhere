@@ -69,6 +69,12 @@ async function loadFetchAndApplyMachines() {
     return mod.fetchAndApplyMachines;
 }
 
+async function flushAsyncWork(): Promise<void> {
+    for (let i = 0; i < 5; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+}
+
 describe('fetchAndApplyMachines request override', () => {
     it('uses injected request transport when provided', async () => {
         const fetchAndApplyMachines = await loadFetchAndApplyMachines();
@@ -509,6 +515,50 @@ describe('fetchAndApplyMachines request override', () => {
                 metadata: null,
             }),
         ], false);
+    });
+
+    it('caps and batches cold machine display hydration work', async () => {
+        const fetchAndApplyMachines = await loadFetchAndApplyMachines();
+        const rows = Array.from({ length: 6 }, (_, index) => ({
+            id: `m_cold_${index}`,
+            metadata: `encrypted-meta-${index}`,
+            metadataVersion: 5,
+            daemonState: `encrypted-daemon-${index}`,
+            daemonStateVersion: 7,
+            dataEncryptionKey: `key-${index}`,
+            seq: index + 1,
+            active: index % 2 === 0,
+            activeAt: 10 + index,
+            revokedAt: null,
+            createdAt: 1,
+            updatedAt: 10 + index,
+        } satisfies RawMachine));
+        const requestSpy = vi.fn(async (_path: string, _init?: RequestInit) => jsonResponse(rows));
+
+        const encryption = createEncryptionHarness();
+        const applyMachines = vi.fn();
+        const applyMachineDisplayEntries = vi.fn();
+
+        await fetchAndApplyMachines({
+            credentials: { token: 't', secret: 's' } satisfies AuthCredentials,
+            encryption,
+            machineDataKeys: new Map<string, Uint8Array>(),
+            request: requestSpy,
+            applyMachines,
+            applyMachineDisplayEntries,
+            cachedMachineDisplayEntries: {},
+            machineDisplayHydrationConcurrencyLimit: 2,
+            machineDisplayEagerHydrationCount: 2,
+            machineDisplayBackgroundHydrationMaxRows: 0,
+            machineDisplayBackgroundHydrationApplyBatchSize: 2,
+        } as any);
+        await flushAsyncWork();
+
+        expect(encryption.decryptMetadata).toHaveBeenCalledTimes(2);
+        expect(encryption.decryptDaemonState).toHaveBeenCalledTimes(2);
+        expect(applyMachines).toHaveBeenCalledTimes(2);
+        expect(applyMachines.mock.calls[1]?.[0]).toHaveLength(2);
+        expect(applyMachines.mock.calls[1]?.[1]).toBe(false);
     });
 
     it('does not throw when the request transport fails (e.g. network error)', async () => {

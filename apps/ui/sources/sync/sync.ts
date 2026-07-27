@@ -4183,6 +4183,9 @@ class Sync {
                 storage.getState().replaceMachineDisplays(machines, { sourceServerId });
             },
             machineDisplayHydrationConcurrencyLimit: this.syncTuning.machineDisplayHydrationConcurrencyLimit,
+            machineDisplayEagerHydrationCount: this.syncTuning.machineDisplayEagerHydrationCount,
+            machineDisplayBackgroundHydrationMaxRows: this.syncTuning.machineDisplayBackgroundHydrationMaxRows,
+            machineDisplayBackgroundHydrationApplyBatchSize: this.syncTuning.machineDisplayBackgroundHydrationApplyBatchSize,
             applyMachines: (machines, replace) => {
                 if (!shouldContinue()) return;
                 storage.getState().applyMachines(machines, replace, { sourceServerId });

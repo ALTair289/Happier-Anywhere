@@ -5,6 +5,7 @@ import { serverFetch } from '@/sync/http/client';
 import { runTasksWithLimit } from '@/sync/runtime/orchestration/runTasksWithLimit';
 import type { MachineDisplayRenderable } from '@/sync/domains/machines/machineDisplayRenderable';
 import type { MachineDisplayCacheEntryV1 } from '@/sync/domains/state/warmCachePersistence';
+import { loadSyncTuning } from '@/sync/runtime/syncTuning';
 
 type MachineEncryption = {
     decryptMetadata: (version: number, value: string) => Promise<any>;
@@ -75,6 +76,29 @@ function readReplacementFieldsFromMachineRow(machine: {
         replacementSource: machine.replacementSource ?? null,
         replacementActorUserId: machine.replacementActorUserId ?? null,
     };
+}
+
+function normalizeNonNegativeInteger(value: number | undefined, fallback: number): number {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+    return Math.max(0, Math.trunc(value));
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+    return Math.max(1, Math.trunc(value));
+}
+
+function compareMachineHydrationPriority(left: { active: boolean; activeAt: number }, right: { active: boolean; activeAt: number }): number {
+    if (left.active !== right.active) return left.active ? -1 : 1;
+    return right.activeAt - left.activeAt;
+}
+
+function batchMachines(machines: Machine[], batchSize: number): Machine[][] {
+    const batches: Machine[][] = [];
+    for (let index = 0; index < machines.length; index += batchSize) {
+        batches.push(machines.slice(index, index + batchSize));
+    }
+    return batches;
 }
 
 export async function buildUpdatedMachineFromSocketUpdate(params: {
@@ -178,6 +202,9 @@ export async function fetchAndApplyMachines(params: {
     applyMachineDisplayEntries?: (machines: MachineDisplayRenderable[], options?: { replace?: boolean }) => void;
     cachedMachineDisplayEntries?: Record<string, MachineDisplayCacheEntryV1>;
     machineDisplayHydrationConcurrencyLimit?: number;
+    machineDisplayEagerHydrationCount?: number;
+    machineDisplayBackgroundHydrationMaxRows?: number;
+    machineDisplayBackgroundHydrationApplyBatchSize?: number;
     shouldContinue?: () => boolean;
     /**
      * When true, drop any locally-cached machines that are missing from the
@@ -199,7 +226,23 @@ export async function fetchAndApplyMachines(params: {
     const request =
         params.request
         ?? ((path: string, init: RequestInit) => serverFetch(path, init, { includeAuth: false }));
-    const concurrencyLimit = Math.max(1, Math.trunc(params.machineDisplayHydrationConcurrencyLimit ?? 4));
+    const syncTuning = loadSyncTuning();
+    const concurrencyLimit = normalizePositiveInteger(
+        params.machineDisplayHydrationConcurrencyLimit,
+        syncTuning.machineDisplayHydrationConcurrencyLimit,
+    );
+    const eagerHydrationCount = normalizeNonNegativeInteger(
+        params.machineDisplayEagerHydrationCount,
+        syncTuning.machineDisplayEagerHydrationCount,
+    );
+    const backgroundHydrationMaxRows = normalizeNonNegativeInteger(
+        params.machineDisplayBackgroundHydrationMaxRows,
+        syncTuning.machineDisplayBackgroundHydrationMaxRows,
+    );
+    const hydrationApplyBatchSize = normalizePositiveInteger(
+        params.machineDisplayBackgroundHydrationApplyBatchSize,
+        syncTuning.machineDisplayBackgroundHydrationApplyBatchSize,
+    );
     const shouldContinue = params.shouldContinue ?? (() => true);
     const throwOnError = params.throwOnError === true;
 
@@ -431,8 +474,12 @@ export async function fetchAndApplyMachines(params: {
             params.replace ?? false,
         );
 
-        const machinesNeedingHydration = machineEncryptionReady
-            ? machines.filter((machine) => needsMachineWarmHydration(machine))
+        const maxWarmHydrationRows = eagerHydrationCount + backgroundHydrationMaxRows;
+        const machinesNeedingHydration = machineEncryptionReady && maxWarmHydrationRows > 0
+            ? machines
+                .filter((machine) => needsMachineWarmHydration(machine))
+                .sort(compareMachineHydrationPriority)
+                .slice(0, maxWarmHydrationRows)
             : [];
         if (machinesNeedingHydration.length > 0) {
             void runTasksWithLimit(
@@ -440,13 +487,17 @@ export async function fetchAndApplyMachines(params: {
                     if (!shouldContinue()) return null;
                     const decryptedMachine = await decryptMachine(machine);
                     if (!shouldContinue()) return null;
-                    if (decryptedMachine) {
-                        applyMachines([decryptedMachine], false);
-                    }
                     return decryptedMachine;
                 }),
                 concurrencyLimit,
-            ).catch((error) => {
+            ).then((decryptedResults) => {
+                if (!shouldContinue()) return;
+                const hydratedMachines = decryptedResults.filter((machine): machine is Machine => Boolean(machine));
+                for (const batch of batchMachines(hydratedMachines, hydrationApplyBatchSize)) {
+                    if (!shouldContinue()) return;
+                    applyMachines(batch, false);
+                }
+            }).catch((error) => {
                 console.error('[machinesSnapshot] Background hydration failed', error);
             });
         }
