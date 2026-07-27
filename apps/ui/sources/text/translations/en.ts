@@ -3661,6 +3661,24 @@ export const en = {
                             },
                             '1p': {
                                 title: "1p",
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                                 subtitle: "First-party internal debug category."
                             }
                         }
@@ -6164,6 +6182,17 @@ export const en = {
 	            branchMenu: {
 	                openA11y: 'Open branch menu',
 	                failedToLoad: 'Failed to load branches.',
+            submissionFailures: {
+                update: 'Update Happier CLI, then try again.',
+                reconnect: 'Reconnect this session, then try again.',
+                retry: 'The answer could not be accepted. Review it and try again.',
+            },
+            claudeDialogNotice: {
+                header: 'Claude dialog',
+                question: 'Claude is showing a dialog. Open the terminal to review it and choose how to continue.',
+                openTerminal: 'Open Claude terminal',
+                description: 'Review and answer the dialog in Claude’s terminal.',
+            },
 	                unavailable: 'Branch list unavailable',
                 empty: 'No branches found',
                 searchPlaceholder: 'Search branches...',

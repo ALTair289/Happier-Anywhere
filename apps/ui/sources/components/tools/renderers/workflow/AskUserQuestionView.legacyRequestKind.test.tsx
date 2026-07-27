@@ -28,6 +28,19 @@ installWorkflowRendererCommonModuleMocks({
     storage: async () => {
         const { createStorageModuleStub, createStorageStoreStub } = await import('@/dev/testkit/mocks/storage');
         return createStorageModuleStub({
+            useSession: () => createSessionFixture({
+                id: 's1',
+                agentState: {
+                    capabilities: { structuredQuestionAnswersV1Supported: true },
+                    requests: {
+                        toolu_1: {
+                            tool: 'AskUserQuestion',
+                            arguments: {},
+                            createdAt: 1,
+                        },
+                    },
+                },
+            }),
             storage: createStorageStoreStub(() => ({
                 sessions: {
                     s1: createSessionFixture({
@@ -51,6 +64,14 @@ installWorkflowRendererCommonModuleMocks({
 
 vi.mock('@/sync/ops', () => ({
     sessionAllowWithAnswers: (...args: any[]) => sessionAllowWithAnswers(...args),
+}));
+
+vi.mock('@/components/sessions/terminal/openAttachedSessionTerminal', () => ({
+    useOpenAttachedSessionTerminal: () => ({
+        available: false,
+        unavailableReason: 'missing_machine',
+        open: vi.fn(),
+    }),
 }));
 
 describe('AskUserQuestionView legacy request-kind fallback', () => {

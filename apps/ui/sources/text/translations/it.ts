@@ -4280,6 +4280,24 @@ export const it: TranslationStructure = {
                             },
                             '1p': {
                                 title: "1p",
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                                 subtitle: "Categoria interna first-party."
                             }
                         }
@@ -6775,7 +6793,18 @@ export const it: TranslationStructure = {
       },
     },
     askUserQuestion: {
-      submit: "Invia risposta",
+        submit: "Invia risposta",
+        submissionFailures: {
+            update: "Aggiorna Happier CLI e riprova.",
+            reconnect: "Riconnetti questa sessione e riprova.",
+            retry: "La risposta non è stata accettata. Controllala e riprova.",
+        },
+      claudeDialogNotice: {
+        header: "Finestra di dialogo di Claude",
+        question: "Claude mostra una finestra di dialogo. Apri il terminale per esaminarla e scegliere come continuare.",
+        openTerminal: "Apri terminale",
+        description: "Esamina e rispondi alla finestra di dialogo nel terminale di Claude.",
+      },
       multipleQuestions: ({ count }: { count: number }) =>
         `${count} ${plural({ count, singular: "domanda", plural: "domande" })}`,
       other: "Altro",

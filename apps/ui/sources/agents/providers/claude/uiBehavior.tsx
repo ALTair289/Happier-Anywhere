@@ -12,8 +12,12 @@ import { SessionClaudeSubagentLauncherView } from '@/agents/providers/claude/ses
 import { resolveClaudeBrowseSourceOptions } from '@/agents/providers/claude/directSessions/resolveClaudeBrowseSourceOptions';
 import { claudeGoalActionCapabilityProfile, claudeSupportsEditableGoals } from '@/agents/providers/claude/workState/claudeEditableGoals';
 import { buildClaudeSessionHandoffProviderPatch } from '@/agents/providers/claude/sessionHandoff';
+import { isClaudeUnifiedAttachedSessionTerminalAvailable } from '@/agents/providers/claude/attachedSessionTerminal';
 
 export const CLAUDE_UI_BEHAVIOR_OVERRIDE: AgentUiBehavior = {
+    attachedSessionTerminal: {
+        isAvailable: ({ session }) => isClaudeUnifiedAttachedSessionTerminalAvailable(session),
+    },
     mcpServers: {
         supportsDetectedConfigScan: true,
     },

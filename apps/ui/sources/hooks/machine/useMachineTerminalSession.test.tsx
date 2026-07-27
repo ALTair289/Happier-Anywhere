@@ -134,6 +134,28 @@ describe('useMachineTerminalSession', () => {
         vi.restoreAllMocks();
     });
 
+    it('keeps the stable terminal key on a typed session-attach request', async () => {
+        const terminalRef = { current: null };
+        const launch = { kind: 'session_attach', sessionId: 'session-1' } as const;
+        const hook = await renderHook(() => useMachineTerminalSession({
+            machineId: 'machine-1',
+            cwd: null,
+            launch,
+            machineReachable: true,
+            machineRpcTargetAvailable: true,
+            terminalKey: 'session:session-1:attached',
+            terminalRef,
+        }));
+        await flushHookEffects();
+
+        expect(machineTerminalEnsureMock).toHaveBeenCalledWith('machine-1', expect.objectContaining({
+            terminalKey: 'session:session-1:attached',
+            launch: { kind: 'session_attach', sessionId: 'session-1' },
+        }));
+
+        await hook.unmount();
+    });
+
     it('releases the reader lease after an early validation error so another pane can connect', async () => {
         const terminalRef = { current: null };
         const failed = await renderHook(() => useMachineTerminalSession({

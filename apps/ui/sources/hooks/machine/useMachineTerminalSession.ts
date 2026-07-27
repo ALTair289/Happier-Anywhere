@@ -1,4 +1,5 @@
 import * as React from 'react';
+import type { DaemonTerminalLaunchIntent } from '@happier-dev/protocol';
 
 import { createEmptyTerminalSurfaceState, readTerminalSurfaceState } from '@/components/sessions/terminal/terminalSurfaceStateCache';
 import {
@@ -31,6 +32,7 @@ export type TerminalStatus = 'idle' | 'connecting' | 'connected' | 'error' | 'ex
 export function useMachineTerminalSession(params: Readonly<{
     machineId: string | null;
     cwd: string | null;
+    launch?: DaemonTerminalLaunchIntent | null;
     machineReachable?: boolean;
     machineRpcTargetAvailable?: boolean;
     terminalKey: string;
@@ -191,7 +193,7 @@ export function useMachineTerminalSession(params: Readonly<{
             setError(null);
             setStatus('connecting');
 
-            if (!params.machineId || !params.cwd) {
+            if (!params.machineId || (!params.cwd && !params.launch)) {
                 failTerminalSession('terminal_missing_machine_target');
                 return;
             }
@@ -210,21 +212,23 @@ export function useMachineTerminalSession(params: Readonly<{
 
             const terminalSize = latestTerminalSizeRef.current ?? initialTerminalSize;
 
+            const request = params.launch
+                ? {
+                    terminalKey: params.terminalKey,
+                    cols: terminalSize.cols,
+                    rows: terminalSize.rows,
+                    launch: params.launch,
+                }
+                : {
+                    terminalKey: params.terminalKey,
+                    cwd: params.cwd!,
+                    cols: terminalSize.cols,
+                    rows: terminalSize.rows,
+                    initialCommand: params.initialCommand ?? undefined,
+                };
             const ensured = restartRequestedRef.current
-                ? await machineTerminalRestart(params.machineId, {
-                    terminalKey: params.terminalKey,
-                    cwd: params.cwd,
-                    cols: terminalSize.cols,
-                    rows: terminalSize.rows,
-                    initialCommand: params.initialCommand ?? undefined,
-                })
-                : await machineTerminalEnsure(params.machineId, {
-                    terminalKey: params.terminalKey,
-                    cwd: params.cwd,
-                    cols: terminalSize.cols,
-                    rows: terminalSize.rows,
-                    initialCommand: params.initialCommand ?? undefined,
-                });
+                ? await machineTerminalRestart(params.machineId, request)
+                : await machineTerminalEnsure(params.machineId, request);
             restartRequestedRef.current = false;
 
             if (canceled) return;
@@ -348,6 +352,7 @@ export function useMachineTerminalSession(params: Readonly<{
         latestTerminalSizeRef,
         params.cwd,
         params.initialCommand,
+        params.launch,
         params.machineId,
         params.machineReachable,
         params.machineRpcTargetAvailable,

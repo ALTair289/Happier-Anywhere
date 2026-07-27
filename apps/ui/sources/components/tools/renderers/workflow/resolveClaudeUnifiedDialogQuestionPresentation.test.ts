@@ -3,12 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { resolveClaudeUnifiedDialogQuestionPresentation } from './resolveClaudeUnifiedDialogQuestionPresentation';
 
 describe('resolveClaudeUnifiedDialogQuestionPresentation', () => {
-    it('localizes the typed unknown-dialog notice while preserving its stable answer value', () => {
+    it('localizes the typed unknown-dialog notice without presenting terminal navigation as an answer', () => {
         const input = {
             happierDialog: {
                 kind: 'unrecognized',
+                mode: 'notice',
                 dialogId: 'unrecognized_confirmation',
-                notice: 'open_terminal',
+                action: 'open_terminal',
             },
             questions: [{
                 header: 'Claude dialog',
@@ -24,14 +25,11 @@ describe('resolveClaudeUnifiedDialogQuestionPresentation', () => {
 
         const resolved = resolveClaudeUnifiedDialogQuestionPresentation(input, (key) => `translated:${key}`);
 
-        expect(resolved.questions[0]).toMatchObject({
+        expect(resolved.questions[0]).toEqual({
             header: 'translated:tools.askUserQuestion.claudeDialogNotice.header',
             question: 'translated:tools.askUserQuestion.claudeDialogNotice.question',
-            options: [{
-                choice: 'open_terminal',
-                label: 'translated:tools.askUserQuestion.claudeDialogNotice.openTerminal',
-                description: 'translated:tools.askUserQuestion.claudeDialogNotice.description',
-            }],
+            multiSelect: false,
+            options: [],
         });
     });
 

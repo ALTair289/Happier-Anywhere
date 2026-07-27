@@ -3975,6 +3975,24 @@ export const pl: TranslationStructure = {
                             },
                             '1p': {
                                 title: "1p",
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                                 subtitle: "Wewnętrzna kategoria first-party."
                             }
                         }
@@ -6522,7 +6540,18 @@ export const pl: TranslationStructure = {
       turnDiffRecap: "Podsumowanie zmian z tej tury",
     },
     askUserQuestion: {
-      submit: "Wyślij odpowiedź",
+        submit: "Wyślij odpowiedź",
+        submissionFailures: {
+            update: "Zaktualizuj Happier CLI i spróbuj ponownie.",
+            reconnect: "Połącz ponownie tę sesję i spróbuj jeszcze raz.",
+            retry: "Nie udało się przyjąć odpowiedzi. Sprawdź ją i spróbuj ponownie.",
+        },
+      claudeDialogNotice: {
+        header: "Okno dialogowe Claude",
+        question: "Claude wyświetla okno dialogowe. Otwórz terminal, aby je sprawdzić i wybrać sposób kontynuacji.",
+        openTerminal: "Otwórz terminal",
+        description: "Sprawdź okno dialogowe i odpowiedz na nie w terminalu Claude.",
+      },
       multipleQuestions: ({ count }: { count: number }) =>
         `${count} ${plural({ count, one: "pytanie", few: "pytania", many: "pytań" })}`,
       other: "Inne",

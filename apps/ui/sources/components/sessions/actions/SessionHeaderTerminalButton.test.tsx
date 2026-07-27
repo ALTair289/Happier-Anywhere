@@ -79,6 +79,22 @@ describe('SessionHeaderTerminalButton', () => {
         terminalFeatureScopeState.enabledForServerId = 'server-session';
     });
 
+    it('switches an open attached terminal back to the workspace shell instead of closing the pane', async () => {
+        const { setSessionTerminalMode, readSessionTerminalMode } = await import('../terminal/sessionTerminalMode');
+        setSessionTerminalMode('s1', 'session_attach');
+        pane.scopeState.bottom.isOpen = true;
+        pane.scopeState.bottom.activeTabId = 'terminal';
+
+        const { SessionHeaderTerminalButton } = await import('./SessionHeaderTerminalButton');
+        const screen = await renderScreen(<SessionHeaderTerminalButton sessionId="s1" scopeId="session:s1" serverId="server-session" />);
+
+        await screen.pressByTestIdAsync('session-header-terminal-button');
+
+        expect(readSessionTerminalMode('s1')).toBe('workspace_shell');
+        expect(closeBottomSpy).not.toHaveBeenCalled();
+        expect(openBottomSpy).toHaveBeenCalledWith({ tabId: 'terminal' });
+    });
+
     it('opens terminal in the bottom pane when docked to bottom', async () => {
         const { SessionHeaderTerminalButton } = await import('./SessionHeaderTerminalButton');
 

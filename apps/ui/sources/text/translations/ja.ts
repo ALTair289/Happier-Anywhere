@@ -4228,6 +4228,24 @@ localTailscale: {
                             },
                             '1p': {
                                 title: "1p",
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                                 subtitle: "ファーストパーティ内部カテゴリ。"
                             }
                         }
@@ -6703,7 +6721,18 @@ localTailscale: {
       },
     },
     askUserQuestion: {
-      submit: "回答を送信",
+        submit: "回答を送信",
+        submissionFailures: {
+            update: "Happier CLI を更新して、もう一度お試しください。",
+            reconnect: "このセッションに再接続して、もう一度お試しください。",
+            retry: "回答を受け付けられませんでした。内容を確認して、もう一度お試しください。",
+        },
+      claudeDialogNotice: {
+        header: "Claude のダイアログ",
+        question: "Claude がダイアログを表示しています。ターミナルを開いて内容を確認し、続行方法を選択してください。",
+        openTerminal: "ターミナルを開く",
+        description: "Claude のターミナルでダイアログを確認して回答します。",
+      },
       multipleQuestions: ({ count }: { count: number }) => `${count}件の質問`,
       other: "その他",
       otherDescription: "自分の回答を入力",

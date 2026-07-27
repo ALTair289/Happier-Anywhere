@@ -3831,6 +3831,24 @@ export const zhHans: TranslationStructure = {
                             },
                             '1p': {
                                 title: "1p",
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                                 subtitle: "第一方内部类别。"
                             }
                         }
@@ -6295,7 +6313,18 @@ export const zhHans: TranslationStructure = {
       turnDiffRecap: "本轮更改摘要",
     },
     askUserQuestion: {
-      submit: "提交答案",
+        submit: "提交答案",
+        submissionFailures: {
+            update: "请更新 Happier CLI，然后重试。",
+            reconnect: "请重新连接此会话，然后重试。",
+            retry: "无法接受该答案。请检查后重试。",
+        },
+      claudeDialogNotice: {
+        header: "Claude 对话框",
+        question: "Claude 正在显示对话框。请打开终端查看并选择如何继续。",
+        openTerminal: "打开终端",
+        description: "在 Claude 终端中查看并回答该对话框。",
+      },
       multipleQuestions: ({ count }: { count: number }) => `${count} 个问题`,
       other: "其他",
       otherDescription: "输入您自己的答案",

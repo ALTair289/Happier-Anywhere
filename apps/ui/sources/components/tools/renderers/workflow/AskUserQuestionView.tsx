@@ -5,34 +5,41 @@ import { ToolViewProps } from '../core/_registry';
 import { resolvePermissionRequestId } from '../core/resolvePermissionRequestId';
 import { ToolSectionView } from '../../shell/presentation/ToolSectionView';
 import { sessionAllowWithAnswers } from '@/sync/ops';
-import { storage } from '@/sync/domains/state/storage';
+import { storage, useSession, useSettingMutable } from '@/sync/domains/state/storage';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { Ionicons } from '@expo/vector-icons';
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { resolveAgentRequestKind } from '@/utils/sessions/permissions/permissionPromptPolicy';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
-import { resolveClaudeUnifiedDialogQuestionPresentation } from './resolveClaudeUnifiedDialogQuestionPresentation';
+import {
+    hasClaudeUnifiedOpenTerminalSecondaryAction,
+    isClaudeUnifiedOpenTerminalNotice,
+    resolveClaudeUnifiedDialogQuestionPresentation,
+} from './resolveClaudeUnifiedDialogQuestionPresentation';
+import {
+    useOpenAttachedSessionTerminal,
+    type AttachedSessionTerminalUnavailableReason,
+} from '@/components/sessions/terminal/openAttachedSessionTerminal';
+import { isClaudeUnifiedTerminalDialogChoiceAgentStateRequest } from '@happier-dev/agents';
+import { getStructuredQuestionAnswersV1Supported } from '@/sync/domains/state/agentStateCapabilities';
 import {
     buildAskUserQuestionAnswerPayload,
-    normalizeAskUserQuestionRenderQuestions,
     tryBuildAskUserQuestionAnswerPayload,
 } from './buildAskUserQuestionAnswerPayload';
-import { getStructuredQuestionAnswersV1Supported } from '@/sync/domains/state/agentStateCapabilities';
-import { RPC_ERROR_CODES } from '@happier-dev/protocol/rpc';
-import { PUBLIC_RPC_HANDLER_ERROR_CODES, readRpcErrorCode } from '@happier-dev/protocol/rpcErrors';
 import {
-    isAskUserQuestionToolName,
-    resolveStructuredQuestionOptionAnswerValue,
-    STRUCTURED_QUESTION_LIMITS,
+    PUBLIC_RPC_HANDLER_ERROR_CODES,
+    RPC_ERROR_CODES,
+    readRpcErrorCode,
 } from '@happier-dev/protocol';
 
 
 interface QuestionOption {
-    label: string;
-    description: string;
     value?: string;
     choice?: string;
+    label: string;
+    description: string;
+    settingMutation?: unknown;
 }
 
 interface Question {
@@ -52,22 +59,49 @@ interface AskUserQuestionInput {
     happierDialog?: unknown;
 }
 
-function readRenderableQuestion(value: unknown): Partial<Question> {
-    return value && typeof value === 'object' && !Array.isArray(value)
-        ? value as Partial<Question>
-        : {};
+type SubmissionFailureGuidance = 'update' | 'reconnect' | 'retry';
+
+function resolveSubmissionFailureGuidance(error: unknown): SubmissionFailureGuidance | null {
+    switch (readRpcErrorCode(error)) {
+        case RPC_ERROR_CODES.METHOD_NOT_AVAILABLE:
+        case RPC_ERROR_CODES.METHOD_NOT_FOUND:
+            return 'update';
+        case PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_RECEIVER_NOT_OWNER:
+            return 'reconnect';
+        case PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_INVALID:
+        case PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_LEGACY_INVALID:
+        case PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_LEGACY_AMBIGUOUS:
+            return 'retry';
+        default:
+            return null;
+    }
 }
 
-function parseAskUserQuestionAnswersFromToolResult(result: unknown): Record<string, readonly string[]> | null {
+function resolveAttachedTerminalUnavailableMessage(
+    reason: AttachedSessionTerminalUnavailableReason | null,
+): string | null {
+    switch (reason) {
+        case 'missing_machine':
+            return t('terminalEmbedded.errors.missingMachineTarget');
+        case 'terminal_disabled':
+            return t('terminalEmbedded.errors.disabled');
+        case 'cli_update_required':
+            return t('deps.ui.notAvailableUpdateCli');
+        default:
+            return null;
+    }
+}
+
+function parseAskUserQuestionAnswersFromToolResult(result: unknown): Record<string, string> | null {
     if (!result || typeof result !== 'object') return null;
-    const record = result as Record<string, unknown>;
-    const maybeAnswers = record.structuredAnswersV1 ?? record.answers;
+    const maybeAnswers = (result as any).answers;
     if (!maybeAnswers || typeof maybeAnswers !== 'object' || Array.isArray(maybeAnswers)) return null;
 
-    const answers = Object.create(null) as Record<string, readonly string[]>;
+    const answers: Record<string, string> = {};
     for (const [key, value] of Object.entries(maybeAnswers as Record<string, unknown>)) {
-        if (Array.isArray(value) && value.every((item) => typeof item === 'string')) answers[key] = value as string[];
-        else if (typeof value === 'string') answers[key] = [value];
+        if (typeof value === 'string') {
+            answers[key] = value;
+        }
     }
     return answers;
 }
@@ -236,35 +270,28 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
     const [freeformAnswers, setFreeformAnswers] = React.useState<Map<number, string>>(new Map());
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const [isSubmitted, setIsSubmitted] = React.useState(false);
-    const [submissionGuidance, setSubmissionGuidance] = React.useState<'update' | 'reconnect' | null>(null);
+    const [submissionGuidance, setSubmissionGuidance] = React.useState<SubmissionFailureGuidance | null>(null);
+    const [, setWorkspaceTrust] = useSettingMutable('claudeUnifiedTerminalWorkspaceTrust');
+    const attachedSessionTerminal = useOpenAttachedSessionTerminal(sessionId ?? null);
+    const session = useSession(sessionId ?? '');
 
+    // Parse input
     const input = tool.input as AskUserQuestionInput | undefined;
-    const hasQuestionArray = Array.isArray(input?.questions) && input.questions.length > 0;
-    const presentedInput = hasQuestionArray && input
-        ? resolveClaudeUnifiedDialogQuestionPresentation(input, (key) => t(key))
-        : input;
-    const renderQuestions = hasQuestionArray
-        ? normalizeAskUserQuestionRenderQuestions(presentedInput)
-        : null;
-    const questions = renderQuestions?.ok ? renderQuestions.questions : [];
-    const hasInvalidRenderQuestions = hasQuestionArray && renderQuestions?.ok === false;
+    const questions = input
+        ? resolveClaudeUnifiedDialogQuestionPresentation(input, (key) => t(key)).questions as Question[]
+        : undefined;
+
+    if (!questions || !Array.isArray(questions) || questions.length === 0) {
+        return null;
+    }
 
     const isRunning = tool.state === 'running';
     const canApprovePermissions = interaction?.canApprovePermissions ?? true;
     const toolCallId = resolvePermissionRequestId(tool);
-    const structuredQuestionAnswersV1Supported = storage((state) => getStructuredQuestionAnswersV1Supported(
-        sessionId ? state.sessions[sessionId]?.agentState?.capabilities : undefined,
-    ));
-    const hasActiveAskUserQuestionRequest = storage((state) => {
-        const activeMatchingRequest = sessionId && toolCallId
-            ? state.sessions[sessionId]?.agentState?.requests?.[toolCallId]
-            : null;
-        return isAskUserQuestionToolName(activeMatchingRequest?.tool)
-            && resolveAgentRequestKind({
-                toolName: activeMatchingRequest.tool,
-                requestKind: activeMatchingRequest.kind,
-            }) === 'user_action';
-    });
+    const activeMatchingRequest = toolCallId ? (session as any)?.agentState?.requests?.[toolCallId] : null;
+    const hasActiveAskUserQuestionRequest =
+        activeMatchingRequest?.tool === 'AskUserQuestion' &&
+        resolveAgentRequestKind({ toolName: activeMatchingRequest.tool, requestKind: activeMatchingRequest.kind }) === 'user_action';
     const canInteract = isRunning && !isSubmitted && canApprovePermissions && hasActiveAskUserQuestionRequest;
     const disabledMessage =
         interaction?.permissionDisabledReason === 'public'
@@ -272,6 +299,58 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
             : interaction?.permissionDisabledReason === 'readOnly'
                 ? t('session.sharing.permissionApprovalsDisabledReadOnly')
                 : t('session.sharing.permissionApprovalsDisabledNotGranted');
+    const isAttachedTerminalNotice = isClaudeUnifiedOpenTerminalNotice(input?.happierDialog);
+    const hasAttachedTerminalSecondaryAction = hasClaudeUnifiedOpenTerminalSecondaryAction(input?.happierDialog);
+    const canOpenAttachedTerminal = Boolean(
+        sessionId
+        && isRunning
+        && canApprovePermissions
+        && attachedSessionTerminal.available,
+    );
+    const attachedTerminalUnavailableMessage = resolveAttachedTerminalUnavailableMessage(
+        attachedSessionTerminal.unavailableReason,
+    );
+
+    if (isAttachedTerminalNotice && tool.state !== 'completed') {
+        const question = questions[0];
+        return (
+            <ToolSectionView>
+                <View testID="ask-user-question" style={styles.container}>
+                    <View style={styles.questionSection}>
+                        <View style={styles.headerChip}>
+                            <Text style={styles.headerText}>{question?.header}</Text>
+                        </View>
+                        <Text style={styles.questionText}>{question?.question}</Text>
+                        {canOpenAttachedTerminal ? (
+                            <TouchableOpacity
+                                testID="ask-user-question.open-claude-terminal"
+                                accessibilityRole="button"
+                                accessibilityLabel={t('tools.askUserQuestion.claudeDialogNotice.openTerminal')}
+                                style={styles.optionButton}
+                                onPress={attachedSessionTerminal.open}
+                                activeOpacity={0.7}
+                            >
+                                <Ionicons name="terminal-outline" size={20} color={theme.colors.text.secondary} />
+                                <View style={styles.optionContent}>
+                                    <Text style={styles.optionLabel}>{t('tools.askUserQuestion.claudeDialogNotice.openTerminal')}</Text>
+                                    <Text style={styles.optionDescription}>{t('tools.askUserQuestion.claudeDialogNotice.description')}</Text>
+                                </View>
+                            </TouchableOpacity>
+                        ) : !canApprovePermissions ? (
+                            <Text style={styles.optionDescription}>{disabledMessage}</Text>
+                        ) : isRunning && attachedTerminalUnavailableMessage ? (
+                            <Text
+                                testID="ask-user-question.attached-terminal-unavailable"
+                                style={styles.optionDescription}
+                            >
+                                {attachedTerminalUnavailableMessage}
+                            </Text>
+                        ) : null}
+                    </View>
+                </View>
+            </ToolSectionView>
+        );
+    }
 
     // Check if all questions have at least one selection
     const allQuestionsAnswered = questions.every((_, qIndex) => {
@@ -287,21 +366,24 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
         const hasSelection = Boolean(selected && selected.size > 0);
         return hasFreeform ? (hasSelection || hasTyped) : hasSelection;
     });
-    const prospectiveBuild = allQuestionsAnswered
+    const prospectivePayload = allQuestionsAnswered
         ? tryBuildAskUserQuestionAnswerPayload({
             questions,
             selections,
             freeformAnswers,
-            structuredQuestionAnswersV1Supported,
+            structuredQuestionAnswersV1Supported: getStructuredQuestionAnswersV1Supported(
+                session?.agentState?.capabilities,
+            ),
         })
         : null;
-    const prospectivePayload = prospectiveBuild?.ok ? prospectiveBuild.payload : null;
-    const hasProspectivePayloadError = prospectiveBuild?.ok === false;
-    const requiresCliUpdate = prospectivePayload?.kind === 'requires_cli_update';
+    const requiresCliUpdate = prospectivePayload?.ok === true
+        && prospectivePayload.payload.kind === 'requires_cli_update';
+    const canSubmit = allQuestionsAnswered
+        && prospectivePayload?.ok === true
+        && prospectivePayload.payload.kind !== 'requires_cli_update';
 
     const handleOptionToggle = React.useCallback((questionIndex: number, optionIndex: number, multiSelect: boolean) => {
         if (!canInteract) return;
-        setSubmissionGuidance(null);
 
         setSelections(prev => {
             const newMap = new Map(prev);
@@ -312,8 +394,6 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                 const newSet = new Set(currentSet);
                 if (newSet.has(optionIndex)) {
                     newSet.delete(optionIndex);
-                } else if (newSet.size >= STRUCTURED_QUESTION_LIMITS.maxAnswersPerQuestion) {
-                    return prev;
                 } else {
                     newSet.add(optionIndex);
                 }
@@ -325,6 +405,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
 
             return newMap;
         });
+        setSubmissionGuidance(null);
 
         // If the user chooses a structured option, clear any typed freeform value so we have a single source of truth.
         setFreeformAnswers((prev) => {
@@ -338,6 +419,35 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
     const handleSubmit = React.useCallback(async () => {
         if (!sessionId || !allQuestionsAnswered || isSubmitting) return;
 
+        // Format answers as readable text
+        const responseLines: string[] = [];
+        questions.forEach((q, qIndex) => {
+            const options = Array.isArray(q.options) ? q.options : [];
+            const typed = freeformAnswers.get(qIndex);
+            const typedText = typeof typed === 'string' ? typed.trim() : '';
+            if (options.length === 0) {
+                if (typedText.length > 0) {
+                    responseLines.push(`${q.header}: ${typedText}`);
+                }
+                return;
+            }
+
+            const selected = selections.get(qIndex);
+            if (typedText.length > 0) {
+                responseLines.push(`${q.header}: ${typedText}`);
+                return;
+            }
+            if (selected && selected.size > 0) {
+                const selectedLabelsArray = Array.from(selected)
+                    .map(optIndex => options[optIndex]?.label)
+                    .filter(Boolean);
+                const selectedLabelsText = selectedLabelsArray.join(', ');
+                responseLines.push(`${q.header}: ${selectedLabelsText}`);
+            }
+        });
+
+        const responseText = responseLines.join('\n');
+
         try {
             if (!toolCallId) {
                 Modal.alert(t('common.error'), t('errors.missingPermissionId'));
@@ -345,9 +455,9 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
             }
 
             const latestSession = storage.getState().sessions[sessionId];
-            const latestRequest = latestSession?.agentState?.requests?.[toolCallId];
+            const latestRequest = (latestSession as any)?.agentState?.requests?.[toolCallId];
             const hasLiveMatchingRequest =
-                isAskUserQuestionToolName(latestRequest?.tool) &&
+                latestRequest?.tool === 'AskUserQuestion' &&
                 resolveAgentRequestKind({ toolName: latestRequest.tool, requestKind: latestRequest.kind }) === 'user_action';
             if (!hasLiveMatchingRequest) {
                 return;
@@ -362,7 +472,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                 ),
             });
             if (payload.kind === 'requires_cli_update') {
-                setSubmissionGuidance('update');
+                Modal.alert(t('common.error'), t('deps.ui.notAvailableUpdateCli'));
                 return;
             }
 
@@ -376,36 +486,42 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
             setIsSubmitted(true);
 
             await sessionAllowWithAnswers(sessionId, toolCallId, payload.send);
+            const dialog = input?.happierDialog;
+            if (dialog && typeof dialog === 'object' && !Array.isArray(dialog)) {
+                const metadata = dialog as Record<string, unknown>;
+                if (
+                    isClaudeUnifiedTerminalDialogChoiceAgentStateRequest(latestRequest)
+                    && metadata.kind === 'recognized'
+                    && metadata.dialogId === 'trust_folder'
+                ) {
+                    for (const [questionIndex, selectedIndexes] of selections) {
+                        for (const optionIndex of selectedIndexes) {
+                            const mutation = questions[questionIndex]?.options?.[optionIndex]?.settingMutation;
+                            if (!mutation || typeof mutation !== 'object' || Array.isArray(mutation)) continue;
+                            const candidate = mutation as Record<string, unknown>;
+                            if (candidate.settingId !== 'claudeUnifiedTerminalWorkspaceTrust') continue;
+                            if (
+                                candidate.value === 'always_trust_happier_workspaces'
+                                || candidate.value === 'always_reject_happier_workspaces'
+                            ) {
+                                setWorkspaceTrust(candidate.value);
+                            }
+                        }
+                    }
+                }
+            }
         } catch (error) {
             setIsSubmitted(false);
-            const errorCode = readRpcErrorCode(error);
-            if (errorCode === RPC_ERROR_CODES.METHOD_NOT_AVAILABLE || errorCode === RPC_ERROR_CODES.METHOD_NOT_FOUND) {
-                setSubmissionGuidance('update');
-            } else if (
-                errorCode === PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_RECEIVER_NOT_OWNER
-                || errorCode === PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_INVALID
-                || errorCode === PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_LEGACY_INVALID
-                || errorCode === PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_LEGACY_AMBIGUOUS
-            ) {
-                setSubmissionGuidance('reconnect');
+            const guidance = resolveSubmissionFailureGuidance(error);
+            if (guidance) {
+                setSubmissionGuidance(guidance);
             } else {
-                Modal.alert(t('common.error'), error instanceof Error ? error.message : t('errors.failedToSendMessage'));
+                Modal.alert(t('common.error'), t('errors.failedToSendMessage'));
             }
         } finally {
             setIsSubmitting(false);
         }
-    }, [sessionId, questions, selections, freeformAnswers, allQuestionsAnswered, isSubmitting, toolCallId]);
-
-    if (!hasQuestionArray) return null;
-    if (hasInvalidRenderQuestions) {
-        return (
-            <ToolSectionView>
-                <Text accessibilityLiveRegion="polite" style={{ color: theme.colors.text.secondary }}>
-                    {t('errors.failedToSendMessage')}
-                </Text>
-            </ToolSectionView>
-        );
-    }
+    }, [sessionId, questions, selections, freeformAnswers, allQuestionsAnswered, input?.happierDialog, isSubmitting, setWorkspaceTrust, toolCallId]);
 
     // Show submitted state
     if (isSubmitted || tool.state === 'completed') {
@@ -413,27 +529,16 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
         return (
             <ToolSectionView>
                 <View style={styles.submittedContainer}>
-                    {questions.map((rawQuestion, qIndex) => {
-                        const q = readRenderableQuestion(rawQuestion);
+                    {questions.map((q, qIndex) => {
                         const selected = selections.get(qIndex);
-                        const questionKey = typeof q.responseKey === 'string'
-                            ? q.responseKey
-                            : typeof q.question === 'string' && q.question.trim().length > 0
-                            ? q.question
-                            : typeof q.header === 'string'
-                                ? q.header
-                                : '';
+                        const questionKey = typeof q.question === 'string' && q.question.trim().length > 0 ? q.question : q.header;
                         const options = Array.isArray(q.options) ? q.options : [];
                         const freeform = freeformAnswers.get(qIndex);
-                        const displayedResultAnswers = answersFromResult?.[questionKey]?.map((answer: string) => (
-                            options.find((option) => resolveStructuredQuestionOptionAnswerValue(option) === answer)?.label
-                            ?? answer
-                        ));
                         const selectedLabels =
                             options.length === 0
                                 ? ((typeof freeform === 'string' && freeform.trim().length > 0)
                                     ? freeform.trim()
-                                    : (displayedResultAnswers?.join(', ') ?? '-'))
+                                    : (answersFromResult?.[questionKey] ?? '-'))
                                 : ((typeof freeform === 'string' && freeform.trim().length > 0)
                                     ? freeform.trim()
                                     : (selected && selected.size > 0
@@ -441,10 +546,10 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                             .map(optIndex => options[optIndex]?.label)
                                             .filter(Boolean)
                                             .join(', ')
-                                        : (displayedResultAnswers?.join(', ') ?? '-')));
+                                        : (answersFromResult?.[questionKey] ?? '-')));
                         return (
                             <View key={qIndex} style={styles.submittedItem}>
-                                <Text style={styles.submittedHeader}>{typeof q.header === 'string' ? q.header : ''}:</Text>
+                                <Text style={styles.submittedHeader}>{q.header}:</Text>
                                 <Text style={styles.submittedValue}>{selectedLabels}</Text>
                             </View>
                         );
@@ -462,28 +567,39 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                         {disabledMessage}
                     </Text>
                 ) : null}
-                {(requiresCliUpdate || submissionGuidance === 'update') ? (
-                    <Text accessibilityLiveRegion="polite" style={{ color: theme.colors.text.secondary }}>
-                        {t('deps.ui.notAvailableUpdateCli')}
-                    </Text>
-                ) : submissionGuidance === 'reconnect' || hasProspectivePayloadError ? (
-                    <Text accessibilityLiveRegion="polite" style={{ color: theme.colors.text.secondary }}>
-                        {t('errors.failedToSendMessage')}
+                {hasAttachedTerminalSecondaryAction && canOpenAttachedTerminal ? (
+                    <TouchableOpacity
+                        testID="ask-user-question.open-claude-terminal"
+                        accessibilityRole="button"
+                        accessibilityLabel={t('tools.askUserQuestion.claudeDialogNotice.openTerminal')}
+                        style={styles.optionButton}
+                        onPress={attachedSessionTerminal.open}
+                        activeOpacity={0.7}
+                    >
+                        <Ionicons name="terminal-outline" size={20} color={theme.colors.text.secondary} />
+                        <View style={styles.optionContent}>
+                            <Text style={styles.optionLabel}>{t('tools.askUserQuestion.claudeDialogNotice.openTerminal')}</Text>
+                            <Text style={styles.optionDescription}>{t('tools.askUserQuestion.claudeDialogNotice.description')}</Text>
+                        </View>
+                    </TouchableOpacity>
+                ) : hasAttachedTerminalSecondaryAction && isRunning && canApprovePermissions && attachedTerminalUnavailableMessage ? (
+                    <Text
+                        testID="ask-user-question.attached-terminal-unavailable"
+                        style={styles.optionDescription}
+                    >
+                        {attachedTerminalUnavailableMessage}
                     </Text>
                 ) : null}
-                {questions.map((rawQuestion, qIndex) => {
-                    const question = readRenderableQuestion(rawQuestion);
+                {questions.map((question, qIndex) => {
                     const selectedOptions = selections.get(qIndex) || new Set();
                     const options = Array.isArray(question.options) ? question.options : [];
-                    const selectionLimitReached = question.multiSelect === true
-                        && selectedOptions.size >= STRUCTURED_QUESTION_LIMITS.maxAnswersPerQuestion;
 
                     return (
                         <View key={qIndex} style={styles.questionSection}>
                             <View style={styles.headerChip}>
-                                <Text style={styles.headerText}>{typeof question.header === 'string' ? question.header : ''}</Text>
+                                <Text style={styles.headerText}>{question.header}</Text>
                             </View>
-                            <Text style={styles.questionText}>{typeof question.question === 'string' ? question.question : ''}</Text>
+                            <Text style={styles.questionText}>{question.question}</Text>
                             <View style={styles.optionsContainer}>
                                 {options.length === 0 || question.freeform ? (
                                     <View>
@@ -493,7 +609,6 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                             value={freeformAnswers.get(qIndex) ?? ''}
                                             onChangeText={(text) => {
                                                 if (!canInteract) return;
-                                                setSubmissionGuidance(null);
                                                 setFreeformAnswers((prev) => {
                                                     const next = new Map(prev);
                                                     next.set(qIndex, text);
@@ -511,7 +626,6 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                             placeholder={question.freeform?.placeholder ?? t('tools.askUserQuestion.otherPlaceholder')}
                                             placeholderTextColor={theme.colors.input.placeholder}
                                             editable={canInteract}
-                                            maxLength={STRUCTURED_QUESTION_LIMITS.maxStringLength}
                                             autoCapitalize="none"
                                             autoCorrect={false}
                                         />
@@ -522,7 +636,6 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                 ) : null}
                                 {options.map((option, oIndex) => {
                                     const isSelected = selectedOptions.has(oIndex);
-                                    const isOptionDisabled = !canInteract || (selectionLimitReached && !isSelected);
                                     const testID = `ask-user-question.option:${qIndex}:${oIndex}`;
 
                                     return (
@@ -531,16 +644,17 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                             testID={testID}
                                             accessibilityRole="button"
                                             accessibilityLabel={option.label}
+                                            accessibilityState={{ selected: isSelected }}
                                             style={[
                                                 styles.optionButton,
                                                 isSelected && styles.optionButtonSelected,
-                                                isOptionDisabled && styles.optionButtonDisabled,
+                                                !canInteract && styles.optionButtonDisabled,
                                             ]}
-                                            onPress={() => handleOptionToggle(qIndex, oIndex, question.multiSelect === true)}
-                                            disabled={isOptionDisabled}
+                                            onPress={() => handleOptionToggle(qIndex, oIndex, question.multiSelect)}
+                                            disabled={!canInteract}
                                             activeOpacity={0.7}
                                         >
-                                            {question.multiSelect === true ? (
+                                            {question.multiSelect ? (
                                                 <View style={[
                                                     styles.checkboxOuter,
                                                     isSelected && styles.checkboxOuterSelected,
@@ -566,30 +680,35 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                         </TouchableOpacity>
                                     );
                                 })}
-                                {selectionLimitReached ? (
-                                    <Text accessibilityLiveRegion="polite" style={styles.freeformDescription}>
-                                        {t('tools.askUserQuestion.selectionLimit', {
-                                            count: STRUCTURED_QUESTION_LIMITS.maxAnswersPerQuestion,
-                                        })}
-                                    </Text>
-                                ) : null}
                             </View>
                         </View>
                     );
                 })}
 
+                {submissionGuidance ? (
+                    <Text
+                        testID="ask-user-question.submission-guidance"
+                        style={styles.optionDescription}
+                    >
+                        {t(`tools.askUserQuestion.submissionFailures.${submissionGuidance}`)}
+                    </Text>
+                ) : null}
+
                 {canInteract && (
                     <View style={styles.actionsContainer}>
+                        {requiresCliUpdate ? (
+                            <Text style={styles.optionDescription}>{t('deps.ui.notAvailableUpdateCli')}</Text>
+                        ) : null}
                         <TouchableOpacity
                             testID="ask-user-question.submit"
                             accessibilityRole="button"
                             accessibilityLabel={t('tools.askUserQuestion.submit')}
                             style={[
                                 styles.submitButton,
-                                (!allQuestionsAnswered || isSubmitting || requiresCliUpdate || hasProspectivePayloadError) && styles.submitButtonDisabled,
+                                (!canSubmit || isSubmitting) && styles.submitButtonDisabled,
                             ]}
                             onPress={handleSubmit}
-                            disabled={!allQuestionsAnswered || isSubmitting || requiresCliUpdate || hasProspectivePayloadError}
+                            disabled={!canSubmit || isSubmitting}
                             activeOpacity={0.7}
                         >
                             {isSubmitting ? (

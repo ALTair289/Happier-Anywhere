@@ -3743,6 +3743,24 @@ export const ca: TranslationStructure = {
                             },
                             '1p': {
                                 title: "1p",
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                                 subtitle: "Categoria interna de depuració (first-party)."
                             }
                         }
@@ -6200,6 +6218,17 @@ deps: {
                   short: 'Publica',
                   failed: 'No s\'ha pogut publicar la branca.',
               },
+            submissionFailures: {
+                update: 'Actualitza el CLI de Happier i torna-ho a provar.',
+                reconnect: 'Torna a connectar aquesta sessió i torna-ho a provar.',
+                retry: 'No s’ha pogut acceptar la resposta. Revisa-la i torna-ho a provar.',
+            },
+            claudeDialogNotice: {
+                header: 'Diàleg de Claude',
+                question: 'Claude mostra un diàleg. Obre el terminal per revisar-lo i triar com continuar.',
+                openTerminal: 'Obre el terminal',
+                description: 'Revisa i respon el diàleg al terminal de Claude.',
+            },
               create: {
                   title: 'Crea una branca',
                   subtitle: ({ name }: { name: string }) => `Crea "${name}"`,

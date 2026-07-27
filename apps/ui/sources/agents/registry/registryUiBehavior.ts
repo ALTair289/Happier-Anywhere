@@ -24,6 +24,7 @@ import { OPENCODE_UI_BEHAVIOR_OVERRIDE } from '@/agents/providers/opencode/uiBeh
 import { PI_UI_BEHAVIOR_OVERRIDE } from '@/agents/providers/pi/uiBehavior';
 import { CUSTOM_ACP_UI_BEHAVIOR_OVERRIDE } from '@/agents/providers/customAcp/uiBehavior';
 import type { AgentInputExtraActionChip } from '@/components/sessions/agentInput';
+import { resolveAgentIdFromSessionMetadata } from '@happier-dev/agents';
 
 type CapabilityResults = Partial<Record<CapabilityId, CapabilityDetectResult>>;
 export type SessionComposerNonSteerablePayloadReason = Extract<NonSteerablePayloadReason, 'provider_config_change_refused'>;
@@ -69,6 +70,12 @@ export type AgentSessionHandoffProviderPatch = Readonly<{
 }>;
 
 export type AgentUiBehavior = Readonly<{
+    attachedSessionTerminal?: Readonly<{
+        isAvailable?: (ctx: {
+            agentId: AgentId;
+            session: Session;
+        }) => boolean;
+    }>;
     guidance?: Readonly<{
         includeInSessionGettingStartedCliExamples?: boolean;
     }>;
@@ -240,6 +247,14 @@ export type NewSessionPreflightIssue = Readonly<{
 
 function mergeAgentUiBehavior(a: AgentUiBehavior, b: AgentUiBehavior): AgentUiBehavior {
     return {
+        ...(a.attachedSessionTerminal || b.attachedSessionTerminal
+            ? {
+                attachedSessionTerminal: {
+                    ...(a.attachedSessionTerminal ?? {}),
+                    ...(b.attachedSessionTerminal ?? {}),
+                },
+            }
+            : {}),
         ...(a.guidance || b.guidance ? { guidance: { ...(a.guidance ?? {}), ...(b.guidance ?? {}) } } : {}),
         ...(a.sessionUsage || b.sessionUsage ? { sessionUsage: { ...(a.sessionUsage ?? {}), ...(b.sessionUsage ?? {}) } } : {}),
         ...(a.workState || b.workState ? { workState: { ...(a.workState ?? {}), ...(b.workState ?? {}) } } : {}),
@@ -320,6 +335,13 @@ export const AGENTS_UI_BEHAVIOR: Readonly<Record<AgentId, AgentUiBehavior>> = Ob
 export function resolveAgentUiBehaviorFromFlavor(flavor: unknown): AgentUiBehavior | null {
     const agentId = typeof flavor === 'string' ? resolveAgentIdFromFlavor(flavor) : null;
     return agentId ? AGENTS_UI_BEHAVIOR[agentId] ?? null : null;
+}
+
+export function isAttachedSessionTerminalAvailableForSession(session: Session): boolean {
+    const agentId = resolveAgentIdFromSessionMetadata(session.metadata);
+    if (!agentId) return false;
+    const isAvailable = AGENTS_UI_BEHAVIOR[agentId].attachedSessionTerminal?.isAvailable;
+    return isAvailable?.({ agentId, session }) === true;
 }
 
 export function getAgentResumeExperimentsFromSettings(agentId: AgentId, settings: Settings): AgentResumeExperiments {

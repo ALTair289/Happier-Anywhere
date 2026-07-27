@@ -39,12 +39,23 @@ const storageStore = createReactiveStorageStoreMock({
 installWorkflowRendererCommonModuleMocks({
     storage: async () => {
         const { createStorageModuleStub } = await import('@/dev/testkit/mocks/storage');
-        return createStorageModuleStub({ storage: storageStore });
+        return createStorageModuleStub({
+            storage: storageStore,
+            useSession: (sessionId: string) => storageStore((state) => state.sessions[sessionId] ?? null),
+        });
     },
 });
 
 vi.mock('@/sync/ops', () => ({
     sessionAllowWithAnswers: (...args: unknown[]) => sessionAllowWithAnswers(...args),
+}));
+
+vi.mock('@/components/sessions/terminal/openAttachedSessionTerminal', () => ({
+    useOpenAttachedSessionTerminal: () => ({
+        available: false,
+        unavailableReason: 'missing_session',
+        open: vi.fn(),
+    }),
 }));
 
 describe('AskUserQuestionView capability reactivity', () => {

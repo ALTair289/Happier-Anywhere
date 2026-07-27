@@ -85,6 +85,29 @@ export const CLAUDE_PROVIDER_SETTINGS_PLUGIN: ProviderSettingsPlugin = {
                         },
                     ],
                 },
+                {
+                    key: 'claudeUnifiedTerminalWorkspaceTrust',
+                    kind: 'enum',
+                    title: { key: 'settingsProviders.plugins.claude.fields.claudeUnifiedTerminalWorkspaceTrust.title' },
+                    subtitle: { key: 'settingsProviders.plugins.claude.fields.claudeUnifiedTerminalWorkspaceTrust.subtitle' },
+                    enumOptions: [
+                        {
+                            id: 'ask_every_time',
+                            title: { key: 'settingsProviders.plugins.claude.fields.claudeUnifiedTerminalWorkspaceTrust.options.ask_every_time.title' },
+                            subtitle: { key: 'settingsProviders.plugins.claude.fields.claudeUnifiedTerminalWorkspaceTrust.options.ask_every_time.subtitle' },
+                        },
+                        {
+                            id: 'always_trust_happier_workspaces',
+                            title: { key: 'settingsProviders.plugins.claude.fields.claudeUnifiedTerminalWorkspaceTrust.options.always_trust_happier_workspaces.title' },
+                            subtitle: { key: 'settingsProviders.plugins.claude.fields.claudeUnifiedTerminalWorkspaceTrust.options.always_trust_happier_workspaces.subtitle' },
+                        },
+                        {
+                            id: 'always_reject_happier_workspaces',
+                            title: { key: 'settingsProviders.plugins.claude.fields.claudeUnifiedTerminalWorkspaceTrust.options.always_reject_happier_workspaces.title' },
+                            subtitle: { key: 'settingsProviders.plugins.claude.fields.claudeUnifiedTerminalWorkspaceTrust.options.always_reject_happier_workspaces.subtitle' },
+                        },
+                    ],
+                },
             ],
         },
         {

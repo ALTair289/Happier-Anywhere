@@ -3903,6 +3903,24 @@ export const ru: TranslationStructure = {
                             },
                             file: {
                                 title: "Файлы",
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                                 subtitle: "Операции файловой системы и вспомогательные функции."
                             },
                             '1p': {
@@ -6508,7 +6526,18 @@ export const ru: TranslationStructure = {
       turnDiffRecap: "Сводка изменений за этот ход",
     },
     askUserQuestion: {
-      submit: "Отправить ответ",
+        submit: "Отправить ответ",
+        submissionFailures: {
+            update: "Обновите Happier CLI и повторите попытку.",
+            reconnect: "Переподключите этот сеанс и повторите попытку.",
+            retry: "Не удалось принять ответ. Проверьте его и повторите попытку.",
+        },
+      claudeDialogNotice: {
+        header: "Диалог Claude",
+        question: "Claude показывает диалог. Откройте терминал, чтобы проверить его и выбрать, как продолжить.",
+        openTerminal: "Открыть терминал",
+        description: "Проверьте диалог и ответьте на него в терминале Claude.",
+      },
       multipleQuestions: ({ count }: { count: number }) =>
         `${count} ${plural({ count, one: "вопрос", few: "вопроса", many: "вопросов" })}`,
       other: "Другое",

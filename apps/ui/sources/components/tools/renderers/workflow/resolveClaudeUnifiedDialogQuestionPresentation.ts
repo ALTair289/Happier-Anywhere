@@ -18,35 +18,40 @@ type ClaudeUnifiedDialogNoticeTranslationKey =
     | 'tools.askUserQuestion.claudeDialogNotice.openTerminal'
     | 'tools.askUserQuestion.claudeDialogNotice.description';
 
-function isOpenTerminalNotice(value: unknown): boolean {
+export function isClaudeUnifiedOpenTerminalNotice(value: unknown): boolean {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
     const dialog = value as Record<string, unknown>;
     return dialog.kind === 'unrecognized'
+        && dialog.mode === 'notice'
         && dialog.dialogId === 'unrecognized_confirmation'
-        && dialog.notice === 'open_terminal';
+        && dialog.action === 'open_terminal';
+}
+
+export function hasClaudeUnifiedOpenTerminalSecondaryAction(value: unknown): boolean {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const dialog = value as Record<string, unknown>;
+    const supportedEnvelope = dialog.kind === 'recognized'
+        || (dialog.kind === 'unrecognized'
+            && dialog.mode === 'generic'
+            && dialog.dialogId === 'unrecognized_confirmation'
+            && typeof dialog.signature === 'string');
+    return supportedEnvelope && dialog.secondaryAction === 'open_terminal';
 }
 
 export function resolveClaudeUnifiedDialogQuestionPresentation<T extends ClaudeUnifiedDialogQuestionInput>(
     input: T,
     translate: (key: ClaudeUnifiedDialogNoticeTranslationKey) => string,
 ): ClaudeUnifiedDialogQuestionInput {
-    if (!isOpenTerminalNotice(input.happierDialog)) return input;
+    if (!isClaudeUnifiedOpenTerminalNotice(input.happierDialog)) return input;
     const firstQuestion = input.questions[0];
     if (!firstQuestion) return input;
-    const firstOption = firstQuestion.options[0];
-    if (!firstOption || firstOption.choice !== 'open_terminal') return input;
-
     return {
         ...input,
         questions: [{
             ...firstQuestion,
             header: translate('tools.askUserQuestion.claudeDialogNotice.header'),
             question: translate('tools.askUserQuestion.claudeDialogNotice.question'),
-            options: [{
-                ...firstOption,
-                label: translate('tools.askUserQuestion.claudeDialogNotice.openTerminal'),
-                description: translate('tools.askUserQuestion.claudeDialogNotice.description'),
-            }],
+            options: [],
         }],
     };
 }

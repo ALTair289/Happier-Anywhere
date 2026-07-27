@@ -5493,6 +5493,12 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                 local: '本地',
                 options: '選項',
             },
+            claudeDialogNotice: {
+                header: 'Claude 對話框',
+                question: 'Claude 正在顯示對話框。請開啟終端機查看並選擇如何繼續。',
+                openTerminal: '開啟終端機',
+                description: '在 Claude 終端機中查看並回答該對話框。',
+            },
             publish: {
                 title: '發佈分支',
                 subtitle: '將目前分支推送到上游遠端分支',

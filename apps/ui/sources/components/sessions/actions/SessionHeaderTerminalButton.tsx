@@ -10,6 +10,7 @@ import { useDeviceType } from '@/utils/platform/responsive';
 import { useLocalSetting } from '@/sync/domains/state/storage';
 import { t } from '@/text';
 import { useOptionalSessionScreenTestId } from '../shell/sessionScreenTestIds';
+import { readSessionTerminalMode, setSessionTerminalMode } from '@/components/sessions/terminal/sessionTerminalMode';
 
 export const SessionHeaderTerminalButton = React.memo((_props: Readonly<{ sessionId: string; scopeId: string; serverId?: string | null }>) => {
     const { theme } = useUnistyles();
@@ -32,9 +33,11 @@ export const SessionHeaderTerminalButton = React.memo((_props: Readonly<{ sessio
 
     const onPress = React.useCallback(() => {
         if (!terminalEnabled) return;
+        const wasAttachedTerminal = readSessionTerminalMode(_props.sessionId) === 'session_attach';
+        setSessionTerminalMode(_props.sessionId, 'workspace_shell');
 
         if (dockLocation === 'bottom') {
-            if (bottomTerminalActive) {
+            if (bottomTerminalActive && !wasAttachedTerminal) {
                 pane.closeBottom();
                 return;
             }
@@ -44,7 +47,7 @@ export const SessionHeaderTerminalButton = React.memo((_props: Readonly<{ sessio
         }
 
         if (dockLocation === 'details') {
-            if (detailsTerminalActive) {
+            if (detailsTerminalActive && !wasAttachedTerminal) {
                 pane.closeDetailsTab(SESSION_DETAILS_TERMINAL_TAB_KEY);
                 return;
             }
@@ -54,7 +57,7 @@ export const SessionHeaderTerminalButton = React.memo((_props: Readonly<{ sessio
         }
 
         // sidebar
-        if (rightTerminalActive) {
+        if (rightTerminalActive && !wasAttachedTerminal) {
             pane.closeRight();
             return;
         }
@@ -67,6 +70,7 @@ export const SessionHeaderTerminalButton = React.memo((_props: Readonly<{ sessio
         pane,
         rightTerminalActive,
         terminalEnabled,
+        _props.sessionId,
     ]);
 
     if (!terminalEnabled) return null;
