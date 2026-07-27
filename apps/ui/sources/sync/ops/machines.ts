@@ -667,7 +667,7 @@ export async function machineStopDaemon(
 }
 
 export type MachineStopSessionResult =
-    | { ok: true }
+    | { ok: true; status: 'stopped' | 'requested' }
     | { ok: false; error: string; errorCode?: string };
 
 export type MachineBashRequest =
@@ -691,7 +691,10 @@ export async function machineStopSession(
         serverId: options?.serverId,
     });
     if (result.type === 'stopped') {
-        return { ok: true };
+        return { ok: true, status: 'stopped' };
+    }
+    if (result.type === 'requested') {
+        return { ok: true, status: 'requested' };
     }
     if (result.errorCode) {
         return {
