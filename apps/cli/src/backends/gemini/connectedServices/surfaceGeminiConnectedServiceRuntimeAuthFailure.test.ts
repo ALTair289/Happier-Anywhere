@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { buildRuntimeAuthRecoveryScheduledResult } from '@/daemon/connectedServices/runtimeAuth/projection/connectedServiceRuntimeAuthRecoveryProjection';
+import { resetConnectedServiceRuntimeAuthFailureReportDedupeForTests } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
+import { computeConnectedServiceAccessTokenFingerprint } from '@/daemon/connectedServices/refresh/credentialFreshness/tokenFingerprint';
 
 import {
   classifyGeminiConnectedServiceRuntimeAuthFailure,
@@ -13,6 +15,10 @@ import {
 } from './surfaceGeminiConnectedServiceRuntimeAuthFailure';
 
 const GEMINI_GROUP_SELECTION_ENV: NodeJS.ProcessEnv = {
+  HAPPIER_GEMINI_CONNECTED_SERVICE_PROVIDER_ACCOUNT_ID: 'google-account-1',
+  HAPPIER_GEMINI_CONNECTED_SERVICE_PROVIDER_EMAIL: 'user@example.com',
+  HAPPIER_GEMINI_CONNECTED_SERVICE_CREDENTIAL_FINGERPRINT:
+    computeConnectedServiceAccessTokenFingerprint('gemini-access-token'),
   HAPPIER_CONNECTED_SERVICE_SELECTIONS_JSON: JSON.stringify([
     {
       kind: 'group',
@@ -21,9 +27,14 @@ const GEMINI_GROUP_SELECTION_ENV: NodeJS.ProcessEnv = {
       activeProfileId: 'leeroy',
       fallbackProfileId: 'backup',
       generation: 2,
+      credentialRevision: 'csr_abcdefghijklmnopqrstuv',
     },
   ]),
 };
+
+beforeEach(() => {
+  resetConnectedServiceRuntimeAuthFailureReportDedupeForTests();
+});
 
 function buildSessionClient(): GeminiRuntimeAuthFailureSessionClient & {
   events: unknown[];
@@ -60,6 +71,11 @@ describe('classifyGeminiConnectedServiceRuntimeAuthFailure', () => {
       serviceId: 'gemini',
       profileId: 'leeroy',
       groupId: 'gemini-main',
+      groupGeneration: 2,
+      credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+      sourceProviderAccountId: 'google-account-1',
+      sourceAccountLabel: 'user@example.com',
+      failingAccessTokenFingerprint: computeConnectedServiceAccessTokenFingerprint('gemini-access-token'),
     });
   });
 
@@ -120,6 +136,46 @@ describe('classifyGeminiConnectedServiceRuntimeAuthFailure', () => {
 });
 
 describe('surfaceGeminiConnectedServiceRuntimeAuthFailure', () => {
+  it('projects the truthful interrupted-turn status when the exact source tuple was superseded', async () => {
+    const reportOutboxDir = await mkdtemp(join(tmpdir(), 'gemini-runtime-auth-report-'));
+    const session = buildSessionClient();
+    const classification = classifyGeminiConnectedServiceRuntimeAuthFailure({
+      error: {
+        source: 'gemini_stderr',
+        message: 'RESOURCE_EXHAUSTED: quota exceeded for model gemini-3-pro',
+      },
+      env: GEMINI_GROUP_SELECTION_ENV,
+    });
+    expect(classification).not.toBeNull();
+
+    const report = await surfaceGeminiConnectedServiceRuntimeAuthFailure({
+      session,
+      classification: classification!,
+      reportOutboxDir,
+      notify: async () => ({
+        ok: true,
+        result: {
+          status: 'recovery_superseded',
+          reason: 'source_tuple_mismatch',
+          serviceId: 'gemini',
+          groupId: 'gemini-main',
+          profileId: 'leeroy',
+        },
+      }),
+    });
+
+    expect(report).toMatchObject({
+      handled: true,
+      statusCode: 'recovery_superseded_source_tuple_mismatch',
+      statusMessage: 'Connected-service account already updated; the old turn was interrupted. Retry your request.',
+    });
+    expect(session.events).toEqual([{
+      type: 'message',
+      message: 'Connected-service account already updated; the old turn was interrupted. Retry your request.',
+    }]);
+    expect(session.metadataUpdates).toBe(0);
+  });
+
   it('reports the structured classification to the daemon and leaves typed transcript projection to the daemon', async () => {
     const reportOutboxDir = await mkdtemp(join(tmpdir(), 'gemini-runtime-auth-report-'));
     const session = buildSessionClient();
@@ -163,7 +219,7 @@ describe('surfaceGeminiConnectedServiceRuntimeAuthFailure', () => {
     });
     expect(report.handled).toBe(true);
     expect(session.events).toEqual([]);
-    expect(session.metadataUpdates).toBeGreaterThan(0);
+    expect(session.metadataUpdates).toBe(0);
   });
 
   it('does not provider-emit duplicate daemon-handled recovery transcript projections', async () => {
@@ -197,5 +253,6 @@ describe('surfaceGeminiConnectedServiceRuntimeAuthFailure', () => {
     });
 
     expect(session.events).toEqual([]);
+    expect(session.metadataUpdates).toBe(0);
   });
 });

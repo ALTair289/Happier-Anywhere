@@ -114,35 +114,40 @@ export function createGeminiBackendMessageHandler(params: {
             errorMessage = buildGeminiWorkspaceProjectAuthenticationMessage();
           }
 
-          // Connected-services producer: report the STRUCTURED classification (usage limit /
-          // throttle / auth) to the daemon so reactive recovery can engage; the raw provider
-          // error keeps flowing through the existing sanitized error surfaces below.
-          const runtimeAuthClassification = reportGeminiConnectedServiceRuntimeAuthFailureBestEffort({
-            session: params.session,
-            error: msg.detail && typeof msg.detail === 'object' ? msg.detail : errorMessage,
-            logPrefix: '[gemini]',
-          });
-
-          params.messageBuffer.addMessage(`Error: ${errorMessage}`, 'status');
+          // Connected-services producer: await the STRUCTURED daemon recovery result before
+          // deciding whether the existing sanitized raw-error fallback is still needed.
           void (async () => {
-            if (hadActiveTurn && !params.state.taskStartedSent && params.session.sessionTurnLifecycle) {
-              await params.session.sessionTurnLifecycle.beginTurn({ provider: 'gemini' });
-            }
-            await surfacePrimarySessionRuntimeIssue({
-              cause: 'status_error',
-              provider: 'gemini',
-              error: runtimeAuthClassification
-                ? Object.assign(new Error(errorMessage), { runtimeAuthClassification })
-                : errorMessage,
-              sessionSeq: params.session.getLastObservedMessageSeq?.() ?? null,
+            const runtimeAuthResult = await reportGeminiConnectedServiceRuntimeAuthFailureBestEffort({
               session: params.session,
+              error: msg.detail && typeof msg.detail === 'object' ? msg.detail : errorMessage,
+              logPrefix: '[gemini]',
             });
+            if (runtimeAuthResult?.recoveryReport?.handled === true) return;
+
+            params.messageBuffer.addMessage(`Error: ${errorMessage}`, 'status');
+            try {
+              if (hadActiveTurn && !params.state.taskStartedSent && params.session.sessionTurnLifecycle) {
+                await params.session.sessionTurnLifecycle.beginTurn({ provider: 'gemini' });
+              }
+              await surfacePrimarySessionRuntimeIssue({
+                cause: 'status_error',
+                provider: 'gemini',
+                error: runtimeAuthResult
+                  ? Object.assign(new Error(errorMessage), {
+                      runtimeAuthClassification: runtimeAuthResult.classification,
+                    })
+                  : errorMessage,
+                sessionSeq: params.session.getLastObservedMessageSeq?.() ?? null,
+                session: params.session,
+              });
+            } finally {
+              params.session.sendAgentMessage('gemini', {
+                type: 'message',
+                message: `Error: ${errorMessage}`,
+              });
+            }
           })().catch((error) => {
             logger.debug('[gemini] Failed to persist primary session runtime issue (non-fatal)', error);
-          });
-          params.session.sendAgentMessage('gemini', {
-            type: 'message',
-            message: `Error: ${errorMessage}`,
           });
         }
         break;
@@ -298,7 +303,7 @@ export function createGeminiBackendMessageHandler(params: {
           // stderr). The raw payload is suppressed from the transcript by contract — Gemini CLI
           // retries these internally — and only the structured daemon report may surface
           // recovery projections.
-          reportGeminiConnectedServiceRuntimeAuthFailureBestEffort({
+          void reportGeminiConnectedServiceRuntimeAuthFailureBestEffort({
             session: params.session,
             error: msg.payload,
             logPrefix: '[gemini]',

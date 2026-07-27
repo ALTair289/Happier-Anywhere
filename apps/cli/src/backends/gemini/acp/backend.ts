@@ -9,6 +9,7 @@
  */
 
 import { AcpBackend, type AcpBackendOptions, type AcpPermissionHandler } from '@/agent/acp/AcpBackend';
+import type { AcpAuthentication } from '@/agent/acp/AcpAuthentication';
 import type { AgentBackend, McpServerConfig, AgentFactoryOptions } from '@/agent/core';
 import { geminiTransport } from '@/backends/gemini/acp/transport';
 import { logger } from '@/ui/logger';
@@ -33,7 +34,7 @@ import {
 import { CHANGE_TITLE_TOOL_NAME_ALIASES } from '@happier-dev/protocol/tools/v2';
 import { requireProviderCliLaunchSpec } from '@/runtime/managedTools/requireProviderCliLaunchSpec';
 import { resolveGeminiAcpFlag } from '@/backends/gemini/cli/detect';
-import type { AcpAuthentication } from '@/agent/acp/AcpAuthentication';
+import { findConnectedServiceChildSelection } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 
 function isTruthyEnv(value: string | undefined): boolean {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -121,8 +122,8 @@ export interface GeminiBackendOptions extends AgentFactoryOptions {
  * Result of creating a Gemini backend
  */
 export interface GeminiBackendResult {
-  /** The created AgentBackend instance */
-  backend: AgentBackend;
+  /** The concrete ACP backend; Gemini prompt delivery requires typed submission evidence. */
+  backend: AcpBackend;
   /** The concrete model when Gemini is not left to auto-route. */
   model?: string;
   /** Source of the model selection for logging */
@@ -140,16 +141,26 @@ export interface GeminiBackendResult {
  */
 export function createGeminiBackend(options: GeminiBackendOptions): GeminiBackendResult {
   const scopedEnv = options.env ?? {};
+  const hasExactConnectedGeminiSelection = findConnectedServiceChildSelection(scopedEnv, 'gemini') !== null;
+  const effectiveScopedEnv = { ...scopedEnv };
+  if (hasExactConnectedGeminiSelection) {
+    delete effectiveScopedEnv.GOOGLE_CLOUD_PROJECT;
+    delete effectiveScopedEnv.GOOGLE_CLOUD_PROJECT_ID;
+  }
   const {
     [GEMINI_MODEL_ENV]: _scopedGeminiModel,
     [GEMINI_ACP_AUTH_METHOD_ENV]: _scopedGeminiAuthMethod,
     [GEMINI_ACP_AUTH_META_ENV]: _scopedGeminiAuthMeta,
     ...scopedEnvWithoutModelAndAuthControl
-  } = scopedEnv;
+  } = effectiveScopedEnv;
   const mergedSourceEnv = {
     ...process.env,
-    ...scopedEnv,
+    ...effectiveScopedEnv,
   };
+  if (hasExactConnectedGeminiSelection) {
+    delete mergedSourceEnv.GOOGLE_CLOUD_PROJECT;
+    delete mergedSourceEnv.GOOGLE_CLOUD_PROJECT_ID;
+  }
   const {
     [GEMINI_MODEL_ENV]: _inheritedGeminiModel,
     ...processEnvWithoutGeminiModel
@@ -158,6 +169,10 @@ export function createGeminiBackend(options: GeminiBackendOptions): GeminiBacken
     ...processEnvWithoutGeminiModel,
     ...scopedEnvWithoutModelAndAuthControl,
   };
+  if (hasExactConnectedGeminiSelection) {
+    delete modelSourceEnv.GOOGLE_CLOUD_PROJECT;
+    delete modelSourceEnv.GOOGLE_CLOUD_PROJECT_ID;
+  }
 
   // Resolve API key from multiple sources (in priority order):
   // 1. Local Gemini CLI config files (~/.gemini/) (API keys only)
@@ -232,7 +247,7 @@ export function createGeminiBackend(options: GeminiBackendOptions): GeminiBacken
   // Get Google Cloud Project from local config (for Workspace accounts)
   // Only use if: no email stored (global), or email matches current user
   let googleCloudProject: string | null = null;
-  if (localConfig.googleCloudProject) {
+  if (!hasExactConnectedGeminiSelection && localConfig.googleCloudProject) {
     const storedEmail = localConfig.googleCloudProjectEmail;
     const currentEmail = options.currentUserEmail;
 
@@ -253,6 +268,7 @@ export function createGeminiBackend(options: GeminiBackendOptions): GeminiBacken
     GEMINI_ACP_AUTH_METHOD_ENV,
     GEMINI_ACP_AUTH_META_ENV,
     ...(shouldSetGeminiModelEnv ? [] : [GEMINI_MODEL_ENV]),
+    ...(hasExactConnectedGeminiSelection ? ['GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_PROJECT_ID'] : []),
   ];
 
   const backendOptions: AcpBackendOptions = {

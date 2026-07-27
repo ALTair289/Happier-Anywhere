@@ -8,6 +8,7 @@ import {
   ConnectedServiceCredentialRecordV1Schema,
   buildConnectedServiceCredentialRecord,
 } from '@happier-dev/protocol';
+import { computeConnectedServiceAccessTokenFingerprint } from '@/daemon/connectedServices/refresh/credentialFreshness/tokenFingerprint';
 
 import { materializeGeminiConnectedServiceAuth } from './materializeGeminiConnectedServiceAuth';
 
@@ -41,6 +42,10 @@ describe('materializeGeminiConnectedServiceAuth', () => {
       GEMINI_FORCE_ENCRYPTED_FILE_STORAGE: 'false',
       GEMINI_FORCE_FILE_STORAGE: 'true',
       GOOGLE_APPLICATION_CREDENTIALS: '',
+      HAPPIER_GEMINI_CONNECTED_SERVICE_PROVIDER_ACCOUNT_ID: 'google-account',
+      HAPPIER_GEMINI_CONNECTED_SERVICE_PROVIDER_EMAIL: 'user@example.com',
+      HAPPIER_GEMINI_CONNECTED_SERVICE_CREDENTIAL_FINGERPRINT:
+        computeConnectedServiceAccessTokenFingerprint('gemini-access'),
       ...(process.platform === 'win32' ? { USERPROFILE: homeDir } : {}),
     });
     const raw = await readFile(join(homeDir, '.gemini', 'oauth_creds.json'), 'utf8');
@@ -54,7 +59,7 @@ describe('materializeGeminiConnectedServiceAuth', () => {
     });
   });
 
-  it('materializes Vertex AI env from connected-service metadata without treating OAuth tokens as API keys', async () => {
+  it('fails closed for Vertex metadata because Remote Gemini supports OAuth Code Assist only', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-gemini-auth-'));
     const record = ConnectedServiceCredentialRecordV1Schema.parse({
       ...buildConnectedServiceCredentialRecord({
@@ -90,20 +95,13 @@ describe('materializeGeminiConnectedServiceAuth', () => {
       },
     });
 
-    const result = await materializeGeminiConnectedServiceAuth({ rootDir, record });
-
-    expect(result.env).toMatchObject({
-      GEMINI_FORCE_ENCRYPTED_FILE_STORAGE: 'false',
-      GEMINI_FORCE_FILE_STORAGE: 'true',
-      GOOGLE_GENAI_USE_VERTEXAI: '1',
-      GOOGLE_CLOUD_PROJECT: 'vertex-project',
-      GOOGLE_CLOUD_LOCATION: 'us-central1',
+    await expect(materializeGeminiConnectedServiceAuth({ rootDir, record })).rejects.toMatchObject({
+      code: 'gemini_connected_service_credential_shape_unsupported',
+      credentialShape: 'vertex',
     });
-    expect(result.env.GEMINI_API_KEY).toBeUndefined();
-    expect(result.env.GOOGLE_API_KEY).toBeUndefined();
   });
 
-  it('materializes gateway auth metadata from connected-service metadata', async () => {
+  it('fails closed for token and gateway credentials because Remote Gemini supports OAuth Code Assist only', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-gemini-auth-'));
     const record = ConnectedServiceCredentialRecordV1Schema.parse({
       ...buildConnectedServiceCredentialRecord({
@@ -133,21 +131,29 @@ describe('materializeGeminiConnectedServiceAuth', () => {
       },
     });
 
-    const result = await materializeGeminiConnectedServiceAuth({ rootDir, record });
+    await expect(materializeGeminiConnectedServiceAuth({ rootDir, record })).rejects.toMatchObject({
+      code: 'gemini_connected_service_credential_shape_unsupported',
+      credentialShape: 'gateway',
+    });
+  });
 
-    expect(result.env.HAPPIER_GEMINI_ACP_AUTH_METHOD).toBe('gateway');
-    expect(result.env.GEMINI_FORCE_ENCRYPTED_FILE_STORAGE).toBe('false');
-    expect(result.env.GEMINI_FORCE_FILE_STORAGE).toBe('true');
-    expect(JSON.parse(result.env.HAPPIER_GEMINI_ACP_AUTH_META ?? '{}')).toEqual({
-      gateway: {
-        baseUrl: 'https://gateway.example.test/v1',
-        headers: {
-          Authorization: 'Bearer gateway-token',
-          'X-Gateway-Account': 'acct-1',
-        },
+  it('fails closed for a raw token credential without gateway metadata', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'happier-gemini-auth-'));
+    const record = buildConnectedServiceCredentialRecord({
+      now: 1_700_000_000_000,
+      serviceId: 'gemini',
+      profileId: 'token-profile',
+      kind: 'token',
+      token: {
+        token: 'gemini-api-key',
+        providerAccountId: null,
+        providerEmail: null,
       },
     });
-    expect(result.env.GEMINI_API_KEY).toBeUndefined();
-    expect(result.env.GOOGLE_API_KEY).toBeUndefined();
+
+    await expect(materializeGeminiConnectedServiceAuth({ rootDir, record })).rejects.toMatchObject({
+      code: 'gemini_connected_service_credential_shape_unsupported',
+      credentialShape: 'token',
+    });
   });
 });

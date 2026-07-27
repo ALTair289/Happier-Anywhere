@@ -201,6 +201,7 @@ describe('createGeminiConnectedServiceRuntimeAuthAdapter', () => {
         serviceId: 'gemini',
         groupId: 'group-gemini',
         profileId: 'gemini-work',
+        credentialRevision: 'csr_abcdefghijklmnopqrstuv',
       },
     })).toMatchObject({
       kind: 'usage_limit',
@@ -208,6 +209,7 @@ describe('createGeminiConnectedServiceRuntimeAuthAdapter', () => {
       serviceId: 'gemini',
       profileId: 'gemini-work',
       groupId: 'group-gemini',
+      credentialRevision: 'csr_abcdefghijklmnopqrstuv',
       retryAfterMs: 150_000,
       quotaScope: 'account',
       // Honest provenance: this classification is derived from text evidence heuristics over
@@ -216,27 +218,29 @@ describe('createGeminiConnectedServiceRuntimeAuthAdapter', () => {
     });
   });
 
-  it('reports restart-rematerialize adoption as weakly_verified — no live provider probe runs (RD-OPI-8)', async () => {
+  it('keeps restart-rematerialize adoption pending until the first matching provider outcome', async () => {
     const adapter = createGeminiConnectedServiceRuntimeAuthAdapter();
 
     await expect(adapter.verifyActiveAccount?.({
       target: { agentId: 'gemini' },
       selection: {},
     })).resolves.toEqual({
-      status: 'weakly_verified',
-      reason: 'provider_restart_rematerialization_authoritative',
+      status: 'unavailable',
+      retryable: true,
+      reason: 'gemini_provider_outcome_pending',
     });
   });
 
-  it('treats post-switch recovery as a successful no-op — restart/rematerialize owns recovery (RD-OPI-8)', async () => {
+  it('does not relabel restart/rematerialization as provider recovery', async () => {
     const adapter = createGeminiConnectedServiceRuntimeAuthAdapter();
 
     await expect(adapter.recoverAfterRuntimeAuthSwitch({
       target: { agentId: 'gemini' },
       selection: {},
     })).resolves.toEqual({
-      recovered: true,
+      recovered: false,
       recovery: 'restart_rematerialize',
+      reason: 'gemini_provider_outcome_pending',
     });
   });
 });

@@ -1,11 +1,17 @@
-import type { AgentBackend } from '@/agent';
+import {
+  type AcpBackend,
+  AcpPromptSubmissionPhaseError,
+  type AcpPromptSubmissionEvidence,
+} from '@/agent/acp/AcpBackend';
 import type { AcpTurnOutcome } from '@/agent/acp/backend/turn/_types';
 import type { ApiSessionClient } from '@/api/session/sessionClient';
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
 
-type GeminiPromptBackend = Omit<AgentBackend, 'waitForResponseComplete'> & {
-  waitForResponseComplete?: (timeoutMs?: number | null) => Promise<AcpTurnOutcome | void>;
-};
+export type GeminiPromptBackend =
+  Pick<AcpBackend, 'sendPromptWithEvidence'>
+  & Readonly<{
+    waitForResponseComplete?: (timeoutMs?: number | null) => Promise<AcpTurnOutcome | void>;
+  }>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -50,6 +56,9 @@ export async function sendGeminiPromptWithRetry(params: {
   retryDelayMs?: number;
   waitForResponseTimeoutMs?: number;
   onProviderPromptAccepted?: () => void;
+  onProviderPromptAttemptStarted?: () => void;
+  onProviderPromptEffectMayHaveOccurred?: () => void;
+  beforeProviderPromptAttempt?: () => void | Promise<void>;
 }): Promise<AcpTurnOutcome | void> {
   const maxRetries = typeof params.maxRetries === 'number' ? params.maxRetries : 3;
   const retryDelayMs = typeof params.retryDelayMs === 'number' ? params.retryDelayMs : 2_000;
@@ -60,16 +69,53 @@ export async function sendGeminiPromptWithRetry(params: {
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     let providerPromptAccepted = false;
+    let providerPromptAttemptStarted = false;
     try {
-      await params.backend.sendPrompt(params.acpSessionId, params.prompt);
+      await params.beforeProviderPromptAttempt?.();
+      let submissionEvidence: AcpPromptSubmissionEvidence | null = null;
+      try {
+        submissionEvidence = await params.backend.sendPromptWithEvidence(
+          params.acpSessionId,
+          params.prompt,
+        );
+        providerPromptAttemptStarted = true;
+        params.onProviderPromptAttemptStarted?.();
+      } catch (error) {
+        if (
+          !(error instanceof AcpPromptSubmissionPhaseError)
+          || error.phase !== 'rejected_before_effect'
+        ) {
+          providerPromptAttemptStarted = true;
+          params.onProviderPromptAttemptStarted?.();
+        }
+        throw error;
+      }
+
+      let responseCompletion: Promise<AcpTurnOutcome | void> | null = null;
+      if (params.backend.waitForResponseComplete) {
+        responseCompletion = params.backend.waitForResponseComplete(waitForResponseTimeoutMs);
+      }
+      if (submissionEvidence?.kind === 'effect_may_have_occurred') {
+        const responseCompletionFailure = responseCompletion
+          ? responseCompletion.then(
+              () => new Promise<never>(() => {}),
+              (error: unknown) => Promise.reject(error),
+            )
+          : new Promise<never>(() => {});
+        await Promise.race([
+          submissionEvidence.finalResponseEvidence,
+          responseCompletionFailure,
+        ]);
+      }
+
       providerPromptAccepted = true;
       params.onProviderPromptAccepted?.();
       params.onDebug('[gemini] Prompt sent successfully');
 
       // Wait for Gemini to finish responding (all chunks received + final idle)
       // This ensures we don't send task_complete until response is truly done.
-      if (params.backend.waitForResponseComplete) {
-        const outcome = await params.backend.waitForResponseComplete(waitForResponseTimeoutMs);
+      if (responseCompletion) {
+        const outcome = await responseCompletion;
         params.onDebug('[gemini] Response complete');
         return isAcpTurnOutcome(outcome) ? outcome : undefined;
       }
@@ -98,6 +144,16 @@ export async function sendGeminiPromptWithRetry(params: {
         const quotaMsg = `Gemini quota exceeded.${resetTimeMsg} Try using a different model (gemini-2.5-flash-lite) or wait for quota reset.`;
         params.messageBuffer.addMessage(quotaMsg, 'status');
         params.session.sendAgentMessage('gemini', { type: 'message', message: quotaMsg });
+        if (providerPromptAttemptStarted) {
+          params.onProviderPromptEffectMayHaveOccurred?.();
+        }
+        throw promptError;
+      }
+
+      // Once session/prompt has been invoked, a rejected/lost response cannot prove that the
+      // provider performed no work. Blindly retrying here can duplicate the exact Queue input.
+      if (providerPromptAttemptStarted) {
+        params.onProviderPromptEffectMayHaveOccurred?.();
         throw promptError;
       }
 

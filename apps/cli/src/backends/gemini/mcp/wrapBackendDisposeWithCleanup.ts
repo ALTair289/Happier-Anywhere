@@ -1,9 +1,9 @@
 import type { AgentBackend } from '@/agent/core';
 
-export function wrapBackendDisposeWithCleanup(
-  backend: AgentBackend,
+export function wrapBackendDisposeWithCleanup<TBackend extends AgentBackend>(
+  backend: TBackend,
   cleanup: () => void | Promise<void>,
-): AgentBackend {
+): TBackend {
   let cleanedUp = false;
 
   return new Proxy(backend, {
@@ -23,5 +23,5 @@ export function wrapBackendDisposeWithCleanup(
       const value = Reflect.get(target, prop, receiver);
       return typeof value === 'function' ? value.bind(target) : value;
     },
-  }) as AgentBackend;
+  }) as TBackend;
 }

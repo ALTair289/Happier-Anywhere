@@ -8,6 +8,7 @@ import type {
 } from '@/agent/runtime/sessionInput/types';
 import type { SessionProviderInputConsumerOptions } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
 import type { MaterializeNextPendingResult } from '@/api/session/sessionClientPort';
+import { resetConnectedServiceRuntimeAuthFailureReportDedupeForTests } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
 import type { Credentials } from '@/persistence';
 
 import type { GeminiMode } from './types';
@@ -15,6 +16,11 @@ import type { GeminiMode } from './types';
 type GeminiInputConsumer = {
   waitForNextInput: (opts: { abortSignal: AbortSignal }) => Promise<MessageBatch<GeminiMode, string> | null>;
   drainPending: (opts?: DrainPendingOptions) => Promise<DrainPendingResult>;
+  runProviderInputDispatch: <Value>(opts: Readonly<{
+    abortSignal: AbortSignal;
+    dispatch: () => Promise<Value>;
+  }>) => Promise<Readonly<{ status: 'dispatched'; value: Value }> | Readonly<{ status: 'cancelled' }>>;
+  closeProviderInputAdmissionAndWaitForDispatches: () => Promise<void>;
 };
 
 type FakeSession = {
@@ -25,14 +31,14 @@ type FakeSession = {
   fetchLatestUserPermissionIntentFromTranscript: ReturnType<typeof vi.fn>;
   keepAlive: ReturnType<typeof vi.fn>;
   waitForMetadataUpdate: ReturnType<typeof vi.fn>;
+  waitForPendingEligibilityUpdate: ReturnType<typeof vi.fn>;
   materializeNextPendingMessageSafely: ReturnType<typeof vi.fn>;
   popPendingMessage: ReturnType<typeof vi.fn>;
   shouldAttemptPendingMaterialization: ReturnType<typeof vi.fn>;
   reconcilePendingQueueState: ReturnType<typeof vi.fn>;
   getLastObservedMessageSeq: ReturnType<typeof vi.fn>;
   beginTurnAssistantTextSnapshot: ReturnType<typeof vi.fn>;
-  deferDeliveredUserMessageWatermarkToProviderAcceptance: ReturnType<typeof vi.fn>;
-  confirmUserMessageDeliveredToProvider: ReturnType<typeof vi.fn>;
+  bindProviderInputOutcomeProducer: ReturnType<typeof vi.fn>;
   blockPendingMessageDelivery: ReturnType<typeof vi.fn>;
   sendAgentMessage: ReturnType<typeof vi.fn>;
   sendSessionEvent: ReturnType<typeof vi.fn>;
@@ -57,6 +63,8 @@ const {
   fakeBackend,
   getFakeSession,
   messageBufferRecords,
+  notifyDaemonConnectedServiceRuntimeAuthFailureMock,
+  providerInputOutcomeObserverMock,
   recordSessionTurnCompletedMock,
   resolveGeminiQueuedPromptWithReplaySeedMock,
   resolveGeminiSystemPromptTextMock,
@@ -99,6 +107,7 @@ const {
     >(),
     createStreamedTranscriptWriterMock: vi.fn(() => ({
       flushAll: vi.fn(async () => undefined),
+      setCommitProvenance: vi.fn(),
     })),
     drainPendingMock: vi.fn<(opts?: DrainPendingOptions) => Promise<DrainPendingResult>>(),
     emitReadyIfIdleMock: vi.fn(),
@@ -115,6 +124,8 @@ const {
       return fakeSession;
     },
     messageBufferRecords,
+    notifyDaemonConnectedServiceRuntimeAuthFailureMock: vi.fn(),
+    providerInputOutcomeObserverMock: vi.fn(),
     recordSessionTurnCompletedMock: vi.fn(async () => undefined),
     resolveGeminiQueuedPromptWithReplaySeedMock: vi.fn(
       async (opts: { text: string; didBootstrap: boolean }) => ({
@@ -124,7 +135,12 @@ const {
     ),
     resolveGeminiSystemPromptTextMock: vi.fn(async () => 'fresh system prompt'),
     sendGeminiPromptWithRetryMock: vi.fn<
-      (opts: { prompt: string; onProviderPromptAccepted?: () => void }) => Promise<AcpTurnOutcome>
+      (opts: {
+        prompt: string;
+        onProviderPromptAccepted?: () => void;
+        onProviderPromptAttemptStarted?: () => void;
+        onProviderPromptEffectMayHaveOccurred?: () => void;
+      }) => Promise<AcpTurnOutcome>
     >(async () => ({
       kind: 'completed',
       stopReason: 'end_turn',
@@ -141,6 +157,11 @@ const {
 
 vi.mock('@/agent/runtime/sessionInput/SessionProviderInputConsumer', () => ({
   createSessionProviderInputConsumer: createSessionProviderInputConsumerMock,
+}));
+
+vi.mock('@/daemon/controlClient', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/daemon/controlClient')>(),
+  notifyDaemonConnectedServiceRuntimeAuthFailure: notifyDaemonConnectedServiceRuntimeAuthFailureMock,
 }));
 
 vi.mock('@/agent/runtime/initializeBackendApiContext', () => ({
@@ -185,8 +206,9 @@ vi.mock('@/daemon/startDaemon', () => ({
 
 vi.mock('@/configuration', () => ({
   configuration: {
-    pendingQueueIdleWakePollIntervalMs: 10,
     startupPermissionSeedTranscriptTake: 5,
+    sessionKeepAliveIdleMs: 10_000,
+    sessionKeepAliveThinkingMs: 2_000,
     // Required transitively by the connected-services runtime-auth producer import in runGemini:
     // resolveExistingSessionAttachContext constructs its concurrency gate at import time. 0 = unlimited.
     daemonReattachCatchUpConcurrency: 0,
@@ -336,7 +358,6 @@ vi.mock('@/backends/gemini/utils/config', () => ({
   getInitialGeminiModel: vi.fn(() => 'gemini-2.5-pro'),
 }));
 
-
 vi.mock('@/backends/gemini/runtime/createGeminiBackendMessageHandler', () => ({
   createGeminiBackendMessageHandler: vi.fn(() => vi.fn()),
 }));
@@ -394,6 +415,7 @@ function createFakeSession(): FakeSession {
     fetchLatestUserPermissionIntentFromTranscript: vi.fn(async () => null),
     keepAlive: vi.fn(),
     waitForMetadataUpdate: vi.fn(async () => false),
+    waitForPendingEligibilityUpdate: vi.fn(async () => false),
     materializeNextPendingMessageSafely: vi.fn(
       async (): Promise<MaterializeNextPendingResult> => ({ type: 'no_pending' }),
     ),
@@ -404,8 +426,7 @@ function createFakeSession(): FakeSession {
     reconcilePendingQueueState: vi.fn(async () => false),
     getLastObservedMessageSeq: vi.fn(() => 10),
     beginTurnAssistantTextSnapshot: vi.fn(() => 'turn-token-1'),
-    deferDeliveredUserMessageWatermarkToProviderAcceptance: vi.fn(),
-    confirmUserMessageDeliveredToProvider: vi.fn(),
+    bindProviderInputOutcomeProducer: vi.fn(() => providerInputOutcomeObserverMock),
     blockPendingMessageDelivery: vi.fn(async () => true),
     sendAgentMessage: vi.fn(),
     sendSessionEvent: vi.fn(),
@@ -423,7 +444,9 @@ describe('runGemini input consumer migration', () => {
   };
 
   beforeEach(() => {
+    vi.unstubAllEnvs();
     vi.clearAllMocks();
+    resetConnectedServiceRuntimeAuthFailureReportDedupeForTests();
     messageBufferRecords.length = 0;
     lastResolveRunnerMcpServersParams = null;
 
@@ -450,10 +473,159 @@ describe('runGemini input consumer migration', () => {
     createSessionProviderInputConsumerMock.mockReturnValue({
       waitForNextInput: waitForNextInputMock,
       drainPending: drainPendingMock,
+      runProviderInputDispatch: vi.fn(async ({ abortSignal, dispatch }) =>
+        abortSignal.aborted
+          ? { status: 'cancelled' as const }
+          : { status: 'dispatched' as const, value: await dispatch() }),
+      closeProviderInputAdmissionAndWaitForDispatches: vi.fn(async () => undefined),
     });
   });
 
+  it('suppresses failed-turn raw fallback when the daemon handled a superseded source tuple', async () => {
+    vi.stubEnv('HAPPIER_CONNECTED_SERVICE_SELECTIONS_JSON', JSON.stringify([{
+      kind: 'group',
+      serviceId: 'gemini',
+      groupId: 'gemini-main',
+      activeProfileId: 'leeroy',
+      fallbackProfileId: 'backup',
+      generation: 2,
+      credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+    }]));
+    notifyDaemonConnectedServiceRuntimeAuthFailureMock.mockResolvedValue({
+      ok: true,
+      result: {
+        status: 'recovery_superseded',
+        reason: 'source_tuple_mismatch',
+        serviceId: 'gemini',
+        groupId: 'gemini-main',
+        profileId: 'leeroy',
+      },
+    });
+    sendGeminiPromptWithRetryMock.mockReset();
+    sendGeminiPromptWithRetryMock.mockResolvedValueOnce({
+      kind: 'failed',
+      error: new Error('RESOURCE_EXHAUSTED: RAW_PROVIDER_ERROR'),
+    });
+    const session = getFakeSession();
+    const { runGemini } = await import('./runGemini');
+
+    await expect(runGemini({ credentials })).resolves.toBeUndefined();
+
+    expect(session.sendSessionEvent).toHaveBeenCalledWith({
+      type: 'message',
+      message: 'Connected-service account already updated; the old turn was interrupted. Retry your request.',
+    });
+    expect(surfacePrimarySessionRuntimeIssueMock).not.toHaveBeenCalled();
+  });
+
+  it('uses a slower heartbeat cadence while idle and the foreground cadence during an active turn', async () => {
+    vi.useFakeTimers();
+    const session = createFakeSession();
+    setFakeSession(session);
+
+    let releaseIdleWait!: (message: MessageBatch<GeminiMode, string>) => void;
+    const idleWait = new Promise<MessageBatch<GeminiMode, string>>((resolve) => {
+      releaseIdleWait = resolve;
+    });
+    const activeMessage: MessageBatch<GeminiMode, string> = {
+      message: 'active prompt',
+      mode: {
+        permissionMode: 'safe-yolo',
+        model: 'gemini-2.5-pro',
+        originalUserMessage: 'active prompt',
+        appendSystemPrompt: null,
+        localId: 'local-active-heartbeat',
+        replaySeedAllowed: true,
+      },
+      isolate: false,
+      hash: 'mode-hash-active',
+    };
+    waitForNextInputMock.mockReset();
+    waitForNextInputMock
+      .mockImplementationOnce(async () => await idleWait)
+      .mockResolvedValueOnce(null);
+
+    let finishActiveTurn!: (outcome: AcpTurnOutcome) => void;
+    const activeTurn = new Promise<AcpTurnOutcome>((resolve) => {
+      finishActiveTurn = resolve;
+    });
+    sendGeminiPromptWithRetryMock.mockReset();
+    sendGeminiPromptWithRetryMock.mockImplementationOnce(async () => await activeTurn);
+
+    const { runGemini } = await import('./runGemini');
+    const runPromise = runGemini({ credentials });
+
+    try {
+      for (let attempt = 0; attempt < 20 && session.keepAlive.mock.calls.length === 0; attempt += 1) {
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(session.keepAlive.mock.calls).toEqual([[false, 'remote']]);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      const idleHeartbeatCalls = session.keepAlive.mock.calls.map((call) => [...call]);
+      expect(idleHeartbeatCalls).toEqual([[false, 'remote']]);
+
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(session.keepAlive).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(session.keepAlive).toHaveBeenCalledTimes(2);
+      expect(session.keepAlive).toHaveBeenLastCalledWith(false, 'remote');
+
+      releaseIdleWait(activeMessage);
+      for (
+        let attempt = 0;
+        attempt < 40 && !session.keepAlive.mock.calls.some(([thinking]) => thinking === true);
+        attempt += 1
+      ) {
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      const activeStartCallCount = session.keepAlive.mock.calls.length;
+      expect(session.keepAlive).toHaveBeenLastCalledWith(true, 'remote');
+
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(session.keepAlive).toHaveBeenCalledTimes(activeStartCallCount);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(session.keepAlive).toHaveBeenCalledTimes(activeStartCallCount + 1);
+      expect(session.keepAlive).toHaveBeenLastCalledWith(true, 'remote');
+    } finally {
+      releaseIdleWait(activeMessage);
+      finishActiveTurn({ kind: 'completed', stopReason: 'end_turn' });
+      try {
+        await runPromise;
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
+  it('uses the exact materialized Gemini provider email without resolving an ambient default profile', async () => {
+    vi.stubEnv('HAPPIER_GEMINI_CONNECTED_SERVICE_PROVIDER_EMAIL', 'selected-account@example.com');
+    const { resolveConnectedServiceCredentials } = await import('@/cloud/connectedServices/resolveConnectedServiceCredentials');
+    const { runGemini } = await import('./runGemini');
+
+    await expect(runGemini({ credentials })).resolves.toBeUndefined();
+
+    expect(createGeminiBackendInstanceMock).toHaveBeenCalledWith(expect.objectContaining({
+      currentUserEmail: 'selected-account@example.com',
+    }));
+    expect(resolveConnectedServiceCredentials).not.toHaveBeenCalled();
+  });
+
   it('routes Gemini waits and post-turn drains through the session provider input consumer', async () => {
+    getFakeSession().getMetadataSnapshot.mockReturnValue({
+      path: '/tmp/gemini-test',
+      connectedServices: {
+        v: 1,
+        bindingsByServiceId: {
+          gemini: {
+            source: 'connected',
+            selection: 'group',
+            profileId: 'primary',
+            groupId: 'team',
+          },
+        },
+      },
+    });
     const { runGemini } = await import('./runGemini');
 
     await expect(runGemini({ credentials })).resolves.toBeUndefined();
@@ -467,7 +639,25 @@ describe('runGemini input consumer migration', () => {
     const [consumerOptions] = firstConsumerCall;
     expect(consumerOptions.onMetadataUpdate).toEqual(expect.any(Function));
     expect(consumerOptions.session.materializeNextPendingMessageSafely).toEqual(expect.any(Function));
-    expect(consumerOptions.session.waitForMetadataUpdate).toEqual(expect.any(Function));
+    expect(consumerOptions.session.waitForPendingEligibilityUpdate).toEqual(expect.any(Function));
+    expect(consumerOptions).not.toHaveProperty('initialProviderInputAdmissions');
+
+    const actualConsumerModule = await vi.importActual<
+      typeof import('@/agent/runtime/sessionInput/SessionProviderInputConsumer')
+    >('@/agent/runtime/sessionInput/SessionProviderInputConsumer');
+    const actualConsumer = actualConsumerModule.createSessionProviderInputConsumer(consumerOptions);
+    consumerOptions.messageQueue.push('normally admitted Gemini prompt', {
+      permissionMode: 'safe-yolo',
+      model: 'gemini-2.5-pro',
+      originalUserMessage: 'normally admitted Gemini prompt',
+      appendSystemPrompt: null,
+      localId: 'local-startup-blocked',
+      replaySeedAllowed: true,
+    });
+    const admissionAbort = new AbortController();
+    await expect(actualConsumer.waitForNextInput({ abortSignal: admissionAbort.signal })).resolves.toEqual(expect.objectContaining({
+      message: 'normally admitted Gemini prompt',
+    }));
 
     expect(waitForNextInputMock).toHaveBeenCalledTimes(2);
     expect(drainPendingMock).toHaveBeenCalledTimes(1);
@@ -519,7 +709,7 @@ describe('runGemini input consumer migration', () => {
     expect(lastResolveRunnerMcpServersParams?.session?.getPermissionMode?.()).toBe('yolo');
   });
 
-  it('opts Gemini direct into request-response provider-acceptance pending delivery custody', async () => {
+  it('binds Gemini ACP as the exact provider-outcome producer', async () => {
     const session = createFakeSession();
     setFakeSession(session);
     waitForNextInputMock.mockReset();
@@ -529,10 +719,12 @@ describe('runGemini input consumer migration', () => {
 
     await runGemini({ credentials });
 
-    expect(session.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledTimes(1);
-    expect(session.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledWith({
-      pendingMaterialization: 'commitAtMaterialize',
-    });
+    expect(session.bindProviderInputOutcomeProducer).toHaveBeenCalledTimes(1);
+    expect(session.bindProviderInputOutcomeProducer).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: 'gemini',
+      mode: 'acp',
+      matchesCurrentSession: expect.any(Function),
+    }));
   });
 
   it('confirms consumed pending rows when Gemini reports provider prompt acceptance', async () => {
@@ -554,6 +746,7 @@ describe('runGemini input consumer migration', () => {
         hash: 'mode-hash-1',
         maxUserMessageSeq: 42,
         userMessageLocalIds: ['local-accepted'],
+        providerAcceptancePending: true,
       })
       .mockResolvedValueOnce(null);
 
@@ -572,10 +765,21 @@ describe('runGemini input consumer migration', () => {
     const runPromise = runGemini({ credentials });
     try {
       await vi.waitFor(() => {
-        expect(session.confirmUserMessageDeliveredToProvider).toHaveBeenCalledTimes(1);
+        expect(providerInputOutcomeObserverMock).toHaveBeenCalledTimes(1);
       });
-      expect(session.confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(42, {
-        localIds: ['local-accepted'],
+      expect(session.bindProviderInputOutcomeProducer).toHaveBeenCalledWith(expect.objectContaining({
+        providerId: 'gemini',
+        mode: 'acp',
+        matchesCurrentSession: expect.any(Function),
+      }));
+      expect(providerInputOutcomeObserverMock).toHaveBeenCalledWith({
+        kind: 'accepted',
+        localId: 'local-accepted',
+        appliedModelId: 'gemini-2.5-pro',
+      });
+      expect(createStreamedTranscriptWriterMock.mock.results[0]?.value.setCommitProvenance).toHaveBeenCalledWith({
+        kind: 'non_dependent',
+        source: 'external',
       });
       expect(session.blockPendingMessageDelivery).not.toHaveBeenCalled();
     } finally {
@@ -584,7 +788,7 @@ describe('runGemini input consumer migration', () => {
     }
   });
 
-  it('blocks consumed pending rows when Gemini fails before provider prompt acceptance', async () => {
+  it('reports possible provider effect when the Gemini prompt response is lost', async () => {
     const session = createFakeSession();
     setFakeSession(session);
     waitForNextInputMock.mockReset();
@@ -603,20 +807,61 @@ describe('runGemini input consumer migration', () => {
         hash: 'mode-hash-1',
         maxUserMessageSeq: null,
         userMessageLocalIds: ['local-rejected'],
+        providerAcceptancePending: true,
       })
       .mockResolvedValueOnce(null);
 
     sendGeminiPromptWithRetryMock.mockReset();
-    sendGeminiPromptWithRetryMock.mockRejectedValueOnce(new Error('Gemini rejected the prompt'));
+    sendGeminiPromptWithRetryMock.mockImplementationOnce(async (params) => {
+      params.onProviderPromptAttemptStarted?.();
+      params.onProviderPromptEffectMayHaveOccurred?.();
+      throw new Error('Gemini prompt response was lost');
+    });
 
     const { runGemini } = await import('./runGemini');
 
     await expect(runGemini({ credentials })).resolves.toBeUndefined();
 
-    expect(session.confirmUserMessageDeliveredToProvider).not.toHaveBeenCalled();
-    expect(session.blockPendingMessageDelivery).toHaveBeenCalledWith({
-      localIds: ['local-rejected'],
-      reason: 'provider_rejected_before_acceptance',
+    expect(providerInputOutcomeObserverMock).toHaveBeenCalledWith({
+      kind: 'effect_may_have_occurred',
+      localId: 'local-rejected',
+    });
+    expect(session.blockPendingMessageDelivery).not.toHaveBeenCalled();
+  });
+
+  it('reports an exact pre-effect rejection when Gemini fails before invoking session/prompt', async () => {
+    const session = createFakeSession();
+    setFakeSession(session);
+    waitForNextInputMock.mockReset();
+    waitForNextInputMock
+      .mockResolvedValueOnce({
+        message: 'queued prompt text',
+        mode: {
+          permissionMode: 'safe-yolo',
+          model: 'gemini-2.5-pro',
+          originalUserMessage: 'visible user text',
+          appendSystemPrompt: null,
+          localId: 'local-runtime-unavailable',
+          replaySeedAllowed: true,
+        },
+        isolate: false,
+        hash: 'mode-hash-1',
+        maxUserMessageSeq: 51,
+        userMessageLocalIds: ['local-runtime-unavailable'],
+        providerAcceptancePending: true,
+      })
+      .mockResolvedValueOnce(null);
+    ensureGeminiAcpSessionMock.mockRejectedValueOnce(new Error('Gemini runtime unavailable'));
+
+    const { runGemini } = await import('./runGemini');
+
+    await expect(runGemini({ credentials })).resolves.toBeUndefined();
+
+    expect(sendGeminiPromptWithRetryMock).not.toHaveBeenCalled();
+    expect(providerInputOutcomeObserverMock).toHaveBeenCalledWith({
+      kind: 'rejected_before_effect',
+      localId: 'local-runtime-unavailable',
+      reason: 'runtime_disposed_before_delivery',
     });
   });
 
@@ -680,5 +925,189 @@ describe('runGemini input consumer migration', () => {
       expect.objectContaining({ cause: 'cancelled', provider: 'gemini' }),
     );
     expect(fakeBackend.cancel).not.toHaveBeenCalled();
+  });
+
+  it('reports an unsupported active steer as rejected before provider effect', async () => {
+    const session = createFakeSession();
+    setFakeSession(session);
+    waitForNextInputMock.mockReset();
+    waitForNextInputMock
+      .mockResolvedValueOnce({
+        message: 'initial active prompt',
+        mode: {
+          permissionMode: 'safe-yolo',
+          model: 'gemini-2.5-pro',
+          originalUserMessage: 'initial active prompt',
+          appendSystemPrompt: null,
+          localId: 'local-initial-active',
+          replaySeedAllowed: true,
+        },
+        isolate: false,
+        hash: 'mode-hash-1',
+      })
+      .mockResolvedValueOnce(null);
+
+    sendGeminiPromptWithRetryMock.mockReset();
+    sendGeminiPromptWithRetryMock.mockImplementationOnce(async () => {
+      const onUserMessage = session.onUserMessage.mock.calls[0]?.[0] as
+        | ((message: unknown, info: unknown) => void)
+        | undefined;
+      if (!onUserMessage) {
+        throw new Error('Expected Gemini onUserMessage handler to be registered');
+      }
+      onUserMessage({
+        content: { text: 'exact active steer' },
+        meta: {},
+        localId: 'local-gemini-steer',
+      }, {
+        seq: 52,
+        pendingProviderAction: 'steer',
+        providerAcceptancePending: true,
+      });
+      return { kind: 'completed', stopReason: 'end_turn' };
+    });
+
+    const { runGemini } = await import('./runGemini');
+    await expect(runGemini({ credentials })).resolves.toBeUndefined();
+
+    expect(providerInputOutcomeObserverMock).toHaveBeenCalledWith({
+      kind: 'rejected_before_effect',
+      localId: 'local-gemini-steer',
+      reason: 'steering_unavailable',
+    });
+    expect(session.blockPendingMessageDelivery).not.toHaveBeenCalled();
+  });
+
+  it('reports an exact interrupt-and-send input as rejected when cancellation fails before enqueue', async () => {
+    const session = createFakeSession();
+    setFakeSession(session);
+    waitForNextInputMock.mockReset();
+    waitForNextInputMock
+      .mockResolvedValueOnce({
+        message: 'initial active prompt',
+        mode: {
+          permissionMode: 'safe-yolo',
+          model: 'gemini-2.5-pro',
+          originalUserMessage: 'initial active prompt',
+          appendSystemPrompt: null,
+          localId: 'local-initial-active',
+          replaySeedAllowed: true,
+        },
+        isolate: false,
+        hash: 'mode-hash-1',
+      })
+      .mockResolvedValueOnce(null);
+    fakeBackend.cancel.mockRejectedValueOnce(new Error('cancel failed'));
+
+    sendGeminiPromptWithRetryMock.mockReset();
+    sendGeminiPromptWithRetryMock.mockImplementationOnce(async () => {
+      const onUserMessage = session.onUserMessage.mock.calls[0]?.[0] as
+        | ((message: unknown, info: unknown) => void)
+        | undefined;
+      if (!onUserMessage) {
+        throw new Error('Expected Gemini onUserMessage handler to be registered');
+      }
+      onUserMessage({
+        content: { text: 'exact failed interrupt message' },
+        meta: {},
+        localId: 'local-gemini-failed-interrupt',
+      }, {
+        seq: 54,
+        pendingProviderAction: 'interrupt_and_send',
+        providerAcceptancePending: true,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return { kind: 'aborted', stopReason: 'cancelled' };
+    });
+
+    const { runGemini } = await import('./runGemini');
+    await expect(runGemini({ credentials })).resolves.toBeUndefined();
+
+    expect(providerInputOutcomeObserverMock).toHaveBeenCalledWith({
+      kind: 'rejected_before_effect',
+      localId: 'local-gemini-failed-interrupt',
+      reason: 'provider_rejected_before_acceptance',
+    });
+    expect(session.blockPendingMessageDelivery).not.toHaveBeenCalled();
+  });
+
+  it('cancels the active Gemini turn before admitting an exact interrupt-and-send message', async () => {
+    const session = createFakeSession();
+    setFakeSession(session);
+    waitForNextInputMock.mockReset();
+    waitForNextInputMock
+      .mockResolvedValueOnce({
+        message: 'initial active prompt',
+        mode: {
+          permissionMode: 'safe-yolo',
+          model: 'gemini-2.5-pro',
+          originalUserMessage: 'initial active prompt',
+          appendSystemPrompt: null,
+          localId: 'local-initial-active',
+          replaySeedAllowed: true,
+        },
+        isolate: false,
+        hash: 'mode-hash-1',
+      })
+      .mockImplementationOnce(async () => {
+        const consumerOptions = createSessionProviderInputConsumerMock.mock.calls[0]?.[0];
+        const batch = await consumerOptions?.messageQueue.waitForMessagesAndGetAsString();
+        return batch ?? null;
+      })
+      .mockResolvedValueOnce(null);
+
+    let releaseCancel!: () => void;
+    const cancelSettled = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    fakeBackend.cancel.mockImplementationOnce(async () => {
+      await cancelSettled;
+    });
+
+    let queuedBeforeCancelSettled = false;
+    let handoffSettledBeforeCancel = false;
+    sendGeminiPromptWithRetryMock.mockReset();
+    sendGeminiPromptWithRetryMock
+      .mockImplementationOnce(async () => {
+        const onUserMessage = session.onUserMessage.mock.calls[0]?.[0] as
+          | ((message: unknown, info: unknown) => void)
+          | undefined;
+        if (!onUserMessage) {
+          throw new Error('Expected Gemini onUserMessage handler to be registered');
+        }
+        const handoff = onUserMessage({
+          content: { text: 'exact Gemini interrupt message' },
+          meta: {},
+          localId: 'local-gemini-exact-interrupt',
+        }, {
+          seq: 51,
+          pendingProviderAction: 'interrupt_and_send',
+          providerAcceptancePending: true,
+        });
+        let handoffSettled = false;
+        const observedHandoff = Promise.resolve(handoff).then(() => {
+          handoffSettled = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const consumerOptions = createSessionProviderInputConsumerMock.mock.calls[0]?.[0];
+        queuedBeforeCancelSettled = (consumerOptions?.messageQueue.size() ?? 0) > 0;
+        handoffSettledBeforeCancel = handoffSettled;
+        releaseCancel();
+        await observedHandoff;
+        return { kind: 'aborted', stopReason: 'cancelled' };
+      })
+      .mockResolvedValueOnce({ kind: 'completed', stopReason: 'end_turn' });
+
+    const { runGemini } = await import('./runGemini');
+    await expect(runGemini({ credentials })).resolves.toBeUndefined();
+
+    expect(fakeBackend.cancel).toHaveBeenCalledTimes(1);
+    expect(queuedBeforeCancelSettled).toBe(false);
+    expect(handoffSettledBeforeCancel).toBe(false);
+    expect(sendGeminiPromptWithRetryMock).toHaveBeenCalledTimes(2);
+    expect(sendGeminiPromptWithRetryMock.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ prompt: expect.stringContaining('exact Gemini interrupt message') }),
+    );
+    expect(session.blockPendingMessageDelivery).not.toHaveBeenCalled();
   });
 });

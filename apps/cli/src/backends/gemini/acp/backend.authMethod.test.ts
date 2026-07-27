@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { withTempDir, withTempDirSync } from '@/testkit/fs/tempDir';
 import { writeExecutableShimSync } from '@/testkit/fs/executableShim';
+import { resolveAcpSdkEntryFromCwd } from '@/capabilities/probes/agentModelsProbe.testkit';
 import type { AcpAuthentication } from '@/agent/acp/AcpAuthentication';
 
 import { createGeminiBackend } from './backend';
@@ -29,6 +30,7 @@ describe('createGeminiBackend auth method', () => {
     'GEMINI_CLI_HOME',
     'GOOGLE_GENAI_USE_VERTEXAI',
     'GOOGLE_CLOUD_PROJECT',
+    'GOOGLE_CLOUD_PROJECT_ID',
     'GOOGLE_CLOUD_LOCATION',
     'HAPPIER_GEMINI_ACP_AUTH_METHOD',
     'HAPPIER_GEMINI_ACP_AUTH_META',
@@ -64,7 +66,7 @@ describe('createGeminiBackend auth method', () => {
     fn: (geminiPath: string) => Promise<T> | T,
   ): Promise<T> {
     return await withTempDir('happier-gemini-bin-', async (dir) => {
-  const acpSdkEntry = resolve(__dirname, '../../../../node_modules/@agentclientprotocol/sdk/dist/acp.js');
+  const acpSdkEntry = resolveAcpSdkEntryFromCwd(process.cwd());
   const geminiPath = writeExecutableShimSync({
         dir,
         fileName: 'gemini',
@@ -94,12 +96,8 @@ async function main() {
   const newSessionLogPath = ${JSON.stringify(params.newSessionLogPath)};
   const authenticateLogPath = ${JSON.stringify(params.authenticateLogPath ?? null)};
 
-  class FakeGeminiAgent {
-    constructor(connection) {
-      this.connection = connection;
-    }
-
-    async initialize() {
+  const app = acp.agent({ name: 'happier-gemini-auth-test-agent' })
+    .onRequest('initialize', async () => {
       return {
         protocolVersion: acp.PROTOCOL_VERSION,
         authMethods: [
@@ -110,16 +108,14 @@ async function main() {
         ],
         agentCapabilities: { loadSession: false },
       };
-    }
-
-    async authenticate(params) {
+    })
+    .onRequest('authenticate', async ({ params }) => {
       if (authenticateLogPath) {
         appendFileSync(authenticateLogPath, JSON.stringify(params) + '\\n', 'utf8');
       }
       return {};
-    }
-
-    async newSession(params) {
+    })
+    .onRequest('session/new', async ({ params }) => {
       const mcpServers = Array.isArray(params && params.mcpServers)
         ? params.mcpServers.map(normalizeServer)
         : [];
@@ -150,10 +146,9 @@ async function main() {
         },
       }) + '\\n', 'utf8');
       return { sessionId: randomUUID() };
-    }
-
-    async prompt(params) {
-      await this.connection.sessionUpdate({
+    })
+    .onRequest('session/prompt', async ({ params, client }) => {
+      await client.notify('session/update', {
         sessionId: params.sessionId,
         update: {
           sessionUpdate: 'agent_message_chunk',
@@ -161,13 +156,12 @@ async function main() {
         },
       });
       return { stopReason: 'end_turn' };
-    }
-
-    async cancel() {}
-  }
+    })
+    .onNotification('session/cancel', async () => {});
 
   const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
-  new acp.AgentSideConnection((conn) => new FakeGeminiAgent(conn), stream);
+  const connection = app.connect(stream);
+  await connection.closed;
 }
 
 main().catch((error) => {
@@ -412,6 +406,43 @@ main().catch((error) => {
         });
         expect(backend.options.env?.GEMINI_API_KEY).toBeUndefined();
         expect(backend.options.env?.GOOGLE_API_KEY).toBeUndefined();
+      }),
+    );
+  });
+
+  it('scrubs ambient Google projects from an exact connected-service OAuth selection', async () => {
+    await withTempHome((homeDir) =>
+      withFakeGeminiCli(() => {
+        mkdirSync(join(homeDir, '.gemini'), { recursive: true });
+        writeFileSync(join(homeDir, '.gemini', 'settings.json'), JSON.stringify({
+          googleCloudProject: 'persisted-project-a',
+        }));
+        envScope.patch({
+          GOOGLE_CLOUD_PROJECT: 'ambient-project-a',
+          GOOGLE_CLOUD_PROJECT_ID: 'ambient-project-a',
+        });
+        const result = createGeminiBackend({
+          cwd: '/tmp',
+          env: {
+            HOME: homeDir,
+            HAPPIER_CONNECTED_SERVICE_SELECTIONS_JSON: JSON.stringify([{
+              kind: 'profile',
+              serviceId: 'gemini',
+              profileId: 'selected-b',
+              credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+            }]),
+          },
+          model: null,
+        });
+
+        const backend = result.backend as unknown as AcpBackendLike;
+        expect(backend.options.authentication).toEqual({ kind: 'static', methodId: 'oauth-personal' });
+        expect(backend.options.env?.GOOGLE_CLOUD_PROJECT).toBeUndefined();
+        expect(backend.options.env?.GOOGLE_CLOUD_PROJECT_ID).toBeUndefined();
+        expect(backend.options.unsetEnv).toEqual(expect.arrayContaining([
+          'GOOGLE_CLOUD_PROJECT',
+          'GOOGLE_CLOUD_PROJECT_ID',
+        ]));
       }),
     );
   });

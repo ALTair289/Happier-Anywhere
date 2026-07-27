@@ -1,5 +1,6 @@
 import {
   ConnectedServiceQuotaSnapshotV1Schema,
+  ConnectedServiceCredentialRevisionV1Schema,
   type ConnectedServiceCredentialRecordV1,
   type ConnectedServiceQuotaMeterV1,
   type ConnectedServiceQuotaSnapshotV1,
@@ -47,6 +48,11 @@ function readString(value: unknown): string | null {
 function readFiniteNumber(value: unknown): number | null {
   const numeric = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function readCredentialRevision(value: unknown) {
+  const parsed = ConnectedServiceCredentialRevisionV1Schema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 function readCredentialRecord(input: ConnectedServiceRuntimeAuthTargetInput): ConnectedServiceCredentialRecordV1 | null {
@@ -195,6 +201,11 @@ function classifyGeminiRuntimeQuotaFailure(
     serviceId: readString(selection?.serviceId) ?? 'gemini',
     profileId: readString(selection?.activeProfileId ?? selection?.profileId),
     groupId: readString(selection?.groupId),
+    groupGeneration: readFiniteNumber(selection?.generation),
+    credentialRevision: readCredentialRevision(selection?.credentialRevision),
+    sourceProviderAccountId: readString(selection?.providerAccountId),
+    sourceAccountLabel: readString(selection?.providerEmail),
+    failingAccessTokenFingerprint: readString(selection?.credentialFingerprint),
     resetsAtMs: timing.resetAtMs,
     retryAfterMs: timing.retryAfterMs,
     quotaScope: 'account' as const,
@@ -231,15 +242,17 @@ export function createGeminiConnectedServiceRuntimeAuthAdapter(
       return { applied: false, reason: 'hot_apply_unsupported' };
     },
     async recoverAfterRuntimeAuthSwitch() {
-      // Nothing to hot-recover: restart/rematerialize IS the recovery for Gemini (no-op success).
-      return { recovered: true, recovery: 'restart_rematerialize' };
+      return {
+        recovered: false,
+        recovery: 'restart_rematerialize',
+        reason: 'gemini_provider_outcome_pending',
+      };
     },
     async verifyActiveAccount() {
-      // No live provider probe exists: adoption is structurally implied by spawning into the
-      // rematerialized home, so the claim is honest-but-weak (never a strong 'verified').
       return {
-        status: 'weakly_verified',
-        reason: 'provider_restart_rematerialization_authoritative',
+        status: 'unavailable',
+        retryable: true,
+        reason: 'gemini_provider_outcome_pending',
       };
     },
     async probeQuota(input) {
