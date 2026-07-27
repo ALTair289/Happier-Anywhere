@@ -18,6 +18,7 @@ import {
 } from '@/sync/domains/sessionControl/configOptionsControl';
 import { shadowLevelStyle } from '@/shadowElevation';
 import { t } from '@/text';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 import { Typography } from '@/constants/Typography';
 
 type WebHoverablePressableState = Readonly<{
@@ -29,6 +30,8 @@ export type OptionPickerOption = Readonly<{
     value: string;
     label: string;
     icon?: React.ReactNode;
+    trailingStatusIcon?: React.ReactNode;
+    accessibilityLabel?: string;
     description?: string;
 }>;
 
@@ -100,7 +103,7 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
     const optionTestIDPrefix = props.optionTestIDPrefix ?? 'model-picker-overlay-option';
     const refreshTestID = props.refreshTestID ?? 'model-picker-overlay-refresh';
     const selectedIndicatorColor = theme.dark ? theme.colors.text.primary : theme.colors.button.primary.background;
-    const selectedValue = props.selectedValue.trim();
+    const selectedValue = readNonBlankSessionControlIdentifier(props.selectedValue) ?? '';
     const selectedCustomValue = props.canEnterCustomValue && selectedValue.length > 0 && !optionValues.has(selectedValue)
         ? selectedValue
         : '';
@@ -109,7 +112,7 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
     const customEditorOpenReasonRef = React.useRef<'selected-custom' | 'manual' | null>(
         selectedCustomValue.length > 0 ? 'selected-custom' : null,
     );
-    const lastCommittedCustomValueRef = React.useRef<string>(selectedCustomValue.trim());
+    const lastCommittedCustomValueRef = React.useRef<string>(selectedCustomValue);
     const previousSelectedValueRef = React.useRef(selectedValue);
     const probeHintText = React.useMemo(() => {
         if (!probe || probe.phase === 'idle') return null;
@@ -131,7 +134,7 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
             setCustomValue(selectedCustomValue);
             setCustomEditorVisible(true);
             customEditorOpenReasonRef.current = 'selected-custom';
-            lastCommittedCustomValueRef.current = selectedCustomValue.trim();
+            lastCommittedCustomValueRef.current = selectedCustomValue;
             return;
         }
         if (optionValues.has(selectedValue)) {
@@ -257,7 +260,7 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
     }, [props]);
 
     const commitCustomValue = React.useCallback((raw: string) => {
-        const normalized = raw.trim();
+        const normalized = readNonBlankSessionControlIdentifier(raw);
         if (!normalized) return;
         if (lastCommittedCustomValueRef.current === normalized) return;
         lastCommittedCustomValueRef.current = normalized;
@@ -287,6 +290,9 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
                             {typeof props.summary === 'string'
                                 ? <Text style={styles.noteText}>{props.summary}</Text>
                                 : props.summary}
+                            {notes.map((note, idx) => (
+                                <Text key={idx} style={styles.noteText}>{note}</Text>
+                            ))}
                         </View>
                     ) : (props.effectiveLabel || notes.length > 0) ? (
                         <View testID="model-picker-overlay-summary" style={styles.effectiveBlock}>
@@ -384,82 +390,111 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
                                                 && Boolean(props.favoriteOptions)
                                                 && (props.favoriteOptions?.isFavoritable?.(option) ?? true);
                                             return (
-                                                <Pressable
+                                                <View
                                                     key={option.value}
-                                                    testID={`${optionTestIDPrefix}:${option.value}`}
-                                                    onPress={() => handleSelectOption(option.value)}
-                                                    style={(state) => {
-                                                        const { pressed } = state;
-                                                        // RN Web exposes `hovered` in the Pressable state callback, but `react-native` types do not model it.
-                                                        const hovered = (state as WebHoverablePressableState).hovered === true;
-                                                        return [
-                                                            styles.optionCard,
-                                                            isSelected ? transientStyles.optionCardSelected : null,
-                                                            !isSelected && hovered ? transientStyles.optionCardHovered : null,
-                                                            pressed ? transientStyles.optionCardPressed : null,
-                                                        ];
-                                                    }}
+                                                    testID={`${optionTestIDPrefix}-container:${option.value}`}
+                                                    style={[
+                                                        styles.optionCardContainer,
+                                                        isSelected ? transientStyles.optionCardSelected : null,
+                                                    ]}
                                                 >
-                                                    <View
-                                                        testID={isSelected ? `model-picker-overlay-option-selected-indicator:${option.value}` : undefined}
-                                                        pointerEvents="box-none"
-                                                        style={styles.optionCardIndicator}
+                                                    <Pressable
+                                                        testID={`${optionTestIDPrefix}:${option.value}`}
+                                                        onPress={() => handleSelectOption(option.value)}
+                                                        accessibilityRole="button"
+                                                        accessibilityLabel={option.accessibilityLabel}
+                                                        accessibilityState={{ selected: isSelected }}
+                                                        style={(state) => {
+                                                            const { pressed } = state;
+                                                            // RN Web exposes `hovered` in the Pressable state callback, but `react-native` types do not model it.
+                                                            const hovered = (state as WebHoverablePressableState).hovered === true;
+                                                            return [
+                                                                styles.optionCard,
+                                                                isSelected ? transientStyles.optionCardSelected : null,
+                                                                !isSelected && hovered ? transientStyles.optionCardHovered : null,
+                                                                pressed ? transientStyles.optionCardPressed : null,
+                                                            ];
+                                                        }}
                                                     >
-                                                        {isSelected ? (
-                                                            <Ionicons
-                                                                name="checkmark-outline"
-                                                                size={14}
-                                                                color={theme.colors.text.primary}
-                                                                style={styles.optionCardIndicatorIcon}
-                                                            />
-                                                        ) : null}
-                                                        {canToggleFavorite ? (
-                                                            <Pressable
-                                                                testID={`${optionTestIDPrefix}-favorite:${option.value}`}
-                                                                accessibilityRole="button"
-                                                                accessibilityLabel={
-                                                                    props.favoriteOptions?.getAccessibilityLabel?.(option, isFavorite)
-                                                                    ?? (isFavorite
-                                                                        ? t('profiles.actions.removeFromFavorites')
-                                                                        : t('profiles.actions.addToFavorites'))
-                                                                }
-                                                                hitSlop={8}
-                                                                onPress={(event) => {
-                                                                    event?.stopPropagation?.();
-                                                                    props.favoriteOptions?.onToggle(option);
-                                                                }}
-                                                                style={styles.optionFavoriteButton}
-                                                            >
-                                                                <Ionicons
-                                                                    name={isFavorite ? 'star' : 'star-outline'}
-                                                                    size={15}
-                                                                    color={isFavorite ? selectedIndicatorColor : theme.colors.text.secondary}
-                                                                />
-                                                            </Pressable>
-                                                        ) : null}
-                                                    </View>
-                                                    <View style={styles.optionCardContentRow}>
-                                                        {option.icon ? (
-                                                            <View
-                                                                testID={`${optionTestIDPrefix}-icon:${option.value}`}
-                                                                style={styles.optionCardIconSlot}
-                                                            >
-                                                                {normalizeNodeForView(option.icon)}
-                                                            </View>
-                                                        ) : null}
-                                                        <View style={styles.optionCardTextBlock}>
-                                                            <Text style={[styles.optionCardTitle, isSelected ? styles.optionCardTitleSelected : null]}>
-                                                                {option.label}
-                                                            </Text>
-                                                            {option.description ? (
-                                                                <Text style={styles.optionCardDescription}>
-                                                                    {option.description}
-                                                                </Text>
+                                                        <View
+                                                            testID={isSelected ? `model-picker-overlay-option-selected-indicator:${option.value}` : undefined}
+                                                            pointerEvents="box-none"
+                                                            style={styles.optionCardIndicator}
+                                                        >
+                                                            {isSelected ? (
+                                                                <View style={styles.optionCardSelectionMark}>
+                                                                    <Ionicons
+                                                                        name="checkmark-outline"
+                                                                        size={14}
+                                                                        color={theme.colors.text.primary}
+                                                                        style={styles.optionCardIndicatorIcon}
+                                                                    />
+                                                                </View>
+                                                            ) : null}
+                                                            {option.trailingStatusIcon ? (
+                                                                <View
+                                                                    testID={`${optionTestIDPrefix}-status-icon:${option.value}`}
+                                                                    pointerEvents="none"
+                                                                    style={styles.optionCardStatusIcon}
+                                                                >
+                                                                    {normalizeNodeForView(option.trailingStatusIcon)}
+                                                                </View>
+                                                            ) : null}
+                                                            {canToggleFavorite ? (
+                                                                <Pressable
+                                                                    testID={`${optionTestIDPrefix}-favorite:${option.value}`}
+                                                                    accessibilityRole="button"
+                                                                    accessibilityLabel={
+                                                                        props.favoriteOptions?.getAccessibilityLabel?.(option, isFavorite)
+                                                                        ?? (isFavorite
+                                                                            ? t('profiles.actions.removeFromFavorites')
+                                                                            : t('profiles.actions.addToFavorites'))
+                                                                    }
+                                                                    hitSlop={8}
+                                                                    onPress={(event) => {
+                                                                        event?.stopPropagation?.();
+                                                                        props.favoriteOptions?.onToggle(option);
+                                                                    }}
+                                                                    style={styles.optionFavoriteButton}
+                                                                >
+                                                                    <Ionicons
+                                                                        name={isFavorite ? 'star' : 'star-outline'}
+                                                                        size={15}
+                                                                        color={isFavorite ? selectedIndicatorColor : theme.colors.text.secondary}
+                                                                    />
+                                                                </Pressable>
                                                             ) : null}
                                                         </View>
-                                                    </View>
-                                                    {isSelected ? renderSelectedOptionControls() : null}
-                                                </Pressable>
+                                                        <View style={styles.optionCardContentRow}>
+                                                            {option.icon ? (
+                                                                <View
+                                                                    testID={`${optionTestIDPrefix}-icon:${option.value}`}
+                                                                    style={styles.optionCardIconSlot}
+                                                                >
+                                                                    {normalizeNodeForView(option.icon)}
+                                                                </View>
+                                                            ) : null}
+                                                            <View style={styles.optionCardTextBlock}>
+                                                                <Text style={[styles.optionCardTitle, isSelected ? styles.optionCardTitleSelected : null]}>
+                                                                    {option.label}
+                                                                </Text>
+                                                                {option.description ? (
+                                                                    <Text style={styles.optionCardDescription}>
+                                                                        {option.description}
+                                                                    </Text>
+                                                                ) : null}
+                                                            </View>
+                                                        </View>
+                                                    </Pressable>
+                                                    {isSelected ? (
+                                                        <View
+                                                            testID={`model-picker-overlay-option-controls:${option.value}`}
+                                                            style={styles.optionCardControls}
+                                                        >
+                                                            {renderSelectedOptionControls()}
+                                                        </View>
+                                                    ) : null}
+                                                </View>
                                             );
                                         })}
                                 </View>
@@ -614,6 +649,16 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingVertical: 7,
         backgroundColor: theme.colors.surface.base,
     },
+    optionCardContainer: {
+        alignSelf: 'stretch',
+        borderRadius: 12,
+        backgroundColor: theme.colors.surface.base,
+        overflow: 'hidden',
+    },
+    optionCardControls: {
+        paddingHorizontal: 7,
+        paddingBottom: 7,
+    },
     optionCardHeader: {
         flexDirection: 'row',
         alignItems: 'flex-start',
@@ -660,6 +705,18 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
     optionCardIndicatorIcon: {
         height: 12,
+    },
+    optionCardSelectionMark: {
+        width: 20,
+        height: 14,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    optionCardStatusIcon: {
+        width: 20,
+        height: 20,
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     optionFavoriteButton: {
         width: 20,

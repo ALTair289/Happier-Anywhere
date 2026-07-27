@@ -221,8 +221,95 @@ describe('OptionPickerOverlay', () => {
         });
 
         expect(screen.findByTestId('model-picker-overlay-custom-save')).toBeNull();
-        expect(onSubmitCustomValue).toHaveBeenCalledWith('custom-model');
+        expect(onSubmitCustomValue).toHaveBeenCalledWith('  custom-model  ');
         expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it('matches and submits model identifiers as exact opaque values', async () => {
+        const onSelect = vi.fn();
+        const onSubmitCustomValue = vi.fn();
+        const { OptionPickerOverlay } = await import('./OptionPickerOverlay');
+        const screen = await renderScreen(
+            <OptionPickerOverlay
+                title="Models"
+                options={[
+                    { value: 'model-a', label: 'Plain' },
+                    { value: ' model-a ', label: 'Spaced' },
+                ]}
+                selectedValue=" model-a "
+                onSelect={onSelect}
+                emptyText="No models"
+                canEnterCustomValue
+                customLabel="Custom model"
+                onSubmitCustomValue={onSubmitCustomValue}
+            />,
+        );
+
+        expect(screen.findByTestId('model-picker-overlay-custom-input')).toBeNull();
+        expect(screen.findByTestId('model-picker-overlay-option-selected-indicator: model-a ')).toBeTruthy();
+    });
+
+    it('renders runtime status in the trailing indicator group without replacing a leading provider icon', async () => {
+        const { OptionPickerOverlay } = await import('./OptionPickerOverlay');
+        const screen = await renderScreen(
+            <OptionPickerOverlay
+                title="Models"
+                summary="Last used: GPT 5.6 Terra"
+                notes={['The selected model will be used when this session resumes.']}
+                options={[
+                    {
+                        value: 'gpt-5.6-terra',
+                        label: 'GPT 5.6 Terra',
+                        icon: <View testID="provider-logo:terra" />,
+                        trailingStatusIcon: <React.Fragment />,
+                        accessibilityLabel: 'Last used: GPT 5.6 Terra',
+                    },
+                    { value: 'gpt-5.6-sol', label: 'GPT 5.6 Sol' },
+                ]}
+                selectedValue="gpt-5.6-sol"
+                onSelect={() => {}}
+                emptyText="No models"
+                canEnterCustomValue={false}
+            />,
+        );
+
+        const terra = screen.findByTestId('model-picker-overlay-option:gpt-5.6-terra');
+        const sol = screen.findByTestId('model-picker-overlay-option:gpt-5.6-sol');
+        expect(terra?.props.accessibilityLabel).toBe('Last used: GPT 5.6 Terra');
+        expect(terra?.props.accessibilityState).toEqual({ selected: false });
+        expect(sol?.props.accessibilityState).toEqual({ selected: true });
+        expect(screen.findByTestId('model-picker-overlay-option-selected-indicator:gpt-5.6-terra')).toBeNull();
+        expect(screen.findByTestId('model-picker-overlay-option-selected-indicator:gpt-5.6-sol')).toBeTruthy();
+        expect(screen.findByTestId('model-picker-overlay-option-icon:gpt-5.6-terra')).toBeTruthy();
+        expect(screen.findByTestId('provider-logo:terra')).toBeTruthy();
+        expect(screen.findByTestId('model-picker-overlay-option-status-icon:gpt-5.6-terra')).toBeTruthy();
+        expect(screen.getTextContent()).toContain('The selected model will be used when this session resumes.');
+    });
+
+    it('stacks the runtime-status icon below the checkmark when the selected model is also running', async () => {
+        const { OptionPickerOverlay } = await import('./OptionPickerOverlay');
+        const screen = await renderScreen(
+            <OptionPickerOverlay
+                title="Models"
+                options={[
+                    {
+                        value: 'gpt-5.6-sol',
+                        label: 'GPT 5.6 Sol',
+                        trailingStatusIcon: <React.Fragment />,
+                    },
+                ]}
+                selectedValue="gpt-5.6-sol"
+                onSelect={() => {}}
+                emptyText="No models"
+                canEnterCustomValue={false}
+            />,
+        );
+
+        const trailingGroup = screen.findByTestId('model-picker-overlay-option-selected-indicator:gpt-5.6-sol');
+        expect(trailingGroup).toBeTruthy();
+        expect(
+            trailingGroup?.findAll((node) => node.props?.testID === 'model-picker-overlay-option-status-icon:gpt-5.6-sol'),
+        ).toHaveLength(1);
     });
 
     it('keeps the custom editor open across parent rerenders while the selected listed value has not changed yet', async () => {
@@ -395,7 +482,8 @@ describe('OptionPickerOverlay', () => {
         expect(titleRow).toBeTruthy();
     });
 
-    it('renders selected model controls inside the selected model card and routes option changes', async () => {
+    it('keeps selected model controls outside the option selection pressable and routes option changes', async () => {
+        const onSelect = vi.fn();
         const onSelectOptionControlValue = vi.fn();
         const { OptionPickerOverlay } = await import('./OptionPickerOverlay');
 
@@ -442,23 +530,42 @@ describe('OptionPickerOverlay', () => {
                         },
                     ]}
                     onSelectOptionControlValue={onSelectOptionControlValue}
-                    onSelect={() => {}}
+                    onSelect={onSelect}
                 />);
 
-        const selectedCard = screen.findByTestId('model-picker-overlay-option:gpt-5.4');
-        expect(selectedCard).not.toBeNull();
+        const selectedOptionPressable = screen.findByTestId('model-picker-overlay-option:gpt-5.4');
+        expect(selectedOptionPressable).not.toBeNull();
+        const selectedCardContainer = screen.findByTestId('model-picker-overlay-option-container:gpt-5.4');
+        expect(selectedCardContainer).not.toBeNull();
+        const selectedCardContainerStyle = Object.assign(
+            {},
+            ...((Array.isArray(selectedCardContainer?.props.style)
+                ? selectedCardContainer?.props.style
+                : [selectedCardContainer?.props.style]).filter(Boolean)),
+        );
+        expect(selectedCardContainerStyle.alignSelf).toBe('stretch');
         expect(
-            selectedCard?.findAll((node) => node.props?.testID === 'model-picker-overlay-selected-option-control:reasoning_effort'),
+            selectedOptionPressable?.findAll((node) => node.props?.testID === 'model-picker-overlay-selected-option-control:reasoning_effort'),
+        ).toHaveLength(0);
+        expect(
+            selectedOptionPressable?.findAll((node) => node.props?.testID === 'model-picker-overlay-selected-option-control:speed'),
+        ).toHaveLength(0);
+
+        const selectedControls = screen.findByTestId('model-picker-overlay-option-controls:gpt-5.4');
+        expect(selectedControls).not.toBeNull();
+        expect(
+            selectedControls?.findAll((node) => node.props?.testID === 'model-picker-overlay-selected-option-control:reasoning_effort'),
         ).not.toHaveLength(0);
         expect(
-            selectedCard?.findAll((node) => node.props?.testID === 'model-picker-overlay-selected-option-control:speed'),
+            selectedControls?.findAll((node) => node.props?.testID === 'model-picker-overlay-selected-option-control:speed'),
         ).not.toHaveLength(0);
 
         await screen.pressByTestIdAsync('model-picker-overlay-selected-option-control-option:reasoning_effort:high');
 
         expect(onSelectOptionControlValue).toHaveBeenCalledWith('reasoning_effort', 'high');
+        expect(onSelect).not.toHaveBeenCalled();
 
-        const speedControl = selectedCard?.findAll((node) => (
+        const speedControl = selectedControls?.findAll((node) => (
             node.props?.testID === 'model-picker-overlay-selected-option-control:speed'
         ))[0];
         const speedSwitch = speedControl?.findAll((node) => (
@@ -468,7 +575,7 @@ describe('OptionPickerOverlay', () => {
 
         expect(speedSwitch).toBeTruthy();
         expect(
-            selectedCard?.findAll((node) => node.props?.testID === 'model-picker-overlay-selected-option-control-switch:speed'),
+            selectedControls?.findAll((node) => node.props?.testID === 'model-picker-overlay-selected-option-control-switch:speed'),
         ).not.toHaveLength(0);
 
         await act(async () => {
@@ -503,6 +610,9 @@ describe('OptionPickerOverlay', () => {
         expect(option).toBeTruthy();
         expect(option?.findAll((node) => node.props?.testID === 'model-picker-overlay-option-icon:claude-fable-5')).toHaveLength(1);
         expect(option?.findAll((node) => node.props?.testID === 'provider-logo:claude')).toHaveLength(1);
+        expect(screen.findByTestId(
+            'model-picker-overlay-option-selected-indicator:claude-fable-5',
+        )).toBeTruthy();
         expect(option?.findAll((node) => (
             String(node.type) === 'Text' && node.props?.children === 'Fable 5'
         ))).toHaveLength(1);
