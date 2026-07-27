@@ -3,10 +3,15 @@ import { buildChatListItems, buildChatListItemsCached } from '@/components/sessi
 import { insertForkDividersIntoTranscriptItems, type ForkDividerTranscriptItem } from '@/components/sessions/transcript/forkContext/insertForkDividersIntoTranscriptItems';
 import { sync } from '@/sync/sync';
 import type { Message } from '@/sync/domains/messages/messageTypes';
-import { buildTranscriptTurnsCached } from '@/components/sessions/transcript/turnGrouping/buildTranscriptTurns';
+import {
+    buildTranscriptTurnsCached,
+    isTranscriptTurnsBuildCacheComplete,
+    type TranscriptTurnsBuildCache,
+} from '@/components/sessions/transcript/turnGrouping/buildTranscriptTurns';
 import type { ChatTranscriptListItem } from '@/components/sessions/transcript/chatListTypes';
 import type { ForkAwareMessageDescriptors } from '@/components/sessions/transcript/forkContext/buildForkAwareMessageDescriptors';
 import type { ForkedTranscriptSnapshot } from '@/sync/domains/sessionFork/forkedTranscriptSnapshot';
+import { runAfterInteractionsWithFallback } from '@/utils/timing/runAfterInteractionsWithFallback';
 import {
     measureTranscriptDerivation,
 } from '@/components/sessions/transcript/items/measureDerivation';
@@ -17,6 +22,9 @@ import {
 } from '@/components/sessions/transcript/items/derivedItemsCache';
 
 type BuildChatListItemsOptions = Parameters<typeof buildChatListItems>[0];
+
+const TRANSCRIPT_COLD_MOUNT_TAIL_MESSAGE_COUNT = 96;
+const TRANSCRIPT_COLD_MOUNT_BACKFILL_MESSAGE_COUNT = 256;
 
 export function useTranscriptRootDerivedItems(params: Readonly<{
     actionDrafts: NonNullable<BuildChatListItemsOptions['actionDrafts']>;
@@ -57,16 +65,24 @@ export function useTranscriptRootDerivedItems(params: Readonly<{
         sessionId,
         derivedItemsCacheMaxSessions,
     );
+    const [localTurnsCacheEntry, setLocalTurnsCacheEntry] = React.useState<{
+        sessionId: string;
+        cache: TranscriptTurnsBuildCache;
+    } | null>(null);
+    const localTurnsCache = localTurnsCacheEntry?.sessionId === sessionId
+        ? localTurnsCacheEntry.cache
+        : null;
+    const turnsCacheForBuild = localTurnsCache ?? derivedItemsCacheEntry.turnsCache;
     const turnsCache = React.useMemo(() => {
         if (groupingMode !== 'turns') return null;
         return measureTranscriptDerivation('ui.sessions.transcript.derived.turns', () => ({
-            cacheProvided: derivedItemsCacheEntry.turnsCache ? 1 : 0,
+            cacheProvided: turnsCacheForBuild ? 1 : 0,
             forked: forkAwareMessageDescriptors ? 1 : 0,
             groupToolCalls: groupToolCalls ? 1 : 0,
             messageCount: messageIdsOldestFirst.length,
         }), () => {
             return buildTranscriptTurnsCached({
-                cache: derivedItemsCacheEntry.turnsCache,
+                cache: turnsCacheForBuild,
                 messageIdsOldestFirst,
                 messagesById,
                 pendingMessages,
@@ -76,10 +92,10 @@ export function useTranscriptRootDerivedItems(params: Readonly<{
                 forkBoundaryBeforeMessageIds: forkAwareMessageDescriptors?.forkBoundaryBeforeMessageIds,
                 forkBoundarySignature: forkAwareMessageDescriptors?.forkBoundarySignature,
                 forkMetadataByMessageId: forkAwareMessageDescriptors?.metadataByMessageId,
+                tailWindowMessageCount: turnsCacheForBuild ? null : TRANSCRIPT_COLD_MOUNT_TAIL_MESSAGE_COUNT,
             });
         });
     }, [
-        derivedItemsCacheEntry.turnsCache,
         discardedPendingMessages,
         forkAwareMessageDescriptors,
         groupToolCalls,
@@ -88,6 +104,7 @@ export function useTranscriptRootDerivedItems(params: Readonly<{
         messagesById,
         pendingMessages,
         toolCallsGroupStrategy,
+        turnsCacheForBuild,
     ]);
 
     React.useEffect(() => {
@@ -96,6 +113,63 @@ export function useTranscriptRootDerivedItems(params: Readonly<{
             turnsCache,
         });
     }, [derivedItemsCacheMaxSessions, groupingMode, sessionId, turnsCache]);
+
+    React.useEffect(() => {
+        if (groupingMode !== 'turns' || !turnsCache || isTranscriptTurnsBuildCacheComplete(turnsCache)) return;
+
+        let cancelled = false;
+        let cancelScheduled: (() => void) | null = null;
+        let currentCache = turnsCache;
+
+        const scheduleNextBackfill = () => {
+            cancelScheduled = runAfterInteractionsWithFallback(() => {
+                cancelScheduled = null;
+                if (cancelled) return;
+
+                const nextCache = buildTranscriptTurnsCached({
+                    cache: currentCache,
+                    messageIdsOldestFirst,
+                    messagesById,
+                    pendingMessages,
+                    discardedMessages: discardedPendingMessages,
+                    groupToolCalls,
+                    toolCallsGroupStrategy,
+                    forkBoundaryBeforeMessageIds: forkAwareMessageDescriptors?.forkBoundaryBeforeMessageIds,
+                    forkBoundarySignature: forkAwareMessageDescriptors?.forkBoundarySignature,
+                    forkMetadataByMessageId: forkAwareMessageDescriptors?.metadataByMessageId,
+                    backfillOlderMessageCount: TRANSCRIPT_COLD_MOUNT_BACKFILL_MESSAGE_COUNT,
+                });
+                currentCache = nextCache;
+                writeTranscriptDerivedItemsCacheEntry(sessionId, derivedItemsCacheMaxSessions, {
+                    turnsCache: nextCache,
+                });
+                setLocalTurnsCacheEntry({ sessionId, cache: nextCache });
+
+                if (!isTranscriptTurnsBuildCacheComplete(nextCache)) {
+                    scheduleNextBackfill();
+                }
+            });
+        };
+
+        scheduleNextBackfill();
+
+        return () => {
+            cancelled = true;
+            cancelScheduled?.();
+        };
+    }, [
+        derivedItemsCacheMaxSessions,
+        discardedPendingMessages,
+        forkAwareMessageDescriptors,
+        groupToolCalls,
+        groupingMode,
+        messageIdsOldestFirst,
+        messagesById,
+        pendingMessages,
+        sessionId,
+        toolCallsGroupStrategy,
+        turnsCache,
+    ]);
 
     const linearCache = React.useMemo(() => {
         if (groupingMode === 'turns') return null;

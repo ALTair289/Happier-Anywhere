@@ -15,6 +15,7 @@ import {
 } from '@/components/sessions/transcript/viewport/jump/host/useTranscriptJumpHost';
 import {
     resolveTranscriptRenderWindowProjection,
+    type TranscriptRendererDataTarget,
     type TranscriptRenderWindowProjection,
 } from '@/components/sessions/transcript/viewport/window/resolveTranscriptRenderWindowProjection';
 import type { TranscriptTargetWindowState } from '@/components/sessions/transcript/viewport/window/transcriptTargetWindowTypes';
@@ -44,12 +45,25 @@ import {
 } from '@/sync/runtime/performance/sessionUiTelemetry';
 import { fireAndForget } from '@/utils/system/fireAndForget';
 import {
-    isEnrichedMarkdownRuntimePreloaded,
-    preloadEnrichedMarkdownRuntime,
+    useEnrichedMarkdownRuntimeStatus,
 } from '@/components/markdown/enriched/preloadEnrichedMarkdownRuntime';
+import {
+    resolveTranscriptFirstPaintFallbackDelayMs,
+    resolveTranscriptFirstPaintPresentation,
+} from '@/components/sessions/transcript/paint/transcriptFirstPaintPresentation';
 import type { SessionOpenLatch } from '@/components/sessions/transcript/viewport/sessionOpen/sessionOpenLatch';
 import type { SessionOpenLatchEffect } from '@/components/sessions/transcript/viewport/sessionOpen/types';
 import type { EntryRestoreOwner } from '@/components/sessions/transcript/viewport/entryRestore/entryRestoreOwner';
+import type { TranscriptRendererEntryPlacementEvent } from '@/components/sessions/transcript/viewport/shell/renderer/types';
+import {
+    createEntryPresentationKey,
+    createEntryPresentationState,
+    reduceEntryPresentationState,
+    type EntryPresentationPlatform,
+} from '@/components/sessions/transcript/viewport/entryRestore/entryPresentation';
+import { useCommittedTranscriptProjectionSnapshot } from '@/components/sessions/transcript/items/useCommittedTranscriptProjectionSnapshot';
+import { useCommittedTranscriptRef } from '@/components/sessions/transcript/viewport/lifecycle/host/useCommittedTranscriptRef';
+import { createTranscriptWindowGapItem } from '@/components/sessions/transcript/viewport/window/transcriptWindowGapItem';
 
 type Ref<T> = { current: T };
 
@@ -74,14 +88,9 @@ export type TranscriptItemsPipelineDeps = Readonly<{
     listDataRef: Ref<readonly ChatTranscriptListItem[]>;
     listOrientation: TranscriptListOrientation;
     messagesById: Readonly<Record<string, Message>>;
-    nativeHotEdgeVisibleRowsRef: Ref<{
-        firstItemId: string | null;
-        firstSourceIndex: number | null;
-        lastItemId: string | null;
-        lastSourceIndex: number | null;
-    } | null>;
     platformOS: string;
     preDecompositionItemsRef: Ref<ChatTranscriptListItem[]>;
+    rendererKind: 'flashList' | 'legendList';
     renderWindowIndexMapRef: Ref<TranscriptRenderWindowProjection<ChatTranscriptListItem>['indexMap'] | null>;
     resolveThinkingExpanded: (messageId: string) => boolean;
     rowFontScaleKey: string;
@@ -90,6 +99,7 @@ export type TranscriptItemsPipelineDeps = Readonly<{
     sessionId: string;
     sessionThinking: boolean;
     setEntrySliceWindow: React.Dispatch<React.SetStateAction<{ sessionId: string; anchorRowId: string } | null>>;
+    tailContiguousFloorSeq?: number | null;
     targetWindowActiveRef: Ref<boolean>;
     targetWindowState?: TranscriptTargetWindowState;
     transcriptNativeHotTailItemCount: number;
@@ -120,9 +130,9 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
         listDataRef,
         listOrientation,
         messagesById,
-        nativeHotEdgeVisibleRowsRef,
         platformOS,
         preDecompositionItemsRef,
+        rendererKind,
         renderWindowIndexMapRef,
         resolveThinkingExpanded,
         rowFontScaleKey,
@@ -131,6 +141,7 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
         sessionId,
         sessionThinking,
         setEntrySliceWindow,
+        tailContiguousFloorSeq,
         targetWindowActiveRef,
         targetWindowState,
         transcriptNativeHotTailItemCount,
@@ -167,7 +178,8 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
 
     const decomposedItems = React.useMemo<ChatTranscriptListItem[]>(() => {
         return buildTranscriptTurnUnits({
-            items,
+            // Window gaps are projection output, never turn-decomposition input.
+            items: items.filter((item) => item.kind !== 'transcript-window-gap'),
             getMessageById: getTurnMessageById,
             metadataByMessageId: forkMessageMetadataById ?? undefined,
             isGroupExpanded: (toolMessageIds) => toolMessageIds.some((id) => expandedToolCallsAnchorMessageIds.has(id)),
@@ -205,15 +217,19 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
     const renderWindowProjection = React.useMemo(() => {
         return resolveTranscriptRenderWindowProjection({
             activeThinkingMessageId,
+            createWindowGapItem: createTranscriptWindowGapItem,
             entrySliceWindow,
             expandedToolCallsAnchorMessageIds,
             isSeqLoaded: jumpWindowFacts.isSeqLoaded,
+            isSeqRangeLoaded: jumpWindowFacts.isSeqRangeLoaded,
             items: decomposedItems,
             liveTailAnchorMessageId: projectionLiveTailAnchorMessageId,
             listOrientation,
             platformOS,
+            rendererKind,
             resolveSeq: jumpWindowFacts.resolveTargetWindowItemSeq,
             sessionId,
+            tailContiguousFloorSeq: tailContiguousFloorSeq ?? null,
             targetWindowState: targetWindowState ?? jumpWindowFacts.sessionTargetWindowState,
             transcriptNativeHotTailItemCount,
             transcriptWebHotTailItemCount,
@@ -226,15 +242,16 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
         jumpWindowFacts,
         listOrientation,
         platformOS,
+        rendererKind,
         projectionLiveTailAnchorMessageId,
         sessionId,
+        tailContiguousFloorSeq,
         targetWindowState,
         transcriptNativeHotTailItemCount,
         transcriptWebHotTailItemCount,
     ]);
 
     const entrySliceSourceBounds = renderWindowProjection.entrySlice.bounds;
-    entrySliceWithheldCountRef.current = renderWindowProjection.entrySlice.withheldCount;
     const targetWindowHostFacts = renderWindowProjection.targetWindow;
     const targetWindowActive = targetWindowHostFacts.targetWindowActive;
     useTranscriptJumpTargetWindowActiveBridge({
@@ -264,7 +281,7 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
     const shouldUseWebHotColdSplit = platformOS === 'web' && transcriptHotColdSplitActive;
     const shouldUseNativeHotColdSplit = platformOS !== 'web' && transcriptHotColdSplitActive;
     const listData = renderWindowProjection.listData;
-    webHotColdCountsRef.current = {
+    const webHotColdCounts = {
         coldCount: transcriptHotColdSplitActive
             ? transcriptHotColdSegments.coldItems.length
             : listData.length,
@@ -272,6 +289,7 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
             ? transcriptHotColdSegments.hotItems.length
             : 0,
     };
+    useCommittedTranscriptRef(webHotColdCountsRef, webHotColdCounts);
 
     React.useEffect(() => {
         if (entrySliceWindow && entrySliceWindow.sessionId !== sessionId) {
@@ -286,18 +304,31 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
         setEntrySliceWindow(null);
     }, [entrySliceWindowRef, jumpToSeq, sessionId, setEntrySliceWindow]);
 
-    canonicalWindowedItemsRef.current = canonicalWindowedItems;
-    renderWindowIndexMapRef.current = renderWindowProjection.indexMap;
-    nativeHotEdgeVisibleRowsRef.current = renderWindowProjection.hotCold.nativeEdgeSlotItems.length > 0
-        ? {
-            firstItemId: renderWindowProjection.hotCold.nativeEdgeSlotItems[0]?.id ?? null,
-            firstSourceIndex: renderWindowProjection.indexMap.hotEdgeSourceIndices[0] ?? null,
-            lastItemId: renderWindowProjection.hotCold.nativeEdgeSlotItems[renderWindowProjection.hotCold.nativeEdgeSlotItems.length - 1]?.id ?? null,
-            lastSourceIndex: renderWindowProjection.indexMap.hotEdgeSourceIndices[renderWindowProjection.indexMap.hotEdgeSourceIndices.length - 1] ?? null,
-        }
-        : null;
-    itemsRef.current = displayItems;
-    listDataRef.current = listData;
+    const nativeHotEdgeVisibleRows = React.useMemo(() => (
+        renderWindowProjection.hotCold.nativeEdgeSlotItems.length > 0
+            ? {
+                firstItemId: renderWindowProjection.hotCold.nativeEdgeSlotItems[0]?.id ?? null,
+                firstSourceIndex: renderWindowProjection.indexMap.hotEdgeSourceIndices[0] ?? null,
+                lastItemId: renderWindowProjection.hotCold.nativeEdgeSlotItems[renderWindowProjection.hotCold.nativeEdgeSlotItems.length - 1]?.id ?? null,
+                lastSourceIndex: renderWindowProjection.indexMap.hotEdgeSourceIndices[renderWindowProjection.indexMap.hotEdgeSourceIndices.length - 1] ?? null,
+            }
+            : null
+    ), [
+        renderWindowProjection.hotCold.nativeEdgeSlotItems,
+        renderWindowProjection.indexMap.hotEdgeSourceIndices,
+    ]);
+    useCommittedTranscriptProjectionSnapshot({
+        canonicalWindowedItems,
+        canonicalWindowedItemsRef,
+        displayItems,
+        entrySliceWithheldCount: renderWindowProjection.entrySlice.withheldCount,
+        entrySliceWithheldCountRef,
+        itemsRef,
+        listData,
+        listDataRef,
+        renderWindowIndexMap: renderWindowProjection.indexMap,
+        renderWindowIndexMapRef,
+    });
     preDecompositionItemsRef.current = items;
     React.useEffect(() => {
         recordStreamingVisibleUpdateForSessionUiTelemetry({
@@ -337,12 +368,17 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
         return item ? resolveTranscriptViewportAnchorDescriptor(item) : null;
     }, [itemsRef]);
 
-    const resolveRestoreAnchorSourceIndexFromLoadedItems = React.useCallback((anchor: TranscriptViewportAnchorIdentity): number | null => {
-        return resolveTranscriptViewportAnchorIndex({
+    const resolveRestoreAnchorRendererTargetFromLoadedItems = React.useCallback((
+        anchor: TranscriptViewportAnchorIdentity,
+    ): TranscriptRendererDataTarget | null => {
+        const displayIndex = resolveTranscriptViewportAnchorIndex({
             anchor,
             items: itemsRef.current,
         });
-    }, [itemsRef]);
+        return displayIndex == null
+            ? null
+            : renderWindowIndexMapRef.current?.resolveRendererTargetForDisplayIndex(displayIndex) ?? null;
+    }, [itemsRef, renderWindowIndexMapRef]);
 
     const resolveKindForMessageId = React.useCallback((messageId: string): string | null => {
         const state = getStorage().getState();
@@ -510,6 +546,7 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
         keyExtractor,
         listData,
         liveTailAnchor,
+        nativeHotEdgeVisibleRows,
         renderWindowProjection,
         resolveCreatedAtForMessageId,
         resolveEntryRestoreOwnerAnchor,
@@ -517,7 +554,7 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
         resolveNearestSurvivingViewportAnchorIndex,
         resolveNearestSurvivingViewportAnchorIndexFromItems,
         resolveRestoreAnchorIdentityFromSourceIndex,
-        resolveRestoreAnchorSourceIndexFromLoadedItems,
+        resolveRestoreAnchorRendererTargetFromLoadedItems,
         resolveSeqForMessageId,
         resolveSeqForViewportAnchor,
         resolveTargetWindowItemSeq: jumpWindowFacts.resolveTargetWindowItemSeq,
@@ -540,6 +577,7 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
         keyExtractor,
         listData,
         liveTailAnchor,
+        nativeHotEdgeVisibleRows,
         renderWindowProjection,
         resolveCreatedAtForMessageId,
         resolveEntryRestoreOwnerAnchor,
@@ -547,7 +585,7 @@ export function useTranscriptItemsPipeline(deps: TranscriptItemsPipelineDeps) {
         resolveNearestSurvivingViewportAnchorIndex,
         resolveNearestSurvivingViewportAnchorIndexFromItems,
         resolveRestoreAnchorIdentityFromSourceIndex,
-        resolveRestoreAnchorSourceIndexFromLoadedItems,
+        resolveRestoreAnchorRendererTargetFromLoadedItems,
         resolveSeqForMessageId,
         resolveSeqForViewportAnchor,
         resolveToolCallMessagesForIds,
@@ -718,6 +756,7 @@ export function useTranscriptEntrySliceReveal(deps: TranscriptEntrySliceRevealDe
 export type TranscriptFirstPaintStateDeps = Readonly<{
     applySessionOpenLatchEffectsRef: Ref<(effects: readonly SessionOpenLatchEffect[]) => void>;
     currentSessionIdRef: Ref<string>;
+    entryAnchorForRender: SessionViewportAnchorSnapshot | null;
     entryRestoreOwner: EntryRestoreOwner;
     firstListPaintObserved: boolean;
     isLoaded: boolean;
@@ -734,6 +773,7 @@ export type TranscriptFirstPaintStateDeps = Readonly<{
     nativeViewportPaintObservedRef: Ref<boolean>;
     pinThresholdPx: number;
     platformOS: string;
+    rendererKind: 'flashList' | 'legendList';
     routeHydrationPending: boolean;
     sessionId: string;
     sessionOpenLatch: SessionOpenLatch;
@@ -746,6 +786,7 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
     const {
         applySessionOpenLatchEffectsRef,
         currentSessionIdRef,
+        entryAnchorForRender,
         entryRestoreOwner,
         firstListPaintObserved,
         isLoaded,
@@ -762,6 +803,7 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
         nativeViewportPaintObservedRef,
         pinThresholdPx,
         platformOS,
+        rendererKind,
         routeHydrationPending,
         sessionId,
         sessionOpenLatch,
@@ -769,29 +811,85 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
         transcriptMountSettleQuiescentWindowMs,
         usesNativeFlashListBottomMaintenance,
     } = deps;
-    const [webMarkdownRuntimeReady, setWebMarkdownRuntimeReady] = React.useState(isEnrichedMarkdownRuntimePreloaded);
-    React.useEffect(() => {
-        if (platformOS !== 'web') return undefined;
-        if (isEnrichedMarkdownRuntimePreloaded()) {
-            setWebMarkdownRuntimeReady(true);
-            return undefined;
+    const entryPresentationPlatform: EntryPresentationPlatform | null =
+        platformOS === 'web'
+            ? 'web'
+            : platformOS === 'ios' || platformOS === 'android'
+                ? 'native'
+                : null;
+    const entryPresentationKey =
+        entryPresentationPlatform != null &&
+        rendererKind === 'legendList' &&
+        !jumpToSeqActive &&
+        entryAnchorForRender != null
+            ? createEntryPresentationKey({
+                platform: entryPresentationPlatform,
+                sessionId,
+            })
+            : null;
+    const currentEntryPresentationKeyRef = React.useRef(entryPresentationKey);
+    currentEntryPresentationKeyRef.current = entryPresentationKey;
+    const [entryPresentationState, setEntryPresentationState] = React.useState(
+        () => createEntryPresentationState(entryPresentationKey),
+    );
+    const transitionEntryPresentation = React.useCallback((
+        event: Parameters<typeof reduceEntryPresentationState>[1],
+    ) => {
+        setEntryPresentationState((previous) => {
+            const currentKey = currentEntryPresentationKeyRef.current;
+            const current = previous.key === currentKey
+                ? previous
+                : createEntryPresentationState(currentKey);
+            return reduceEntryPresentationState(current, event);
+        });
+    }, []);
+    const onEntryPlacementEvent = React.useCallback((
+        event: TranscriptRendererEntryPlacementEvent,
+    ) => {
+        const currentKey = currentEntryPresentationKeyRef.current;
+        if (currentKey !== createEntryPresentationKey({
+            platform: event.platform,
+            sessionId: event.dataKey,
+        })) return;
+        if (event.type === 'started') {
+            transitionEntryPresentation({ type: 'renderer-started' });
+            return;
         }
-        let cancelled = false;
-        const preload = preloadEnrichedMarkdownRuntime();
-        fireAndForget(preload, { tag: 'ChatList.webMarkdownRuntimeFirstPaint' });
-        preload.then(
-            () => {
-                if (!cancelled) setWebMarkdownRuntimeReady(true);
-            },
-            () => {
-                if (!cancelled) setWebMarkdownRuntimeReady(true);
-            },
-        );
-        return () => {
-            cancelled = true;
-        };
-    }, [platformOS]);
-    const showNativeFirstPaintPlaceholder =
+        transitionEntryPresentation({
+            type: event.outcome === 'settled'
+                ? 'renderer-settled'
+                : 'renderer-fallback',
+        });
+    }, [transitionEntryPresentation]);
+    const recordEntryOwnerOutcome = React.useCallback((params: Readonly<{
+        outcome: 'confirmed' | 'fallback';
+        sessionId: string;
+    }>) => {
+        const currentKey = currentEntryPresentationKeyRef.current;
+        if (
+            currentKey == null
+            || entryPresentationPlatform == null
+            || currentKey !== createEntryPresentationKey({
+                platform: entryPresentationPlatform,
+                sessionId: params.sessionId,
+            })
+        ) return;
+        transitionEntryPresentation({
+            type: params.outcome === 'confirmed'
+                ? 'entry-confirmed'
+                : 'entry-fallback',
+        });
+    }, [entryPresentationPlatform, transitionEntryPresentation]);
+    const effectiveEntryPresentationState =
+        entryPresentationState.key === entryPresentationKey
+            ? entryPresentationState
+            : createEntryPresentationState(entryPresentationKey);
+    const entryPlacementPending =
+        entryPresentationKey != null &&
+        !effectiveEntryPresentationState.released;
+    const webMarkdownRuntimeStatus = useEnrichedMarkdownRuntimeStatus();
+    const nativePlacementPending =
+        entryPresentationKey == null &&
         platformOS !== 'web' &&
         sessionOpenLatch.shouldShowNativeFirstPaintPlaceholder({
             firstListPaintObserved,
@@ -810,42 +908,71 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
             sessionId,
             usesNativeFlashListBottomMaintenance,
         });
-    const showWebMarkdownRuntimeFirstPaintPlaceholder =
-        platformOS === 'web' &&
-        isLoaded &&
-        itemCount > 0 &&
-        !firstListPaintObserved &&
-        !webMarkdownRuntimeReady;
+    const [firstPaintDeadlineElapsedSessionId, setFirstPaintDeadlineElapsedSessionId] =
+        React.useState<string | null>(null);
+    const presentation = resolveTranscriptFirstPaintPresentation({
+        deadlineElapsed: firstPaintDeadlineElapsedSessionId === sessionId,
+        entryPlacementPending,
+        firstListPaintObserved,
+        // Only the web Legend renderer reports an onLoad first-paint fact; the other
+        // configurations have no such fact and must not be held waiting for one.
+        firstListPaintPending:
+            platformOS === 'web' &&
+            rendererKind === 'legendList' &&
+            !firstListPaintObserved,
+        isLoaded,
+        itemCount,
+        // Both remaining data-availability facts only describe rows the transcript already
+        // has: with nothing loaded there is no enriched Markdown to wait for and no cached
+        // content a route refresh could be covering.
+        markdownRuntimePending:
+            platformOS === 'web' &&
+            isLoaded &&
+            itemCount > 0 &&
+            webMarkdownRuntimeStatus === 'pending',
+        nativePlacementPending,
+        routeHydrationPending: routeHydrationPending && isLoaded && itemCount > 0,
+    });
+    const showFirstPaintPlaceholder = presentation.covered;
     const showRouteHydrationFirstPaintPlaceholder =
-        routeHydrationPending &&
-        isLoaded &&
-        itemCount > 0;
-    const showFirstPaintPlaceholder =
-        showNativeFirstPaintPlaceholder ||
-        showWebMarkdownRuntimeFirstPaintPlaceholder ||
-        showRouteHydrationFirstPaintPlaceholder;
+        presentation.covered && presentation.reason === 'route-hydration';
     const nativeFirstPaintReleasedWithoutListLoad =
         platformOS !== 'web' &&
         (nativeMountSettleStable || nativeMountSettleDeadlineReached);
 
+    // The session-open latch's own native fallback keeps its previous arming conditions; only
+    // the timer that drives it is shared now.
+    const nativeLatchFallbackEligibleRef = React.useRef(false);
+    nativeLatchFallbackEligibleRef.current =
+        platformOS !== 'web' && isLoaded && itemCount > 0;
+    const presentationCoveredRef = React.useRef(false);
+    presentationCoveredRef.current = presentation.covered;
+
+    // The single bound on the placeholder. One timer per cover episode, armed the first time the
+    // placeholder covers; the handle guard means a longer cover cannot extend it. It reveals with
+    // `deadline-fallback` and never asserts that the pending paint or placement happened. A cover
+    // that ended on its own before the deadline does not latch, so a later legitimate cover — a
+    // warm re-entry restoring a detached position into the same mounted session — still gets its
+    // own bound. The same timer drives the session-open latch's native fallback, whose only effect
+    // is releasing that same placeholder; the entry lifecycle keeps its existing authority to
+    // cancel and re-arm the handle across a session entry.
     React.useEffect(() => {
-        if (platformOS === 'web') return;
-        if (!isLoaded) return;
-        if (itemCount <= 0) return;
-        if (nativeViewportPaintObservedRef.current) return;
+        if (firstPaintDeadlineElapsedSessionId === sessionId) return;
+        if (!presentation.covered) return;
         if (nativeFirstPaintFallbackReleaseTimeoutRef.current?.sessionId === sessionId) return;
-        const timeoutMs =
-            transcriptInitialFillBudgetMs +
-            transcriptMountSettleQuiescentWindowMs * 2 +
-            1;
         const handle = {
             sessionId,
             timeoutId: null as unknown as ReturnType<typeof setTimeout>,
         };
         handle.timeoutId = setTimeout(() => {
-            if (nativeFirstPaintFallbackReleaseTimeoutRef.current !== handle) return;
-            nativeFirstPaintFallbackReleaseTimeoutRef.current = null;
+            if (nativeFirstPaintFallbackReleaseTimeoutRef.current === handle) {
+                nativeFirstPaintFallbackReleaseTimeoutRef.current = null;
+            }
             if (currentSessionIdRef.current !== handle.sessionId) return;
+            if (presentationCoveredRef.current) {
+                setFirstPaintDeadlineElapsedSessionId(handle.sessionId);
+            }
+            if (!nativeLatchFallbackEligibleRef.current) return;
             if (nativeViewportPaintObservedRef.current) return;
             const decision = sessionOpenLatch.onNativeFirstPaintFallbackDeadline({
                 nativeViewportPaintObserved: nativeViewportPaintObservedRef.current,
@@ -853,25 +980,28 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
                 sessionId: handle.sessionId,
             });
             applySessionOpenLatchEffectsRef.current(decision.effects);
-        }, timeoutMs);
+        }, resolveTranscriptFirstPaintFallbackDelayMs({
+            transcriptInitialFillBudgetMs,
+            transcriptMountSettleQuiescentWindowMs,
+        }));
         nativeFirstPaintFallbackReleaseTimeoutRef.current = handle;
     }, [
         applySessionOpenLatchEffectsRef,
         currentSessionIdRef,
-        isLoaded,
-        itemCount,
+        firstPaintDeadlineElapsedSessionId,
         nativeFirstPaintFallbackReleaseTimeoutRef,
         nativeViewportPaintObservedRef,
-        platformOS,
+        presentation.covered,
         sessionId,
         sessionOpenLatch,
         transcriptInitialFillBudgetMs,
         transcriptMountSettleQuiescentWindowMs,
-        usesNativeFlashListBottomMaintenance,
     ]);
 
     return {
         nativeFirstPaintReleasedWithoutListLoad,
+        onEntryPlacementEvent,
+        recordEntryOwnerOutcome,
         showFirstPaintPlaceholder,
         showRouteHydrationFirstPaintPlaceholder,
     };
