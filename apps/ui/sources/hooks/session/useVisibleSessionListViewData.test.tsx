@@ -1728,7 +1728,7 @@ describe('useVisibleSessionListViewData', () => {
         await hook.unmount();
     });
 
-    it('recomputes non-live global working placement when runtime activity expires without a store update', async () => {
+    it('does not promote background activity into non-live global working placement', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(1_000_000);
         sourceData.sessionListWorkingPlacementMode = 'global';
@@ -1745,13 +1745,13 @@ describe('useVisibleSessionListViewData', () => {
                 session: makeRenderableSession('runtime-active-session', {
                     active: false,
                     activeAt: 1_000_000,
-                    presence: 'offline',
+                    presence: 0,
                     latestTurnStatus: 'completed',
                     latestTurnStatusObservedAt: 999_000,
+                    runtimeActivityState: 'active',
                     runtimeActivityActiveCount: 1,
                     runtimeActivityObservedAt: 999_000,
-                    runtimeActivityExpiresAt: 1_060_000,
-                    runtimeActivitySourceClass: 'provider_detached_task',
+                    runtimeActivityRevision: 1,
                 }),
                 section: 'active',
                 groupKey: 'server:server-a:day:2026-05-04',
@@ -1777,9 +1777,8 @@ describe('useVisibleSessionListViewData', () => {
             ? `header:${item.headerKind ?? 'unknown'}`
             : `session:${item.session.id}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`
         )).toEqual([
-            'header:working',
-            'session:runtime-active-session:working:working',
             'header:date',
+            'session:runtime-active-session:date:none',
             'session:normal-session:date:none',
         ]);
 

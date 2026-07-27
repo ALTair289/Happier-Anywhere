@@ -69,7 +69,6 @@ type SessionListDataState = Readonly<{
     pinnedSessionKeysV1: ReadonlyArray<string>;
     sessionListAttentionPromotionMode: SessionListAttentionPromotionMode;
     sessionListWorkingPlacementMode: SessionListWorkingPlacementMode;
-    sessionListSeparateBackgroundWork: boolean;
     sessionListFolderSortModeV1: SessionListFolderSortModeV1;
     sessionListOrderingModeV1: SessionListOrderingModeV1;
     sessionListSectionModeV1: SessionListOrderingSectionMode;
@@ -212,7 +211,6 @@ function buildVisibleSessionListIndexForState(
         workingPlacement: state.sessionListWorkingPlacementMode !== 'off'
             ? {
                 mode: state.sessionListWorkingPlacementMode,
-                separateBackgroundWork: state.sessionListSeparateBackgroundWork,
             }
             : DISABLED_WORKING_PLACEMENT_OPTIONS,
         retainWorkingSessionKeys: options.retainWorkingSessionKeys,
@@ -474,7 +472,6 @@ function useSessionListDataState(
     const hideInactiveSessions = useSetting('hideInactiveSessions') === true;
     const sessionListAttentionPromotionMode = normalizeSessionListAttentionPromotionMode(useSetting('sessionListAttentionPromotionModeV1'));
     const sessionListWorkingPlacementMode = normalizeSessionListWorkingPlacementMode(useSetting('sessionListWorkingPlacementModeV1'));
-    const sessionListSeparateBackgroundWork = useSetting('sessionListSeparateBackgroundWork') === true;
     const sessionListFolderSortModeV1 = normalizeSessionListFolderSortModeV1(useLocalSetting('sessionListFolderSortModeV1'));
     const sessionListOrderingModeV1 = normalizeSessionListOrderingModeV1(useSetting('sessionListOrderingModeV1'));
     const sessionListSectionModeV1 = normalizeSessionListOrderingSectionMode(useSetting('sessionListSectionModeV1'));
@@ -615,7 +612,6 @@ function useSessionListDataState(
         pinnedSessionKeysV1,
         sessionListAttentionPromotionMode,
         sessionListWorkingPlacementMode,
-        sessionListSeparateBackgroundWork,
         sessionListFolderSortModeV1,
         sessionListOrderingModeV1,
         sessionListSectionModeV1,
@@ -638,7 +634,6 @@ function useSessionListDataState(
         normalizedWorkspaceOrder,
         pinnedSessionKeysV1,
         sessionListAttentionPromotionMode,
-        sessionListSeparateBackgroundWork,
         sessionListWorkingPlacementMode,
         sessionListFolderSortModeV1,
         sessionListOrderingModeV1,
