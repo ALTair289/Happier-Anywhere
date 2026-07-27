@@ -158,6 +158,53 @@ describe('materializeClaudeCodeNativeAuth', () => {
     expect(JSON.stringify(group.identityDiagnostic)).not.toContain('selected-refresh-placeholder');
   });
 
+  it('marks a virgin managed Claude home provider-ready after exact native OAuth materialization', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-home-'));
+    const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-source-'));
+    const targetClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-target-'));
+    const record = buildConnectedServiceCredentialRecord({
+      now: REALISTIC_ISSUED_AT_MS,
+      serviceId: 'claude-subscription',
+      profileId: 'work-profile',
+      kind: 'oauth',
+      expiresAt: REALISTIC_EXPIRES_AT_MS,
+      oauth: {
+        accessToken: 'selected-access-placeholder',
+        refreshToken: 'selected-refresh-placeholder',
+        idToken: null,
+        scope: CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: 'provider-account-id',
+        providerEmail: 'user@example.test',
+      },
+    });
+
+    const result = await materializeClaudeSubscriptionNativeAuthHome({
+      record,
+      targetClaudeConfigDir,
+      sourceEnv: { HOME: homeDir, CLAUDE_CONFIG_DIR: sourceClaudeConfigDir },
+      accountSettings: null,
+      sessionDirectory: null,
+      selectionDescriptor: {
+        kind: 'group',
+        serviceId: 'claude-subscription',
+        groupId: 'claude-team',
+        activeProfileId: 'work-profile',
+        fallbackProfileId: 'fallback-profile',
+        generation: 7,
+      },
+    });
+
+    expect(result.status).toBe('materialized');
+    expect(JSON.parse(await readFile(join(targetClaudeConfigDir, '.claude.json'), 'utf8'))).toEqual({
+      hasCompletedOnboarding: true,
+      oauthAccount: {
+        accountUuid: 'provider-account-id',
+        emailAddress: 'user@example.test',
+      },
+    });
+  });
+
   it('writes native credentials and returns only CLAUDE_CONFIG_DIR for healthy OAuth records', async () => {
     const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-test-'));
     const record = buildConnectedServiceCredentialRecord({
@@ -819,6 +866,7 @@ describe('materializeClaudeCodeNativeAuth', () => {
     ]);
     expect(JSON.stringify(result.diagnostics)).not.toContain('secret-placeholder');
     await expect(lstat(join(claudeConfigDir, '.credentials.json'))).rejects.toThrow();
+    await expect(lstat(join(claudeConfigDir, '.claude.json'))).rejects.toThrow();
     expect(logger.info).toHaveBeenCalledWith(
       '[DAEMON RUN] Claude Code credential materialization decision',
       expect.objectContaining({

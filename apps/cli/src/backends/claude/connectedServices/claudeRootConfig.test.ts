@@ -32,6 +32,7 @@ describe('reconcileClaudeAccountScopedRootConfig', () => {
       providerAccountId: 'new-account',
       providerEmail: 'new@example.test',
     })).toEqual({
+      hasCompletedOnboarding: true,
       oauthAccount: { accountUuid: 'new-account', emailAddress: 'new@example.test' },
       projects: { '/repo': { hasTrustDialogAccepted: true } },
     });
@@ -47,6 +48,9 @@ describe('reconcileClaudeAccountScopedRootConfig', () => {
       preserveExistingAccountState: true,
       providerAccountId: 'current-account',
       providerEmail: 'current@example.test',
-    })).toEqual(rootConfig);
+    })).toEqual({
+      ...rootConfig,
+      hasCompletedOnboarding: true,
+    });
   });
 });

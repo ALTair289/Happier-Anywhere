@@ -313,5 +313,8 @@ describe('Claude shared-group switch continuity', () => {
       await readFile(join(groupClaudeConfigDir, '.credentials.json'), 'utf8'),
     ) as { claudeAiOauth?: { accessToken?: string } };
     expect(materializedCredentials.claudeAiOauth?.accessToken).toBe('lb-bat-selected-access');
+    expect(JSON.parse(await readFile(join(groupClaudeConfigDir, '.claude.json'), 'utf8'))).toMatchObject({
+      hasCompletedOnboarding: true,
+    });
   });
 });

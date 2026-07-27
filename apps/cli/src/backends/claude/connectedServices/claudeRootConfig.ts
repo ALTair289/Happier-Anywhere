@@ -62,8 +62,14 @@ export function reconcileClaudeAccountScopedRootConfig(params: Readonly<{
   providerAccountId: string | null;
   providerEmail: string | null;
 }>): ClaudeRootConfigJson {
-  if (params.preserveExistingAccountState) return sanitizeClaudeRootConfig(params.rootConfig);
-  const next = { ...params.rootConfig };
+  // This owner is invoked only after exact native credential materialization succeeds.
+  // Provider onboarding readiness is distinct from workspace trust, which remains unsynthesized.
+  const providerReadyRoot = {
+    ...params.rootConfig,
+    hasCompletedOnboarding: true,
+  };
+  if (params.preserveExistingAccountState) return sanitizeClaudeRootConfig(providerReadyRoot);
+  const next: ClaudeRootConfigJson = { ...providerReadyRoot };
   for (const key of CLAUDE_ACCOUNT_SCOPED_ROOT_KEYS) delete next[key];
   const oauthAccount = {
     ...(params.providerAccountId ? { accountUuid: params.providerAccountId } : {}),
@@ -78,8 +84,7 @@ export async function reconcileClaudeAccountScopedRootConfigFile(params: Readonl
   providerAccountId: string | null;
   providerEmail: string | null;
 }>): Promise<void> {
-  const rootConfig = await readClaudeRootConfigFile(params.path);
-  if (!rootConfig) return;
+  const rootConfig = await readClaudeRootConfigFile(params.path) ?? {};
   await writeJsonAtomic(params.path, reconcileClaudeAccountScopedRootConfig({
     rootConfig,
     preserveExistingAccountState: params.preserveExistingAccountState,

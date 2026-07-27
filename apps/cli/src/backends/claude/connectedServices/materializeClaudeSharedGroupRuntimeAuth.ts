@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+
 import { withConnectedServiceStateSharingDestinationLock } from '@/daemon/connectedServices/stateSharing/connectedServiceStateSharingLock';
 
 import {
@@ -6,6 +8,7 @@ import {
   readClaudeConnectedServiceHomeProvenance,
   writeClaudeConnectedServiceHomeProvenance,
 } from './claudeConnectedServiceHomeProvenance';
+import { reconcileClaudeAccountScopedRootConfigFile } from './claudeRootConfig';
 import type { ClaudeSharedGroupHotApplyTarget } from './claudeSharedGroupHotApplyTarget';
 import { materializeClaudeCodeNativeAuth } from './nativeAuth/materializeClaudeCodeNativeAuth';
 import { resolveClaudeCodeCredentialsFilePath } from './nativeAuth/claudeCodeCredentialFile';
@@ -30,12 +33,19 @@ export async function materializeClaudeSharedGroupRuntimeAuth(
       const existingProvenance = await readClaudeConnectedServiceHomeProvenance(
         target.metadata.runtimeClaudeConfigDir,
       );
-      if (
-        matchesClaudeConnectedServiceHomeProvenance(expectedProvenance, existingProvenance)
-        && (await verifyClaudeCodeNativeAuth({
+      const exactExistingCredential = matchesClaudeConnectedServiceHomeProvenance(
+        expectedProvenance,
+        existingProvenance,
+      ) && (await verifyClaudeCodeNativeAuth({
           claudeConfigDir: target.metadata.runtimeClaudeConfigDir,
-        })).status === 'ok'
-      ) {
+        })).status === 'ok';
+      if (exactExistingCredential) {
+        await reconcileClaudeAccountScopedRootConfigFile({
+          path: join(target.metadata.runtimeClaudeConfigDir, '.claude.json'),
+          preserveExistingAccountState: true,
+          providerAccountId: target.record.oauth.providerAccountId,
+          providerEmail: target.record.oauth.providerEmail,
+        });
         return {
           status: 'materialized' as const,
           env: { CLAUDE_CONFIG_DIR: target.metadata.runtimeClaudeConfigDir },
@@ -56,6 +66,12 @@ export async function materializeClaudeSharedGroupRuntimeAuth(
       });
       if (materialized.status !== 'materialized') return materialized;
 
+      await reconcileClaudeAccountScopedRootConfigFile({
+        path: join(target.metadata.runtimeClaudeConfigDir, '.claude.json'),
+        preserveExistingAccountState: false,
+        providerAccountId: target.record.oauth.providerAccountId,
+        providerEmail: target.record.oauth.providerEmail,
+      });
       await writeClaudeConnectedServiceHomeProvenance({
         claudeConfigDir: target.metadata.runtimeClaudeConfigDir,
         provenance: expectedProvenance,
