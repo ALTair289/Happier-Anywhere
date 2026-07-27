@@ -6,12 +6,11 @@ import {
 } from '@happier-dev/protocol';
 
 import type { Metadata } from '@/api/types';
-import { updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
 import type { SessionEventMessage } from '@/api/session/sessionMessageTypes';
 import { classifyPrimarySessionRuntimeIssue } from '@/agent/runtime/session/errors/classifyPrimarySessionRuntimeIssue';
 import { reportConnectedServiceRuntimeAuthFailureToDaemon } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
 import {
-    connectedServiceRuntimeAuthRecoveryCanOwnTurnFailure,
+    connectedServiceRuntimeAuthRecoveryWillContinue,
     projectConnectedServiceRuntimeAuthRecoveryReport,
 } from '@/daemon/connectedServices/runtimeAuth/projection/connectedServiceRuntimeAuthRecoverySessionEvent';
 import { findConnectedServiceChildSelection } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
@@ -51,16 +50,16 @@ const recentRecoveryProjectionByClient = new WeakMap<
     RuntimeIssueSession['client'],
     RuntimeIssueRecoveryProjectionDeduperState
 >();
-const daemonOwnedRuntimeAuthFailures = new WeakSet<object>();
+const continuingRuntimeAuthRecoveries = new WeakSet<object>();
 
-export function isClaudeRuntimeAuthFailureOwnedByDaemonRecovery(error: unknown): boolean {
+export function isClaudeRuntimeAuthRecoveryContinuing(error: unknown): boolean {
     if (!error || typeof error !== 'object') return false;
-    return daemonOwnedRuntimeAuthFailures.has(error);
+    return continuingRuntimeAuthRecoveries.has(error);
 }
 
-function markClaudeRuntimeAuthFailureOwnedByDaemonRecovery(error: unknown): void {
+function markClaudeRuntimeAuthRecoveryContinuing(error: unknown): void {
     if (error && typeof error === 'object') {
-        daemonOwnedRuntimeAuthFailures.add(error);
+        continuingRuntimeAuthRecoveries.add(error);
     }
 }
 
@@ -78,24 +77,6 @@ function normalizeClaudePublicLimitCategory(
     value: NormalizedProviderUsageLimitDetailsV1['limitCategory'] | null | undefined,
 ): ConnectedServiceLimitCategoryV1 {
     return readConnectedServiceLimitCategoryV1(value) ?? 'usage_limit';
-}
-
-function commitRuntimeAuthUsageLimitRecoveryMetadata(
-    session: RuntimeIssueSession,
-    logPrefix: string,
-): ((updater: (metadata: Metadata) => Metadata) => boolean) | undefined {
-    if (!session.client.updateMetadata) return undefined;
-    return (updater) => {
-        updateMetadataBestEffort(
-            session.client as Readonly<{
-                updateMetadata: (updater: (metadata: Metadata) => Metadata) => Promise<void> | void;
-            }>,
-            updater,
-            logPrefix,
-            'runtime_auth_usage_limit_recovery',
-        );
-        return true;
-    };
 }
 
 function buildRuntimeAuthRecoveryProjectionDeduperKey(input: Readonly<{
@@ -173,7 +154,6 @@ function projectClaudeRuntimeAuthRecoveryReport(input: Readonly<{
             input.session.client.sendSessionEvent?.(projection.transcriptEvent);
             return Boolean(input.session.client.sendSessionEvent);
         },
-        commitUsageLimitRecoveryMetadata: commitRuntimeAuthUsageLimitRecoveryMetadata(input.session, input.logPrefix),
     });
     if (result.emitted) {
         rememberRuntimeAuthRecoveryProjection({
@@ -543,6 +523,13 @@ export async function surfaceClaudeRuntimeAuthFailure(
         return true;
     }
 
+    // The provider has already rejected this exact turn. Settle that provider-input fact before
+    // asking Connected Services to repair the account. Recovery may remain retryable/verifying,
+    // but it must not own or delay the turn terminal boundary that continuation and Pending consume.
+    await session.client.sessionTurnLifecycle?.failTurn?.({
+        provider: 'claude',
+        issue,
+    });
     const recoveryReport = await reportConnectedServiceRuntimeAuthFailureToDaemon({
         sessionId: session.client.sessionId,
         switchesThisTurn: 0,
@@ -555,13 +542,9 @@ export async function surfaceClaudeRuntimeAuthFailure(
         classification,
         logPrefix,
     });
-    if (connectedServiceRuntimeAuthRecoveryCanOwnTurnFailure(recoveryReport)) {
-        markClaudeRuntimeAuthFailureOwnedByDaemonRecovery(error);
+    if (connectedServiceRuntimeAuthRecoveryWillContinue(recoveryReport)) {
+        markClaudeRuntimeAuthRecoveryContinuing(error);
         return true;
     }
-    await session.client.sessionTurnLifecycle?.failTurn?.({
-        provider: 'claude',
-        issue,
-    });
     return true;
 }

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { SDKMessage } from '@/backends/claude/sdk';
+import type { SDKMessage, SDKUserMessage } from '@/backends/claude/sdk';
 import type { EnhancedMode } from './loop';
 
 const mockQuery = vi.fn();
@@ -49,6 +49,11 @@ vi.mock('./utils/resolveClaudeCliPath', () => ({
 
 type RemoteOptions = Parameters<(typeof import('./claudeRemote'))['claudeRemote']>[0];
 type QueryCall = Readonly<{
+  prompt?: AsyncIterable<SDKUserMessage>;
+  onPromptTransportOutcome?: (
+    message: SDKUserMessage,
+    outcome: 'accepted' | 'rejected_before_effect' | 'effect_may_have_occurred',
+  ) => void;
   options?: Readonly<{
     resume?: string;
     continue?: boolean;
@@ -57,6 +62,7 @@ type QueryCall = Readonly<{
     customSystemPrompt?: string;
     appendSystemPrompt?: string;
     executable?: string;
+    includeHookEvents?: boolean;
   }>;
 }>;
 
@@ -137,11 +143,109 @@ describe('claudeRemote', () => {
     expect(ensureJavaScriptRuntimeExecutableMock).toHaveBeenCalled();
     const call = mockQuery.mock.calls[0]?.[0] as QueryCall | undefined;
     expect(call?.options?.executable).toBe('/managed/js-runtime');
+    expect(call?.options?.includeHookEvents).toBe(true);
   });
 
-  it('confirms provider acceptance after starting the legacy SDK query with the prompt stream', async () => {
-    const onPromptAcceptedByProvider = vi.fn();
+  it('arms workflow startup reconciliation after the legacy query observer installs', async () => {
+    const order: string[] = [];
+    mockQuery.mockImplementation(() => {
+      order.push('query-installed');
+      return messageStream(resultMessage());
+    });
+
+    const { claudeRemote } = await import('./claudeRemote');
+
+    await claudeRemote(createBaseOptions({
+      onWorkflowActivityObserverReady: () => { order.push('workflow-armed'); },
+      runtimeActivityAdapter: {
+        activateObservation: vi.fn(async () => { order.push('runtime-offered'); }),
+      } as any,
+    }));
+
+    expect(order).toEqual(['query-installed', 'workflow-armed', 'runtime-offered']);
+  });
+
+  it('reports only failed required-hook responses fenced to the current provider session', async () => {
+    const onProviderActivityObservationLost = vi.fn();
+    const onMessage = vi.fn();
+    const messages = [
+      systemInitMessage('current-session'),
+      {
+        type: 'system', subtype: 'hook_response', session_id: 'current-session',
+        hook_name: 'required-post-tool-use', hook_event: 'PostToolUse', outcome: 'success',
+      },
+      {
+        type: 'system', subtype: 'hook_response', session_id: 'current-session',
+        hook_name: 'permission', hook_event: 'PermissionRequest', outcome: 'error',
+      },
+      {
+        type: 'system', subtype: 'hook_response', session_id: 'current-session',
+        hook_name: 'status', hook_event: 'Stop', outcome: 'error',
+      },
+      {
+        type: 'system', subtype: 'hook_started', session_id: 'current-session',
+        hook_name: 'required-post-tool-use', hook_event: 'PostToolUse',
+      },
+      {
+        type: 'system', subtype: 'hook_progress', session_id: 'current-session',
+        hook_name: 'required-post-tool-use', hook_event: 'PostToolUse',
+      },
+      {
+        type: 'system', subtype: 'hook_response', session_id: 'stale-session',
+        hook_name: 'required-subagent-start', hook_event: 'SubagentStart', outcome: 'error',
+      },
+      {
+        type: 'system', subtype: 'hook_response', session_id: 'current-session',
+        hook_name: 'required-post-tool-use', hook_event: 'PostToolUse', outcome: 'cancelled',
+      },
+      {
+        type: 'system', subtype: 'hook_response', session_id: 'current-session',
+        hook_name: 'required-subagent-stop', hook_event: 'SubagentStop', outcome: 'error',
+      },
+    ] as SDKMessage[];
+    mockQuery.mockImplementation((config: { onMessageReceived?: (message: SDKMessage) => void }) => ({
+      async *[Symbol.asyncIterator]() {
+        for (const message of messages) {
+          config.onMessageReceived?.(message);
+          yield message;
+        }
+      },
+    }));
+    const { claudeRemote } = await import('./claudeRemote');
+
+    await claudeRemote(createBaseOptions({ onProviderActivityObservationLost, onMessage }));
+
+    expect(onProviderActivityObservationLost).toHaveBeenCalledTimes(2);
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith(systemInitMessage('current-session'));
+  });
+
+  it('installs the authenticated hook plugin before legacy provider input', async () => {
     mockQuery.mockReturnValue(messageStream(resultMessage()));
+    const { claudeRemote } = await import('./claudeRemote');
+
+    await claudeRemote(createBaseOptions({
+      hookPluginDir: '/tmp/happier-hook-plugin',
+    } as Partial<RemoteOptions>));
+
+    const call = mockQuery.mock.calls[0]?.[0] as QueryCall | undefined;
+    expect(call?.options?.extraArgs).toEqual([
+      '--plugin-dir',
+      '/tmp/happier-hook-plugin',
+    ]);
+  });
+
+  it('confirms provider acceptance after the legacy SDK reports successful prompt transport', async () => {
+    const onPromptAcceptedByProvider = vi.fn();
+    mockQuery.mockImplementation((config: QueryCall & { prompt: AsyncIterable<SDKUserMessage> }) => ({
+      async *[Symbol.asyncIterator]() {
+        const consumed = await config.prompt[Symbol.asyncIterator]().next();
+        if (!consumed.done) {
+          config.onPromptTransportOutcome?.(consumed.value, 'accepted');
+        }
+        yield resultMessage();
+      },
+    }));
     let didSendPrompt = false;
 
     const { claudeRemote } = await import('./claudeRemote');

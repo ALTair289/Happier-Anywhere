@@ -17,6 +17,7 @@ function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void
 }
 
 describe('createClaudeStartupSpec', () => {
+
   it('invokes vendor spawn without awaiting background session initialization', async () => {
     const backgroundGate = createDeferred<void>();
 

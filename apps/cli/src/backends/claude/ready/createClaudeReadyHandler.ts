@@ -25,6 +25,13 @@ export function createClaudeReadyHandler(params: Readonly<{
     assistantPreviewTracker?: Pick<TurnAssistantPreviewTracker, 'getPreview'>;
     getPending: () => unknown;
     getQueueSize: () => number;
+    /**
+     * True when the canonical pending queue holds only blocked (undeliverable) rows. Such rows can
+     * never advance the session, so they must not suppress the completed-turn ready event + push
+     * A blocked row cannot suppress the notification forever.
+     * Optional so non-pending-aware callers keep the raw queue-size guard.
+     */
+    hasOnlyBlockedPendingWork?: () => boolean;
     includeAssistantPreviewText?: boolean;
     shouldSendPush?: () => boolean;
     accountSettings?: AccountSettings | null;
@@ -32,7 +39,10 @@ export function createClaudeReadyHandler(params: Readonly<{
 }>): (context?: ReadyNotificationTurnContext) => void {
     return (context?: ReadyNotificationTurnContext) => {
         if (params.getPending()) return;
-        if (params.getQueueSize() !== 0) return;
+        // Suppress ready only while genuinely-deliverable queued work remains. A non-empty local
+        // queue whose canonical pending rows are all blocked cannot advance the session, so the
+        // completed turn must still notify rather than sit online/idle forever.
+        if (params.getQueueSize() !== 0 && params.hasOnlyBlockedPendingWork?.() !== true) return;
         if (!params.pushSender) {
             params.session.sendSessionEvent({ type: 'ready' });
             return;

@@ -11,6 +11,7 @@ import { resolveClaudeConnectedServiceSwitchContinuity } from './resolveClaudeCo
 import { CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE } from './nativeAuth/claudeCodeCredentialScopes';
 
 const CLAUDE_ROLLBACK_ENV = 'HAPPIER_CONNECTED_SERVICES_LEGACY_CLAUDE_RESTART_SAME_HOME';
+const CREDENTIAL_REVISION = 'csr_abcdefghijklmnopqrstuv';
 
 const claudeEnvKeys = [
   CLAUDE_ROLLBACK_ENV,
@@ -222,6 +223,7 @@ describe('resolveClaudeConnectedServiceSwitchContinuity', () => {
           activeProfileId: 'backup',
           fallbackProfileId: 'primary',
           generation: 7,
+          credentialRevision: CREDENTIAL_REVISION,
           targetMaterializedEnv: { CLAUDE_CONFIG_DIR: runtimeClaudeConfigDir },
           targetMaterializedRoot: runtimeClaudeConfigDir,
           claudeRuntimeAuthSharedGroupSurface: {
@@ -326,6 +328,7 @@ describe('resolveClaudeConnectedServiceSwitchContinuity', () => {
           activeProfileId: 'backup',
           fallbackProfileId: 'primary',
           generation: 7,
+          credentialRevision: CREDENTIAL_REVISION,
           targetMaterializedEnv: { CLAUDE_CONFIG_DIR: runtimeClaudeConfigDir },
           targetMaterializedRoot: runtimeClaudeConfigDir,
           claudeRuntimeAuthSharedGroupSurface: {

@@ -121,6 +121,7 @@ export async function claudeLocalLauncher(
             logPrefix: '[local]',
             getPending: () => null,
             getQueueSize: () => session.queue.size(),
+            hasOnlyBlockedPendingWork: () => session.client.hasOnlyBlockedPendingWork?.() === true,
         });
         const surfaceRateLimit = (details: NormalizedProviderUsageLimitDetailsV1): void => {
             void surfaceClaudeRateLimitRuntimeIssue(session, details, '[local]').catch((error) => {
@@ -161,7 +162,8 @@ export async function claudeLocalLauncher(
         };
         const lifecycleTracker = createClaudeLocalLifecycleTracker({
             lifecycle: turnLifecycle,
-            runtimeActivityPublisher: session.runtimeActivityPublisher,
+            runtimeActivityAdapter: session.getProviderTaskRuntimeActivityAdapter(),
+            providerActivityLedger: session.getProviderTaskActivityLedger() ?? undefined,
         });
         const unifiedTelemetry = createClaudeUnifiedTelemetrySink();
 
@@ -179,8 +181,14 @@ export async function claudeLocalLauncher(
         // system/init slash_commands are dropped before `onMessage` (F2 gate), so
         // the goal source must observe them on the RAW channel. The projector keeps
         // them out of the visible transcript.
-        onRawJsonlValue: (value) => {
-            transcriptProjector.observeRaw(value);
+        onRawJsonlValue: (value, observation) => {
+            transcriptProjector.observeRaw(value, observation);
+        },
+        onLiveJsonlValue: ({ sessionId, value }) => {
+            lifecycleTracker.observeLiveProviderActivityRow(value, sessionId);
+        },
+        onLiveJsonlObservationLost: ({ reason }) => {
+            lifecycleTracker.handleProviderActivityObservationLoss(reason);
         },
         onTranscriptMissing: () => {
             session.client.sendSessionEvent({
@@ -211,6 +219,10 @@ export async function claudeLocalLauncher(
     let deferredRemoteSwitch: { dispose: () => void } | null = null;
     let pendingQueueWatcher: { stop: () => void } | null = null;
     try {
+        workflowActivitySource?.armStartupReconciliation();
+        await session.getProviderTaskRuntimeActivityAdapter()?.activateObservation(
+            'claude-local-provider-observer-installed',
+        );
         const clientEmitter = session.client as unknown as {
             getMetadataSnapshot?: () => Metadata | null | undefined;
             on?: (event: string, listener: () => void) => void;
@@ -358,9 +370,8 @@ export async function claudeLocalLauncher(
                 }
                 return session.client.peekPendingMessageQueueV2Count({ reconcileWhenEmpty: 'skip', reason: 'passive-wait' });
             },
-            pollIntervalMs: configuration.pendingQueueIdleWakePollIntervalMs,
             requestRemoteSwitch: () => remoteSwitchController.requestRemoteSwitch('server_pending_queue'),
-            waitForPendingQueueUpdate: (signal) => session.client.waitForMetadataUpdate(signal),
+            waitForPendingQueueUpdate: (signal) => session.client.waitForPendingEligibilityUpdate(signal),
         }) : null;
 
         // Handle session start
@@ -513,6 +524,9 @@ export async function claudeLocalLauncher(
         deferredRemoteSwitch?.dispose();
         turnLifecycle.dispose();
 
+        // G-6: mark an active-but-unmet Claude goal as interrupted on graceful teardown (status stays
+        // active; the goal may resume) before the source is disposed.
+        transcriptProjector.finalizeInterruptedGoal();
         // Drain any pending workflow-activity writes, then stop scheduling (dispose via reset()).
         await transcriptProjector.flushWorkflowActivity();
         transcriptProjector.reset();

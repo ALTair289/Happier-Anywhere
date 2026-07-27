@@ -16,33 +16,31 @@ import type { Metadata } from '@/api/types';
 import type { SessionClientPort } from '@/api/session/sessionClientPort';
 import type { PushNotificationClient } from '@/api/pushNotifications';
 import { createHappierMcpBridge } from '@/agent/runtime/createHappierMcpBridge';
+import { applyRunnerMcpSessionContext } from '@/mcp/runtime/applyRunnerMcpSessionContext';
 import type { McpServerConfig } from '@/agent';
-import type { AccountSettings } from '@happier-dev/protocol';
+import {
+    type AccountSettings,
+    SessionConnectedServiceAuthCurrentGroupTruthV1Schema,
+    type SessionConnectedServiceAuthApplyGenerationRequestV1,
+    type SessionConnectedServiceAuthApplyGenerationResponseV1,
+} from '@happier-dev/protocol';
 import { resolveConfiguredClaudeConfigDir } from './utils/resolveConfiguredClaudeConfigDir';
 import type { TerminalRuntimeFlags } from '@/terminal/runtime/terminalRuntimeFlags';
 import { resolveSessionCriticalMetadataDrainTimeoutMs } from '@/session/transport/shared/sessionTimeouts';
 import { getProjectPath } from './utils/path';
 import { readExplicitClaudeResumeSessionIdFromArgs } from './utils/claudeResumeArgs';
 import {
-    createSessionRuntimeActivityPublisher,
-    type SessionRuntimeActivityPublisher,
-} from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
-import {
-    buildClaudeProviderTaskRuntimeActivitySourceId,
-    CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
-    CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+    createClaudeProviderActivityLedger,
 } from './providerActivity/createClaudeProviderActivityLedger';
+import type { SessionRuntimeActivityContributionHandle } from '@/session/runtimeActivity/types';
+import { createClaudeProviderRuntimeActivityAdapter } from './providerActivity/createClaudeProviderRuntimeActivityAdapter';
 import {
     isSidechainSessionHook,
     isSidechainSessionHookRuntimeActivityEvent,
-    isSidechainSessionHookRuntimeActivityTerminalEvent,
     readSessionHookEventName,
-    readSidechainSessionHookProviderTaskId,
 } from './utils/sessionHookAttribution';
-import { readClaudeSessionHookBackgroundTasks } from './utils/sessionHookBackgroundTasks';
-import { readClaudeSessionHookTaskNotification } from './utils/sessionHookTaskNotification';
-
-const CLAUDE_RUNTIME_ACTIVITY_PROJECTION_LEASE_MS = 120_000;
+import { ClaudeConnectedServiceAuthGroupRequestFence } from './connectedServices/claudeConnectedServiceAuthGroupRequestFence';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 
 export type SessionFoundInfo = {
     sessionId: string;
@@ -317,10 +315,13 @@ function buildClaudeReportedSessionMetadata(params: Readonly<{
 }
 
 export class Session {
+    readonly connectedServiceAuthGroupRequestFence = new ClaudeConnectedServiceAuthGroupRequestFence();
+    private unregisterConnectedServiceAuthGroupRuntimeControl: () => void = () => {};
     readonly path: string;
     readonly logPath: string;
     readonly client: SessionClientPort;
-    readonly runtimeActivityPublisher: SessionRuntimeActivityPublisher;
+    private readonly providerTaskRuntimeActivityAdapter: ReturnType<typeof createClaudeProviderRuntimeActivityAdapter> | null;
+    private readonly providerTaskActivityLedger: ReturnType<typeof createClaudeProviderActivityLedger> | null;
     pushSender: PushNotificationClient | null;
     accountSettings: AccountSettings | null;
     accountSettingsSecretsReadKeys: readonly Uint8Array[];
@@ -398,6 +399,8 @@ export class Session {
      */
     private claudeStatuslineRuntimeReconciler: ((input: ClaudeStatuslineRuntimeReconcileInput) => void) | null = null;
     private readonly criticalMetadataWrites = new Set<Promise<void>>();
+    private readonly providerInputConsumers = new Set<SessionProviderInputConsumer<EnhancedMode, string>>();
+    private providerInputAdmissionClosed = false;
     private readonly reportSessionMetadataToDaemon: SessionMetadataDaemonReporter | null;
     
     /** Keep alive interval reference for cleanup */
@@ -429,17 +432,27 @@ export class Session {
         defaultSystemPromptText?: string,
         precomputedMcpBridge?: { mcpServers: Record<string, McpServerConfig>; stop: () => void } | null,
         reportSessionMetadataToDaemon?: SessionMetadataDaemonReporter | null,
+        runtimeActivityContributions?: Readonly<{
+            providerTasks?: SessionRuntimeActivityContributionHandle | null;
+            isCurrentRuntime?: () => boolean;
+        }>,
     }) {
         this.path = opts.path;
         this.client = opts.client;
-        this.runtimeActivityPublisher = createSessionRuntimeActivityPublisher({
-            nowMs: () => Date.now(),
-            leaseDurationMs: CLAUDE_RUNTIME_ACTIVITY_PROJECTION_LEASE_MS,
-            updateRuntimeActivityProjection: (projection) => opts.client.updateRuntimeActivityProjection?.(projection),
-            logError: (event, details) => {
-                logger.debug(`[claude-session] ${event}`, details);
-            },
-        });
+        this.unregisterConnectedServiceAuthGroupRuntimeControl = this.client.registerSessionRuntimeControls?.({
+            applyConnectedServiceAuthGeneration: this.applyConnectedServiceAuthGeneration,
+        }) ?? (() => {});
+        const providerTaskContributionHandle = opts.runtimeActivityContributions?.providerTasks ?? null;
+        this.providerTaskActivityLedger = providerTaskContributionHandle
+            ? createClaudeProviderActivityLedger()
+            : null;
+        this.providerTaskRuntimeActivityAdapter = providerTaskContributionHandle && this.providerTaskActivityLedger
+            ? createClaudeProviderRuntimeActivityAdapter({
+                contributionHandle: providerTaskContributionHandle,
+                providerActivityLedger: this.providerTaskActivityLedger,
+                isCurrentRuntime: opts.runtimeActivityContributions?.isCurrentRuntime,
+            })
+            : null;
         this.pushSender = opts.pushSender ?? null;
         this.accountSettings = opts.accountSettings ?? null;
         this.accountSettingsSecretsReadKeys = opts.accountSettingsSecretsReadKeys ?? [];
@@ -510,6 +523,21 @@ export class Session {
         this.accountSettings = settings;
     }
 
+    registerProviderInputConsumer(consumer: SessionProviderInputConsumer<EnhancedMode, string>): void {
+        this.providerInputConsumers.add(consumer);
+        if (this.providerInputAdmissionClosed) {
+            void consumer.closeProviderInputAdmissionAndWaitForDispatches();
+        }
+    }
+
+    async closeProviderInputAdmissionAndWaitForDispatches(): Promise<void> {
+        this.providerInputAdmissionClosed = true;
+        await Promise.all(
+            [...this.providerInputConsumers].map((consumer) =>
+                consumer.closeProviderInputAdmissionAndWaitForDispatches()),
+        );
+    }
+
     private scheduleNextKeepAlive(): void {
         if (this.keepAliveTimer) {
             clearTimeout(this.keepAliveTimer);
@@ -528,6 +556,8 @@ export class Session {
      * Cleanup resources (call when session is no longer needed)
      */
     cleanup = (): void => {
+        this.unregisterConnectedServiceAuthGroupRuntimeControl();
+        this.unregisterConnectedServiceAuthGroupRuntimeControl = () => {};
         if (this.keepAliveTimer) {
             clearTimeout(this.keepAliveTimer);
             this.keepAliveTimer = null;
@@ -545,6 +575,17 @@ export class Session {
         this.permissionRpcRouter = null;
         logger.debug('[Session] Cleaned up resources');
     }
+
+    applyConnectedServiceAuthGeneration = async (
+        request: SessionConnectedServiceAuthApplyGenerationRequestV1,
+    ): Promise<SessionConnectedServiceAuthApplyGenerationResponseV1> => {
+        const truth = SessionConnectedServiceAuthCurrentGroupTruthV1Schema.safeParse(request.authGeneration);
+        if (!truth.success) {
+            return { ok: false, errorCode: 'invalid_request', error: 'invalid_request' };
+        }
+        this.connectedServiceAuthGroupRequestFence.applyCurrentTruth(truth.data);
+        return { ok: true, appliedVia: 'current_truth_fence' };
+    };
 
     private trackCriticalMetadataWrite(write: () => Promise<void> | void, reason: string): void {
         let result: Promise<void> | void;
@@ -584,6 +625,32 @@ export class Session {
         }
     }
 
+    publishUnifiedTerminalHostMetadata = async (
+        terminal: NonNullable<Metadata['terminal']>,
+    ): Promise<void> => {
+        let updatedMetadata: Metadata | null = null;
+        try {
+            await this.client.updateMetadata((metadata) => {
+                updatedMetadata = {
+                    ...metadata,
+                    terminal,
+                };
+                return updatedMetadata;
+            });
+            if (updatedMetadata) {
+                await this.reportSessionMetadataToDaemon?.({
+                    sessionId: this.client.sessionId,
+                    metadata: updatedMetadata,
+                });
+            }
+        } catch (error) {
+            logger.debug(
+                '[Session] Failed to publish Claude Unified terminal host metadata (non-fatal)',
+                error,
+            );
+        }
+    };
+
     async getOrCreateHappierMcpBridge(): Promise<{ mcpServers: Record<string, McpServerConfig>; mcpConfigJson: string }> {
         if (this.happierMcpBridge) {
             return { mcpServers: this.happierMcpBridge.mcpServers, mcpConfigJson: this.happierMcpBridge.mcpConfigJson };
@@ -591,7 +658,25 @@ export class Session {
 
         if (!this.happierMcpBridgePromise) {
             this.happierMcpBridgePromise = (async () => {
-                const bridge = await createHappierMcpBridge(this.client, {
+                const mcpSession = applyRunnerMcpSessionContext(this.client, {
+                    getPermissionMode: () => this.lastPermissionMode,
+                    getBackendTarget: () => ({ kind: 'builtInAgent', agentId: 'claude' }),
+                    getCurrentSessionLocation: () => {
+                        const metadata = this.client.getMetadataSnapshot?.() as Record<string, unknown> | null | undefined;
+                        const host = typeof metadata?.host === 'string' && metadata.host.trim()
+                            ? metadata.host.trim()
+                            : null;
+                        const machineId = typeof metadata?.machineId === 'string' && metadata.machineId.trim()
+                            ? metadata.machineId.trim()
+                            : null;
+                        return {
+                            path: this.path,
+                            host,
+                            machineId,
+                        };
+                    },
+                });
+                const bridge = await createHappierMcpBridge(mcpSession, {
                     accountSettings: this.accountSettings,
                 });
                 const mcpConfigJson = JSON.stringify({ mcpServers: bridge.mcpServers });
@@ -667,13 +752,18 @@ export class Session {
     }
 
     onThinkingChange = (thinking: boolean) => {
-        const didChange = this.applyThinkingState(thinking);
+        this.applyThinkingState(thinking);
 
-        if (!didChange) {
-            return;
-        }
-
+        // The task lifecycle is keyed on `currentTaskId` — NOT on the `thinking` display flag's
+        // transition. An optimistic `setThinkingWithoutTaskLifecycle(true)` latch (fired on remote
+        // prompt injection) sets `thinking` before the canonical hook-driven onThinkingChange(true),
+        // so gating on a thinking-flag change let the latch swallow the task open and the completed
+        // turn never emitted `task_complete` (no completed status → no ready/push → no attention).
+        // Keying on the task itself collapses that two-writer split-brain to one writer.
         if (thinking) {
+            if (this.currentTaskId) {
+                return;
+            }
             const id = randomUUID();
             this.currentTaskId = id;
             this.client.sendAgentMessage('claude', { type: 'task_started', id });
@@ -739,14 +829,8 @@ export class Session {
                 sessionId,
                 workingDirectory: this.path,
             });
-        const metadataTranscriptPath = resumableTranscriptPath
-            ?? (
-                nativeTranscriptPathCandidate
-                && !isReachableClaudeTranscriptPath(nativeTranscriptPathCandidate)
-                    ? nativeTranscriptPathCandidate
-                    : null
-            );
-        const observedTranscriptPath = resumableTranscriptPath ?? nextTranscriptPath ?? metadataTranscriptPath;
+        const metadataTranscriptPath = resumableTranscriptPath;
+        const observedTranscriptPath = resumableTranscriptPath ?? nextTranscriptPath ?? nativeTranscriptPathCandidate;
 
         const prevSessionId = this.sessionId;
         const prevTranscriptPath = this.transcriptPath;
@@ -837,98 +921,20 @@ export class Session {
         }
     }
 
-    private publishSidechainHookRuntimeActivity = (data: SessionHookData): void => {
-        const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(
-            readSidechainSessionHookProviderTaskId(data),
-        );
-        if (!sourceId) return;
-        if (isSidechainSessionHookRuntimeActivityTerminalEvent(data)) {
-            void this.runtimeActivityPublisher.clearSource(
-                sourceId,
-                'claude_sidechain_hook_terminal',
-            ).catch((error) => {
-                logger.debug('[Session] failed to clear Claude sidechain hook runtime activity (non-fatal)', { error });
-            });
-            return;
-        }
-        if (!isSidechainSessionHookRuntimeActivityEvent(data)) return;
-        void this.runtimeActivityPublisher.observeSource({
-            id: sourceId,
-            reason: 'claude_sidechain_hook_activity',
-        }).catch((error) => {
-            logger.debug('[Session] failed to renew Claude sidechain hook runtime activity (non-fatal)', { error });
-        });
-    }
-
-    private publishMainHookBackgroundTaskRuntimeActivity = (data: SessionHookData): void => {
-        if (isSidechainSessionHook(data)) return;
-        if (readSessionHookEventName(data) !== 'Stop') return;
-        const backgroundTasks = readClaudeSessionHookBackgroundTasks(data);
-        if (!backgroundTasks) return;
-        if (backgroundTasks.reportsEmpty) {
-            void this.runtimeActivityPublisher.clearProviderSources(
-                CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
-                'claude_hook_no_background_tasks',
-            ).catch((error) => {
-                logger.debug('[Session] failed to clear Claude hook background-task runtime activity (non-fatal)', { error });
-            });
-            return;
-        }
-        for (const taskId of backgroundTasks.terminalTaskIds) {
-            const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
-            if (!sourceId) continue;
-            void this.runtimeActivityPublisher.clearSource(
-                sourceId,
-                'claude_hook_background_task_terminal',
-            ).catch((error) => {
-                logger.debug('[Session] failed to clear Claude hook terminal background task (non-fatal)', { error });
-            });
-        }
-        for (const taskId of backgroundTasks.activeTaskIds) {
-            const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
-            if (!sourceId) continue;
-            void this.runtimeActivityPublisher.setSourceActive({
-                id: sourceId,
-                sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
-                providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
-            }).catch((error) => {
-                logger.debug('[Session] failed to publish Claude hook background task runtime activity (non-fatal)', { error });
-            });
-        }
-    }
-
-    private publishHookTaskNotificationRuntimeActivity = (data: SessionHookData): void => {
-        const notification = readClaudeSessionHookTaskNotification(data);
-        if (!notification) return;
-        const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(notification.taskId);
-        if (!sourceId) return;
-        if (notification.terminal) {
-            void this.runtimeActivityPublisher.clearSource(
-                sourceId,
-                'claude_hook_task_notification_terminal',
-            ).catch((error) => {
-                logger.debug('[Session] failed to clear Claude hook task notification runtime activity (non-fatal)', { error });
-            });
-            return;
-        }
-        void this.runtimeActivityPublisher.setSourceActive({
-            id: sourceId,
-            sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
-            providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
-        }).catch((error) => {
-            logger.debug('[Session] failed to publish Claude hook task notification runtime activity (non-fatal)', { error });
-        });
-    }
-
     onClaudeSessionHook = (data: SessionHookData): void => {
-        this.publishHookTaskNotificationRuntimeActivity(data);
-        this.publishMainHookBackgroundTaskRuntimeActivity(data);
-        this.publishSidechainHookRuntimeActivity(data);
         for (const callback of this.claudeSessionHookCallbacks) {
             callback(data);
         }
     }
-    
+
+    getProviderTaskRuntimeActivityAdapter(): ReturnType<typeof createClaudeProviderRuntimeActivityAdapter> | null {
+        return this.providerTaskRuntimeActivityAdapter;
+    }
+
+    getProviderTaskActivityLedger(): ReturnType<typeof createClaudeProviderActivityLedger> | null {
+        return this.providerTaskActivityLedger;
+    }
+
     /**
      * Register a callback to be notified when session ID is found/changed
      */

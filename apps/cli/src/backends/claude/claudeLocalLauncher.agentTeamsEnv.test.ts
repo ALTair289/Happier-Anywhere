@@ -55,6 +55,7 @@ function createSessionStub(): Session {
     keepAlive: vi.fn(),
     getMetadataSnapshot: vi.fn(() => null),
     waitForMetadataUpdate: vi.fn(async () => true),
+    waitForPendingEligibilityUpdate: vi.fn(async () => true),
     popPendingMessage: vi.fn(async () => false),
     peekPendingMessageQueueV2Count: vi.fn(async () => 0),
     discardPendingMessageQueueV2All: vi.fn(async () => 0),

@@ -1,12 +1,17 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
+import { spawn } from 'node:child_process';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { HAPPIER_CLAUDE_ENDPOINT_STATE_ENV_KEY, type ClaudeEndpointState } from '@/daemon/sessionRegistry';
-import { resolveClaudeAdoptEndpointRecovery } from './runClaude';
+import {
+    HAPPIER_CLAUDE_ENDPOINT_STATE_ENV_KEY,
+    type AttachmentBoundClaudeEndpointState,
+} from './endpointRecovery/claudeEndpointArtifacts';
+import { resolveClaudeAdoptEndpointRecovery } from './endpointRecovery/claudeEndpointRecovery';
+import { startHookServer } from './utils/startHookServer';
 
 const originalEndpointStateEnv = process.env[HAPPIER_CLAUDE_ENDPOINT_STATE_ENV_KEY];
 
@@ -38,14 +43,35 @@ async function findAvailablePort(): Promise<number> {
     return port;
 }
 
+async function runSessionForwarder(params: Readonly<{
+    scriptPath: string;
+    port: number;
+    secretFilePath: string;
+    body: unknown;
+}>): Promise<number | null> {
+    return await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [
+            params.scriptPath,
+            String(params.port),
+            'UserPromptSubmit',
+            '--secret-file',
+            params.secretFilePath,
+        ], { stdio: ['pipe', 'ignore', 'ignore'] });
+        child.once('error', reject);
+        child.once('close', resolve);
+        child.stdin.end(JSON.stringify(params.body));
+    });
+}
+
 async function writeRecoveryArtifacts(params: Readonly<{
     root: string;
+    attachmentId?: string;
     stateHookServerPort: number;
     hooksJsonHookServerPort?: number;
     mcpPort: number;
     permissionSecret?: string;
     statuslineSecret?: string;
-}>): Promise<ClaudeEndpointState> {
+}>): Promise<AttachmentBoundClaudeEndpointState> {
     const hookPluginDir = join(params.root, 'hook-plugin');
     const hooksDir = join(hookPluginDir, 'hooks');
     const hookSettingsPath = join(params.root, 'session-hook.json');
@@ -72,7 +98,8 @@ async function writeRecoveryArtifacts(params: Readonly<{
         },
     }), 'utf8');
     return {
-        v: 1,
+        v: 2,
+        attachmentId: params.attachmentId ?? 'attachment-endpoint-test',
         hookServerPort: params.stateHookServerPort,
         hookPluginDir,
         hookSettingsPath,
@@ -106,8 +133,9 @@ describe('resolveClaudeAdoptEndpointRecovery', () => {
     it('returns null when retained endpoint artifacts are missing', async () => {
         const root = await mkdtemp(join(tmpdir(), 'happier-adopt-missing-'));
         tempDirs.push(root);
-        const state: ClaudeEndpointState = {
-            v: 1,
+        const state: AttachmentBoundClaudeEndpointState = {
+            v: 2,
+            attachmentId: 'attachment-missing-artifacts',
             hookServerPort: await findAvailablePort(),
             hookPluginDir: join(root, 'missing-plugin'),
             hookSettingsPath: join(root, 'missing-settings.json'),
@@ -115,6 +143,23 @@ describe('resolveClaudeAdoptEndpointRecovery', () => {
             mcpPort: await findAvailablePort(),
         };
         process.env[HAPPIER_CLAUDE_ENDPOINT_STATE_ENV_KEY] = JSON.stringify(state);
+
+        await expect(resolveClaudeAdoptEndpointRecovery()).resolves.toBeNull();
+    });
+
+    it('rejects an unbound legacy endpoint descriptor even when its artifacts are valid', async () => {
+        const root = await mkdtemp(join(tmpdir(), 'happier-adopt-unbound-'));
+        tempDirs.push(root);
+        const state = await writeRecoveryArtifacts({
+            root,
+            stateHookServerPort: await findAvailablePort(),
+            mcpPort: await findAvailablePort(),
+        });
+        process.env[HAPPIER_CLAUDE_ENDPOINT_STATE_ENV_KEY] = JSON.stringify({
+            ...state,
+            v: 1,
+            attachmentId: undefined,
+        });
 
         await expect(resolveClaudeAdoptEndpointRecovery()).resolves.toBeNull();
     });
@@ -168,5 +213,52 @@ describe('resolveClaudeAdoptEndpointRecovery', () => {
             permissionHookSecret: 'permission-secret-happy',
             statuslineSecret: 'statusline-secret-happy',
         });
+
+        const hooksJson = JSON.parse(await readFile(join(state.hookPluginDir!, 'hooks', 'hooks.json'), 'utf8')) as any;
+        const userPromptSubmitCommand = hooksJson.hooks?.UserPromptSubmit?.[0]?.hooks?.[0]?.command as string;
+        expect(userPromptSubmitCommand).toEqual(expect.any(String));
+        const sessionForwarderPath = userPromptSubmitCommand.match(/"([^"]*session_hook_forwarder\.cjs)"/)?.[1];
+        expect(sessionForwarderPath).toContain(state.hookPluginDir!);
+        await expect(access(sessionForwarderPath!)).resolves.toBeUndefined();
+
+        const onSessionHook = vi.fn();
+        const hookServer = await startHookServer({
+            requestedPort: state.hookServerPort,
+            permissionHookSecret: 'permission-secret-happy',
+            onSessionHook,
+        });
+        try {
+            await expect(runSessionForwarder({
+                scriptPath: sessionForwarderPath!,
+                port: state.hookServerPort,
+                secretFilePath: join(state.hookPluginDir!, 'permission-hook-secret'),
+                body: { session_id: 'claude-retained-session', prompt: 'retained prompt' },
+            })).resolves.toBe(0);
+            await vi.waitFor(() => {
+                expect(onSessionHook).toHaveBeenCalledWith(
+                    'claude-retained-session',
+                    expect.objectContaining({ hook_event_name: 'UserPromptSubmit', prompt: 'retained prompt' }),
+                );
+            });
+        } finally {
+            hookServer.stop();
+        }
+    });
+
+    it('keeps the complete legacy hooks file when local forwarder materialization fails', async () => {
+        const root = await mkdtemp(join(tmpdir(), 'happier-adopt-refresh-failure-'));
+        tempDirs.push(root);
+        const state = await writeRecoveryArtifacts({
+            root,
+            stateHookServerPort: await findAvailablePort(),
+            mcpPort: await findAvailablePort(),
+        });
+        const hooksJsonPath = join(state.hookPluginDir!, 'hooks', 'hooks.json');
+        const originalHooksJson = await readFile(hooksJsonPath, 'utf8');
+        await writeFile(join(state.hookPluginDir!, 'runtime-assets'), 'blocks runtime asset directory creation', 'utf8');
+        process.env[HAPPIER_CLAUDE_ENDPOINT_STATE_ENV_KEY] = JSON.stringify(state);
+
+        await expect(resolveClaudeAdoptEndpointRecovery()).resolves.toBeNull();
+        await expect(readFile(hooksJsonPath, 'utf8')).resolves.toBe(originalHooksJson);
     });
 });

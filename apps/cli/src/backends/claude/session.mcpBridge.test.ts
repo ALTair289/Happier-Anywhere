@@ -29,6 +29,7 @@ function createSessionClientStub(overrides?: Partial<SessionClientPort>): Sessio
     keepAlive: vi.fn(),
     getMetadataSnapshot: () => null,
     waitForMetadataUpdate: vi.fn(async () => false),
+    waitForPendingEligibilityUpdate: vi.fn(async () => false),
     popPendingMessage: vi.fn(async () => false),
     peekPendingMessageQueueV2Count: vi.fn(async () => 0),
     discardPendingMessageQueueV2All: vi.fn(async () => 0),
@@ -97,6 +98,29 @@ describe('Session (MCP bridge)', () => {
     try {
       const out = await session.getOrCreateHappierMcpBridge();
       expect(out.mcpServers).toEqual({ happier: { command: 'precomputed' }, extra: { command: 'extra' } });
+    } finally {
+      session.cleanup();
+    }
+  });
+
+  it('exposes the last Claude session permission mode to the MCP bridge', async () => {
+    const client = createSessionClientStub();
+    const session = new Session({
+      client,
+      path: '/tmp',
+      logPath: '/tmp/log',
+      sessionId: null,
+      claudeArgs: [],
+      messageQueue: new MessageQueue2<EnhancedMode>(() => 'mode'),
+      onModeChange: () => {},
+      hookSettingsPath: '/tmp/hooks.json',
+    } as any);
+
+    try {
+      session.setLastPermissionMode('bypassPermissions');
+      await session.getOrCreateHappierMcpBridge();
+      const bridgeSession = createHappierMcpBridgeSpy.mock.calls.at(-1)?.[0] as any;
+      expect(bridgeSession?.getPermissionMode?.()).toBe('yolo');
     } finally {
       session.cleanup();
     }

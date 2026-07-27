@@ -1,20 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionClientPort } from '@/api/session/sessionClientPort';
 import { MessageQueue2 } from '@/agent/runtime/modeMessageQueue';
-import type { EnhancedMode } from './loop';
+import { loop, type EnhancedMode } from './loop';
 import type { Session } from './session';
 
-const mockClaudeLocalLauncher = vi.fn();
+const mockClaudeLocalLauncher = vi.hoisted(() => vi.fn());
 vi.mock('./claudeLocalLauncher', () => ({
   claudeLocalLauncher: mockClaudeLocalLauncher,
 }));
 
-const mockClaudeRemoteLauncher = vi.fn();
+const mockClaudeRemoteLauncher = vi.hoisted(() => vi.fn());
 vi.mock('./claudeRemoteLauncher', () => ({
   claudeRemoteLauncher: mockClaudeRemoteLauncher,
 }));
 
-const mockClaudeUnifiedTerminalLauncher = vi.fn();
+const mockClaudeUnifiedTerminalLauncher = vi.hoisted(() => vi.fn());
 vi.mock('./unifiedTerminal/claudeUnifiedTerminalLauncher', () => ({
   claudeUnifiedTerminalLauncher: mockClaudeUnifiedTerminalLauncher,
 }));
@@ -48,6 +48,7 @@ function createLoopClient(overrides?: Partial<SessionClientPort>): SessionClient
     sendAgentMessageCommitted: vi.fn(async () => {}),
     keepAlive: vi.fn(),
     getMetadataSnapshot: () => null,
+    waitForPendingEligibilityUpdate: vi.fn(async () => false),
     waitForMetadataUpdate: vi.fn(async () => false),
     popPendingMessage: vi.fn(async () => false),
     peekPendingMessageQueueV2Count: vi.fn(async () => 0),
@@ -68,8 +69,6 @@ async function runLoop(options?: Partial<LoopOptions>): Promise<{ code: number; 
   const keepAlive = vi.fn();
   const client = createLoopClient({ keepAlive });
   const messageQueue = new MessageQueue2<EnhancedMode>(() => 'mode');
-  const { loop } = await import('./loop');
-
   let capturedSession: Session | null = null;
 
   const code = await loop({
@@ -91,6 +90,40 @@ describe.sequential('loop', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockResolveCliFeatureDecision.mockReturnValue({ state: 'enabled' });
+  });
+
+  it.each([
+    ['remote', false],
+    ['unified', true],
+  ] as const)('awaits Claude readiness reconciliation before the %s launcher', async (_label, unified) => {
+    let releaseReady!: () => void;
+    const ready = new Promise<void>((resolve) => { releaseReady = resolve; });
+    const client = createLoopClient({ registerSessionRuntimeControls: vi.fn(() => vi.fn()) });
+    const messageQueue = new MessageQueue2<EnhancedMode>(() => 'mode');
+    const { loop } = await import('./loop');
+    if (unified) {
+      mockClaudeUnifiedTerminalLauncher.mockResolvedValueOnce({ type: 'exit', code: 0 });
+    } else {
+      mockClaudeRemoteLauncher.mockResolvedValueOnce('exit');
+    }
+
+    const loopResult = loop({
+      path: '/tmp',
+      startingMode: 'remote',
+      claudeUnifiedTerminalEnabled: unified,
+      onModeChange: () => {},
+      session: client,
+      messageQueue,
+      hookSettingsPath: '/tmp/hooks.json',
+      onSessionReady: async () => await ready,
+    });
+    await Promise.resolve();
+    expect(mockClaudeRemoteLauncher).not.toHaveBeenCalled();
+    expect(mockClaudeUnifiedTerminalLauncher).not.toHaveBeenCalled();
+
+    releaseReady();
+    await expect(loopResult).resolves.toBe(0);
+    expect(unified ? mockClaudeUnifiedTerminalLauncher : mockClaudeRemoteLauncher).toHaveBeenCalledOnce();
   });
 
   it('does not fetch transcript permission intent during loop startup seeding', async () => {
@@ -241,6 +274,47 @@ describe.sequential('loop', () => {
       expect(result.keepAlive.mock.calls.some((call) => call[1] === 'local')).toBe(true);
     } finally {
       result.capturedSession?.cleanup();
+    }
+  });
+
+  it('activates the current-runtime provider observer before a remote provider can accept input', async () => {
+    const order: string[] = [];
+    const readySession: { current: Session | null } = { current: null };
+    let noteProviderEntered = (): void => {
+      throw new Error('provider entry signal was not armed');
+    };
+    const providerEntered = new Promise<void>((resolve) => {
+      noteProviderEntered = resolve;
+    });
+    const providerTasks = {
+      report: vi.fn(async () => {}),
+      markUnknown: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const activateProviderTasks = vi.fn(async () => {
+      order.push('observer');
+      return { providerTasks, isCurrentRuntime: () => true };
+    });
+    mockClaudeRemoteLauncher.mockImplementationOnce(async () => {
+      order.push('provider');
+      noteProviderEntered();
+      return await new Promise<never>(() => {});
+    });
+
+    void runLoop({
+      startingMode: 'remote',
+      runtimeActivityContributions: { activateProviderTasks },
+      onSessionReady: (session) => {
+        readySession.current = session;
+        order.push('session');
+      },
+    });
+    await providerEntered;
+    try {
+      expect(activateProviderTasks).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(['observer', 'session', 'provider']);
+    } finally {
+      readySession.current?.cleanup();
     }
   });
 });

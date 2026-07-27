@@ -420,7 +420,7 @@ export async function claudeLocal(opts: {
 
             if (shouldUseNodeLauncher) {
                 if (!claudeCliPath || (!existsSync(claudeCliPath) && !isEmbeddedBunBundlePath(claudeCliPath))) {
-                    throw new Error('Claude local launcher not found. Please ensure HAPPIER_PROJECT_ROOT is set correctly for development.');
+                    throw new Error('Claude local launcher not found. Please ensure CLI runtime assets are present next to the running bundle.');
                 }
 
                 // Avoid re-running auto-discovery inside the node wrapper (saves filesystem work).

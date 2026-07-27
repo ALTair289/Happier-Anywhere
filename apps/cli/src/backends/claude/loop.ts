@@ -13,6 +13,7 @@ import type { McpServerConfig } from '@/agent';
 import type { TerminalRuntimeFlags } from '@/terminal/runtime/terminalRuntimeFlags';
 import { resolveCliFeatureDecision } from '@/features/featureDecisionService';
 import { installClaudeProviderOwnedUserMessageEchoClassifier } from './utils/claudeProviderOwnedUserMessageEcho';
+import type { SessionRuntimeActivityContributionHandle } from '@/session/runtimeActivity/types';
 
 // Re-export permission mode type from api/types
 // Single unified type with 7 modes - Codex modes mapped at SDK boundary
@@ -71,7 +72,6 @@ export interface EnhancedMode {
     claudeRemoteDebugCategories?: ReadonlyArray<'api' | 'mcp' | 'hooks' | 'file' | '1p'>;
     claudeRemoteAdvancedOptionsJson?: string;
 }
-
 interface LoopOptions {
     path: string
     model?: string
@@ -88,7 +88,7 @@ interface LoopOptions {
     accountSettingsSecretsReadKeys?: readonly Uint8Array[]
     claudeArgs?: string[]
     messageQueue: MessageQueue2<EnhancedMode>
-    onSessionReady?: (session: Session) => void
+    onSessionReady?: (session: Session) => Promise<void> | void
     /** Path to temporary settings file with non-hook config (required for session tracking) */
     hookSettingsPath: string
     /**
@@ -114,7 +114,19 @@ interface LoopOptions {
         sessionId: string;
         metadata: import('@/api/types').Metadata;
     }>) => Promise<void> | void
+    runtimeActivityContributions?: Readonly<{
+        activateProviderTasks(): Promise<Readonly<{
+            providerTasks: SessionRuntimeActivityContributionHandle;
+            isCurrentRuntime: () => boolean;
+        }>>;
+    }>
     initialClaudeUnifiedTerminalMode?: EnhancedMode
+    expectedExistingTerminalHostAttachmentId?: string
+    onTerminalHostReady?: ((params: Readonly<{
+        handle: import('@/integrations/terminalHost/_types').TerminalHostHandle;
+        terminal: NonNullable<import('@/api/types').Metadata['terminal']>;
+        destroyOwnedHostForExplicitStop: () => Promise<void>;
+    }>) => void | Promise<void>)
     signal?: AbortSignal
 }
 
@@ -124,6 +136,8 @@ export async function loop(opts: LoopOptions): Promise<number> {
 
     // Get log path for debug display
     const logPath = logger.logFilePath;
+    const runtimeActivityContributions =
+        await opts.runtimeActivityContributions?.activateProviderTasks();
     let session = new Session({
         client: opts.session,
         pushSender: opts.pushSender ?? null,
@@ -144,6 +158,7 @@ export async function loop(opts: LoopOptions): Promise<number> {
         defaultSystemPromptText: opts.defaultSystemPromptText,
         precomputedMcpBridge: opts.precomputedMcpBridge ?? null,
         reportSessionMetadataToDaemon: opts.reportSessionMetadataToDaemon ?? null,
+        runtimeActivityContributions,
     });
     session.claudeCodeExperimentalAgentTeamsEnabled = opts.claudeCodeExperimentalAgentTeamsEnabled === true;
 
@@ -159,7 +174,7 @@ export async function loop(opts: LoopOptions): Promise<number> {
         session.lastPermissionMode = opts.permissionMode ?? 'default';
         session.lastPermissionModeUpdatedAt = typeof opts.permissionModeUpdatedAt === 'number' ? opts.permissionModeUpdatedAt : 0;
     }
-    opts.onSessionReady?.(session)
+    await opts.onSessionReady?.(session)
 
     if (opts.claudeUnifiedTerminalEnabled === true) {
         const unifiedTerminalDecision = resolveCliFeatureDecision({
@@ -176,6 +191,8 @@ export async function loop(opts: LoopOptions): Promise<number> {
                 claudeUnifiedTerminalEnabled: true,
                 claudeCodeExperimentalAgentTeamsEnabled: opts.claudeCodeExperimentalAgentTeamsEnabled,
             },
+            expectedExistingTerminalHostAttachmentId: opts.expectedExistingTerminalHostAttachmentId,
+            onTerminalHostReady: opts.onTerminalHostReady,
             signal: opts.signal,
         });
         switch (result.type) {

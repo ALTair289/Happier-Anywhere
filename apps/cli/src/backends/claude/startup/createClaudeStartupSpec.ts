@@ -41,7 +41,10 @@ const defaultDeps: CreateClaudeStartupSpecDeps = {
   spawnLoop: async () => 0,
 };
 
-export function createClaudeStartupSpec(params: { deps?: Partial<CreateClaudeStartupSpecDeps> }): BackendStartupSpec<ClaudeStartupArtifacts> {
+export function createClaudeStartupSpec(params: {
+  configureSessionClient?: (session: DeferredApiSessionClient) => void;
+  deps?: Partial<CreateClaudeStartupSpecDeps>;
+}): BackendStartupSpec<ClaudeStartupArtifacts> {
   const deps: CreateClaudeStartupSpecDeps = { ...defaultDeps, ...(params.deps ?? {}) };
 
   const tasks: Array<StartupTask<ClaudeStartupArtifacts>> = [
@@ -65,6 +68,7 @@ export function createClaudeStartupSpec(params: { deps?: Partial<CreateClaudeSta
           maxBytes: configuration.startupDeferredSessionBufferMaxBytes,
         },
       });
+      params.configureSessionClient?.(deferredSession);
 
       return {
         deferredSession,

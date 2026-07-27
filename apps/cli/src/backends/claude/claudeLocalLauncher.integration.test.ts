@@ -50,6 +50,11 @@ vi.mock('./utils/sessionScanner', () => ({
   createSessionScanner: mockCreateSessionScanner,
 }));
 
+const mockCreateClaudeWorkflowActivitySourceForSession = vi.fn();
+vi.mock('./workflows/createClaudeWorkflowActivitySourceForSession', () => ({
+  createClaudeWorkflowActivitySourceForSession: mockCreateClaudeWorkflowActivitySourceForSession,
+}));
+
 vi.mock('@/ui/logger', () => ({
   logger: {
     debug: vi.fn(),
@@ -61,6 +66,10 @@ vi.mock('@/ui/logger', () => ({
 vi.mock('@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon', () => ({
   reportConnectedServiceRuntimeAuthFailureToDaemon: vi.fn(async () => {}),
 }));
+
+// Transform the launcher dependency graph during test-file collection so the
+// first case's timeout measures launcher behavior rather than Vite compilation.
+await import('./claudeLocalLauncher');
 
 type SessionClientStub = EventEmitter &
   SessionClientPort & {
@@ -116,7 +125,10 @@ function hookWithTranscript(transcriptPath: string): SessionFoundHookData {
   return { transcript_path: transcriptPath };
 }
 
-function createLocalHarness(options?: { metadataSnapshot?: MetadataSnapshot }): LocalHarness {
+function createLocalHarness(options?: {
+  metadataSnapshot?: MetadataSnapshot;
+  providerTasks?: NonNullable<ConstructorParameters<typeof Session>[0]['runtimeActivityContributions']>['providerTasks'];
+}): LocalHarness {
   const switchDeferred = createDeferred<RpcHandler>();
   const abortDeferred = createDeferred<RpcHandler>();
   const sendSessionEvent = vi.fn();
@@ -131,6 +143,7 @@ function createLocalHarness(options?: { metadataSnapshot?: MetadataSnapshot }): 
     },
     getMetadataSnapshot: options?.metadataSnapshot ? vi.fn(() => options.metadataSnapshot) : undefined,
     waitForMetadataUpdate: vi.fn(async () => false),
+    waitForPendingEligibilityUpdate: vi.fn(async () => false),
     popPendingMessage: vi.fn(async () => false),
     rpcHandlerManager: {
       registerHandler: vi.fn((method: string, handler: RpcHandler) => {
@@ -163,6 +176,9 @@ function createLocalHarness(options?: { metadataSnapshot?: MetadataSnapshot }): 
     messageQueue: new MessageQueue2<EnhancedMode>(() => 'mode'),
     onModeChange: () => {},
     hookSettingsPath: '/tmp/hooks.json',
+    runtimeActivityContributions: options?.providerTasks
+      ? { providerTasks: options.providerTasks }
+      : undefined,
   });
   createdSessions.push(session);
 
@@ -180,8 +196,13 @@ const defaultMode = { permissionMode: 'default' } as EnhancedMode;
 describe('claudeLocalLauncher', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockClaudeLocal.mockReset();
+    mockCreateSessionScanner.mockReset();
     readlineAnswer = 'n';
+    mockClaudeLocal.mockResolvedValue(undefined);
     mockCreateSessionScanner.mockResolvedValue(createSessionScannerStub());
+    mockCreateClaudeWorkflowActivitySourceForSession.mockReset();
+    mockCreateClaudeWorkflowActivitySourceForSession.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -211,6 +232,76 @@ describe('claudeLocalLauncher', () => {
         message: expect.any(String),
       }),
     );
+  });
+
+  it('offers Runtime Activity only after the local transcript observer installs', async () => {
+    const order: string[] = [];
+    const providerTasks = {
+      report: vi.fn(async () => { order.push('runtime-offered'); }),
+      markUnknown: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const { session } = createLocalHarness({ providerTasks });
+    mockCreateSessionScanner.mockImplementationOnce(async () => {
+      order.push('scanner-installed');
+      return createSessionScannerStub();
+    });
+    mockClaudeLocal.mockImplementationOnce(async () => {
+      order.push('provider-started');
+    });
+
+    const { claudeLocalLauncher } = await import('./claudeLocalLauncher');
+    await claudeLocalLauncher(session);
+
+    expect(order).toEqual(['scanner-installed', 'runtime-offered', 'provider-started']);
+    expect(providerTasks.report).toHaveBeenCalledWith(
+      { state: 'idle', activeCount: 0 },
+      'claude-local-provider-observer-installed',
+    );
+  });
+
+  it('arms workflow startup reconciliation only after the local transcript observer installs', async () => {
+    const order: string[] = [];
+    mockCreateClaudeWorkflowActivitySourceForSession.mockResolvedValueOnce({
+      armStartupReconciliation: vi.fn(() => { order.push('workflow-armed'); }),
+      observeTranscriptMessage: vi.fn(),
+      getWorkflowOwnedAgentToolUseIds: vi.fn(() => new Set<string>()),
+      isWorkflowOwnedProviderTaskId: vi.fn(() => false),
+      isWorkflowOwnedTaskReference: vi.fn(() => false),
+      flush: vi.fn(async () => {}),
+      reconcileStartupInterruptedRuns: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    });
+    const { session } = createLocalHarness();
+    mockCreateSessionScanner.mockImplementationOnce(async () => {
+      order.push('scanner-installed');
+      return createSessionScannerStub();
+    });
+    mockClaudeLocal.mockImplementationOnce(async () => {
+      order.push('provider-started');
+    });
+
+    const { claudeLocalLauncher } = await import('./claudeLocalLauncher');
+    await claudeLocalLauncher(session);
+
+    expect(order).toEqual(['scanner-installed', 'workflow-armed', 'provider-started']);
+  });
+
+  it('does not offer Runtime Activity or start Claude when local observer installation rejects', async () => {
+    const providerTasks = {
+      report: vi.fn(async () => {}),
+      markUnknown: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const { session } = createLocalHarness({ providerTasks });
+    mockCreateSessionScanner.mockRejectedValueOnce(new Error('scanner install failed'));
+
+    const { claudeLocalLauncher } = await import('./claudeLocalLauncher');
+    await expect(claudeLocalLauncher(session)).rejects.toThrow('scanner install failed');
+
+    expect(providerTasks.report).not.toHaveBeenCalled();
+    expect(providerTasks.markUnknown).not.toHaveBeenCalled();
+    expect(mockClaudeLocal).not.toHaveBeenCalled();
   });
 
   it('seeds the local Claude spawn permission mode from session metadata before the first launch', async () => {
@@ -735,7 +826,7 @@ describe('claudeLocalLauncher', () => {
 
     client.peekPendingMessageQueueV2Count = vi.fn(async () => pendingCount);
     client.shouldAttemptPendingMaterialization = vi.fn(() => pendingCount > 0);
-    client.waitForMetadataUpdate = vi.fn(async (signal?: AbortSignal) => {
+    client.waitForPendingEligibilityUpdate = vi.fn(async (signal?: AbortSignal) => {
       return await new Promise<boolean>((resolve) => {
         wakePendingQueueUpdateRef.current = resolve;
         signal?.addEventListener('abort', () => resolve(false), { once: true });
@@ -773,7 +864,7 @@ describe('claudeLocalLauncher', () => {
     await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
-    expect(client.waitForMetadataUpdate).toHaveBeenCalled();
+    expect(client.waitForPendingEligibilityUpdate).toHaveBeenCalled();
     expect(client.peekPendingMessageQueueV2Count).not.toHaveBeenCalled();
     expect(abortObserved).toBe(false);
 

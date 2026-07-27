@@ -1,0 +1,314 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { MessageQueue2 } from '@/agent/runtime/modeMessageQueue';
+import type { SessionClientPort } from '@/api/session/sessionClientPort';
+import type { AgentState, Metadata } from '@/api/types';
+import type { SessionRuntimeActivityContribution } from '@/session/runtimeActivity/types';
+import type { SDKMessage, SDKUserMessage } from '@/backends/claude/sdk';
+
+import type { EnhancedMode } from './loop';
+import { hashClaudeEnhancedModeForQueue } from './remote/modeHash';
+import { Session } from './session';
+
+const mockQuery = vi.hoisted(() => vi.fn());
+
+vi.mock('@/backends/claude/sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/backends/claude/sdk')>();
+  return { ...actual, query: mockQuery };
+});
+
+vi.mock('@/runtime/js/ensureJavaScriptRuntimeExecutable', () => ({
+  ensureJavaScriptRuntimeExecutable: vi.fn(async () => '/managed/js-runtime'),
+}));
+
+vi.mock('./utils/resolveClaudeCliPath', () => ({
+  resolveClaudeCliPath: vi.fn(() => '/resolved/claude-cli.js'),
+}));
+
+type RpcHandler = (params?: unknown) => unknown | Promise<unknown>;
+
+type QueryConfig = Readonly<{
+  prompt: AsyncIterable<SDKUserMessage>;
+  onMessageReceived?: (message: SDKMessage) => void;
+}>;
+
+type ContributionObservation = Readonly<{
+  snapshot: SessionRuntimeActivityContribution;
+  reason: string;
+}>;
+
+const createdSessions: Session[] = [];
+
+function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolveFn: ((value: T) => void) | null = null;
+  const promise = new Promise<T>((resolve) => {
+    resolveFn = resolve;
+  });
+  return {
+    promise,
+    resolve: (value: T) => resolveFn?.(value),
+  };
+}
+
+function createHarness(): Readonly<{
+  session: Session;
+  observations: ContributionObservation[];
+  switchHandlerReady: Promise<RpcHandler>;
+}> {
+  const switchDeferred = createDeferred<RpcHandler>();
+  const observations: ContributionObservation[] = [];
+  let agentState: AgentState = { requests: Object.create(null), completedRequests: Object.create(null) };
+  let metadata: Metadata = {
+    path: '/tmp',
+    host: 'localhost',
+    homeDir: '/tmp/home',
+    happyHomeDir: '/tmp/.happier',
+    happyLibDir: '/tmp/.happier/lib',
+    happyToolsDir: '/tmp/.happier/tools',
+  };
+  let hasMetadata = false;
+
+  const client = {
+    sessionId: 'happier-session-1',
+    sendAgentMessage: vi.fn(),
+    sendAgentMessageCommitted: vi.fn(async () => {}),
+    recordClaudeJsonlMessageConsumed: vi.fn(),
+    keepAlive: vi.fn(),
+    sessionTurnLifecycle: {
+      beginTurn: vi.fn(async () => ({ turnId: 'turn-1' })),
+      attachProviderTurnId: vi.fn(async () => {}),
+      appendTranscriptAnchors: vi.fn(async () => {}),
+      completeTurn: vi.fn(async () => {}),
+      failTurn: vi.fn(async () => {}),
+      cancelTurn: vi.fn(async () => {}),
+      endSession: vi.fn(async () => {}),
+      markRollbackEligible: vi.fn(async () => {}),
+      markRolledBack: vi.fn(async () => {}),
+      touchActiveTurn: vi.fn(async () => {}),
+      hasActiveTurn: vi.fn(() => false),
+      observeAcpLifecycleMarker: vi.fn((input: { body: unknown }) => ({ body: input.body, pendingWrite: null })),
+    },
+    updateMetadata: vi.fn((updater: (current: Metadata) => Metadata) => {
+      metadata = updater(metadata);
+      hasMetadata = true;
+    }),
+    updateAgentState: vi.fn((updater: (current: AgentState) => AgentState) => {
+      agentState = updater(agentState);
+    }),
+    getAgentStateSnapshot: vi.fn(() => agentState),
+    rpcHandlerManager: {
+      registerHandler: vi.fn((method: string, handler: RpcHandler) => {
+        if (method === 'switch') switchDeferred.resolve(handler);
+      }),
+      invokeLocal: vi.fn(async () => ({})),
+    },
+    sendClaudeSessionMessage: vi.fn(),
+    blockPendingMessageDelivery: vi.fn(async () => false),
+    registerSessionRuntimeControls: vi.fn(() => vi.fn()),
+    fetchRecentTranscriptTextItemsForAcpImport: vi.fn(async () => []),
+    sendSessionEvent: vi.fn(),
+    getMetadataSnapshot: vi.fn(() => hasMetadata ? metadata : null),
+    waitForMetadataUpdate: vi.fn(async () => false),
+    waitForPendingEligibilityUpdate: vi.fn(async () => false),
+    popPendingMessage: vi.fn(async () => false),
+    peekPendingMessageQueueV2Count: vi.fn(async () => 0),
+    discardPendingMessageQueueV2All: vi.fn(async () => 0),
+    discardCommittedMessageLocalIds: vi.fn(async () => 0),
+    sendSessionDeath: vi.fn(),
+    flush: vi.fn(async () => {}),
+    close: vi.fn(async () => {}),
+    on: vi.fn(),
+    off: vi.fn(),
+  } as unknown as SessionClientPort;
+
+  const session = new Session({
+    client,
+    path: '/tmp',
+    logPath: '/tmp/claude-remote.log',
+    sessionId: 'claude-current',
+    messageQueue: new MessageQueue2<EnhancedMode>(hashClaudeEnhancedModeForQueue),
+    onModeChange: () => {},
+    hookSettingsPath: '/tmp/claude-hooks.json',
+    hookPluginDir: '/tmp/claude-hook-plugin',
+    precomputedMcpBridge: { mcpServers: {}, stop: vi.fn() },
+    runtimeActivityContributions: {
+      providerTasks: {
+        report: vi.fn(async (snapshot, reason) => {
+          observations.push({ snapshot, reason });
+        }),
+        markUnknown: vi.fn(async (reason) => {
+          observations.push({ snapshot: { state: 'unknown', activeCount: 0 }, reason });
+        }),
+        dispose: vi.fn(async () => {}),
+      },
+      // Keep this true after launcher exit: post-exit inertness must come from
+      // subscriber disposal rather than being masked by the runtime fence.
+      isCurrentRuntime: () => true,
+    },
+  });
+  session.transcriptPath = '/tmp/claude-current.jsonl';
+  createdSessions.push(session);
+
+  return { session, observations, switchHandlerReady: switchDeferred.promise };
+}
+
+function emitStreamRow(config: QueryConfig, message: SDKMessage): SDKMessage {
+  config.onMessageReceived?.(message);
+  return message;
+}
+
+async function runLegacySubscriberScenario(params: Readonly<{
+  hookResponses: readonly SDKMessage[];
+  expectedAfterTerminal: 'idle' | 'unknown';
+}>): Promise<void> {
+  const { session, observations, switchHandlerReady } = createHarness();
+  const queryStarted = createDeferred<void>();
+  const terminalHookConsumed = createDeferred<void>();
+  let providerInputConsumed = false;
+
+  mockQuery.mockImplementationOnce((config: QueryConfig) => {
+    queryStarted.resolve(undefined);
+    return {
+      async *[Symbol.asyncIterator]() {
+        // This exact launch is emitted synchronously with the provider's first
+        // prompt read. Missing/late launcher subscription would lose it.
+        session.onClaudeSessionHook({
+          hook_event_name: 'PostToolUse',
+          session_id: 'claude-current',
+          tool_name: 'Agent',
+          tool_response: { status: 'async_launched', agentId: 'agent-1' },
+        });
+        await vi.waitFor(() => {
+          expect(observations.some(({ snapshot }) => (
+            snapshot.state === 'active' && snapshot.activeCount === 1
+          ))).toBe(true);
+        });
+
+        const prompt = await config.prompt[Symbol.asyncIterator]().next();
+        expect(prompt.done).toBe(false);
+        providerInputConsumed = true;
+
+        yield emitStreamRow(config, {
+          type: 'system', subtype: 'init', session_id: 'claude-current',
+        } as SDKMessage);
+        for (const response of params.hookResponses) {
+          yield emitStreamRow(config, response);
+        }
+
+        // A terminal after a genuine observation gap must become unknown, not
+        // idle. When every response was inert, the same terminal remains idle.
+        session.onClaudeSessionHook({
+          hook_event_name: 'SubagentStop',
+          session_id: 'claude-current',
+          agent_id: 'agent-1',
+        });
+        terminalHookConsumed.resolve(undefined);
+
+        yield emitStreamRow(config, { type: 'result' } as SDKMessage);
+      },
+    };
+  });
+
+  session.queue.push(
+    'start background work',
+    {
+      permissionMode: 'default',
+      claudeRemoteAgentSdkEnabled: false,
+      claudeUnifiedTerminalEnabled: false,
+    },
+    { userMessageLocalId: 'local-provider-input-1' },
+  );
+
+  const { claudeRemoteLauncher } = await import('./claudeRemoteLauncher');
+  const launcherPromise = claudeRemoteLauncher(session);
+  const launchOutcome = launcherPromise.then(
+    (value) => ({ type: 'resolved' as const, value }),
+    (error: unknown) => ({ type: 'rejected' as const, error }),
+  );
+
+  await expect(Promise.race([
+    queryStarted.promise.then(() => ({ type: 'query-started' as const })),
+    launchOutcome,
+  ])).resolves.toEqual({ type: 'query-started' });
+  await vi.waitFor(() => expect(providerInputConsumed).toBe(true));
+  await terminalHookConsumed.promise;
+  await vi.waitFor(() => {
+    expect(observations.at(-1)).toEqual({
+      snapshot: params.expectedAfterTerminal === 'unknown'
+        ? { state: 'unknown', activeCount: 0 }
+        : { state: 'idle', activeCount: 0 },
+      reason: 'claude-native-terminal',
+    });
+  });
+
+  const switchHandler = await switchHandlerReady;
+  await expect(switchHandler({ to: 'local' })).resolves.toBe(true);
+  await expect(launcherPromise).resolves.toBe('switch');
+
+  const observationCountAfterExit = observations.length;
+  session.onClaudeSessionHook({
+    hook_event_name: 'PostToolUse',
+    session_id: 'claude-current',
+    tool_name: 'Agent',
+    tool_response: { status: 'async_launched', agentId: 'stale-agent' },
+  });
+  await Promise.resolve();
+  expect(observations).toHaveLength(observationCountAfterExit);
+}
+
+describe.sequential('claudeRemoteLauncher legacy Runtime Activity subscriber', () => {
+  const previousGraceMs = process.env.HAPPIER_CLAUDE_REMOTE_INTERRUPT_THEN_TEARDOWN_GRACE_MS;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockQuery.mockReset();
+    process.env.HAPPIER_CLAUDE_REMOTE_INTERRUPT_THEN_TEARDOWN_GRACE_MS = '0';
+  });
+
+  afterEach(() => {
+    if (previousGraceMs === undefined) {
+      delete process.env.HAPPIER_CLAUDE_REMOTE_INTERRUPT_THEN_TEARDOWN_GRACE_MS;
+    } else {
+      process.env.HAPPIER_CLAUDE_REMOTE_INTERRUPT_THEN_TEARDOWN_GRACE_MS = previousGraceMs;
+    }
+    for (const session of createdSessions.splice(0)) session.cleanup();
+  });
+
+  it.each([
+    ['PostToolUse', 'error'],
+    ['SubagentStart', 'cancelled'],
+    ['SubagentStop', 'error'],
+  ] as const)('routes current-session %s %s through observation loss', async (hookEvent, outcome) => {
+    await runLegacySubscriberScenario({
+      hookResponses: [{
+        type: 'system', subtype: 'hook_response', session_id: 'claude-current',
+        hook_event: hookEvent, outcome,
+      } as SDKMessage],
+      expectedAfterTerminal: 'unknown',
+    });
+  }, 60_000);
+
+  it('keeps success, stale-session, replay, and unrelated hook responses inert', async () => {
+    await runLegacySubscriberScenario({
+      hookResponses: [
+        {
+          type: 'system', subtype: 'hook_response', session_id: 'claude-current',
+          hook_event: 'PostToolUse', outcome: 'success',
+        },
+        {
+          type: 'system', subtype: 'hook_response', session_id: 'claude-stale',
+          hook_event: 'PostToolUse', outcome: 'error',
+        },
+        {
+          type: 'system', subtype: 'hook_response', session_id: 'claude-current',
+          hook_event: 'PostToolUse', outcome: 'error', isReplay: true,
+        },
+        {
+          type: 'system', subtype: 'hook_response', session_id: 'claude-current',
+          hook_event: 'PermissionRequest', outcome: 'error',
+        },
+      ] as SDKMessage[],
+      expectedAfterTerminal: 'idle',
+    });
+  }, 60_000);
+});

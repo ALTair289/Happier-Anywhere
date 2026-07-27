@@ -17,6 +17,7 @@ function createSessionClientStub(overrides?: Partial<SessionClientPort>): Sessio
     keepAlive: vi.fn(),
     getMetadataSnapshot: () => null,
     waitForMetadataUpdate: vi.fn(async () => false),
+    waitForPendingEligibilityUpdate: vi.fn(async () => false),
     popPendingMessage: vi.fn(async () => false),
     peekPendingMessageQueueV2Count: vi.fn(async () => 0),
     discardPendingMessageQueueV2All: vi.fn(async () => 0),
@@ -32,7 +33,11 @@ function createSessionClientStub(overrides?: Partial<SessionClientPort>): Sessio
   };
 }
 
-async function createSessionWithEnv(client: SessionClientPort, env: Record<string, string>) {
+async function createSessionWithEnv(
+  client: SessionClientPort,
+  env: Record<string, string>,
+  options: Readonly<{ sessionId?: string | null; claudeArgs?: string[] }> = {},
+) {
   vi.resetModules();
   for (const [k, v] of Object.entries(env)) {
     process.env[k] = v;
@@ -42,7 +47,8 @@ async function createSessionWithEnv(client: SessionClientPort, env: Record<strin
     client,
     path: '/tmp',
     logPath: '/tmp/log',
-    sessionId: null,
+    sessionId: options.sessionId ?? null,
+    ...(options.claudeArgs ? { claudeArgs: options.claudeArgs } : {}),
     messageQueue: new MessageQueue2<EnhancedMode>(() => 'mode'),
     onModeChange: () => {},
     hookSettingsPath: '/tmp/hooks.json',

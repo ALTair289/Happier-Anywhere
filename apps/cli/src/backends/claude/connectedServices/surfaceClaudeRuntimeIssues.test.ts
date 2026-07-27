@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY } from '@happier-dev/protocol';
 import type { SessionRuntimeIssueV1 } from '@happier-dev/protocol';
 
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
@@ -306,11 +305,14 @@ describe('surfaceClaudeRuntimeIssues runtime-auth projection', () => {
     }
   });
 
-  it('lets connected-service recovery own parent-scoped 401 evidence while recovery is retryable', async () => {
+  it('settles parent-scoped 401 failure before asking Connected Services to recover it', async () => {
     const previousSelectionEnv = installClaudeSelectionEnv();
-    mockNotifyDaemonConnectedServiceRuntimeAuthFailure.mockResolvedValueOnce(createScheduledRuntimeAuthRecoveryReport());
     const sendSessionEvent = vi.fn();
     const failTurn = createClaudeFailTurnSpy();
+    mockNotifyDaemonConnectedServiceRuntimeAuthFailure.mockImplementationOnce(async () => {
+      expect(failTurn).toHaveBeenCalledOnce();
+      return createScheduledRuntimeAuthRecoveryReport();
+    });
     try {
       const surfaced = await surfaceClaudeRuntimeAuthFailure({
         client: {
@@ -330,7 +332,10 @@ describe('surfaceClaudeRuntimeIssues runtime-auth projection', () => {
       }, '[claude-test]');
 
       expect(surfaced).toBe(true);
-      expect(failTurn).not.toHaveBeenCalled();
+      expect(failTurn).toHaveBeenCalledWith(expect.objectContaining({
+        provider: 'claude',
+        issue: expect.objectContaining({ source: 'auth_error' }),
+      }));
       expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalled();
     } finally {
       restoreClaudeSelectionEnv(previousSelectionEnv);
@@ -464,7 +469,10 @@ describe('surfaceClaudeRuntimeIssues runtime-auth projection', () => {
         },
       } as any, { status: 401, message: 'OAuth token has expired' }, '[claude-test]');
 
-      expect(failTurn).not.toHaveBeenCalled();
+      expect(failTurn).toHaveBeenCalledWith(expect.objectContaining({
+        provider: 'claude',
+        issue: expect.objectContaining({ source: 'auth_error' }),
+      }));
       expect(sendSessionEvent).not.toHaveBeenCalled();
     } finally {
       restoreClaudeSelectionEnv(previousSelectionEnv);
@@ -807,51 +815,6 @@ describe('surfaceClaudeRuntimeIssues runtime-auth projection', () => {
       expect(sendSessionEvent).toHaveBeenCalledWith({
         type: 'message',
         message: expect.stringContaining('retry scheduled'),
-      });
-    } finally {
-      restoreClaudeSelectionEnv(previousSelectionEnv);
-    }
-  });
-
-  it('commits usage-limit recovery metadata through the bound session client method', async () => {
-    const previousSelectionEnv = installClaudeSelectionEnv();
-    mockNotifyDaemonConnectedServiceRuntimeAuthFailure.mockResolvedValueOnce(createScheduledRuntimeAuthRecoveryReport());
-    const client = {
-      sessionId: 'sess_claude_bound_update',
-      metadata: {} as Record<string, unknown>,
-      metadataLock: {
-        inLock: async <T>(fn: () => Promise<T> | T): Promise<T> => await fn(),
-      },
-      updateMetadata(this: any, updater: (metadata: Record<string, unknown>) => Record<string, unknown>) {
-        return this.metadataLock.inLock(async () => {
-          this.metadata = updater(this.metadata);
-        });
-      },
-      sendSessionEvent: vi.fn(),
-      sessionTurnLifecycle: { failTurn: vi.fn(async () => undefined) },
-    };
-    try {
-      await surfaceClaudeRateLimitRuntimeIssue({
-        client,
-      } as any, {
-        v: 1,
-        resetAtMs: 1_700_000_060_000,
-        retryAfterMs: null,
-        quotaScope: 'account',
-        recoverability: 'switch_account',
-        providerLimitId: 'daily_tokens',
-        planType: null,
-        utilization: 100,
-        overage: null,
-        action: null,
-        connectedService: null,
-      }, '[claude-test]');
-
-      expect(client.metadata).toMatchObject({
-        [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: expect.objectContaining({
-          status: 'waiting',
-          nextCheckAtMs: 1_700_000_100_000,
-        }),
       });
     } finally {
       restoreClaudeSelectionEnv(previousSelectionEnv);
