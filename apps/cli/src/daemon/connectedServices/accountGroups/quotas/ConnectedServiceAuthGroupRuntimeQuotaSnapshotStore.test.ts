@@ -618,12 +618,94 @@ describe('ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore', () => {
     expect(store.getRecentBurn({ serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active' }))
       .toBeNull();
   });
+
+  it('invalidates burn history across group generations and quota windows', () => {
+    const store = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
+    store.recordSnapshot({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 1,
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 0, remainingPct: 60, resetAtMs: 100_000 }),
+    });
+    store.recordSnapshot({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 1,
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 30_000, remainingPct: 40, resetAtMs: 100_000 }),
+    });
+    expect(store.getRecentBurn({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 1,
+    })).not.toBeNull();
+
+    store.recordSnapshot({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 2,
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 60_000, remainingPct: 30, resetAtMs: 100_000 }),
+    });
+    expect(store.getRecentBurn({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 2,
+    })).toBeNull();
+
+    store.recordSnapshot({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 2,
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 90_000, remainingPct: 20, resetAtMs: 100_000 }),
+    });
+    expect(store.getRecentBurn({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 2,
+    })).not.toBeNull();
+
+    store.recordSnapshot({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 2,
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 120_000, remainingPct: 15, resetAtMs: 200_000 }),
+    });
+    expect(store.getRecentBurn({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 2,
+    })).toBeNull();
+  });
+
+  it('returns burn only when it is current, bounded, and matches the canonical effective snapshot', () => {
+    const store = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
+    store.recordSnapshot({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 3,
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 0, remainingPct: 60, resetAtMs: 100_000 }),
+    });
+    store.recordSnapshot({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 3,
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 30_000, remainingPct: 40, resetAtMs: 100_000 }),
+    });
+    const currentQuotaSnapshot = store.buildMemberStates({
+      serviceId: 'claude-subscription', groupId: 'team-pool', capturedAtMs: 30_000,
+    }).get('active')?.quotaSnapshot;
+    expect(currentQuotaSnapshot).toBeDefined();
+    expect(store.getRecentBurn({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 3,
+      nowMs: 30_000,
+      maxAgeMs: 60_000,
+      currentQuotaSnapshot,
+    })).not.toBeNull();
+    expect(store.getRecentBurn({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 3,
+      nowMs: 100_000,
+      maxAgeMs: 100_000,
+      currentQuotaSnapshot,
+    })).toBeNull();
+    expect(store.getRecentBurn({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 3,
+      nowMs: 100_001,
+      maxAgeMs: 60_000,
+      currentQuotaSnapshot,
+    })).toBeNull();
+    expect(store.getRecentBurn({
+      serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active', groupGeneration: 3,
+      nowMs: 30_001,
+      maxAgeMs: 60_000,
+      currentQuotaSnapshot: currentQuotaSnapshot
+        ? { ...currentQuotaSnapshot, capturedAtMs: currentQuotaSnapshot.capturedAtMs + 1 }
+        : currentQuotaSnapshot,
+    })).toBeNull();
+  });
 });
 
 function quotaSnapshotWithRemaining(input: Readonly<{
   profileId: string;
   fetchedAt: number;
   remainingPct: number;
+  resetAtMs?: number | null;
 }>) {
   return {
     v: 1 as const,
@@ -645,7 +727,7 @@ function quotaSnapshotWithRemaining(input: Readonly<{
         unit: 'unknown' as const,
         utilizationPct: 100 - input.remainingPct,
         remainingPct: input.remainingPct,
-        resetsAt: null,
+        resetsAt: input.resetAtMs ?? null,
         status: 'ok' as const,
         details: { providerLimitId: 'seven_day', limitCategory: 'usage_limit' as const },
       },

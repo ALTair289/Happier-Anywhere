@@ -124,6 +124,7 @@ export function buildConnectedServiceAuthGroupSwitchStateFromAccountUsage(input:
       groupId: input.group.groupId,
       activeProfileId: input.group.activeProfileId,
       generation: input.group.generation,
+      runtimeStateRevision: input.group.runtimeStateRevision,
       policy: normalizeConnectedServiceAuthGroupPolicy(input.group.policy),
       members: input.group.members.map((member) => ({
         profileId: member.profileId,

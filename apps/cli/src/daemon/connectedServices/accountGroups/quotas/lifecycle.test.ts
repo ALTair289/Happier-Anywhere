@@ -22,6 +22,7 @@ function createGroup(): ConnectedServiceAuthGroupV1 {
     displayName: 'Team',
     activeProfileId: 'primary',
     generation: 4,
+    runtimeStateRevision: 0,
     policy: {
       ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
       autoSwitch: true,

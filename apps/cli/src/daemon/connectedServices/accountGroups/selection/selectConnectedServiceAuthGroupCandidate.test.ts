@@ -116,7 +116,18 @@ describe('selectConnectedServiceAuthGroupCandidate', () => {
         providerResetsAtMs: 500,
         lastFailureKind: 'usage_limit',
         lastObservedAtMs: 400,
-        quotaSnapshot: { capturedAtMs: 900, effectiveMeterId: 'weekly', effectiveRemainingPercent: 60 },
+        quotaSnapshot: {
+          capturedAtMs: 900,
+          effectiveMeterId: 'weekly',
+          effectiveRemainingPercent: 60,
+          meters: [{
+            meterId: 'weekly',
+            limitCategory: 'usage_limit',
+            remainingPct: 60,
+            resetAtMs: null,
+            providerLimitId: 'weekly',
+          }],
+        },
       }],
       ['backup', { quotaSnapshot: { capturedAtMs: 900, effectiveMeterId: 'weekly', effectiveRemainingPercent: 80 } }],
       ['other', { quotaSnapshot: { capturedAtMs: 900, effectiveMeterId: 'weekly', effectiveRemainingPercent: 90 } }],
@@ -285,44 +296,41 @@ describe('selectConnectedServiceAuthGroupCandidate', () => {
     expect(result.selected?.profileId).toBe('backup');
   });
 
-  it('clears stale auth, capacity, plan, validation, and reconnect-required state with newer positive quota evidence', () => {
-    const reconciled = reconcileMemberRuntimeStateWithPositiveEvidence({
-      state: {
-        credentialHealthStatus: 'needs_reauth',
-        authInvalidUntilMs: 10_000,
-        capacityLimitedUntilMs: 10_000,
-        planUnavailableUntilMs: 10_000,
-        validationBlockedUntilMs: 10_000,
-        cooldownStartedAtMs: 900,
-        cooldownUntilMs: 10_000,
-        exhaustedUntilMs: 10_000,
-        quotaExhaustedUntilMs: 10_000,
-        rateLimitedUntilMs: 10_000,
-        providerResetsAtMs: 10_000,
-        lastFailureKind: 'auth_expired',
-        lastObservedAtMs: 900,
-      },
-      evidence: {
-        kind: 'quota_headroom',
-        observedAtMs: 1_000,
-        quotaSnapshot: {
-          capturedAtMs: 1_000,
-          effectiveMeterId: 'daily',
-          effectiveRemainingPercent: 80,
-          meters: [
-            { meterId: 'daily', limitCategory: 'usage_limit', remainingPct: 80, resetAtMs: null, providerLimitId: 'daily' },
-            { meterId: 'minute', limitCategory: 'rate_limit', remainingPct: 80, resetAtMs: null, providerLimitId: 'minute' },
-          ],
-        },
+  it('does not let quota headroom erase unrelated auth, capacity, plan, or validation failures', () => {
+    const state = {
+      credentialHealthStatus: 'needs_reauth' as const,
+      authInvalidUntilMs: 10_000,
+      capacityLimitedUntilMs: 10_000,
+      planUnavailableUntilMs: 10_000,
+      validationBlockedUntilMs: 10_000,
+      cooldownStartedAtMs: 900,
+      cooldownUntilMs: 10_000,
+      exhaustedUntilMs: 10_000,
+      quotaExhaustedUntilMs: 10_000,
+      rateLimitedUntilMs: 10_000,
+      providerResetsAtMs: 10_000,
+      lastFailureKind: 'auth_expired',
+      lastObservedAtMs: 900,
+    };
+    const reconciled = reconcileMemberRuntimeStateWithFreshQuotaEvidence({
+      state,
+      quotaSnapshot: {
+        capturedAtMs: 1_000,
+        effectiveMeterId: 'daily',
+        effectiveRemainingPercent: 80,
+        meters: [
+          { meterId: 'daily', limitCategory: 'usage_limit', remainingPct: 80, resetAtMs: null, providerLimitId: 'daily' },
+          { meterId: 'minute', limitCategory: 'rate_limit', remainingPct: 80, resetAtMs: null, providerLimitId: 'minute' },
+        ],
       },
       policy: basePolicy,
       nowMs: 1_000,
     });
 
-    expect(reconciled).toEqual({ providerResetsAtMs: 10_000 });
+    expect(reconciled).toBe(state);
   });
 
-  it('clears refreshable reconnect-required state before least-limited headroom ranking', () => {
+  it('does not make reconnect-required credentials selectable from quota headroom alone', () => {
     const result = selectConnectedServiceAuthGroupCandidate({
       nowMs: 1_000,
       quotaFreshnessMs: 60_000,
@@ -347,10 +355,46 @@ describe('selectConnectedServiceAuthGroupCandidate', () => {
       ]),
     });
 
-    expect(result.selected?.profileId).toBe('high-stale-window');
-    expect(result.excluded).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ profileId: 'high-stale-window' }),
-    ]));
+    expect(result.selected?.profileId).toBe('low-no-window');
+    expect(result.excluded).toContainEqual(expect.objectContaining({
+      profileId: 'high-stale-window',
+      reason: 'auth_invalid',
+    }));
+  });
+
+  it('clears reconnect-required state only from matching credential-refresh evidence', () => {
+    const reconciled = reconcileMemberRuntimeStateWithPositiveEvidence({
+      state: {
+        credentialHealthStatus: 'needs_reauth',
+        authInvalidUntilMs: 10_000,
+        capacityLimitedUntilMs: 10_000,
+        planUnavailableUntilMs: 10_000,
+        validationBlockedUntilMs: 10_000,
+        cooldownStartedAtMs: 900,
+        cooldownUntilMs: 10_000,
+        exhaustedUntilMs: 10_000,
+        quotaExhaustedUntilMs: 10_000,
+        rateLimitedUntilMs: 10_000,
+        providerResetsAtMs: 10_000,
+        lastFailureKind: 'auth_expired',
+        lastObservedAtMs: 900,
+      },
+      evidence: {
+        kind: 'credential_refresh',
+        observedAtMs: 1_000,
+      },
+      policy: basePolicy,
+      nowMs: 1_000,
+    });
+
+    expect(reconciled).toEqual({
+      capacityLimitedUntilMs: 10_000,
+      planUnavailableUntilMs: 10_000,
+      quotaExhaustedUntilMs: 10_000,
+      rateLimitedUntilMs: 10_000,
+      validationBlockedUntilMs: 10_000,
+      providerResetsAtMs: 10_000,
+    });
   });
 
   it('ranks least-limited candidates by generic effective meter headroom', () => {

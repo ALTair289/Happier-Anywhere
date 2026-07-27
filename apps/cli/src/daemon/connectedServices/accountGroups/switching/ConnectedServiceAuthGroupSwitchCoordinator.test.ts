@@ -13,6 +13,7 @@ function state(activeProfileId: string, generation: number): ConnectedServiceAut
     groupId: 'main',
     activeProfileId,
     generation,
+    runtimeStateRevision: 0,
     policy: { ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1, strategy: 'priority', autoSwitch: true },
     members: [
       { profileId: 'primary', priority: 1, createdAtMs: 1, enabled: true },
@@ -29,7 +30,7 @@ class TestGenerationConflictError extends Error {
 }
 
 describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
-  it('expires lease losers instead of waiting forever for an abandoned owner', async () => {
+  it('times out a waiter without releasing the still-effectful owner', async () => {
     vi.useFakeTimers();
     try {
       const leases = new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry({ leaseTimeoutMs: 10 });
@@ -37,12 +38,78 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
       expect(owner.kind).toBe('owner');
       const loser = leases.acquire({ serviceId: 'openai-codex', groupId: 'main' });
       expect(loser.kind).toBe('loser');
-      const wait = loser.kind === 'loser' ? loser.waitForOwner() : Promise.resolve({ activeProfileId: null, generation: 0, serviceId: '', groupId: '' });
+      const wait = loser.kind === 'loser' ? loser.waitForOwner({ timeoutMs: 10 }) : Promise.resolve({ activeProfileId: null, generation: 0, serviceId: '', groupId: '' });
       const assertion = expect(wait).rejects.toThrow('connected_service_auth_group_switch_lease_expired');
 
       await vi.advanceTimersByTimeAsync(10);
 
       await assertion;
+
+      const stillLoser = leases.acquire({ serviceId: 'openai-codex', groupId: 'main' });
+      expect(stillLoser.kind).toBe('loser');
+      const eventual = stillLoser.kind === 'loser'
+        ? stillLoser.waitForOwner({ timeoutMs: 1_000 })
+        : Promise.reject(new Error('replacement owner incorrectly acquired'));
+      if (owner.kind !== 'owner') throw new Error('owner expected');
+      owner.complete({
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        activeProfileId: 'backup',
+        generation: 2,
+        result: { status: 'switched', activeProfileId: 'backup', generation: 2 },
+      });
+      await expect(eventual).resolves.toMatchObject({ generation: 2, activeProfileId: 'backup' });
+      expect(leases.acquire({ serviceId: 'openai-codex', groupId: 'main' }).kind).toBe('loser');
+      owner.finish();
+      expect(leases.acquire({ serviceId: 'openai-codex', groupId: 'main' }).kind).toBe('owner');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('adopts authoritative switched truth when a reactive lease waiter expires after the peer commit', async () => {
+    vi.useFakeTimers();
+    try {
+      const leases = new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry({ leaseTimeoutMs: 10 });
+      const owner = leases.acquire({ serviceId: 'openai-codex', groupId: 'main' });
+      if (owner.kind !== 'owner') throw new Error('owner expected');
+      let current = state('primary', 1);
+      const applyGeneration = vi.fn(async () => ({ mode: 'hot_apply' as const }));
+      const coordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
+        leases,
+        nowMs: () => 1_000,
+        quotaFreshnessMs: 60_000,
+        loadState: async () => current,
+        commitSwitch: async () => {
+          throw new Error('lease loser must not commit');
+        },
+        applyGeneration,
+      });
+
+      const recovery = coordinator.switchAfterClassifiedFailure({
+        sessionId: 'source-session',
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        reason: 'usage_limit',
+        observedProfileId: 'primary',
+      });
+      current = state('backup', 2);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await expect(recovery).resolves.toMatchObject({
+        status: 'observed_generation',
+        activeProfileId: 'backup',
+        generation: 2,
+      });
+      expect(applyGeneration).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: 'source-session',
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        activeProfileId: 'backup',
+        generation: 2,
+        fromProfileId: 'primary',
+      }));
+      owner.finish();
     } finally {
       vi.useRealTimers();
     }
@@ -185,7 +252,8 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
     ]);
   });
 
-  it('does not treat permanent refresh failure as group-switchable auth recovery without positive target evidence', async () => {
+  it.each(['auth_expired', 'refresh_failed', 'permission_denied'] as const)(
+    'switches to a healthy group fallback for credential failure %s', async (reason) => {
     let didCommit = false;
     const coordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
       leases: new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry(),
@@ -202,13 +270,14 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
     await expect(coordinator.switchAfterClassifiedFailure({
       serviceId: 'openai-codex',
       groupId: 'main',
-      reason: 'refresh_failed',
+      reason,
       observedProfileId: 'primary',
     })).resolves.toMatchObject({
-      status: 'switch_reason_disabled',
-      generation: 1,
+      status: 'switched',
+      activeProfileId: 'backup',
+      generation: 2,
     });
-    expect(didCommit).toBe(false);
+    expect(didCommit).toBe(true);
   });
 
   it('treats capacity failures as usage-limit recovery by default', async () => {
@@ -1209,6 +1278,122 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
     ]);
   });
 
+  it('reports the adopted generation as superseded when authoritative truth advances during apply', async () => {
+    const withQuota = (activeProfileId: string, generation: number): ConnectedServiceAuthGroupSwitchState => ({
+      ...state(activeProfileId, generation),
+      policy: { ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1, strategy: 'least_limited', autoSwitch: true },
+      memberStatesByProfileId: new Map([
+        ['primary', { quotaSnapshot: { capturedAtMs: 1_000, effectiveRemainingPercent: 5 } }],
+        ['backup', { quotaSnapshot: { capturedAtMs: 1_000, effectiveRemainingPercent: 80 } }],
+      ]),
+    });
+    let current = withQuota('primary', 1);
+    const coordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
+      leases: new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry(),
+      nowMs: () => 1_000,
+      quotaFreshnessMs: 60_000,
+      loadState: async () => current,
+      commitSwitch: async () => {
+        current = withQuota('backup', 2);
+        return current;
+      },
+      applyGeneration: async () => {
+        // Concurrent decision C/gen3 wins while this session is still adopting B/gen2.
+        current = withQuota('primary', 3);
+        return { mode: 'hot_apply' as const };
+      },
+    });
+
+    await expect(coordinator.switchBeforeTurn({
+      sessionId: 'session-stale',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      reason: 'soft_threshold',
+    })).resolves.toMatchObject({
+      status: 'superseded_after_apply',
+      activeProfileId: 'primary',
+      generation: 3,
+      adoptedProfileId: 'backup',
+      adoptedGeneration: 2,
+      reconciliationDisposition: 'superseded_after_apply',
+    });
+  });
+
+  it('post-fences a lease recipient that applies an already-superseded committed generation', async () => {
+    const leases = new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry();
+    const owner = leases.acquire({ serviceId: 'openai-codex', groupId: 'main' });
+    if (owner.kind !== 'owner') throw new Error('owner expected');
+    owner.complete({
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      activeProfileId: 'backup',
+      generation: 2,
+      result: { status: 'switched', activeProfileId: 'backup', generation: 2 },
+    });
+    let current = state('backup', 2);
+    const coordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
+      leases,
+      nowMs: () => 1_000,
+      quotaFreshnessMs: 60_000,
+      loadState: async () => current,
+      commitSwitch: vi.fn(),
+      applyGeneration: async () => {
+        current = state('primary', 3);
+        return { mode: 'hot_apply' as const };
+      },
+    });
+
+    await expect(coordinator.switchBeforeTurn({
+      sessionId: 'recipient',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      reason: 'usage_limit',
+    })).resolves.toMatchObject({
+      status: 'superseded_after_apply',
+      adoptedProfileId: 'backup',
+      adoptedGeneration: 2,
+      activeProfileId: 'primary',
+      generation: 3,
+    });
+    owner.finish();
+  });
+
+  it('post-fences a same-generation credential revision that was superseded during apply', async () => {
+    const adoptedRevision = 'csr_aaaaaaaaaaaaaaaaaaaaaa';
+    const authoritativeRevision = 'csr_bbbbbbbbbbbbbbbbbbbbbb';
+    const current = {
+      ...state('backup', 2),
+      credentialRevision: authoritativeRevision,
+    };
+    const coordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
+      leases: new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry(),
+      nowMs: () => 1_000,
+      quotaFreshnessMs: 60_000,
+      loadState: async () => current,
+      commitSwitch: vi.fn(),
+      applyGeneration: async () => ({ mode: 'hot_apply' as const }),
+    });
+
+    await expect(coordinator.applyCommittedGeneration({
+      sessionId: 'revision-recipient',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      activeProfileId: 'backup',
+      generation: 2,
+      credentialRevision: adoptedRevision,
+      reason: 'credential_revision_changed',
+    })).resolves.toMatchObject({
+      status: 'superseded_after_apply',
+      activeProfileId: 'backup',
+      generation: 2,
+      credentialRevision: authoritativeRevision,
+      adoptedProfileId: 'backup',
+      adoptedGeneration: 2,
+      adoptedCredentialRevision: adoptedRevision,
+      reconciliationDisposition: 'superseded_after_apply',
+    });
+  });
+
   it('probes stale group quota state before selecting a soft-threshold pre-turn candidate', async () => {
     let current = state('primary', 1);
     const probeQuotaSnapshotsForGroup = vi.fn(async () => {
@@ -1909,7 +2094,8 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
       },
     });
     expect(commitSwitch).toHaveBeenCalledTimes(1);
-    expect(loadCount).toBe(2);
+    // Conflict resolution reads the winner, then the post-apply epoch fence reads once more.
+    expect(loadCount).toBe(3);
     expect(applied).toEqual(['backup:2']);
     expect(events).toEqual([
       expect.objectContaining({

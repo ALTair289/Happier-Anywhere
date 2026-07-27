@@ -18,6 +18,7 @@ function createGroup(): ConnectedServiceAuthGroupV1 {
     displayName: 'Team',
     activeProfileId: 'exhausted',
     generation: 4,
+    runtimeStateRevision: 0,
     state: {},
     createdAt: 1,
     updatedAt: 2,

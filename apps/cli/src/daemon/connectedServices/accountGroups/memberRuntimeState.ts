@@ -6,6 +6,7 @@ import type {
 import { clearConnectedServiceAuthGroupMemberRuntimeBlockers } from '@happier-dev/protocol';
 
 import { logger as defaultLogger } from '@/ui/logger';
+import { ConnectedServiceAuthGroupRuntimeStateRevisionConflictError } from '@/api/connectedServices/connectedServiceCredentialApi';
 
 import type {
   ConnectedServiceAuthGroupMemberRuntimeState,
@@ -23,6 +24,7 @@ export type ConnectedServiceMemberRuntimeStateApi = Readonly<{
     serviceId: ConnectedServiceId;
     groupId: string;
     expectedGeneration: number;
+    expectedRuntimeStateRevision: number;
     memberStates: ReadonlyArray<Readonly<{
       profileId: string;
       state: ConnectedServiceAuthGroupMemberStateV1;
@@ -81,20 +83,15 @@ function resolveSnapshotEligibilityBlocker(
 }
 
 export type ConnectedServiceAuthGroupPositiveEvidence = Readonly<
-  | {
-      kind:
-        | 'successful_spawn'
-        | 'successful_turn'
-        | 'credential_refresh'
-        | 'oauth_token_callback'
-        | 'account_adoption';
-      observedAtMs: number;
-    }
-  | {
-      kind: 'quota_headroom';
-      observedAtMs: number;
-      quotaSnapshot: ConnectedServiceAuthGroupQuotaSnapshot;
-    }
+  {
+    kind:
+      | 'successful_spawn'
+      | 'successful_turn'
+      | 'credential_refresh'
+      | 'oauth_token_callback'
+      | 'account_adoption';
+    observedAtMs: number;
+  }
 >;
 
 function evidenceIsNewerThanFailure(
@@ -107,12 +104,44 @@ function evidenceIsNewerThanFailure(
 
 function positiveEvidenceProvesRuntimeUsable(
   evidence: ConnectedServiceAuthGroupPositiveEvidence,
-  nowMs: number,
 ): boolean {
-  if (evidence.kind !== 'quota_headroom') return true;
-  if (evidence.quotaSnapshot.planUnavailable) return false;
-  if (resolveSnapshotEligibilityBlocker(evidence.quotaSnapshot, nowMs)) return false;
-  return snapshotProvesQuotaUsable(evidence.quotaSnapshot);
+  if (evidence.kind === 'successful_spawn' || evidence.kind === 'account_adoption') return false;
+  return true;
+}
+
+function clearAuthenticationFailure(
+  state: ConnectedServiceAuthGroupMemberRuntimeState,
+): ConnectedServiceAuthGroupMemberRuntimeState {
+  const next: {
+    -readonly [Key in keyof ConnectedServiceAuthGroupMemberRuntimeState]: ConnectedServiceAuthGroupMemberRuntimeState[Key];
+  } = { ...state };
+  let changed = false;
+  for (const key of ['authInvalidUntilMs', 'credentialHealthStatus'] as const) {
+    if (next[key] !== undefined) {
+      delete next[key];
+      changed = true;
+    }
+  }
+  if (
+    state.lastFailureKind === 'auth_expired'
+    || state.lastFailureKind === 'auth_failed'
+    || state.lastFailureKind === 'refresh_failed'
+    || state.lastFailureKind === 'account_disabled'
+  ) {
+    for (const key of [
+      'cooldownStartedAtMs',
+      'cooldownUntilMs',
+      'exhaustedUntilMs',
+      'lastFailureKind',
+      'lastObservedAtMs',
+    ] as const) {
+      if (next[key] !== undefined) {
+        delete next[key];
+        changed = true;
+      }
+    }
+  }
+  return changed ? next : state;
 }
 
 export function reconcileMemberRuntimeStateWithPositiveEvidence(params: Readonly<{
@@ -122,10 +151,14 @@ export function reconcileMemberRuntimeStateWithPositiveEvidence(params: Readonly
   nowMs: number;
 }>): ConnectedServiceAuthGroupMemberRuntimeState | null {
   void params.policy;
+  void params.nowMs;
   const state = params.state;
   if (!state || !evidenceIsNewerThanFailure(params.evidence, state)) return state;
-  if (!positiveEvidenceProvesRuntimeUsable(params.evidence, params.nowMs)) return state;
+  if (!positiveEvidenceProvesRuntimeUsable(params.evidence)) return state;
 
+  if (params.evidence.kind === 'credential_refresh' || params.evidence.kind === 'oauth_token_callback') {
+    return clearAuthenticationFailure(state);
+  }
   const cleared = clearConnectedServiceAuthGroupMemberRuntimeBlockers(state);
   return cleared === state ? state : cleared;
 }
@@ -158,34 +191,42 @@ export async function persistMemberRuntimeStateWithPositiveEvidence(params: Read
    */
   logger?: Pick<typeof defaultLogger, 'info'>;
 }>): Promise<boolean> {
-  const group = await params.api.getConnectedServiceAuthGroup({
-    serviceId: params.serviceId,
-    groupId: params.groupId,
-  });
-  if (!group || group.generation !== params.generation) return false;
-  const member = group.members.find((item) => item.profileId === params.profileId) ?? null;
-  if (!member) return false;
-  const reconciled = reconcileMemberRuntimeStateWithPositiveEvidence({
-    state: member.state,
-    evidence: params.evidence,
-    policy: params.normalizePolicy(group.policy),
-    nowMs: params.evidence.observedAtMs,
-  });
-  if (!reconciled || reconciled === member.state) return false;
-  await params.api.updateConnectedServiceAuthGroupRuntimeState({
-    serviceId: params.serviceId,
-    groupId: params.groupId,
-    expectedGeneration: group.generation,
-    memberStates: [{ profileId: params.profileId, state: reconciled }],
-  });
-  (params.logger ?? defaultLogger).info('[DAEMON RUN] Connected-service member blockers cleared by positive evidence', {
-    serviceId: params.serviceId,
-    groupId: params.groupId,
-    profileId: params.profileId,
-    evidenceKind: params.evidence.kind,
-    clearedBlockerKinds: resolveClearedBlockerKinds(member.state, reconciled),
-  });
-  return true;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const group = await params.api.getConnectedServiceAuthGroup({
+      serviceId: params.serviceId,
+      groupId: params.groupId,
+    });
+    if (!group || group.generation !== params.generation) return false;
+    const member = group.members.find((item) => item.profileId === params.profileId) ?? null;
+    if (!member) return false;
+    const reconciled = reconcileMemberRuntimeStateWithPositiveEvidence({
+      state: member.state,
+      evidence: params.evidence,
+      policy: params.normalizePolicy(group.policy),
+      nowMs: params.evidence.observedAtMs,
+    });
+    if (!reconciled || reconciled === member.state) return false;
+    try {
+      await params.api.updateConnectedServiceAuthGroupRuntimeState({
+        serviceId: params.serviceId,
+        groupId: params.groupId,
+        expectedGeneration: group.generation,
+        expectedRuntimeStateRevision: group.runtimeStateRevision,
+        memberStates: [{ profileId: params.profileId, state: reconciled }],
+      });
+      (params.logger ?? defaultLogger).info('[DAEMON RUN] Connected-service member blockers cleared by positive evidence', {
+        serviceId: params.serviceId,
+        groupId: params.groupId,
+        profileId: params.profileId,
+        evidenceKind: params.evidence.kind,
+        clearedBlockerKinds: resolveClearedBlockerKinds(member.state, reconciled),
+      });
+      return true;
+    } catch (error) {
+      if (!(error instanceof ConnectedServiceAuthGroupRuntimeStateRevisionConflictError) || attempt === 1) throw error;
+    }
+  }
+  return false;
 }
 
 export function reconcileMemberRuntimeStateWithFreshQuotaEvidence(params: Readonly<{
@@ -198,25 +239,19 @@ export function reconcileMemberRuntimeStateWithFreshQuotaEvidence(params: Readon
   const quotaSnapshot = params.quotaSnapshot;
   const lastObservedAtMs = numberOrNull(state?.lastObservedAtMs);
   if (!state || !quotaSnapshot || (lastObservedAtMs !== null && quotaSnapshot.capturedAtMs <= lastObservedAtMs)) return state;
-
-  const positiveReconciled = reconcileMemberRuntimeStateWithPositiveEvidence({
-    state,
-    evidence: {
-      kind: 'quota_headroom',
-      observedAtMs: quotaSnapshot.capturedAtMs,
-      quotaSnapshot,
-    },
-    policy: params.policy,
-    nowMs: params.nowMs,
-  });
-  if (positiveReconciled !== state) return positiveReconciled;
+  if (quotaSnapshot.planUnavailable || resolveSnapshotEligibilityBlocker(quotaSnapshot, params.nowMs)) return state;
 
   let changed = false;
   const next: {
     -readonly [Key in keyof ConnectedServiceAuthGroupMemberRuntimeState]: ConnectedServiceAuthGroupMemberRuntimeState[Key];
   } = { ...state };
 
-  const quotaUsable = snapshotProvesQuotaUsable(quotaSnapshot);
+  const quotaMeters = (quotaSnapshot.meters ?? []).filter(isQuotaMeter);
+  const quotaUsable = state.lastFailureKind === 'usage_limit'
+    ? quotaMeters.length > 0 && quotaMeters.every(meterHasRemainingQuota)
+    : state.lastFailureKind === undefined || state.lastFailureKind === null
+      ? snapshotProvesQuotaUsable(quotaSnapshot)
+      : false;
   if (
     quotaUsable
     && (
@@ -236,16 +271,22 @@ export function reconcileMemberRuntimeStateWithFreshQuotaEvidence(params: Readon
     delete next.providerResetsAtMs;
     if (state.lastFailureKind === 'usage_limit') {
       delete next.lastFailureKind;
+      delete next.lastObservedAtMs;
     }
     changed = true;
   }
 
-  const rateUsable = snapshotProvesRateLimitUsable(quotaSnapshot);
+  const rateUsable = (
+    state.lastFailureKind === 'rate_limit'
+    || state.lastFailureKind === undefined
+    || state.lastFailureKind === null
+  ) && snapshotProvesRateLimitUsable(quotaSnapshot);
   if (rateUsable && (numberOrNull(state.rateLimitedUntilMs) !== null || state.lastFailureKind === 'rate_limit')) {
     delete next.rateLimitedUntilMs;
     delete next.providerResetsAtMs;
     if (state.lastFailureKind === 'rate_limit') {
       delete next.lastFailureKind;
+      delete next.lastObservedAtMs;
     }
     changed = true;
   }

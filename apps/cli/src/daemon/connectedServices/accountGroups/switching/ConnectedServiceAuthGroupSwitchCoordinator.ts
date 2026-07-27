@@ -22,6 +22,7 @@ import {
   buildSwitchDecisionDiagnostics,
   canRetryCurrentProfileForObservedProfile,
   canRetryObservedProfileDuringPreTurnSelection,
+  ConnectedServiceAuthGroupSwitchLeaseExpiredError,
   InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry,
   isPredictiveSessionApplyReason,
   isProfileAdoptableForObservedDivergence,
@@ -92,6 +93,12 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     applyGeneration(
       input: ConnectedServiceAuthGroupSwitchApplyGenerationInput,
     ): Promise<ConnectedServiceAuthGroupSwitchApplyGenerationResult | void>;
+    resolvePostApplyCredentialRevision?(input: Readonly<{
+      serviceId: string;
+      groupId: string;
+      activeProfileId: string | null;
+      generation: number;
+    }>): Promise<ConnectedServiceAuthGroupSwitchState['credentialRevision']>;
     recordObservedFailureState?(input: Readonly<{
       serviceId: string;
       groupId: string;
@@ -112,6 +119,25 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     resolveGenerationConflict?: (error: unknown) => number | null;
     emitEvent?: (event: ConnectedServiceAuthGroupSwitchEvent) => void;
   }>) {}
+
+  private async loadStateAfterApply(input: Readonly<{
+    serviceId: string;
+    groupId: string;
+    trigger?: ConnectedServiceAuthGroupSwitchPipelineTrigger;
+  }>): Promise<ConnectedServiceAuthGroupSwitchState> {
+    const observed = await this.deps.loadState(input);
+    if (!this.deps.resolvePostApplyCredentialRevision) return observed;
+    const credentialRevision = await this.deps.resolvePostApplyCredentialRevision({
+      serviceId: observed.serviceId,
+      groupId: observed.groupId,
+      activeProfileId: observed.activeProfileId,
+      generation: observed.generation,
+    });
+    return {
+      ...observed,
+      credentialRevision: credentialRevision ?? null,
+    };
+  }
 
   private async preflightPredictiveSessionApply(
     input: ConnectedServiceAuthGroupSwitchApplyGenerationInput,
@@ -245,21 +271,27 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       groupId: input.groupId,
       activeProfileId: observed.activeProfileId,
       generation: observed.generation,
+      ...(observed.credentialRevision == null ? {} : { credentialRevision: observed.credentialRevision }),
       ...(input.reason ? { reason: input.reason } : {}),
       result: {
         status: 'observed_generation',
         activeProfileId: observed.activeProfileId,
         generation: observed.generation,
+        credentialRevision: observed.credentialRevision ?? null,
         diagnostics: buildSwitchDecisionDiagnostics({
           decisionTrace: observedGenerationSelection.decisionTrace,
         }),
       },
     });
     input.lease.complete(completion);
-    return {
-      kind: 'observed_generation',
-      result: await this.applyObservedGeneration(completion),
-    };
+    try {
+      return {
+        kind: 'observed_generation',
+        result: await this.applyObservedGeneration(completion),
+      };
+    } finally {
+      input.lease.finish();
+    }
   }
 
   private async applyObservedGeneration(completion: LeaseCompletion): Promise<ObservedGenerationApplyResult> {
@@ -292,10 +324,40 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
         });
       }
       const applyFields = switchResultApplyFields(applyResult);
+      const observedAfterApply = await this.loadStateAfterApply({
+        serviceId: completion.serviceId,
+        groupId: completion.groupId,
+      });
+      const revisionWasSuperseded = observedAfterApply.generation === completion.generation
+        && completion.credentialRevision != null
+        && observedAfterApply.credentialRevision != null
+        && observedAfterApply.credentialRevision !== completion.credentialRevision;
+      if (observedAfterApply.generation > completion.generation || revisionWasSuperseded) {
+        return {
+          status: 'superseded_after_apply',
+          activeProfileId: observedAfterApply.activeProfileId,
+          generation: observedAfterApply.generation,
+          credentialRevision: observedAfterApply.credentialRevision ?? null,
+          adoptedProfileId: completion.activeProfileId,
+          adoptedGeneration: completion.generation,
+          adoptedCredentialRevision: completion.credentialRevision ?? null,
+          reconciliationDisposition: 'superseded_after_apply',
+          ...applyFields,
+          ...(decisionTrace === undefined
+            ? {}
+            : {
+                diagnostics: mergeSwitchDecisionDiagnostics({
+                  diagnostics: applyFields.diagnostics,
+                  decisionTrace,
+                }),
+              }),
+        };
+      }
       return {
         status: 'observed_generation',
         activeProfileId: completion.activeProfileId,
         generation: completion.generation,
+        credentialRevision: completion.credentialRevision ?? null,
         ...applyFields,
         ...(decisionTrace === undefined
           ? {}
@@ -392,7 +454,11 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       providerLimitId?: string | null;
       action?: ConnectedServiceAuthGroupSwitchLimitAction | null;
     }>;
-    loaded: Readonly<{ activeProfileId: string | null; generation: number }>;
+    loaded: Readonly<{
+      activeProfileId: string | null;
+      generation: number;
+      credentialRevision?: import('@happier-dev/protocol').ConnectedServiceCredentialRevisionV1 | null;
+    }>;
     resultStatus: ConnectedServiceAuthGroupSwitchResult['status'];
     toProfileId: string | null;
     toGeneration: number;
@@ -440,7 +506,11 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     trigger: ConnectedServiceAuthGroupSwitchPipelineTrigger;
     phase: ConnectedServiceAuthGroupSwitchPipelinePhase;
     request: ConnectedServiceAuthGroupSwitchPipelineRequest;
-    loaded: Readonly<{ activeProfileId: string | null; generation: number }>;
+    loaded: Readonly<{
+      activeProfileId: string | null;
+      generation: number;
+      credentialRevision?: import('@happier-dev/protocol').ConnectedServiceCredentialRevisionV1 | null;
+    }>;
     resultStatus: ConnectedServiceAuthGroupSwitchResult['status'];
     toProfileId: string | null;
     toGeneration: number;
@@ -463,6 +533,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       case 'observed_generation':
       case 'generation_apply_failed':
       case 'predictive_apply_unavailable':
+      case 'superseded_after_apply':
         return input.result.activeProfileId;
       case 'auto_switch_disabled':
       case 'switch_reason_disabled':
@@ -479,7 +550,11 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     phase: ConnectedServiceAuthGroupSwitchPipelinePhase;
     lease: Extract<LeaseAcquireResult, { kind: 'owner' }>;
     request: ConnectedServiceAuthGroupSwitchPipelineRequest;
-    loaded: Readonly<{ activeProfileId: string | null; generation: number }>;
+    loaded: Readonly<{
+      activeProfileId: string | null;
+      generation: number;
+      credentialRevision?: import('@happier-dev/protocol').ConnectedServiceCredentialRevisionV1 | null;
+    }>;
     result: ConnectedServiceAuthGroupSwitchResult;
     startedAtMs: number;
   }>): ConnectedServiceAuthGroupSwitchResult {
@@ -489,6 +564,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       groupId: input.request.groupId,
       activeProfileId: input.loaded.activeProfileId,
       generation: input.loaded.generation,
+      ...(input.loaded.credentialRevision == null ? {} : { credentialRevision: input.loaded.credentialRevision }),
       reason: input.request.reason,
       result: input.result,
     }));
@@ -504,6 +580,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       startedAtMs: input.startedAtMs,
       decisionTrace: readSwitchResultDecisionTrace(input.result),
     });
+    input.lease.finish();
     return input.result;
   }
 
@@ -592,6 +669,39 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     return await this.runSwitchPipeline(input, 'pre_turn');
   }
 
+  /**
+   * Recipient-only application of an already-authoritative generation. This API deliberately has
+   * no candidate-selection or commit input; automatic/settings fanout can therefore share one
+   * bounded executor without allowing siblings to re-enter the decision pipeline.
+   */
+  async applyCommittedGeneration(input: Readonly<{
+    sessionId: string;
+    serviceId: string;
+    groupId: string;
+    activeProfileId: string;
+    generation: number;
+    credentialRevision?: import('@happier-dev/protocol').ConnectedServiceCredentialRevisionV1 | null;
+    reason: string;
+    fromProfileId?: string | null;
+  }>): Promise<ObservedGenerationApplyResult> {
+    return await this.applyObservedGeneration(buildLeaseCompletion({
+      sessionId: input.sessionId,
+      serviceId: input.serviceId,
+      groupId: input.groupId,
+      activeProfileId: input.activeProfileId,
+      generation: input.generation,
+      ...(input.credentialRevision === undefined ? {} : { credentialRevision: input.credentialRevision }),
+      reason: input.reason,
+      ...(input.fromProfileId === undefined ? {} : { fromProfileId: input.fromProfileId }),
+      result: {
+        status: 'observed_generation',
+        activeProfileId: input.activeProfileId,
+        generation: input.generation,
+        credentialRevision: input.credentialRevision ?? null,
+      },
+    }));
+  }
+
   private async runSwitchPipeline(
     input: ConnectedServiceAuthGroupSwitchPipelineRequest,
     trigger: ConnectedServiceAuthGroupSwitchPipelineTrigger,
@@ -599,7 +709,45 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     const startedAtMs = this.deps.nowMs();
     const lease = this.deps.leases.acquire(input);
     if (lease.kind === 'loser') {
-      const observed = await lease.waitForOwner();
+      let observed: LeaseCompletion;
+      try {
+        observed = await lease.waitForOwner();
+      } catch (error) {
+        const failedProfileId = normalizeProfileId(input.observedProfileId);
+        if (
+          !(error instanceof ConnectedServiceAuthGroupSwitchLeaseExpiredError)
+          || trigger !== 'classified_failure'
+          || !failedProfileId
+        ) {
+          throw error;
+        }
+        const current = await this.deps.loadState({ ...input, trigger });
+        const currentProfileId = normalizeProfileId(current.activeProfileId);
+        if (!currentProfileId || currentProfileId === failedProfileId) {
+          throw error;
+        }
+        // A peer committed current group truth before its longer application work completed.
+        // Consume that authoritative generation instead of terminalizing the recovery on a
+        // coordination timeout.
+        observed = buildLeaseCompletion({
+          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+          serviceId: current.serviceId,
+          groupId: current.groupId,
+          activeProfileId: currentProfileId,
+          generation: current.generation,
+          ...(current.credentialRevision === undefined
+            ? {}
+            : { credentialRevision: current.credentialRevision }),
+          reason: input.reason,
+          fromProfileId: failedProfileId,
+          result: {
+            status: 'observed_generation',
+            activeProfileId: currentProfileId,
+            generation: current.generation,
+            credentialRevision: current.credentialRevision ?? null,
+          },
+        });
+      }
       if (!shouldApplyLeaseCompletion(observed)) {
         this.maybeEmitSwitchPipelineResult({
           trigger,
@@ -711,19 +859,26 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
               groupId: input.groupId,
               activeProfileId: loaded.activeProfileId,
               generation: loaded.generation,
+              ...(loaded.credentialRevision == null ? {} : { credentialRevision: loaded.credentialRevision }),
               reason: input.reason,
               fromProfileId: observedProfileId,
               result: {
                 status: 'observed_generation',
                 activeProfileId: loaded.activeProfileId,
                 generation: loaded.generation,
+                credentialRevision: loaded.credentialRevision ?? null,
                 diagnostics: buildSwitchDecisionDiagnostics({
                   decisionTrace: observedGenerationSelection.decisionTrace,
                 }),
               },
             });
             lease.complete(completion);
-            const result = await this.applyObservedGeneration(completion);
+            let result: ObservedGenerationApplyResult;
+            try {
+              result = await this.applyObservedGeneration(completion);
+            } finally {
+              lease.finish();
+            }
             this.maybeEmitSwitchPipelineResult({
               trigger,
               phase: 'observed_divergence',
@@ -797,6 +952,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
               status: 'observed_generation',
               activeProfileId: loaded.activeProfileId,
               generation: loaded.generation,
+              credentialRevision: loaded.credentialRevision ?? null,
               diagnostics: buildSwitchDecisionDiagnostics({
                 decisionTrace: observedGenerationSelection.decisionTrace,
               }),
@@ -807,12 +963,18 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
               groupId: input.groupId,
               activeProfileId: loaded.activeProfileId,
               generation: loaded.generation,
+              ...(loaded.credentialRevision == null ? {} : { credentialRevision: loaded.credentialRevision }),
               reason: input.reason,
               fromProfileId: observedProfileId,
               result,
             });
             lease.complete(completion);
-            const applied = await this.applyObservedGeneration(completion);
+            let applied: ObservedGenerationApplyResult;
+            try {
+              applied = await this.applyObservedGeneration(completion);
+            } finally {
+              lease.finish();
+            }
             this.maybeEmitSwitchPipelineResult({
               trigger,
               phase: 'observed_divergence',
@@ -890,6 +1052,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
           status: 'observed_generation',
           activeProfileId: loaded.activeProfileId,
           generation: loaded.generation,
+          credentialRevision: loaded.credentialRevision ?? null,
           diagnostics: buildSwitchDecisionDiagnostics({ decisionTrace: selectedDecisionTrace }),
         };
         return this.completePipelineResult({
@@ -960,6 +1123,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
               fromProfileId: commitLoaded.activeProfileId,
               result,
             }));
+            lease.finish();
             return result;
           }
           committed = await this.deps.commitSwitch({
@@ -1037,6 +1201,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
                 status: 'observed_generation',
                 activeProfileId: commitLoaded.activeProfileId,
                 generation: commitLoaded.generation,
+                credentialRevision: commitLoaded.credentialRevision ?? null,
               };
               return this.completePipelineResult({
                 trigger,
@@ -1059,66 +1224,69 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
         groupId: input.groupId,
         activeProfileId: committed.activeProfileId,
         generation: committed.generation,
+        ...(committed.credentialRevision == null ? {} : { credentialRevision: committed.credentialRevision }),
         reason: input.reason,
         result: {
           status: 'switched',
           activeProfileId: committed.activeProfileId ?? selectedProfileId,
           generation: committed.generation,
+          credentialRevision: committed.credentialRevision ?? null,
           diagnostics: buildSwitchDecisionDiagnostics({ decisionTrace: selectedDecisionTrace }),
         },
       });
       let applyResult: ConnectedServiceAuthGroupSwitchApplyGenerationResult | void;
       lease.complete(completion);
       try {
-        applyResult = await this.deps.applyGeneration({
-          ...completion,
-          // Pre-switch active member, so the transcript "from" is the real member rather than null.
-          fromProfileId: commitLoaded.activeProfileId,
-        });
-      } catch (error) {
-        const applyFailure = readConnectedServiceAuthGenerationApplyFailure(error);
-        if (!applyFailure) throw error;
-        const unavailableResult = isTransientPredictiveApplyUnavailable({
-          reason: input.reason,
-          failure: applyFailure,
-        })
-          ? buildPredictiveApplyUnavailableResult({
-              activeProfileId: committed.activeProfileId ?? selectedProfileId,
-              generation: committed.generation,
-              failure: applyFailure,
-            })
-          : null;
-        if (unavailableResult) return unavailableResult;
-        this.maybeEmitSwitchPipelineResult({
-          trigger,
-          phase: 'apply_failed',
-          request: input,
-          loaded: trigger === 'classified_failure' ? loaded : commitLoaded,
-          resultStatus: 'generation_apply_failed',
-          toProfileId: committed.activeProfileId ?? selectedProfileId,
-          toGeneration: committed.generation,
-          success: false,
-          startedAtMs,
-          decisionTrace: selectedDecisionTrace,
-        });
-        return {
-          status: 'generation_apply_failed',
-          activeProfileId: committed.activeProfileId ?? selectedProfileId,
-          generation: committed.generation,
-          errorCode: applyFailure.errorCode,
-          diagnostics: mergeSwitchDecisionDiagnostics({
-            diagnostics: applyFailure.diagnostics,
+        try {
+          applyResult = await this.deps.applyGeneration({
+            ...completion,
+            // Pre-switch active member, so the transcript "from" is the real member rather than null.
+            fromProfileId: commitLoaded.activeProfileId,
+          });
+        } catch (error) {
+          const applyFailure = readConnectedServiceAuthGenerationApplyFailure(error);
+          if (!applyFailure) throw error;
+          const unavailableResult = isTransientPredictiveApplyUnavailable({
+            reason: input.reason,
+            failure: applyFailure,
+          })
+            ? buildPredictiveApplyUnavailableResult({
+                activeProfileId: committed.activeProfileId ?? selectedProfileId,
+                generation: committed.generation,
+                failure: applyFailure,
+              })
+            : null;
+          if (unavailableResult) return unavailableResult;
+          this.maybeEmitSwitchPipelineResult({
+            trigger,
+            phase: 'apply_failed',
+            request: input,
+            loaded: trigger === 'classified_failure' ? loaded : commitLoaded,
+            resultStatus: 'generation_apply_failed',
+            toProfileId: committed.activeProfileId ?? selectedProfileId,
+            toGeneration: committed.generation,
+            success: false,
+            startedAtMs,
             decisionTrace: selectedDecisionTrace,
-          }),
-        };
-      }
-      const sessionSwitchKey = this.resolveSessionSwitchKey(input);
-      const predictiveFailure = readPredictiveSoftSwitchSessionApplyFailure({
-        reason: input.reason,
-        sessionId: input.sessionId,
-        applyResult,
-      });
-      if (predictiveFailure) {
+          });
+          return {
+            status: 'generation_apply_failed',
+            activeProfileId: committed.activeProfileId ?? selectedProfileId,
+            generation: committed.generation,
+            errorCode: applyFailure.errorCode,
+            diagnostics: mergeSwitchDecisionDiagnostics({
+              diagnostics: applyFailure.diagnostics,
+              decisionTrace: selectedDecisionTrace,
+            }),
+          };
+        }
+        const sessionSwitchKey = this.resolveSessionSwitchKey(input);
+        const predictiveFailure = readPredictiveSoftSwitchSessionApplyFailure({
+          reason: input.reason,
+          sessionId: input.sessionId,
+          applyResult,
+        });
+        if (predictiveFailure) {
         const unavailableResult = isTransientPredictiveApplyUnavailable({
           reason: input.reason,
           failure: predictiveFailure,
@@ -1152,8 +1320,47 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
             decisionTrace: selectedDecisionTrace,
           }),
         };
-      }
-      this.recordSessionSwitch(sessionSwitchKey, this.deps.nowMs());
+        }
+        const observedAfterApply = await this.loadStateAfterApply({ ...input, trigger });
+        const adoptedProfileId = committed.activeProfileId ?? selectedProfileId;
+      // The server generation is the group-selection CAS epoch. Credential refresh can advance the
+      // exact application epoch without changing that number, so revision is the second fence.
+      // A lower generation remains a lagging/non-authoritative adapter observation.
+        const revisionWasSuperseded = observedAfterApply.generation === committed.generation
+          && committed.credentialRevision != null
+          && observedAfterApply.credentialRevision != null
+          && observedAfterApply.credentialRevision !== committed.credentialRevision;
+        if (observedAfterApply.generation > committed.generation || revisionWasSuperseded) {
+        const applyFields = switchResultApplyFields(applyResult);
+        this.maybeEmitSwitchPipelineResult({
+          trigger,
+          phase: 'apply_failed',
+          request: input,
+          loaded: trigger === 'classified_failure' ? loaded : commitLoaded,
+          resultStatus: 'superseded_after_apply',
+          toProfileId: observedAfterApply.activeProfileId,
+          toGeneration: observedAfterApply.generation,
+          success: false,
+          startedAtMs,
+          decisionTrace: selectedDecisionTrace,
+        });
+        return {
+          status: 'superseded_after_apply',
+          activeProfileId: observedAfterApply.activeProfileId,
+          generation: observedAfterApply.generation,
+          credentialRevision: observedAfterApply.credentialRevision ?? null,
+          adoptedProfileId,
+          adoptedGeneration: committed.generation,
+          adoptedCredentialRevision: committed.credentialRevision ?? null,
+          reconciliationDisposition: 'superseded_after_apply',
+          ...applyFields,
+          diagnostics: mergeSwitchDecisionDiagnostics({
+            diagnostics: applyFields.diagnostics,
+            decisionTrace: selectedDecisionTrace,
+          }),
+        };
+        }
+        this.recordSessionSwitch(sessionSwitchKey, this.deps.nowMs());
       this.maybeEmitSwitchPipelineResult({
         trigger,
         phase: 'switched',
@@ -1167,17 +1374,21 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
         startedAtMs,
         decisionTrace: selectedDecisionTrace,
       });
-      const applyFields = switchResultApplyFields(applyResult);
-      return {
-        status: 'switched',
-        activeProfileId: committed.activeProfileId ?? selectedProfileId,
-        generation: committed.generation,
-        ...applyFields,
-        diagnostics: mergeSwitchDecisionDiagnostics({
-          diagnostics: applyFields.diagnostics,
-          decisionTrace: selectedDecisionTrace,
-        }),
-      };
+        const applyFields = switchResultApplyFields(applyResult);
+        return {
+          status: 'switched',
+          activeProfileId: committed.activeProfileId ?? selectedProfileId,
+          generation: committed.generation,
+          credentialRevision: committed.credentialRevision ?? null,
+          ...applyFields,
+          diagnostics: mergeSwitchDecisionDiagnostics({
+            diagnostics: applyFields.diagnostics,
+            decisionTrace: selectedDecisionTrace,
+          }),
+        };
+      } finally {
+        lease.finish();
+      }
     } catch (error) {
       lease.fail(error);
       throw error;

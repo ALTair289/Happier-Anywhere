@@ -13,6 +13,7 @@ function groupWithPersistedState(state: ConnectedServiceAuthGroupV1['members'][n
     policy: ConnectedServiceAuthGroupPolicyV1Schema.parse({ autoSwitch: true }),
     activeProfileId: 'primary',
     generation: 7,
+    runtimeStateRevision: 0,
     state: { v: 1 },
     members: [
       {
