@@ -30,22 +30,98 @@ function quotaSnapshot(overrides: Partial<ConnectedServiceQuotaSnapshotV1> = {})
 }
 
 describe('resolveQuotaProbeFreshProof', () => {
+  const appliedIdentity = {
+    serviceId: 'openai-codex' as const,
+    profileId: 'backup',
+    groupId: 'team',
+    groupGeneration: 3,
+    providerAccountId: 'acct-provider-a',
+    materialFingerprint: 'fingerprint-a',
+  };
+
   it('produces quota_probe_fresh only for fresh matching usable normalized quota evidence', () => {
     expect(resolveQuotaProbeFreshProof({
       nowMs: 12_000,
       maxAgeMs: 30_000,
       serviceId: 'openai-codex',
       profileId: 'backup',
-      groupId: 'team',
-      expectedGroupGeneration: 3,
-      currentGroupGeneration: 3,
-      expectedMaterialFingerprint: 'fingerprint-a',
-      snapshotMaterialFingerprint: 'fingerprint-a',
+      expectedAppliedIdentity: appliedIdentity,
+      snapshotAppliedIdentity: appliedIdentity,
       snapshot: quotaSnapshot(),
     })).toEqual({
       status: 'proof',
       proofKind: 'quota_probe_fresh',
     });
+  });
+
+  it.each([
+    { name: 'both tuples missing', expectedAppliedIdentity: null, snapshotAppliedIdentity: null },
+    { name: 'expected tuple missing', expectedAppliedIdentity: null, snapshotAppliedIdentity: appliedIdentity },
+    { name: 'snapshot tuple missing', expectedAppliedIdentity: appliedIdentity, snapshotAppliedIdentity: null },
+    {
+      name: 'distinct fractional generations collapse to the same integer',
+      expectedAppliedIdentity: { ...appliedIdentity, groupGeneration: 3.9 },
+      snapshotAppliedIdentity: { ...appliedIdentity, groupGeneration: 3.1 },
+    },
+    {
+      name: 'both provider account ids missing',
+      expectedAppliedIdentity: { ...appliedIdentity, providerAccountId: null },
+      snapshotAppliedIdentity: { ...appliedIdentity, providerAccountId: null },
+    },
+    {
+      name: 'expected provider account id missing',
+      expectedAppliedIdentity: { ...appliedIdentity, providerAccountId: null },
+      snapshotAppliedIdentity: appliedIdentity,
+    },
+    {
+      name: 'snapshot provider account id missing',
+      expectedAppliedIdentity: appliedIdentity,
+      snapshotAppliedIdentity: { ...appliedIdentity, providerAccountId: null },
+    },
+    {
+      name: 'both material fingerprints missing despite fresh host time and a matching group',
+      expectedAppliedIdentity: { ...appliedIdentity, materialFingerprint: null },
+      snapshotAppliedIdentity: { ...appliedIdentity, materialFingerprint: null },
+    },
+    {
+      name: 'expected material fingerprint missing',
+      expectedAppliedIdentity: { ...appliedIdentity, materialFingerprint: null },
+      snapshotAppliedIdentity: appliedIdentity,
+    },
+    {
+      name: 'snapshot material fingerprint missing',
+      expectedAppliedIdentity: appliedIdentity,
+      snapshotAppliedIdentity: { ...appliedIdentity, materialFingerprint: null },
+    },
+  ])('refuses provider proof when $name', ({ expectedAppliedIdentity, snapshotAppliedIdentity }) => {
+    expect(resolveQuotaProbeFreshProof({
+      nowMs: 12_000,
+      maxAgeMs: 30_000,
+      serviceId: 'openai-codex',
+      profileId: 'backup',
+      expectedAppliedIdentity,
+      snapshotAppliedIdentity,
+      snapshot: quotaSnapshot(),
+    })).toEqual({ status: 'no_proof', reason: 'provider_operation_identity_missing' });
+  });
+
+  it.each([
+    ['service', { serviceId: 'anthropic' as const }],
+    ['profile', { profileId: 'other' }],
+    ['group', { groupId: 'other-team' }],
+    ['generation', { groupGeneration: 4 }],
+    ['provider account', { providerAccountId: 'acct-provider-b' }],
+    ['material fingerprint', { materialFingerprint: 'fingerprint-b' }],
+  ])('refuses a provider-operation tuple with mismatched %s', (_field, override) => {
+    expect(resolveQuotaProbeFreshProof({
+      nowMs: 12_000,
+      maxAgeMs: 30_000,
+      serviceId: 'openai-codex',
+      profileId: 'backup',
+      expectedAppliedIdentity: appliedIdentity,
+      snapshotAppliedIdentity: { ...appliedIdentity, ...override },
+      snapshot: quotaSnapshot(),
+    })).toEqual({ status: 'no_proof', reason: 'provider_operation_identity_mismatch' });
   });
 
   it('refuses stale, exhausted, disabled, mismatched, and generation-stale snapshots', () => {
@@ -54,15 +130,24 @@ describe('resolveQuotaProbeFreshProof', () => {
       maxAgeMs: 1_000,
       serviceId: 'openai-codex' as const,
       profileId: 'backup',
-      groupId: 'team',
-      expectedGroupGeneration: 3,
-      currentGroupGeneration: 3,
-      expectedMaterialFingerprint: 'fingerprint-a',
-      snapshotMaterialFingerprint: 'fingerprint-a',
+      expectedAppliedIdentity: appliedIdentity,
+      snapshotAppliedIdentity: appliedIdentity,
       snapshot: quotaSnapshot(),
     };
 
     expect(resolveQuotaProbeFreshProof(base)).toEqual({ status: 'no_proof', reason: 'stale_snapshot' });
+    expect(resolveQuotaProbeFreshProof({
+      ...base,
+      nowMs: 12_000,
+      maxAgeMs: 30_000,
+      snapshot: quotaSnapshot({ fetchedAt: 12_001 }),
+    })).toEqual({ status: 'no_proof', reason: 'stale_snapshot' });
+    expect(resolveQuotaProbeFreshProof({
+      ...base,
+      nowMs: 12_000,
+      maxAgeMs: 30_000,
+      snapshot: quotaSnapshot({ staleAfterMs: 1_000 }),
+    })).toEqual({ status: 'no_proof', reason: 'stale_snapshot' });
     expect(resolveQuotaProbeFreshProof({
       ...base,
       nowMs: 12_000,
@@ -112,13 +197,13 @@ describe('resolveQuotaProbeFreshProof', () => {
       ...base,
       nowMs: 12_000,
       maxAgeMs: 30_000,
-      currentGroupGeneration: 4,
-    })).toEqual({ status: 'no_proof', reason: 'group_generation_mismatch' });
+      snapshotAppliedIdentity: { ...appliedIdentity, groupGeneration: 4 },
+    })).toEqual({ status: 'no_proof', reason: 'provider_operation_identity_mismatch' });
     expect(resolveQuotaProbeFreshProof({
       ...base,
       nowMs: 12_000,
       maxAgeMs: 30_000,
-      snapshotMaterialFingerprint: 'fingerprint-b',
-    })).toEqual({ status: 'no_proof', reason: 'material_fingerprint_mismatch' });
+      snapshotAppliedIdentity: { ...appliedIdentity, materialFingerprint: 'fingerprint-b' },
+    })).toEqual({ status: 'no_proof', reason: 'provider_operation_identity_mismatch' });
   });
 });

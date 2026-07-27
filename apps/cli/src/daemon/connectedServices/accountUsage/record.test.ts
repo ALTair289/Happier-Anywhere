@@ -37,11 +37,19 @@ type RecordModule = Readonly<{
       sources?: readonly ConnectedServiceUsageSourceV1[];
     }>;
     sourceProviderAccountId?: string | null;
+    credentialFingerprint?: string | null;
+    verifyCredentialFingerprint?: (input: Readonly<{
+      serviceId: string;
+      profileId: string;
+      providerAccountId: string;
+      credentialFingerprint: string;
+    }>) => Promise<boolean>;
     sessionId: string;
     snapshot: ProviderAccountUsageSnapshotV1;
   }>): Promise<
     | Readonly<{ status: 'snapshot_advanced'; recordId: string; persisted: boolean }>
     | Readonly<{ status: 'session_not_found' }>
+    | Readonly<{ status: 'credential_fingerprint_mismatch'; recordId: string; persisted: false }>
   >;
 }>;
 
@@ -239,42 +247,51 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     expect(publishRecordId).not.toHaveBeenCalled();
   });
 
-  it('suppresses metadata publication when persistence fails but keeps the in-memory record', async () => {
+  it('rejects failed persistence custody and retries an identical in-memory record', async () => {
     const module = await loadRecordModule();
     expect(module).not.toBeNull();
     const snapshot = createSnapshot();
     const store = {
-      recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1) => ({
-        status: 'snapshot_advanced' as const,
-        recordId: recorded.recordId,
-      })),
+      recordSnapshot: vi.fn()
+        .mockImplementationOnce((recorded: ProviderAccountUsageSnapshotV1) => ({
+          status: 'snapshot_advanced' as const,
+          recordId: recorded.recordId,
+        }))
+        .mockImplementation((recorded: ProviderAccountUsageSnapshotV1) => ({
+          status: 'duplicate' as const,
+          recordId: recorded.recordId,
+        })),
       resolveRecordId: vi.fn(() => snapshot),
     };
     const persistence = {
-      recordInBandSnapshot: vi.fn(async () => {
-        throw new Error('store unavailable');
-      }),
+      recordInBandSnapshot: vi.fn()
+        .mockRejectedValueOnce(new Error('store unavailable'))
+        .mockResolvedValue({ status: 'enqueued' as const, enqueue: 'accepted' as const }),
     };
     const publishRecordId = vi.fn(async () => {});
 
-    await expect(module!.recordProviderAccountUsageSnapshotForSession({
+    const input = {
       getChildren: () => [{ happySessionId: 'sess_1' }],
       store,
       persistence,
       publishRecordId,
       sessionId: 'sess_1',
       snapshot,
-    })).resolves.toEqual({
-      status: 'snapshot_advanced',
+    } as const;
+    await expect(module!.recordProviderAccountUsageSnapshotForSession(input))
+      .rejects.toThrow('store unavailable');
+    await expect(module!.recordProviderAccountUsageSnapshotForSession(input)).resolves.toEqual({
+      status: 'duplicate',
       recordId: snapshot.recordId,
       persisted: false,
     });
 
-    expect(store.recordSnapshot).toHaveBeenCalledOnce();
+    expect(store.recordSnapshot).toHaveBeenCalledTimes(2);
+    expect(persistence.recordInBandSnapshot).toHaveBeenCalledTimes(2);
     expect(publishRecordId).not.toHaveBeenCalled();
   });
 
-  it('does not label suppressed persistence as persisted or publish metadata refs', async () => {
+  it('treats scheduler-confirmed already-persisted truth as durable and publishes its metadata ref', async () => {
     const module = await loadRecordModule();
     expect(module).not.toBeNull();
     const snapshot = createSnapshot();
@@ -286,7 +303,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       resolveRecordId: vi.fn(() => snapshot),
     };
     const persistence = {
-      recordInBandSnapshot: vi.fn(async () => ({ status: 'suppressed' as const, reason: 'unchanged' })),
+      recordInBandSnapshot: vi.fn(async () => ({ status: 'already_persisted' as const, reason: 'unchanged' })),
     };
     const publishRecordId = vi.fn(async () => {});
 
@@ -300,15 +317,18 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     })).resolves.toEqual({
       status: 'snapshot_advanced',
       recordId: snapshot.recordId,
-      persisted: false,
+      persisted: true,
     });
 
     expect(store.recordSnapshot).toHaveBeenCalledOnce();
     expect(persistence.recordInBandSnapshot).toHaveBeenCalledOnce();
-    expect(publishRecordId).not.toHaveBeenCalled();
+    expect(publishRecordId).toHaveBeenCalledWith({
+      sessionId: 'sess_1',
+      recordId: snapshot.recordId,
+    });
   });
 
-  it('records the usage fact but strips source links when the source owner differs from the provider account subject', async () => {
+  it('does not advance account usage when an exact source claim mismatches the provider account', async () => {
     const module = await loadRecordModule();
     expect(module).not.toBeNull();
     const snapshot = createSnapshot(createRecordKey('acct_observed_runtime'));
@@ -328,29 +348,82 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     const persistence = {
       recordInBandSnapshot: vi.fn(async () => ({ status: 'enqueued' as const })),
     };
+    const verifyCredentialFingerprint = vi.fn(async () => true);
 
     await expect(module!.recordProviderAccountUsageSnapshotForSession({
       getChildren: () => [{ happySessionId: 'sess_1' }],
       store,
       persistence,
       sourceProviderAccountId: 'acct_connected_profile',
+      credentialFingerprint: 'sha256:deadbeef',
+      verifyCredentialFingerprint,
       observation: { sources: [source] },
       sessionId: 'sess_1',
       snapshot,
     })).resolves.toEqual({
-      status: 'snapshot_advanced',
+      status: 'credential_fingerprint_mismatch',
       recordId: snapshot.recordId,
       persisted: false,
     });
 
-    expect(store.recordSnapshot).toHaveBeenCalledWith(expect.objectContaining({
-      recordId: snapshot.recordId,
-      recordKey: expect.objectContaining({ accountSubjectId: 'acct_observed_runtime' }),
-    }), undefined);
+    expect(verifyCredentialFingerprint).toHaveBeenCalledOnce();
+    expect(verifyCredentialFingerprint).toHaveBeenCalledWith({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      providerAccountId: 'acct_connected_profile',
+      credentialFingerprint: 'sha256:deadbeef',
+    });
+    expect(store.recordSnapshot).not.toHaveBeenCalled();
     expect(latestObservation).toBeUndefined();
-    expect(persistence.recordInBandSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+    expect(persistence.recordInBandSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('does not advance account usage when an exact source credential fingerprint is rejected', async () => {
+    const module = await loadRecordModule();
+    expect(module).not.toBeNull();
+    const snapshot = createSnapshot(createRecordKey('acct_observed_runtime'));
+    const source: ConnectedServiceUsageSourceV1 = {
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      bindingKind: 'profile',
+    };
+    const store = {
+      recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1) => ({
+        status: 'snapshot_advanced' as const,
+        recordId: recorded.recordId,
+      })),
+      resolveRecordId: vi.fn(() => snapshot),
+    };
+    const persistence = {
+      recordInBandSnapshot: vi.fn(async () => ({ status: 'enqueued' as const })),
+    };
+    const verifyCredentialFingerprint = vi.fn(async () => false);
+
+    await expect(module!.recordProviderAccountUsageSnapshotForSession({
+      getChildren: () => [{ happySessionId: 'sess_1' }],
+      store,
+      persistence,
+      sourceProviderAccountId: 'acct_observed_runtime',
+      credentialFingerprint: 'sha256:deadbeef',
+      verifyCredentialFingerprint,
+      observation: { sources: [source] },
+      sessionId: 'sess_1',
+      snapshot,
+    })).resolves.toEqual({
+      status: 'credential_fingerprint_mismatch',
       recordId: snapshot.recordId,
-    }), undefined);
+      persisted: false,
+    });
+
+    expect(verifyCredentialFingerprint).toHaveBeenCalledWith({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      providerAccountId: 'acct_observed_runtime',
+      credentialFingerprint: 'sha256:deadbeef',
+    });
+    expect(verifyCredentialFingerprint).toHaveBeenCalledOnce();
+    expect(store.recordSnapshot).not.toHaveBeenCalled();
+    expect(persistence.recordInBandSnapshot).not.toHaveBeenCalled();
   });
 
   it('records the usage fact but strips source links when source ownership is unproven', async () => {
@@ -378,6 +451,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       getChildren: () => [{ happySessionId: 'sess_1' }],
       store,
       persistence,
+      sourceProviderAccountId: 'acct_connected_profile',
       observation: { sources: [source] },
       sessionId: 'sess_1',
       snapshot,
@@ -477,6 +551,45 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       persisted: true,
     });
     expect(publishRecordId).toHaveBeenCalledOnce();
+  });
+
+  it('returns after persistence custody without waiting for session metadata publication', async () => {
+    const module = await loadRecordModule();
+    expect(module).not.toBeNull();
+    const snapshot = createSnapshot();
+    let releasePublication!: () => void;
+    const publicationBarrier = new Promise<void>((resolve) => {
+      releasePublication = resolve;
+    });
+    const publishRecordId = vi.fn(async () => await publicationBarrier);
+
+    const recording = module!.recordProviderAccountUsageSnapshotForSession({
+      getChildren: () => [{ happySessionId: 'sess_1' }],
+      store: {
+        recordSnapshot: () => ({
+          status: 'snapshot_advanced' as const,
+          recordId: snapshot.recordId,
+        }),
+        resolveRecordId: () => snapshot,
+      },
+      persistence: {
+        recordInBandSnapshot: async () => ({ status: 'persisted' as const }),
+      },
+      publishRecordId,
+      sessionId: 'sess_1',
+      snapshot,
+    });
+
+    await expect(Promise.race([
+      recording,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 50)),
+    ])).resolves.toEqual({
+      status: 'snapshot_advanced',
+      recordId: snapshot.recordId,
+      persisted: true,
+    });
+    expect(publishRecordId).toHaveBeenCalledOnce();
+    releasePublication();
   });
 
   it('records provisional connected-service usage without any durable connected-service quota projection', async () => {

@@ -7,8 +7,8 @@ import type { ProviderOutcomeProofKind } from '../../recovery/providerOutcomePro
 export type QuotaProbeFreshNoProofReason =
   | 'service_mismatch'
   | 'profile_mismatch'
-  | 'group_generation_mismatch'
-  | 'material_fingerprint_mismatch'
+  | 'provider_operation_identity_missing'
+  | 'provider_operation_identity_mismatch'
   | 'stale_snapshot'
   | 'snapshot_unavailable'
   | 'snapshot_exhausted'
@@ -18,15 +18,60 @@ export type QuotaProbeFreshProofResult =
   | Readonly<{ status: 'proof'; proofKind: Extract<ProviderOutcomeProofKind, 'quota_probe_fresh'> }>
   | Readonly<{ status: 'no_proof'; reason: QuotaProbeFreshNoProofReason }>;
 
-function normalizeFingerprint(value: string | null | undefined): string | null {
+function normalizeRequiredString(value: string | null | undefined): string | null {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   return trimmed ? trimmed : null;
 }
 
 function normalizeGeneration(value: number | null | undefined): number | null {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? Math.trunc(value)
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+    ? value
     : null;
+}
+
+export type QuotaProbeAppliedIdentity = Readonly<{
+  serviceId: ConnectedServiceId;
+  profileId: string;
+  groupId: string | null;
+  groupGeneration: number | null;
+  providerAccountId: string | null;
+  materialFingerprint: string | null;
+}>;
+
+type NormalizedQuotaProbeAppliedIdentity = Omit<QuotaProbeAppliedIdentity, 'providerAccountId' | 'materialFingerprint'> & Readonly<{
+  providerAccountId: string;
+  materialFingerprint: string;
+}>;
+
+function normalizeAppliedIdentity(identity: QuotaProbeAppliedIdentity | null): NormalizedQuotaProbeAppliedIdentity | null {
+  if (!identity) return null;
+  const profileId = normalizeRequiredString(identity.profileId);
+  const groupId = normalizeRequiredString(identity.groupId);
+  const providerAccountId = normalizeRequiredString(identity.providerAccountId);
+  const materialFingerprint = normalizeRequiredString(identity.materialFingerprint);
+  const groupGeneration = normalizeGeneration(identity.groupGeneration);
+  if (!profileId || !providerAccountId || !materialFingerprint) return null;
+  if ((groupId === null) !== (groupGeneration === null)) return null;
+  return {
+    serviceId: identity.serviceId,
+    profileId,
+    groupId,
+    groupGeneration,
+    providerAccountId,
+    materialFingerprint,
+  };
+}
+
+function appliedIdentitiesMatch(
+  expected: NormalizedQuotaProbeAppliedIdentity,
+  observed: NormalizedQuotaProbeAppliedIdentity,
+): boolean {
+  return expected.serviceId === observed.serviceId
+    && expected.profileId === observed.profileId
+    && expected.groupId === observed.groupId
+    && expected.groupGeneration === observed.groupGeneration
+    && expected.providerAccountId === observed.providerAccountId
+    && expected.materialFingerprint === observed.materialFingerprint;
 }
 
 function isUnavailableMeter(meter: ConnectedServiceQuotaMeterV1): boolean {
@@ -60,11 +105,8 @@ export function resolveQuotaProbeFreshProof(input: Readonly<{
   maxAgeMs: number;
   serviceId: ConnectedServiceId;
   profileId: string;
-  groupId: string | null;
-  expectedGroupGeneration: number | null;
-  currentGroupGeneration: number | null;
-  expectedMaterialFingerprint: string | null;
-  snapshotMaterialFingerprint: string | null;
+  expectedAppliedIdentity: QuotaProbeAppliedIdentity | null;
+  snapshotAppliedIdentity: QuotaProbeAppliedIdentity | null;
   snapshot: ConnectedServiceQuotaSnapshotV1;
 }>): QuotaProbeFreshProofResult {
   if (input.snapshot.serviceId !== input.serviceId) {
@@ -73,19 +115,26 @@ export function resolveQuotaProbeFreshProof(input: Readonly<{
   if (input.snapshot.profileId !== input.profileId) {
     return { status: 'no_proof', reason: 'profile_mismatch' };
   }
-  const expectedGeneration = normalizeGeneration(input.expectedGroupGeneration);
-  const currentGeneration = normalizeGeneration(input.currentGroupGeneration);
-  if (expectedGeneration !== null && currentGeneration !== expectedGeneration) {
-    return { status: 'no_proof', reason: 'group_generation_mismatch' };
+  const expectedIdentity = normalizeAppliedIdentity(input.expectedAppliedIdentity);
+  const snapshotIdentity = normalizeAppliedIdentity(input.snapshotAppliedIdentity);
+  if (!expectedIdentity || !snapshotIdentity) {
+    return { status: 'no_proof', reason: 'provider_operation_identity_missing' };
   }
-  const expectedFingerprint = normalizeFingerprint(input.expectedMaterialFingerprint);
-  const snapshotFingerprint = normalizeFingerprint(input.snapshotMaterialFingerprint);
-  if (expectedFingerprint !== null && snapshotFingerprint !== expectedFingerprint) {
-    return { status: 'no_proof', reason: 'material_fingerprint_mismatch' };
+  if (
+    expectedIdentity.serviceId !== input.serviceId
+    || expectedIdentity.profileId !== input.profileId
+    || !appliedIdentitiesMatch(expectedIdentity, snapshotIdentity)
+  ) {
+    return { status: 'no_proof', reason: 'provider_operation_identity_mismatch' };
   }
   const fetchedAt = Number.isFinite(input.snapshot.fetchedAt) ? Math.trunc(input.snapshot.fetchedAt) : 0;
-  const maxAgeMs = Math.max(1, Math.trunc(input.maxAgeMs));
-  if (Math.max(0, Math.trunc(input.nowMs)) - fetchedAt > maxAgeMs) {
+  const configuredMaxAgeMs = Math.max(1, Math.trunc(input.maxAgeMs));
+  const snapshotMaxAgeMs = Number.isFinite(input.snapshot.staleAfterMs)
+    ? Math.max(1, Math.trunc(input.snapshot.staleAfterMs))
+    : configuredMaxAgeMs;
+  const maxAgeMs = Math.min(configuredMaxAgeMs, snapshotMaxAgeMs);
+  const nowMs = Math.max(0, Math.trunc(input.nowMs));
+  if (fetchedAt > nowMs || nowMs - fetchedAt > maxAgeMs) {
     return { status: 'no_proof', reason: 'stale_snapshot' };
   }
   if (input.snapshot.meters.length > 0 && input.snapshot.meters.every(isUnavailableMeter)) {
