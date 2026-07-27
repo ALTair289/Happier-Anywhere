@@ -89,6 +89,32 @@ describe('accountSettingsCache', () => {
     await expect(stat(tmp)).rejects.toBeTruthy();
   });
 
+  it('does not let an older writer overwrite a newer cache version after acquiring the lock', async () => {
+    const root = join(tmpdir(), `happier-account-settings-cache-${randomUUID()}`);
+    const path = join(root, 'account.settings.cache.json');
+
+    await writeAccountSettingsCacheAtomic(path, {
+      version: 2,
+      cachedAt: 200,
+      settingsContent: { t: 'plain', v: { sessionPendingQueueDeliveryTiming: 'after_runtime_idle' } },
+      settingsVersion: 5,
+    });
+    await writeAccountSettingsCacheAtomic(path, {
+      version: 2,
+      cachedAt: 100,
+      settingsContent: { t: 'plain', v: { sessionPendingQueueDeliveryTiming: 'after_foreground_ready' } },
+      settingsVersion: 3,
+    });
+
+    await expect(readAccountSettingsCache(path)).resolves.toMatchObject({
+      settingsVersion: 5,
+      settingsContent: {
+        t: 'plain',
+        v: { sessionPendingQueueDeliveryTiming: 'after_runtime_idle' },
+      },
+    });
+  });
+
   it('waits long enough for a non-stale lock to be released', async () => {
     // Fake only `setTimeout` so we can "fast-forward" retry delays while still
     // letting fs I/O resolve normally.

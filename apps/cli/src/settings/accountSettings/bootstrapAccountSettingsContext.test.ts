@@ -1,10 +1,13 @@
 import axios from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { accountSettingsParse } from '@happier-dev/protocol';
 
 import { configuration } from '@/configuration';
 import type { Credentials } from '@/persistence';
 
 import { bootstrapAccountSettingsContext, resetInMemoryAccountSettingsContextForTests } from './bootstrapAccountSettingsContext';
+import { setActiveAccountSettingsSnapshot } from './activeAccountSettingsSnapshot';
+import { createAccountSettingsScopeKey } from './accountSettingsScopeKey';
 
 function createCredentialsStub(): Credentials {
   return {
@@ -597,6 +600,52 @@ describe('bootstrapAccountSettingsContext', () => {
     expect(res.settingsVersion).toBe(11);
     expect(res.settings.notificationsSettingsV1.ready).toBe(false);
     expect(applySideEffects).toHaveBeenCalledWith(expect.objectContaining({ source: 'network', settingsVersion: 11 }));
+  });
+
+  it('does not let a slow older network bootstrap overwrite or cache a newer live snapshot', async () => {
+    const credentials = createCredentialsStub();
+    let finishDecrypt: (value: Record<string, unknown>) => void = () => {};
+    const decryptCiphertext = vi.fn(() => new Promise<Record<string, unknown>>((resolve) => {
+      finishDecrypt = resolve;
+    }));
+    const writeCache = vi.fn(async () => {});
+    const applySideEffects = vi.fn();
+
+    const bootstrapping = bootstrapAccountSettingsContext({
+      credentials,
+      mode: 'blocking',
+      refresh: 'force',
+      nowMs: 100,
+      deps: {
+        resolveCachePath: () => '/tmp/account-a.settings.cache.json',
+        readCache: async () => null,
+        fetchFromServer: async () => ({ settingsCiphertext: 'older-ciphertext', settingsVersion: 3 }),
+        decryptCiphertext,
+        writeCache,
+        applySideEffects,
+      },
+    });
+    await vi.waitFor(() => expect(decryptCiphertext).toHaveBeenCalled());
+
+    setActiveAccountSettingsSnapshot({
+      source: 'network',
+      settings: accountSettingsParse({ sessionPendingQueueDeliveryTiming: 'after_runtime_idle' }),
+      settingsVersion: 5,
+      loadedAtMs: 200,
+      settingsSecretsReadKeys: [],
+      scopeKey: createAccountSettingsScopeKey({
+        cachePath: '/tmp/account-a.settings.cache.json',
+        token: credentials.token,
+      }),
+    });
+    finishDecrypt({ sessionPendingQueueDeliveryTiming: 'after_foreground_ready' });
+
+    await expect(bootstrapping).resolves.toMatchObject({
+      settingsVersion: 5,
+      settings: expect.objectContaining({ sessionPendingQueueDeliveryTiming: 'after_runtime_idle' }),
+    });
+    expect(writeCache).not.toHaveBeenCalled();
+    expect(applySideEffects).not.toHaveBeenCalledWith(expect.objectContaining({ settingsVersion: 3 }));
   });
 
   it('fast mode returns immediately and exposes whenRefreshed for stale cache', async () => {

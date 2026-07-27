@@ -137,6 +137,12 @@ export async function writeAccountSettingsCacheAtomic(path: string, cache: Accou
   await mkdir(dirname(path), { recursive: true });
   const lock = await acquireLock(lockFile);
   try {
+    // The lock is the shared-disk publication boundary. A bootstrap request can finish after a
+    // newer daemon/update writer, so re-read under this lock and preserve the monotonic winner.
+    // Equal versions are also retained: the server version identifies one authoritative value,
+    // and replacing it with different bytes would make arrival order a second authority.
+    const current = await readAccountSettingsCache(path);
+    if (current && current.settingsVersion >= cache.settingsVersion) return;
     await writeFile(tmpFile, JSON.stringify(cache, null, 2), { mode: 0o600 });
     await rename(tmpFile, path);
     await bestEffortChmod0600(path);
