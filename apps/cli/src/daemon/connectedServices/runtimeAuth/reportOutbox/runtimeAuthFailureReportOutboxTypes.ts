@@ -6,6 +6,7 @@ import type {
 } from '../types';
 import type {
   ConnectedServiceCredentialHealthStatusV1,
+  ConnectedServiceCredentialRevisionV1,
   ProviderAccountUsageRecordId,
   SessionUsageLimitRecoveryResumePromptModeV1,
 } from '@happier-dev/protocol';
@@ -26,6 +27,7 @@ export type RuntimeAuthFailureReportOutboxClassification = Readonly<{
   profileId: string | null;
   groupId: string | null;
   groupGeneration?: number | null;
+  credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
   activeProfileId?: string | null;
   credentialHealthStatus?: ConnectedServiceCredentialHealthStatusV1 | null;
   identityProofVersion?: number | null;
@@ -37,6 +39,7 @@ export type RuntimeAuthFailureReportOutboxClassification = Readonly<{
   providerLimitId?: string | null;
   sourceProviderAccountId?: string | null;
   sourceAccountLabel?: string | null;
+  failingAccessTokenFingerprint?: string | null;
   action?: RuntimeAuthFailureReportOutboxAction | null;
   planType: string | null;
   rateLimits: null;
@@ -45,6 +48,9 @@ export type RuntimeAuthFailureReportOutboxClassification = Readonly<{
 }>;
 
 export type RuntimeAuthFailureReportOutboxReport = Readonly<{
+  reportId?: string;
+  /** Accepted only when reading a legacy caller shape; ignored by the current writer. */
+  originDaemonExecutionGenerationV1?: string;
   sessionId: string;
   switchesThisTurn?: number;
   resumePromptMode?: unknown;
@@ -55,6 +61,7 @@ export type RuntimeAuthFailureReportOutboxItem = Readonly<{
   schemaVersion: 1;
   fileId: string;
   reportKey: string;
+  reportId: string;
   sessionId: string;
   switchesThisTurn: number;
   resumePromptMode?: SessionUsageLimitRecoveryResumePromptModeV1;

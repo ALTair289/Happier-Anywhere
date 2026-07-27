@@ -1,4 +1,6 @@
+import { spawn } from 'node:child_process';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -30,6 +32,7 @@ const classifiedFailure = {
   source: 'structured_provider_error',
   sourceProviderAccountId: 'acct-source',
   sourceAccountLabel: 'source@example.test',
+  failingAccessTokenFingerprint: 'sha256:abcdef12',
   accessToken: 'secret-access-token',
   refresh_token: 'secret-refresh-token',
   env: { OPENAI_API_KEY: 'secret-env-value' },
@@ -37,7 +40,92 @@ const classifiedFailure = {
   rawProviderPayload: { body: 'raw-provider-body' },
 } as const;
 
+async function waitForReadyFiles(barrierDir: string, expected: number): Promise<void> {
+  // Six fresh TSX child processes can take more than ten seconds to initialize on a busy
+  // validation host; the barrier tests concurrency, not startup latency.
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const readyCount = (await readdir(barrierDir)).filter((entry) => entry.startsWith('ready-')).length;
+    if (readyCount === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('runtime_auth_failure_report_outbox_child_barrier_timeout');
+}
+
+async function runEnqueueChild(params: Readonly<{
+  outboxDir: string;
+  barrierDir: string;
+  childId: string;
+}>): Promise<string> {
+  const fixturePath = fileURLToPath(new URL(
+    './fixtures/enqueueRuntimeAuthFailureReportOutboxChild.ts',
+    import.meta.url,
+  ));
+  const child = spawn(process.execPath, ['--import', 'tsx', fixturePath, params.outboxDir, params.barrierDir, params.childId], {
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+  child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', resolve);
+  });
+  if (exitCode !== 0) throw new Error(`enqueue child ${params.childId} failed (${exitCode}): ${stderr}`);
+  return stdout.trim();
+}
+
 describe('runtimeAuthFailureReportOutbox', () => {
+  it('ignores a legacy daemon-generation field when coalescing one durable failure', async () => {
+    const outboxDir = await createTempDir('happier-runtime-auth-outbox-generation-');
+    try {
+      const first = await enqueueRuntimeAuthFailureReportOutboxItem({
+        outboxDir,
+        nowMs: () => 1_000,
+        report: {
+          reportId: 'runtime-auth-report:old-generation',
+          originDaemonExecutionGenerationV1: 'daemon-old',
+          sessionId: 'session-generation',
+          classification: classifiedFailure,
+        },
+      });
+      const second = await enqueueRuntimeAuthFailureReportOutboxItem({
+        outboxDir,
+        nowMs: () => 1_001,
+        report: {
+          reportId: 'runtime-auth-report:current-generation',
+          originDaemonExecutionGenerationV1: 'daemon-current',
+          sessionId: 'session-generation',
+          classification: classifiedFailure,
+        },
+      });
+
+      expect(first).toMatchObject({ status: 'enqueued' });
+      expect(second).toMatchObject({
+        status: 'enqueued',
+        item: {
+          reportId: 'runtime-auth-report:old-generation',
+          attemptCount: 2,
+          createdAtMs: 1_000,
+        },
+      });
+      const items = await readRuntimeAuthFailureReportOutboxItems({ outboxDir });
+      expect(items).toEqual([
+        expect.objectContaining({
+          reportId: 'runtime-auth-report:old-generation',
+          attemptCount: 2,
+        }),
+      ]);
+      expect(items[0]).not.toHaveProperty('originDaemonExecutionGenerationV1');
+    } finally {
+      await removeTempDir(outboxDir);
+    }
+  });
   it('stores only sanitized non-secret report fields', async () => {
     const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-');
     try {
@@ -56,6 +144,7 @@ describe('runtimeAuthFailureReportOutbox', () => {
       const items = await readRuntimeAuthFailureReportOutboxItems({ outboxDir });
       expect(items).toHaveLength(1);
       expect(items[0]).toMatchObject({
+        reportId: expect.stringMatching(/^runtime-auth-report:/),
         sessionId: 'sess_1',
         switchesThisTurn: 1,
         resumePromptMode: 'custom',
@@ -75,6 +164,7 @@ describe('runtimeAuthFailureReportOutbox', () => {
           source: 'structured_provider_error',
           sourceProviderAccountId: 'acct-source',
           sourceAccountLabel: 'source@example.test',
+          failingAccessTokenFingerprint: 'sha256:abcdef12',
         },
         attemptCount: 1,
         createdAtMs: 1_700_000_000_000,
@@ -97,7 +187,7 @@ describe('runtimeAuthFailureReportOutbox', () => {
   it('coalesces duplicate report keys by updating attempt metadata', async () => {
     const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-coalesce-');
     try {
-      await enqueueRuntimeAuthFailureReportOutboxItem({
+      const first = await enqueueRuntimeAuthFailureReportOutboxItem({
         outboxDir,
         report: {
           sessionId: 'sess_1',
@@ -123,6 +213,7 @@ describe('runtimeAuthFailureReportOutbox', () => {
       const items = await readRuntimeAuthFailureReportOutboxItems({ outboxDir });
       expect(items).toHaveLength(1);
       expect(items[0]).toMatchObject({
+        reportId: first.status === 'enqueued' ? first.item.reportId : undefined,
         switchesThisTurn: 3,
         resumePromptMode: 'custom',
         attemptCount: 2,
@@ -133,6 +224,73 @@ describe('runtimeAuthFailureReportOutbox', () => {
       await removeTempDir(outboxDir);
     }
   });
+
+  it('does not coalesce otherwise identical reports from different credential revisions', async () => {
+    const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-revision-');
+    try {
+      for (const credentialRevision of ['csr_aaaaaaaaaaaaaaaaaaaaaa', 'csr_bbbbbbbbbbbbbbbbbbbbbb']) {
+        await enqueueRuntimeAuthFailureReportOutboxItem({
+          outboxDir,
+          report: {
+            sessionId: 'sess_revision',
+            classification: { ...classifiedFailure, credentialRevision },
+          },
+          nowMs: () => 1_700_000_000_000,
+        });
+      }
+      expect(await readRuntimeAuthFailureReportOutboxItems({ outboxDir })).toHaveLength(2);
+    } finally {
+      await removeTempDir(outboxDir);
+    }
+  });
+
+  it('allocates one report id when concurrent writers enqueue the same stable key', async () => {
+    const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-concurrent-');
+    try {
+      const results = await Promise.all(Array.from({ length: 20 }, async () => (
+        await enqueueRuntimeAuthFailureReportOutboxItem({
+          outboxDir,
+          report: {
+            sessionId: 'sess_concurrent',
+            switchesThisTurn: 1,
+            classification: classifiedFailure,
+          },
+          nowMs: () => 1_700_000_000_000,
+        })
+      )));
+
+      const reportIds = new Set(results.flatMap((result) => (
+        result.status === 'enqueued' ? [result.item.reportId] : []
+      )));
+      expect(results.every((result) => result.status === 'enqueued')).toBe(true);
+      expect(reportIds.size).toBe(1);
+      await expect(readRuntimeAuthFailureReportOutboxItems({ outboxDir })).resolves.toHaveLength(1);
+    } finally {
+      await removeTempDir(outboxDir);
+    }
+  });
+
+  it('allocates one report id across child processes released at the same barrier', async () => {
+    const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-processes-');
+    const barrierDir = await createTempDir('happier-runtime-auth-report-outbox-barrier-');
+    try {
+      const childCount = 6;
+      const children = Array.from({ length: childCount }, (_, index) => runEnqueueChild({
+        outboxDir,
+        barrierDir,
+        childId: String(index),
+      }));
+      await waitForReadyFiles(barrierDir, childCount);
+      await writeFile(join(barrierDir, 'go'), '', 'utf8');
+      const reportIds = new Set(await Promise.all(children));
+
+      expect(reportIds.size).toBe(1);
+      await expect(readRuntimeAuthFailureReportOutboxItems({ outboxDir })).resolves.toHaveLength(1);
+    } finally {
+      await removeTempDir(outboxDir);
+      await removeTempDir(barrierDir);
+    }
+  }, 45_000);
 
   it('coalesces unchanged evidence even when retryAfterMs jitters between retries', async () => {
     const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-stable-key-');
@@ -278,6 +436,19 @@ describe('runtimeAuthFailureReportOutbox', () => {
     }
   });
 
+  it('keeps removal idempotent when the outbox directory does not exist', async () => {
+    const parentDir = await createTempDir('happier-runtime-auth-report-outbox-missing-');
+    const outboxDir = join(parentDir, 'not-created');
+    try {
+      await expect(removeRuntimeAuthFailureReportOutboxItem({
+        outboxDir,
+        reportKey: 'runtime-auth-failure-report:v1:missing',
+      })).resolves.toBeUndefined();
+    } finally {
+      await removeTempDir(parentDir);
+    }
+  });
+
   it('drains delivered reports and keeps retryable reports', async () => {
     const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-drain-');
     try {
@@ -318,6 +489,72 @@ describe('runtimeAuthFailureReportOutbox', () => {
       expect(remaining).toHaveLength(1);
       expect(remaining[0].sessionId).toBe('sess_retry');
     } finally {
+      await removeTempDir(outboxDir);
+    }
+  });
+
+  it('does not remove a same-key report refreshed while an older delivery is in flight', async () => {
+    const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-refresh-race-');
+    let releaseDelivery!: () => void;
+    const deliveryReleased = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    let markDeliveryStarted!: () => void;
+    const deliveryStarted = new Promise<void>((resolve) => {
+      markDeliveryStarted = resolve;
+    });
+    try {
+      const original = await enqueueRuntimeAuthFailureReportOutboxItem({
+        outboxDir,
+        report: {
+          sessionId: 'sess_refresh_race',
+          switchesThisTurn: 1,
+          classification: classifiedFailure,
+        },
+        nowMs: () => 1_700_000_000_000,
+      });
+      expect(original.status).toBe('enqueued');
+
+      const drain = drainRuntimeAuthFailureReportOutboxItems({
+        outboxDir,
+        nowMs: () => 1_700_000_000_100,
+        deliver: async () => {
+          markDeliveryStarted();
+          await deliveryReleased;
+          return { status: 'delivered' as const };
+        },
+      });
+      await deliveryStarted;
+
+      const refreshed = await enqueueRuntimeAuthFailureReportOutboxItem({
+        outboxDir,
+        report: {
+          sessionId: 'sess_refresh_race',
+          switchesThisTurn: 2,
+          classification: classifiedFailure,
+        },
+        nowMs: () => 1_700_000_000_200,
+      });
+      expect(refreshed).toMatchObject({
+        status: 'enqueued',
+        item: {
+          attemptCount: 2,
+          switchesThisTurn: 2,
+        },
+      });
+
+      releaseDelivery();
+      await expect(drain).resolves.toEqual({ delivered: 1, dropped: 0, retried: 0 });
+      await expect(readRuntimeAuthFailureReportOutboxItems({ outboxDir })).resolves.toEqual([
+        expect.objectContaining({
+          reportId: refreshed.status === 'enqueued' ? refreshed.item.reportId : '',
+          attemptCount: 2,
+          switchesThisTurn: 2,
+          updatedAtMs: 1_700_000_000_200,
+        }),
+      ]);
+    } finally {
+      releaseDelivery?.();
       await removeTempDir(outboxDir);
     }
   });
