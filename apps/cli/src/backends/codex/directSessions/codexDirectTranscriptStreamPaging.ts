@@ -15,8 +15,15 @@ import {
 import {
   decodeCodexDirectForwardCursor,
   encodeCodexDirectForwardCursor,
+  type CodexDurableStreamForwardProgress,
   type CodexDirectForwardCursor,
 } from './codexDirectForwardCursor';
+import {
+  captureCodexRolloutFileBoundary,
+  captureCodexRolloutTailProgress,
+  codexRolloutFileBoundaryMatches,
+  type CodexRolloutFileBoundary,
+} from './codexDirectRolloutFileBoundary';
 import {
   compareCodexProjectedRecordsOldestFirst,
   measureDirectTranscriptItemBytes,
@@ -34,72 +41,138 @@ function normalizeOffsetBytes(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
 }
 
-function buildStreamVectorCursorFromProgress(
+type CodexBoundaryProgress = CodexStreamProgress & Readonly<{
+  fingerprintOffsetBytes: number;
+}>;
+
+type CodexExpectedBoundary = CodexRolloutFileBoundary;
+
+function toBoundaryProgress(entry: CodexDurableStreamForwardProgress): CodexBoundaryProgress {
+  return {
+    nextOffsetBytes: entry.nextOffsetBytes,
+    subIndex: entry.subIndex,
+    fingerprintOffsetBytes: entry.fingerprintOffsetBytes,
+  };
+}
+
+async function captureDurableStreamProgress(
+  stream: CodexDirectTranscriptRolloutStream,
+  progress: CodexBoundaryProgress,
+): Promise<CodexDurableStreamForwardProgress | null> {
+  const captured = await captureCodexRolloutFileBoundary(stream.filePath, progress.fingerprintOffsetBytes);
+  if (!captured) return null;
+  return {
+    fileRelPath: stream.fileRelPath,
+    nextOffsetBytes: progress.nextOffsetBytes,
+    subIndex: progress.subIndex,
+    fingerprintOffsetBytes: progress.fingerprintOffsetBytes,
+    fileIdentity: captured.boundary.fileIdentity,
+    contentFingerprint: captured.boundary.contentFingerprint,
+  };
+}
+
+async function buildStreamVectorCursorFromProgress(
   streams: readonly CodexDirectTranscriptRolloutStream[],
-  progressByStreamId: ReadonlyMap<string, CodexStreamProgress>,
-): string {
-  return encodeCodexDirectForwardCursor({
-    v: 4,
-    kind: 'codexForwardStreamVector',
-    streams: streams
-      .map((stream) => {
-        const progress = progressByStreamId.get(stream.fileRelPath);
-        return {
-          fileRelPath: stream.fileRelPath,
-          nextOffsetBytes: progress?.nextOffsetBytes ?? 0,
-          subIndex: progress?.subIndex ?? 0,
-        };
-      })
-      .sort((left, right) => left.fileRelPath.localeCompare(right.fileRelPath)),
-  });
+  progressByStreamId: ReadonlyMap<string, CodexBoundaryProgress>,
+): Promise<Readonly<{ cursor: string; resetStreamIds: ReadonlySet<string> }>> {
+  const resetStreamIds = new Set<string>();
+  const entries = await Promise.all(streams.map(async (stream) => {
+    const progress = progressByStreamId.get(stream.fileRelPath);
+    const durable = progress ? await captureDurableStreamProgress(stream, progress) : null;
+    if (durable) return durable;
+
+    resetStreamIds.add(stream.fileRelPath);
+    const tail = await captureCodexRolloutTailProgress(stream.filePath);
+    if (!tail) return null;
+    return {
+      fileRelPath: stream.fileRelPath,
+      ...tail.progress,
+      ...tail.boundary,
+    } satisfies CodexDurableStreamForwardProgress;
+  }));
+  return {
+    cursor: encodeCodexDirectForwardCursor({
+      v: 5,
+      kind: 'codexForwardStreamVector',
+      streams: entries
+        .filter((entry): entry is CodexDurableStreamForwardProgress => entry !== null)
+        .sort((left, right) => left.fileRelPath.localeCompare(right.fileRelPath)),
+    }),
+    resetStreamIds,
+  };
 }
 
 async function buildCodexStreamVectorTailCursor(
   streams: readonly CodexDirectTranscriptRolloutStream[],
 ): Promise<string> {
-  const progressEntries = await Promise.all(streams.map(async (stream) => [
-    stream.fileRelPath,
-    { nextOffsetBytes: await statFileSize(stream.filePath), subIndex: 0 },
-  ] as const));
-  return buildStreamVectorCursorFromProgress(streams, new Map(progressEntries));
+  const entries = await Promise.all(streams.map(async (stream) => {
+    const tail = await captureCodexRolloutTailProgress(stream.filePath);
+    return tail
+      ? {
+        fileRelPath: stream.fileRelPath,
+        ...tail.progress,
+        ...tail.boundary,
+      } satisfies CodexDurableStreamForwardProgress
+      : null;
+  }));
+  return encodeCodexDirectForwardCursor({
+    v: 5,
+    kind: 'codexForwardStreamVector',
+    streams: entries
+      .filter((entry): entry is CodexDurableStreamForwardProgress => entry !== null)
+      .sort((left, right) => left.fileRelPath.localeCompare(right.fileRelPath)),
+  });
 }
 
-function decodeStreamVectorCursor(cursor: CodexDirectForwardCursor | null): ReadonlyMap<string, CodexStreamProgress> | null {
-  if (!cursor || cursor.kind !== 'codexForwardStreamVector') return null;
-  return new Map(
-    cursor.streams.map((entry) => [
-      entry.fileRelPath,
-      {
-        nextOffsetBytes: Math.max(0, Math.trunc(entry.nextOffsetBytes)),
-        subIndex: Math.max(0, Math.trunc(entry.subIndex ?? 0)),
-      },
-    ]),
-  );
+function decodeDurableStreamVectorCursor(
+  cursor: CodexDirectForwardCursor | null,
+): ReadonlyMap<string, CodexDurableStreamForwardProgress> | null {
+  if (!cursor || cursor.kind !== 'codexForwardStreamVector' || cursor.v !== 5) return null;
+  return new Map(cursor.streams.map((entry) => [entry.fileRelPath, entry]));
 }
 
 async function collectReadAfterRecords(params: Readonly<{
   codexHome: string;
   initialStreams: readonly CodexDirectTranscriptRolloutStream[];
-  initialProgressByStreamId: ReadonlyMap<string, CodexStreamProgress>;
+  initialProgressByStreamId: ReadonlyMap<string, CodexBoundaryProgress>;
+  expectedBoundaryByStreamId: ReadonlyMap<string, CodexExpectedBoundary>;
+  readableStreamIds: ReadonlySet<string>;
+  historicalUnknownStreamIds: ReadonlySet<string>;
   maxBytes: number;
   maxItems: number;
 }>): Promise<Readonly<{
   streams: readonly CodexDirectTranscriptRolloutStream[];
   records: readonly CodexProjectedTranscriptRecord[];
-  baseProgressByStreamId: ReadonlyMap<string, CodexStreamProgress>;
+  baseProgressByStreamId: ReadonlyMap<string, CodexBoundaryProgress>;
+  boundaryChanged: boolean;
+  remainingHistoricalUnknownStreamIds: ReadonlySet<string>;
 }>> {
   const streamsById = new Map(params.initialStreams.map((stream) => [stream.fileRelPath, stream] as const));
-  const streamQueue = [...params.initialStreams];
+  const streamsByThreadId = new Map<string, CodexDirectTranscriptRolloutStream[]>();
+  for (const stream of params.initialStreams) {
+    const threadStreams = streamsByThreadId.get(stream.threadId) ?? [];
+    threadStreams.push(stream);
+    streamsByThreadId.set(stream.threadId, threadStreams);
+  }
+  const streamQueue = params.initialStreams.filter((stream) => params.readableStreamIds.has(stream.fileRelPath));
+  const queuedStreamIds = new Set(streamQueue.map((stream) => stream.fileRelPath));
   const records: CodexProjectedTranscriptRecord[] = [];
   const baseProgressByStreamId = new Map(params.initialProgressByStreamId);
+  const expectedBoundaryByStreamId = new Map(params.expectedBoundaryByStreamId);
+  const remainingHistoricalUnknownStreamIds = new Set(params.historicalUnknownStreamIds);
   const semanticTrackerByStreamId = new Map<string, ReturnType<typeof createCodexRolloutSemanticTracker>>();
-  const seenThreadIds = new Set(params.initialStreams.map((stream) => stream.threadId));
+  let boundaryChanged = false;
 
   for (let queueIndex = 0; queueIndex < streamQueue.length; queueIndex += 1) {
     const stream = streamQueue[queueIndex]!;
+    const progress = baseProgressByStreamId.get(stream.fileRelPath);
+    const expectedBoundary = expectedBoundaryByStreamId.get(stream.fileRelPath);
+    if (!progress || !expectedBoundary) {
+      boundaryChanged = true;
+      continue;
+    }
     const fileSize = await statFileSize(stream.filePath);
-    const progress = params.initialProgressByStreamId.get(stream.fileRelPath) ?? { nextOffsetBytes: 0, subIndex: 0 };
-    const offsetBytes = Math.min(fileSize, normalizeOffsetBytes(progress.nextOffsetBytes));
+    const offsetBytes = normalizeOffsetBytes(progress.nextOffsetBytes);
     if (offsetBytes >= fileSize) continue;
 
     const semanticTracker = semanticTrackerByStreamId.get(stream.fileRelPath) ?? createCodexRolloutSemanticTracker();
@@ -110,8 +183,20 @@ async function collectReadAfterRecords(params: Readonly<{
       maxBytes: Math.max(params.maxBytes, 1),
       maxItems: Math.max(params.maxItems * 2, 1),
     });
+    if (page.truncated || !(await codexRolloutFileBoundaryMatches(stream.filePath, expectedBoundary))) {
+      const tail = await captureCodexRolloutTailProgress(stream.filePath);
+      if (tail) {
+        baseProgressByStreamId.set(stream.fileRelPath, tail.progress);
+        expectedBoundaryByStreamId.set(stream.fileRelPath, tail.boundary);
+      }
+      boundaryChanged = true;
+      continue;
+    }
 
     for (const line of page.items) {
+      // A valid JSON prefix is still not a committed JSONL record until its newline arrives.
+      // Keeping the cursor before it avoids both early projection and loss when the writer appends.
+      if (line.endOffsetBytes >= fileSize) continue;
       const projected = projectCodexRolloutLineToTranscriptRecords({
         stream,
         lineStartOffsetBytes: line.startOffsetBytes,
@@ -123,6 +208,7 @@ async function collectReadAfterRecords(params: Readonly<{
         baseProgressByStreamId.set(stream.fileRelPath, {
           nextOffsetBytes: Math.min(fileSize, line.endOffsetBytes + 1),
           subIndex: 0,
+          fingerprintOffsetBytes: Math.min(fileSize, line.endOffsetBytes + 1),
         });
       }
       for (const record of projected.records) {
@@ -130,13 +216,29 @@ async function collectReadAfterRecords(params: Readonly<{
         records.push(record);
       }
       for (const threadId of projected.discoveredChildThreadIds) {
-        if (seenThreadIds.has(threadId)) continue;
-        seenThreadIds.add(threadId);
-        const childFiles = await collectCodexSessionRolloutFiles({ codexHome: params.codexHome, remoteSessionId: threadId });
-        for (const file of childFiles) {
-          const childStream: CodexDirectTranscriptRolloutStream = { ...file, threadId, sidechainId: threadId };
-          if (streamsById.has(childStream.fileRelPath)) continue;
-          streamsById.set(childStream.fileRelPath, childStream);
+        if (line.startOffsetBytes === offsetBytes && progress.subIndex > 0) continue;
+        let childStreams = streamsByThreadId.get(threadId) ?? [];
+        if (childStreams.length === 0) {
+          const childFiles = await collectCodexSessionRolloutFiles({ codexHome: params.codexHome, remoteSessionId: threadId });
+          childStreams = childFiles.map((file) => ({ ...file, threadId, sidechainId: threadId }));
+          streamsByThreadId.set(threadId, childStreams);
+          for (const childStream of childStreams) {
+            streamsById.set(childStream.fileRelPath, childStream);
+          }
+        }
+        for (const childStream of childStreams) {
+          if (queuedStreamIds.has(childStream.fileRelPath)) continue;
+          const liveBoundary = await captureCodexRolloutFileBoundary(childStream.filePath, 0);
+          if (!liveBoundary) continue;
+          const liveProgress: CodexBoundaryProgress = {
+            nextOffsetBytes: 0,
+            subIndex: 0,
+            fingerprintOffsetBytes: 0,
+          };
+          baseProgressByStreamId.set(childStream.fileRelPath, liveProgress);
+          expectedBoundaryByStreamId.set(childStream.fileRelPath, liveBoundary.boundary);
+          remainingHistoricalUnknownStreamIds.delete(childStream.fileRelPath);
+          queuedStreamIds.add(childStream.fileRelPath);
           streamQueue.push(childStream);
         }
       }
@@ -149,7 +251,13 @@ async function collectReadAfterRecords(params: Readonly<{
     || left.mtimeMs - right.mtimeMs
     || left.fileRelPath.localeCompare(right.fileRelPath),
   );
-  return { streams, records, baseProgressByStreamId };
+  return {
+    streams,
+    records,
+    baseProgressByStreamId,
+    boundaryChanged,
+    remainingHistoricalUnknownStreamIds,
+  };
 }
 
 export async function readAfterCodexRolloutStreams(params: Readonly<{
@@ -175,7 +283,7 @@ export async function readAfterCodexRolloutStreams(params: Readonly<{
   }
 
   const decoded = decodeCodexDirectForwardCursor(params.cursor);
-  const cursorProgressByStreamId = decodeStreamVectorCursor(decoded);
+  const cursorProgressByStreamId = decodeDurableStreamVectorCursor(decoded);
   if (!cursorProgressByStreamId) {
     return {
       items: [],
@@ -184,10 +292,41 @@ export async function readAfterCodexRolloutStreams(params: Readonly<{
     };
   }
 
+  const streamsById = new Map(streams.map((stream) => [stream.fileRelPath, stream] as const));
+  const initialProgressByStreamId = new Map<string, CodexBoundaryProgress>();
+  const expectedBoundaryByStreamId = new Map<string, CodexExpectedBoundary>();
+  const readableStreamIds = new Set<string>();
+  const historicalUnknownStreamIds = new Set<string>();
+  let boundaryChanged = [...cursorProgressByStreamId.keys()].some((streamId) => !streamsById.has(streamId));
+
+  for (const stream of streams) {
+    const persisted = cursorProgressByStreamId.get(stream.fileRelPath);
+    if (persisted && await codexRolloutFileBoundaryMatches(stream.filePath, persisted)) {
+      initialProgressByStreamId.set(stream.fileRelPath, toBoundaryProgress(persisted));
+      expectedBoundaryByStreamId.set(stream.fileRelPath, persisted);
+      readableStreamIds.add(stream.fileRelPath);
+      continue;
+    }
+
+    const tail = await captureCodexRolloutTailProgress(stream.filePath);
+    if (tail) {
+      initialProgressByStreamId.set(stream.fileRelPath, tail.progress);
+      expectedBoundaryByStreamId.set(stream.fileRelPath, tail.boundary);
+    }
+    if (persisted) {
+      boundaryChanged = true;
+    } else {
+      historicalUnknownStreamIds.add(stream.fileRelPath);
+    }
+  }
+
   const collected = await collectReadAfterRecords({
     codexHome: params.codexHome,
     initialStreams: streams,
-    initialProgressByStreamId: cursorProgressByStreamId,
+    initialProgressByStreamId,
+    expectedBoundaryByStreamId,
+    readableStreamIds,
+    historicalUnknownStreamIds,
     maxBytes: params.maxBytes,
     maxItems: params.maxItems,
   });
@@ -196,7 +335,9 @@ export async function readAfterCodexRolloutStreams(params: Readonly<{
   const maxItems = Math.max(1, Math.trunc(params.maxItems));
   const items: DirectTranscriptRawMessageV1[] = [];
   let usedBytes = 0;
-  let truncated = false;
+  let truncated = boundaryChanged
+    || collected.boundaryChanged
+    || collected.remainingHistoricalUnknownStreamIds.size > 0;
   const progressByStreamId = new Map(collected.baseProgressByStreamId);
 
   for (let index = 0; index < collected.records.length; index += 1) {
@@ -209,18 +350,27 @@ export async function readAfterCodexRolloutStreams(params: Readonly<{
     items.push(record.item);
     usedBytes += itemBytes;
     progressByStreamId.set(record.streamId, record.subIndex + 1 >= record.lineRecordCount
-      ? { nextOffsetBytes: record.lineNextOffsetBytes, subIndex: 0 }
-      : { nextOffsetBytes: record.lineStartOffsetBytes, subIndex: record.subIndex + 1 });
+      ? {
+        nextOffsetBytes: record.lineNextOffsetBytes,
+        subIndex: 0,
+        fingerprintOffsetBytes: record.lineNextOffsetBytes,
+      }
+      : {
+        nextOffsetBytes: record.lineStartOffsetBytes,
+        subIndex: record.subIndex + 1,
+        fingerprintOffsetBytes: record.lineNextOffsetBytes,
+      });
     if (items.length >= maxItems || usedBytes >= maxBytes) {
-      truncated = index + 1 < collected.records.length;
+      truncated = truncated || index + 1 < collected.records.length;
       break;
     }
   }
 
+  const builtCursor = await buildStreamVectorCursorFromProgress(collected.streams, progressByStreamId);
   return {
     items,
-    nextCursor: buildStreamVectorCursorFromProgress(collected.streams, progressByStreamId),
-    truncated,
+    nextCursor: builtCursor.cursor,
+    truncated: truncated || builtCursor.resetStreamIds.size > 0,
   };
 }
 

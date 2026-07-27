@@ -29,11 +29,27 @@ type CodexStreamVectorForwardCursorV4 = Readonly<{
   }>[];
 }>;
 
+export type CodexDurableStreamForwardProgress = Readonly<{
+  fileRelPath: string;
+  nextOffsetBytes: number;
+  subIndex: number;
+  fingerprintOffsetBytes: number;
+  fileIdentity: string;
+  contentFingerprint: string;
+}>;
+
+type CodexDurableStreamVectorForwardCursorV5 = Readonly<{
+  v: 5;
+  kind: 'codexForwardStreamVector';
+  streams: readonly CodexDurableStreamForwardProgress[];
+}>;
+
 export type CodexDirectForwardCursor =
   | CodexForwardCursorV1
   | CodexAppServerForwardCursorV2
   | CodexMergedForwardCursorV3
-  | CodexStreamVectorForwardCursorV4;
+  | CodexStreamVectorForwardCursorV4
+  | CodexDurableStreamVectorForwardCursorV5;
 
 export function encodeCodexDirectForwardCursor(value: CodexDirectForwardCursor): string {
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
@@ -90,6 +106,52 @@ export function decodeCodexDirectForwardCursor(raw: string): CodexDirectForwardC
         })
         .filter((entry): entry is { fileRelPath: string; nextOffsetBytes: number; subIndex: number } => entry !== null);
       return { v: 4, kind: 'codexForwardStreamVector', streams };
+    }
+    if (record.v === 5 && record.kind === 'codexForwardStreamVector') {
+      const rawStreams = Array.isArray(record.streams) ? record.streams : [];
+      const streams = rawStreams
+        .map((entry) => {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+          const streamRecord = entry as Record<string, unknown>;
+          const fileRelPath = typeof streamRecord.fileRelPath === 'string' ? streamRecord.fileRelPath.trim() : '';
+          const nextOffsetBytes = typeof streamRecord.nextOffsetBytes === 'number' && Number.isFinite(streamRecord.nextOffsetBytes)
+            ? Math.trunc(streamRecord.nextOffsetBytes)
+            : NaN;
+          const subIndex = typeof streamRecord.subIndex === 'number' && Number.isFinite(streamRecord.subIndex)
+            ? Math.trunc(streamRecord.subIndex)
+            : NaN;
+          const fingerprintOffsetBytes = typeof streamRecord.fingerprintOffsetBytes === 'number'
+            && Number.isFinite(streamRecord.fingerprintOffsetBytes)
+            ? Math.trunc(streamRecord.fingerprintOffsetBytes)
+            : NaN;
+          const fileIdentity = typeof streamRecord.fileIdentity === 'string' ? streamRecord.fileIdentity.trim() : '';
+          const contentFingerprint = typeof streamRecord.contentFingerprint === 'string'
+            ? streamRecord.contentFingerprint.trim()
+            : '';
+          if (
+            !fileRelPath
+            || !Number.isSafeInteger(nextOffsetBytes)
+            || nextOffsetBytes < 0
+            || !Number.isSafeInteger(subIndex)
+            || subIndex < 0
+            || !Number.isSafeInteger(fingerprintOffsetBytes)
+            || fingerprintOffsetBytes < nextOffsetBytes
+            || !/^[a-f0-9]{64}$/.test(fileIdentity)
+            || !/^[a-f0-9]{64}$/.test(contentFingerprint)
+          ) return null;
+          return {
+            fileRelPath,
+            nextOffsetBytes,
+            subIndex,
+            fingerprintOffsetBytes,
+            fileIdentity,
+            contentFingerprint,
+          };
+        })
+        .filter((entry): entry is CodexDurableStreamForwardProgress => entry !== null);
+      if (streams.length !== rawStreams.length) return null;
+      if (new Set(streams.map((entry) => entry.fileRelPath)).size !== streams.length) return null;
+      return { v: 5, kind: 'codexForwardStreamVector', streams };
     }
     return null;
   } catch {

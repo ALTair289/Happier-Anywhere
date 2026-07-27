@@ -10,6 +10,11 @@ type SessionLike = Readonly<{
         body: ACPMessageData,
         opts?: { localId?: string; meta?: Record<string, unknown> },
     ) => void;
+    sendAgentMessageCommitted: (
+        provider: 'codex',
+        body: ACPMessageData,
+        opts: { localId: string; meta?: Record<string, unknown> },
+    ) => Promise<unknown>;
 }>;
 
 type SubagentThreadState = Readonly<{
@@ -29,26 +34,45 @@ export function createCodexSyntheticSubagentTracker(params: Readonly<{
 }>) {
     const stateByThreadId = new Map<string, SubagentThreadState>();
 
-    const ensureStarted = (metadata: SubagentMetadata): void => {
+    const ensureStarted = async (
+        metadata: SubagentMetadata,
+        opts?: Readonly<{ localId: string }>,
+    ): Promise<void> => {
         const current = stateByThreadId.get(metadata.threadId);
         if (current?.rootToolCallSent) return;
 
-        params.session.sendAgentMessage('codex', buildCodexSyntheticSubagentToolCall(metadata));
+        const body = buildCodexSyntheticSubagentToolCall(metadata);
+        if (opts) {
+            await params.session.sendAgentMessageCommitted('codex', body, opts);
+        } else {
+            params.session.sendAgentMessage('codex', body);
+        }
         stateByThreadId.set(metadata.threadId, {
             rootToolCallSent: true,
             rootToolResultSent: current?.rootToolResultSent ?? false,
         });
     };
 
-    const finalize = (metadata: Readonly<{ threadId: string; status: 'completed' | 'interrupted' }>): void => {
+    const finalize = async (
+        metadata: Readonly<{ threadId: string; status: 'completed' | 'interrupted' }>,
+        opts?: Readonly<{ localId: string }>,
+    ): Promise<void> => {
         const current = stateByThreadId.get(metadata.threadId);
         if (!current?.rootToolCallSent) {
-            ensureStarted({ threadId: metadata.threadId });
+            if (opts) {
+                throw new Error(`Exact Codex subagent result is missing its started occurrence: ${metadata.threadId}`);
+            }
+            await ensureStarted({ threadId: metadata.threadId });
         }
         const latest = stateByThreadId.get(metadata.threadId);
         if (latest?.rootToolResultSent) return;
 
-        params.session.sendAgentMessage('codex', buildCodexSyntheticSubagentToolResult(metadata));
+        const body = buildCodexSyntheticSubagentToolResult(metadata);
+        if (opts) {
+            await params.session.sendAgentMessageCommitted('codex', body, opts);
+        } else {
+            params.session.sendAgentMessage('codex', body);
+        }
         stateByThreadId.set(metadata.threadId, {
             rootToolCallSent: true,
             rootToolResultSent: true,

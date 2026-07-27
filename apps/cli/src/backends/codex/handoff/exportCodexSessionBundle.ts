@@ -61,6 +61,7 @@ function resolveCodexSource(metadata: Record<string, unknown>): DirectSessionsSo
 
   const connectedServiceId = typeof runtimeDescriptor.connectedServiceId === 'string' ? runtimeDescriptor.connectedServiceId : undefined;
   const connectedServiceProfileId = typeof runtimeDescriptor.connectedServiceProfileId === 'string' ? runtimeDescriptor.connectedServiceProfileId : undefined;
+  const connectedServiceGroupId = typeof runtimeDescriptor.connectedServiceGroupId === 'string' ? runtimeDescriptor.connectedServiceGroupId : undefined;
 
   return runtimeDescriptor.home === 'connectedService'
     ? {
@@ -68,6 +69,7 @@ function resolveCodexSource(metadata: Record<string, unknown>): DirectSessionsSo
       home: 'connectedService' as const,
       ...(connectedServiceId ? { connectedServiceId } : {}),
       ...(connectedServiceProfileId ? { connectedServiceProfileId } : {}),
+      ...(connectedServiceGroupId ? { connectedServiceGroupId } : {}),
     } satisfies DirectSessionsSource
     : {
       kind: 'codexHome' as const,
@@ -90,6 +92,7 @@ export async function exportCodexSessionBundle(params: Readonly<{
       home: runtimeDescriptor.provider.home ?? null,
       connectedServiceId: runtimeDescriptor.provider.connectedServiceId ?? null,
       connectedServiceProfileId: runtimeDescriptor.provider.connectedServiceProfileId ?? null,
+      connectedServiceGroupId: runtimeDescriptor.provider.connectedServiceGroupId ?? null,
       homePath: null,
     })
     : null;

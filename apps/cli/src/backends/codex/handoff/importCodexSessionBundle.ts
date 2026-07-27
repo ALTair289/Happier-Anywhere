@@ -17,6 +17,7 @@ function resolveCodexRuntimeSourceAffinity(source: unknown): Readonly<{
   home?: 'user' | 'connectedService';
   connectedServiceId?: string;
   connectedServiceProfileId?: string;
+  connectedServiceGroupId?: string;
 }> {
   const parsedSource = DirectSessionsSourceSchema.safeParse(source);
   if (!parsedSource.success || parsedSource.data.kind !== 'codexHome') {
@@ -28,6 +29,7 @@ function resolveCodexRuntimeSourceAffinity(source: unknown): Readonly<{
       home: 'connectedService',
       connectedServiceId: parsedSource.data.connectedServiceId,
       connectedServiceProfileId: parsedSource.data.connectedServiceProfileId,
+      connectedServiceGroupId: parsedSource.data.connectedServiceGroupId,
     }
     : { home: 'user' };
 }
@@ -59,6 +61,7 @@ export async function importCodexSessionBundle(params: Readonly<{
       home: importedRuntimeDescriptor.home,
       connectedServiceId: importedRuntimeDescriptor.connectedServiceId,
       connectedServiceProfileId: importedRuntimeDescriptor.connectedServiceProfileId,
+      connectedServiceGroupId: importedRuntimeDescriptor.connectedServiceGroupId,
       // Handoff bundles must be portable across machines; never import a source-machine homePath.
       // Rollout files are written into the *target* CODEX_HOME below, so the runtime must use that.
       homePath: codexHome,
@@ -75,6 +78,7 @@ export async function importCodexSessionBundle(params: Readonly<{
       home: 'connectedService' as const,
       ...(runtimeDescriptor.provider.connectedServiceId ? { connectedServiceId: runtimeDescriptor.provider.connectedServiceId } : {}),
       ...(runtimeDescriptor.provider.connectedServiceProfileId ? { connectedServiceProfileId: runtimeDescriptor.provider.connectedServiceProfileId } : {}),
+      ...(runtimeDescriptor.provider.connectedServiceGroupId ? { connectedServiceGroupId: runtimeDescriptor.provider.connectedServiceGroupId } : {}),
       // Intentionally omit any homePath: connected-service homes are resolved/verified per-machine.
     }
     : {

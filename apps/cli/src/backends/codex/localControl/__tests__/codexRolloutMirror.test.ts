@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, writeFile, appendFile, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, appendFile, rm, mkdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexRolloutMirror } from '../codexRolloutMirror';
@@ -34,6 +34,20 @@ async function waitFor(assertion: () => void, timeoutMs = 5_000, intervalMs = 25
       await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
     }
   }
+}
+
+async function runMirrorProcess(params: Readonly<{
+  filePath: string;
+  session: unknown;
+}>): Promise<void> {
+  const mirror = new CodexRolloutMirror({
+    filePath: params.filePath,
+    debug: false,
+    onCodexSessionId: () => {},
+    session: params.session as any,
+  });
+  await mirror.start();
+  await mirror.stop();
 }
 
 afterEach(async () => {
@@ -93,35 +107,82 @@ describe('CodexRolloutMirror', () => {
     expect(sessionEvents).toEqual([]);
   });
 
-  it('emits Codex rollout compaction markers as structured session events', async () => {
-    const sessionEvents: SessionEvent[] = [];
+  it('awaits exact commits for root compaction markers and reuses their rollout source identity', async () => {
+    const root = rememberTempDir(await mkdtemp(join(tmpdir(), 'codex-rollout-compaction-')));
+    const filePath = join(root, 'rollout.jsonl');
+    const compactionLine = {
+      type: 'event_msg',
+      payload: { type: 'context_compacted', turn_id: 'turn_compact' },
+    };
+    await writeFile(filePath, `${JSON.stringify(compactionLine)}\n`, 'utf8');
+    const rolloutStats = await stat(filePath);
+
+    const bestEffortSessionEvents: SessionEvent[] = [];
+    const committedSessionEvents: Array<{
+      event: SessionEvent;
+      localId: string;
+    }> = [];
+    let releaseFirstCommit!: () => void;
+    const firstCommit = new Promise<void>((resolve) => {
+      releaseFirstCommit = resolve;
+    });
 
     const mirror = new CodexRolloutMirror({
-      filePath: '/tmp/codex-rollout-mirror-unused.jsonl',
+      filePath,
       debug: false,
       onCodexSessionId: () => {},
       session: {
         sendUserTextMessage: () => {},
         sendCodexMessage: () => {},
-        sendSessionEvent: (event: unknown) => sessionEvents.push(event as SessionEvent),
+        sendSessionEvent: (event: unknown) => bestEffortSessionEvents.push(event as SessionEvent),
+        sendSessionEventCommitted: async (event: unknown, opts: { localId: string }) => {
+          committedSessionEvents.push({ event: event as SessionEvent, localId: opts.localId });
+          if (committedSessionEvents.length === 1) {
+            await firstCommit;
+            return { localId: opts.localId, didWrite: true };
+          }
+          return { localId: opts.localId, didWrite: false };
+        },
       } as any,
     });
 
-    await (mirror as any).onJson({
-      type: 'event_msg',
-      payload: { type: 'context_compacted', turn_id: 'turn_compact' },
+    let startSettled = false;
+    const startPromise = mirror.start().finally(() => {
+      startSettled = true;
     });
+    try {
+      await waitFor(() => {
+        expect(committedSessionEvents).toHaveLength(1);
+      });
+      expect(startSettled).toBe(false);
 
-    expect(sessionEvents).toEqual([
-      expect.objectContaining({
-        type: 'context-compaction',
-        phase: 'completed',
-        lifecycleId: 'codex:context-compaction:turn_compact',
-        provider: 'codex',
-        source: 'provider-event',
-        providerEventId: 'turn_compact',
-      }),
-    ]);
+      releaseFirstCommit();
+      await startPromise;
+
+      await (mirror as any).onJson(compactionLine, {
+        lineStartOffsetBytes: 0,
+        fileIdentity: { dev: rolloutStats.dev, ino: rolloutStats.ino },
+      });
+    } finally {
+      releaseFirstCommit();
+      await startPromise.catch(() => undefined);
+      await mirror.stop();
+    }
+
+    expect(bestEffortSessionEvents).toEqual([]);
+    expect(committedSessionEvents).toHaveLength(2);
+    expect(committedSessionEvents[0]?.localId).toBe(committedSessionEvents[1]?.localId);
+    expect(committedSessionEvents[0]?.localId).toMatch(/^[a-f0-9]{64}$/);
+    expect(committedSessionEvents.map(({ event }) => event)).toEqual(
+      Array.from({ length: 2 }, () => expect.objectContaining({
+          type: 'context-compaction',
+          phase: 'completed',
+          lifecycleId: 'codex:context-compaction:turn_compact',
+          provider: 'codex',
+          source: 'provider-event',
+          providerEventId: 'turn_compact',
+      })),
+    );
   });
 
   it('emits user + assistant messages and tool calls/results', async () => {
@@ -222,6 +283,9 @@ describe('CodexRolloutMirror', () => {
       session: {
         sendUserTextMessage: () => {},
         sendCodexMessage: (body: unknown) => codexBodies.push(body as CodexBody),
+        sendCodexMessageCommitted: async (body: unknown) => {
+          codexBodies.push(body as CodexBody);
+        },
         sendSessionEvent: () => {},
       } as any,
     });
@@ -326,6 +390,7 @@ describe('CodexRolloutMirror', () => {
           body: unknown,
           opts: { localId: string; meta?: Record<string, unknown> },
         ) => {
+          agentBodies.push(body as AgentBody);
           committedMessages.push({
             provider,
             body: body as { type?: string; message?: string; text?: string; sidechainId?: string },
@@ -466,6 +531,7 @@ describe('CodexRolloutMirror', () => {
           body: unknown,
           opts: { localId: string; meta?: Record<string, unknown> },
         ) => {
+          agentBodies.push(body as AgentBody);
           committedMessages.push({
             provider,
             body: body as { type?: string; message?: string; text?: string; sidechainId?: string },
@@ -560,5 +626,288 @@ describe('CodexRolloutMirror', () => {
           message.body.sidechainId === childThreadId,
       ),
     ).toBe(true);
+  });
+
+  it('reuses the acknowledged source identity after a crash between one line effect and cursor commit', async () => {
+    const root = rememberTempDir(await mkdtemp(join(tmpdir(), 'codex-rollout-effect-recovery-')));
+    const filePath = join(root, 'rollout.jsonl');
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        type: 'response_item',
+        payload: {
+          type: 'function_call',
+          name: 'exec_command',
+          arguments: '{"cmd":"pwd"}',
+          call_id: 'call_process_loss',
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    const attempts: string[] = [];
+    const acknowledged = new Set<string>();
+    let crashAfterFirstAcknowledgement = true;
+    const acknowledge = (identity: string | undefined): void => {
+      const effectiveIdentity = identity ?? `unacknowledged-${attempts.length}`;
+      attempts.push(effectiveIdentity);
+      acknowledged.add(effectiveIdentity);
+      if (crashAfterFirstAcknowledgement) {
+        crashAfterFirstAcknowledgement = false;
+        throw new Error('simulated process loss after effect acknowledgement');
+      }
+    };
+    const session = {
+      sendUserTextMessage: () => {},
+      sendCodexMessage: () => acknowledge(undefined),
+      sendCodexMessageCommitted: async (_body: unknown, opts: { localId: string }) => acknowledge(opts.localId),
+      sendAgentMessage: (_provider: string, _body: unknown, opts?: { localId?: string }) => acknowledge(opts?.localId),
+      sendAgentMessageCommitted: async (_provider: string, _body: unknown, opts: { localId: string }) => acknowledge(opts.localId),
+      sendSessionEvent: () => {},
+    };
+
+    await runMirrorProcess({ filePath, session });
+    await runMirrorProcess({ filePath, session });
+    const attemptsAfterRecovery = attempts.length;
+    await runMirrorProcess({ filePath, session });
+
+    expect(new Set(attempts)).toEqual(new Set([attempts[0]!]));
+    expect(acknowledged.size).toBe(1);
+    expect(attempts).toHaveLength(3);
+    expect(attempts.length).toBe(attemptsAfterRecovery + 1);
+  });
+
+  it('replays a consumed multi-effect line until every deterministic source identity is acknowledged', async () => {
+    const root = rememberTempDir(await mkdtemp(join(tmpdir(), 'codex-rollout-multi-effect-recovery-')));
+    const filePath = join(root, 'rollout.jsonl');
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'collab_waiting_end',
+          agent_statuses: [
+            { thread_id: 'child-one', status: { completed: 'first result' } },
+            { thread_id: 'child-two', status: { completed: 'second result' } },
+          ],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    const attempts: string[] = [];
+    const acknowledged = new Set<string>();
+    let crashBeforeThirdEffect = true;
+    const acknowledge = (identity: string | undefined): void => {
+      const effectiveIdentity = identity ?? `unacknowledged-${attempts.length}`;
+      attempts.push(effectiveIdentity);
+      if (crashBeforeThirdEffect && attempts.length === 3) {
+        crashBeforeThirdEffect = false;
+        throw new Error('simulated process loss after read cursor intent but before all line effects');
+      }
+      acknowledged.add(effectiveIdentity);
+    };
+    const session = {
+      sendUserTextMessage: () => {},
+      sendCodexMessage: () => acknowledge(undefined),
+      sendCodexMessageCommitted: async (_body: unknown, opts: { localId: string }) => acknowledge(opts.localId),
+      sendAgentMessage: (_provider: string, _body: unknown, opts?: { localId?: string }) => acknowledge(opts?.localId),
+      sendAgentMessageCommitted: async (_provider: string, _body: unknown, opts: { localId: string }) => acknowledge(opts.localId),
+      sendSessionEvent: () => {},
+    };
+
+    await runMirrorProcess({ filePath, session });
+    await runMirrorProcess({ filePath, session });
+    const attemptsAfterRecovery = attempts.length;
+    await runMirrorProcess({ filePath, session });
+
+    expect(attempts[3]).toBe(attempts[0]);
+    expect(attempts[4]).toBe(attempts[1]);
+    expect(attempts[5]).toBe(attempts[2]);
+    expect(new Set(attempts.slice(7))).toEqual(acknowledged);
+    expect(acknowledged.size).toBe(4);
+    expect(attempts).toHaveLength(11);
+    expect(attempts.length).toBe(attemptsAfterRecovery + 4);
+  });
+
+  it('redrives inferred subagent completion state after the completion effect rejects', async () => {
+    const childThreadId = 'child-retry-after-rejection';
+    const attempts: Array<{ type?: string; localId: string }> = [];
+    let rejectCompletion = true;
+    const mirror = new CodexRolloutMirror({
+      filePath: '/tmp/codex-rollout-mirror-unused.jsonl',
+      debug: false,
+      onCodexSessionId: () => {},
+      session: {
+        sendUserTextMessage: () => {},
+        sendCodexMessage: () => {},
+        sendAgentMessageCommitted: async (
+          _provider: string,
+          body: { type?: string },
+          opts: { localId: string },
+        ) => {
+          attempts.push({ type: body.type, localId: opts.localId });
+          if (body.type === 'tool-result' && rejectCompletion) {
+            rejectCompletion = false;
+            throw new Error('subagent completion was not acknowledged');
+          }
+        },
+        sendSessionEvent: () => {},
+      } as any,
+    });
+    const completionLine = {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{
+          type: 'input_text',
+          text: `<subagent_notification>\n{"agent_id":"${childThreadId}","status":{"completed":"done"}}\n</subagent_notification>`,
+        }],
+      },
+    };
+    const source = {
+      lineStartOffsetBytes: 42,
+      fileIdentity: { dev: 7, ino: 11 },
+    };
+
+    await expect((mirror as any).onJson(completionLine, source)).rejects.toThrow(
+      'subagent completion was not acknowledged',
+    );
+    await expect((mirror as any).onJson(completionLine, source)).resolves.toBeUndefined();
+
+    expect(attempts.map(({ type }) => type)).toEqual([
+      'tool-call',
+      'tool-result',
+      'tool-result',
+    ]);
+    expect(attempts[1]?.localId).toBe(attempts[2]?.localId);
+    await mirror.stop();
+  });
+
+  it('redrives a rejected subagent start from the same live rollout row', async () => {
+    const root = rememberTempDir(await mkdtemp(join(tmpdir(), 'codex-rollout-subagent-start-rejection-')));
+    const filePath = join(root, 'rollout.jsonl');
+    const childThreadId = 'child-retry-start-after-rejection';
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'collab_agent_spawn_end',
+          call_id: 'call_spawn_retry',
+          sender_thread_id: 'parent-thread',
+          new_thread_id: childThreadId,
+          new_agent_nickname: 'Retry',
+          new_agent_role: 'explorer',
+          prompt: 'retry this start',
+          status: 'pending_init',
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    const attempts: string[] = [];
+    let rejectFirstStart = true;
+    const mirror = new CodexRolloutMirror({
+      filePath,
+      debug: false,
+      onCodexSessionId: () => {},
+      session: {
+        sendUserTextMessage: () => {},
+        sendCodexMessage: () => {},
+        sendAgentMessageCommitted: async (
+          _provider: string,
+          body: { type?: string; callId?: string },
+          opts: { localId: string },
+        ) => {
+          if (body.type !== 'tool-call' || body.callId !== childThreadId) return;
+          attempts.push(opts.localId);
+          if (rejectFirstStart) {
+            rejectFirstStart = false;
+            throw new Error('subagent start was not acknowledged');
+          }
+        },
+        sendSessionEvent: () => {},
+        // Narrow session-boundary fixture: this regression exercises only committed subagent starts.
+      } as any,
+    });
+
+    try {
+      await mirror.start();
+      await waitFor(() => {
+        expect(attempts).toHaveLength(2);
+      });
+      expect(attempts[0]).toBe(attempts[1]);
+    } finally {
+      await mirror.stop();
+    }
+  });
+
+  it('shares an in-flight subagent start acknowledgement across concurrent observations', async () => {
+    const childThreadId = 'child-concurrent-start';
+    const spawnLine = {
+      type: 'event_msg',
+      payload: {
+        type: 'collab_agent_spawn_end',
+        call_id: 'call_spawn_concurrent',
+        sender_thread_id: 'parent-thread',
+        new_thread_id: childThreadId,
+        status: 'pending_init',
+      },
+    };
+    let releaseStart!: () => void;
+    const startAcknowledgement = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const attempts: string[] = [];
+    const mirror = new CodexRolloutMirror({
+      filePath: '/tmp/codex-rollout-mirror-unused.jsonl',
+      debug: false,
+      onCodexSessionId: () => {},
+      session: {
+        sendUserTextMessage: () => {},
+        sendCodexMessage: () => {},
+        sendAgentMessageCommitted: async (
+          _provider: string,
+          body: { type?: string; callId?: string },
+          opts: { localId: string },
+        ) => {
+          if (body.type !== 'tool-call' || body.callId !== childThreadId) return;
+          attempts.push(opts.localId);
+          await startAcknowledgement;
+        },
+        sendSessionEvent: () => {},
+        // Narrow session-boundary fixture: this concurrency check exercises only committed subagent starts.
+      } as any,
+    });
+
+    const first = (mirror as any).onJson(spawnLine, {
+      lineStartOffsetBytes: 10,
+      fileIdentity: { dev: 7, ino: 11 },
+    });
+    await waitFor(() => {
+      expect(attempts).toHaveLength(1);
+    });
+    let secondSettled = false;
+    const second = (mirror as any).onJson(spawnLine, {
+      lineStartOffsetBytes: 20,
+      fileIdentity: { dev: 7, ino: 11 },
+    }).finally(() => {
+      secondSettled = true;
+    });
+
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(secondSettled).toBe(false);
+      expect(attempts).toHaveLength(1);
+      releaseStart();
+      await Promise.all([first, second]);
+      expect(attempts).toHaveLength(1);
+    } finally {
+      releaseStart();
+      await Promise.allSettled([first, second]);
+      await mirror.stop();
+    }
   });
 });

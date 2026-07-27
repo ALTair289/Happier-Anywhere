@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
 import type { ApiSessionClient } from '@/api/session/sessionClient';
 import { createJsonlFollowController, type JsonlFollowController } from '@/agent/localControl/jsonlFollowController';
+import type { JsonlLineSource } from '@/agent/localControl/jsonlLineFollower';
 import { DEFAULT_JSONL_FOLLOW_POLICY, normalizeJsonlFollowPolicy, type JsonlFollowPolicyInput, type JsonlFollowPolicyV1 } from '@/agent/localControl/jsonlFollowPolicy';
 import { createKeyedStreamedTranscriptBridge } from '@/api/session/createKeyedStreamedTranscriptBridge';
 import { collectCodexSessionRolloutFiles } from '../directSessions/collectCodexSessionRolloutFiles';
@@ -8,12 +8,28 @@ import { createCodexSyntheticSubagentTracker } from '../collaboration/createCode
 import { mapCodexRolloutEventToActions, type CodexRolloutAction } from './rolloutMapper';
 import { projectCodexRolloutActions } from '../rollout/projectCodexRolloutActions';
 import { createCodexRolloutSemanticTracker } from '../rollout/createCodexRolloutSemanticTracker';
+import {
+    createCodexRolloutEffectLocalId,
+    createCodexRolloutFileIdentity,
+} from '../rollout/codexRolloutFileIdentity';
 import type { LocalTurnLifecycleEvent } from '@/agent/localControl/turnLifecycle';
 
 type MirrorContext = Readonly<{
     sidechainId: string | null;
     streamScopeId: string;
 }>;
+
+type RolloutActionSource = JsonlLineSource & Readonly<{
+    actionIndex: number;
+}>;
+
+function createRolloutActionLocalId(source: RolloutActionSource, fileIdentity: string): string {
+    return createCodexRolloutEffectLocalId({
+        fileIdentity,
+        lineStartOffsetBytes: source.lineStartOffsetBytes,
+        effectIndex: source.actionIndex,
+    });
+}
 
 type SubagentMirrorState = {
     threadId: string;
@@ -22,6 +38,7 @@ type SubagentMirrorState = {
     role: string | null;
     controller: JsonlFollowController | null;
     discoveryTimer: NodeJS.Timeout | null;
+    initialization: Promise<void> | null;
     createdAtMs: number;
     lastTouchedAtMs: number;
 };
@@ -81,7 +98,7 @@ export class CodexRolloutMirror {
             filePath: this.opts.filePath,
             pollPolicy: this.followPolicy,
             startAtEnd: false,
-            onJson: (value) => this.onJson(value),
+            onJson: (value, source) => this.onJson(value, source),
         });
         this.controller = controller;
         await controller.start();
@@ -119,9 +136,16 @@ export class CodexRolloutMirror {
         });
     }
 
-    private async ensureSubagentMirror(action: Extract<CodexRolloutAction, { type: 'subagent-spawn' }>): Promise<void> {
+    private async ensureSubagentMirror(
+        action: Extract<CodexRolloutAction, { type: 'subagent-spawn' }>,
+        localId?: string,
+    ): Promise<void> {
         if (this.closedSubagentThreadIds.has(action.threadId)) return;
-        if (this.subagentMirrorByThreadId.has(action.threadId)) return;
+        const existing = this.subagentMirrorByThreadId.get(action.threadId);
+        if (existing) {
+            await existing.initialization;
+            return;
+        }
 
         const now = Date.now();
         const state: SubagentMirrorState = {
@@ -131,59 +155,87 @@ export class CodexRolloutMirror {
             role: action.role,
             controller: null,
             discoveryTimer: null,
+            initialization: null,
             createdAtMs: now,
             lastTouchedAtMs: now,
         };
+        const initialization = (async (): Promise<void> => {
+            await this.syntheticSubagentTracker.ensureStarted({
+                threadId: action.threadId,
+                prompt: action.prompt,
+                nickname: action.nickname,
+                role: action.role,
+            }, localId ? { localId } : undefined);
+
+            const codexHome = this.resolveCodexHome();
+            if (!codexHome) return;
+
+            const startFollowerIfReady = async (): Promise<void> => {
+                if (this.stopped || state.controller) return;
+                const files = await collectCodexSessionRolloutFiles({
+                    codexHome,
+                    remoteSessionId: action.threadId,
+                });
+                const latestFile = files.at(-1);
+                if (!latestFile) return;
+
+                if (state.discoveryTimer) {
+                    clearInterval(state.discoveryTimer);
+                    state.discoveryTimer = null;
+                }
+
+                const childController = createJsonlFollowController({
+                    filePath: latestFile.filePath,
+                    pollPolicy: this.followPolicy,
+                    startAtEnd: false,
+                    onClosed: () => this.closeSubagentMirror(action.threadId),
+                    onJson: (value, source) => this.onSubagentJson(action.threadId, value, source),
+                });
+                state.controller = childController;
+                await childController.start();
+                if (this.stopped || state.controller !== childController) {
+                    await childController.stop();
+                }
+                this.enforceSubagentFollowerCaps();
+            };
+
+            await startFollowerIfReady();
+            if (!state.controller && !this.stopped) {
+                state.discoveryTimer = setInterval(() => {
+                    void startFollowerIfReady();
+                }, this.followPolicy.missingFileRetryIntervalMs);
+                state.discoveryTimer.unref?.();
+            }
+        })();
+        state.initialization = initialization;
         this.subagentMirrorByThreadId.set(action.threadId, state);
-        this.syntheticSubagentTracker.ensureStarted({
-            threadId: action.threadId,
-            prompt: action.prompt,
-            nickname: action.nickname,
-            role: action.role,
-        });
-
-        const codexHome = this.resolveCodexHome();
-        if (!codexHome) return;
-
-        const startFollowerIfReady = async (): Promise<void> => {
-            if (this.stopped || state.controller) return;
-            const files = await collectCodexSessionRolloutFiles({
-                codexHome,
-                remoteSessionId: action.threadId,
-            });
-            const latestFile = files.at(-1);
-            if (!latestFile) return;
-
+        try {
+            await initialization;
+            state.initialization = null;
+        } catch (error) {
             if (state.discoveryTimer) {
                 clearInterval(state.discoveryTimer);
                 state.discoveryTimer = null;
             }
-
-            const childController = createJsonlFollowController({
-                filePath: latestFile.filePath,
-                pollPolicy: this.followPolicy,
-                startAtEnd: false,
-                onClosed: () => this.closeSubagentMirror(action.threadId),
-                onJson: (value) => this.onSubagentJson(action.threadId, value),
-            });
-            state.controller = childController;
-            await childController.start();
-            if (this.stopped || state.controller !== childController) {
-                await childController.stop();
+            const childController = state.controller;
+            state.controller = null;
+            await childController?.stop().catch(() => undefined);
+            if (this.subagentMirrorByThreadId.get(action.threadId) === state) {
+                this.subagentMirrorByThreadId.delete(action.threadId);
             }
-            this.enforceSubagentFollowerCaps();
-        };
-
-        await startFollowerIfReady();
-        if (!state.controller && !this.stopped) {
-            state.discoveryTimer = setInterval(() => {
-                void startFollowerIfReady();
-            }, this.followPolicy.missingFileRetryIntervalMs);
-            state.discoveryTimer.unref?.();
+            throw error;
         }
     }
 
-    private async handleAction(action: CodexRolloutAction, context: MirrorContext): Promise<void> {
+    private async handleAction(
+        action: CodexRolloutAction,
+        context: MirrorContext,
+        source?: RolloutActionSource,
+    ): Promise<void> {
+        const localId = source
+            ? createRolloutActionLocalId(source, createCodexRolloutFileIdentity(source.fileIdentity))
+            : undefined;
+
         if (action.type === 'turn-lifecycle') {
             if (context.sidechainId === null) {
                 await this.opts.onTurnLifecycleEvent?.(action.event);
@@ -198,7 +250,11 @@ export class CodexRolloutMirror {
             }
             if (projected.type === 'user-text') {
                 await this.flushTranscriptBoundary(context);
-                this.opts.session.sendUserTextMessage(projected.text);
+                if (localId) {
+                    await this.opts.session.sendUserTextMessageCommitted(projected.text, { localId });
+                } else {
+                    this.opts.session.sendUserTextMessage(projected.text);
+                }
                 continue;
             }
 
@@ -213,13 +269,18 @@ export class CodexRolloutMirror {
 
             if (projected.type === 'context-compaction') {
                 if (projected.sidechainId !== null) continue;
-                this.opts.session.sendSessionEvent({
+                if (!source || !localId) {
+                    throw new Error('Root Codex rollout compaction is missing its source position');
+                }
+                await this.opts.session.sendSessionEventCommitted({
                     type: 'context-compaction',
                     phase: projected.phase,
                     lifecycleId: projected.lifecycleId,
                     provider: 'codex',
                     source: projected.source,
                     ...(projected.providerEventId ? { providerEventId: projected.providerEventId } : {}),
+                }, {
+                    localId,
                 });
                 continue;
             }
@@ -230,60 +291,83 @@ export class CodexRolloutMirror {
                 }
                 await this.flushTranscriptBoundary(context);
                 if (context.sidechainId) {
-                    this.opts.session.sendAgentMessage('codex', {
+                    const body = {
                         type: 'tool-call',
                         callId: projected.callId,
                         name: projected.name,
                         input: projected.input,
-                        id: randomUUID(),
+                        id: localId ?? projected.callId,
                         sidechainId: context.sidechainId,
-                    });
+                    } as const;
+                    if (localId) {
+                        await this.opts.session.sendAgentMessageCommitted('codex', body, { localId });
+                    } else {
+                        this.opts.session.sendAgentMessage('codex', body);
+                    }
                 } else {
-                    this.opts.session.sendCodexMessage({
+                    const body = {
                         type: 'tool-call',
                         callId: projected.callId,
                         name: projected.name,
                         input: projected.input,
-                        id: randomUUID(),
-                    });
+                        id: localId ?? projected.callId,
+                    };
+                    if (localId) {
+                        await this.opts.session.sendCodexMessageCommitted(body, { localId });
+                    } else {
+                        this.opts.session.sendCodexMessage(body);
+                    }
                 }
                 continue;
             }
 
             if (projected.type === 'tool-result') {
                 if (context.sidechainId === null && action.type === 'subagent-complete') {
-                    this.syntheticSubagentTracker.finalize({
+                    await this.syntheticSubagentTracker.finalize({
                         threadId: action.threadId,
                         status: action.status,
-                    });
+                    }, localId ? { localId } : undefined);
                     this.markSubagentMirrorCompleted(action.threadId);
                     continue;
                 }
                 await this.flushTranscriptBoundary(context);
                 if (context.sidechainId) {
-                    this.opts.session.sendAgentMessage('codex', {
+                    const body = {
                         type: 'tool-result',
                         callId: projected.callId,
                         output: projected.output,
-                        id: randomUUID(),
+                        id: localId ?? projected.callId,
                         sidechainId: context.sidechainId,
                         ...(projected.isError ? { isError: projected.isError } : {}),
-                    });
+                    } as const;
+                    if (localId) {
+                        await this.opts.session.sendAgentMessageCommitted('codex', body, { localId });
+                    } else {
+                        this.opts.session.sendAgentMessage('codex', body);
+                    }
                 } else {
-                    this.opts.session.sendCodexMessage({
+                    const body = {
                         type: 'tool-call-result',
                         callId: projected.callId,
                         output: projected.output,
-                        id: randomUUID(),
+                        id: localId ?? projected.callId,
                         ...(projected.isError ? { isError: projected.isError } : {}),
-                    });
+                    };
+                    if (localId) {
+                        await this.opts.session.sendCodexMessageCommitted(body, { localId });
+                    } else {
+                        this.opts.session.sendCodexMessage(body);
+                    }
                 }
                 continue;
             }
 
             if (projected.type === 'subagent-spawn') {
                 await this.flushTranscriptBoundary(context);
-                await this.ensureSubagentMirror(action as Extract<CodexRolloutAction, { type: 'subagent-spawn' }>);
+                await this.ensureSubagentMirror(
+                    action as Extract<CodexRolloutAction, { type: 'subagent-spawn' }>,
+                    localId,
+                );
                 continue;
             }
 
@@ -296,20 +380,26 @@ export class CodexRolloutMirror {
         }
     }
 
-    private async onSubagentJson(threadId: string, value: unknown): Promise<void> {
+    private async onSubagentJson(
+        threadId: string,
+        value: unknown,
+        source?: JsonlLineSource,
+    ): Promise<void> {
         const state = this.subagentMirrorByThreadId.get(threadId);
         if (state) {
             state.lastTouchedAtMs = Date.now();
         }
         const actions = mapCodexRolloutEventToActions(value, { debug: this.opts.debug });
-        for (const action of actions) {
-            for (const normalizedAction of this.rolloutSemanticTracker.consume(action)) {
+        await this.rolloutSemanticTracker.consumeAfterAcknowledgement(actions, async (normalizedActions) => {
+            let actionIndex = 0;
+            for (const normalizedAction of normalizedActions) {
                 await this.handleAction(normalizedAction, {
                     sidechainId: threadId,
                     streamScopeId: threadId,
-                });
+                }, source ? { ...source, actionIndex } : undefined);
+                actionIndex += 1;
             }
-        }
+        });
     }
 
     private markSubagentMirrorCompleted(threadId: string): void {
@@ -361,16 +451,18 @@ export class CodexRolloutMirror {
         }
     }
 
-    private async onJson(value: unknown): Promise<void> {
+    private async onJson(value: unknown, source?: JsonlLineSource): Promise<void> {
         const actions = mapCodexRolloutEventToActions(value, { debug: this.opts.debug });
-        for (const action of actions) {
-            for (const normalizedAction of this.rolloutSemanticTracker.consume(action)) {
+        await this.rolloutSemanticTracker.consumeAfterAcknowledgement(actions, async (normalizedActions) => {
+            let actionIndex = 0;
+            for (const normalizedAction of normalizedActions) {
                 await this.handleAction(normalizedAction, {
                     sidechainId: null,
                     streamScopeId: 'main',
-                });
+                }, source ? { ...source, actionIndex } : undefined);
+                actionIndex += 1;
             }
-        }
+        });
     }
 }
 

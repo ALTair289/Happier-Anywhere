@@ -152,6 +152,7 @@ describe('codex session handoff bundle', () => {
             vendorSessionId: 'thread_runtime',
             home: 'connectedService',
             connectedServiceId: 'openai-codex',
+            connectedServiceGroupId: 'primary-pool',
           },
         },
       },
@@ -170,6 +171,7 @@ describe('codex session handoff bundle', () => {
         vendorSessionId: 'thread_runtime',
         home: 'connectedService',
         connectedServiceId: 'openai-codex',
+        connectedServiceGroupId: 'primary-pool',
         providerExtra: {
           owner: 'codex',
           schemaId: 'codex.agentRuntimeDescriptorExtra',
@@ -578,6 +580,7 @@ describe('codex session handoff bundle', () => {
             kind: 'codexHome',
             home: 'connectedService',
             connectedServiceId: 'openai-codex',
+            connectedServiceGroupId: 'primary-pool',
           },
         },
         files: [
@@ -601,6 +604,7 @@ describe('codex session handoff bundle', () => {
         vendorSessionId: 'thread_source',
         home: 'connectedService',
         connectedServiceId: 'openai-codex',
+        connectedServiceGroupId: 'primary-pool',
         providerExtra: {
           v: 1,
           runtimeAffinity: {
@@ -608,9 +612,16 @@ describe('codex session handoff bundle', () => {
             vendorSessionId: 'thread_source',
             home: 'connectedService',
             connectedServiceId: 'openai-codex',
+            connectedServiceGroupId: 'primary-pool',
           },
         },
       },
+    });
+    expect(result.directSource).toEqual({
+      kind: 'codexHome',
+      home: 'connectedService',
+      connectedServiceId: 'openai-codex',
+      connectedServiceGroupId: 'primary-pool',
     });
   });
 
