@@ -3,10 +3,16 @@ import type { Metadata } from '@/sync/domains/state/storageTypes';
 import { DEFAULT_AGENT_ID, getAgentCore, resolveAgentIdFromFlavor } from '@/agents/catalog/catalog';
 import { hasDynamicModelListForSession, getSelectableModelIdsForSession, supportsFreeformModelSelectionForSession } from '@/sync/domains/models/modelOptions';
 import { readSessionModelsState, readSessionModesState } from '@/sync/domains/sessionControl/readSessionControlMetadata';
+import { readSessionAppliedModelMetadataStateV1 } from '@happier-dev/agents';
 
 export type ModelApplyScope = 'live' | 'next_prompt' | 'spawn_only';
 
 export type EffectiveModelModeDescription = Readonly<{
+    /** The user-requested model that owns picker selection and the next run/turn. */
+    selectedModelId: string;
+    /** The latest model accepted for a new provider prompt, when available. */
+    appliedModelId: string | null;
+    /** @deprecated Use selectedModelId. Retained for internal callers during migration. */
     effectiveModelId: string;
     applyScope: ModelApplyScope;
     notes: string[];
@@ -22,11 +28,11 @@ export function describeEffectiveModelMode(params: {
 
     const selectedModelId = typeof params.selectedModelId === 'string' ? params.selectedModelId.trim() : '';
     const hasExplicitSelection = selectedModelId.length > 0;
-    const providerModelState = readSessionModelsState(params.metadata);
-    const providerCurrentModelId = providerModelState?.provider === agentId
-        ? providerModelState.currentModelId.trim()
+    const appliedModelState = readSessionAppliedModelMetadataStateV1(params.metadata);
+    const appliedModelId = appliedModelState?.provider === agentId
+        ? appliedModelState.modelId.trim()
         : '';
-    const effectiveModelId = providerCurrentModelId || (hasExplicitSelection ? selectedModelId : core.model.defaultMode);
+    const resolvedSelectedModelId = hasExplicitSelection ? selectedModelId : core.model.defaultMode;
 
     const isAcpSession = Boolean(readSessionModesState(params.metadata) || readSessionModelsState(params.metadata));
 
@@ -52,7 +58,7 @@ export function describeEffectiveModelMode(params: {
     const hasDynamicList = hasDynamicModelListForSession(agentId, params.metadata);
     if (hasExplicitSelection && !hasDynamicList && supportsFreeformModelSelectionForSession(agentId, params.metadata)) {
         const known = getSelectableModelIdsForSession(agentId, params.metadata);
-        if (!known.includes(effectiveModelId)) {
+        if (!known.includes(resolvedSelectedModelId)) {
             notes.push('This session accepts custom model IDs (not validated).');
         }
     }
@@ -61,5 +67,11 @@ export function describeEffectiveModelMode(params: {
         notes.push('Model selection is not available in the app for this provider.');
     }
 
-    return { effectiveModelId, applyScope, notes };
+    return {
+        selectedModelId: resolvedSelectedModelId,
+        appliedModelId: appliedModelId || null,
+        effectiveModelId: resolvedSelectedModelId,
+        applyScope,
+        notes,
+    };
 }

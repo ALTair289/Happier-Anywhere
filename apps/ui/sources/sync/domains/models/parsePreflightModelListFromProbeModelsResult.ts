@@ -1,4 +1,4 @@
-import type { AcpConfigOption } from '@/sync/acp/configOptionsControl';
+import type { SessionConfigOption } from '@/sync/domains/sessionControl/configOptionsControl';
 import type { PreflightModelList } from '@/sync/domains/models/modelOptions';
 
 export function parsePreflightModelListFromProbeModelsResult(raw: unknown): PreflightModelList | null {
@@ -19,7 +19,7 @@ export function parsePreflightModelListFromProbeModelsResult(raw: unknown): Pref
                     ? { contextWindowTokens: Math.trunc(m.contextWindowTokens) }
                     : {}),
                 ...(Array.isArray(m.modelOptions) && m.modelOptions.length > 0
-                    ? { modelOptions: m.modelOptions as readonly AcpConfigOption[] }
+                    ? { modelOptions: m.modelOptions as readonly SessionConfigOption[] }
                     : {}),
             })),
         supportsFreeform: Boolean(supportsFreeformRaw),

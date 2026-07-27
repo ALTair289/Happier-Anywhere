@@ -2,8 +2,11 @@ import type { ModelMode } from '../permissions/permissionTypes';
 import { t } from '@/text';
 import { getAgentCore, type AgentId } from '@/agents/catalog/catalog';
 import type { Metadata } from '../state/storageTypes';
-import type { AcpConfigOption } from '@/sync/acp/configOptionsControl';
-import { getAgentStaticModels } from '@happier-dev/agents';
+import type { SessionConfigOption } from '@/sync/domains/sessionControl/configOptionsControl';
+import {
+    getAgentStaticModels,
+} from '@happier-dev/agents';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 import { readSessionModelsState } from '@/sync/domains/sessionControl/readSessionControlMetadata';
 
 export type AgentType = AgentId;
@@ -19,7 +22,7 @@ export type ModelOption = Readonly<{
      * `value` and this variant through the regular model-override pipeline.
      */
     extendedContextModelId?: string;
-    modelOptions?: readonly AcpConfigOption[];
+    modelOptions?: readonly SessionConfigOption[];
 }>;
 
 /**
@@ -44,7 +47,7 @@ export type PreflightModelList = Readonly<{
         name: string;
         description?: string;
         contextWindowTokens?: number;
-        modelOptions?: readonly AcpConfigOption[];
+        modelOptions?: readonly SessionConfigOption[];
     }>>;
     supportsFreeform: boolean;
 }>;
@@ -124,7 +127,7 @@ function readSessionModelListState(metadata: Metadata | null | undefined): Sessi
 
 function readSelectedModelOverrideId(metadata: Metadata | null | undefined): string {
     const metadataModelOverrideRaw = (metadata as any)?.modelOverrideV1 as { modelId?: unknown } | undefined;
-    return typeof metadataModelOverrideRaw?.modelId === 'string' ? metadataModelOverrideRaw.modelId.trim() : '';
+    return readNonBlankSessionControlIdentifier(metadataModelOverrideRaw?.modelId) ?? '';
 }
 
 function supportsDynamicSessionModelList(agentType: AgentType): boolean {
@@ -243,7 +246,7 @@ export function getModelOptionsForAgentTypeOrPreflight(params: {
         return mergeModelOptionsWithCatalog({
             options: preflightOptions,
             catalogOptions,
-            appendMissingCatalogOptions: params.preflight.supportsFreeform === true,
+            appendMissingCatalogOptions: true,
         });
     }
     return getModelOptionsForAgentType(params.agentType);
@@ -262,7 +265,7 @@ function resolveModelOptionsForSession(agentType: AgentType, metadata: Metadata 
                 const value = String(m.id);
                 const description = typeof m.description === 'string' ? m.description : '';
                 const modelOptionsRaw = Array.isArray(m.modelOptions) && m.modelOptions.length > 0
-                    ? (m.modelOptions as readonly AcpConfigOption[])
+                    ? (m.modelOptions as readonly SessionConfigOption[])
                     : null;
 
                 return {
@@ -301,7 +304,7 @@ export function getSelectableModelIdsForSession(agentType: AgentType, metadata: 
 }
 
 export function isModelSelectableForSession(agentType: AgentType, metadata: Metadata | null | undefined, modelId: string): boolean {
-    const normalized = typeof modelId === 'string' ? modelId.trim() : '';
+    const normalized = readNonBlankSessionControlIdentifier(modelId) ?? '';
     if (!normalized) return false;
 
     const allowed = getSelectableModelIdsForSession(agentType, metadata);
