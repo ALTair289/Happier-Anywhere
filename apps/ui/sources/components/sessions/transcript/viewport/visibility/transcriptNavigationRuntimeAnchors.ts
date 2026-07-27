@@ -1,7 +1,4 @@
-import { TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX } from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
-
 import type { TranscriptNavigationAnchorCandidate } from './deriveCurrentTranscriptAnchor';
-import type { WebTranscriptAnchorRowRect } from './webTranscriptVisibleAnchorFacts';
 import type {
     TranscriptNavigationEntry,
     TranscriptNavigationRole,
@@ -23,12 +20,6 @@ export type TranscriptNavigationRenderedAnchorSource = Readonly<{
 
 export type TranscriptNavigationRuntimeAnchor = TranscriptNavigationAnchorCandidate & Readonly<{
     messageIds: readonly string[];
-}>;
-
-export type WebTranscriptNavigationAnchorRowSource = Readonly<{
-    bottomPx: number;
-    testId: string | null;
-    topPx: number;
 }>;
 
 function normalizeString(value: unknown): string | null {
@@ -93,6 +84,32 @@ function sourceMatchesEntry(
     });
 }
 
+/**
+ * Resolves the MOST SPECIFIC rendered row for an entry. A group header row
+ * carries every message id in the group, so a first-match scan hands a pinned
+ * tool the group's source index — and a second pinned tool in the same group
+ * then resolves to the identical anchor. Fewer message ids means a narrower
+ * row, so the tool's own `tool-group-tool` item wins over its header; ties keep
+ * the earliest rendered row.
+ */
+function resolveMostSpecificSourceForEntry(
+    renderedSources: readonly TranscriptNavigationRenderedAnchorSource[],
+    entry: TranscriptNavigationEntry,
+): TranscriptNavigationRenderedAnchorSource | null {
+    let best: TranscriptNavigationRenderedAnchorSource | null = null;
+    let bestSpecificity = Number.POSITIVE_INFINITY;
+    for (const candidate of renderedSources) {
+        if (normalizeInteger(candidate.sourceIndex) === null) continue;
+        if (!sourceMatchesEntry(candidate, entry)) continue;
+        const specificity = candidate.messages.length;
+        if (specificity < bestSpecificity) {
+            best = candidate;
+            bestSpecificity = specificity;
+        }
+    }
+    return best;
+}
+
 export function deriveTranscriptNavigationRuntimeAnchors(params: Readonly<{
     entries: readonly TranscriptNavigationEntry[];
     renderedSources: readonly TranscriptNavigationRenderedAnchorSource[];
@@ -102,10 +119,7 @@ export function deriveTranscriptNavigationRuntimeAnchors(params: Readonly<{
     for (const entry of params.entries) {
         const id = normalizeString(entry.id);
         if (!id || seen.has(id)) continue;
-        const source = params.renderedSources.find((candidate) => (
-            normalizeInteger(candidate.sourceIndex) !== null &&
-            sourceMatchesEntry(candidate, entry)
-        ));
+        const source = resolveMostSpecificSourceForEntry(params.renderedSources, entry);
         if (!source) continue;
         anchors.push({
             id,
@@ -116,40 +130,4 @@ export function deriveTranscriptNavigationRuntimeAnchors(params: Readonly<{
         seen.add(id);
     }
     return anchors;
-}
-
-function messageIdFromWebAnchorTestId(testId: string | null): string | null {
-    const normalized = normalizeString(testId);
-    if (!normalized?.startsWith(TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX)) return null;
-    return normalizeString(normalized.slice(TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX.length));
-}
-
-export function deriveWebTranscriptNavigationAnchorRows(params: Readonly<{
-    anchors: readonly TranscriptNavigationRuntimeAnchor[];
-    rows: readonly WebTranscriptNavigationAnchorRowSource[];
-}>): WebTranscriptAnchorRowRect[] {
-    const anchorsByMessageId = new Map<string, TranscriptNavigationRuntimeAnchor>();
-    for (const anchor of params.anchors) {
-        for (const messageId of anchor.messageIds) {
-            if (!anchorsByMessageId.has(messageId)) {
-                anchorsByMessageId.set(messageId, anchor);
-            }
-        }
-    }
-
-    const out: WebTranscriptAnchorRowRect[] = [];
-    const seen = new Set<string>();
-    for (const row of params.rows) {
-        const messageId = messageIdFromWebAnchorTestId(row.testId);
-        if (!messageId) continue;
-        const anchor = anchorsByMessageId.get(messageId);
-        if (!anchor || seen.has(anchor.id)) continue;
-        out.push({
-            anchorId: anchor.id,
-            bottomPx: row.bottomPx,
-            topPx: row.topPx,
-        });
-        seen.add(anchor.id);
-    }
-    return out;
 }

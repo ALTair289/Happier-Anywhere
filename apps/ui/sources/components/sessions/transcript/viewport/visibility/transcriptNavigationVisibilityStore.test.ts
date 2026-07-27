@@ -91,6 +91,36 @@ describe('transcript navigation visibility store', () => {
         expect(store.subscriberCount()).toBe(0);
     });
 
+    it('notifies presence listeners when the first consumer arrives and the last one leaves', () => {
+        const store = createTranscriptNavigationVisibilityStore();
+        const presence = vi.fn();
+        const stopWatchingPresence = store.subscribeSubscriberPresence(presence);
+
+        const unsubscribe = store.subscribe(vi.fn());
+
+        expect(presence).toHaveBeenCalledTimes(1);
+        expect(store.hasSubscribers()).toBe(true);
+
+        unsubscribe();
+
+        expect(presence).toHaveBeenCalledTimes(2);
+        expect(store.hasSubscribers()).toBe(false);
+
+        stopWatchingPresence();
+        store.subscribe(vi.fn());
+
+        expect(presence).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps presence watchers out of the data-subscriber count', () => {
+        const store = createTranscriptNavigationVisibilityStore();
+
+        store.subscribeSubscriberPresence(vi.fn());
+
+        expect(store.hasSubscribers()).toBe(false);
+        expect(store.subscriberCount()).toBe(0);
+    });
+
     it('scopes default stores by session id and clears a host session on unmount', () => {
         const s1Store = getTranscriptNavigationVisibilityStore('session-1');
         const s2Store = getTranscriptNavigationVisibilityStore('session-2');

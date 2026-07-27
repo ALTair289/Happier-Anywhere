@@ -1,79 +1,113 @@
 import { describe, expect, it } from 'vitest';
 
-import { deriveCurrentTranscriptAnchor } from './deriveCurrentTranscriptAnchor';
+import {
+    deriveCurrentTranscriptAnchor,
+    type TranscriptNavigationAnchorCandidate,
+} from './deriveCurrentTranscriptAnchor';
 
-const anchors = [
-    { id: 'turn-1', kind: 'user-turn', sourceIndex: 0 },
-    { id: 'pin-a', kind: 'pinned-assistant', sourceIndex: 2 },
-    { id: 'turn-2', kind: 'user-turn', sourceIndex: 3 },
-    { id: 'pin-tool', kind: 'pinned-tool', sourceIndex: 4 },
-] as const;
+const TURN_1: TranscriptNavigationAnchorCandidate = { id: 'turn-1', kind: 'user-turn', sourceIndex: 2 };
+const PIN_A: TranscriptNavigationAnchorCandidate = { id: 'pin-a', kind: 'pinned-tool', sourceIndex: 6 };
+const TURN_2: TranscriptNavigationAnchorCandidate = { id: 'turn-2', kind: 'user-turn', sourceIndex: 10 };
+const TURN_3: TranscriptNavigationAnchorCandidate = { id: 'turn-3', kind: 'user-turn', sourceIndex: 30 };
+const ANCHORS = [TURN_1, PIN_A, TURN_2, TURN_3];
 
 describe('deriveCurrentTranscriptAnchor', () => {
-    it('uses the top visible anchor id when the host reports an exact row', () => {
+    it('keeps the turn being read current when its own prompt row is scrolled out of the visible range', () => {
+        // The user is deep inside turn-2's body: turn-2's prompt row (index 10)
+        // is no longer rendered in the visible window at all.
         expect(deriveCurrentTranscriptAnchor({
-            anchors,
-            topVisibleAnchorId: 'turn-2',
-            visibleAnchorIds: ['pin-a', 'turn-2'],
+            anchors: ANCHORS,
+            preferUserTurnAnchor: true,
+            visibleSourceRange: { firstSourceIndex: 17, lastSourceIndex: 24 },
         })).toEqual({
             currentAnchorId: 'turn-2',
+            visibleAnchorIds: [],
+        });
+    });
+
+    it('does not hand off to the next turn while it is only peeking in below the leading row', () => {
+        expect(deriveCurrentTranscriptAnchor({
+            anchors: ANCHORS,
+            preferUserTurnAnchor: true,
+            visibleSourceRange: { firstSourceIndex: 5, lastSourceIndex: 12 },
+        })).toEqual({
+            currentAnchorId: 'turn-1',
             visibleAnchorIds: ['pin-a', 'turn-2'],
         });
     });
 
-    it('uses the exact top visible anchor even before a full visible-id list is available', () => {
+    it('treats a partially scrolled leading row as landed so a freshly jump-aligned turn is current', () => {
+        // Jump-to-turn-2 aligns turn-2 at the viewport top: it IS the leading
+        // visible row, so it wins over the earlier turn whether its top sits a
+        // few pixels above or below the exact viewport edge.
         expect(deriveCurrentTranscriptAnchor({
-            anchors,
-            topVisibleAnchorId: 'turn-2',
+            anchors: ANCHORS,
+            preferUserTurnAnchor: true,
+            visibleSourceRange: { firstSourceIndex: 10, lastSourceIndex: 18 },
         })).toEqual({
             currentAnchorId: 'turn-2',
             visibleAnchorIds: ['turn-2'],
         });
     });
 
-    it('derives visible anchors from a canonical source range when exact row ids are unavailable', () => {
+    it('reports every anchor inside the visible source range', () => {
         expect(deriveCurrentTranscriptAnchor({
-            anchors,
-            visibleSourceRange: { firstSourceIndex: 2, lastSourceIndex: 4 },
+            anchors: ANCHORS,
+            preferUserTurnAnchor: true,
+            visibleSourceRange: { firstSourceIndex: 2, lastSourceIndex: 30 },
+        })).toEqual({
+            currentAnchorId: 'turn-1',
+            visibleAnchorIds: ['turn-1', 'pin-a', 'turn-2', 'turn-3'],
+        });
+    });
+
+    it('falls back to the greatest anchor of any kind when no user turn has been reached', () => {
+        expect(deriveCurrentTranscriptAnchor({
+            anchors: [PIN_A, TURN_2],
+            preferUserTurnAnchor: true,
+            visibleSourceRange: { firstSourceIndex: 8, lastSourceIndex: 9 },
         })).toEqual({
             currentAnchorId: 'pin-a',
-            visibleAnchorIds: ['pin-a', 'turn-2', 'pin-tool'],
+            visibleAnchorIds: [],
         });
     });
 
-    it('can prefer the first visible user-turn anchor for user-turn navigation surfaces', () => {
+    it('falls back to the first visible anchor when nothing sits at or above the leading row', () => {
         expect(deriveCurrentTranscriptAnchor({
-            anchors,
+            anchors: [TURN_2, TURN_3],
             preferUserTurnAnchor: true,
-            visibleSourceRange: { firstSourceIndex: 2, lastSourceIndex: 4 },
+            visibleSourceRange: { firstSourceIndex: 0, lastSourceIndex: 12 },
         })).toEqual({
             currentAnchorId: 'turn-2',
-            visibleAnchorIds: ['pin-a', 'turn-2', 'pin-tool'],
+            visibleAnchorIds: ['turn-2'],
         });
     });
 
-    it('returns an empty snapshot for empty, invalid, or out-of-range facts', () => {
+    it('returns the empty snapshot for an absent or inverted range', () => {
         expect(deriveCurrentTranscriptAnchor({
-            anchors,
-            visibleSourceRange: { firstSourceIndex: 4, lastSourceIndex: 2 },
-        })).toEqual({
-            currentAnchorId: null,
-            visibleAnchorIds: [],
-        });
+            anchors: ANCHORS,
+            preferUserTurnAnchor: true,
+            visibleSourceRange: null,
+        })).toEqual({ currentAnchorId: null, visibleAnchorIds: [] });
         expect(deriveCurrentTranscriptAnchor({
-            anchors: [],
-            visibleAnchorIds: ['turn-1'],
-        })).toEqual({
-            currentAnchorId: null,
-            visibleAnchorIds: [],
-        });
+            anchors: ANCHORS,
+            preferUserTurnAnchor: true,
+            visibleSourceRange: { firstSourceIndex: 9, lastSourceIndex: 3 },
+        })).toEqual({ currentAnchorId: null, visibleAnchorIds: [] });
+    });
+
+    it('ignores malformed anchors instead of ranking them', () => {
         expect(deriveCurrentTranscriptAnchor({
-            anchors,
-            topVisibleAnchorId: 'missing',
-            visibleAnchorIds: ['missing'],
+            anchors: [
+                { id: '', kind: 'user-turn', sourceIndex: 0 },
+                { id: 'turn-nan', kind: 'user-turn', sourceIndex: Number.NaN },
+                TURN_2,
+            ],
+            preferUserTurnAnchor: true,
+            visibleSourceRange: { firstSourceIndex: 10, lastSourceIndex: 11 },
         })).toEqual({
-            currentAnchorId: null,
-            visibleAnchorIds: [],
+            currentAnchorId: 'turn-2',
+            visibleAnchorIds: ['turn-2'],
         });
     });
 });

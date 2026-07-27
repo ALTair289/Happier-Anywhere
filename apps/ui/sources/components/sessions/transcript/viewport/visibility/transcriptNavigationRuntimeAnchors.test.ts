@@ -1,9 +1,31 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-    deriveTranscriptNavigationRuntimeAnchors,
-    deriveWebTranscriptNavigationAnchorRows,
-} from './transcriptNavigationRuntimeAnchors';
+import { deriveTranscriptNavigationRuntimeAnchors } from './transcriptNavigationRuntimeAnchors';
+import type { TranscriptNavigationEntry } from '../../navigation/transcriptNavigationTypes';
+
+function pinnedToolEntry(params: Readonly<{
+    id: string;
+    label: string;
+    routeMessageId: string;
+    seq: number;
+}>): TranscriptNavigationEntry {
+    return {
+        id: params.id,
+        sessionId: 'session-1',
+        seq: params.seq,
+        routeMessageId: params.routeMessageId,
+        transcriptBlockIndex: null,
+        kind: 'pinned-tool',
+        role: 'tool',
+        label: params.label,
+        promptPreview: 'Prompt',
+        responsePreview: params.label,
+        createdAtMs: params.seq,
+        pinned: true,
+        pinnedAtMs: params.seq,
+        loaded: true,
+    };
+}
 
 describe('transcriptNavigationRuntimeAnchors', () => {
     it('matches entries to rendered row source indices by route id before seq/block fallback', () => {
@@ -89,42 +111,51 @@ describe('transcriptNavigationRuntimeAnchors', () => {
         ]);
     });
 
-    it('maps visible web message rows back to navigation entry ids', () => {
-        const rows = deriveWebTranscriptNavigationAnchorRows({
-            anchors: [
+    it('gives two pinned tools in one group distinct anchors instead of the group header row', () => {
+        const groupHeaderSource = {
+            sourceIndex: 4,
+            messageIds: ['tool-a', 'tool-b'],
+            messages: [
                 {
-                    id: 'session-1:user-turn:7',
-                    kind: 'user-turn',
-                    sourceIndex: 0,
-                    messageIds: ['u1'],
+                    messageId: 'tool-a',
+                    routeMessageId: 'local:tool-a',
+                    seq: 11,
+                    transcriptBlockIndex: null,
+                    role: 'tool' as const,
                 },
                 {
-                    id: 'session-1:pinned:local:a1',
-                    kind: 'pinned-assistant',
-                    sourceIndex: 1,
-                    messageIds: ['a1'],
+                    messageId: 'tool-b',
+                    routeMessageId: 'local:tool-b',
+                    seq: 12,
+                    transcriptBlockIndex: null,
+                    role: 'tool' as const,
                 },
             ],
-            rows: [
+        };
+
+        const anchors = deriveTranscriptNavigationRuntimeAnchors({
+            entries: [
+                pinnedToolEntry({ id: 'session-1:pinned:tool-a', label: 'Read', routeMessageId: 'local:tool-a', seq: 11 }),
+                pinnedToolEntry({ id: 'session-1:pinned:tool-b', label: 'Edit', routeMessageId: 'local:tool-b', seq: 12 }),
+            ],
+            renderedSources: [
+                groupHeaderSource,
                 {
-                    testId: 'transcript-anchor-message-a1',
-                    topPx: 200,
-                    bottomPx: 260,
+                    sourceIndex: 5,
+                    messageIds: ['tool-a'],
+                    messages: [groupHeaderSource.messages[0]!],
                 },
                 {
-                    testId: 'transcript-anchor-message-missing',
-                    topPx: 300,
-                    bottomPx: 360,
+                    sourceIndex: 6,
+                    messageIds: ['tool-b'],
+                    messages: [groupHeaderSource.messages[1]!],
                 },
             ],
         });
 
-        expect(rows).toEqual([
-            {
-                anchorId: 'session-1:pinned:local:a1',
-                topPx: 200,
-                bottomPx: 260,
-            },
+        expect(anchors.map((anchor) => ({ id: anchor.id, sourceIndex: anchor.sourceIndex }))).toEqual([
+            { id: 'session-1:pinned:tool-a', sourceIndex: 5 },
+            { id: 'session-1:pinned:tool-b', sourceIndex: 6 },
         ]);
     });
 
