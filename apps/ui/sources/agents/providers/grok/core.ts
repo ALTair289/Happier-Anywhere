@@ -37,8 +37,7 @@ export const GROK_CORE: AgentCoreConfig = {
     tools: buildAgentToolsUiConfig({ agentId: 'grok' }),
     sessionStorage: buildAgentSessionStorageUiConfig({ agentId: 'grok' }),
     ui: {
-        // A neutral host glyph is used until the exact official xAI asset can be downloaded and
-        // byte-proven; xAI's current brand terms prohibit altering or recreating its mark.
+        // Node-safe fallback for surfaces that cannot load the UI-owned SVG registry.
         agentPickerIconName: 'flash-outline',
         cliGlyphScale: 0.9,
         profileCompatibilityGlyphScale: 0.9,

@@ -116,7 +116,7 @@ describe('agents/registryCore', () => {
             availability: { experimental: true },
             cli: { detectKey: 'grok', machineLoginKey: 'grok', spawnAgent: 'grok' },
             sessionModes: { kind: 'none' },
-            model: { supportsSelection: false, supportsFreeform: false },
+            model: { supportsSelection: true, supportsFreeform: false },
             resume: {
                 vendorResumeIdField: 'grokSessionId',
                 uiVendorResumeIdLabelKey: 'sessionInfo.grokSessionId',

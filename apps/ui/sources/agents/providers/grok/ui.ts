@@ -1,12 +1,11 @@
 import type { AgentUiConfig } from '@/agents/registry/registryUi';
+import { PROVIDER_LOGO_SVG_XML } from '@/agents/registry/providerLogoSvgXml';
 
 export const GROK_UI: AgentUiConfig = {
     id: 'grok',
     icon: null,
-    // The official asset download is the only permitted logo source and is currently blocked by
-    // its CDN. Keep the host fallback rather than shipping a modified or third-party recreation.
-    svgIconXml: null,
-    pickerIconScale: 1,
+    svgIconXml: PROVIDER_LOGO_SVG_XML.grok ?? null,
+    pickerIconScale: 1.25,
     tintColor: null,
     avatarOverlay: {
         circleScale: 0.42,
