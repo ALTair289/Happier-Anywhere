@@ -1,6 +1,7 @@
 import { TokenStorage } from '@/auth/storage/tokenStorage';
 import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
 import { toServerUrlDisplay } from '@/sync/domains/server/url/serverUrlDisplay';
+import { redactPublicShareCapabilityUrl } from '@happier-dev/protocol';
 import { runtimeFetch } from '@/utils/system/runtimeFetch';
 import { createEndpointSupervisedRequest } from '@/sync/runtime/connectivity/createEndpointSupervisedRequest';
 import { getEndpointSupervisorForServer } from '@/sync/runtime/connectivity/endpointSupervisorPool';
@@ -148,7 +149,9 @@ function maybeLogRuntimeFetchFailure(params: {
     if (!isDebugEnabled()) return;
 
     const errorName = params.error instanceof Error ? params.error.name : '';
-    const errorMessage = params.error instanceof Error ? params.error.message : String(params.error ?? '');
+    const errorMessage = redactPublicShareCapabilityUrl(
+        params.error instanceof Error ? params.error.message : String(params.error ?? ''),
+    );
     const activeServerUrl = redactUrlForLogs(params.activeServerUrl);
     const requestUrl = redactUrlForLogs(params.requestUrl);
     const key = `${params.activeServerId}|${activeServerUrl}|${requestUrl}|${errorName}|${errorMessage}`;
@@ -387,6 +390,8 @@ export async function serverFetch(
             if (current.generation !== snapshot.generation || current.serverId !== snapshot.serverId) {
                 throw new StaleServerGenerationError();
             }
+
+            await observeUiClientUpgradeRequiredResponse(response);
 
             if (!usedToken || response.status !== 401 || !isActiveOrigin) {
                 break;
