@@ -37,6 +37,9 @@ vi.mock('@/sync/sync', () => ({
         getSyncTuning: () => ({
             transcriptFlashListEstimatedItemSize: 120,
             transcriptMaxTurnEntriesPerListItem: 8,
+            // These WREG presentation cases intentionally cover the shipping FlashList escape hatch.
+            // The shared sidechain renderer matrix owns default-Legend composition.
+            transcriptLegendListSpikeSurface: 'flashList',
         }),
     },
 }));
@@ -192,6 +195,7 @@ describe('ChainTranscriptList presentation parity', () => {
 
         await renderScreen(React.createElement(ChainTranscriptList, {
             sessionId: 's1',
+            datasetKey: JSON.stringify(['s1', 'presentation-parity']),
             messages: [agentMessage],
             metadata: null,
             interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },
@@ -235,6 +239,7 @@ describe('ChainTranscriptList presentation parity', () => {
         let tree!: renderer.ReactTestRenderer;
         tree = (await renderScreen(React.createElement(ChainTranscriptList, {
                     sessionId: 's1',
+                    datasetKey: JSON.stringify(['s1', 'presentation-parity']),
                     messages: [toolMessageOne, toolMessageTwo],
                     metadata: null,
                     interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },
@@ -282,6 +287,7 @@ describe('ChainTranscriptList presentation parity', () => {
 
         await renderScreen(React.createElement(ChainTranscriptList, {
                     sessionId: 's1',
+                    datasetKey: JSON.stringify(['s1', 'presentation-parity']),
                     messages: [userMessage, ...toolMessages],
                     metadata: null,
                     interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },
@@ -320,6 +326,7 @@ describe('ChainTranscriptList presentation parity', () => {
         let tree!: renderer.ReactTestRenderer;
         tree = (await renderScreen(React.createElement(ChainTranscriptList, {
                     sessionId: 's1',
+                    datasetKey: JSON.stringify(['s1', 'presentation-parity']),
                     messages: [userMessage, toolMessage],
                     metadata: null,
                     interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },
@@ -368,6 +375,7 @@ describe('ChainTranscriptList presentation parity', () => {
 
         await renderScreen(React.createElement(ChainTranscriptList, {
                     sessionId: 's1',
+                    datasetKey: JSON.stringify(['s1', 'presentation-parity']),
                     messages: [userMessage, toolMessage],
                     metadata: null,
                     interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },
@@ -411,6 +419,7 @@ describe('ChainTranscriptList presentation parity', () => {
 
         const screen = await renderScreen(React.createElement(ChainTranscriptList, {
             sessionId: 's1',
+            datasetKey: JSON.stringify(['s1', 'presentation-parity']),
             messages: [toolMessageOne, toolMessageTwo],
             metadata: null,
             interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },
@@ -482,6 +491,7 @@ describe('ChainTranscriptList presentation parity', () => {
 
             const screen = await renderScreen(React.createElement(ChainTranscriptList, {
                 sessionId: 's1',
+                datasetKey: JSON.stringify(['s1', 'presentation-parity']),
                 messages: [userMessage, ...toolMessages],
                 metadata: null,
                 interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },
@@ -553,6 +563,7 @@ describe('ChainTranscriptList presentation parity', () => {
 
             const screen = await renderScreen(React.createElement(ChainTranscriptList, {
                 sessionId: 's1',
+                datasetKey: JSON.stringify(['s1', 'presentation-parity']),
                 messages: [userMessage, ...toolMessages],
                 metadata: null,
                 interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },

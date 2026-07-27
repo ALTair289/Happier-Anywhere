@@ -27,12 +27,24 @@ vi.mock('@shopify/flash-list', () => ({
     }),
 }));
 
+vi.mock('@legendapp/list/react-native', async () => {
+    const { createCapturingLegendListMock } = await import('@/dev/testkit/mocks/legendList');
+    return createCapturingLegendListMock().module;
+});
+
 describe('ChainTranscriptList empty-state footer spinner', () => {
+    type ChainTranscriptListTestProps =
+        Omit<React.ComponentProps<typeof import('./ChainTranscriptList')['ChainTranscriptList']>, 'datasetKey'>
+        & { datasetKey?: string };
+
     async function renderChainTranscriptList(
-        props: React.ComponentProps<typeof import('./ChainTranscriptList')['ChainTranscriptList']>,
+        props: ChainTranscriptListTestProps,
     ) {
         const { ChainTranscriptList } = await import('./ChainTranscriptList');
-        return renderScreen(React.createElement(ChainTranscriptList, props));
+        return renderScreen(React.createElement(ChainTranscriptList, {
+            ...props,
+            datasetKey: props.datasetKey ?? JSON.stringify([props.sessionId, 'test-sidechain']),
+        }));
     }
 
     afterEach(() => {
