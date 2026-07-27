@@ -81,17 +81,23 @@ export function AuthProvider({ children, initialCredentials }: { children: React
         setIsAuthenticated(Boolean(nextCredentials));
     }, []);
 
+    // Single source of truth for the context value so consumers (and the non-React
+    // `getCurrentAuth()` bridge) share one identity-stable object. Without this memo the
+    // provider hands every consumer a fresh object on each render, re-rendering all ~50
+    // `useAuth()` callers — including the root layout Stack subtree — on unrelated renders.
+    const value = React.useMemo<AuthContextType>(() => ({
+        isAuthenticated,
+        credentials,
+        login,
+        loginWithCredentials,
+        logout,
+        refreshFromActiveServer,
+    }), [isAuthenticated, credentials, login, loginWithCredentials, logout, refreshFromActiveServer]);
+
     // Update global auth state when local state changes
     useEffect(() => {
-        setCurrentAuth({
-            isAuthenticated,
-            credentials,
-            login,
-            loginWithCredentials,
-            logout,
-            refreshFromActiveServer,
-        });
-    }, [isAuthenticated, credentials, login, loginWithCredentials, logout, refreshFromActiveServer]);
+        setCurrentAuth(value);
+    }, [value]);
 
     useEffect(() => {
         const unsubscribe = subscribeActiveServer((snapshot) => {
@@ -115,16 +121,7 @@ export function AuthProvider({ children, initialCredentials }: { children: React
     }, [isAuthenticated]);
 
     return (
-        <AuthContext.Provider
-            value={{
-                isAuthenticated,
-                credentials,
-                login,
-                loginWithCredentials,
-                logout,
-                refreshFromActiveServer,
-            }}
-        >
+        <AuthContext.Provider value={value}>
             {children}
         </AuthContext.Provider>
     );
