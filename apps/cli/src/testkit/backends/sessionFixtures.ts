@@ -163,6 +163,9 @@ export function createMutableApiSessionClientFixture<TMetadata extends Record<st
         async waitForMetadataUpdate() {
             return false;
         },
+        async waitForPendingEligibilityUpdate() {
+            return false;
+        },
         async refreshSessionSnapshotFromServerBestEffort() {},
         getMetadataSnapshot() {
             return metadata;

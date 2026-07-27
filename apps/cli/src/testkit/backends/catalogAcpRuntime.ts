@@ -4,6 +4,7 @@ import * as acpModule from '@/agent/acp';
 import type { AgentBackend, AgentMessageHandler } from '@/agent/core';
 import type { PermissionMode } from '@/api/types';
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 
 export type CatalogAcpRuntimeCreateCall = {
     agentId: string;
@@ -52,4 +53,17 @@ export function createCatalogAcpBackendSpy(createCalls: CatalogAcpRuntimeCreateC
 
 export function createMessageBufferFixture(): MessageBuffer {
     return new MessageBuffer();
+}
+
+export function createSessionProviderInputConsumerFixture(): SessionProviderInputConsumer<unknown, unknown> {
+    return {
+        waitForNextInput: vi.fn(async () => null),
+        runProviderInputDispatch: vi.fn(async ({ dispatch }) => ({
+            status: 'dispatched' as const,
+            value: await dispatch(),
+        })),
+        closeProviderInputAdmissionAndWaitForDispatches: vi.fn(async () => undefined),
+        drainPending: vi.fn(async () => ({ materialized: 0, stoppedReason: 'no_pending' as const })),
+        pumpPendingWhileActive: vi.fn(async () => undefined),
+    };
 }
