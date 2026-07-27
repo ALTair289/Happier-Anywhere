@@ -10,7 +10,10 @@ export function resolveConnectedServiceOauthErrorMessage(
 
   if (code === 'connect_oauth_state_mismatch') return t('errors.oauthStateMismatch');
   if (code === 'connect_oauth_timeout') return t('errors.connectionTimeout');
-  if (code === 'connected_service_reconnect_target_mismatch') {
+  if (
+    'code' in error
+    && error.code === 'connected_service_credential_binding_mismatch'
+  ) {
     return t('connectedServices.reconnect.targetMismatch');
   }
   if (
