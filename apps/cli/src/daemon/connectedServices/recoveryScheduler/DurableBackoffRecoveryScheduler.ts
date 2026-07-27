@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { sanitizeConnectedServiceDiagnosticString } from '../diagnostics/sanitizeConnectedServiceDiagnosticString';
 
 export type DurableRecoveryStatus = 'waiting' | 'checking' | 'cancelled' | 'exhausted';
@@ -6,6 +8,22 @@ export type DurableRecoveryStore<TIntent> = Readonly<{
   read: (recoveryKey: string) => unknown | null;
   readAll?: () => ReadonlyArray<readonly [recoveryKey: string, value: unknown]>;
   write: (recoveryKey: string, intent: TIntent) => Promise<void> | void;
+  merge?: (
+    recoveryKey: string,
+    next: TIntent,
+    merge: (previous: TIntent | null, next: TIntent) => TIntent | null,
+  ) => Promise<TIntent | null> | TIntent | null;
+  transact?: <TResult>(
+    recoveryKey: string,
+    transaction: (current: Readonly<{
+      intent: TIntent | null;
+      effectClaimToken: string | null;
+    }>) => Readonly<{
+      intent: TIntent | null;
+      effectClaimToken: string | null;
+      result: TResult;
+    }>,
+  ) => Promise<TResult> | TResult;
   remove?: (recoveryKey: string) => Promise<void> | void;
   prune?: (predicate: (entry: Readonly<{ recoveryKey: string; value: unknown }>) => boolean) => Promise<ReadonlyArray<string>> | ReadonlyArray<string>;
 }>;
@@ -32,6 +50,19 @@ type DurableRecoveryWakeWriteReason =
   | 'terminal'
   | 'exhausted'
   | 'waiting';
+
+type DurableConditionalUpsertResult<TIntent> =
+  | Readonly<{ status: 'settled'; intent: TIntent }>
+  | Readonly<{ status: 'stale'; intent: TIntent | null }>;
+
+type DurableWakePreparation<TIntent> =
+  | Readonly<{ status: 'inactive' }>
+  | Readonly<{ status: 'cancelled' }>
+  | Readonly<{ status: 'already_exhausted' }>
+  | Readonly<{ status: 'checking' }>
+  | Readonly<{ status: 'delayed'; intent: TIntent; retryAtMs: number; reason: string }>
+  | Readonly<{ status: 'exhausted'; intent: TIntent }>
+  | Readonly<{ status: 'claimed'; intent: TIntent }>;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -129,6 +160,107 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
     return input.intent;
   }
 
+  async upsertConditionallyByKey(input: Readonly<{
+    sessionId: string;
+    recoveryKey: string;
+    intent: TIntent;
+    expectedCurrent: (current: TIntent) => boolean;
+    merge?: (current: TIntent, next: TIntent) => TIntent;
+  }>): Promise<DurableConditionalUpsertResult<TIntent>> {
+    this.sessionIdByRecoveryKey.set(input.recoveryKey, input.sessionId);
+    if (this.deps.store?.transact) {
+      const settlement = await this.deps.store.transact<DurableConditionalUpsertResult<TIntent>>(input.recoveryKey, (current) => {
+        const currentIntent = current.intent === null ? null : this.deps.normalizeIntent(current.intent);
+        if (!currentIntent || !input.expectedCurrent(currentIntent)) {
+          return {
+            intent: currentIntent,
+            effectClaimToken: current.effectClaimToken,
+            result: { status: 'stale' as const, intent: currentIntent },
+          };
+        }
+        const nextIntent = input.merge?.(currentIntent, input.intent) ?? input.intent;
+        return {
+          intent: nextIntent,
+          effectClaimToken: current.effectClaimToken,
+          result: { status: 'settled' as const, intent: nextIntent },
+        };
+      });
+      if (settlement.intent) {
+        this.memoryStore.set(input.recoveryKey, settlement.intent);
+        this.schedule(input.recoveryKey, settlement.intent);
+      } else {
+        this.memoryStore.delete(input.recoveryKey);
+      }
+      return settlement;
+    }
+    if (this.deps.store?.merge) {
+      const committed = await this.deps.store.merge(input.recoveryKey, input.intent, (current, next) => {
+        const currentIntent = current === null ? null : this.deps.normalizeIntent(current);
+        if (!currentIntent || !input.expectedCurrent(currentIntent)) return currentIntent;
+        return input.merge?.(currentIntent, next) ?? next;
+      });
+      const committedIntent = committed === null ? null : this.deps.normalizeIntent(committed);
+      if (committedIntent) {
+        this.memoryStore.set(input.recoveryKey, committedIntent);
+        this.schedule(input.recoveryKey, committedIntent);
+      } else {
+        this.memoryStore.delete(input.recoveryKey);
+        this.clearTimer(input.recoveryKey);
+      }
+      return committedIntent && input.expectedCurrent(committedIntent)
+        ? { status: 'settled', intent: committedIntent }
+        : { status: 'stale', intent: committedIntent };
+    }
+    const currentIntent = this.readByKeyPassive(input.recoveryKey);
+    if (!currentIntent || !input.expectedCurrent(currentIntent)) {
+      return { status: 'stale', intent: currentIntent };
+    }
+    const nextIntent = input.merge?.(currentIntent, input.intent) ?? input.intent;
+    await this.write(input.recoveryKey, nextIntent);
+    return { status: 'settled', intent: nextIntent };
+  }
+
+  /** Records an externally proven terminal/success settlement and fences any older effect owner. */
+  async upsertSettledByKey(input: Readonly<{
+    sessionId: string;
+    recoveryKey: string;
+    intent: TIntent;
+    expectedCurrent?: (current: TIntent) => boolean;
+  }>): Promise<DurableConditionalUpsertResult<TIntent>> {
+    this.sessionIdByRecoveryKey.set(input.recoveryKey, input.sessionId);
+    if (this.deps.store?.transact) {
+      const settlement = await this.deps.store.transact<DurableConditionalUpsertResult<TIntent>>(input.recoveryKey, (current) => {
+        const currentIntent = current.intent === null ? null : this.deps.normalizeIntent(current.intent);
+        if (input.expectedCurrent && (!currentIntent || !input.expectedCurrent(currentIntent))) {
+          return {
+            intent: currentIntent,
+            effectClaimToken: current.effectClaimToken,
+            result: { status: 'stale' as const, intent: currentIntent },
+          };
+        }
+        return {
+          intent: input.intent,
+          effectClaimToken: null,
+          result: { status: 'settled' as const, intent: input.intent },
+        };
+      });
+      if (settlement.status === 'stale') {
+        if (settlement.intent) this.memoryStore.set(input.recoveryKey, settlement.intent);
+        else this.memoryStore.delete(input.recoveryKey);
+        return settlement;
+      }
+      this.memoryStore.set(input.recoveryKey, input.intent);
+      this.schedule(input.recoveryKey, input.intent);
+      return settlement;
+    }
+    const currentIntent = this.readByKeyPassive(input.recoveryKey);
+    if (input.expectedCurrent && (!currentIntent || !input.expectedCurrent(currentIntent))) {
+      return { status: 'stale', intent: currentIntent };
+    }
+    await this.write(input.recoveryKey, input.intent);
+    return { status: 'settled', intent: input.intent };
+  }
+
   async upsertMerged(input: Readonly<{
     sessionId: string;
     recoveryKey?: string;
@@ -151,6 +283,13 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
     merge: (previous: TIntent | null, next: TIntent) => TIntent;
   }>): Promise<TIntent> {
     this.sessionIdByRecoveryKey.set(input.recoveryKey, input.sessionId);
+    if (this.deps.store?.merge) {
+      const merged = await this.deps.store.merge(input.recoveryKey, input.intent, input.merge);
+      if (!merged) throw new Error('durable_recovery_store_merge_removed_required_intent');
+      this.memoryStore.set(input.recoveryKey, merged);
+      this.schedule(input.recoveryKey, merged);
+      return merged;
+    }
     const previous = this.readByKey(input.recoveryKey);
     const merged = input.merge(previous, input.intent);
     await this.write(input.recoveryKey, merged);
@@ -162,11 +301,18 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
   }
 
   readByKey(recoveryKey: string): TIntent | null {
+    const intent = this.readByKeyPassive(recoveryKey);
+    if (!intent) return null;
+    this.schedule(recoveryKey, intent);
+    return intent;
+  }
+
+  /** Reads durable state without arming a timer or granting recovery execution authority. */
+  readByKeyPassive(recoveryKey: string): TIntent | null {
     const stored = this.deps.store?.read(recoveryKey) ?? this.memoryStore.get(recoveryKey) ?? null;
     const intent = this.deps.normalizeIntent(stored);
     if (!intent) return null;
     this.memoryStore.set(recoveryKey, intent);
-    this.schedule(recoveryKey, intent);
     return intent;
   }
 
@@ -188,13 +334,22 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
   }
 
   hydrate(): ReadonlyArray<TIntent> {
+    const intents = this.hydratePassive();
+    for (const [recoveryKey, value] of this.deps.store?.readAll?.() ?? []) {
+      const intent = this.deps.normalizeIntent(value);
+      if (intent) this.schedule(recoveryKey, intent);
+    }
+    return intents;
+  }
+
+  /** Reconstructs display/decision state only; it never schedules or executes recovery. */
+  hydratePassive(): ReadonlyArray<TIntent> {
     const entries = this.deps.store?.readAll?.() ?? [];
     const intents: TIntent[] = [];
     for (const [recoveryKey, value] of entries) {
       const intent = this.deps.normalizeIntent(value);
       if (!intent) continue;
       this.memoryStore.set(recoveryKey, intent);
-      this.schedule(recoveryKey, intent);
       intents.push(intent);
     }
     return intents;
@@ -227,9 +382,24 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
   }
 
   async cancelByKey(recoveryKey: string): Promise<TIntent | null> {
+    this.bumpCancellationVersion(recoveryKey);
+    if (this.deps.store?.transact) {
+      const cancelled = await this.deps.store.transact(recoveryKey, (current) => {
+        const intent = current.intent === null ? null : this.deps.normalizeIntent(current.intent);
+        const next = intent ? this.deps.markCancelled(intent) : null;
+        return {
+          intent: next,
+          effectClaimToken: null,
+          result: next,
+        };
+      });
+      if (!cancelled) return null;
+      this.memoryStore.set(recoveryKey, cancelled);
+      this.clearTimer(recoveryKey);
+      return cancelled;
+    }
     const intent = this.readByKey(recoveryKey);
     if (!intent) return null;
-    this.bumpCancellationVersion(recoveryKey);
     const cancelled = this.deps.markCancelled(intent);
     await this.write(recoveryKey, cancelled);
     this.clearTimer(recoveryKey);
@@ -243,6 +413,50 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
     await this.remove(recoveryKey);
     this.clearTimer(recoveryKey);
     return intent;
+  }
+
+  /**
+   * Clears a durable in-flight effect claim only after the caller has independently
+   * proven that its previous owner no longer exists and a fresh user action has
+   * authorized recovery in the current process epoch. Claims never expire on time:
+   * expiry could overlap a slow live owner with its replacement.
+   */
+  async rearmAfterConfirmedEffectOwnerLossByKey(input: Readonly<{
+    recoveryKey: string;
+    authorization: 'fresh_user_action_after_owner_loss';
+  }>): Promise<TIntent | null> {
+    if (!this.deps.store?.transact) return this.readByKeyPassive(input.recoveryKey);
+    const rearmed = await this.deps.store.transact(input.recoveryKey, (current) => {
+      const intent = current.intent === null ? null : this.deps.normalizeIntent(current.intent);
+      if (!intent || current.effectClaimToken === null) {
+        return {
+          intent,
+          effectClaimToken: current.effectClaimToken,
+          result: intent,
+        };
+      }
+      const status = this.deps.getStatus(intent);
+      if (status === 'cancelled' || status === 'exhausted') {
+        return {
+          intent,
+          effectClaimToken: null,
+          result: intent,
+        };
+      }
+      const next = this.deps.markWaiting(intent, {
+        nextRetryAtMs: this.deps.nowMs() + this.computeBackoffMs(this.deps.getAttemptCount(intent)),
+        lastError: 'recovery_effect_owner_lost',
+      });
+      return {
+        intent: next,
+        effectClaimToken: null,
+        result: next,
+      };
+    });
+    if (!rearmed) return null;
+    this.memoryStore.set(input.recoveryKey, rearmed);
+    this.schedule(input.recoveryKey, rearmed);
+    return rearmed;
   }
 
   async pruneTerminalRecords(): Promise<ReadonlyArray<string>> {
@@ -270,12 +484,9 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
   async cancelForSession(sessionId: string): Promise<ReadonlyArray<TIntent>> {
     const entries = this.readEntriesForSession(sessionId);
     const cancelled: TIntent[] = [];
-    for (const [recoveryKey, intent] of entries) {
-      this.bumpCancellationVersion(recoveryKey);
-      const nextIntent = this.deps.markCancelled(intent);
-      await this.write(recoveryKey, nextIntent);
-      this.clearTimer(recoveryKey);
-      cancelled.push(nextIntent);
+    for (const [recoveryKey] of entries) {
+      const nextIntent = await this.cancelByKey(recoveryKey);
+      if (nextIntent) cancelled.push(nextIntent);
     }
     return cancelled;
   }
@@ -314,7 +525,7 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
     // Disposed (daemon shutting down): never run recovery work. Any optional store is
     // left untouched; caller wiring decides whether those records outlive the process.
     if (this.disposed) return { status: 'disposed' };
-    const intent = this.readByKey(input.recoveryKey);
+    const intent = this.readByKeyPassive(input.recoveryKey);
     if (!intent) return { status: 'inactive' };
     const sessionId = input.sessionId ?? this.resolveSessionIdForEntry(input.recoveryKey, intent);
 
@@ -330,47 +541,164 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
     }
 
     const cancellationVersion = this.getCancellationVersion(input.recoveryKey);
-    const gate = this.deps.gate?.({ sessionId, intent });
-    if (gate?.status === 'delayed') {
-      const delayed = this.prepareWakeWrite(input.recoveryKey, {
-        base: intent,
-        next: this.deps.markWaiting(intent, {
-          nextRetryAtMs: gate.retryAtMs,
-          lastError: this.sanitizeLastError(gate.reason),
-        }),
-        reason: 'delayed',
-      });
-      await this.write(input.recoveryKey, delayed);
-      this.deps.onDelayed?.({
-        sessionId,
-        intent: delayed,
-        retryAtMs: gate.retryAtMs,
-        reason: gate.reason,
-      });
-      return { status: 'waiting' };
+    const effectClaimToken = randomUUID();
+    const durablePreparation = this.deps.store?.transact
+      ? await this.deps.store.transact<DurableWakePreparation<TIntent>>(input.recoveryKey, (current) => {
+        const currentIntent = current.intent === null ? null : this.deps.normalizeIntent(current.intent);
+        if (!currentIntent) {
+          return {
+            intent: null,
+            effectClaimToken: null,
+            result: { status: 'inactive' as const },
+          };
+        }
+        const currentStatus = this.deps.getStatus(currentIntent);
+        if (currentStatus === 'cancelled' || currentStatus === 'exhausted') {
+          return {
+            intent: currentIntent,
+            effectClaimToken: null,
+            result: {
+              status: currentStatus === 'cancelled'
+                ? 'cancelled' as const
+                : 'already_exhausted' as const,
+            },
+          };
+        }
+        if (current.effectClaimToken !== null) {
+          return {
+            intent: currentIntent,
+            effectClaimToken: current.effectClaimToken,
+            result: { status: 'checking' as const },
+          };
+        }
+        const currentGate = this.deps.gate?.({ sessionId, intent: currentIntent });
+        if (currentGate?.status === 'delayed') {
+          const delayed = this.deps.markWaiting(currentIntent, {
+            nextRetryAtMs: currentGate.retryAtMs,
+            lastError: this.sanitizeLastError(currentGate.reason),
+          });
+          return {
+            intent: delayed,
+            effectClaimToken: null,
+            result: {
+              status: 'delayed' as const,
+              intent: delayed,
+              retryAtMs: currentGate.retryAtMs,
+              reason: currentGate.reason,
+            },
+          };
+        }
+        const currentMaxAttempts = this.deps.getMaxAttempts(currentIntent);
+        if (currentMaxAttempts > 0 && this.deps.getAttemptCount(currentIntent) >= currentMaxAttempts) {
+          const exhaustedAttempt = this.deps.markChecking(
+            currentIntent,
+            this.deps.getAttemptCount(currentIntent) + 1,
+          );
+          const exhausted = this.deps.markExhausted(exhaustedAttempt, {
+            lastError: 'max_attempts_exhausted',
+          });
+          return {
+            intent: exhausted,
+            effectClaimToken: null,
+            result: { status: 'exhausted' as const, intent: exhausted },
+          };
+        }
+        const nextChecking = this.deps.markChecking(
+          currentIntent,
+          this.deps.getAttemptCount(currentIntent) + 1,
+        );
+        return {
+          intent: nextChecking,
+          effectClaimToken,
+          result: { status: 'claimed' as const, intent: nextChecking },
+        };
+      })
+      : null;
+    if (durablePreparation) {
+      if (durablePreparation.status === 'inactive' || durablePreparation.status === 'cancelled') {
+        this.clearTimer(input.recoveryKey);
+        return { status: 'inactive' };
+      }
+      if (durablePreparation.status === 'already_exhausted') {
+        this.clearTimer(input.recoveryKey);
+        return { status: 'exhausted' };
+      }
+      if (durablePreparation.status === 'checking') {
+        this.clearTimer(input.recoveryKey);
+        return { status: 'checking' };
+      }
+      if (durablePreparation.status === 'delayed') {
+        this.memoryStore.set(input.recoveryKey, durablePreparation.intent);
+        this.schedule(input.recoveryKey, durablePreparation.intent);
+        this.deps.onDelayed?.({
+          sessionId,
+          intent: durablePreparation.intent,
+          retryAtMs: durablePreparation.retryAtMs,
+          reason: durablePreparation.reason,
+        });
+        return { status: 'waiting' };
+      }
+      if (durablePreparation.status === 'exhausted') {
+        this.memoryStore.set(input.recoveryKey, durablePreparation.intent);
+        this.clearTimer(input.recoveryKey);
+        this.deps.onExhausted?.({
+          sessionId,
+          intent: durablePreparation.intent,
+          lastError: 'max_attempts_exhausted',
+        });
+        return { status: 'exhausted' };
+      }
     }
 
-    const maxAttempts = this.deps.getMaxAttempts(intent);
-    if (maxAttempts > 0 && this.deps.getAttemptCount(intent) >= maxAttempts) {
-      const exhaustedAttempt = this.deps.markChecking(intent, this.deps.getAttemptCount(intent) + 1);
-      const exhausted = this.prepareWakeWrite(input.recoveryKey, {
-        base: intent,
-        next: this.deps.markExhausted(exhaustedAttempt, { lastError: 'max_attempts_exhausted' }),
-        reason: 'max_attempts_exhausted',
-      });
-      await this.write(input.recoveryKey, exhausted);
-      this.clearTimer(input.recoveryKey);
-      this.deps.onExhausted?.({
-        sessionId,
-        intent: exhausted,
-        lastError: 'max_attempts_exhausted',
-      });
-      return { status: 'exhausted' };
+    if (!this.deps.store?.transact) {
+      const gate = this.deps.gate?.({ sessionId, intent });
+      if (gate?.status === 'delayed') {
+        const delayed = this.prepareWakeWrite(input.recoveryKey, {
+          base: intent,
+          next: this.deps.markWaiting(intent, {
+            nextRetryAtMs: gate.retryAtMs,
+            lastError: this.sanitizeLastError(gate.reason),
+          }),
+          reason: 'delayed',
+        });
+        await this.write(input.recoveryKey, delayed);
+        this.deps.onDelayed?.({
+          sessionId,
+          intent: delayed,
+          retryAtMs: gate.retryAtMs,
+          reason: gate.reason,
+        });
+        return { status: 'waiting' };
+      }
+      const maxAttempts = this.deps.getMaxAttempts(intent);
+      if (maxAttempts > 0 && this.deps.getAttemptCount(intent) >= maxAttempts) {
+        const exhaustedAttempt = this.deps.markChecking(intent, this.deps.getAttemptCount(intent) + 1);
+        const exhausted = this.prepareWakeWrite(input.recoveryKey, {
+          base: intent,
+          next: this.deps.markExhausted(exhaustedAttempt, { lastError: 'max_attempts_exhausted' }),
+          reason: 'max_attempts_exhausted',
+        });
+        await this.write(input.recoveryKey, exhausted);
+        this.clearTimer(input.recoveryKey);
+        this.deps.onExhausted?.({
+          sessionId,
+          intent: exhausted,
+          lastError: 'max_attempts_exhausted',
+        });
+        return { status: 'exhausted' };
+      }
     }
 
-    const attemptCount = this.deps.getAttemptCount(intent) + 1;
-    const checking = this.deps.markChecking(intent, attemptCount);
-    await this.write(input.recoveryKey, checking);
+    const checking = durablePreparation?.status === 'claimed'
+      ? durablePreparation.intent
+      : this.deps.markChecking(intent, this.deps.getAttemptCount(intent) + 1);
+    const attemptCount = this.deps.getAttemptCount(checking);
+    const maxAttempts = this.deps.getMaxAttempts(checking);
+    if (!this.deps.store?.transact) {
+      await this.write(input.recoveryKey, checking);
+    } else {
+      this.memoryStore.set(input.recoveryKey, checking);
+    }
     if (this.wasCancelledSince(input.recoveryKey, cancellationVersion)) {
       this.clearTimer(input.recoveryKey);
       return { status: 'inactive' };
@@ -403,19 +731,42 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
         reason: 'success',
       });
       if (this.deps.clearOnSuccess && this.deps.getStatus(succeeded) !== 'cancelled' && this.deps.getStatus(succeeded) !== 'exhausted') {
-        await this.remove(input.recoveryKey);
+        const settlement = await this.settleEffectClaim({
+          recoveryKey: input.recoveryKey,
+          effectClaimToken,
+          base: checking,
+          next: succeeded,
+          reason: 'success',
+          remove: true,
+        });
+        if (settlement.status === 'stale') return { status: 'inactive' };
         this.clearTimer(input.recoveryKey);
         await this.deps.onSuccess?.({ sessionId, intent: succeeded });
         return { status: 'succeeded' };
       }
-      await this.write(input.recoveryKey, succeeded);
+      const settlement = await this.settleEffectClaim({
+        recoveryKey: input.recoveryKey,
+        effectClaimToken,
+        base: checking,
+        next: succeeded,
+        reason: 'success',
+      });
+      if (settlement.status === 'stale') return { status: 'inactive' };
       this.clearTimer(input.recoveryKey);
-      await this.deps.onSuccess?.({ sessionId, intent: succeeded });
+      await this.deps.onSuccess?.({ sessionId, intent: settlement.intent });
       return { status: 'succeeded' };
     }
 
     if (outcome.status === 'superseded') {
-      await this.remove(input.recoveryKey);
+      const settlement = await this.settleEffectClaim({
+        recoveryKey: input.recoveryKey,
+        effectClaimToken,
+        base: checking,
+        next: checking,
+        reason: 'terminal',
+        remove: true,
+      });
+      if (settlement.status === 'stale') return { status: 'inactive' };
       this.clearTimer(input.recoveryKey);
       this.deps.onSuperseded?.({
         sessionId,
@@ -432,9 +783,16 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
         reason: 'terminal',
       });
       const lastError = this.sanitizeLastError(outcome.lastError);
-      await this.write(input.recoveryKey, terminal);
+      const settlement = await this.settleEffectClaim({
+        recoveryKey: input.recoveryKey,
+        effectClaimToken,
+        base: checking,
+        next: terminal,
+        reason: 'terminal',
+      });
+      if (settlement.status === 'stale') return { status: 'inactive' };
       this.clearTimer(input.recoveryKey);
-      this.deps.onTerminal?.({ sessionId, intent: terminal, lastError });
+      this.deps.onTerminal?.({ sessionId, intent: settlement.intent, lastError });
       return { status: 'terminal' };
     }
 
@@ -456,9 +814,16 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
         next: this.deps.markExhausted(outcome.intent ?? checking, { lastError }),
         reason: 'exhausted',
       });
-      await this.write(input.recoveryKey, exhausted);
+      const settlement = await this.settleEffectClaim({
+        recoveryKey: input.recoveryKey,
+        effectClaimToken,
+        base: checking,
+        next: exhausted,
+        reason: 'exhausted',
+      });
+      if (settlement.status === 'stale') return { status: 'inactive' };
       this.clearTimer(input.recoveryKey);
-      this.deps.onExhausted?.({ sessionId, intent: exhausted, lastError });
+      this.deps.onExhausted?.({ sessionId, intent: settlement.intent, lastError });
       return { status: 'exhausted' };
     }
 
@@ -469,12 +834,68 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
       nextRetryAtMs: explicitNextRetryAtMs ?? nowMs + this.computeBackoffMs(attemptCount),
       lastError: this.sanitizeLastError(outcome.lastError),
     });
-    await this.write(input.recoveryKey, this.prepareWakeWrite(input.recoveryKey, {
+    const settlement = await this.settleEffectClaim({
+      recoveryKey: input.recoveryKey,
+      effectClaimToken,
       base: checking,
       next: waiting,
       reason: 'waiting',
-    }));
+    });
+    if (settlement.status === 'stale') return { status: 'inactive' };
     return { status: 'waiting' };
+  }
+
+  private async settleEffectClaim(input: Readonly<{
+    recoveryKey: string;
+    effectClaimToken: string;
+    base: TIntent;
+    next: TIntent;
+    reason: DurableRecoveryWakeWriteReason;
+    remove?: boolean;
+  }>): Promise<Readonly<{ status: 'settled'; intent: TIntent }> | Readonly<{ status: 'stale' }>> {
+    if (!this.deps.store?.transact) {
+      const intent = this.prepareWakeWrite(input.recoveryKey, input);
+      if (input.remove) await this.remove(input.recoveryKey);
+      else await this.write(input.recoveryKey, intent);
+      return { status: 'settled', intent };
+    }
+    const settlement = await this.deps.store.transact(input.recoveryKey, (current) => {
+      const currentIntent = current.intent === null ? null : this.deps.normalizeIntent(current.intent);
+      if (!currentIntent || current.effectClaimToken !== input.effectClaimToken) {
+        return {
+          intent: currentIntent,
+          effectClaimToken: current.effectClaimToken,
+          result: null,
+        };
+      }
+      const merged = this.deps.mergeBeforeWakeWrite?.({
+        recoveryKey: input.recoveryKey,
+        current: currentIntent,
+        base: input.base,
+        next: input.next,
+        reason: input.reason,
+      }) ?? input.next;
+      const accepted = !input.remove || merged === input.next;
+      return {
+        intent: input.remove && accepted ? null : merged,
+        effectClaimToken: null,
+        result: { accepted, intent: merged },
+      };
+    });
+    if (!settlement) return { status: 'stale' };
+    if (!settlement.accepted) {
+      this.memoryStore.set(input.recoveryKey, settlement.intent);
+      this.schedule(input.recoveryKey, settlement.intent);
+      return { status: 'stale' };
+    }
+    if (input.remove) {
+      this.memoryStore.delete(input.recoveryKey);
+      this.sessionIdByRecoveryKey.delete(input.recoveryKey);
+    } else {
+      this.memoryStore.set(input.recoveryKey, settlement.intent);
+      this.schedule(input.recoveryKey, settlement.intent);
+    }
+    return { status: 'settled', intent: settlement.intent };
   }
 
   private resolveRecoveryKey(input: Readonly<{ sessionId: string; recoveryKey?: string }>): string {

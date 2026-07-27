@@ -1,11 +1,12 @@
-import { mkdtemp, readFile, rename as renameMock, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rename as renameMock, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const renameControl = vi.hoisted(() => ({
   callCount: 0,
+  blockFirst: false,
   firstBlocked: null as null | (() => void),
   releaseFirst: null as null | (() => void),
   secondStarted: null as null | (() => void),
@@ -19,13 +20,13 @@ vi.mock('node:fs/promises', async () => {
     ...actual,
     rename: vi.fn(async (from: string, to: string) => {
       renameControl.callCount += 1;
-      if (renameControl.callCount === 1) {
+      if (renameControl.blockFirst && renameControl.callCount === 1) {
         renameControl.firstBlocked?.();
         await new Promise<void>((resolve) => {
           renameControl.releaseFirst = resolve;
         });
       }
-      if (renameControl.callCount === 2) {
+      if (renameControl.blockFirst && renameControl.callCount === 2) {
         renameControl.secondStarted?.();
       }
       await actualRename(from, to);
@@ -36,7 +37,43 @@ vi.mock('node:fs/promises', async () => {
 import { createRecoveryIntentFileStore } from './recoveryIntentFileStore';
 
 describe('createRecoveryIntentFileStore', () => {
+  beforeEach(() => {
+    renameControl.callCount = 0;
+    renameControl.blockFirst = false;
+    renameControl.firstBlocked = null;
+    renameControl.releaseFirst = null;
+    renameControl.secondStarted = null;
+    vi.clearAllMocks();
+  });
+
+  it('does not steal a stale-looking transaction lock from a live owning process', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-recovery-intents-live-lock-'));
+    const filePath = join(dir, 'runtime-auth.json');
+    const lockPath = `${filePath}.lock`;
+    try {
+      const liveOwner = JSON.stringify({
+        pid: process.pid,
+        ownerToken: 'owner-token',
+        processStartedAtMs: Math.trunc(Date.now() - (process.uptime() * 1_000)),
+        createdAtMs: 1,
+        updatedAtMs: 1,
+      });
+      await writeFile(lockPath, liveOwner, 'utf8');
+      await utimes(lockPath, new Date(1_000), new Date(1_000));
+
+      const write = createRecoveryIntentFileStore(filePath, {
+        lockAcquireTimeoutMs: 250,
+        staleLockAfterMs: 1,
+      }).write('session-a', { status: 'waiting' });
+      await expect(write).rejects.toThrow('recovery_intent_file_store_lock_timeout');
+      await expect(readFile(lockPath, 'utf8')).resolves.toBe(liveOwner);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('serializes concurrent writes so older snapshots cannot overwrite newer intents', async () => {
+    renameControl.blockFirst = true;
     const dir = await mkdtemp(join(tmpdir(), 'happier-recovery-intents-'));
     const filePath = join(dir, 'runtime-auth.json');
     const store = createRecoveryIntentFileStore(filePath);
@@ -68,7 +105,7 @@ describe('createRecoveryIntentFileStore', () => {
         'session-b': { status: 'waiting', attempt: 2 },
       },
     });
-    expect(renameMock).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(renameMock).mock.calls.filter((call) => call[1] === filePath)).toHaveLength(2);
 
     await rm(dir, { recursive: true, force: true });
   });

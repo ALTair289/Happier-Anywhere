@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { DurableBackoffRecoveryScheduler } from './DurableBackoffRecoveryScheduler';
+import { createRecoveryIntentFileStore } from './recoveryIntentFileStore';
 
 type TestIntent = Readonly<{
   status: 'waiting' | 'checking' | 'cancelled' | 'exhausted';
@@ -36,6 +40,408 @@ function createDeferred<T>(): {
 }
 
 describe('DurableBackoffRecoveryScheduler', () => {
+  it('lets only one of two durable scheduler controllers execute recovery for a key', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-durable-recovery-claim-'));
+    const filePath = join(dir, 'recovery.json');
+    const recoveryOutcome = createDeferred<{ status: 'wait'; lastError: string }>();
+    let recoverCalls = 0;
+
+    const createScheduler = () => new DurableBackoffRecoveryScheduler<TestIntent>({
+      nowMs: () => 1_000,
+      baseBackoffMs: 100,
+      maxBackoffMs: 1_000,
+      jitterMs: () => 0,
+      store: createRecoveryIntentFileStore<TestIntent>(filePath),
+      normalizeIntent: (value) => value as TestIntent,
+      getStatus: (intent) => intent.status,
+      getNextRetryAtMs: (intent) => intent.nextRetryAtMs,
+      getAttemptCount: (intent) => intent.attemptCount,
+      getMaxAttempts: (intent) => intent.maxAttempts,
+      markChecking: (intent, attemptCount) => ({ ...intent, status: 'checking', attemptCount }),
+      markWaiting: (intent, input) => ({
+        ...intent,
+        status: 'waiting',
+        nextRetryAtMs: input.nextRetryAtMs,
+        lastError: input.lastError,
+      }),
+      markCancelled: (intent) => ({ ...intent, status: 'cancelled', nextRetryAtMs: null }),
+      markExhausted: (intent, input) => ({
+        ...intent,
+        status: 'exhausted',
+        nextRetryAtMs: null,
+        lastError: input.lastError,
+      }),
+      recover: async () => {
+        recoverCalls += 1;
+        return await recoveryOutcome.promise;
+      },
+    });
+
+    try {
+      const first = createScheduler();
+      const second = createScheduler();
+      await first.upsertByKey({ sessionId: 'session-1', recoveryKey: 'recovery-1', intent: createIntent() });
+
+      const firstWake = first.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      while (recoverCalls < 1) await new Promise<void>((resolve) => setImmediate(resolve));
+      const secondWake = second.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      await expect(Promise.race([
+        secondWake,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('second controller did not join durable claim')), 500)),
+      ])).resolves.toEqual({ status: 'checking' });
+
+      recoveryOutcome.resolve({ status: 'wait', lastError: 'still blocked' });
+      await Promise.all([firstWake, secondWake]);
+
+      expect(recoverCalls).toBe(1);
+    } finally {
+      recoveryOutcome.resolve({ status: 'wait', lastError: 'cleanup' });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let a sibling dead-letter the final allowed attempt while its owner is still recovering', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-durable-recovery-final-claim-'));
+    const filePath = join(dir, 'recovery.json');
+    const recoveryStarted = createDeferred<void>();
+    const recoveryOutcome = createDeferred<{ status: 'success' }>();
+    const onExhausted = vi.fn();
+    const createScheduler = () => new DurableBackoffRecoveryScheduler<TestIntent>({
+      nowMs: () => 1_000,
+      store: createRecoveryIntentFileStore<TestIntent>(filePath),
+      normalizeIntent: (value) => value as TestIntent,
+      getStatus: (intent) => intent.status,
+      getNextRetryAtMs: (intent) => intent.nextRetryAtMs,
+      getAttemptCount: (intent) => intent.attemptCount,
+      getMaxAttempts: (intent) => intent.maxAttempts,
+      markChecking: (intent, attemptCount) => ({ ...intent, status: 'checking', attemptCount }),
+      markWaiting: (intent, input) => ({ ...intent, status: 'waiting', nextRetryAtMs: input.nextRetryAtMs }),
+      markCancelled: (intent) => ({ ...intent, status: 'cancelled', nextRetryAtMs: null }),
+      markExhausted: (intent, input) => ({ ...intent, status: 'exhausted', nextRetryAtMs: null, lastError: input.lastError }),
+      onExhausted,
+      recover: async () => {
+        recoveryStarted.resolve();
+        return await recoveryOutcome.promise;
+      },
+    });
+    try {
+      const owner = createScheduler();
+      const sibling = createScheduler();
+      await owner.upsertByKey({
+        sessionId: 'session-1',
+        recoveryKey: 'recovery-1',
+        intent: { ...createIntent(), maxAttempts: 1 },
+      });
+
+      const ownerWake = owner.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      await recoveryStarted.promise;
+      const siblingResult = await sibling.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      const exhaustedCallsWhileOwned = onExhausted.mock.calls.length;
+      recoveryOutcome.resolve({ status: 'success' });
+      const ownerResult = await ownerWake;
+
+      expect(siblingResult).toEqual({ status: 'checking' });
+      expect(exhaustedCallsWhileOwned).toBe(0);
+      expect(ownerResult).toEqual({ status: 'succeeded' });
+      expect(createRecoveryIntentFileStore<TestIntent>(filePath).read('recovery-1')).toMatchObject({ status: 'cancelled' });
+    } finally {
+      recoveryOutcome.resolve({ status: 'success' });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let a sibling gate mutate or project delay while another controller owns the effect', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-durable-recovery-gated-claim-'));
+    const filePath = join(dir, 'recovery.json');
+    const recoveryStarted = createDeferred<void>();
+    const recoveryOutcome = createDeferred<{ status: 'wait'; lastError: string }>();
+    const onDelayed = vi.fn();
+    const createScheduler = (gate?: () => { status: 'delayed'; retryAtMs: number; reason: string }) => (
+      new DurableBackoffRecoveryScheduler<TestIntent>({
+        nowMs: () => 1_000,
+        store: createRecoveryIntentFileStore<TestIntent>(filePath),
+        normalizeIntent: (value) => value as TestIntent,
+        getStatus: (intent) => intent.status,
+        getNextRetryAtMs: (intent) => intent.nextRetryAtMs,
+        getAttemptCount: (intent) => intent.attemptCount,
+        getMaxAttempts: (intent) => intent.maxAttempts,
+        markChecking: (intent, attemptCount) => ({ ...intent, status: 'checking', attemptCount }),
+        markWaiting: (intent, input) => ({ ...intent, status: 'waiting', nextRetryAtMs: input.nextRetryAtMs }),
+        markCancelled: (intent) => ({ ...intent, status: 'cancelled', nextRetryAtMs: null }),
+        markExhausted: (intent, input) => ({ ...intent, status: 'exhausted', nextRetryAtMs: null, lastError: input.lastError }),
+        ...(gate ? { gate } : {}),
+        onDelayed,
+        recover: async () => {
+          recoveryStarted.resolve();
+          return await recoveryOutcome.promise;
+        },
+      })
+    );
+    try {
+      const owner = createScheduler();
+      const sibling = createScheduler(() => ({
+        status: 'delayed',
+        retryAtMs: 5_000,
+        reason: 'local_gate',
+      }));
+      await owner.upsertByKey({ sessionId: 'session-1', recoveryKey: 'recovery-1', intent: createIntent() });
+
+      const ownerWake = owner.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      await recoveryStarted.promise;
+      const siblingResult = await sibling.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      const delayedCallsWhileOwned = onDelayed.mock.calls.length;
+      const persistedStatusWhileOwned = createRecoveryIntentFileStore<TestIntent>(filePath).read('recovery-1');
+      recoveryOutcome.resolve({ status: 'wait', lastError: 'still blocked' });
+      await ownerWake;
+
+      expect(siblingResult).toEqual({ status: 'checking' });
+      expect(delayedCallsWhileOwned).toBe(0);
+      expect(persistedStatusWhileOwned).toMatchObject({ status: 'checking' });
+    } finally {
+      recoveryOutcome.resolve({ status: 'wait', lastError: 'cleanup' });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let a stale recovery settlement regress another controller cancellation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-durable-recovery-fence-'));
+    const filePath = join(dir, 'recovery.json');
+    const recoveryStarted = createDeferred<void>();
+    const recoveryOutcome = createDeferred<{ status: 'wait'; lastError: string }>();
+
+    const createScheduler = () => new DurableBackoffRecoveryScheduler<TestIntent>({
+      nowMs: () => 1_000,
+      baseBackoffMs: 100,
+      maxBackoffMs: 1_000,
+      jitterMs: () => 0,
+      store: createRecoveryIntentFileStore<TestIntent>(filePath),
+      normalizeIntent: (value) => value as TestIntent,
+      getStatus: (intent) => intent.status,
+      getNextRetryAtMs: (intent) => intent.nextRetryAtMs,
+      getAttemptCount: (intent) => intent.attemptCount,
+      getMaxAttempts: (intent) => intent.maxAttempts,
+      markChecking: (intent, attemptCount) => ({ ...intent, status: 'checking', attemptCount }),
+      markWaiting: (intent, input) => ({
+        ...intent,
+        status: 'waiting',
+        nextRetryAtMs: input.nextRetryAtMs,
+        lastError: input.lastError,
+      }),
+      markCancelled: (intent) => ({ ...intent, status: 'cancelled', nextRetryAtMs: null }),
+      markExhausted: (intent, input) => ({
+        ...intent,
+        status: 'exhausted',
+        nextRetryAtMs: null,
+        lastError: input.lastError,
+      }),
+      recover: async () => {
+        recoveryStarted.resolve();
+        return await recoveryOutcome.promise;
+      },
+    });
+
+    try {
+      const recovering = createScheduler();
+      const cancelling = createScheduler();
+      await recovering.upsertByKey({ sessionId: 'session-1', recoveryKey: 'recovery-1', intent: createIntent() });
+
+      const wake = recovering.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      await recoveryStarted.promise;
+      await cancelling.cancelByKey('recovery-1');
+      recoveryOutcome.resolve({ status: 'wait', lastError: 'late failure' });
+      await wake;
+
+      expect(createRecoveryIntentFileStore<TestIntent>(filePath).read('recovery-1')).toMatchObject({
+        status: 'cancelled',
+      });
+    } finally {
+      recoveryOutcome.resolve({ status: 'wait', lastError: 'cleanup' });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fences stale effects when another controller cancels every intent for the session', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-durable-recovery-session-cancel-'));
+    const filePath = join(dir, 'recovery.json');
+    const recoveryStarted = createDeferred<void>();
+    const recoveryOutcome = createDeferred<{ status: 'wait'; lastError: string }>();
+    const createScheduler = () => new DurableBackoffRecoveryScheduler<TestIntent>({
+      nowMs: () => 1_000,
+      store: createRecoveryIntentFileStore<TestIntent>(filePath),
+      normalizeIntent: (value) => value as TestIntent,
+      getStatus: (intent) => intent.status,
+      getNextRetryAtMs: (intent) => intent.nextRetryAtMs,
+      getAttemptCount: (intent) => intent.attemptCount,
+      getMaxAttempts: (intent) => intent.maxAttempts,
+      getSessionId: () => 'session-1',
+      markChecking: (intent, attemptCount) => ({ ...intent, status: 'checking', attemptCount }),
+      markWaiting: (intent, input) => ({ ...intent, status: 'waiting', nextRetryAtMs: input.nextRetryAtMs }),
+      markCancelled: (intent) => ({ ...intent, status: 'cancelled', nextRetryAtMs: null }),
+      markExhausted: (intent, input) => ({ ...intent, status: 'exhausted', nextRetryAtMs: null, lastError: input.lastError }),
+      recover: async () => {
+        recoveryStarted.resolve();
+        return await recoveryOutcome.promise;
+      },
+    });
+    try {
+      const recovering = createScheduler();
+      const cancelling = createScheduler();
+      await recovering.upsertByKey({ sessionId: 'session-1', recoveryKey: 'recovery-1', intent: createIntent() });
+      const wake = recovering.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      await recoveryStarted.promise;
+      await cancelling.cancelForSession('session-1');
+      recoveryOutcome.resolve({ status: 'wait', lastError: 'late wait' });
+      await wake;
+
+      expect(createRecoveryIntentFileStore<TestIntent>(filePath).read('recovery-1')).toMatchObject({ status: 'cancelled' });
+    } finally {
+      recoveryOutcome.resolve({ status: 'wait', lastError: 'cleanup' });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('hydrates durable recovery state passively without arming execution', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-durable-recovery-passive-'));
+    const filePath = join(dir, 'recovery.json');
+    const recover = vi.fn(async () => ({ status: 'success' as const }));
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const store = createRecoveryIntentFileStore<TestIntent>(filePath);
+      await store.write('recovery-1', { ...createIntent(), nextRetryAtMs: 0 });
+      const scheduler = new DurableBackoffRecoveryScheduler<TestIntent>({
+        nowMs: () => 1_000,
+        store,
+        normalizeIntent: (value) => value as TestIntent,
+        getStatus: (intent) => intent.status,
+        getNextRetryAtMs: (intent) => intent.nextRetryAtMs,
+        getAttemptCount: (intent) => intent.attemptCount,
+        getMaxAttempts: (intent) => intent.maxAttempts,
+        markChecking: (intent, attemptCount) => ({ ...intent, status: 'checking', attemptCount }),
+        markWaiting: (intent, input) => ({ ...intent, status: 'waiting', nextRetryAtMs: input.nextRetryAtMs }),
+        markCancelled: (intent) => ({ ...intent, status: 'cancelled', nextRetryAtMs: null }),
+        markExhausted: (intent, input) => ({ ...intent, status: 'exhausted', nextRetryAtMs: null, lastError: input.lastError }),
+        recover,
+      });
+
+      setTimeoutSpy.mockClear();
+      expect(scheduler.hydratePassive()).toHaveLength(1);
+      expect(setTimeoutSpy).not.toHaveBeenCalled();
+      expect(recover).not.toHaveBeenCalled();
+      expect(scheduler.readByKeyPassive('recovery-1')).toMatchObject({ status: 'waiting' });
+      scheduler.dispose();
+    } finally {
+      setTimeoutSpy.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('retains a crashed controller claim until a confirmed-owner-loss action rearms it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-durable-recovery-crash-'));
+    const filePath = join(dir, 'recovery.json');
+    const firstRecoveryStarted = createDeferred<void>();
+    const neverSettles = new Promise<{ status: 'wait'; lastError: string }>(() => {});
+    let replacementRecoverCalls = 0;
+    const createScheduler = (recover: () => Promise<{ status: 'wait'; lastError: string }>) => (
+      new DurableBackoffRecoveryScheduler<TestIntent>({
+        nowMs: () => 1_000,
+        baseBackoffMs: 100,
+        maxBackoffMs: 1_000,
+        jitterMs: () => 0,
+        store: createRecoveryIntentFileStore<TestIntent>(filePath),
+        normalizeIntent: (value) => value as TestIntent,
+        getStatus: (intent) => intent.status,
+        getNextRetryAtMs: (intent) => intent.nextRetryAtMs,
+        getAttemptCount: (intent) => intent.attemptCount,
+        getMaxAttempts: (intent) => intent.maxAttempts,
+        markChecking: (intent, attemptCount) => ({ ...intent, status: 'checking', attemptCount }),
+        markWaiting: (intent, input) => ({
+          ...intent,
+          status: 'waiting',
+          nextRetryAtMs: input.nextRetryAtMs,
+          lastError: input.lastError,
+        }),
+        markCancelled: (intent) => ({ ...intent, status: 'cancelled', nextRetryAtMs: null }),
+        markExhausted: (intent, input) => ({ ...intent, status: 'exhausted', nextRetryAtMs: null, lastError: input.lastError }),
+        recover,
+      })
+    );
+
+    try {
+      const crashed = createScheduler(async () => {
+        firstRecoveryStarted.resolve();
+        return await neverSettles;
+      });
+      await crashed.upsertByKey({ sessionId: 'session-1', recoveryKey: 'recovery-1', intent: createIntent() });
+      void crashed.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      await firstRecoveryStarted.promise;
+      crashed.dispose();
+
+      const replacement = createScheduler(async () => {
+        replacementRecoverCalls += 1;
+        return { status: 'wait', lastError: 'still blocked' };
+      });
+      expect(replacement.hydratePassive()).toHaveLength(1);
+      await expect(replacement.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' }))
+        .resolves.toEqual({ status: 'checking' });
+      expect(replacementRecoverCalls).toBe(0);
+
+      await replacement.rearmAfterConfirmedEffectOwnerLossByKey({
+        recoveryKey: 'recovery-1',
+        authorization: 'fresh_user_action_after_owner_loss',
+      });
+      await replacement.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      expect(replacementRecoverCalls).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fences a stale effect after another controller records an external terminal settlement', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-durable-recovery-terminal-'));
+    const filePath = join(dir, 'recovery.json');
+    const recoveryStarted = createDeferred<void>();
+    const recoveryOutcome = createDeferred<{ status: 'wait'; lastError: string }>();
+    const onTerminal = vi.fn();
+    const createScheduler = () => new DurableBackoffRecoveryScheduler<TestIntent>({
+      nowMs: () => 1_000,
+      store: createRecoveryIntentFileStore<TestIntent>(filePath),
+      normalizeIntent: (value) => value as TestIntent,
+      getStatus: (intent) => intent.status,
+      getNextRetryAtMs: (intent) => intent.nextRetryAtMs,
+      getAttemptCount: (intent) => intent.attemptCount,
+      getMaxAttempts: (intent) => intent.maxAttempts,
+      markChecking: (intent, attemptCount) => ({ ...intent, status: 'checking', attemptCount }),
+      markWaiting: (intent, input) => ({ ...intent, status: 'waiting', nextRetryAtMs: input.nextRetryAtMs }),
+      markCancelled: (intent) => ({ ...intent, status: 'cancelled', nextRetryAtMs: null }),
+      markExhausted: (intent, input) => ({ ...intent, status: 'exhausted', nextRetryAtMs: null, lastError: input.lastError }),
+      onTerminal,
+      recover: async () => {
+        recoveryStarted.resolve();
+        return await recoveryOutcome.promise;
+      },
+    });
+    try {
+      const recovering = createScheduler();
+      const settling = createScheduler();
+      await recovering.upsertByKey({ sessionId: 'session-1', recoveryKey: 'recovery-1', intent: createIntent() });
+      const wake = recovering.wakeByKey({ recoveryKey: 'recovery-1', reason: 'manual', sessionId: 'session-1' });
+      await recoveryStarted.promise;
+
+      await settling.upsertSettledByKey({
+        sessionId: 'session-1',
+        recoveryKey: 'recovery-1',
+        intent: { ...createIntent(), status: 'cancelled', nextRetryAtMs: null },
+      });
+      recoveryOutcome.resolve({ status: 'wait', lastError: 'late wait' });
+
+      await expect(wake).resolves.toEqual({ status: 'inactive' });
+      expect(createRecoveryIntentFileStore<TestIntent>(filePath).read('recovery-1')).toMatchObject({ status: 'cancelled' });
+    } finally {
+      recoveryOutcome.resolve({ status: 'wait', lastError: 'cleanup' });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('stores and reads separate recovery intents with explicit recovery keys in one session', async () => {
     vi.useFakeTimers();
     try {
