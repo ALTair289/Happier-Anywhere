@@ -28,7 +28,12 @@ test('hstack mobile --prebuild --profiling-runtime=memory patches iOS Podfile au
       `#!/usr/bin/env node
 const fs = require('fs');
 fs.mkdirSync('ios', { recursive: true });
-fs.writeFileSync('ios/Podfile.properties.json', JSON.stringify({ EX_DEV_CLIENT_NETWORK_INSPECTOR: 'true' }, null, 2));
+// Mirrors a real prebuild: expo-build-properties writes these from app.config.js.
+fs.writeFileSync('ios/Podfile.properties.json', JSON.stringify({
+  EX_DEV_CLIENT_NETWORK_INSPECTOR: 'true',
+  'ios.deploymentTarget': '16.0',
+  'ios.buildReactNativeFromSource': 'true',
+}, null, 2));
 fs.writeFileSync('ios/Podfile', \`target 'Happierdev' do
   use_expo_modules!
 
