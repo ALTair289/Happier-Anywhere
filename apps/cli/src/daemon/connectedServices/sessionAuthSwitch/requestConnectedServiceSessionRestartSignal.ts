@@ -27,6 +27,17 @@ export type ConnectedServiceSessionRestartSignalResult = Readonly<{
     | 'skipped_terminal_restart';
 }>;
 
+export type ConnectedServiceRestartRequestedTranscriptEventOwner = 'switch_fsm' | 'restart_signal';
+
+export function shouldEmitConnectedServiceRestartRequestedSessionEvent(input: Readonly<{
+  owner: ConnectedServiceRestartRequestedTranscriptEventOwner;
+  signaled: boolean;
+}>): boolean {
+  // A switch attempt already has one canonical FSM event author. Direct refresh/recovery restart
+  // signals do not, so their signal owner remains responsible for the request-level transcript fact.
+  return input.signaled && input.owner === 'restart_signal';
+}
+
 export type ConnectedServiceDaemonRestartDiagnosticInput = Readonly<{
   trigger: ConnectedServiceDaemonRestartTrigger;
   sessionId?: string | null;
@@ -93,8 +104,8 @@ export function buildConnectedServiceRestartRequestedSessionEvent(
   action: 'restart_requested';
   reason: string;
   attemptedContinuityMode: 'restart';
-  outcome: 'succeeded';
-  outcomeAction: 'restarted';
+  outcome: 'observed';
+  outcomeAction: 'none';
   errorCode: null;
   groupGeneration?: number;
   partialState: null;
@@ -113,8 +124,10 @@ export function buildConnectedServiceRestartRequestedSessionEvent(
     action: 'restart_requested',
     reason: trigger,
     attemptedContinuityMode: 'restart',
-    outcome: 'succeeded',
-    outcomeAction: 'restarted',
+    // A successful signal request is not proof that the process stopped or that a replacement
+    // adopted the target. The process supervisor emits those later facts independently.
+    outcome: 'observed',
+    outcomeAction: 'none',
     errorCode: null,
     ...(generation === null ? {} : { groupGeneration: generation }),
     partialState: null,

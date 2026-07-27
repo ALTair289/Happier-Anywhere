@@ -77,7 +77,11 @@ describe('materializeSessionConnectedServiceRuntimeAuthSelection', () => {
     });
     const api = {
       getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
-      getConnectedServiceCredentialPlain: vi.fn(async () => ({ content: { t: 'plain' as const, v: record } })),
+      getConnectedServiceCredentialPlain: vi.fn(async () => ({
+        content: { t: 'plain' as const, v: record },
+        revisionSemantics: 'revisioned' as const,
+        credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+      })),
       getConnectedServiceCredentialSealed: vi.fn(async () => null),
     };
     const credentials: Credentials = {
@@ -153,6 +157,7 @@ describe('materializeSessionConnectedServiceRuntimeAuthSelection', () => {
       activeProfileId: 'backup',
       fallbackProfileId: 'fallback',
       generation: 7,
+      credentialRevision: 'csr_abcdefghijklmnopqrstuv',
       record,
     });
   });
@@ -438,6 +443,140 @@ describe('materializeSessionConnectedServiceRuntimeAuthSelection', () => {
       fallbackProfileId: 'fresh-fallback',
       generation: 8,
       record,
+    });
+  });
+
+  it('rejects a canonical credential revision mismatch before the Claude materializer writes provider state', async () => {
+    const committedRevision = 'csr_aaaaaaaaaaaaaaaaaaaaaa';
+    const actualRevision = 'csr_bbbbbbbbbbbbbbbbbbbbbb';
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-pre-effect-revision-fence-'));
+    const groupConfigDir = join(
+      activeServerDir,
+      'daemon',
+      'connected-services',
+      'homes',
+      'claude-subscription',
+      '__groups',
+      'work',
+      'claude',
+      'claude-config',
+    );
+    await mkdir(groupConfigDir, { recursive: true });
+    await writeFile(join(groupConfigDir, '.credentials.json'), JSON.stringify({
+      claudeAiOauth: {
+        accessToken: 'credential-before-mismatch',
+        expiresAt: 1,
+        scopes: [CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE],
+      },
+    }));
+    const record = buildConnectedServiceCredentialRecord({
+      now: 1_000,
+      serviceId: 'claude-subscription',
+      profileId: 'backup',
+      kind: 'oauth',
+      expiresAt: 2_000,
+      oauth: {
+        accessToken: 'credential-that-must-not-be-written',
+        refreshToken: 'refresh-that-must-not-be-written',
+        idToken: null,
+        scope: CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: 'provider-account',
+        providerEmail: null,
+      },
+    });
+    const api = {
+      getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
+      getConnectedServiceCredentialPlain: vi.fn(async () => ({
+        content: { t: 'plain' as const, v: record },
+        revisionSemantics: 'revisioned' as const,
+        credentialRevision: actualRevision,
+      })),
+      getConnectedServiceCredentialSealed: vi.fn(async () => null),
+    };
+    const previousBindings: ConnectedServiceBindingsV1 = {
+      v: 1,
+      bindingsByServiceId: {
+        'claude-subscription': {
+          source: 'connected',
+          selection: 'group',
+          groupId: 'work',
+          profileId: 'primary',
+        },
+      },
+    };
+    const tracked: TrackedSession = {
+      startedBy: 'daemon',
+      happySessionId: 'sess_1',
+      pid: 123,
+      spawnOptions: {
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        connectedServices: previousBindings,
+        environmentVariables: {},
+      },
+    };
+    const normalizedBindings = {
+      v: 1,
+      bindingsByServiceId: {
+        'claude-subscription': {
+          source: 'connected',
+          selection: 'group',
+          groupId: 'work',
+          profileId: 'backup',
+        },
+      },
+    } as const;
+
+    const outcome = await materializeSessionConnectedServiceRuntimeAuthSelection({
+      credentials: {
+        token: 'token',
+        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
+      },
+      api: api as unknown as ApiClient,
+      activeServerDir,
+      input: {
+        mode: 'apply',
+        tracked,
+        sessionId: 'sess_1',
+        agentId: 'claude',
+        serviceId: 'claude-subscription',
+        previous: {
+          source: 'connected',
+          selection: 'group',
+          serviceId: 'claude-subscription',
+          profileId: 'primary',
+          groupId: 'work',
+        },
+        next: {
+          source: 'connected',
+          selection: 'group',
+          serviceId: 'claude-subscription',
+          profileId: 'backup',
+          groupId: 'work',
+        },
+        previousBindings,
+        normalizedBindings,
+        groupMetadata: {
+          groupId: 'work',
+          activeProfileId: 'backup',
+          fallbackProfileId: 'primary',
+          generation: 8,
+        },
+        expectedCredentialRevision: committedRevision,
+      } as Parameters<typeof materializeSessionConnectedServiceRuntimeAuthSelection>[0]['input'] & Readonly<{
+        expectedCredentialRevision: string;
+      }>,
+      processEnv: { HOME: tmpdir() },
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    const credential = JSON.parse(await readFile(join(groupConfigDir, '.credentials.json'), 'utf8'));
+    expect(credential.claudeAiOauth.accessToken).toBe('credential-before-mismatch');
+    expect(outcome).toMatchObject({
+      message: 'connected_service_auth_generation_apply_failed:credential_revision_superseded',
     });
   });
 

@@ -37,8 +37,10 @@ export function resolveSwitchAttemptEventOutcomeForSuccess(input: Readonly<{
       return {
         action: 'restart_requested',
         attemptedContinuityMode: 'restart',
-        outcome: 'succeeded',
-        outcomeAction: 'restarted',
+        // Request acceptance proves neither process exit nor replacement/provider adoption.
+        // Those later supervision facts own any completed-restart projection.
+        outcome: 'observed',
+        outcomeAction: 'none',
       };
   }
 }

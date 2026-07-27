@@ -1,10 +1,14 @@
 import type { ApiClient } from '@/api/api';
 import { materializeConnectedServiceRuntimeAuthSelectionThroughCatalog } from '@/backends/catalog';
-import { resolveConnectedServiceCredentials } from '@/cloud/connectedServices/resolveConnectedServiceCredentials';
+import { resolveConnectedServiceCredentialsWithRevisions } from '@/cloud/connectedServices/resolveConnectedServiceCredentials';
 import type { Credentials } from '@/persistence';
 import { findConnectedServiceChildSelection } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
-import type { AccountSettings } from '@happier-dev/protocol';
+import {
+  ConnectedServiceCredentialRevisionV1Schema,
+  type AccountSettings,
+} from '@happier-dev/protocol';
 
+import { createConnectedServiceAuthGenerationApplyFailureError } from '../runtimeAuth/connectedServiceAuthGenerationApplyFailure';
 import type { SessionConnectedServiceRuntimeAuthSelectionMaterializerInput } from './switchSessionConnectedServiceAuth';
 
 function readNonEmptyString(value: unknown): string {
@@ -46,18 +50,34 @@ export async function materializeSessionConnectedServiceRuntimeAuthSelection(par
     : readNonEmptyString(binding.profileId);
   if (!profileId) return null;
 
-  const records = await resolveConnectedServiceCredentials({
+  const credentialsByServiceId = await resolveConnectedServiceCredentialsWithRevisions({
     credentials: params.credentials,
     api: params.api,
     bindings: [{ serviceId: params.input.serviceId, profileId }],
   });
-  const record = records.get(params.input.serviceId);
-  if (!record) return null;
+  const resolvedCredential = credentialsByServiceId.get(params.input.serviceId);
+  if (!resolvedCredential) return null;
+  if (params.input.expectedCredentialRevision !== undefined) {
+    const actualCredentialRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(
+      resolvedCredential.credentialRevision,
+    );
+    if (!actualCredentialRevision.success) {
+      throw createConnectedServiceAuthGenerationApplyFailureError({
+        errorCode: 'credential_revision_missing',
+      });
+    }
+    if (actualCredentialRevision.data !== params.input.expectedCredentialRevision) {
+      throw createConnectedServiceAuthGenerationApplyFailureError({
+        errorCode: 'credential_revision_superseded',
+      });
+    }
+  }
 
   const baseSelection = {
     serviceId: params.input.serviceId,
     binding,
     profileId,
+    credentialRevision: resolvedCredential.credentialRevision,
     ...(binding.selection === 'group'
       ? {
           groupId: binding.groupId,
@@ -72,7 +92,7 @@ export async function materializeSessionConnectedServiceRuntimeAuthSelection(par
               : 0,
         }
       : {}),
-    record,
+    record: resolvedCredential.record,
   };
 
   return await materializeConnectedServiceRuntimeAuthSelectionThroughCatalog(params.input.agentId, {

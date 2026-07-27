@@ -12,9 +12,10 @@ import { createCodexConnectedServiceRuntimeAuthAdapter } from '@/backends/codex/
 import { resolveCodexConnectedServiceSwitchContinuity } from '@/backends/codex/connectedServices/resolveCodexConnectedServiceSwitchContinuity';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import { ConnectedServiceSessionAuthSwitchLockRegistry, createConnectedServiceSessionAuthSwitchCore } from '../runtimeAuth/connectedServiceSessionAuthSwitchCore';
-import { createSessionContinuationRecoveryController } from '../continuation/sessionContinuationRecovery';
 import { createSessionConnectedServiceAuthHotApply } from './sessionConnectedServiceAuthHotApply';
 import { switchSessionConnectedServiceAuth, type SwitchSessionConnectedServiceAuthInput } from './switchSessionConnectedServiceAuth';
+
+const credentialRevision = 'csr_abcdefghijklmnopqrstuv';
 
 function trackedSession(overrides: Partial<TrackedSession> = {}): TrackedSession {
   return {
@@ -56,6 +57,7 @@ function group(overrides: Partial<ConnectedServiceAuthGroupV1> = {}): ConnectedS
     policy: ConnectedServiceAuthGroupPolicyV1Schema.parse({ autoSwitch: true }),
     activeProfileId: 'group-active',
     generation: 4,
+    runtimeStateRevision: 0,
     state: { v: 1 },
     members: [
       {
@@ -438,6 +440,56 @@ describe('switchSessionConnectedServiceAuth', () => {
       action: 'restart_requested',
     });
     expect(restartSession).toHaveBeenCalledOnce();
+  });
+
+  it('fails before side effects when startup reconciliation would require restart-resume', async () => {
+    const tracked = trackedSession({
+      spawnOptions: {
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        connectedServices: bindings('old-profile'),
+      },
+    });
+    const restartSession = vi.fn(async () => {});
+    const persistSessionBindings = vi.fn(async () => {});
+
+    await expect(switchSessionConnectedServiceAuth({
+      core: createCore(),
+      executionPolicy: {
+        allowRestartResume: false,
+        allowContinuation: false,
+        source: 'startup_reconciliation',
+      },
+      postSwitchVerificationMode: {
+        kind: 'disabled_for_test_only',
+        reason: 'startup execution-authority policy fails before provider verification',
+      },
+      getChildren: () => [tracked],
+      api: {
+        listConnectedServiceProfiles: async () => ({
+          serviceId: 'anthropic' as const,
+          profiles: [{ profileId: 'new-profile', status: 'connected' as const }],
+        }),
+        getConnectedServiceAuthGroup: async () => null,
+      },
+      resolveContinuity: async () => ({ mode: 'restart_rematerialize' as const }),
+      restartSession,
+      hotApply: async () => ({ ok: false, errorCode: 'hot_apply_restart_required' }),
+      persistSessionBindings,
+      registerHotApplyTargets: vi.fn(),
+      emitSessionEvent: vi.fn(),
+      request: {
+        sessionId: 'sess_1',
+        agentId: 'claude',
+        bindings: bindings('new-profile'),
+      },
+    })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'restart_disallowed_by_execution_policy',
+    });
+
+    expect(restartSession).not.toHaveBeenCalled();
+    expect(persistSessionBindings).not.toHaveBeenCalled();
   });
 
   it('updates inactive session bindings without requesting a restart', async () => {
@@ -1038,6 +1090,7 @@ describe('switchSessionConnectedServiceAuth', () => {
       materializeRuntimeAuthSelection: async () => ({
         targetMaterializedEnv: { CLAUDE_CONFIG_DIR: '/tmp/new-claude-config' },
         targetMaterializedRoot: '/tmp/new-claude-config',
+        credentialRevision,
       }),
       restartSession,
       hotApply: async () => ({ ok: true }),
@@ -1072,7 +1125,7 @@ describe('switchSessionConnectedServiceAuth', () => {
     expect(tracked.spawnOptions?.environmentVariables).toEqual({
       EXISTING: '1',
       [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([
-        { kind: 'profile', serviceId: 'anthropic', profileId: 'new-profile' },
+        { kind: 'profile', serviceId: 'anthropic', profileId: 'new-profile', credentialRevision },
       ]),
     });
     expect(persistSessionBindings).toHaveBeenCalledWith({
@@ -1219,8 +1272,8 @@ describe('switchSessionConnectedServiceAuth', () => {
       ok: true,
       action: 'restart_requested',
       attemptedContinuityMode: 'restart',
-      outcome: 'succeeded',
-      outcomeAction: 'restarted',
+      outcome: 'observed',
+      outcomeAction: 'none',
       errorCode: null,
     }));
     expect(emitSessionEvent).not.toHaveBeenCalledWith('sess_1', expect.objectContaining({
@@ -1231,7 +1284,7 @@ describe('switchSessionConnectedServiceAuth', () => {
     }));
   });
 
-  it('rematerializes an unchanged group binding when an expected generation must be applied', async () => {
+  it('startup reconciliation hot-applies an unchanged group generation without continuation', async () => {
     const tracked = trackedSession({
       spawnOptions: {
         directory: '/tmp/project',
@@ -1259,6 +1312,11 @@ describe('switchSessionConnectedServiceAuth', () => {
 
     const result = await switchSessionConnectedServiceAuth({
       core: createCore(),
+      executionPolicy: {
+        allowRestartResume: false,
+        allowContinuation: false,
+        source: 'startup_reconciliation',
+      },
       postSwitchVerificationMode: {
         kind: 'disabled_for_test_only',
         reason: 'existing switch fixture does not exercise provider adoption verification',
@@ -1335,11 +1393,107 @@ describe('switchSessionConnectedServiceAuth', () => {
 
     expect(hotApply).toHaveBeenCalledOnce();
     expect(verifyProviderAccountAdoption).toHaveBeenCalledOnce();
-    expect(continueAfterRuntimeAuthSwitch).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: 'sess_1',
-      attemptId: 'connected-service-auth-switch|hot_applied|anthropic:group:work:group-active:67',
-      action: 'hot_applied',
+    expect(continueAfterRuntimeAuthSwitch).not.toHaveBeenCalled();
+  });
+
+  it('rejects a revision-only mismatch before unchanged-binding rematerialization side effects', async () => {
+    const desiredRevision = 'csr_aaaaaaaaaaaaaaaaaaaaaa';
+    const materializedRevision = 'csr_bbbbbbbbbbbbbbbbbbbbbb';
+    const tracked = trackedSession({
+      spawnOptions: {
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        connectedServices: {
+          v: 1,
+          bindingsByServiceId: {
+            anthropic: {
+              source: 'connected',
+              selection: 'group',
+              groupId: 'work',
+              profileId: 'group-active',
+            },
+          },
+        },
+        connectedServiceMaterializationIdentityV1: materializationIdentity,
+      },
+    });
+    const previousSpawnOptions = tracked.spawnOptions;
+    const hotApply = vi.fn(async () => ({ ok: true as const }));
+    const persistSessionBindings = vi.fn(async () => {});
+    const registerHotApplyTargets = vi.fn();
+    const restartSession = vi.fn(async () => {});
+    const recoverAfterRuntimeAuthSwitch = vi.fn(async () => ({ ok: true as const }));
+    const continueAfterRuntimeAuthSwitch = vi.fn(async () => {});
+    const verifyProviderAccountAdoption = vi.fn(async () => ({
+      status: 'verified' as const,
+      reason: 'test_verified',
     }));
+
+    await expect(switchSessionConnectedServiceAuth({
+      core: createCore(),
+      executionPolicy: {
+        allowRestartResume: false,
+        allowContinuation: false,
+        source: 'startup_reconciliation',
+      },
+      postSwitchVerificationMode: {
+        kind: 'disabled_for_test_only',
+        reason: 'revision fencing aborts before provider adoption verification',
+      },
+      getChildren: () => [tracked],
+      api: {
+        listConnectedServiceProfiles: async () => ({
+          serviceId: 'anthropic',
+          profiles: [{ profileId: 'group-active', status: 'connected' }],
+        }),
+        getConnectedServiceAuthGroup: async () => group({
+          activeProfileId: 'group-active',
+          generation: 67,
+        }),
+      },
+      expectedCredentialRevisionByServiceId: {
+        anthropic: desiredRevision,
+      },
+      resolveContinuity: async () => ({ mode: 'hot_apply' }),
+      materializeRuntimeAuthSelection: async () => ({
+        credentialRevision: materializedRevision,
+      }),
+      restartSession,
+      hotApply,
+      recoverAfterRuntimeAuthSwitch,
+      continueAfterRuntimeAuthSwitch,
+      verifyProviderAccountAdoption,
+      persistSessionBindings,
+      registerHotApplyTargets,
+      emitSessionEvent: vi.fn(),
+      request: {
+        sessionId: 'sess_1',
+        agentId: 'claude',
+        expectedGroupGenerationByServiceId: { anthropic: 67 },
+        bindings: {
+          v: 1,
+          bindingsByServiceId: {
+            anthropic: {
+              source: 'connected',
+              selection: 'group',
+              groupId: 'work',
+              profileId: 'group-active',
+            },
+          },
+        },
+      },
+    })).rejects.toThrow(
+      'connected_service_auth_generation_apply_failed:credential_revision_superseded',
+    );
+
+    expect(tracked.spawnOptions).toBe(previousSpawnOptions);
+    expect(hotApply).not.toHaveBeenCalled();
+    expect(verifyProviderAccountAdoption).not.toHaveBeenCalled();
+    expect(persistSessionBindings).not.toHaveBeenCalled();
+    expect(registerHotApplyTargets).not.toHaveBeenCalled();
+    expect(restartSession).not.toHaveBeenCalled();
+    expect(recoverAfterRuntimeAuthSwitch).not.toHaveBeenCalled();
+    expect(continueAfterRuntimeAuthSwitch).not.toHaveBeenCalled();
   });
 
   it('suppresses continuation replay for pre-turn group switches through the unchanged-binding path (F5)', async () => {
@@ -1595,7 +1749,7 @@ describe('switchSessionConnectedServiceAuth', () => {
     }));
   });
 
-  it('does not hot-apply an unchanged group binding when the tracked runtime already adopted the expected generation', async () => {
+  it('does not accept tracked launch metadata as proof that the runtime adopted the expected generation', async () => {
     const tracked = trackedSession({
       spawnOptions: {
         directory: '/tmp/project',
@@ -1677,7 +1831,7 @@ describe('switchSessionConnectedServiceAuth', () => {
 
     expect(result).toMatchObject({
       ok: true,
-      action: 'unchanged',
+      action: 'hot_applied',
       normalizedBindings: {
         v: 1,
         bindingsByServiceId: {
@@ -1689,14 +1843,11 @@ describe('switchSessionConnectedServiceAuth', () => {
           },
         },
       },
-      continuityByServiceId: {},
     });
-    expect(materializeRuntimeAuthSelection).not.toHaveBeenCalled();
-    expect(resolveContinuity).not.toHaveBeenCalled();
-    expect(hotApply).not.toHaveBeenCalled();
-    expect(verifyProviderAccountAdoption).not.toHaveBeenCalled();
-    expect(continueAfterRuntimeAuthSwitch).not.toHaveBeenCalled();
-    expect(emitSessionEvent).not.toHaveBeenCalled();
+    expect(materializeRuntimeAuthSelection).toHaveBeenCalledOnce();
+    expect(resolveContinuity).toHaveBeenCalledOnce();
+    expect(hotApply).toHaveBeenCalledOnce();
+    expect(verifyProviderAccountAdoption).toHaveBeenCalledOnce();
   });
 
   it('does not treat tracked env adoption as provider proof for same-account exhausted fanout', async () => {
@@ -2638,6 +2789,7 @@ describe('switchSessionConnectedServiceAuth', () => {
             activeProfileId: 'group-active',
             fallbackProfileId: 'group-active',
             generation: 5,
+            credentialRevision,
           },
         ]),
       });
@@ -2658,6 +2810,7 @@ describe('switchSessionConnectedServiceAuth', () => {
         getConnectedServiceAuthGroup: async () => group({ generation: 5 }),
       },
       resolveContinuity: async () => ({ mode: 'restart_rematerialize' }),
+      materializeRuntimeAuthSelection: async () => ({ credentialRevision }),
       restartSession,
       hotApply: async () => ({ ok: true }),
       registerHotApplyTargets: () => {},
@@ -2752,6 +2905,7 @@ describe('switchSessionConnectedServiceAuth', () => {
             activeProfileId: 'group-active',
             fallbackProfileId: 'fallback-profile',
             generation: 9,
+            credentialRevision,
           },
         ]),
       });
@@ -2802,6 +2956,7 @@ describe('switchSessionConnectedServiceAuth', () => {
         }),
       },
       resolveContinuity: async () => ({ mode: 'restart_rematerialize' }),
+      materializeRuntimeAuthSelection: async () => ({ credentialRevision }),
       restartSession,
       hotApply: async () => ({ ok: true }),
       registerHotApplyTargets: () => {},
@@ -3472,8 +3627,8 @@ describe('switchSessionConnectedServiceAuth', () => {
       ok: true,
       action: 'restart_requested',
       attemptedContinuityMode: 'restart',
-      outcome: 'succeeded',
-      outcomeAction: 'restarted',
+      outcome: 'observed',
+      outcomeAction: 'none',
       errorCode: null,
     })]);
   });
@@ -4335,8 +4490,8 @@ describe('switchSessionConnectedServiceAuth', () => {
       ok: true,
       action: 'restart_requested',
       attemptedContinuityMode: 'restart',
-      outcome: 'succeeded',
-      outcomeAction: 'restarted',
+      outcome: 'observed',
+      outcomeAction: 'none',
       errorCode: null,
     }));
   });
@@ -4436,11 +4591,8 @@ describe('switchSessionConnectedServiceAuth', () => {
 	    });
 	  });
 
-  it('records durable continuation state after requesting restart recovery', async () => {
+  it('invokes the continuation producer after requesting restart recovery', async () => {
     const tracked = trackedSession();
-    const store = createContinuationStore();
-    const controller = createSessionContinuationRecoveryController({ nowMs: () => 2_000, store });
-    const sentPrompts: string[] = [];
     const calls: string[] = [];
     const emitSessionEvent = vi.fn();
     const verifyProviderAccountAdoption = vi.fn(async () => {
@@ -4454,24 +4606,6 @@ describe('switchSessionConnectedServiceAuth', () => {
       serviceIds: ReadonlySet<string>;
     }) => {
       calls.push('continue');
-      await controller.beginAttempt({
-        sessionId: context.sessionId,
-        attemptId: context.attemptId,
-        failureAtMs: 1_000,
-        resumePromptMode: 'standard',
-      });
-      if (context.action === 'restart_requested') return;
-      await controller.resolveAttempt({
-        sessionId: context.sessionId,
-        attemptId: context.attemptId,
-        failureAtMs: 1_000,
-        resumePromptMode: 'standard',
-        exactProviderContextAvailable: true,
-        hasUserMessageAfterFailure: () => false,
-        sendContinuationPrompt: ({ prompt }) => {
-          sentPrompts.push(prompt);
-        },
-      });
     });
     const input = {
       core: createCore(),
@@ -4521,36 +4655,20 @@ describe('switchSessionConnectedServiceAuth', () => {
     expect(calls).toEqual(['continue']);
     expect(verifyProviderAccountAdoption).not.toHaveBeenCalled();
     expect(input.recoverAfterRuntimeAuthSwitch).not.toHaveBeenCalled();
-    expect(sentPrompts).toHaveLength(0);
-    const persisted = store.stored.get('sess_1');
-    const attemptsById =
-      persisted && typeof persisted === 'object' && !Array.isArray(persisted)
-        ? (persisted as { attemptsById?: Record<string, { status?: string }> }).attemptsById
-        : null;
-    expect(Object.keys(attemptsById ?? {})).toEqual([expect.stringContaining('anthropic')]);
-    expect(Object.values(attemptsById ?? {})[0]).toMatchObject({ status: 'pending_provider_context' });
 	    expect(emitSessionEvent).toHaveBeenCalledWith('sess_1', expect.objectContaining({
 	      type: 'connected_service_account_switch_attempt',
 	      ok: true,
 	      action: 'restart_requested',
 	      attemptedContinuityMode: 'restart',
-	      outcome: 'succeeded',
-	      outcomeAction: 'restarted',
+	      outcome: 'observed',
+	      outcomeAction: 'none',
 	      partialState: null,
 	      errorCode: null,
 	    }));
 	  });
 
-  it('continues the interrupted turn in place exactly once after a hot-apply (K2 mid-turn-limit contract)', async () => {
-    // K2 LOCKED contract: when a usage limit interrupts an in-flight turn and the
-    // switch HOT-APPLIES, the SAME turn must re-continue in place automatically,
-    // exactly once, with no respawn. We assert the continuation handler runs with
-    // action:'hot_applied' and the continuation prompt is sent exactly once when the
-    // user has NOT supplied newer input (no newer input ⇒ auto re-continue).
+  it('invokes the post-switch continuation decision exactly once after hot apply', async () => {
     const tracked = trackedSession();
-    const store = createContinuationStore();
-    const controller = createSessionContinuationRecoveryController({ nowMs: () => 2_000, store });
-    const sentPrompts: string[] = [];
     const calls: string[] = [];
     const restartSession = vi.fn();
     const verifyProviderAccountAdoption = vi.fn(async () => {
@@ -4564,24 +4682,6 @@ describe('switchSessionConnectedServiceAuth', () => {
       serviceIds: ReadonlySet<string>;
     }) => {
       calls.push('continue');
-      await controller.beginAttempt({
-        sessionId: context.sessionId,
-        attemptId: context.attemptId,
-        failureAtMs: 1_000,
-        resumePromptMode: 'standard',
-      });
-      if (context.action === 'restart_requested') return;
-      await controller.resolveAttempt({
-        sessionId: context.sessionId,
-        attemptId: context.attemptId,
-        failureAtMs: 1_000,
-        resumePromptMode: 'standard',
-        exactProviderContextAvailable: true,
-        hasUserMessageAfterFailure: async () => false,
-        sendContinuationPrompt: ({ prompt }) => {
-          sentPrompts.push(prompt);
-        },
-      });
     });
     const input = {
       core: createCore(),
@@ -4628,8 +4728,6 @@ describe('switchSessionConnectedServiceAuth', () => {
       serviceIds: new Set(['anthropic']),
     }));
     expect(calls).toEqual(['verify', 'continue']);
-    // Exactly once.
-    expect(sentPrompts).toHaveLength(1);
   });
 
   it('returns typed partial result when post-switch recovery fails', async () => {
@@ -4887,6 +4985,7 @@ describe('switchSessionConnectedServiceAuth', () => {
       binding,
       profileId: 'new-codex-profile',
       record,
+      credentialRevision,
       applyConnectedServiceAuthGeneration,
       applyReason: 'manual',
     };
@@ -4962,7 +5061,7 @@ describe('switchSessionConnectedServiceAuth', () => {
       spawnOptions: expect.objectContaining({
         environmentVariables: expect.objectContaining({
           [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([
-            { kind: 'profile', serviceId: 'openai-codex', profileId: 'new-codex-profile' },
+            { kind: 'profile', serviceId: 'openai-codex', profileId: 'new-codex-profile', credentialRevision },
           ]),
         }),
       }),
@@ -4971,6 +5070,58 @@ describe('switchSessionConnectedServiceAuth', () => {
     });
     expect(registerHotApplyTargets.mock.calls[0]?.[1]?.runtimeAuthSelectionsByServiceId?.get('openai-codex'))
       .toBe(runtimeAuthSelection);
+  });
+
+  it('rejects a superseded materialized credential revision before the provider effect', async () => {
+    const desiredRevision = 'csr_aaaaaaaaaaaaaaaaaaaaaa';
+    const materializedRevision = 'csr_bbbbbbbbbbbbbbbbbbbbbb';
+    const tracked = trackedSession({
+      spawnOptions: {
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        connectedServices: codexBindings('old-codex-profile'),
+      },
+    });
+    const hotApply = vi.fn(async () => ({ ok: true as const }));
+    const switchInput = {
+      core: createCore(),
+      postSwitchVerificationMode: {
+        kind: 'disabled_for_test_only',
+        reason: 'revision fencing aborts before provider adoption verification',
+      },
+      getChildren: () => [tracked],
+      api: {
+        listConnectedServiceProfiles: async () => ({
+          serviceId: 'openai-codex' as const,
+          profiles: [{ profileId: 'new-codex-profile', status: 'connected' as const }],
+        }),
+        getConnectedServiceAuthGroup: async () => null,
+      },
+      expectedCredentialRevisionByServiceId: {
+        'openai-codex': desiredRevision,
+      },
+      materializeRuntimeAuthSelection: async () => ({
+        credentialRevision: materializedRevision,
+      }),
+      resolveContinuity: async () => ({ mode: 'hot_apply' as const }),
+      restartSession: vi.fn(),
+      hotApply,
+      persistSessionBindings: vi.fn(),
+      registerHotApplyTargets: vi.fn(),
+      emitSessionEvent: vi.fn(),
+      request: {
+        sessionId: 'sess_1',
+        agentId: 'codex',
+        bindings: codexBindings('new-codex-profile'),
+      },
+    } satisfies SwitchSessionConnectedServiceAuthInput & Readonly<{
+      expectedCredentialRevisionByServiceId: Readonly<Record<string, string>>;
+    }>;
+
+    await expect(switchSessionConnectedServiceAuth(switchInput)).rejects.toThrow(
+      'connected_service_auth_generation_apply_failed:credential_revision_superseded',
+    );
+    expect(hotApply).not.toHaveBeenCalled();
   });
 
   it('requires direct live Codex apply for usage-limit recovery when the provider declares direct live auth', async () => {
@@ -5285,6 +5436,7 @@ describe('switchSessionConnectedServiceAuth', () => {
           policy: ConnectedServiceAuthGroupPolicyV1Schema.parse({ autoSwitch: true }),
           activeProfileId: 'work',
           generation: 4,
+          runtimeStateRevision: 0,
           state: { v: 1 },
           members: [
             {

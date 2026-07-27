@@ -4,12 +4,19 @@ import {
   createConnectedServiceSessionRestartAmplificationGuard,
   isConnectedServiceRestartSignalStaleProcessError,
   requestConnectedServiceSessionRestartSignal,
+  shouldEmitConnectedServiceRestartRequestedSessionEvent,
 } from './requestConnectedServiceSessionRestartSignal';
 
 describe('requestConnectedServiceSessionRestartSignal', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it('assigns one transcript author to switch-FSM and direct-signal restart requests', () => {
+    expect(shouldEmitConnectedServiceRestartRequestedSessionEvent({ owner: 'switch_fsm', signaled: true })).toBe(false);
+    expect(shouldEmitConnectedServiceRestartRequestedSessionEvent({ owner: 'restart_signal', signaled: true })).toBe(true);
+    expect(shouldEmitConnectedServiceRestartRequestedSessionEvent({ owner: 'restart_signal', signaled: false })).toBe(false);
   });
 
   it('waits for a delayed restart signal before resolving', async () => {
@@ -169,8 +176,8 @@ describe('requestConnectedServiceSessionRestartSignal', () => {
       action: 'restart_requested',
       reason: 'refresh_triggered_restart',
       attemptedContinuityMode: 'restart',
-      outcome: 'succeeded',
-      outcomeAction: 'restarted',
+      outcome: 'observed',
+      outcomeAction: 'none',
       errorCode: null,
       groupGeneration: 7,
       partialState: null,

@@ -1,4 +1,9 @@
-import type { ConnectedServiceBindingsV1, ConnectedServiceId } from '@happier-dev/protocol';
+import {
+  ConnectedServiceCredentialRevisionV1Schema,
+  ConnectedServiceIdSchema,
+  type ConnectedServiceBindingsV1,
+  type ConnectedServiceId,
+} from '@happier-dev/protocol';
 
 import { getConnectedServiceRuntimeAuthAdapter, resolveCatalogAgentId } from '@/backends/catalog';
 import { CATALOG_AGENT_IDS, type CatalogAgentId } from '@/backends/types';
@@ -73,6 +78,32 @@ function readAcceptedVerificationFromHotApplyResult(
   const sharedAuthSurfaceId = readString(verification.sharedAuthSurfaceId);
   const source = readString(verification.source);
   const reason = readString(verification.reason);
+  const credentialRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(verification.credentialRevision);
+  const credentialFingerprint = readString(verification.credentialFingerprint);
+  const generationApplicationRaw = readRecord(verification.generationApplication);
+  const generationApplicationServiceId = ConnectedServiceIdSchema.safeParse(generationApplicationRaw?.serviceId);
+  const generationApplicationCredentialRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(
+    generationApplicationRaw?.credentialRevision,
+  );
+  const generationApplicationGeneration = generationApplicationRaw?.generation;
+  const generationApplication = generationApplicationRaw
+    && generationApplicationServiceId.success
+    && readString(generationApplicationRaw.groupId)
+    && readString(generationApplicationRaw.profileId)
+    && typeof generationApplicationGeneration === 'number'
+    && Number.isSafeInteger(generationApplicationGeneration)
+    && generationApplicationGeneration >= 0
+    && generationApplicationCredentialRevision.success
+    && readString(generationApplicationRaw.credentialFingerprint)
+    ? {
+        serviceId: generationApplicationServiceId.data,
+        groupId: readString(generationApplicationRaw.groupId)!,
+        profileId: readString(generationApplicationRaw.profileId)!,
+        generation: generationApplicationGeneration,
+        credentialRevision: generationApplicationCredentialRevision.data,
+        credentialFingerprint: readString(generationApplicationRaw.credentialFingerprint)!,
+      }
+    : null;
 
   const hasExactIdentityMaterial = providerAccountId !== null
     || activeAccountId !== null
@@ -91,6 +122,9 @@ function readAcceptedVerificationFromHotApplyResult(
       ...(proofStrength !== null ? { proofStrength } : {}),
       ...(source !== null ? { source } : {}),
       ...(reason !== null ? { reason } : {}),
+      ...(credentialRevision.success ? { credentialRevision: credentialRevision.data } : {}),
+      ...(credentialFingerprint !== null ? { credentialFingerprint } : {}),
+      ...(generationApplication !== null ? { generationApplication } : {}),
     };
   }
 
@@ -103,6 +137,9 @@ function readAcceptedVerificationFromHotApplyResult(
       proofStrength: 'exact',
       ...(source !== null ? { source } : {}),
       ...(reason !== null ? { reason } : {}),
+      ...(credentialRevision.success ? { credentialRevision: credentialRevision.data } : {}),
+      ...(credentialFingerprint !== null ? { credentialFingerprint } : {}),
+      ...(generationApplication !== null ? { generationApplication } : {}),
     };
   }
 
