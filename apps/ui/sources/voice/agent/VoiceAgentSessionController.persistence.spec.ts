@@ -117,9 +117,24 @@ vi.mock('@/sync/domains/server/serverRuntime', () => ({
   getActiveServerSnapshot: () => ({ serverId: 'server-a', serverUrl: 'http://localhost', generation: 1 }),
 }));
 
+async function spawnSessionWithMatchingCustody(opts: any) {
+  const result: any = await spawnSession(opts);
+  if (result?.type !== 'success' || result.spawnAttemptCustody) return result;
+  return {
+    ...result,
+    spawnAttemptCustody: {
+      status: 'completed',
+      userAttemptId: opts.userAttemptId,
+      spawnNonce: 'voice-test-nonce',
+      targetFingerprint: 'voice-test-target',
+    },
+  };
+}
+
 vi.mock('@/sync/ops/machines', () => ({
   machineSpawnNewSession: (opts: unknown) => spawnSession(opts),
-  machineSpawnNewSessionUntilResolved: (opts: unknown) => spawnSession(opts),
+  machineSpawnNewSessionUntilResolved: (opts: unknown) => spawnSessionWithMatchingCustody(opts),
+  completeMachineSpawnAttemptCustody: vi.fn(async () => true),
 }));
 
 // sessionExecutionRunGet is a protocol boundary; keep the mock flexible as the run schema evolves.

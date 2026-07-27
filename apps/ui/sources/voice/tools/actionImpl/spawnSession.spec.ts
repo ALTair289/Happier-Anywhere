@@ -1,7 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { installVoiceToolActionImplCommonModuleMocks } from './voiceToolActionImplTestHelpers';
 
-const machineSpawnNewSession = vi.fn(async (_params: any) => ({ type: 'success', sessionId: 's_new' }));
+const machineSpawnNewSession = vi.fn(async (params: any) => ({
+  type: 'success',
+  sessionId: 's_new',
+  spawnAttemptCustody: {
+    status: 'completed',
+    userAttemptId: params.userAttemptId,
+    spawnNonce: 'nonce-s-new',
+    targetFingerprint: 'target-s-new',
+  },
+}));
 const getActiveServerSnapshot = vi.fn(() => ({ serverId: 'server-a' }));
 const resolveEffectiveWindowsRemoteSessionLaunchMode = vi.fn((_params: any) => ({ mode: null }));
 const postprocessSpawnedSession = vi.fn(async (_params: any) => {});
@@ -52,6 +61,7 @@ installVoiceToolActionImplCommonModuleMocks({
 vi.mock('@/sync/ops/machines', () => ({
   machineSpawnNewSession: (params: any) => machineSpawnNewSession(params),
   machineSpawnNewSessionUntilResolved: (params: any) => machineSpawnNewSession(params),
+  completeMachineSpawnAttemptCustody: vi.fn(async () => true),
 }));
 
 vi.mock('@/sync/domains/server/serverRuntime', () => ({
@@ -100,6 +110,12 @@ describe('spawnSessionForVoiceTool', () => {
       machineId: 'm1',
       directory: '/Users/leeroy/projects/happier',
     }));
+    const spawnRequest = machineSpawnNewSession.mock.calls[0]?.[0] as { userAttemptId: string };
+    expect(postprocessSpawnedSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 's_new',
+      serverId: 'server-a',
+      firstTurnLocalId: `voice-spawn-first-turn:${spawnRequest.userAttemptId}`,
+    }));
     expect(result).toMatchObject({
       type: 'success',
       sessionId: 's_new',
@@ -111,6 +127,31 @@ describe('spawnSessionForVoiceTool', () => {
         label: 'happier — Leeroy MacBook Pro',
       },
     });
+  });
+
+  it('does not apply tag or first input to a session rejoined from a different spawn attempt', async () => {
+    machineSpawnNewSession.mockResolvedValueOnce({
+      type: 'success',
+      sessionId: 's_new',
+      spawnAttemptCustody: {
+        status: 'completed',
+        userAttemptId: 'different-attempt',
+        spawnNonce: 'different-nonce',
+        targetFingerprint: 'target-a',
+      },
+    });
+    const { spawnSessionForVoiceTool } = await import('./spawnSession');
+
+    await spawnSessionForVoiceTool({
+      path: '/Users/leeroy/projects/happier',
+      tag: 'must-not-apply',
+      initialMessage: 'must not send',
+    });
+
+    expect(machineSpawnNewSession).toHaveBeenCalledWith(expect.objectContaining({
+      userAttemptId: expect.stringMatching(/^ui-session-attempt-/),
+    }));
+    expect(postprocessSpawnedSession).not.toHaveBeenCalled();
   });
 
   it('falls back to the freshest recent target when no explicit path is provided', async () => {

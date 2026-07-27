@@ -1,6 +1,5 @@
 import {
   buildSystemSessionMetadataV1,
-  SPAWN_SESSION_ERROR_CODES,
 } from '@happier-dev/protocol';
 import { DEFAULT_AGENT_ID, type AgentId } from '@happier-dev/agents';
 
@@ -17,6 +16,11 @@ import { sync } from '@/sync/sync';
 import { isMachineOnline } from '@/utils/sessions/machineUtils';
 import { useVoiceTargetStore } from '@/voice/runtime/voiceTargetStore';
 import { normalizeNonEmptyString } from '@/voice/shared/normalizeNonEmptyString';
+import {
+  completeVoiceSpawnAttemptCustody,
+  createVoiceSpawnAttempt,
+  readVoiceSpawnedSessionIdForAttempt,
+} from '@/voice/shared/voiceSpawnAttempt';
 
 import {
   matchesVoiceConversationScope,
@@ -41,8 +45,6 @@ export {
 
 const VOICE_HOME_SPAWN_TARGET_WAIT_TIMEOUT_MS = 5_000;
 const VOICE_HOME_SPAWN_TARGET_WAIT_INTERVAL_MS = 100;
-const VOICE_CONVERSATION_LATE_SPAWN_RECOVERY_TIMEOUT_MS = 5_000;
-const VOICE_CONVERSATION_LATE_SPAWN_RECOVERY_POLL_INTERVAL_MS = 100;
 
 function buildVoiceConversationSystemSessionMetadata() {
   return buildSystemSessionMetadataV1({ key: VOICE_CONVERSATION_SYSTEM_SESSION_KEY, hidden: true });
@@ -244,7 +246,12 @@ function toVoiceConversationSpawnError(spawned: unknown): Error {
   const errorMessage = normalizeNonEmptyString((spawned as any)?.errorMessage);
   return Object.assign(
     new Error(errorMessage ?? 'voice_conversation_spawn_failed'),
-    { code: errorCode ?? 'VOICE_CONVERSATION_SPAWN_FAILED' },
+    {
+      code: errorCode ?? 'VOICE_CONVERSATION_SPAWN_FAILED',
+      ...((spawned as any)?.spawnAttemptCustody
+        ? { spawnAttemptCustody: (spawned as any).spawnAttemptCustody }
+        : {}),
+    },
   );
 }
 
@@ -256,89 +263,6 @@ function assertTargetMachineOnline(machineId: string): void {
     new Error('Target machine daemon is offline. Start or reconnect the daemon before starting local voice.'),
     { code: 'VOICE_AGENT_TARGET_MACHINE_OFFLINE' },
   );
-}
-
-function isSpawnWebhookTimeout(spawned: unknown): boolean {
-  const errorCode = normalizeNonEmptyString((spawned as any)?.errorCode)?.toLowerCase();
-  return errorCode === String(SPAWN_SESSION_ERROR_CODES.SESSION_WEBHOOK_TIMEOUT).toLowerCase();
-}
-
-function matchesLateSpawnedVoiceConversationTarget(
-  session: any,
-  params: Readonly<{ machineId: string; directory: string }>,
-): boolean {
-  return (
-    normalizeNonEmptyString(session?.metadata?.machineId) === params.machineId
-    && normalizeNonEmptyString(session?.metadata?.path) === params.directory
-  );
-}
-
-function findLateSpawnedVoiceConversationSessionId(params: Readonly<{
-  machineId: string;
-  directory: string;
-  knownSessionIds: ReadonlySet<string>;
-}>): string | null {
-  const sessions = Object.values((storage.getState() as any)?.sessions ?? {}) as any[];
-  let best: { id: string; updatedAt: number } | null = null;
-
-  for (const session of sessions) {
-    if (!session || typeof session.id !== 'string') continue;
-    if (params.knownSessionIds.has(session.id)) continue;
-    if (session.active !== true) continue;
-    if (!matchesLateSpawnedVoiceConversationTarget(session, params)) continue;
-
-    const updatedAt = typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt) ? session.updatedAt : 0;
-    if (!best || updatedAt > best.updatedAt || (updatedAt === best.updatedAt && session.id < best.id)) {
-      best = { id: session.id, updatedAt };
-    }
-  }
-
-  return best?.id ?? null;
-}
-
-function listLateSpawnedVoiceConversationCandidateIds(params: Readonly<{
-  knownSessionIds: ReadonlySet<string>;
-}>): string[] {
-  return (Object.values((storage.getState() as any)?.sessions ?? {}) as any[])
-    .filter((session) =>
-      session
-      && typeof session.id === 'string'
-      && !params.knownSessionIds.has(session.id)
-      && session.active === true,
-    )
-    .sort((left: any, right: any) => {
-      const leftUpdatedAt = typeof left?.updatedAt === 'number' && Number.isFinite(left.updatedAt) ? left.updatedAt : 0;
-      const rightUpdatedAt = typeof right?.updatedAt === 'number' && Number.isFinite(right.updatedAt) ? right.updatedAt : 0;
-      if (rightUpdatedAt !== leftUpdatedAt) return rightUpdatedAt - leftUpdatedAt;
-      return String(left?.id ?? '').localeCompare(String(right?.id ?? ''));
-    })
-    .map((session) => String(session.id));
-}
-
-async function recoverLateSpawnedVoiceConversationSessionId(params: Readonly<{
-  machineId: string;
-  directory: string;
-  knownSessionIds: ReadonlySet<string>;
-}>): Promise<string | null> {
-  const startedAt = Date.now();
-
-  while ((Date.now() - startedAt) < VOICE_CONVERSATION_LATE_SPAWN_RECOVERY_TIMEOUT_MS) {
-    await sync.refreshSessions().catch(() => {});
-    const recoveredSessionId = findLateSpawnedVoiceConversationSessionId(params);
-    if (recoveredSessionId) return recoveredSessionId;
-
-    for (const candidateSessionId of listLateSpawnedVoiceConversationCandidateIds(params)) {
-      await Promise.resolve(sync.ensureSessionVisibleForMessageRoute(candidateSessionId, { forceRefresh: true } as any)).catch(() => {});
-      const candidateSession = (storage.getState() as any)?.sessions?.[candidateSessionId] ?? null;
-      if (matchesLateSpawnedVoiceConversationTarget(candidateSession, params)) {
-        return candidateSessionId;
-      }
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, VOICE_CONVERSATION_LATE_SPAWN_RECOVERY_POLL_INTERVAL_MS));
-  }
-
-  return null;
 }
 
 async function waitForSessionMetadata(sessionId: string, timeoutMs: number): Promise<void> {
@@ -496,7 +420,7 @@ export async function ensureVoiceConversationSessionForVoiceHome(): Promise<stri
 
   const agent = resolveVoiceConversationAgentId(state);
   const serverId = getActiveServerSnapshot().serverId;
-  const knownSessionIds = new Set(Object.keys(state.sessions ?? {}));
+  const spawnAttempt = createVoiceSpawnAttempt();
   const spawned = await machineSpawnNewSessionUntilResolved({
     machineId: target.machineId,
     directory: target.directory,
@@ -504,30 +428,28 @@ export async function ensureVoiceConversationSessionForVoiceHome(): Promise<stri
     approvedNewDirectoryCreation: true,
     backendTarget: { kind: 'builtInAgent', agentId: agent },
     serverId,
+    userAttemptId: spawnAttempt.userAttemptId,
+    firstTurnLocalId: spawnAttempt.firstTurnLocalId,
+    attachmentMessageLocalId: spawnAttempt.attachmentMessageLocalId,
   });
 
-  if (!spawned || spawned.type !== 'success' || typeof spawned.sessionId !== 'string') {
-    if (isSpawnWebhookTimeout(spawned)) {
-      const recoveredSessionId = await recoverLateSpawnedVoiceConversationSessionId({
-        machineId: target.machineId,
-        directory: target.directory,
-        knownSessionIds,
-      });
-      if (recoveredSessionId) {
-        await touchVoiceConversationSessionWithScope(recoveredSessionId, { kind: 'voice_home' }).catch(() => {});
-        await applyVoiceConversationRetentionPolicy({ keepSessionId: recoveredSessionId }).catch(() => {});
-        return recoveredSessionId;
-      }
-    }
+  const spawnedSessionId = readVoiceSpawnedSessionIdForAttempt(spawned, spawnAttempt);
+  if (!spawnedSessionId) {
     throw toVoiceConversationSpawnError(spawned);
   }
 
   await sync.refreshSessions();
-  await waitForSessionMetadata(spawned.sessionId, 15_000);
+  await waitForSessionMetadata(spawnedSessionId, 15_000);
   persistVoiceAutoTargetMachineId(target.machineId);
-  await touchVoiceConversationSessionWithScope(spawned.sessionId, { kind: 'voice_home' }).catch(() => {});
-  await applyVoiceConversationRetentionPolicy({ keepSessionId: spawned.sessionId }).catch(() => {});
-  return spawned.sessionId;
+  await touchVoiceConversationSessionWithScope(spawnedSessionId, { kind: 'voice_home' }).catch(() => {});
+  await applyVoiceConversationRetentionPolicy({ keepSessionId: spawnedSessionId }).catch(() => {});
+  await completeVoiceSpawnAttemptCustody({
+    spawned,
+    attempt: spawnAttempt,
+    machineId: target.machineId,
+    serverId,
+  });
+  return spawnedSessionId;
 }
 
 export async function ensureVoiceConversationSessionId(): Promise<string> {
@@ -579,35 +501,33 @@ export async function ensureVoiceConversationSessionForSessionRoot(params: Reado
 
   const agent = resolveVoiceConversationAgentId(state);
   const serverId = getActiveServerSnapshot().serverId;
-  const knownSessionIds = new Set(Object.keys(state.sessions ?? {}));
+  const spawnAttempt = createVoiceSpawnAttempt();
   const spawned = await machineSpawnNewSessionUntilResolved({
     machineId,
     directory,
     transcriptStorage: 'persisted',
     backendTarget: { kind: 'builtInAgent', agentId: agent },
     serverId,
+    userAttemptId: spawnAttempt.userAttemptId,
+    firstTurnLocalId: spawnAttempt.firstTurnLocalId,
+    attachmentMessageLocalId: spawnAttempt.attachmentMessageLocalId,
   });
 
-  if (!spawned || spawned.type !== 'success' || typeof spawned.sessionId !== 'string') {
-    if (isSpawnWebhookTimeout(spawned)) {
-      const recoveredSessionId = await recoverLateSpawnedVoiceConversationSessionId({
-        machineId,
-        directory,
-        knownSessionIds,
-      });
-      if (recoveredSessionId) {
-        await touchVoiceConversationSessionWithScope(recoveredSessionId, { kind: 'session_root', sessionRootId: sessionId }).catch(() => {});
-        await applyVoiceConversationRetentionPolicy({ keepSessionId: recoveredSessionId }).catch(() => {});
-        return recoveredSessionId;
-      }
-    }
+  const spawnedSessionId = readVoiceSpawnedSessionIdForAttempt(spawned, spawnAttempt);
+  if (!spawnedSessionId) {
     throw toVoiceConversationSpawnError(spawned);
   }
 
   await sync.refreshSessions();
-  await waitForSessionMetadata(spawned.sessionId, 15_000);
-  await touchVoiceConversationSessionWithScope(spawned.sessionId, { kind: 'session_root', sessionRootId: sessionId }).catch(() => {});
-  await applyVoiceConversationRetentionPolicy({ keepSessionId: spawned.sessionId }).catch(() => {});
+  await waitForSessionMetadata(spawnedSessionId, 15_000);
+  await touchVoiceConversationSessionWithScope(spawnedSessionId, { kind: 'session_root', sessionRootId: sessionId }).catch(() => {});
+  await applyVoiceConversationRetentionPolicy({ keepSessionId: spawnedSessionId }).catch(() => {});
+  await completeVoiceSpawnAttemptCustody({
+    spawned,
+    attempt: spawnAttempt,
+    machineId,
+    serverId,
+  });
 
-  return spawned.sessionId;
+  return spawnedSessionId;
 }

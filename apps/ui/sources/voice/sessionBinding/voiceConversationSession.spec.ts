@@ -40,6 +40,7 @@ installVoiceSessionBindingCommonModuleMocks({
 vi.mock('@/sync/ops/machines', () => ({
   machineSpawnNewSession: (...args: any[]) => machineSpawnNewSession(...args),
   machineSpawnNewSessionUntilResolved: (...args: any[]) => machineSpawnNewSession(...args),
+  completeMachineSpawnAttemptCustody: vi.fn(async () => true),
 }));
 
 vi.mock('@/sync/sync', () => ({
@@ -110,7 +111,16 @@ describe('ensureVoiceConversationSessionForVoiceHome', () => {
           path: params.directory,
         },
       };
-      return { type: 'success', sessionId: 'voice-home-session' };
+      return {
+        type: 'success',
+        sessionId: 'voice-home-session',
+        spawnAttemptCustody: {
+          status: 'completed',
+          userAttemptId: params.userAttemptId,
+          spawnNonce: 'voice-home-nonce',
+          targetFingerprint: 'voice-home-target',
+        },
+      };
     });
 
     patchSessionMetadataWithRetry.mockImplementation(async (sessionId: string, applyPatch: (metadata: any) => any) => {
@@ -261,24 +271,24 @@ describe('ensureVoiceConversationSessionForVoiceHome', () => {
     }));
   });
 
-  it('recovers a late-spawned voice home session after webhook timeout even when metadata hydrates only after ensuring the session is visible', async () => {
+  it('does not recover or mutate a newer ordinary same-target session after an unresolved spawn', async () => {
     machineSpawnNewSession.mockResolvedValue({
       type: 'error',
       errorCode: 'SESSION_WEBHOOK_TIMEOUT',
       errorMessage: 'Session startup timed out',
     });
     refreshSessions.mockImplementation(async () => {
-      state.sessions['late-session'] = {
-        id: 'late-session',
+      state.sessions['ordinary-session'] = {
+        id: 'ordinary-session',
         active: true,
         updatedAt: 2,
         metadata: {},
       };
     });
     ensureSessionVisibleForMessageRoute.mockImplementation(async (sessionId: string) => {
-      if (sessionId !== 'late-session') return;
-      state.sessions['late-session'] = {
-        ...state.sessions['late-session'],
+      if (sessionId !== 'ordinary-session') return;
+      state.sessions['ordinary-session'] = {
+        ...state.sessions['ordinary-session'],
         metadata: {
           machineId: 'machine-1',
           path: '/Users/test/.happier/voice-agent',
@@ -288,8 +298,40 @@ describe('ensureVoiceConversationSessionForVoiceHome', () => {
 
     const { ensureVoiceConversationSessionForVoiceHome } = await import('./voiceConversationSession');
 
-    await expect(ensureVoiceConversationSessionForVoiceHome()).resolves.toBe('late-session');
-    expect(ensureSessionVisibleForMessageRoute).toHaveBeenCalledWith('late-session', { forceRefresh: true });
+    await expect(ensureVoiceConversationSessionForVoiceHome()).rejects.toMatchObject({
+      code: 'SESSION_WEBHOOK_TIMEOUT',
+    });
+    expect(patchSessionMetadataWithRetry).not.toHaveBeenCalledWith(
+      'ordinary-session',
+      expect.any(Function),
+    );
+  });
+
+  it('does not claim a session rejoined from a different voice-home spawn attempt', async () => {
+    state.sessions['ordinary-session'] = {
+      id: 'ordinary-session',
+      active: true,
+      updatedAt: 2,
+      metadata: { machineId: 'machine-1', path: '/Users/test/.happier/voice-agent' },
+    };
+    machineSpawnNewSession.mockResolvedValue({
+      type: 'success',
+      sessionId: 'ordinary-session',
+      spawnAttemptCustody: {
+        status: 'completed',
+        userAttemptId: 'different-attempt',
+        spawnNonce: 'different-nonce',
+        targetFingerprint: 'target-a',
+      },
+    });
+
+    const { ensureVoiceConversationSessionForVoiceHome } = await import('./voiceConversationSession');
+
+    await expect(ensureVoiceConversationSessionForVoiceHome()).rejects.toThrow('voice_conversation_spawn_failed');
+    expect(machineSpawnNewSession).toHaveBeenCalledWith(expect.objectContaining({
+      userAttemptId: expect.stringMatching(/^ui-session-attempt-/),
+    }));
+    expect(patchSessionMetadataWithRetry).not.toHaveBeenCalled();
   });
 });
 
@@ -350,7 +392,16 @@ describe('ensureVoiceConversationSessionForSessionRoot', () => {
           path: params.directory,
         },
       };
-      return { type: 'success', sessionId: 'voice-root-session' };
+      return {
+        type: 'success',
+        sessionId: 'voice-root-session',
+        spawnAttemptCustody: {
+          status: 'completed',
+          userAttemptId: params.userAttemptId,
+          spawnNonce: 'voice-root-nonce',
+          targetFingerprint: 'voice-root-target',
+        },
+      };
     });
 
     patchSessionMetadataWithRetry.mockImplementation(async (sessionId: string, applyPatch: (metadata: any) => any) => {
@@ -390,5 +441,47 @@ describe('ensureVoiceConversationSessionForSessionRoot', () => {
       directory: '/Users/test/workspace/rebound',
       serverId: 'server-1',
     }));
+  });
+
+  it('does not claim a session rejoined from a different session-root spawn attempt', async () => {
+    state.sessions['root-session'] = {
+      id: 'root-session',
+      active: true,
+      updatedAt: 5,
+      metadata: {
+        machineId: 'machine-target',
+        path: '/Users/test/workspace/rebound',
+        homeDir: '/Users/test',
+        host: 'target.local',
+      },
+    };
+    state.sessions['ordinary-session'] = {
+      id: 'ordinary-session',
+      active: true,
+      updatedAt: 2,
+      metadata: { machineId: 'machine-target', path: '/Users/test/workspace/rebound' },
+    };
+    state.getProjectForSession = (sessionId: string) => sessionId === 'root-session'
+      ? { key: { machineId: 'machine-target', path: '/Users/test/workspace/rebound' } }
+      : null;
+    machineSpawnNewSession.mockResolvedValue({
+      type: 'success',
+      sessionId: 'ordinary-session',
+      spawnAttemptCustody: {
+        status: 'completed',
+        userAttemptId: 'different-attempt',
+        spawnNonce: 'different-nonce',
+        targetFingerprint: 'target-a',
+      },
+    });
+
+    const { ensureVoiceConversationSessionForSessionRoot } = await import('./voiceConversationSession');
+
+    await expect(ensureVoiceConversationSessionForSessionRoot({ sessionId: 'root-session' }))
+      .rejects.toThrow('voice_conversation_spawn_failed');
+    expect(machineSpawnNewSession).toHaveBeenCalledWith(expect.objectContaining({
+      userAttemptId: expect.stringMatching(/^ui-session-attempt-/),
+    }));
+    expect(patchSessionMetadataWithRetry).not.toHaveBeenCalled();
   });
 });

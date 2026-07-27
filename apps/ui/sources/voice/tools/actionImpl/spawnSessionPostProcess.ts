@@ -1,4 +1,5 @@
 import { sync } from '@/sync/sync';
+import { followUpSpawnedSessionWithServerScope } from '@/sync/runtime/orchestration/serverScopedRpc/followUpSpawnedSession';
 
 function normalizeNonEmptyString(value: unknown): string | null {
   const text = typeof value === 'string' ? value.trim() : '';
@@ -7,8 +8,10 @@ function normalizeNonEmptyString(value: unknown): string | null {
 
 export async function postprocessSpawnedSession(params: Readonly<{
   sessionId: string | null;
+  serverId?: string | null;
   tag?: string | null;
   initialMessage?: string | null;
+  firstTurnLocalId?: string | null;
 }>): Promise<void> {
   const sessionId = normalizeNonEmptyString(params.sessionId);
   if (!sessionId) return;
@@ -28,13 +31,11 @@ export async function postprocessSpawnedSession(params: Readonly<{
   }
 
   if (initialMessage) {
-    try {
-      await sync.refreshSessions();
-      await sync.sendMessage(sessionId, initialMessage, undefined, undefined, {
-        bypassPendingQueueReason: 'voice_post_process',
-      });
-    } catch {
-      // best-effort
-    }
+    await followUpSpawnedSessionWithServerScope({
+      sessionId,
+      targetServerId: params.serverId ?? null,
+      initialMessageText: initialMessage,
+      messageLocalId: normalizeNonEmptyString(params.firstTurnLocalId),
+    });
   }
 }

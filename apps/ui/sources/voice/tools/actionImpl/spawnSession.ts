@@ -18,6 +18,11 @@ import {
   resolveMachineTargetForSessionFromState,
   type SessionMachineTargetState,
 } from '@/sync/ops/sessionMachineTarget';
+import {
+  completeVoiceSpawnAttemptCustody,
+  createVoiceSpawnAttempt,
+  readVoiceSpawnedSessionIdForAttempt,
+} from '@/voice/shared/voiceSpawnAttempt';
 
 type VoiceSpawnTarget = Readonly<{
   machineId: string;
@@ -167,22 +172,38 @@ export async function spawnSessionForVoiceTool(params: Readonly<{
     path: directory,
   });
 
+  const spawnAttempt = createVoiceSpawnAttempt();
   const spawned = await machineSpawnNewSessionUntilResolved({
     machineId,
     directory,
     backendTarget: { kind: 'builtInAgent', agentId: agent },
     serverId,
+    userAttemptId: spawnAttempt.userAttemptId,
+    firstTurnLocalId: spawnAttempt.firstTurnLocalId,
+    attachmentMessageLocalId: spawnAttempt.attachmentMessageLocalId,
     ...(windowsRemoteSessionLaunchMode ? { windowsRemoteSessionLaunchMode } : {}),
     ...(modelId ? { modelId, modelUpdatedAt: modelUpdatedAt ?? Date.now() } : {}),
   });
 
-  const spawnedSessionId = spawned.type === 'success' && typeof spawned.sessionId === 'string'
-    ? spawned.sessionId
-    : null;
+  const spawnedSessionId = readVoiceSpawnedSessionIdForAttempt(spawned, spawnAttempt);
 
   const tag = normalizeNonEmptyString(params.tag);
   const initialMessage = normalizeNonEmptyString(params.initialMessage);
-  await postprocessSpawnedSession({ sessionId: spawnedSessionId, tag, initialMessage });
+  if (spawnedSessionId) {
+    await postprocessSpawnedSession({
+      sessionId: spawnedSessionId,
+      serverId,
+      tag,
+      initialMessage,
+      firstTurnLocalId: spawnAttempt.firstTurnLocalId,
+    });
+    await completeVoiceSpawnAttemptCustody({
+      spawned,
+      attempt: spawnAttempt,
+      machineId,
+      serverId,
+    });
+  }
 
   if (!spawned || typeof spawned !== 'object' || Array.isArray(spawned)) {
     return spawned;

@@ -9,6 +9,11 @@ import { resolveSpawnAgentIdFromState } from './spawnSessionAgent';
 import { postprocessSpawnedSession } from './spawnSessionPostProcess';
 import { normalizeNonEmptyString } from './shared';
 import { isAgentId } from '@/agents/registry/registryCore';
+import {
+  completeVoiceSpawnAttemptCustody,
+  createVoiceSpawnAttempt,
+  readVoiceSpawnedSessionIdForAttempt,
+} from '@/voice/shared/voiceSpawnAttempt';
 
 export async function spawnSessionWithPickerForVoiceTool(params: Readonly<{ tag?: string; agentId?: string; modelId?: string; initialMessage?: string }>): Promise<unknown> {
   const picked = await openVoiceSessionSpawnPicker();
@@ -42,25 +47,36 @@ export async function spawnSessionWithPickerForVoiceTool(params: Readonly<{ tag?
     settings: state?.settings ?? {},
   }).mode;
 
+  const spawnAttempt = createVoiceSpawnAttempt();
   const spawned = await machineSpawnNewSessionUntilResolved({
     machineId: picked.machineId,
     directory: picked.directory,
     backendTarget: { kind: 'builtInAgent', agentId: agent },
     serverId,
+    userAttemptId: spawnAttempt.userAttemptId,
+    firstTurnLocalId: spawnAttempt.firstTurnLocalId,
+    attachmentMessageLocalId: spawnAttempt.attachmentMessageLocalId,
     ...(windowsRemoteSessionLaunchMode ? { windowsRemoteSessionLaunchMode } : {}),
     ...(modelId ? { modelId, modelUpdatedAt: modelUpdatedAt ?? Date.now() } : {}),
   });
 
-  const spawnedSessionId =
-    spawned && (spawned as any).type === 'success' && typeof (spawned as any).sessionId === 'string'
-      ? String((spawned as any).sessionId)
-      : null;
+  const spawnedSessionId = readVoiceSpawnedSessionIdForAttempt(spawned, spawnAttempt);
 
-  await postprocessSpawnedSession({
-    sessionId: spawnedSessionId,
-    tag: normalizeNonEmptyString(params.tag),
-    initialMessage: normalizeNonEmptyString(params.initialMessage),
-  });
+  if (spawnedSessionId) {
+    await postprocessSpawnedSession({
+      sessionId: spawnedSessionId,
+      serverId,
+      tag: normalizeNonEmptyString(params.tag),
+      initialMessage: normalizeNonEmptyString(params.initialMessage),
+      firstTurnLocalId: spawnAttempt.firstTurnLocalId,
+    });
+    await completeVoiceSpawnAttemptCustody({
+      spawned,
+      attempt: spawnAttempt,
+      machineId: picked.machineId,
+      serverId,
+    });
+  }
 
   return spawned;
 }

@@ -22,6 +22,20 @@ const state: any = {
   },
 };
 
+async function spawnSessionWithMatchingCustody(opts: any) {
+  const result = await spawnSession(opts);
+  if (result?.type !== 'success' || result.spawnAttemptCustody) return result;
+  return {
+    ...result,
+    spawnAttemptCustody: {
+      status: 'completed',
+      userAttemptId: opts.userAttemptId,
+      spawnNonce: 'voice-test-nonce',
+      targetFingerprint: 'voice-test-target',
+    },
+  };
+}
+
 installVoiceAgentCommonModuleMocks({
     storage: async () => {
         const { createStorageModuleStub } = await import('@/dev/testkit/mocks/storage');
@@ -39,7 +53,8 @@ vi.mock('@/sync/domains/server/serverRuntime', () => ({
 
 vi.mock('@/sync/ops/machines', () => ({
   machineSpawnNewSession: (opts: any) => spawnSession(opts),
-  machineSpawnNewSessionUntilResolved: (opts: any) => spawnSession(opts),
+  machineSpawnNewSessionUntilResolved: (opts: any) => spawnSessionWithMatchingCustody(opts),
+  completeMachineSpawnAttemptCustody: vi.fn(async () => true),
 }));
 
 vi.mock('@/sync/sync', () => ({
@@ -443,7 +458,7 @@ describe('voiceConversationSession', () => {
     });
   });
 
-  it('recovers a late-created hidden voice conversation session after a session-root spawn timeout', async () => {
+  it('preserves exact spawn custody without refreshing or mutating a same-target session after timeout', async () => {
     const { ensureVoiceConversationSessionForSessionRoot } = await import('@/voice/sessionBinding/voiceConversationSession');
 
     state.sessions.s_user = {
@@ -453,38 +468,41 @@ describe('voiceConversationSession', () => {
       updatedAt: 1,
       metadata: { path: '/tmp/repo', host: 'm1', machineId: 'm1', homeDir: '/home/u' },
     };
+    state.sessions.sys_voice_repo_late = {
+      id: 'sys_voice_repo_late',
+      active: true,
+      activeAt: 2,
+      updatedAt: 2,
+      metadata: { path: '/tmp/repo', host: 'm1', machineId: 'm1', homeDir: '/home/u' },
+    };
 
     spawnSession.mockResolvedValue({
       type: 'error',
-      errorCode: 'session_webhook_timeout',
+      errorCode: 'SESSION_WEBHOOK_TIMEOUT',
       errorMessage: 'Session startup timed out',
-    });
-    refreshSessions.mockImplementation(async () => {
-      state.sessions.sys_voice_repo_late = {
-        id: 'sys_voice_repo_late',
-        active: true,
-        activeAt: 2,
-        updatedAt: 2,
-        metadata: { path: '/tmp/repo', host: 'm1', machineId: 'm1', homeDir: '/home/u' },
-      };
-    });
-    patchSessionMetadataWithRetry.mockImplementation(async (sessionId: string, updater: (m: any) => any) => {
-      state.sessions[sessionId].metadata = updater(state.sessions[sessionId].metadata);
+      spawnAttemptCustody: {
+        status: 'unresolved',
+        userAttemptId: 'attempt-a',
+        spawnNonce: 'nonce-a',
+        targetFingerprint: 'target-a',
+      },
     });
 
-    await expect(ensureVoiceConversationSessionForSessionRoot({ sessionId: 's_user' })).resolves.toBe('sys_voice_repo_late');
+    await expect(ensureVoiceConversationSessionForSessionRoot({ sessionId: 's_user' })).rejects.toMatchObject({
+      code: 'SESSION_WEBHOOK_TIMEOUT',
+      spawnAttemptCustody: {
+        status: 'unresolved',
+        userAttemptId: 'attempt-a',
+        spawnNonce: 'nonce-a',
+        targetFingerprint: 'target-a',
+      },
+    });
 
-    expect(refreshSessions).toHaveBeenCalled();
-    expect(state.sessions.sys_voice_repo_late.metadata.systemSessionV1).toMatchObject({
-      v: 1,
-      key: 'voice_conversation',
-      hidden: true,
-    });
-    expect(state.sessions.sys_voice_repo_late.metadata.voiceConversationScopeV1).toMatchObject({
-      v: 1,
-      kind: 'session_root',
-      sessionRootId: 's_user',
-    });
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+    expect(refreshSessions).not.toHaveBeenCalled();
+    expect(patchSessionMetadataWithRetry).not.toHaveBeenCalled();
+    expect(state.sessions.sys_voice_repo_late.metadata).not.toHaveProperty('systemSessionV1');
+    expect(state.sessions.sys_voice_repo_late.metadata).not.toHaveProperty('voiceConversationScopeV1');
   });
 
   it('reuses an active hidden voice session only for the same session root', async () => {

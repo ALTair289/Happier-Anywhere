@@ -231,6 +231,20 @@ vi.mock('@/voice/agent/teleportVoiceAgentToSessionRoot', () => ({
   teleportVoiceAgentToSessionRoot: (args: any) => teleportVoiceAgentToSessionRoot(args),
 }));
 
+async function spawnSessionWithMatchingCustody(options: any) {
+  const result = await spawnSession(options);
+  if (result?.type !== 'success' || result.spawnAttemptCustody) return result;
+  return {
+    ...result,
+    spawnAttemptCustody: {
+      status: 'completed',
+      userAttemptId: options.userAttemptId,
+      spawnNonce: 'voice-test-nonce',
+      targetFingerprint: 'voice-test-target',
+    },
+  };
+}
+
 vi.mock('@/sync/ops/sessionExecutionRuns', () => ({
   sessionExecutionRunStart: (sessionId: string, request: any, opts?: any) => executionRunStart(sessionId, request, opts),
   sessionExecutionRunList: (sessionId: string, request: any, opts?: any) => executionRunList(sessionId, request, opts),
@@ -242,7 +256,8 @@ vi.mock('@/sync/ops/sessionExecutionRuns', () => ({
 
 vi.mock('@/sync/ops/machines', () => ({
   machineSpawnNewSession: (options: any) => spawnSession(options),
-  machineSpawnNewSessionUntilResolved: (options: any) => spawnSession(options),
+  machineSpawnNewSessionUntilResolved: (options: any) => spawnSessionWithMatchingCustody(options),
+  completeMachineSpawnAttemptCustody: vi.fn(async () => true),
 }));
 
 vi.mock('@/sync/domains/server/activeServerSwitch', () => ({
