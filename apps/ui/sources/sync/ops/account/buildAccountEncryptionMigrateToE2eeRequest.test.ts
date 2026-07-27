@@ -121,4 +121,24 @@ describe('buildAccountEncryptionMigrateToE2eeRequest', () => {
     const envelope = JSON.parse(template.templateCiphertext);
     expect(envelope.kind).toBe('happier_automation_template_encrypted_v1');
   });
+
+  it('rejects a fetched plaintext credential whose embedded binding differs from the requested profile', async () => {
+    const credentials = createLegacyCredentials();
+    const misboundRecord = buildConnectedServiceCredentialRecord({
+      now: 1,
+      serviceId: 'openai-codex',
+      profileId: 'other',
+      kind: 'token',
+      token: { token: 'tok-foreign', providerAccountId: 'acct-1', providerEmail: null },
+    });
+
+    await expect(buildAccountEncryptionMigrateToE2eeRequest({
+      credentials,
+      expectedSettingsVersion: 1,
+      settings: { schemaVersion: 2, backendEnabledById: {} } as any,
+      connectedServiceProfiles: [{ serviceId: 'openai-codex', profileId: 'work' }],
+      automations: [],
+      fetchConnectedServiceCredentialPlain: async () => ({ content: { t: 'plain', v: misboundRecord } }),
+    })).rejects.toMatchObject({ code: 'connected_service_credential_binding_mismatch' });
+  });
 });

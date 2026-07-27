@@ -163,6 +163,36 @@ describe('buildAccountEncryptionMigrateToPlainRequest', () => {
     expect(plainEnvelope.kind).toBe('happier_automation_template_plain_v1');
   });
 
+  it('rejects a decrypted sealed credential whose embedded binding differs from the requested profile', async () => {
+    const credentials = createLegacyCredentials();
+    const material = resolveAccountScopedCryptoMaterialFromCredentials(credentials);
+    const misboundRecord = buildConnectedServiceCredentialRecord({
+      now: 1,
+      serviceId: 'openai-codex',
+      profileId: 'other',
+      kind: 'token',
+      token: { token: 'tok-foreign', providerAccountId: 'acct-1', providerEmail: null },
+    });
+    const sealedCiphertext = sealConnectedServiceCredentialCiphertext({
+      material,
+      payload: misboundRecord,
+      randomBytes: () => new Uint8Array(24).fill(2),
+    });
+
+    await expect(buildAccountEncryptionMigrateToPlainRequest({
+      credentials,
+      expectedSettingsVersion: 7,
+      settings: { schemaVersion: 2, backendEnabledById: {} } as any,
+      connectedServiceProfiles: [{ serviceId: 'openai-codex', profileId: 'work' }],
+      automations: [],
+      fetchConnectedServiceCredentialSealed: async () => ({
+        sealed: { format: 'account_scoped_v1', ciphertext: sealedCiphertext },
+        metadata: { kind: 'token', providerEmail: null, providerAccountId: 'acct-1', expiresAt: null },
+      }),
+      decryptAutomationTemplateRaw: async () => null,
+    })).rejects.toMatchObject({ code: 'connected_service_credential_binding_mismatch' });
+  });
+
   it('unseals canonical machine-key-sealed saved secrets when migrating a legacy account to plain storage', async () => {
     const credentials = createLegacyCredentials();
     const recoverySecret = Buffer.from(credentials.secret, 'base64url');

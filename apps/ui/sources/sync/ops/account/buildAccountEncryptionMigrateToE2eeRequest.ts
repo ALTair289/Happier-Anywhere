@@ -4,6 +4,7 @@ import { stripLocalOnlyAccountSettings } from '@/sync/domains/settings/localOnly
 import type { Settings } from '@/sync/domains/settings/settings';
 import {
   ConnectedServiceCredentialRecordV1Schema,
+  assertConnectedServiceCredentialRecordBinding,
   sealAccountScopedBlobCiphertext,
   sealConnectedServiceCredentialCiphertext,
   type ConnectedServiceId,
@@ -76,7 +77,10 @@ export async function buildAccountEncryptionMigrateToE2eeRequest(params: Readonl
       if (!recordParsed.success) {
         throw new Error(`Failed to parse connected service credential record (${profile.serviceId}/${profile.profileId})`);
       }
-      const record = recordParsed.data;
+      const record = assertConnectedServiceCredentialRecordBinding({
+        binding: profile,
+        record: recordParsed.data,
+      });
       const sealedCiphertext = sealConnectedServiceCredentialCiphertext({
         material,
         payload: record,

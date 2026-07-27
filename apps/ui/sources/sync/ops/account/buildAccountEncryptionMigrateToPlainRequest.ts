@@ -4,6 +4,7 @@ import { stripLocalOnlyAccountSettings } from '@/sync/domains/settings/localOnly
 import type { Settings } from '@/sync/domains/settings/settings';
 import {
   ConnectedServiceCredentialRecordV1Schema,
+  assertConnectedServiceCredentialRecordBinding,
   openConnectedServiceCredentialCiphertext,
   type ConnectedServiceCredentialRecordV1,
   type ConnectedServiceId,
@@ -69,7 +70,10 @@ export async function buildAccountEncryptionMigrateToPlainRequest(params: Readon
       if (!recordParsed.success) {
         throw new Error(`Failed to open connected service credential (${profile.serviceId}/${profile.profileId})`);
       }
-      const record: ConnectedServiceCredentialRecordV1 = recordParsed.data;
+      const record: ConnectedServiceCredentialRecordV1 = assertConnectedServiceCredentialRecordBinding({
+        binding: profile,
+        record: recordParsed.data,
+      });
       credentials.push({
         serviceId: profile.serviceId,
         profileId: profile.profileId,
