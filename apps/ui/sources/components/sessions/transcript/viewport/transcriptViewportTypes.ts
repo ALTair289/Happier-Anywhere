@@ -73,7 +73,7 @@ export type TranscriptViewportCommand =
     | Readonly<{ kind: 'restore-distance'; sessionId: string; reason: TranscriptViewportScrollReason; mode: 'restore-distance'; distanceFromLiveTailPx: number; animated?: boolean; contentHeight?: number }>
     | Readonly<{ kind: 'apply-history-correction'; sessionId: string; reason: 'prepend-restore'; mode: 'restore-anchor'; targetDistanceFromHistoryStartPx: number; animated?: boolean }>
     | Readonly<{ kind: 'restore-anchor'; sessionId: string; reason: TranscriptViewportScrollReason; mode: 'restore-anchor'; target: TranscriptViewportRestoreAnchorTarget; animated?: boolean }>
-    | Readonly<{ kind: 'restore-visible-anchor'; sessionId: string; reason: Extract<TranscriptViewportScrollReason, 'content-size-change' | 'entry-restore'>; mode: 'restore-anchor'; target: TranscriptViewportRestoreAnchorTarget; animated?: boolean }>
+    | Readonly<{ kind: 'restore-visible-anchor'; sessionId: string; reason: Extract<TranscriptViewportScrollReason, 'content-size-change' | 'entry-restore' | 'prepend-restore'>; mode: 'restore-anchor'; target: TranscriptViewportRestoreAnchorTarget; animated?: boolean }>
     | Readonly<{ kind: 'jump-to-seq'; sessionId: string; reason: 'jump-to-seq'; mode: 'jump-to-seq'; seq: number; routeMessageId?: string | null; transcriptBlockIndex?: number | null; role?: TranscriptJumpTargetRole | null; align?: TranscriptViewportJumpAlignment; animated?: boolean }>
     | Readonly<{ kind: 'recover-jump-to-seq'; sessionId: string; reason: 'jump-to-seq'; mode: 'jump-to-seq'; failedRenderedIndex: number; averageItemLengthPx: number; animated?: boolean }>
     | Readonly<{ kind: 'preserve-live-tail-distance'; sessionId: string; reason: TranscriptViewportScrollReason; mode: 'follow-bottom'; previousDistanceFromLiveTailPx: number; animated?: boolean; schedulerAuthorityReason?: TranscriptViewportScrollReason; schedulerAuthorityWriter?: TranscriptViewportSchedulerAuthorityWriter }>
@@ -150,7 +150,7 @@ export type TranscriptViewportControllerInput =
     | Readonly<{
         type: 'restore-visible-anchor';
         sessionId: string;
-        reason: Extract<TranscriptViewportScrollReason, 'content-size-change' | 'entry-restore'>;
+        reason: Extract<TranscriptViewportScrollReason, 'content-size-change' | 'entry-restore' | 'prepend-restore'>;
         anchor: TranscriptViewportAnchorIdentity;
         itemIndex?: number | null;
         itemOffsetPx: number;

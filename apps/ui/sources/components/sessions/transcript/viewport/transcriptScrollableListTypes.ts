@@ -1,22 +1,11 @@
 import type { TranscriptViewportTelemetryScrollReason } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
+import type { TranscriptListShellRef } from '@/components/sessions/transcript/viewport/shell/renderer/types';
 
 /**
- * The imperative scroll surface the transcript command writer drives — the subset of the FlashList/FlatList
- * handle the viewport command executor relies on. Optional members reflect methods only some list
- * implementations expose (guarded with `typeof node.x === 'function'` at the call sites).
+ * Compatibility name used by the transcript hosts and command driver. The renderer-owned
+ * shell handle is the single source of truth for imperative viewport capabilities.
  */
-export type ScrollableChatListRef = Readonly<{
-    transcriptViewportCommandSpace?: 'native-inverted' | 'standard';
-    scrollToIndex: (params: { index: number; animated?: boolean; viewOffset?: number; viewPosition?: number }) => void;
-    scrollToOffset: (params: { offset: number; animated?: boolean }) => void;
-    scrollToEnd?: (params?: { animated?: boolean }) => void;
-    notifyViewportGeometryChanged?: () => void;
-    clearLayoutCacheOnUpdate?: () => void;
-    computeVisibleIndices?: () => { startIndex: number; endIndex: number };
-    getAbsoluteLastScrollOffset?: () => number;
-    getFirstVisibleIndex?: () => number;
-    getLayout?: (index: number) => { x: number; y: number; width: number; height: number } | undefined;
-}>;
+export type ScrollableChatListRef = TranscriptListShellRef;
 
 /**
  * The last native index-targeted restore write the command executor issued — retained so the native
