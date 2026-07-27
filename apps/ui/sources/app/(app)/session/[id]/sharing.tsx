@@ -203,7 +203,7 @@ function SharingManagementContent({ sessionId }: { sessionId: string }) {
                 },
                 getSessionDataKey: (sid) => sync.getSessionDataKey(sid),
                 encryptDataKeyForPublicShare,
-                api: { createPublicShare, getPublicShare },
+                api: { createPublicShare },
             });
 
             setPublicShare(created);
