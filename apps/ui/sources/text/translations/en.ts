@@ -4376,6 +4376,9 @@ export const en = {
         daemonRpcUnavailableTitle: 'Daemon unavailable',
         daemonRpcUnavailableBody:
             'Happier can’t reach the daemon on this machine. It may be offline, still starting, or disconnected from the server.',
+        launchStillPendingTitle: 'Launch still in progress',
+        launchStillPendingBody:
+            'Happier hasn’t confirmed the new session yet. Your launch request is still saved. Retry to continue the same launch without creating a duplicate session.',
         connectedServiceSwitchUnavailable: {
             title: 'Switch unavailable',
             body: ({ reason, agentId }: { reason: string; agentId: string }) =>

@@ -4107,6 +4107,9 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         daemonRpcUnavailableTitle: '守護程序無法使用',
         daemonRpcUnavailableBody:
             'Happier 無法連線到此裝置上的守護程序。它可能離線、仍在啟動，或與伺服器中斷連線。',
+        launchStillPendingTitle: '工作階段仍在啟動',
+        launchStillPendingBody:
+            'Happier 尚未確認新的工作階段。啟動要求仍已儲存。請重試以繼續同一次啟動，不會建立重複的工作階段。',
         connectedServiceSwitchUnavailable: {
             title: '無法切換',
             body: ({ reason, agentId }: { reason: string; agentId: string }) =>

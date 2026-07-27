@@ -4437,6 +4437,9 @@ deps: {
         daemonRpcUnavailableTitle: 'Dimoni no disponible',
         daemonRpcUnavailableBody:
             'Happier no pot connectar amb el dimoni en aquesta màquina. Pot estar fora de línia, iniciant-se o desconnectat del servidor.',
+        launchStillPendingTitle: 'L’inici encara està en curs',
+        launchStillPendingBody:
+            'Happier encara no ha confirmat la nova sessió. La sol·licitud d’inici continua desada. Torna-ho a provar per continuar el mateix inici sense crear una sessió duplicada.',
         connectedServiceSwitchUnavailable: {
             title: 'Canvi no disponible',
             body: ({ reason, agentId }: { reason: string; agentId: string }) =>

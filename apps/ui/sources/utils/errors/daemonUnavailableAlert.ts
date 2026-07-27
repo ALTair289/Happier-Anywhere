@@ -215,7 +215,7 @@ export type LaunchRetryFailurePhase = 'spawn' | 'upload' | 'send';
 export type LaunchRetryFailureClassification =
     | Readonly<{
         kind: 'retryable';
-        reason: 'daemon_unavailable' | 'session_target_unavailable';
+        reason: 'daemon_unavailable' | 'session_target_unavailable' | 'launch_still_pending';
         titleKey: TranslationKey;
         bodyKey: TranslationKey;
         retryButtonKey: TranslationKey;
@@ -278,7 +278,14 @@ export function classifyLaunchRetryFailure(params: Readonly<{
         params.phase === 'spawn'
         && normalizedCode === SPAWN_SESSION_ERROR_CODES.SESSION_WEBHOOK_TIMEOUT
     ) {
-        return buildRetryableLaunchFailureClassification(params.phase, 'daemon_unavailable');
+        return {
+            kind: 'retryable',
+            reason: 'launch_still_pending',
+            titleKey: 'newSession.launchStillPendingTitle',
+            bodyKey: 'newSession.launchStillPendingBody',
+            retryButtonKey: 'common.retry',
+            cancelButtonKey: 'common.cancel',
+        };
     }
 
     if (

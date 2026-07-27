@@ -4577,6 +4577,9 @@ export const zhHans: TranslationStructure = {
     daemonRpcUnavailableTitle: "守护进程不可用",
     daemonRpcUnavailableBody:
       "Happier 无法连接到此设备上的守护进程。它可能离线、仍在启动，或与服务器断开连接。",
+    launchStillPendingTitle: "会话仍在启动",
+    launchStillPendingBody:
+      "Happier 尚未确认新会话。启动请求仍已保存。请重试以继续同一次启动，不会创建重复会话。",
     connectedServiceSwitchUnavailable: {
       title: "无法切换",
       body: ({ reason, agentId }: { reason: string; agentId: string }) =>

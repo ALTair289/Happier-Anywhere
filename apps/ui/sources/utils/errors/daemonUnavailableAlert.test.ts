@@ -204,8 +204,9 @@ describe('daemonUnavailableAlert', () => {
             },
         })).toMatchObject({
             kind: 'retryable',
-            reason: 'daemon_unavailable',
-            titleKey: 'newSession.daemonRpcUnavailableTitle',
+            reason: 'launch_still_pending',
+            titleKey: 'newSession.launchStillPendingTitle',
+            bodyKey: 'newSession.launchStillPendingBody',
         });
     });
 

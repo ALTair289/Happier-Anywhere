@@ -4864,6 +4864,9 @@ export const pt: TranslationStructure = {
     daemonRpcUnavailableTitle: "Daemon indisponível",
     daemonRpcUnavailableBody:
       "O Happier não consegue acessar o daemon nesta máquina. Ele pode estar offline, iniciando ou desconectado do servidor.",
+    launchStillPendingTitle: "A inicialização ainda está em andamento",
+    launchStillPendingBody:
+      "O Happier ainda não confirmou a nova sessão. A solicitação de inicialização continua salva. Tente novamente para continuar a mesma inicialização sem criar uma sessão duplicada.",
     connectedServiceSwitchUnavailable: {
       title: "Troca indisponível",
       body: ({ reason, agentId }: { reason: string; agentId: string }) =>

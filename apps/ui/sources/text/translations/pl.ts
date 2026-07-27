@@ -4767,6 +4767,9 @@ export const pl: TranslationStructure = {
     daemonRpcUnavailableTitle: "Demon niedostępny",
     daemonRpcUnavailableBody:
       "Happier nie może połączyć się z demonem na tej maszynie. Może być offline, w trakcie uruchamiania lub odłączony od serwera.",
+    launchStillPendingTitle: "Uruchamianie nadal trwa",
+    launchStillPendingBody:
+      "Happier nie potwierdził jeszcze nowej sesji. Żądanie uruchomienia jest nadal zapisane. Spróbuj ponownie, aby kontynuować to samo uruchomienie bez tworzenia duplikatu sesji.",
     connectedServiceSwitchUnavailable: {
       title: "Przełączenie niedostępne",
       body: ({ reason, agentId }: { reason: string; agentId: string }) =>

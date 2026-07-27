@@ -5015,6 +5015,9 @@ localTailscale: {
     daemonRpcUnavailableTitle: "デーモンを利用できません",
     daemonRpcUnavailableBody:
       "このマシン上のデーモンに接続できません。オフライン、起動中、またはサーバーから切断されている可能性があります。",
+    launchStillPendingTitle: "起動処理はまだ進行中です",
+    launchStillPendingBody:
+      "Happier はまだ新しいセッションを確認できていません。起動リクエストは保存されています。重複するセッションを作成せずに同じ起動を続けるには、再試行してください。",
     connectedServiceSwitchUnavailable: {
       title: "切り替えできません",
       body: ({ reason, agentId }: { reason: string; agentId: string }) =>

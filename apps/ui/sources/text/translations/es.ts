@@ -4743,6 +4743,9 @@ export const es: TranslationStructure = {
     daemonRpcUnavailableTitle: "Daemon no disponible",
     daemonRpcUnavailableBody:
       "Happier no puede comunicarse con el daemon en esta máquina. Puede estar sin conexión, iniciándose o desconectado del servidor.",
+    launchStillPendingTitle: "El inicio sigue en curso",
+    launchStillPendingBody:
+      "Happier aún no ha confirmado la nueva sesión. La solicitud de inicio sigue guardada. Vuelve a intentarlo para continuar el mismo inicio sin crear una sesión duplicada.",
     connectedServiceSwitchUnavailable: {
       title: "Cambio no disponible",
       body: ({ reason, agentId }: { reason: string; agentId: string }) =>
