@@ -3411,6 +3411,16 @@ export const zhHans: TranslationStructure = {
         subtitle: "当受阻的提供商可以再次继续时通知",
       },
     },
+    pushPriming: {
+        title: '开启通知？',
+        body: 'Happier 可以在智能体完成工作、需要权限决定或正在等待你时通知你。你随时可以在设置中更改。',
+        accept: '开启',
+        decline: '暂不',
+        blockedTitle: '通知已被阻止',
+        blockedBody: '此应用的通知已在系统设置中关闭。请打开设置以允许通知。',
+        openSettings: '打开设置',
+        openSettingsFailed: '无法打开系统设置。',
+    },
     pushTroubleshooting: {
       status: {
         title: "状态",
@@ -3423,6 +3433,9 @@ export const zhHans: TranslationStructure = {
         title: "权限",
         loading: "加载中…",
         loadingSubtitle: "正在检查通知权限",
+        runtimeUnavailable: '不可用',
+        runtimeUnavailableSubtitle: '无法在此设备上连接通知服务。',
+        runtimeTimeoutSubtitle: '通知服务未响应。请检查开发服务器连接后重试。',
         unsupported: "不支持",
         unsupportedSubtitle: "Web 上无法使用推送权限。",
         allowed: "已允许",
@@ -3436,6 +3449,10 @@ export const zhHans: TranslationStructure = {
         title: "此设备",
         subtitle: ({ fingerprint }: { fingerprint: string }) => `当前令牌：${fingerprint}`,
         unavailableSubtitle: "无法获取 Expo 推送令牌。",
+        checkingSubtitle: '正在读取此设备的令牌…',
+        runtimeUnavailableSubtitle: '无法在此设备上连接通知服务。',
+        runtimeTimeoutSubtitle: '通知服务未在规定时间内响应。',
+        deviceUnavailableSubtitle: '此版本无法提供推送令牌。请确认此应用版本已启用推送通知。',
         registered: "已注册",
       },
       actions: {

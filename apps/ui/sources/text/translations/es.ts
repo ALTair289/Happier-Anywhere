@@ -3511,6 +3511,16 @@ export const es: TranslationStructure = {
         subtitle: "Notificar cuando un proveedor bloqueado pueda continuar de nuevo",
       },
     },
+    pushPriming: {
+        title: '¿Activar las notificaciones?',
+        body: 'Happier puede avisarte cuando un agente termina, necesita una decisión de permiso o está esperándote. Puedes cambiarlo cuando quieras en Ajustes.',
+        accept: 'Activar',
+        decline: 'Ahora no',
+        blockedTitle: 'Las notificaciones están bloqueadas',
+        blockedBody: 'Las notificaciones están desactivadas para esta app en los ajustes del sistema. Abre los ajustes para permitirlas.',
+        openSettings: 'Abrir ajustes',
+        openSettingsFailed: 'No se pudieron abrir los ajustes del sistema.',
+    },
     pushTroubleshooting: {
       status: {
         title: "Estado",
@@ -3526,6 +3536,9 @@ export const es: TranslationStructure = {
         title: "Permiso",
         loading: "Cargando…",
         loadingSubtitle: "Comprobando permisos de notificaciones",
+        runtimeUnavailable: 'No disponible',
+        runtimeUnavailableSubtitle: 'No se pudo acceder al servicio de notificaciones en este dispositivo.',
+        runtimeTimeoutSubtitle: 'El servicio de notificaciones no respondió. Revisa la conexión con el servidor de desarrollo y reinténtalo.',
         unsupported: "No compatible",
         unsupportedSubtitle: "Los permisos push no están disponibles en la web.",
         allowed: "Permitido",
@@ -3540,6 +3553,10 @@ export const es: TranslationStructure = {
         subtitle: ({ fingerprint }: { fingerprint: string }) =>
           `Token actual: ${fingerprint}`,
         unavailableSubtitle: "No se pudo leer un token push de Expo.",
+        checkingSubtitle: 'Leyendo el token de este dispositivo…',
+        runtimeUnavailableSubtitle: 'No se pudo acceder al servicio de notificaciones en este dispositivo.',
+        runtimeTimeoutSubtitle: 'El servicio de notificaciones no respondió a tiempo.',
+        deviceUnavailableSubtitle: 'Esta compilación no puede proporcionar un token push. Comprueba que las notificaciones push estén habilitadas para esta compilación.',
         registered: "Registrado",
       },
       actions: {

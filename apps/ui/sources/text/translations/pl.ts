@@ -3542,6 +3542,16 @@ export const pl: TranslationStructure = {
         subtitle: "Powiadamiaj, gdy zablokowany dostawca może znowu kontynuować",
       },
     },
+    pushPriming: {
+        title: 'Włączyć powiadomienia?',
+        body: 'Happier może informować, gdy agent zakończy pracę, potrzebuje decyzji o uprawnieniach lub czeka na Ciebie. Możesz to zmienić w każdej chwili w Ustawieniach.',
+        accept: 'Włącz',
+        decline: 'Nie teraz',
+        blockedTitle: 'Powiadomienia są zablokowane',
+        blockedBody: 'Powiadomienia dla tej aplikacji są wyłączone w ustawieniach systemu. Otwórz ustawienia, aby je zezwolić.',
+        openSettings: 'Otwórz ustawienia',
+        openSettingsFailed: 'Nie udało się otworzyć ustawień systemu.',
+    },
     pushTroubleshooting: {
       status: {
         title: "Stan",
@@ -3554,6 +3564,9 @@ export const pl: TranslationStructure = {
         title: "Uprawnienie",
         loading: "Ładowanie…",
         loadingSubtitle: "Sprawdzanie uprawnień powiadomień",
+        runtimeUnavailable: 'Niedostępne',
+        runtimeUnavailableSubtitle: 'Nie udało się połączyć z usługą powiadomień na tym urządzeniu.',
+        runtimeTimeoutSubtitle: 'Usługa powiadomień nie odpowiedziała. Sprawdź połączenie z serwerem deweloperskim i spróbuj ponownie.',
         unsupported: "Nieobsługiwane",
         unsupportedSubtitle: "Uprawnienia push nie są dostępne w web.",
         allowed: "Dozwolone",
@@ -3568,6 +3581,10 @@ export const pl: TranslationStructure = {
         subtitle: ({ fingerprint }: { fingerprint: string }) =>
           `Aktualny token: ${fingerprint}`,
         unavailableSubtitle: "Nie można odczytać tokenu push Expo.",
+        checkingSubtitle: 'Odczytywanie tokenu tego urządzenia…',
+        runtimeUnavailableSubtitle: 'Nie udało się połączyć z usługą powiadomień na tym urządzeniu.',
+        runtimeTimeoutSubtitle: 'Usługa powiadomień nie odpowiedziała na czas.',
+        deviceUnavailableSubtitle: 'Ta kompilacja nie może dostarczyć tokenu push. Sprawdź, czy powiadomienia push są włączone dla tej kompilacji.',
         registered: "Zarejestrowany",
       },
       actions: {

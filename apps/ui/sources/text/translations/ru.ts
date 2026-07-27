@@ -3434,6 +3434,16 @@ export const ru: TranslationStructure = {
         subtitle: "Уведомлять, когда заблокированный провайдер снова может продолжить",
       },
     },
+    pushPriming: {
+        title: 'Включить уведомления?',
+        body: 'Happier может сообщать, когда агент завершил работу, нужно решение о разрешении или он ждёт вас. Это можно изменить в любой момент в настройках.',
+        accept: 'Включить',
+        decline: 'Не сейчас',
+        blockedTitle: 'Уведомления заблокированы',
+        blockedBody: 'Уведомления для этого приложения отключены в системных настройках. Откройте настройки, чтобы разрешить их.',
+        openSettings: 'Открыть настройки',
+        openSettingsFailed: 'Не удалось открыть системные настройки.',
+    },
     pushTroubleshooting: {
       status: {
         title: "Статус",
@@ -3446,6 +3456,9 @@ export const ru: TranslationStructure = {
         title: "Разрешение",
         loading: "Загрузка…",
         loadingSubtitle: "Проверяем разрешения для уведомлений",
+        runtimeUnavailable: 'Недоступно',
+        runtimeUnavailableSubtitle: 'Не удалось обратиться к службе уведомлений на этом устройстве.',
+        runtimeTimeoutSubtitle: 'Служба уведомлений не ответила. Проверьте подключение к серверу разработки и повторите попытку.',
         unsupported: "Не поддерживается",
         unsupportedSubtitle: "Разрешения push недоступны в веб-версии.",
         allowed: "Разрешено",
@@ -3460,6 +3473,10 @@ export const ru: TranslationStructure = {
         subtitle: ({ fingerprint }: { fingerprint: string }) =>
           `Текущий токен: ${fingerprint}`,
         unavailableSubtitle: "Не удалось получить push-токен Expo.",
+        checkingSubtitle: 'Чтение токена этого устройства…',
+        runtimeUnavailableSubtitle: 'Не удалось обратиться к службе уведомлений на этом устройстве.',
+        runtimeTimeoutSubtitle: 'Служба уведомлений не ответила вовремя.',
+        deviceUnavailableSubtitle: 'Эта сборка не может выдать push-токен. Убедитесь, что push-уведомления включены для этой сборки.',
         registered: "Зарегистрирован",
       },
       actions: {

@@ -3323,6 +3323,16 @@ export const ca: TranslationStructure = {
                 subtitle: 'Notifica quan un proveïdor bloquejat pugui continuar de nou',
             },
         },
+        pushPriming: {
+            title: 'Vols activar les notificacions?',
+            body: 'Happier et pot avisar quan un agent acaba, necessita una decisió de permís o està esperant-te. Ho pots canviar quan vulguis a Configuració.',
+            accept: 'Activa',
+            decline: 'Ara no',
+            blockedTitle: 'Les notificacions estan bloquejades',
+            blockedBody: 'Les notificacions estan desactivades per a aquesta app a la configuració del sistema. Obre la configuració per permetre-les.',
+            openSettings: 'Obre la configuració',
+            openSettingsFailed: 'No s\'ha pogut obrir la configuració del sistema.',
+        },
         pushTroubleshooting: {
             status: {
                 title: 'Estat',
@@ -3335,6 +3345,9 @@ export const ca: TranslationStructure = {
                 title: 'Permís',
                 loading: 'Carregant…',
                 loadingSubtitle: 'Comprovant els permisos de notificacions',
+                runtimeUnavailable: 'No disponible',
+                runtimeUnavailableSubtitle: 'No s\'ha pogut accedir al servei de notificacions en aquest dispositiu.',
+                runtimeTimeoutSubtitle: 'El servei de notificacions no ha respost. Revisa la connexió amb el servidor de desenvolupament i torna-ho a provar.',
                 unsupported: 'No disponible',
                 unsupportedSubtitle: 'Els permisos push no estan disponibles al web.',
                 allowed: 'Permès',
@@ -3348,6 +3361,10 @@ export const ca: TranslationStructure = {
                 title: 'Aquest dispositiu',
                 subtitle: ({ fingerprint }: { fingerprint: string }) => `Token actual: ${fingerprint}`,
                 unavailableSubtitle: 'No s’ha pogut llegir un token push d’Expo.',
+                checkingSubtitle: 'Llegint el testimoni d\'aquest dispositiu…',
+                runtimeUnavailableSubtitle: 'No s\'ha pogut accedir al servei de notificacions en aquest dispositiu.',
+                runtimeTimeoutSubtitle: 'El servei de notificacions no ha respost a temps.',
+                deviceUnavailableSubtitle: 'Aquesta compilació no pot proporcionar un testimoni push. Comprova que les notificacions push estiguin habilitades per a aquesta compilació.',
                 registered: 'Registrat',
             },
             actions: {

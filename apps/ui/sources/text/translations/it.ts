@@ -3850,6 +3850,16 @@ export const it: TranslationStructure = {
         subtitle: "Notifica quando un provider bloccato può continuare di nuovo",
       },
     },
+    pushPriming: {
+        title: 'Attivare le notifiche?',
+        body: 'Happier può avvisarti quando un agente termina, richiede una decisione sui permessi o è in attesa. Puoi modificarlo in qualsiasi momento nelle Impostazioni.',
+        accept: 'Attiva',
+        decline: 'Non ora',
+        blockedTitle: 'Le notifiche sono bloccate',
+        blockedBody: 'Le notifiche sono disattivate per questa app nelle impostazioni di sistema. Apri le impostazioni per consentirle.',
+        openSettings: 'Apri impostazioni',
+        openSettingsFailed: 'Impossibile aprire le impostazioni di sistema.',
+    },
     pushTroubleshooting: {
       status: {
         title: "Stato",
@@ -3862,6 +3872,9 @@ export const it: TranslationStructure = {
         title: "Permesso",
         loading: "Caricamento…",
         loadingSubtitle: "Verifica dei permessi di notifica",
+        runtimeUnavailable: 'Non disponibile',
+        runtimeUnavailableSubtitle: 'Non è stato possibile raggiungere il servizio di notifiche su questo dispositivo.',
+        runtimeTimeoutSubtitle: 'Il servizio di notifiche non ha risposto. Verifica la connessione al server di sviluppo e riprova.',
         unsupported: "Non supportato",
         unsupportedSubtitle: "I permessi push non sono disponibili sul web.",
         allowed: "Consentito",
@@ -3876,6 +3889,10 @@ export const it: TranslationStructure = {
         subtitle: ({ fingerprint }: { fingerprint: string }) =>
           `Token attuale: ${fingerprint}`,
         unavailableSubtitle: "Impossibile leggere un token push di Expo.",
+        checkingSubtitle: 'Lettura del token di questo dispositivo…',
+        runtimeUnavailableSubtitle: 'Non è stato possibile raggiungere il servizio di notifiche su questo dispositivo.',
+        runtimeTimeoutSubtitle: 'Il servizio di notifiche non ha risposto in tempo.',
+        deviceUnavailableSubtitle: 'Questa build non può fornire un token push. Verifica che le notifiche push siano abilitate per questa build.',
         registered: "Registrato",
       },
       actions: {

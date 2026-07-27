@@ -15,7 +15,9 @@ import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { useLocalSettings, useSettings } from '@/sync/domains/state/storage';
 import { useApplyLocalSettings, useApplySettings } from '@/sync/store/settingsWriters';
 import { t } from '@/text';
+import { sync } from '@/sync/sync';
 import { isTauriDesktop } from '@/utils/platform/tauri';
+import { runPushNotificationPermissionPriming } from '@/activity/notifications/permission/pushNotificationPermissionPriming';
 
 import {
     DEFAULT_NOTIFICATIONS_SETTINGS_V1,
@@ -94,6 +96,21 @@ export const NotificationsSettingsView = React.memo(function NotificationsSettin
         });
         applyRemoteNotificationSettings(nextNotifications, webhookChannels);
     }, [applyRemoteNotificationSettings, notifications, webhookChannels]);
+
+    /**
+     * Enabling push here is the user's demonstrated intent, so it is the right moment to ask the OS
+     * — framed in-app first. Registration itself never prompts, so without this the setting could
+     * be on while the OS permission was never requested.
+     */
+    const handlePushEnabledChange = React.useCallback(async (value: boolean) => {
+        setNotifications({ pushEnabled: value });
+        if (!value) return;
+        await runPushNotificationPermissionPriming({
+            pushEnabled: true,
+            trigger: 'user_action',
+            onGranted: () => sync.onPushPermissionGranted(),
+        });
+    }, [setNotifications]);
 
     const setNotificationTopic = React.useCallback((
         topic: 'connectedServiceAccountSwitch' | 'connectedServiceQuotaBlocked' | 'connectedServiceQuotaRecovered',
@@ -469,7 +486,7 @@ export const NotificationsSettingsView = React.memo(function NotificationsSettin
                     rightElement={(
                         <Switch
                             value={pushEnabled}
-                            onValueChange={(value) => setNotifications({ pushEnabled: Boolean(value) })}
+                            onValueChange={(value) => { void handlePushEnabledChange(Boolean(value)); }}
                         />
                     )}
                     showChevron={false}

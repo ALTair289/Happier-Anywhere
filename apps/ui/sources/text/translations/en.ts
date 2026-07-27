@@ -3244,6 +3244,16 @@ export const en = {
                 subtitle: 'Notify when a blocked provider can continue again',
             },
         },
+        pushPriming: {
+            title: 'Turn on notifications?',
+            body: 'Happier can let you know when an agent finishes working, needs a permission decision, or is waiting on you. You can change this any time in Settings.',
+            accept: 'Turn on',
+            decline: 'Not now',
+            blockedTitle: 'Notifications are blocked',
+            blockedBody: 'Notifications are turned off for this app in system settings. Open settings to allow them.',
+            openSettings: 'Open settings',
+            openSettingsFailed: 'Could not open system settings.',
+        },
         pushTroubleshooting: {
             status: {
                 title: 'Status',
@@ -3256,6 +3266,9 @@ export const en = {
                 title: 'Permission',
                 loading: 'Loading…',
                 loadingSubtitle: 'Checking notification permissions',
+                runtimeUnavailable: 'Unavailable',
+                runtimeUnavailableSubtitle: 'The notification service could not be reached on this device.',
+                runtimeTimeoutSubtitle: 'The notification service did not respond. Check the development server connection, then retry.',
                 unsupported: 'Unsupported',
                 unsupportedSubtitle: 'Push permissions are not available on web.',
                 allowed: 'Allowed',
@@ -3269,6 +3282,10 @@ export const en = {
                 title: 'This device',
                 subtitle: ({ fingerprint }: { fingerprint: string }) => `Current token: ${fingerprint}`,
                 unavailableSubtitle: 'Unable to read an Expo push token.',
+                checkingSubtitle: 'Reading this device token…',
+                runtimeUnavailableSubtitle: 'The notification service could not be reached on this device.',
+                runtimeTimeoutSubtitle: 'The notification service did not respond in time.',
+                deviceUnavailableSubtitle: 'This build cannot provide a push token. Check that push notifications are enabled for this app build.',
                 registered: 'Registered',
             },
             actions: {

@@ -3634,6 +3634,16 @@ export const pt: TranslationStructure = {
         subtitle: "Notificar quando um provedor bloqueado puder continuar novamente",
       },
     },
+    pushPriming: {
+        title: 'Ativar as notificações?',
+        body: 'O Happier pode avisar quando um agente termina, precisa de uma decisão de permissão ou está à sua espera. Pode alterar isto a qualquer momento nas Definições.',
+        accept: 'Ativar',
+        decline: 'Agora não',
+        blockedTitle: 'As notificações estão bloqueadas',
+        blockedBody: 'As notificações estão desativadas para esta app nas definições do sistema. Abra as definições para as permitir.',
+        openSettings: 'Abrir definições',
+        openSettingsFailed: 'Não foi possível abrir as definições do sistema.',
+    },
     pushTroubleshooting: {
       status: {
         title: "Estado",
@@ -3646,6 +3656,9 @@ export const pt: TranslationStructure = {
         title: "Permissão",
         loading: "Carregando…",
         loadingSubtitle: "Verificando permissões de notificações",
+        runtimeUnavailable: 'Indisponível',
+        runtimeUnavailableSubtitle: 'Não foi possível contactar o serviço de notificações neste dispositivo.',
+        runtimeTimeoutSubtitle: 'O serviço de notificações não respondeu. Verifique a ligação ao servidor de desenvolvimento e tente novamente.',
         unsupported: "Não suportado",
         unsupportedSubtitle: "As permissões push não estão disponíveis na web.",
         allowed: "Permitido",
@@ -3660,6 +3673,10 @@ export const pt: TranslationStructure = {
         subtitle: ({ fingerprint }: { fingerprint: string }) =>
           `Token atual: ${fingerprint}`,
         unavailableSubtitle: "Não foi possível obter um token push do Expo.",
+        checkingSubtitle: 'A ler o token deste dispositivo…',
+        runtimeUnavailableSubtitle: 'Não foi possível contactar o serviço de notificações neste dispositivo.',
+        runtimeTimeoutSubtitle: 'O serviço de notificações não respondeu a tempo.',
+        deviceUnavailableSubtitle: 'Esta compilação não consegue fornecer um token push. Verifique se as notificações push estão ativadas para esta compilação.',
         registered: "Registrado",
       },
       actions: {

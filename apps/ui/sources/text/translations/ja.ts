@@ -3798,6 +3798,16 @@ localTailscale: {
         subtitle: "ブロックされたプロバイダーが再開可能になったときに通知します",
       },
     },
+    pushPriming: {
+        title: '通知をオンにしますか？',
+        body: 'エージェントの作業完了、権限の確認が必要なとき、応答待ちのときに Happier がお知らせします。設定でいつでも変更できます。',
+        accept: 'オンにする',
+        decline: '後で',
+        blockedTitle: '通知がブロックされています',
+        blockedBody: 'このアプリの通知はシステム設定でオフになっています。設定を開いて許可してください。',
+        openSettings: '設定を開く',
+        openSettingsFailed: 'システム設定を開けませんでした。',
+    },
     pushTroubleshooting: {
       status: {
         title: "状態",
@@ -3810,6 +3820,9 @@ localTailscale: {
         title: "権限",
         loading: "読み込み中…",
         loadingSubtitle: "通知権限を確認しています",
+        runtimeUnavailable: '利用不可',
+        runtimeUnavailableSubtitle: 'この端末で通知サービスに接続できませんでした。',
+        runtimeTimeoutSubtitle: '通知サービスが応答しませんでした。開発サーバーへの接続を確認して再試行してください。',
         unsupported: "未対応",
         unsupportedSubtitle: "Web ではプッシュ権限を利用できません。",
         allowed: "許可",
@@ -3824,6 +3837,10 @@ localTailscale: {
         subtitle: ({ fingerprint }: { fingerprint: string }) =>
           `現在のトークン: ${fingerprint}`,
         unavailableSubtitle: "Expo のプッシュトークンを取得できません。",
+        checkingSubtitle: 'この端末のトークンを読み取っています…',
+        runtimeUnavailableSubtitle: 'この端末で通知サービスに接続できませんでした。',
+        runtimeTimeoutSubtitle: '通知サービスが時間内に応答しませんでした。',
+        deviceUnavailableSubtitle: 'このビルドではプッシュトークンを取得できません。このビルドでプッシュ通知が有効か確認してください。',
         registered: "登録済み",
       },
       actions: {

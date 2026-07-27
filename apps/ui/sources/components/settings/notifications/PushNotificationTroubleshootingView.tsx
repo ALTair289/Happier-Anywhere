@@ -1,33 +1,29 @@
 import * as React from 'react';
-import { Linking, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import Constants from 'expo-constants';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { ItemList } from '@/components/ui/lists/ItemList';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { Item } from '@/components/ui/lists/Item';
 import { ItemRowActions } from '@/components/ui/lists/ItemRowActions';
+import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { useAuth } from '@/auth/context/AuthContext';
 import { useSettings } from '@/sync/domains/state/storage';
 import { useActiveServerSnapshot } from '@/hooks/server/useActiveServerSnapshot';
-import {
-    DEFAULT_NOTIFICATIONS_SETTINGS_V1,
-    NotificationsSettingsV1Schema,
-    type NotificationsSettingsV1,
-} from '@happier-dev/protocol';
+import { isExpoPushNotificationChannelEnabled } from '@happier-dev/protocol';
 import { deletePushToken, fetchPushTokens, type PushToken } from '@/sync/api/session/apiPush';
 import { loadLastRegisteredExpoPushToken } from '@/sync/domains/state/pushTokenRegistration';
-import { loadExpoNotifications } from '@/utils/platform/loadExpoNotifications';
+import {
+    isPushNotificationRuntimeSupported,
+    readExpoPushToken,
+    readPushPermission,
+    type ExpoPushTokenOutcome,
+    type PushPermissionOutcome,
+} from '@/activity/notifications/permission/pushNotificationAccess';
+import { runPushNotificationPermissionPriming } from '@/activity/notifications/permission/pushNotificationPermissionPriming';
 
-type PushPermissionStatus = 'unsupported' | 'granted' | 'denied' | 'undetermined';
-type PushPermissionInfo = Readonly<{
-    status: PushPermissionStatus;
-    granted: boolean;
-    canAskAgain: boolean;
-}>;
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -42,104 +38,61 @@ function formatPushTimestamp(timestamp: number): string {
     return new Date(timestamp).toLocaleString();
 }
 
-function resolveExpoProjectId(): string | null {
-    try {
-        const constants = Constants as unknown;
-        if (!isRecord(constants)) return null;
-
-        const expoConfig = isRecord(constants.expoConfig) ? constants.expoConfig : null;
-        const extra = expoConfig && isRecord(expoConfig.extra) ? expoConfig.extra : null;
-        const easExtra = extra && isRecord(extra.eas) ? extra.eas : null;
-        const projectIdFromExpoConfig = easExtra?.projectId;
-
-        const easConfig = isRecord(constants.easConfig) ? constants.easConfig : null;
-        const projectIdFromEasConfig = easConfig?.projectId;
-
-        const candidate =
-            typeof projectIdFromExpoConfig === 'string'
-                ? projectIdFromExpoConfig
-                : typeof projectIdFromEasConfig === 'string'
-                    ? projectIdFromEasConfig
-                    : null;
-        const trimmed = candidate?.trim() ?? '';
-        return trimmed ? trimmed : null;
-    } catch {
-        return null;
-    }
-}
-
-async function getPushPermissionInfo(): Promise<PushPermissionInfo> {
-    if (Platform.OS === 'web') {
-        return { status: 'unsupported', granted: false, canAskAgain: false };
-    }
-
-    try {
-        const Notifications = await loadExpoNotifications();
-        const result = await Notifications.getPermissionsAsync();
-        const status: PushPermissionStatus =
-            result.status === 'granted' || result.status === 'denied' || result.status === 'undetermined'
-                ? result.status
-                : 'undetermined';
-        return {
-            status,
-            granted: result.granted === true || status === 'granted',
-            canAskAgain: result.canAskAgain === true,
-        };
-    } catch {
-        return { status: 'undetermined', granted: false, canAskAgain: false };
-    }
-}
-
-async function getCurrentExpoPushToken(): Promise<string | null> {
-    if (Platform.OS === 'web') return null;
-
-    const projectId = resolveExpoProjectId();
-    try {
-        const Notifications = await loadExpoNotifications();
-        const res = projectId
-            ? await Notifications.getExpoPushTokenAsync({ projectId })
-            : await Notifications.getExpoPushTokenAsync();
-        const token = typeof res.data === 'string' ? res.data.trim() : '';
-        const cached = loadLastRegisteredExpoPushToken()?.trim() ?? '';
-        return token || cached || null;
-    } catch {
-        const cached = loadLastRegisteredExpoPushToken()?.trim() ?? '';
-        return cached || null;
-    }
-}
-
-function resolvePermissionDetail(permission: PushPermissionInfo | null): string {
-    if (!permission) return t('settingsNotifications.pushTroubleshooting.permission.loading');
+/**
+ * The status rows must distinguish "still checking", "the notification runtime could not answer",
+ * and "the OS or this device says no". Collapsing those into one message is what made this screen
+ * undiagnosable: an unreachable runtime looked identical to a denied permission.
+ */
+function resolvePermissionDetail(outcome: PushPermissionOutcome | null): string {
+    if (!outcome) return t('settingsNotifications.pushTroubleshooting.permission.loading');
+    if (!outcome.ok) return t('settingsNotifications.pushTroubleshooting.permission.runtimeUnavailable');
+    const permission = outcome.permission;
     if (permission.status === 'unsupported') return t('settingsNotifications.pushTroubleshooting.permission.unsupported');
     if (permission.granted) return t('settingsNotifications.pushTroubleshooting.permission.allowed');
     if (permission.status === 'denied') return t('settingsNotifications.pushTroubleshooting.permission.denied');
     return t('settingsNotifications.pushTroubleshooting.permission.notRequested');
 }
 
-function resolvePermissionSubtitle(permission: PushPermissionInfo | null): string {
-    if (!permission) return t('settingsNotifications.pushTroubleshooting.permission.loadingSubtitle');
+function resolvePermissionSubtitle(outcome: PushPermissionOutcome | null): string {
+    if (!outcome) return t('settingsNotifications.pushTroubleshooting.permission.loadingSubtitle');
+    if (!outcome.ok) {
+        return outcome.reason === 'runtime_timeout'
+            ? t('settingsNotifications.pushTroubleshooting.permission.runtimeTimeoutSubtitle')
+            : t('settingsNotifications.pushTroubleshooting.permission.runtimeUnavailableSubtitle');
+    }
+    const permission = outcome.permission;
     if (permission.status === 'unsupported') return t('settingsNotifications.pushTroubleshooting.permission.unsupportedSubtitle');
     if (permission.granted) return t('settingsNotifications.pushTroubleshooting.permission.allowedSubtitle');
     if (permission.canAskAgain) return t('settingsNotifications.pushTroubleshooting.permission.canAskAgainSubtitle');
     return t('settingsNotifications.pushTroubleshooting.permission.openSettingsSubtitle');
 }
 
+function resolveTokenSubtitle(outcome: ExpoPushTokenOutcome | null, fingerprint: string | null): string {
+    if (!outcome) return t('settingsNotifications.pushTroubleshooting.token.checkingSubtitle');
+    if (outcome.ok && fingerprint) {
+        return t('settingsNotifications.pushTroubleshooting.token.subtitle', { fingerprint });
+    }
+    if (!outcome.ok) {
+        if (outcome.reason === 'runtime_timeout') {
+            return t('settingsNotifications.pushTroubleshooting.token.runtimeTimeoutSubtitle');
+        }
+        if (outcome.reason === 'runtime_unavailable') {
+            return t('settingsNotifications.pushTroubleshooting.token.runtimeUnavailableSubtitle');
+        }
+        return t('settingsNotifications.pushTroubleshooting.token.deviceUnavailableSubtitle');
+    }
+    return t('settingsNotifications.pushTroubleshooting.token.unavailableSubtitle');
+}
+
 export const PushNotificationTroubleshootingView = React.memo(function PushNotificationTroubleshootingView() {
     const { theme } = useUnistyles();
     const auth = useAuth();
     const settings = useSettings();
-    const notificationsRaw = isRecord(settings) ? settings.notificationsSettingsV1 : undefined;
-    const notifications: NotificationsSettingsV1 = React.useMemo(() => {
-        try {
-            return NotificationsSettingsV1Schema.parse(notificationsRaw);
-        } catch {
-            return DEFAULT_NOTIFICATIONS_SETTINGS_V1;
-        }
-    }, [notificationsRaw]);
 
     const activeServer = useActiveServerSnapshot();
 
-    const [permission, setPermission] = React.useState<PushPermissionInfo | null>(null);
+    const [permission, setPermission] = React.useState<PushPermissionOutcome | null>(null);
+    const [tokenOutcome, setTokenOutcome] = React.useState<ExpoPushTokenOutcome | null>(null);
     const [currentToken, setCurrentToken] = React.useState<string | null>(null);
     const [tokens, setTokens] = React.useState<PushToken[]>([]);
     const [loading, setLoading] = React.useState(false);
@@ -153,7 +106,9 @@ export const PushNotificationTroubleshootingView = React.memo(function PushNotif
         };
     }, []);
 
-    const pushEnabled = notifications.pushEnabled !== false;
+    // Canonical account-level truth, shared with push-token registration, so this row cannot report
+    // a state that the registration path disagrees with.
+    const pushEnabled = isExpoPushNotificationChannelEnabled(isRecord(settings) ? settings : {});
 
     const loadTroubleshootingState = React.useCallback(async (opts?: { showErrors?: boolean }) => {
         const showErrors = opts?.showErrors === true;
@@ -162,11 +117,17 @@ export const PushNotificationTroubleshootingView = React.memo(function PushNotif
             setLoading(true);
         }
         try {
-            const nextPermission = await getPushPermissionInfo();
-            const nextToken = await getCurrentExpoPushToken();
+            // Each of these is individually bounded, so this screen always reaches a terminal,
+            // actionable state even when the notification runtime never answers.
+            const nextPermission = await readPushPermission();
+            const nextTokenOutcome = await readExpoPushToken();
             if (!isMountedRef.current) return;
             setPermission(nextPermission);
-            setCurrentToken(nextToken);
+            setTokenOutcome(nextTokenOutcome);
+            // Fall back to the last registered token so the caller can still identify this device
+            // in the registered list while reporting why a live read failed.
+            const cachedToken = loadLastRegisteredExpoPushToken()?.trim() ?? '';
+            setCurrentToken(nextTokenOutcome.ok ? nextTokenOutcome.token : (cachedToken || null));
 
             if (credentials?.token) {
                 const nextTokens = await fetchPushTokens(credentials);
@@ -191,30 +152,11 @@ export const PushNotificationTroubleshootingView = React.memo(function PushNotif
     }, [loadTroubleshootingState]);
 
     const requestPermission = React.useCallback(async () => {
-        if (Platform.OS === 'web') {
-            return;
-        }
-        const nextPermission = await getPushPermissionInfo();
-        if (nextPermission.granted) {
-            setPermission(nextPermission);
-            return;
-        }
-        if (nextPermission.canAskAgain) {
-            try {
-                const Notifications = await loadExpoNotifications();
-                await Notifications.requestPermissionsAsync();
-            } catch {
-                // ignore
-            }
-            await loadTroubleshootingState({ showErrors: true });
-            return;
-        }
-        try {
-            await Linking.openSettings();
-        } catch {
-            await Modal.alert(t('common.error'), t('settingsNotifications.pushTroubleshooting.loadError'));
-        }
-    }, [loadTroubleshootingState]);
+        // Explicit user intent, so the primed flow may ask again even after an earlier decline and
+        // may route to system settings when the OS refuses further prompts.
+        await runPushNotificationPermissionPriming({ pushEnabled, trigger: 'user_action' });
+        await loadTroubleshootingState({ showErrors: true });
+    }, [loadTroubleshootingState, pushEnabled]);
 
     const reregister = React.useCallback(async () => {
         if (!auth.credentials) {
@@ -299,9 +241,8 @@ export const PushNotificationTroubleshootingView = React.memo(function PushNotif
                 />
                 <Item
                     title={t('settingsNotifications.pushTroubleshooting.token.title')}
-                    subtitle={tokenFingerprint
-                        ? t('settingsNotifications.pushTroubleshooting.token.subtitle', { fingerprint: tokenFingerprint })
-                        : t('settingsNotifications.pushTroubleshooting.token.unavailableSubtitle')}
+                    subtitle={resolveTokenSubtitle(tokenOutcome, tokenFingerprint)}
+                    subtitleLines={0}
                     detail={currentTokenPresentOnServer ? t('settingsNotifications.pushTroubleshooting.token.registered') : undefined}
                     icon={<Ionicons name="key-outline" size={29} color={theme.colors.text.secondary} />}
                     showChevron={false}
@@ -319,7 +260,7 @@ export const PushNotificationTroubleshootingView = React.memo(function PushNotif
                     subtitle={t('settingsNotifications.pushTroubleshooting.actions.requestPermissionSubtitle')}
                     icon={<Ionicons name="shield-checkmark-outline" size={29} color={theme.colors.accent.blue} />}
                     onPress={() => { void requestPermission(); }}
-                    disabled={Platform.OS === 'web'}
+                    disabled={!isPushNotificationRuntimeSupported()}
                     showChevron={false}
                 />
                 <Item
@@ -337,7 +278,11 @@ export const PushNotificationTroubleshootingView = React.memo(function PushNotif
                     subtitle={t('settingsNotifications.pushTroubleshooting.actions.refreshSubtitle')}
                     icon={<Ionicons name="cloud-download-outline" size={29} color={theme.colors.text.secondary} />}
                     onPress={() => { void loadTroubleshootingState({ showErrors: true }); }}
-                    loading={loading}
+                    // Progress is shown without `loading`, which would also disable the row: the
+                    // recovery action must stay reachable precisely when a load is misbehaving.
+                    rightElement={loading
+                        ? <ActivitySpinner size="small" color={theme.colors.text.secondary} />
+                        : undefined}
                     disabled={!auth.credentials}
                     showChevron={false}
                 />

@@ -3189,6 +3189,16 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                 subtitle: '當受阻的提供者可以再次繼續時通知',
             },
         },
+        pushPriming: {
+            title: '開啟通知？',
+            body: 'Happier 可以在代理完成工作、需要權限決定或正在等待你時通知你。你隨時可以在設定中變更。',
+            accept: '開啟',
+            decline: '暫不',
+            blockedTitle: '通知已被封鎖',
+            blockedBody: '此應用程式的通知已在系統設定中關閉。請開啟設定以允許通知。',
+            openSettings: '開啟設定',
+            openSettingsFailed: '無法開啟系統設定。',
+        },
         pushTroubleshooting: {
             status: {
                 title: '狀態',
@@ -3201,6 +3211,9 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                 title: '權限',
                 loading: '載入中…',
                 loadingSubtitle: '正在檢查通知權限',
+                runtimeUnavailable: '無法使用',
+                runtimeUnavailableSubtitle: '無法在此裝置上連線至通知服務。',
+                runtimeTimeoutSubtitle: '通知服務未回應。請檢查開發伺服器連線後重試。',
                 unsupported: '不支援',
                 unsupportedSubtitle: 'Web 上無法使用推播權限。',
                 allowed: '已允許',
@@ -3214,6 +3227,10 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                 title: '此裝置',
                 subtitle: ({ fingerprint }: { fingerprint: string }) => `目前 Token：${fingerprint}`,
                 unavailableSubtitle: '無法讀取 Expo 推播 Token。',
+                checkingSubtitle: '正在讀取此裝置的權杖…',
+                runtimeUnavailableSubtitle: '無法在此裝置上連線至通知服務。',
+                runtimeTimeoutSubtitle: '通知服務未在時限內回應。',
+                deviceUnavailableSubtitle: '此版本無法提供推播權杖。請確認此應用程式版本已啟用推播通知。',
                 registered: '已註冊',
             },
             actions: {

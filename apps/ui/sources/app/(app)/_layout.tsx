@@ -26,6 +26,7 @@ import {
 } from '@/utils/navigation/createSocialStackScreenOptions';
 import { ActivityBadgeRuntime } from '@/activity/badges/ActivityBadgeRuntime';
 import { ActivityLocalNotificationRuntime } from '@/activity/notifications/runtime/ActivityLocalNotificationRuntime';
+import { PushNotificationPermissionPrimingRuntime } from '@/activity/notifications/permission/PushNotificationPermissionPrimingRuntime';
 import { DesktopTrayRuntime } from '@/desktop/tray/DesktopTrayRuntime';
 import { ReleaseNotesAutoShowMount } from '@/changelog/releaseNotes';
 import { useNotificationResponseRouting } from '@/activity/notifications/runtime/useNotificationResponseRouting';
@@ -73,6 +74,7 @@ function NewSessionKeyboardDismissHeaderTitle(): React.ReactElement {
 const AuthenticatedAppShellRuntimes = React.memo(function AuthenticatedAppShellRuntimes(): React.ReactElement {
     return (
         <>
+            <PushNotificationPermissionPrimingRuntime />
             <DesktopPetOverlayRuntimeMount />
             <PetAppShellCompanionMount />
             <ReleaseNotesAutoShowMount />
