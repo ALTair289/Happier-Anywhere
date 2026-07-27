@@ -2962,6 +2962,7 @@ localTailscale: {
     account: {
       refreshA11y: "使用状況と制限を更新",
       usageCaption: "使用状況",
+      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
       resetsCaption: "クォータのリセット",
       usedDetail: ({ used, limit }: { used: string; limit: string }) => `${used}/${limit} 使用`,
       capacity: ({ percent }: { percent: number }) => `容量 ${percent}%`,

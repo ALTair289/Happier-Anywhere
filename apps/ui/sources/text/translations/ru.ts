@@ -2531,6 +2531,7 @@ export const ru: TranslationStructure = {
         daysHours: ({ days, hours }: { days: number; hours: number }) =>
           `${days}д ${hours}ч`,
         hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) =>
+      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
           `${hours}ч ${minutes}м`,
         hours: ({ hours }: { hours: number }) => `${hours}ч`,
         minutes: ({ minutes }: { minutes: number }) => `${minutes}м`,

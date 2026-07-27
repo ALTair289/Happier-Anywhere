@@ -2450,6 +2450,7 @@ export const en = {
             usedDetail: ({ used, limit }: { used: string; limit: string }) => `${used}/${limit} used`,
             capacity: ({ percent }: { percent: number }) => `${percent}% capacity`,
             memberEnabledLabel: 'Enabled in pool',
+            recoveryCreditNothingToReset: 'No exhausted usage window currently needs a reset.',
             poolsLabel: 'Pools',
             planEmailSubtitle: ({ plan, email }: { plan: string; email: string }) => `${plan} · ${email}`,
             poolsCount: ({ count }: { count: number }) => count === 1 ? '1 pool' : `${count} pools`,

@@ -40,9 +40,9 @@ function normalizeFutureExpiry(expiresAtMs: number | null | undefined, nowMs: nu
  * - No available count ⇒ no rows.
  * - Empty `credits[]` + positive `availableCount` ⇒ one aggregate placeholder
  *   row (`consumableCreditId: null`, `canUse: true`) consumed via the summary.
- * - Detailed credits ⇒ one row per AVAILABLE (future-expiry) credit. The `Use`
- *   action is gated on a real `providerCreditId`; rows without one are shown but
- *   not individually consumable.
+ * - Detailed credits ⇒ at most `availableCount` individually consumable rows.
+ *   Missing-id and undisclosed/capped credits remain reachable through one
+ *   aggregate-remainder row instead of consuming an unusable detail slot.
  */
 export function buildQuotaResetRows(
     recoveryCredits: ConnectedServiceQuotaRecoveryCreditsV1 | null | undefined,
@@ -65,19 +65,36 @@ export function buildQuotaResetRows(
         }];
     }
 
-    const availableCredits = detailedCredits.filter((credit) => isAvailableCredit(credit, nowMs));
-    if (availableCredits.length === 0) return [];
-
-    return availableCredits.map((credit, index) => {
-        const consumableCreditId = readProviderCreditId(credit);
+    const individuallyConsumableCredits = detailedCredits
+        .filter((credit) => isAvailableCredit(credit, nowMs))
+        .map((credit) => ({ credit, consumableCreditId: readProviderCreditId(credit) }))
+        .filter((entry): entry is Readonly<{
+            credit: ConnectedServiceQuotaRecoveryCreditV1;
+            consumableCreditId: string;
+        }> => entry.consumableCreditId !== null)
+        .slice(0, recoveryCredits.availableCount);
+    const rows: QuotaResetRow[] = individuallyConsumableCredits.map(({ credit, consumableCreditId }) => {
         const expiresAtMs = normalizeFutureExpiry(credit.expiresAtMs, nowMs);
         return {
-            key: consumableCreditId ?? String(index),
+            key: consumableCreditId,
             consumableCreditId,
-            canUse: consumableCreditId !== null,
+            canUse: true,
             isAggregate: false,
             expiresAtMs,
             countdownLabel: formatResetCountdownDays(nowMs, expiresAtMs, formatter),
         };
     });
+    const aggregateRemainder = Math.max(0, recoveryCredits.availableCount - individuallyConsumableCredits.length);
+    if (aggregateRemainder > 0) {
+        const expiresAtMs = normalizeFutureExpiry(recoveryCredits.nextExpiresAtMs, nowMs);
+        rows.push({
+            key: 'aggregate-remainder',
+            consumableCreditId: null,
+            canUse: true,
+            isAggregate: true,
+            expiresAtMs,
+            countdownLabel: formatResetCountdownDays(nowMs, expiresAtMs, formatter),
+        });
+    }
+    return rows;
 }

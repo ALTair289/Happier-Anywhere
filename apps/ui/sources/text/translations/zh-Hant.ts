@@ -1231,6 +1231,7 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                 hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) => `${hours}小時 ${minutes}分鐘`,
                 hours: ({ hours }: { hours: number }) => `${hours}小時`,
                 minutes: ({ minutes }: { minutes: number }) => `${minutes}分鐘`,
+            recoveryCreditNothingToReset: 'No exhausted usage window currently needs a reset.',
             },
         },
         list: {

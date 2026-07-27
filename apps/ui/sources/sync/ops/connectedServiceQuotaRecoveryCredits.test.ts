@@ -152,6 +152,7 @@ describe('connectedServiceQuotaRecoveryCredits ops', () => {
             ok: false,
             errorCode: 'provider_rejected',
             error: SECRET_BEARING_ERROR,
+            receipt: { idempotencyKey: 'timeout-key', status: 'unknown_after_timeout' },
         });
 
         const { connectedServiceQuotaRecoveryCreditConsume } = await import('./connectedServiceQuotaRecoveryCredits');
@@ -164,6 +165,7 @@ describe('connectedServiceQuotaRecoveryCredits ops', () => {
         expect(result).toMatchObject({
             ok: false,
             errorCode: 'provider_rejected',
+            receipt: { idempotencyKey: 'timeout-key', status: 'unknown_after_timeout' },
         });
         expect(result.error).toContain('https://custom.example.test:9443/path');
         expect(result.error).toContain('Authorization: Bearer [REDACTED]');

@@ -183,6 +183,7 @@ import {
 } from '@/sync/domains/connectedServices/connectedServiceQuotaGauge';
 import { useConnectedServiceQuotaSnapshots } from '@/hooks/server/connectedServices/useConnectedServiceQuotaSnapshots';
 import { useProviderAccountUsageSnapshots } from '@/hooks/server/connectedServices/useProviderAccountUsageSnapshots';
+import { resolveConnectedServiceQuotaRecoveryCreditReceiptNoticeKey } from '@/sync/domains/connectedServices/connectedServiceQuotaRecoveryCreditReceiptPresentation';
 import {
     selectProviderUsageDisplaySnapshot,
     type ProviderUsageDisplaySnapshotSource,
@@ -2814,6 +2815,8 @@ function SessionViewLoaded({
     const activeStaleSessionRunnerOperationStatus = staleSessionRunnerOperationStatus
         && staleSessionRunnerStatus?.fingerprint === staleSessionRunnerOperationStatus.fingerprint
         ? { status: staleSessionRunnerOperationStatus.status }
+            const noticeKey = resolveConnectedServiceQuotaRecoveryCreditReceiptNoticeKey(result.receipt.status);
+            if (noticeKey) await Modal.alert(t('common.info'), t(noticeKey));
         : null;
     const staleSessionRunnerNoticePresentation = React.useMemo(() => buildStaleSessionRunnerNoticePresentation({
         status: staleSessionRunnerNoticeResolved ? null : staleSessionRunnerStatus,
@@ -3347,7 +3350,6 @@ function SessionViewLoaded({
             try {
                 await consumeConnectedServiceRecoveryCreditForProfile({
                     profileRef: providerUsageGaugeConnectedServiceProfileRef,
-                    providerCreditId: providerUsageGauge.recoveryCreditSummary.providerCreditId,
                 });
             } finally {
                 setProviderUsageRecoveryCreditPending(false);

@@ -90,10 +90,10 @@ describe('buildQuotaResetRows', () => {
             NOW,
             formatter,
         );
-        expect(rows.map((row) => row.consumableCreditId)).toEqual(['live']);
+        expect(rows.map((row) => row.consumableCreditId)).toEqual(['live', null]);
     });
 
-    it('disables Use for available credits that lack a provider credit id', () => {
+    it('preserves aggregate redemption when an available detail lacks a provider credit id', () => {
         const rows = buildQuotaResetRows(
             ConnectedServiceQuotaRecoveryCreditsV1Schema.parse({
                 kind: 'usage_limit_resets',
@@ -103,11 +103,15 @@ describe('buildQuotaResetRows', () => {
             NOW,
             formatter,
         );
-        expect(rows).toHaveLength(1);
-        expect(rows[0]).toMatchObject({ key: '0', consumableCreditId: null, canUse: false, isAggregate: false });
+        expect(rows).toEqual([expect.objectContaining({
+            key: 'aggregate-remainder',
+            consumableCreditId: null,
+            canUse: true,
+            isAggregate: true,
+        })]);
     });
 
-    it('returns no rows when every detailed credit is unavailable', () => {
+    it('keeps an aggregate affordance when every capped detail row is unavailable but total remains positive', () => {
         const rows = buildQuotaResetRows(
             ConnectedServiceQuotaRecoveryCreditsV1Schema.parse({
                 kind: 'usage_limit_resets',
@@ -117,6 +121,57 @@ describe('buildQuotaResetRows', () => {
             NOW,
             formatter,
         );
-        expect(rows).toEqual([]);
+        expect(rows).toEqual([expect.objectContaining({
+            key: 'aggregate-remainder',
+            consumableCreditId: null,
+            canUse: true,
+            isAggregate: true,
+        })]);
+    });
+
+    it('retains an aggregate remainder when the authoritative total exceeds capped detail rows', () => {
+        const rows = buildQuotaResetRows(
+            ConnectedServiceQuotaRecoveryCreditsV1Schema.parse({
+                kind: 'usage_limit_resets',
+                availableCount: 3,
+                nextExpiresAtMs: NOW + 4 * DAY,
+                credits: [
+                    { kind: 'usage_limit_reset', status: 'available', providerCreditId: 'credit-a', expiresAtMs: NOW + DAY },
+                ],
+            }),
+            NOW,
+            formatter,
+        );
+        expect(rows).toHaveLength(2);
+        expect(rows[0]).toMatchObject({ consumableCreditId: 'credit-a', isAggregate: false });
+        expect(rows[1]).toMatchObject({ key: 'aggregate-remainder', consumableCreditId: null, canUse: true, isAggregate: true });
+    });
+
+    it('caps individually actionable detail rows at the authoritative available count', () => {
+        const rows = buildQuotaResetRows(
+            ConnectedServiceQuotaRecoveryCreditsV1Schema.parse({
+                kind: 'usage_limit_resets',
+                availableCount: 1,
+                credits: [
+                    { kind: 'usage_limit_reset', status: 'available', providerCreditId: 'credit-a' },
+                    { kind: 'usage_limit_reset', status: 'available', providerCreditId: 'credit-b' },
+                ],
+            }), NOW, formatter,
+        );
+        expect(rows.map((row) => row.consumableCreditId)).toEqual(['credit-a']);
+    });
+
+    it('does not let missing-id details consume aggregate remainder capacity', () => {
+        const rows = buildQuotaResetRows(
+            ConnectedServiceQuotaRecoveryCreditsV1Schema.parse({
+                kind: 'usage_limit_resets',
+                availableCount: 2,
+                credits: [
+                    { kind: 'usage_limit_reset', status: 'available' },
+                    { kind: 'usage_limit_reset', status: 'available', providerCreditId: 'credit-a' },
+                ],
+            }), NOW, formatter,
+        );
+        expect(rows.map((row) => row.consumableCreditId)).toEqual(['credit-a', null]);
     });
 });

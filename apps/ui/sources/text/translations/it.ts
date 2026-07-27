@@ -3004,6 +3004,7 @@ export const it: TranslationStructure = {
     account: {
       refreshA11y: "Aggiorna utilizzo e limiti",
       usageCaption: "Utilizzo",
+      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
       resetsCaption: "Ripristini quota",
       usedDetail: ({ used, limit }: { used: string; limit: string }) => `${used}/${limit} usati`,
       capacity: ({ percent }: { percent: number }) => `${percent}% di capacità`,

@@ -336,22 +336,24 @@ describe('AccountBlock', () => {
         ).length).toBeGreaterThan(0);
     });
 
-    it('disables the reset Use action when the credit is not individually consumable', async () => {
-        quotaHookState.value = buildQuotaResult({
+    it('keeps aggregate Use available when a detail cannot be consumed individually', async () => {
+        const quota = buildQuotaResult({
             snapshot: buildSnapshot({
                 recoveryCredits: {
                     kind: 'usage_limit_resets',
                     availableCount: 1,
                     nextExpiresAtMs: NOW_MS + 3 * DAY_MS,
-                    // No providerCreditId -> row.canUse is false.
+                    // No providerCreditId: this detail must not suppress aggregate redemption.
                     credits: [{ kind: 'usage_limit_reset', status: 'available', expiresAtMs: NOW_MS + 3 * DAY_MS }],
                 },
             }),
         });
+        quotaHookState.value = quota;
 
         const screen = await renderAccountBlock();
 
-        expect(screen.findByTestId('acct:reset-use:0')?.props.disabled).toBe(true);
+        await screen.pressByTestIdAsync('acct:reset-use:aggregate-remainder');
+        expect(quota.consumeRecoveryCredit).toHaveBeenCalledWith(null);
     });
 
     it('persists collapse state to connectedServicesCollapsedItemKeysV1 (sparse deviation)', async () => {

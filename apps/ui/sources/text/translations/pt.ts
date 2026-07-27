@@ -2693,6 +2693,7 @@ export const pt: TranslationStructure = {
         hours: ({ hours }: { hours: number }) => `${hours}h`,
         minutes: ({ minutes }: { minutes: number }) => `${minutes}m`,
       },
+      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
     },
     account: {
       refreshA11y: "Atualizar uso e limites",

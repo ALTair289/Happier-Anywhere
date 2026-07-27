@@ -64,7 +64,11 @@ const {
   machineState: { machines: [{ id: 'machine-1', active: true }] },
   profileState: { profile: { connectedServicesV2: [] } },
   sessionState: { sessions: null as ReadonlyArray<any> | null },
-  consumeQuotaRecoveryCreditSpy: vi.fn(async () => ({ ok: true, snapshot: null })),
+  consumeQuotaRecoveryCreditSpy: vi.fn(async () => ({
+    ok: true,
+    snapshot: null,
+    receipt: { idempotencyKey: 'test-reset', status: 'consumed' },
+  })),
 }));
 vi.mock('@/sync/api/account/apiAccountEncryptionMode', () => ({
   fetchAccountEncryptionMode: fetchAccountEncryptionModeSpy,
@@ -263,7 +267,11 @@ describe('useConnectedServiceQuotaSnapshot', () => {
     getConnectedServiceQuotaSnapshotSealedSpy.mockResolvedValue(null);
     requestConnectedServiceQuotaSnapshotRefreshSpy.mockResolvedValue(true);
     requestConnectedServiceQuotaSnapshotRefreshV3Spy.mockResolvedValue(false);
-    consumeQuotaRecoveryCreditSpy.mockResolvedValue({ ok: true, snapshot: null });
+    consumeQuotaRecoveryCreditSpy.mockResolvedValue({
+      ok: true,
+      snapshot: null,
+      receipt: { idempotencyKey: 'test-reset', status: 'consumed' },
+    });
     machineState.machines = [{ id: 'machine-1', active: true }];
     profileState.profile = { connectedServicesV2: [] };
     sessionState.sessions = null;

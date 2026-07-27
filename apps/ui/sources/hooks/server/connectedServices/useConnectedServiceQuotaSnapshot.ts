@@ -12,6 +12,8 @@ import { useSetting } from '@/sync/store/hooks';
 import { useApplySettings } from '@/sync/store/settingsWriters';
 import { type ConnectedServiceId } from '@happier-dev/protocol';
 import { t } from '@/text';
+import { Modal } from '@/modal';
+import { resolveConnectedServiceQuotaRecoveryCreditReceiptNoticeKey } from '@/sync/domains/connectedServices/connectedServiceQuotaRecoveryCreditReceiptPresentation';
 
 import { useCredentialScopedAccountModeResolver } from './useCredentialScopedAccountModeResolver';
 import {
@@ -131,9 +133,7 @@ export function useConnectedServiceQuotaSnapshot(params: Readonly<{
         }
         if (!key || !loadContext) return;
         // Redeem the row's specific credit when provided, else the summary default.
-        const targetCreditId = providerCreditId !== undefined
-            ? providerCreditId
-            : recoveryCreditSummary.providerCreditId;
+        const targetCreditId = providerCreditId ?? null;
         setConsumeRecoveryCreditPendingTarget({ providerCreditId: targetCreditId });
         setActionError(null);
         try {
@@ -142,7 +142,12 @@ export function useConnectedServiceQuotaSnapshot(params: Readonly<{
                 machineId: recoveryCreditMachineId,
                 providerCreditId: targetCreditId,
             });
-            if (!result.ok) setActionError(result.error);
+            if (!result.ok) {
+                setActionError(result.error);
+            } else {
+                const noticeKey = resolveConnectedServiceQuotaRecoveryCreditReceiptNoticeKey(result.receipt.status);
+                if (noticeKey) await Modal.alert(t('common.info'), t(noticeKey));
+            }
         } finally {
             setConsumeRecoveryCreditPendingTarget(null);
         }

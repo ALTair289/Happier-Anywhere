@@ -12,7 +12,11 @@ import { connectedServiceQuotaRecoveryCreditConsume } from '@/sync/ops/connected
 import { sanitizeEndpointErrorMessage } from '@/sync/runtime/connectivity/sanitizeEndpointErrorMessage';
 import type { AuthCredentials } from '@/auth/storage/tokenStorage';
 import type { CredentialScopedAccountMode } from './useCredentialScopedAccountModeResolver';
-import type { ConnectedServiceId, ConnectedServiceQuotaSnapshotV1 } from '@happier-dev/protocol';
+import type {
+    ConnectedServiceId,
+    ConnectedServiceQuotaRecoveryCreditConsumeReceiptV1,
+    ConnectedServiceQuotaSnapshotV1,
+} from '@happier-dev/protocol';
 import { t } from '@/text';
 
 /**
@@ -50,8 +54,12 @@ export type QuotaRecoveryConsumeContext = QuotaSnapshotLoadContext & Readonly<{
 }>;
 
 export type QuotaRecoveryConsumeResult =
-    | Readonly<{ ok: true }>
-    | Readonly<{ ok: false; error: string }>;
+    | Readonly<{ ok: true; receipt: ConnectedServiceQuotaRecoveryCreditConsumeReceiptV1 }>
+    | Readonly<{
+        ok: false;
+        error: string;
+        receipt?: ConnectedServiceQuotaRecoveryCreditConsumeReceiptV1;
+    }>;
 
 type InternalEntry = {
     snapshot: ConnectedServiceQuotaSnapshotV1 | null;
@@ -364,9 +372,13 @@ export async function consumeQuotaRecoveryCredit(
             entry.snapshot = result.snapshot;
             entry.error = null;
             publish(key, entry);
-            return { ok: true };
+            return { ok: true, receipt: result.receipt };
         }
-        return { ok: false, error: result.error };
+        return {
+            ok: false,
+            error: result.error,
+            ...(result.receipt ? { receipt: result.receipt } : {}),
+        };
     } catch (error) {
         return { ok: false, error: sanitizeEndpointErrorMessage(error) ?? t('common.error') };
     }

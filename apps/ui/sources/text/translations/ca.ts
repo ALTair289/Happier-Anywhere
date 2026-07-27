@@ -2529,6 +2529,7 @@ export const ca: TranslationStructure = {
             usedDetail: ({ used, limit }: { used: string; limit: string }) => `${used}/${limit} usat`,
             capacity: ({ percent }: { percent: number }) => `${percent}% de capacitat`,
             memberEnabledLabel: 'Activat al Pool',
+            recoveryCreditNothingToReset: 'No exhausted usage window currently needs a reset.',
             poolsLabel: 'Pools',
             planEmailSubtitle: ({ plan, email }: { plan: string; email: string }) => `${plan} · ${email}`,
             poolsCount: ({ count }: { count: number }) => count === 1 ? '1 pool' : `${count} pools`,

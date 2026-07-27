@@ -2600,6 +2600,7 @@ export const pl: TranslationStructure = {
         hours: ({ hours }: { hours: number }) => `${hours}g`,
         minutes: ({ minutes }: { minutes: number }) => `${minutes}m`,
       },
+      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
     },
     account: {
       refreshA11y: "Odśwież użycie i limity",

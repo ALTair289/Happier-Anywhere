@@ -2493,6 +2493,7 @@ export const zhHans: TranslationStructure = {
         hours: ({ hours }: { hours: number }) => `${hours}小时`,
         minutes: ({ minutes }: { minutes: number }) => `${minutes}分钟`,
       },
+      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
     },
     account: {
       refreshA11y: "刷新用量和限额",
