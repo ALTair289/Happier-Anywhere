@@ -494,7 +494,7 @@ describe('AccountBlock', () => {
             });
             const radio = screen.findByTestId('acct:active-radio');
             expect(radio).toBeTruthy();
-            expect(radio?.props.accessibilityState?.selected).toBe(false);
+            expect(radio?.props.accessibilityState?.checked).toBe(false);
             radio?.props.onPress?.({});
             expect(onSetActive).toHaveBeenCalled();
         });
@@ -509,7 +509,7 @@ describe('AccountBlock', () => {
                 reorderGesture: await makeReorderGesture(),
             });
             const radio = screen.findByTestId('acct:active-radio');
-            expect(radio?.props.accessibilityState?.selected).toBe(true);
+            expect(radio?.props.accessibilityState?.checked).toBe(true);
             expect(radio?.props.accessibilityState?.disabled).toBe(true);
         });
 

@@ -397,7 +397,7 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                     }}
                     accessibilityRole="radio"
                     accessibilityState={{
-                        selected: props.isActive ?? false,
+                        checked: props.isActive ?? false,
                         disabled: (props.isActive ?? false) || props.onSetActive == null,
                     }}
                     accessibilityLabel={t(props.isActive
@@ -605,9 +605,11 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                     {!quota.canConsume ? (
                         // Explain WHY "Use" is inert (the reachable disabled cause is
                         // no resolvable target machine) instead of a silent dead button.
-                        <Eyebrow testID={`${testID}:resets-hint`} style={styles.resetsHint}>
-                            {t('connectedServices.quota.recoveryCreditMachineUnavailable')}
-                        </Eyebrow>
+                        <ItemGroupColumn span={2}>
+                            <Eyebrow testID={`${testID}:resets-hint`} style={styles.resetsHint}>
+                                {t('connectedServices.quota.recoveryCreditMachineUnavailable')}
+                            </Eyebrow>
+                        </ItemGroupColumn>
                     ) : null}
                     {quota.resetRows.map((row) => {
                         const rowPending = quota.consumeRecoveryCreditPendingTarget !== null
