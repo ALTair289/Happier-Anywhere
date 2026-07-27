@@ -89,11 +89,6 @@ function deriveSubAgentStatus(
 ): SessionSubagent['status'] {
     if (toolMessage.tool.state === 'completed') return 'succeeded';
     if (toolMessage.tool.state === 'error') return 'failed';
-    if (completionOnlyNativeSubagent) {
-        const input = asRecord(toolMessage.tool.input);
-        const acp = asRecord(input?._acp);
-        if (acp?.terminalWithoutResult === true) return 'cancelled';
-    }
     if (toolMessage.tool.state === 'running') return 'running';
     return 'unknown';
 }

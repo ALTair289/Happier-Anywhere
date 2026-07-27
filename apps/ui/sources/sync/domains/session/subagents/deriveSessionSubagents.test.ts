@@ -465,39 +465,6 @@ describe('deriveSessionSubagents', () => {
         expect(subagents[0]?.timestamps.startedAtMs).toBe(9_958);
     });
 
-    it('renders a completion-only native task tombstoned without a result as cancelled rather than running', async () => {
-        const subagents = await deriveSubagents({
-            session: { metadata: { flavor: 'cursor' } },
-            messages: [
-                createToolMessage({
-                    id: 'message_cursor_cancelled_task',
-                    name: 'SubAgent',
-                    state: 'running',
-                    input: {
-                        description: 'Cancelled native task',
-                        _acp: { terminalWithoutResult: true },
-                        _happier: {
-                            nativeSubagent: {
-                                v: 1,
-                                lifecycle: 'completion_only',
-                                type: 'browser',
-                            },
-                        },
-                    },
-                    toolExtras: { id: 'cancelled-cursor-task-id' },
-                }),
-            ],
-        });
-
-        expect(subagents).toEqual([
-            expect.objectContaining({
-                id: 'subagent_sidechain:cancelled-cursor-task-id',
-                status: 'cancelled',
-                transcript: expect.not.objectContaining({ sidechainId: expect.anything() }),
-            }),
-        ]);
-    });
-
     it('fails closed on oversized or out-of-contract native task display metadata from durable history', async () => {
         const oversized = 'x'.repeat(513);
         const subagents = await deriveSubagents({

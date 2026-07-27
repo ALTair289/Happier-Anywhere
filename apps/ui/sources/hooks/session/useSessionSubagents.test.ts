@@ -457,4 +457,71 @@ describe('useSessionSubagents', () => {
         expect(second.sidechainIds).toBe(first.sidechainIds);
         await hook.unmount();
     });
+
+    it('restores provider-native completion-only tasks after reload without registering a child sidechain or recipient', async () => {
+        const now = Date.now();
+        const createReloadedMessages = (): readonly any[] => [{
+            kind: 'tool-call',
+            id: 'message-cursor-task',
+            localId: 'stable-local-id',
+            createdAt: now,
+            tool: {
+                id: 'opaque-cursor-task-id',
+                name: 'SubAgent',
+                state: 'completed',
+                input: {
+                    operation: 'run',
+                    description: 'Inspect the integration',
+                    _happier: {
+                        v: 2,
+                        protocol: 'acp',
+                        provider: 'cursor',
+                        rawToolName: 'Task',
+                        canonicalToolName: 'SubAgent',
+                        nativeSubagent: {
+                            v: 1,
+                            lifecycle: 'completion_only',
+                            type: 'explore',
+                        },
+                    },
+                },
+                createdAt: now,
+                startedAt: now,
+                completedAt: now + 1,
+                description: null,
+            },
+            children: [],
+        }];
+        const hook = await renderHook((messages: readonly any[]) =>
+            useSessionSubagents({
+                sessionId: 'session-1',
+                session: {
+                    id: 'session-1',
+                    metadata: { flavor: 'cursor' },
+                } as any,
+                messages,
+                directSessionRuntime: directSessionRuntimeState,
+            }), {
+                initialProps: createReloadedMessages(),
+            });
+
+        expect(hook.getCurrent()).toMatchObject({
+            subagents: [{
+                id: 'subagent_sidechain:opaque-cursor-task-id',
+                status: 'succeeded',
+                transcript: {
+                    toolMessageRouteId: 'local:stable-local-id',
+                    toolId: 'opaque-cursor-task-id',
+                },
+                recipient: null,
+            }],
+            participantTargets: [],
+            sidechainIds: [],
+        });
+
+        await hook.rerender(createReloadedMessages());
+        expect(hook.getCurrent().subagents).toHaveLength(1);
+        expect(hook.getCurrent().sidechainIds).toEqual([]);
+        await hook.unmount();
+    });
 });
