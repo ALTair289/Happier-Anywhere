@@ -411,7 +411,7 @@ test('supervisor retries when the only target bootstrap fails after its initial 
         runProcess: async ({ command, args }) => {
           if (
             command === 'ssh'
-            && args.some((arg) => String(arg).includes('corepack yarn install'))
+            && args.some((arg) => String(arg).includes('remote_dependency_bootstrap.mjs'))
           ) {
             bootstrapAttempts += 1;
             if (bootstrapAttempts === 1) return { code: 1 };

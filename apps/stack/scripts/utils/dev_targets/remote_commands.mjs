@@ -40,13 +40,12 @@ export function buildRemoteBootstrapCommand(target) {
       target,
       [
         '$ErrorActionPreference = "Stop"',
-        '$ProgressPreference = "SilentlyContinue"',
         `Set-Location -LiteralPath ${powershellQuote(target.repoDir)}`,
         'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "Node.js is required on the remote target" }',
         'if (-not (Get-Command corepack -ErrorAction SilentlyContinue)) { throw "Corepack is required on the remote target" }',
-        '$installExitCode = 1',
-        'for ($attempt = 1; $attempt -le 3; $attempt++) { corepack yarn install --frozen-lockfile; $installExitCode = $LASTEXITCODE; if ($installExitCode -eq 0) { break }; if ($attempt -lt 3) { Start-Sleep -Seconds (2 * $attempt) } }',
-        'if ($installExitCode -ne 0) { exit $installExitCode }',
+        `$env:HAPPIER_STACK_PM_CACHE_BASE_DIR = Join-Path $env:USERPROFILE '.cache'`,
+        'node ./apps/stack/scripts/utils/dev_targets/remote_dependency_bootstrap.mjs',
+        'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
       ].join('; '),
     );
   }
@@ -57,7 +56,8 @@ export function buildRemoteBootstrapCommand(target) {
       `cd -- ${posixQuote(target.repoDir)}`,
       'command -v node >/dev/null || { echo "Node.js is required on the remote target" >&2; exit 127; }',
       'command -v corepack >/dev/null || { echo "Corepack is required on the remote target" >&2; exit 127; }',
-      'corepack yarn install --frozen-lockfile',
+      'export HAPPIER_STACK_PM_CACHE_BASE_DIR="$HOME/.cache"',
+      'node ./apps/stack/scripts/utils/dev_targets/remote_dependency_bootstrap.mjs',
     ].join('; '),
   );
 }
@@ -130,6 +130,7 @@ export function buildRemoteDaemonCommand(target, { serverUrl, activeServerId, st
         `$env:HAPPIER_HOME_DIR = ${powershellQuote(target.cliHomeDir)}`,
         `$env:HAPPIER_STACK_CLI_HOME_DIR = ${powershellQuote(target.cliHomeDir)}`,
         `$env:HAPPIER_STACK_STORAGE_DIR = ${powershellQuote(stackStorageDir)}`,
+        `$env:HAPPIER_STACK_PM_CACHE_BASE_DIR = Join-Path $env:USERPROFILE '.cache'`,
         `$env:HAPPIER_STACK_STACK = ${powershellQuote(stackName)}`,
         `$env:HAPPIER_ACTIVE_SERVER_ID = ${powershellQuote(activeServerId)}`,
         `$env:HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID = ${powershellQuote(activeServerId)}`,
@@ -149,6 +150,7 @@ export function buildRemoteDaemonCommand(target, { serverUrl, activeServerId, st
       `export HAPPIER_HOME_DIR=${posixQuote(target.cliHomeDir)}`,
       `export HAPPIER_STACK_CLI_HOME_DIR=${posixQuote(target.cliHomeDir)}`,
       `export HAPPIER_STACK_STORAGE_DIR=${posixQuote(stackStorageDir)}`,
+      'export HAPPIER_STACK_PM_CACHE_BASE_DIR="$HOME/.cache"',
       `export HAPPIER_STACK_STACK=${posixQuote(stackName)}`,
       `export HAPPIER_ACTIVE_SERVER_ID=${posixQuote(activeServerId)}`,
       `export HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID=${posixQuote(activeServerId)}`,

@@ -27,19 +27,30 @@ const windows = {
   remoteServerPort: 43105,
 };
 
-test('remote bootstrap installs target-local dependencies from synchronized source', () => {
+test('remote bootstrap reuses canonical dependency freshness instead of reinstalling on every Stack restart', () => {
   const posixCommand = buildRemoteBootstrapCommand(posix);
   assert.match(posixCommand, /^bash -lc /);
-  assert.match(posixCommand, /corepack yarn install --frozen-lockfile/);
+  assert.match(
+    posixCommand,
+    /node .*apps\/stack\/scripts\/utils\/dev_targets\/remote_dependency_bootstrap\.mjs/,
+  );
+  assert.match(posixCommand, /HAPPIER_STACK_PM_CACHE_BASE_DIR=.*HOME.*\/\.cache/);
+  assert.doesNotMatch(posixCommand, /corepack yarn install --frozen-lockfile/);
   assert.match(posixCommand, /Happier repo/);
 
   const windowsCommand = buildRemoteBootstrapCommand(windows);
   assert.match(windowsCommand, /^powershell\.exe -NoProfile -NonInteractive -EncodedCommand /);
   assert.doesNotMatch(windowsCommand, /test qa/);
   const decodedPowerShell = Buffer.from(windowsCommand.split(' ').at(-1), 'base64').toString('utf16le');
-  assert.match(decodedPowerShell, /ProgressPreference/);
-  assert.match(decodedPowerShell, /for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\)/);
-  assert.match(decodedPowerShell, /Start-Sleep/);
+  assert.match(
+    decodedPowerShell,
+    /node .*apps\/stack\/scripts\/utils\/dev_targets\/remote_dependency_bootstrap\.mjs/,
+  );
+  assert.match(
+    decodedPowerShell,
+    /\$env:HAPPIER_STACK_PM_CACHE_BASE_DIR = Join-Path \$env:USERPROFILE '\.cache'/,
+  );
+  assert.doesNotMatch(decodedPowerShell, /corepack yarn install --frozen-lockfile/);
 });
 
 test('remote doctor checks prerequisites without changing the target', () => {
@@ -70,6 +81,7 @@ test('remote daemon command reuses the Stack dev owner without the repo-local en
   assert.match(command, /HAPPIER_HOME_DIR/);
   assert.match(command, /HAPPIER_STACK_CLI_HOME_DIR/);
   assert.match(command, /HAPPIER_STACK_STORAGE_DIR/);
+  assert.match(command, /HAPPIER_STACK_PM_CACHE_BASE_DIR=.*HOME.*\/\.cache/);
   assert.match(command, /HAPPIER_STACK_STACK/);
   assert.match(command, /HAPPIER_ACTIVE_SERVER_ID/);
   assert.match(command, /HAPPIER_CLI_PKGROLL_TIMEOUT_MS=1800000/);
@@ -83,6 +95,10 @@ test('remote daemon command reuses the Stack dev owner without the repo-local en
   });
   const decodedPowerShell = Buffer.from(windowsCommand.split(' ').at(-1), 'base64').toString('utf16le');
   assert.match(decodedPowerShell, /\$env:HAPPIER_STACK_CLI_HOME_DIR/);
+  assert.match(
+    decodedPowerShell,
+    /\$env:HAPPIER_STACK_PM_CACHE_BASE_DIR = Join-Path \$env:USERPROFILE '\.cache'/,
+  );
   assert.match(decodedPowerShell, /\$env:HAPPIER_STACK_STACK = 'repo-local-dev'/);
   assert.match(decodedPowerShell, /HAPPIER_CLI_PKGROLL_TIMEOUT_MS=1800000/);
   assert.match(
