@@ -16,6 +16,26 @@ function buildDesktopMessage(params: Readonly<{
 }
 
 export function buildAppUpdateStatusModel(params: BuildAppUpdateStatusModelParams): AppUpdateStatusModel {
+    if (params.nativeUpdateRequired === true) {
+        const storeActionLabel = params.platformOs === 'ios'
+            ? params.t('updateBanner.tapToUpdateAppStore')
+            : params.t('updateBanner.tapToUpdatePlayStore');
+        return {
+            visible: true,
+            kind: 'native-store',
+            tone: 'warning',
+            iconName: 'download-outline',
+            label: params.t('updateBanner.nativeUpdateAvailable'),
+            message: params.nativeUpdateUrl
+                ? storeActionLabel
+                : params.t('updateBanner.nativeUpdateAvailable'),
+            actionLabel: params.nativeUpdateUrl
+                ? storeActionLabel
+                : params.t('common.loading'),
+            actionDisabled: !params.nativeUpdateUrl,
+        };
+    }
+
     if (params.nativeUpdateUrl) {
         const storeActionLabel = params.platformOs === 'ios'
             ? params.t('updateBanner.tapToUpdateAppStore')

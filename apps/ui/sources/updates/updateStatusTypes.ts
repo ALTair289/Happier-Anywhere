@@ -30,6 +30,8 @@ export type AppUpdateStatusModel =
 export type BuildAppUpdateStatusModelParams = Readonly<{
     platformOs: string;
     nativeUpdateUrl: string | null;
+    nativeUpdateRequired?: boolean;
+    nativeMinimumAppVersion?: string | null;
     desktop: Readonly<{
         status: DesktopUpdateStatus;
         availableVersion: string | null;

@@ -5,7 +5,7 @@ import { useRouter } from 'expo-router';
 import { useDesktopUpdater } from '@/desktop/updates/useDesktopUpdater';
 import { useChangelog } from '@/hooks/inbox/useChangelog';
 import { useUpdates } from '@/hooks/inbox/useUpdates';
-import { useNativeUpdate } from '@/hooks/ui/useNativeUpdate';
+import { useNativeUpdateStatus } from '@/hooks/ui/useNativeUpdate';
 import {
     useReleaseNotesLauncher,
     useReleaseNotesUnread,
@@ -16,7 +16,8 @@ import { buildAppUpdateStatusModel } from './buildAppUpdateStatusModel';
 
 export function useAppUpdateStatus() {
     const router = useRouter();
-    const nativeUpdateUrl = useNativeUpdate();
+    const nativeUpdateStatus = useNativeUpdateStatus();
+    const nativeUpdateUrl = nativeUpdateStatus?.updateUrl ?? null;
     const desktop = useDesktopUpdater();
     const ota = useUpdates();
     const changelog = useChangelog();
@@ -27,6 +28,8 @@ export function useAppUpdateStatus() {
         () => buildAppUpdateStatusModel({
             platformOs: Platform.OS,
             nativeUpdateUrl,
+            nativeUpdateRequired: nativeUpdateStatus?.required === true,
+            nativeMinimumAppVersion: nativeUpdateStatus?.minimumAppVersion ?? null,
             desktop: {
                 status: desktop.status,
                 availableVersion: desktop.availableVersion,
@@ -49,6 +52,8 @@ export function useAppUpdateStatus() {
             desktop.error,
             desktop.status,
             nativeUpdateUrl,
+            nativeUpdateStatus?.required,
+            nativeUpdateStatus?.minimumAppVersion,
             ota.isUpdatePending,
             releaseNotes.hasUnread,
         ],

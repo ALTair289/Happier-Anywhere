@@ -9,6 +9,8 @@ import type {
 
 const nativeUpdateState = vi.hoisted(() => ({
     updateUrl: null as string | null,
+    required: false,
+    minimumAppVersion: null as string | null,
 }));
 const desktopUpdateState = vi.hoisted(() => ({
     status: 'idle' as 'idle' | 'checking' | 'available' | 'installing' | 'error' | 'dismissed' | 'upToDate',
@@ -100,6 +102,14 @@ vi.mock('@/changelog/releaseNotes', () => ({
 
 vi.mock('@/hooks/ui/useNativeUpdate', () => ({
     useNativeUpdate: () => nativeUpdateState.updateUrl,
+    useNativeUpdateStatus: () => nativeUpdateState.required || nativeUpdateState.updateUrl
+        ? {
+            available: true,
+            ...(nativeUpdateState.updateUrl ? { updateUrl: nativeUpdateState.updateUrl } : {}),
+            ...(nativeUpdateState.required ? { required: true } : {}),
+            ...(nativeUpdateState.minimumAppVersion ? { minimumAppVersion: nativeUpdateState.minimumAppVersion } : {}),
+        }
+        : null,
 }));
 
 vi.mock('@/text', async () => {
@@ -135,6 +145,8 @@ describe('useAppUpdateStatus', () => {
     beforeEach(() => {
         reactNativeState.os = 'web';
         nativeUpdateState.updateUrl = null;
+        nativeUpdateState.required = false;
+        nativeUpdateState.minimumAppVersion = null;
         desktopUpdateState.status = 'idle';
         desktopUpdateState.availableVersion = null;
         desktopUpdateState.error = null;
@@ -213,6 +225,27 @@ describe('useAppUpdateStatus', () => {
         expect(linkingState.canOpenURL).toHaveBeenCalledWith('https://apps.apple.com/app/id123');
         expect(linkingState.openURL).toHaveBeenCalledWith('https://apps.apple.com/app/id123');
 
+        await hook.unmount();
+    });
+
+    it('keeps a required update visible and non-dismissible without a safe URL', async () => {
+        nativeUpdateState.required = true;
+        nativeUpdateState.minimumAppVersion = '0.3.0';
+
+        const { useAppUpdateStatus } = await import('./useAppUpdateStatus');
+        const hook = await renderHook(() => useAppUpdateStatus());
+        await flushHookEffects({ cycles: 1, turns: 2 });
+
+        const model = expectVisibleModel(hook.getCurrent().model);
+        expect(model).toMatchObject({
+            kind: 'native-store',
+            tone: 'warning',
+            actionDisabled: true,
+        });
+        expect(model.dismissLabel).toBeUndefined();
+
+        await hook.getCurrent().dismiss();
+        expect(hook.getCurrent().model.visible).toBe(true);
         await hook.unmount();
     });
 
