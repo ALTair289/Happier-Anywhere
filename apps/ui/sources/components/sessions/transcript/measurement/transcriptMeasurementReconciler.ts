@@ -3,6 +3,7 @@ import {
     isTranscriptItemHeightSignatureStable,
     type TranscriptItemHeightCache,
     type TranscriptItemHeightCacheOptions,
+    type TranscriptItemHeightRowState,
     type TranscriptItemHeightValiditySignature,
 } from './transcriptItemHeightCache';
 
@@ -92,7 +93,30 @@ export type TranscriptMeasurementReconcilerOptions = Readonly<{
 type FloorState = Readonly<{
     /** Last-measured monotonic floor for this exact item+geometry, or null while reset-pending. */
     minHeight: number | null;
+    /** The content shape the floor was recorded from. Scopes the floor for shrink-capable rows. */
+    structuralKey: string;
 }>;
+
+/**
+ * Row states whose content only ever GROWS within one shape. Their monotonic floor must survive
+ * `structuralKey` churn: it is the thing that stops a mid-stream frame from under-reserving.
+ *
+ * Everything else — `stable`, `pending-action`, `tool-progress` — is SHRINK-CAPABLE: a draining
+ * pending queue, a granted permission prompt collapsing into a running row, a shrinking tool preview.
+ * For those the floor is only valid for the shape that produced it (see {@link isFloorShapeValid}).
+ *
+ * `thinking` is growing and NOT `streaming`: `resolveMessageRowState` returns 'thinking' BEFORE any
+ * streaming branch, so a genuinely growing thinking block reports 'thinking'. A settled thinking
+ * block must therefore stop reporting 'thinking' at the assignment owner, not be special-cased here.
+ */
+export const TRANSCRIPT_GROWING_ROW_STATES: ReadonlySet<TranscriptItemHeightRowState> = new Set<TranscriptItemHeightRowState>([
+    'streaming',
+    'thinking',
+]);
+
+function isGrowingRowState(rowState: TranscriptItemHeightRowState): boolean {
+    return TRANSCRIPT_GROWING_ROW_STATES.has(rowState);
+}
 
 function isValidHeight(value: number): boolean {
     return Number.isFinite(value) && value > 0;
@@ -100,6 +124,23 @@ function isValidHeight(value: number): boolean {
 
 function buildFloorKey(signature: TranscriptItemHeightValiditySignature): string {
     return `${signature.itemId.length}:${signature.itemId}|${signature.widthBucket}|${signature.fontScaleKey}`;
+}
+
+/**
+ * The floor key is deliberately geometry-scoped (`itemId|widthBucket|fontScaleKey`) and carries no
+ * `structuralKey`, so one entry survives content churn. For a GROWING row that is the whole point.
+ * For a shrink-capable row it is how the tallest historical height outlived its content: the reset
+ * trigger cannot run at all on a fresh mount (`TranscriptRowShell` initialises both signature refs
+ * to the current signature, so there is no previous signature to diff), and a viewport resize plus
+ * return re-selects the same warm key. Serving and carrying over are therefore both gated on the
+ * shape the floor was recorded from.
+ */
+function isFloorShapeValid(
+    floor: FloorState,
+    signature: TranscriptItemHeightValiditySignature,
+): boolean {
+    if (isGrowingRowState(signature.rowState)) return true;
+    return floor.structuralKey === signature.structuralKey;
 }
 
 /**
@@ -135,14 +176,19 @@ function hasStructuralDelta(
  * whole-list cache mid-stream drops the pin); this one suppresses only when BOTH sides stream — a
  * streaming row's own frames keep their growing floor, but a streaming→stable finalize re-seeds.
  *
- * It additionally re-seeds on a SETTLED-row content change: a `structuralKey` delta while BOTH sides
- * are `stable` is shrink-capable. The motivating case is a grouped tool-calls HEADER, whose height
- * drops (≈36→33px) when its status goes running→completed — the status lives in `structuralKey`,
- * which the rowState/expansion/width/font checks all miss, so the per-item floor (keyed without
- * `structuralKey`) keeps serving the taller running-state height and the `minHeight` self-fulfills
- * a persistent gap. Growing rows (`streaming`/`tool-progress`) are excluded by the both-`stable`
- * guard: their `structuralKey` churns every frame and the monotonic floor is exactly what prevents
- * append overlap there.
+ * It additionally re-seeds on a SHRINK-CAPABLE content change: a `structuralKey` delta while NEITHER
+ * side is growing ({@link TRANSCRIPT_GROWING_ROW_STATES}). The motivating cases are a grouped
+ * tool-calls HEADER whose height drops (≈36→33px) when its status goes running→completed, a pending
+ * queue draining 3→1, and a `permission_pending`→`running` collapse — which keeps the SAME
+ * `tool-progress` rowState, so every rowState/expansion/width/font check misses it. In all of them
+ * the status lives in `structuralKey` while the per-item floor is keyed WITHOUT it, so the floor
+ * keeps serving the taller historical height and the `minHeight` self-fulfils a persistent gap.
+ *
+ * This clause was previously gated on `stable && stable`, which excluded `tool-progress` and
+ * `pending-action` on the premise that they grow like a stream. That premise is refuted: a
+ * `minHeight` is INERT for a growing row — it binds only BELOW natural height — so the floor never
+ * protected growth; it only stranded shrinks. Only `streaming` and `thinking` are growing, and for
+ * those the monotonic floor still absorbs transient mid-frame shortfalls.
  */
 export function isStructuralSignatureDelta(
     previous: TranscriptItemHeightValiditySignature,
@@ -155,8 +201,8 @@ export function isStructuralSignatureDelta(
     if (previous.widthBucket !== next.widthBucket) return true;
     if (previous.fontScaleKey !== next.fontScaleKey) return true;
     if (
-        previous.rowState === 'stable'
-        && next.rowState === 'stable'
+        !isGrowingRowState(previous.rowState)
+        && !isGrowingRowState(next.rowState)
         && previous.structuralKey !== next.structuralKey
     ) {
         return true;
@@ -180,11 +226,16 @@ export function createTranscriptMeasurementReconciler(
         signature: TranscriptItemHeightValiditySignature,
     ): TranscriptRowHeightReservation | undefined {
         const floor = floorsByKey.get(buildFloorKey(signature));
-        if (floor !== undefined && floor.minHeight !== null && isValidHeight(floor.minHeight)) {
+        if (
+            floor !== undefined
+            && floor.minHeight !== null
+            && isValidHeight(floor.minHeight)
+            && isFloorShapeValid(floor, signature)
+        ) {
             return { kind: 'floor', minHeight: floor.minHeight };
         }
-        // Never-measured (or reset-pending) row: reserve NOTHING → FlashList's natural onLayout
-        // measures the row's real height. (No per-type median seed — see the module doc.)
+        // Never-measured, reset-pending, or shape-stale row: reserve NOTHING → FlashList's natural
+        // onLayout measures the row's real height. (No per-type median seed — see the module doc.)
         return undefined;
     }
 
@@ -216,21 +267,29 @@ export function createTranscriptMeasurementReconciler(
                 cache.set(signature, { heightPx: measured });
             }
 
-            // Floor path: monotonic per item+geometry. A reset-pending (null) floor re-seeds from
-            // this measurement (taking the new, possibly smaller, height); otherwise it only grows.
+            // Floor path: monotonic per item+geometry, WITHIN one content shape. A reset-pending
+            // (null) floor, or a floor recorded from a different shape on a shrink-capable row,
+            // re-seeds from this measurement (taking the new, possibly smaller, height); otherwise it
+            // only grows. Carrying the peak across a shrink-capable shape change is what let the
+            // tallest historical height leak back in after the row had already re-measured shorter.
             const floorKey = buildFloorKey(signature);
             const existing = floorsByKey.get(floorKey);
-            const nextFloor = existing === undefined || existing.minHeight === null
-                ? measured
-                : Math.max(existing.minHeight, measured);
-            floorsByKey.set(floorKey, { minHeight: nextFloor });
+            const carriedPeak = existing !== undefined
+                && existing.minHeight !== null
+                && isFloorShapeValid(existing, signature)
+                ? existing.minHeight
+                : null;
+            floorsByKey.set(floorKey, {
+                minHeight: carriedPeak === null ? measured : Math.max(carriedPeak, measured),
+                structuralKey: signature.structuralKey,
+            });
         },
 
         resetReservationForStructuralChange(input) {
             const floorKey = buildFloorKey(input.signature);
             // Mark reset-pending (null) rather than deleting: a known-but-reset item re-seeds its
             // floor from the next real onLayout (so a collapse never reserves the pre-collapse height).
-            floorsByKey.set(floorKey, { minHeight: null });
+            floorsByKey.set(floorKey, { minHeight: null, structuralKey: input.signature.structuralKey });
         },
 
         requestGlobalLayoutInvalidation(input) {
