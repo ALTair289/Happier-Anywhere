@@ -20,7 +20,6 @@ import { useMultiClick } from '@/hooks/ui/useMultiClick';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/ui/layout/layout';
 import { useHappyAction } from '@/hooks/ui/useHappyAction';
-import { disconnectVendorToken } from '@/sync/api/account/apiVendorTokens';
 import { getDisplayName, getAvatarUrl, getBio } from '@/sync/domains/profiles/profile';
 import { Avatar } from '@/components/ui/avatar/Avatar';
 import { t } from '@/text';
@@ -218,24 +217,6 @@ export const SettingsView = React.memo(function SettingsView() {
         }
     });
 
-    // Anthropic disconnection
-      const [disconnectingAnthropic, handleDisconnectAnthropic] = useHappyAction(async () => {
-          const serviceName = anthropicAgentCore.uiConnectedService.label;
-          const confirmed = await Modal.confirm(
-              t('modals.disconnectService', { service: serviceName }),
-            t('modals.disconnectServiceConfirm', { service: serviceName }),
-            { confirmText: t('modals.disconnect'), destructive: true }
-          );
-          if (confirmed) {
-              if (!auth.credentials) {
-                  Modal.alert(t('common.error'), t('errors.unknownError'), [{ text: t('common.ok') }]);
-                  return;
-              }
-              await disconnectVendorToken(auth.credentials, 'anthropic');
-              await sync.refreshProfile();
-          }
-      });
-
     const profileAndAccountSection = React.useMemo(() => (
         <ItemGroup title={t('settings.profileAndAccount')}>
             <Item
@@ -428,9 +409,13 @@ export const SettingsView = React.memo(function SettingsView() {
                             icon={
                                 <AgentIcon agentId={anthropicAgentId} size={29} />
                             }
-                            onPress={isAnthropicConnected ? handleDisconnectAnthropic : connectAnthropic}
-                            loading={connectingAnthropic || disconnectingAnthropic}
-                            showChevron={false}
+                            onPress={isAnthropicConnected
+                                ? () => pushRoute({
+                                    pathname: '/settings/connected-services/[serviceId]',
+                                    params: { serviceId: 'anthropic' },
+                                })
+                                : connectAnthropic}
+                            loading={connectingAnthropic}
                         />
                     </ItemGroup>
                 </>

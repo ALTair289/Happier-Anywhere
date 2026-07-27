@@ -9,6 +9,8 @@ import { installSettingsViewCommonModuleMocks } from './settingsViewTestHelpers'
 
 const shared = vi.hoisted(() => ({
     routerPushSpy: vi.fn(),
+    devModeEnabled: false,
+    connectedServices: [] as string[],
 }));
 
 installSettingsViewCommonModuleMocks({
@@ -22,7 +24,7 @@ installSettingsViewCommonModuleMocks({
         const { createStorageModuleStub } = await import('@/dev/testkit/mocks/storage');
         return createStorageModuleStub({
             useEntitlement: () => false,
-            useLocalSettingMutable: () => [false, vi.fn()],
+            useLocalSettingMutable: () => [shared.devModeEnabled, vi.fn()],
             useSetting: (key: string) => {
                 if (key === 'serverSelectionGroups') return [];
                 if (key === 'serverSelectionActiveTargetKind') return null;
@@ -36,7 +38,7 @@ installSettingsViewCommonModuleMocks({
             useAllMachines: () => [],
             useMachineListByServerId: () => ({}),
             useMachineListStatusByServerId: () => ({}),
-            useProfile: () => ({ id: 'prof_1', firstName: '', connectedServices: [] }),
+            useProfile: () => ({ id: 'prof_1', firstName: '', connectedServices: shared.connectedServices }),
         });
     },
 });
@@ -112,6 +114,8 @@ describe('SettingsView keyboard shortcuts entry', () => {
     afterEach(() => {
         standardCleanup();
         shared.routerPushSpy.mockClear();
+        shared.devModeEnabled = false;
+        shared.connectedServices = [];
     });
 
     it('routes to keyboard shortcut settings from the general settings group', async () => {
@@ -123,5 +127,20 @@ describe('SettingsView keyboard shortcuts entry', () => {
         screen.pressRow('settings-keyboard-shortcuts-row');
 
         expect(shared.routerPushSpy).toHaveBeenCalledWith('/settings/keyboard');
+    });
+
+    it('routes a hidden connected projection to the canonical service detail owner', async () => {
+        shared.devModeEnabled = true;
+        shared.connectedServices = ['anthropic'];
+        const { SettingsView } = await import('./SettingsView');
+        const screen = await renderSettingsView(<SettingsView />);
+
+        expect(screen.findRowByTitle('Anthropic')).not.toBeNull();
+        await screen.pressRowByTitle('Anthropic');
+
+        expect(shared.routerPushSpy).toHaveBeenCalledWith({
+            pathname: '/settings/connected-services/[serviceId]',
+            params: { serviceId: 'anthropic' },
+        });
     });
 });
