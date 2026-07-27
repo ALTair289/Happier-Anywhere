@@ -5,7 +5,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DirectSessionTranscriptDeltaEphemeral } from '@happier-dev/protocol';
 
-import { bindApiSessionSocketMock, createApiSessionSocketStub } from '@/testkit/backends/apiSessionSocketHarness';
+import {
+  bindApiSessionSocketMock,
+  createApiSessionSocketStub,
+} from '@/testkit/backends/apiSessionSocketHarness';
 import { logger } from '@/ui/logger';
 import type { Machine } from './types';
 
@@ -321,7 +324,7 @@ describe('ApiMachineClient transports', () => {
     }));
   });
 
-  it('keeps startup cleanup session-end queued when HTTP delivery fails', async () => {
+  it('keeps exact daemon terminal custody queued in the suffixed journal when delivery fails', async () => {
     const tempServerDir = await mkdtemp(join(tmpdir(), 'happier-machine-session-end-'));
     configurationMock.activeServerDir = tempServerDir;
     mockAxiosPost.mockRejectedValue(new Error('server offline'));
@@ -340,26 +343,25 @@ describe('ApiMachineClient transports', () => {
     const client = new mod.ApiMachineClient('fake-token', machine);
 
     try {
-      const durableClient: {
-        enqueueSessionEndMutation?: (payload: { sid: string; time: number; exit?: unknown }) => void;
-      } = client;
-
-      expect(durableClient.enqueueSessionEndMutation).toBeTypeOf('function');
-      durableClient.enqueueSessionEndMutation?.({
-        sid: 'session-1',
-        time: 1234,
-        exit: { observedBy: 'daemon', reason: 'process-missing' },
+      await client.enqueueDaemonTerminalExactTurnEnd({
+        v: 1,
+        sessionId: 'session-1',
+        mutationId: 'daemon-observed-exit:exact-1',
+        action: 'end_session',
+        turnId: 'turn-1',
+        observedAt: 1234,
       });
 
       await vi.waitFor(async () => {
         const parsed = JSON.parse(
-          await readFile(join(tempServerDir, 'session-mutations', 'session-session-1.json'), 'utf8'),
-        ) as { mutations?: Array<{ kind?: string; payload?: { sessionId?: string; observedAt?: number } }> };
+          await readFile(join(tempServerDir, 'session-mutations', 'session-session-1.daemon-terminal.json'), 'utf8'),
+        ) as { mutations?: Array<{ kind?: string; payload?: { sessionId?: string; turnId?: string; observedAt?: number } }> };
         expect(parsed.mutations).toEqual([
           expect.objectContaining({
-            kind: 'session_end',
+            kind: 'session_turn',
             payload: expect.objectContaining({
               sessionId: 'session-1',
+              turnId: 'turn-1',
               observedAt: 1234,
             }),
           }),
@@ -371,7 +373,71 @@ describe('ApiMachineClient transports', () => {
     }
   });
 
-  it('routes daemon turn-settlement and session-end for one session through a single shared durable queue', async () => {
+  it('shares a recovered daemon terminal handle with exits observed during startup recovery', async () => {
+    const tempServerDir = await mkdtemp(join(tmpdir(), 'happier-machine-session-recovery-race-'));
+    configurationMock.activeServerDir = tempServerDir;
+    const mod = await import('./apiMachine');
+    const machine: Machine = {
+      id: 'test-machine',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'legacy',
+      metadata: null,
+      metadataVersion: 0,
+      daemonState: null,
+      daemonStateVersion: 0,
+    };
+    const seedClient = new mod.ApiMachineClient('fake-token', machine);
+    mockAxiosPost.mockRejectedValue(new Error('seed offline'));
+    await seedClient.enqueueDaemonTerminalExactTurnEnd({
+      v: 1,
+      sessionId: 'session-race',
+      mutationId: 'daemon-observed-exit:seed',
+      action: 'end_session',
+      turnId: 'turn-seed',
+      observedAt: 100,
+    });
+    await seedClient.shutdown();
+
+    mockAxiosPost.mockReset();
+    let rejectRecovery!: (error: Error) => void;
+    let rejectObservedExit!: (error: Error) => void;
+    const observedExitOffline = new Promise<never>((_, reject) => { rejectObservedExit = reject; });
+    mockAxiosPost
+      .mockImplementationOnce(async () => await new Promise((_, reject) => { rejectRecovery = reject; }))
+      .mockImplementation(async () => await observedExitOffline);
+    const client = new mod.ApiMachineClient('fake-token', machine);
+
+    try {
+      const recovery = client.recoverDaemonTerminalSessionMutationJournals();
+      await vi.waitFor(() => expect(mockAxiosPost).toHaveBeenCalledTimes(1));
+      await client.enqueueDaemonTerminalExactTurnEnd({
+        v: 1,
+        sessionId: 'session-race',
+        mutationId: 'daemon-observed-exit:during-recovery',
+        action: 'end_session',
+        turnId: 'turn-during-recovery',
+        observedAt: 200,
+      });
+      rejectRecovery(new Error('recovery offline'));
+      await recovery;
+
+      const parsed = JSON.parse(
+        await readFile(join(tempServerDir, 'session-mutations', 'session-session-race.daemon-terminal.json'), 'utf8'),
+      ) as { mutations?: Array<{ mutationId?: string }> };
+      expect(parsed.mutations?.map((mutation) => mutation.mutationId).sort()).toEqual([
+        'daemon-observed-exit:during-recovery',
+        'daemon-observed-exit:seed',
+      ]);
+    } finally {
+      const shutdown = client.shutdown();
+      await vi.waitFor(() => expect(mockAxiosPost.mock.calls.length).toBeGreaterThanOrEqual(2));
+      rejectObservedExit(new Error('observed exit offline'));
+      await shutdown;
+      await rm(tempServerDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not expose daemon full-end or broad no-turn settlement producers', async () => {
     const tempServerDir = await mkdtemp(join(tmpdir(), 'happier-machine-single-owner-'));
     configurationMock.activeServerDir = tempServerDir;
     mockAxiosPost.mockRejectedValue(new Error('server offline'));
@@ -390,23 +456,9 @@ describe('ApiMachineClient transports', () => {
     const client = new mod.ApiMachineClient('fake-token', machine);
 
     try {
-      // Two distinct daemon publish paths (Lane N1 turn-settlement + full session-end) for the same
-      // session must land in ONE durable outbox queue — no second instance, no rival file.
-      client.enqueueSessionTurnSettlementMutation({ sid: 'session-solo', time: 1000 });
-      client.enqueueSessionEndMutation({
-        sid: 'session-solo',
-        time: 2000,
-        exit: { observedBy: 'daemon', reason: 'process-missing' },
-      });
-
-      await vi.waitFor(async () => {
-        const parsed = JSON.parse(
-          await readFile(join(tempServerDir, 'session-mutations', 'session-session-solo.json'), 'utf8'),
-        ) as { mutations?: Array<{ kind?: string }> };
-        const kinds = (parsed.mutations ?? []).map((mutation) => mutation.kind);
-        // One queue, correct order: settlement turn precedes the session-end, session-end not superseded.
-        expect(kinds).toEqual(['session_turn', 'session_end']);
-      });
+      expect('enqueueSessionEndMutation' in client).toBe(false);
+      expect('enqueueSessionTurnSettlementMutation' in client).toBe(false);
+      expect(client.enqueueDaemonTerminalExactTurnEnd).toBeTypeOf('function');
     } finally {
       await client.shutdown();
       await rm(tempServerDir, { recursive: true, force: true });
@@ -460,4 +512,5 @@ describe('ApiMachineClient transports', () => {
       nextCursor: 'cursor-2',
     }));
   });
+
 });

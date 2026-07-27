@@ -5,8 +5,11 @@ import { SentFromSchema } from '@happier-dev/protocol'
 import type { ExecutionRunPublicState } from '@happier-dev/protocol'
 import type {
   AcpConfigOptionOverridesV1,
+  AcceptedPendingSettlementRequestV1,
+  AcceptedPendingSettlementResponseV1,
   AcpSessionModeOverrideV1,
   ConnectedServiceBindingsV1,
+  ConnectedServiceId,
   ConnectedServiceMaterializationIdentityV1,
   DirectSessionsSource,
   ModelOverrideV1,
@@ -14,12 +17,15 @@ import type {
   PrimaryTurnStatusV1,
   ContentPublicKeyFingerprint,
   SessionRollbackRangesV1,
-  SessionRuntimeActivitySourceClassV1,
   SessionUsageLimitRecoveryV1,
   SessionTerminalMetadata,
   SocketRpcAuthorizationContext,
   SessionMessageRole,
-  SessionContinuationRecoveryV1,
+  ProviderSessionInfoV1,
+  SessionRuntimeActivityState,
+  SessionTranscriptObservationV1,
+  SessionTranscriptObservationAckV1,
+  SessionTranscriptObservationCapabilityAckV1,
 } from '@happier-dev/protocol'
 import {
   ContentPublicKeyFingerprintSchema,
@@ -172,6 +178,18 @@ export interface ServerToClientEvents {
  * Socket events from client to server
  */
 export interface ClientToServerEvents {
+  'pending-delivery-accepted-v1': (
+    data: AcceptedPendingSettlementRequestV1,
+    cb?: (answer: AcceptedPendingSettlementResponseV1) => void,
+  ) => void
+  'transcript-observation-capability-v1': (
+    data: { v: 1; sessionId: string },
+    cb?: (answer: SessionTranscriptObservationCapabilityAckV1) => void,
+  ) => void
+  'transcript-observation-v1': (
+    data: SessionTranscriptObservationV1,
+    cb?: (answer: SessionTranscriptObservationAckV1) => void,
+  ) => void
   message: (
     data: { sid: string, message: string | SessionMessageContent, localId?: string | null, sidechainId?: string | null, echoToSender?: boolean, messageRole?: SessionMessageRole },
     cb?: (answer: MessageAckResponse) => void
@@ -181,13 +199,18 @@ export interface ClientToServerEvents {
     time: number;
     thinking: boolean;
     mode?: 'local' | 'remote';
+    latestTurnStatus?: PrimaryTurnStatusV1;
+    latestTurnStatusObservedAt?: number;
   }) => void
   'session-end': (data: { sid: string, time: number }, cb?: (answer: SessionEndAckResponse) => void) => void,
   'pending-materialize-next': (data: {
     sid: string;
     pendingVersion?: number;
+    expectedPendingVersion?: number;
+    expectedRuntimeActivityRevision?: number;
     deliveryState?: 'provider';
     deliveryTiming?: 'after_foreground_ready' | 'after_runtime_idle';
+    foregroundState?: 'ready' | 'active_steerable' | 'active_unsteerable';
   }, cb?: (answer: {
     ok: boolean;
     didMaterialize?: boolean;
@@ -195,7 +218,7 @@ export interface ClientToServerEvents {
 	    pendingCount?: number;
 	    pendingBlockedCount?: number;
 	    pendingVersion?: number;
-	    deferredReason?: 'runtime_activity_active';
+	    deferredReason?: 'waiting_for_runtime_activity' | 'runtime_activity_unknown' | 'pending_version_mismatch' | 'waiting_for_predecessor' | 'waiting_for_foreground_turn';
 	    deliveryState?: {
 	      mode: 'provider';
 	      unresolved: boolean;
@@ -255,7 +278,7 @@ export interface ClientToServerEvents {
     },
   }, cb: (answer: UpdateStateAckResponse) => void) => void,
   'update-read-cursor': (data: UpdateReadCursorPayload, cb: (answer: UpdateReadCursorAckResponse) => void) => void,
-  'ping': (callback: () => void) => void
+  'ping': (callback: (response: unknown) => void) => void
   [SOCKET_RPC_EVENTS.REGISTER]: (data: { method: string }) => void
   [SOCKET_RPC_EVENTS.UNREGISTER]: (data: { method: string }) => void
   [SOCKET_RPC_EVENTS.CALL]: (data: SocketRpcCallPayload, callback: (response: SocketRpcCallResponse) => void) => void
@@ -289,10 +312,10 @@ type SessionSharedFields = Readonly<{
 	  pendingVersion?: number;
 	  latestTurnStatus?: PrimaryTurnStatusV1 | null;
 	  latestTurnStatusObservedAt?: number | null;
+	  runtimeActivityState?: SessionRuntimeActivityState | null;
 	  runtimeActivityActiveCount?: number;
 	  runtimeActivityObservedAt?: number | null;
-	  runtimeActivityExpiresAt?: number | null;
-	  runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
+	  runtimeActivityRevision?: number;
 	}>;
 
 export type Session =
@@ -308,7 +331,8 @@ export const MachineMetadataSchema = z.object({
   happyCliVersion: z.string(),
   homeDir: z.string(),
   happyHomeDir: z.string(),
-  happyLibDir: z.string()
+  happyLibDir: z.string(),
+  daemonTerminalSessionAttachSupported: z.boolean().optional(),
 })
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>
@@ -405,6 +429,7 @@ export type MessageMeta = z.infer<typeof MessageMetaSchema>
  * API response types
  */
 export const CreateSessionResponseSchema = z.object({
+  resolution: z.enum(['created', 'existing']).optional(),
   session: z.object({
     id: z.string(),
     tag: z.string(),
@@ -518,6 +543,15 @@ export type Metadata = {
   claudeTranscriptPath?: string | null, // Claude Code transcript path (hooks)
   claudeLastCheckpointId?: string | null, // Claude SDK file checkpoint UUID (remote)
   claudeLastAssistantUuid?: string | null, // Claude SDK assistant message UUID (resume anchoring)
+  claudeSubscriptionAccessTokenRefreshV1?: {
+    v: 1,
+    mode: 'daemon_callback' | 'unavailable',
+  },
+  connectedServiceAccessTokenRefreshV1?: {
+    v: 1,
+    mode: 'daemon_callback' | 'unavailable',
+    serviceIds: ConnectedServiceId[],
+  },
   codexSessionId?: string, // Codex session/conversation ID (uuid)
   codexBackendMode?: 'mcp' | 'acp' | 'appServer',
   agentRuntimeDescriptorV1?: unknown,
@@ -569,6 +603,7 @@ export type Metadata = {
     v: 1,
     provider: string
   },
+  providerSessionInfoV1?: ProviderSessionInfoV1,
   /**
    * ACP session modes (if supported by the provider's ACP agent).
    *
@@ -653,6 +688,12 @@ export type Metadata = {
       }>,
     }>,
   },
+  sessionAppliedModelV1?: {
+    v: 1,
+    provider: string,
+    updatedAt: number,
+    modelId: string,
+  },
   /**
    * ACP session configuration options (if supported by the provider's ACP agent).
    *
@@ -730,7 +771,6 @@ export type Metadata = {
   /** Timestamp (ms) for permissionMode, used for "latest wins" arbitration across devices. */
   permissionModeUpdatedAt?: number,
   sessionRollbackRangesV1?: SessionRollbackRangesV1,
-  sessionContinuationRecoveryV1?: SessionContinuationRecoveryV1,
   /**
    * Session-scoped connected-service auth binding selected for this agent.
    *
@@ -747,24 +787,6 @@ export type Metadata = {
    * (some agents support live model switching; others may require a new session).
    */
   modelOverrideV1?: ModelOverrideV1,
-  /**
-   * Owed-delivery watermark (QA A-F2/D15b): highest user-row seq actually handed to the runner's
-   * agent loop. Daemon attach paths clamp the resume catch-up cursor to this value so user rows
-   * committed while the runner was down are redelivered instead of silently skipped.
-   */
-  deliveredUserMessageSeqV1?: number,
-  /**
-   * Provider-custody watermark: highest user-row seq accepted by the provider/runtime.
-   * This is intentionally separate from the legacy delivered cursor so older metadata never
-   * becomes provider-accepted proof by name collision.
-   */
-  providerAcceptedUserMessageSeqV1?: number,
-  /**
-   * Delivery watermark interpretation. `queueHandoff` preserves legacy semantics where
-   * deliveredUserMessageSeqV1 means the runtime queue accepted handoff. `providerAcceptance`
-   * means catch-up/resume must use providerAcceptedUserMessageSeqV1 as provider custody.
-   */
-  userMessageDeliveryWatermarkModeV1?: 'queueHandoff' | 'providerAcceptance',
 };
 
 /**
@@ -817,6 +839,10 @@ export type AgentState = {
      */
     terminalComposerClearSupported?: boolean | null | undefined
     terminalComposerDraftPresent?: boolean | null | undefined
+    /** Exact current native-custody head eligible for the transient interrupt-and-run control. */
+    pendingInputInterruptAndRunLocalId?: string | null | undefined
+    /** Timestamp (ms) of the exact custody capability observation. */
+    pendingInputInterruptAndRunStateAt?: number | null | undefined
     localPermissionBridgeInLocalMode?: boolean | null | undefined
     permissionsInUiWhileLocal?: boolean | null | undefined
   } | null | undefined

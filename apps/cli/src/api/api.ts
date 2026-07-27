@@ -27,9 +27,12 @@ import { HttpStatusError } from './client/httpStatusError';
 import { resolveServerHttpBaseUrl } from './client/serverHttpBaseUrl';
 import {
   ConnectedServiceAuthGroupGenerationConflictError,
+  ConnectedServiceAuthGroupRuntimeStateRevisionConflictError,
   createConnectedServiceCredentialApi,
   type ConnectedServiceAuthGroupApi,
   type ConnectedServiceCredentialApi,
+  type ConnectedServiceCredentialPlainResponse,
+  type ConnectedServiceCredentialSealedResponse,
 } from './connectedServices/connectedServiceCredentialApi';
 import { resolveConnectedServicesServerApiTimeoutMs } from './connectedServices/serverApiTimeout';
 import {
@@ -47,6 +50,8 @@ import {
   ConnectedServiceAuthGroupErrorResponseV1Schema,
   ConnectedServiceAuthGroupResponseV1Schema,
   ConnectedServiceCredentialHealthV1Schema,
+  ConnectedServiceCredentialCompatibleMutationResponseV1Schema,
+  ConnectedServiceCredentialRevisionV1Schema,
   ConnectedServiceCredentialHealthStatusV1Schema,
   ConnectedServiceIdSchema,
   ConnectedServiceUsageSourceV1Schema,
@@ -64,6 +69,7 @@ import type {
   ConnectedServiceAuthGroupRuntimeStatePatchRequestV1,
   ConnectedServiceCredentialHealthV1,
   ConnectedServiceCredentialHealthStatusV1,
+  ConnectedServiceCredentialRevisionV1,
   ConnectedServiceId,
   ConnectedServiceQuotaSnapshotV1,
   ConnectedServiceUsageSourceV1,
@@ -75,18 +81,31 @@ import type {
   SealedProviderAccountUsageSnapshotV1,
 } from '@happier-dev/protocol';
 import { resolveSessionCreateEncryptionMode } from '@/api/session/resolveSessionCreateEncryptionMode';
+import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 import { createScmConnectedAccountCredentialResolver } from './connectedServices/scmConnectedAccountCredentialResolver';
 import { resolveMachineRegistrationIdentity } from '@/daemon/machineIdentity/resolveMachineRegistrationIdentity';
 import { consumeMachineReplacementCandidateAfterRegistration } from '@/daemon/machineIdentity/machineReplacementCandidates';
+import { readSessionRuntimeActivityProjectionBoundary } from './session/runtimeActivityProjection';
 
 export {
   ConnectedServiceAuthGroupGenerationConflictError,
+  ConnectedServiceAuthGroupRuntimeStateRevisionConflictError,
   ConnectedServiceCredentialUnsupportedFormatError,
 } from './connectedServices/connectedServiceCredentialApi';
 
 const CONNECTED_SERVICE_PROFILE_LIST_CACHE_TTL_MS = 10_000;
 const ACCOUNT_ENCRYPTION_MODE_CACHE_TTL_MS = 10_000;
 const ProviderAccountUsageResponseSourcesSchema = z.array(ConnectedServiceUsageSourceV1Schema).optional();
+const ExactProviderAccountUsageSourceResolutionSchema = z.object({
+  source: ConnectedServiceUsageSourceV1Schema,
+  recordId: ProviderAccountUsageRecordIdSchema,
+  providerAccountId: z.string().trim().min(1).max(512),
+  fetchedAt: z.number().int().nonnegative().nullable(),
+  staleAfterMs: z.number().int().nonnegative().nullable(),
+}).strict();
+const ExactProviderAccountUsageSourceNotFoundSchema = z.object({
+  error: z.literal('provider_account_usage_source_not_found'),
+}).strict();
 const ProviderAccountUsageWriteSourceOutcomeSchema = z.union([
   z.object({ status: z.literal('linked') }).strict(),
   z.object({
@@ -101,6 +120,21 @@ function parseProviderAccountUsageResponseSources(raw: Readonly<Record<string, u
     throw createConnectedServiceQuotaProtocolError('Invalid provider account usage snapshot response', parsed.error);
   }
   return parsed.data;
+}
+
+function isExactConnectedServiceUsageSource(
+  actual: ConnectedServiceUsageSourceV1,
+  expected: ConnectedServiceUsageSourceV1,
+): boolean {
+  if (
+    actual.serviceId !== expected.serviceId
+    || actual.profileId !== expected.profileId
+    || actual.bindingKind !== expected.bindingKind
+  ) return false;
+  if (actual.bindingKind === 'profile') return expected.bindingKind === 'profile';
+  return expected.bindingKind === 'group_member'
+    && actual.groupId === expected.groupId
+    && (actual.groupGeneration ?? null) === (expected.groupGeneration ?? null);
 }
 
 function logProviderAccountUsageWriteSourceOutcome(params: Readonly<{
@@ -186,6 +220,7 @@ type AccountEncryptionModeCacheEntry = Readonly<
 
 type ConnectedServiceAuthGroupRuntimeStatePatchInput = Readonly<{
   expectedGeneration?: ConnectedServiceAuthGroupRuntimeStatePatchRequestV1['expectedGeneration'];
+  expectedRuntimeStateRevision?: ConnectedServiceAuthGroupRuntimeStatePatchRequestV1['expectedRuntimeStateRevision'];
   state?: ConnectedServiceAuthGroupRuntimeStatePatchRequestV1['state'];
   memberStates?: ReadonlyArray<Readonly<ConnectedServiceAuthGroupRuntimeStatePatchRequestV1['memberStates'][number]>>;
 }>;
@@ -431,7 +466,8 @@ export class ApiClient {
           {
             headers: {
               'Authorization': `Bearer ${this.credential.token}`,
-              'Content-Type': 'application/json'
+              'Content-Type': 'application/json',
+              ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
             },
             timeout: 60000 // 1 minute timeout for very bad network connections
           }
@@ -476,6 +512,7 @@ export class ApiClient {
 	        return {
 	          id: raw.id,
 	          seq: raw.seq,
+	          ...readSessionRuntimeActivityProjectionBoundary(raw),
 	          encryptionMode: 'plain' as const,
 	          metadata,
 	          metadataVersion: raw.metadataVersion,
@@ -487,6 +524,7 @@ export class ApiClient {
 	      return {
 	        id: raw.id,
 	        seq: raw.seq,
+	        ...readSessionRuntimeActivityProjectionBoundary(raw),
 	        encryptionMode: 'e2ee' as const,
 	        encryptionKey: sessionEncryptionKey,
 	        encryptionVariant,
@@ -705,8 +743,11 @@ export class ApiClient {
     }
   }
 
-  sessionSyncClient(session: Session): ApiSessionClient {
-    return new ApiSessionClient(this.credential.token, session);
+  sessionSyncClient(
+    session: Session,
+    runtimeActivity?: import('./session/sessionClient').SessionRuntimeActivityClientConfig,
+  ): ApiSessionClient {
+    return new ApiSessionClient(this.credential.token, session, runtimeActivity);
   }
 
   machineSyncClient(
@@ -788,7 +829,9 @@ export class ApiClient {
       providerAccountId?: string | null;
       expiresAt?: number | null;
     };
-  }): Promise<void> {
+    expectedCredentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
+    refreshLeaseOwnerId?: string;
+  }): Promise<import('@happier-dev/protocol').ConnectedServiceCredentialCompatibleMutationResponseV1> {
     const serverUrl = resolveServerHttpBaseUrl();
     const serviceId = encodeURIComponent(params.serviceId);
     const profileId = encodeURIComponent(params.profileId);
@@ -799,6 +842,8 @@ export class ApiClient {
         {
           sealed: params.sealed,
           ...(params.metadata ? { metadata: params.metadata } : {}),
+          ...(params.expectedCredentialRevision !== undefined ? { expectedCredentialRevision: params.expectedCredentialRevision } : {}),
+          ...(params.refreshLeaseOwnerId ? { refreshLeaseOwnerId: params.refreshLeaseOwnerId } : {}),
         },
         {
           headers: {
@@ -813,6 +858,8 @@ export class ApiClient {
         throw new Error(`Server returned status ${response.status}`);
       }
 
+      const parsed = ConnectedServiceCredentialCompatibleMutationResponseV1Schema.safeParse(response.data);
+      if (!parsed.success) throw new Error('Invalid connected service credential mutation response');
       this.invalidateConnectedServiceProfileListCache(params.serviceId);
       logConnectedServiceCredentialRegistration({
         serviceId: params.serviceId,
@@ -820,13 +867,21 @@ export class ApiClient {
         registeredProfileId: readRegisteredConnectedServiceProfileId(response.data),
         version: 'v2',
       });
+      return parsed.data;
     } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 409) {
+        const superseded = ConnectedServiceCredentialCompatibleMutationResponseV1Schema.safeParse(error.response.data);
+        if (superseded.success && 'error' in superseded.data) return superseded.data;
+      }
       // Never log raw Axios errors: they can contain bearer tokens or provider secrets.
       logServerEndpointFailure({
         logger,
         operation: 'Failed to register connected service credential',
         error,
       });
+      if (axios.isAxiosError(error) && typeof error.response?.status === 'number') {
+        throw new HttpStatusError(error.response.status, `Failed to register connected service credential (status ${error.response.status})`);
+      }
       throw new Error(`Failed to register connected service credential: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -834,25 +889,20 @@ export class ApiClient {
   async getConnectedServiceCredentialSealed(params: {
     serviceId: ConnectedServiceId;
     profileId: string;
-  }): Promise<{
-    sealed: SealedConnectedServiceCredentialV1;
-    metadata: {
-      kind: 'oauth' | 'token';
-      providerEmail?: string | null;
-      providerAccountId?: string | null;
-      expiresAt?: number | null;
-    };
-  } | null> {
+  }): Promise<ConnectedServiceCredentialSealedResponse | null> {
     return await this.connectedServiceCredentialApi.getConnectedServiceCredentialSealed(params);
   }
 
   async listConnectedServiceProfiles(params: {
     serviceId: ConnectedServiceId;
+    forceRefresh?: boolean;
   }): Promise<ConnectedServiceProfileListResult> {
     const cached = this.connectedServiceProfileListCache.get(params.serviceId);
     const nowMs = Date.now();
-    if (cached?.kind === 'value' && cached.expiresAtMs > nowMs) return cached.value;
-    if (cached?.kind === 'in_flight') return await cached.promise;
+    if (!params.forceRefresh) {
+      if (cached?.kind === 'value' && cached.expiresAtMs > nowMs) return cached.value;
+      if (cached?.kind === 'in_flight') return await cached.promise;
+    }
 
     const promise = this.fetchConnectedServiceProfilesFromServer(params);
     this.connectedServiceProfileListCache.set(params.serviceId, { kind: 'in_flight', promise });
@@ -927,6 +977,12 @@ export class ApiClient {
     return await this.connectedServiceCredentialApi.getConnectedServiceAuthGroup(params);
   }
 
+  async listConnectedServiceAuthGroups(params: {
+    serviceId: ConnectedServiceId;
+  }): Promise<readonly ConnectedServiceAuthGroupV1[]> {
+    return await this.connectedServiceCredentialApi.listConnectedServiceAuthGroups(params);
+  }
+
   async updateConnectedServiceAuthGroupActiveProfile(params: {
     serviceId: ConnectedServiceId;
     groupId: string;
@@ -997,6 +1053,10 @@ export class ApiClient {
     if (mutatesRuntimeState && expectedGeneration === undefined) {
       throw new Error('Connected service auth group runtime-state update requires expectedGeneration');
     }
+    const expectedRuntimeStateRevision = params.expectedRuntimeStateRevision;
+    if (mutatesRuntimeState && expectedRuntimeStateRevision === undefined) {
+      throw new Error('Connected service auth group runtime-state update requires expectedRuntimeStateRevision');
+    }
     const serverUrl = resolveServerHttpBaseUrl();
     const serviceId = encodeURIComponent(params.serviceId);
     const groupId = encodeURIComponent(params.groupId);
@@ -1006,6 +1066,7 @@ export class ApiClient {
         `${serverUrl}/v3/connect/${serviceId}/groups/${groupId}/runtime-state`,
         {
           ...(expectedGeneration === undefined ? {} : { expectedGeneration }),
+          ...(expectedRuntimeStateRevision === undefined ? {} : { expectedRuntimeStateRevision }),
           ...(params.state === undefined ? {} : { state: params.state }),
           memberStates,
         },
@@ -1030,6 +1091,13 @@ export class ApiClient {
         const parsed = ConnectedServiceAuthGroupErrorResponseV1Schema.safeParse(error.response.data);
         if (parsed.success && parsed.data.error === 'connect_group_generation_conflict' && parsed.data.generation !== undefined) {
           throw new ConnectedServiceAuthGroupGenerationConflictError(parsed.data.generation);
+        }
+        if (
+          parsed.success
+          && parsed.data.error === 'connect_group_runtime_state_revision_conflict'
+          && parsed.data.runtimeStateRevision !== undefined
+        ) {
+          throw new ConnectedServiceAuthGroupRuntimeStateRevisionConflictError(parsed.data.runtimeStateRevision);
         }
       }
       logServerEndpointFailure({
@@ -1206,10 +1274,10 @@ export class ApiClient {
     }
   }
 
-  async getAccountEncryptionMode(): Promise<'e2ee' | 'plain' | 'unknown'> {
+  async getAccountEncryptionMode(options?: Readonly<{ refresh?: boolean }>): Promise<'e2ee' | 'plain' | 'unknown'> {
     const cached = this.accountEncryptionModeCache;
     const nowMs = Date.now();
-    if (cached?.kind === 'value' && cached.expiresAtMs > nowMs) return cached.value;
+    if (!options?.refresh && cached?.kind === 'value' && cached.expiresAtMs > nowMs) return cached.value;
     if (cached?.kind === 'in_flight') return await cached.promise;
 
     const promise = this.fetchAccountEncryptionModeFromServer();
@@ -1237,9 +1305,7 @@ export class ApiClient {
   async getConnectedServiceCredentialPlain(params: {
     serviceId: ConnectedServiceId;
     profileId: string;
-  }): Promise<{
-    content: { t: 'plain'; v: ConnectedServiceCredentialRecordV1 };
-  } | null> {
+  }): Promise<ConnectedServiceCredentialPlainResponse | null> {
     return await this.connectedServiceCredentialApi.getConnectedServiceCredentialPlain?.(params) ?? null;
   }
 
@@ -1247,7 +1313,9 @@ export class ApiClient {
     serviceId: ConnectedServiceId;
     profileId: string;
     content: { t: 'plain'; v: ConnectedServiceCredentialRecordV1 };
-  }): Promise<void> {
+    expectedCredentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
+    refreshLeaseOwnerId?: string;
+  }): Promise<import('@happier-dev/protocol').ConnectedServiceCredentialCompatibleMutationResponseV1> {
     const serverUrl = resolveServerHttpBaseUrl();
     const serviceId = encodeURIComponent(params.serviceId);
     const profileId = encodeURIComponent(params.profileId);
@@ -1257,6 +1325,8 @@ export class ApiClient {
         `${serverUrl}/v3/connect/${serviceId}/profiles/${profileId}/credential`,
         {
           content: params.content,
+          ...(params.expectedCredentialRevision !== undefined ? { expectedCredentialRevision: params.expectedCredentialRevision } : {}),
+          ...(params.refreshLeaseOwnerId ? { refreshLeaseOwnerId: params.refreshLeaseOwnerId } : {}),
         },
         {
           headers: {
@@ -1271,6 +1341,8 @@ export class ApiClient {
         throw new Error(`Server returned status ${response.status}`);
       }
 
+      const parsed = ConnectedServiceCredentialCompatibleMutationResponseV1Schema.safeParse(response.data);
+      if (!parsed.success) throw new Error('Invalid connected service credential mutation response');
       this.invalidateConnectedServiceProfileListCache(params.serviceId);
       logConnectedServiceCredentialRegistration({
         serviceId: params.serviceId,
@@ -1278,7 +1350,12 @@ export class ApiClient {
         registeredProfileId: readRegisteredConnectedServiceProfileId(response.data),
         version: 'v3',
       });
+      return parsed.data;
     } catch (error: unknown) {
+      if (axios.isAxiosError(error) && error.response?.status === 409) {
+        const superseded = ConnectedServiceCredentialCompatibleMutationResponseV1Schema.safeParse(error.response.data);
+        if (superseded.success && 'error' in superseded.data) return superseded.data;
+      }
       if (axios.isAxiosError(error) && error.response?.status === 409) {
         const parsed = ConnectedServiceAuthGroupErrorResponseV1Schema.safeParse(error.response.data);
         if (parsed.success && parsed.data.error === 'connect_group_generation_conflict' && parsed.data.generation !== undefined) {
@@ -1290,6 +1367,9 @@ export class ApiClient {
         operation: 'Failed to register connected service credential',
         error,
       });
+      if (axios.isAxiosError(error) && typeof error.response?.status === 'number') {
+        throw new HttpStatusError(error.response.status, `Failed to register connected service credential (status ${error.response.status})`);
+      }
       throw new Error(`Failed to register connected service credential: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -1298,7 +1378,8 @@ export class ApiClient {
     serviceId: ConnectedServiceId;
     profileId: string;
     health: ConnectedServiceCredentialHealthV1;
-  }): Promise<void> {
+    expectedCredentialRevision?: string;
+  }): Promise<import('@happier-dev/protocol').ConnectedServiceCredentialCompatibleMutationResponseV1> {
     const healthParsed = ConnectedServiceCredentialHealthV1Schema.safeParse(params.health);
     if (!healthParsed.success) {
       throw new Error('Invalid connected service credential health');
@@ -1310,7 +1391,7 @@ export class ApiClient {
     try {
       const response = await axios.patch(
         `${serverUrl}/v3/connect/${serviceId}/profiles/${profileId}/credential/health`,
-        { health: healthParsed.data },
+        { health: healthParsed.data, ...(params.expectedCredentialRevision ? { expectedCredentialRevision: params.expectedCredentialRevision } : {}) },
         {
           headers: {
             'Authorization': `Bearer ${this.credential.token}`,
@@ -1322,8 +1403,15 @@ export class ApiClient {
       if (response.status !== 200) {
         throw new Error(`Server returned status ${response.status}`);
       }
+      const parsed = ConnectedServiceCredentialCompatibleMutationResponseV1Schema.safeParse(response.data);
+      if (!parsed.success) throw new Error('Invalid connected service credential mutation response');
       this.invalidateConnectedServiceProfileListCache(params.serviceId);
+      return parsed.data;
     } catch (error: unknown) {
+      if (axios.isAxiosError(error) && error.response?.status === 409) {
+        const superseded = ConnectedServiceCredentialCompatibleMutationResponseV1Schema.safeParse(error.response.data);
+        if (superseded.success && 'error' in superseded.data) return superseded.data;
+      }
       if (axios.isAxiosError(error) && error.response?.status === 409) {
         const parsed = ConnectedServiceAuthGroupErrorResponseV1Schema.safeParse(error.response.data);
         if (parsed.success && parsed.data.error === 'connect_group_generation_conflict' && parsed.data.generation !== undefined) {
@@ -1627,6 +1715,71 @@ export class ApiClient {
     }
   }
 
+  async resolveProviderAccountUsageSource(params: {
+    source: ConnectedServiceUsageSourceV1;
+  }): Promise<z.infer<typeof ExactProviderAccountUsageSourceResolutionSchema> | null> {
+    const serverUrl = resolveServerHttpBaseUrl();
+    const source = ConnectedServiceUsageSourceV1Schema.parse(params.source);
+
+    try {
+      const response = await axios.get(
+        `${serverUrl}/v3/connect/provider-account-usage/sources/resolve`,
+        {
+          params: source,
+          headers: {
+            'Authorization': `Bearer ${this.credential.token}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
+        },
+      );
+      if (response.status !== 200) {
+        throw createConnectedServiceQuotaHttpStatusError({
+          status: response.status,
+          message: `Provider account usage source resolution failed with status ${response.status}`,
+        });
+      }
+      const parsed = ExactProviderAccountUsageSourceResolutionSchema.safeParse(response.data);
+      if (!parsed.success) {
+        throw createConnectedServiceQuotaProtocolError(
+          'Invalid provider account usage source resolution response',
+          parsed.error,
+        );
+      }
+      if (!isExactConnectedServiceUsageSource(parsed.data.source, source)) {
+        throw createConnectedServiceQuotaProtocolError(
+          'Provider account usage source resolution returned a different source',
+        );
+      }
+      return parsed.data;
+    } catch (error: unknown) {
+      if (error instanceof ConnectedServiceQuotaApiError) {
+        logServerEndpointFailure({
+          logger,
+          operation: 'Failed to resolve provider account usage source',
+          error,
+        });
+        throw error;
+      }
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      if (
+        status === 404
+        && ExactProviderAccountUsageSourceNotFoundSchema.safeParse(
+          axios.isAxiosError(error) ? error.response?.data : undefined,
+        ).success
+      ) return null;
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to resolve provider account usage source',
+        error,
+      });
+      throw createConnectedServiceQuotaApiError({
+        message: 'Failed to resolve provider account usage source',
+        cause: error,
+      });
+    }
+  }
+
   async getProviderAccountUsageSnapshotPlain(params: {
     recordId: ProviderAccountUsageRecordId;
   }): Promise<{
@@ -1820,7 +1973,8 @@ export class ApiClient {
     machineId: string;
     ownerId?: string;
     leaseMs: number;
-  }): Promise<{ acquired: boolean; leaseUntil: number }> {
+    expectedCredentialRevision?: string;
+  }): Promise<{ acquired: boolean; leaseUntil: number; ownerId: string; credentialRevision: string }> {
     const serverUrl = resolveServerHttpBaseUrl();
     const serviceId = encodeURIComponent(params.serviceId);
     const profileId = encodeURIComponent(params.profileId);
@@ -1830,6 +1984,7 @@ export class ApiClient {
         machineId: params.machineId,
         ...(params.ownerId ? { ownerId: params.ownerId } : {}),
         leaseMs: params.leaseMs,
+        ...(params.expectedCredentialRevision ? { expectedCredentialRevision: params.expectedCredentialRevision } : {}),
       },
       {
         headers: {
@@ -1845,6 +2000,8 @@ export class ApiClient {
     const schema = z.object({
       acquired: z.boolean(),
       leaseUntil: z.number(),
+      credentialRevision: ConnectedServiceCredentialRevisionV1Schema,
+      ownerId: z.string().trim().min(1),
     });
     const parsed = schema.safeParse(response.data);
     if (!parsed.success) {

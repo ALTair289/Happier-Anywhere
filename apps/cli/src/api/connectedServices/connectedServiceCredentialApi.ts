@@ -4,12 +4,16 @@ import { z } from 'zod';
 import {
   AccountEncryptionModeResponseSchema,
   ConnectedServiceAuthGroupErrorResponseV1Schema,
+  ConnectedServiceAuthGroupListResponseV1Schema,
   ConnectedServiceAuthGroupResponseV1Schema,
   ConnectedServiceCredentialRecordV1Schema,
   SealedConnectedServiceCredentialV1Schema,
   StoredJsonContentEnvelopeSchema,
+  assertConnectedServiceCredentialRecordBinding,
+  readConnectedServiceCredentialRevisionBoundaryV1,
   type ConnectedServiceAuthGroupV1,
   type ConnectedServiceCredentialRecordV1,
+  type ConnectedServiceCredentialRevisionBoundaryV1,
   type ConnectedServiceId,
   type SealedConnectedServiceCredentialV1,
 } from '@happier-dev/protocol';
@@ -25,6 +29,12 @@ import { resolveConnectedServicesServerApiTimeoutMs } from './serverApiTimeout';
 export class ConnectedServiceAuthGroupGenerationConflictError extends Error {
   constructor(public readonly generation: number) {
     super('connected_service_auth_group_generation_conflict');
+  }
+}
+
+export class ConnectedServiceAuthGroupRuntimeStateRevisionConflictError extends Error {
+  constructor(public readonly runtimeStateRevision: number) {
+    super('connected_service_auth_group_runtime_state_revision_conflict');
   }
 }
 
@@ -51,6 +61,12 @@ export class ConnectedServiceCredentialUnsupportedFormatError extends Error {
   }
 }
 
+/**
+ * The compatible credential responses below adapt exact server-v0.2.1 at
+ * 4913c1e533c872a0712ba1c25b3104fd470aacc2, which omitted credential revisions.
+ * Remove the legacy response branch when exact 0.2.1 leaves the supported
+ * predecessor window.
+ */
 export type ConnectedServiceCredentialSealedResponse = Readonly<{
   sealed: SealedConnectedServiceCredentialV1;
   metadata: {
@@ -59,11 +75,11 @@ export type ConnectedServiceCredentialSealedResponse = Readonly<{
     providerAccountId?: string | null;
     expiresAt?: number | null;
   };
-}>;
+}> & ConnectedServiceCredentialRevisionBoundaryV1;
 
 export type ConnectedServiceCredentialPlainResponse = Readonly<{
   content: { t: 'plain'; v: ConnectedServiceCredentialRecordV1 };
-}>;
+}> & ConnectedServiceCredentialRevisionBoundaryV1;
 
 export type ConnectedServiceCredentialApi = Readonly<{
   getAccountEncryptionMode?: () => Promise<'e2ee' | 'plain' | 'unknown'>;
@@ -78,6 +94,9 @@ export type ConnectedServiceCredentialApi = Readonly<{
 }>;
 
 export type ConnectedServiceAuthGroupApi = Readonly<{
+  listConnectedServiceAuthGroups: (params: {
+    serviceId: ConnectedServiceId;
+  }) => Promise<readonly ConnectedServiceAuthGroupV1[]>;
   getConnectedServiceAuthGroup: (params: {
     serviceId: ConnectedServiceId;
     groupId: string;
@@ -130,6 +149,7 @@ export function createConnectedServiceCredentialApi(
     getAccountEncryptionMode: async () => getAccountEncryptionMode({ token }),
     getConnectedServiceCredentialSealed: async (params) => getConnectedServiceCredentialSealed({ token, ...params }),
     getConnectedServiceCredentialPlain: async (params) => getConnectedServiceCredentialPlain({ token, ...params }),
+    listConnectedServiceAuthGroups: async (params) => listConnectedServiceAuthGroups({ token, ...params }),
     getConnectedServiceAuthGroup: async (params) => getConnectedServiceAuthGroup({ token, ...params }),
   };
 }
@@ -191,7 +211,8 @@ export async function getConnectedServiceCredentialSealed(params: Readonly<{
     }
 
     const sealedParsed = SealedConnectedServiceCredentialV1Schema.safeParse((raw as Record<string, unknown>).sealed);
-    if (!sealedParsed.success) {
+    const revision = readConnectedServiceCredentialRevisionBoundaryV1(raw as Record<string, unknown>);
+    if (!sealedParsed.success || !revision) {
       throw new Error('Invalid connected service credential response');
     }
 
@@ -206,7 +227,7 @@ export async function getConnectedServiceCredentialSealed(params: Readonly<{
       throw new Error('Invalid connected service credential response');
     }
 
-    return { sealed: sealedParsed.data, metadata: metadataParsed.data };
+    return { ...revision, sealed: sealedParsed.data, metadata: metadataParsed.data };
   } catch (error: unknown) {
     throwConnectedServiceGroupGenerationConflictIfPresent(error);
     const status = readAxiosStatus(error);
@@ -252,7 +273,8 @@ export async function getConnectedServiceCredentialPlain(params: Readonly<{
     }
 
     const contentParsed = StoredJsonContentEnvelopeSchema.safeParse((raw as Record<string, unknown>).content);
-    if (!contentParsed.success || contentParsed.data.t !== 'plain') {
+    const revision = readConnectedServiceCredentialRevisionBoundaryV1(raw as Record<string, unknown>);
+    if (!contentParsed.success || contentParsed.data.t !== 'plain' || !revision) {
       throw new Error('Invalid connected service credential response');
     }
 
@@ -260,8 +282,16 @@ export async function getConnectedServiceCredentialPlain(params: Readonly<{
     if (!recordParsed.success) {
       throw new Error('Invalid connected service credential response');
     }
+    try {
+      assertConnectedServiceCredentialRecordBinding({
+        binding: { serviceId: params.serviceId, profileId: params.profileId },
+        record: recordParsed.data,
+      });
+    } catch {
+      throw new Error('Invalid connected service credential response');
+    }
 
-    return { content: { t: 'plain', v: recordParsed.data } };
+    return { ...revision, content: { t: 'plain', v: recordParsed.data } };
   } catch (error: unknown) {
     throwConnectedServiceGroupGenerationConflictIfPresent(error);
     const status = readAxiosStatus(error);
@@ -278,6 +308,41 @@ export async function getConnectedServiceCredentialPlain(params: Readonly<{
       error,
     });
     throw new Error(`Failed to get connected service credential: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+export async function listConnectedServiceAuthGroups(params: Readonly<{
+  token: string;
+  serviceId: ConnectedServiceId;
+}>): Promise<readonly ConnectedServiceAuthGroupV1[]> {
+  const serverUrl = resolveServerHttpBaseUrl();
+  const serviceId = encodeURIComponent(params.serviceId);
+  try {
+    const response = await axios.get(
+      `${serverUrl}/v3/connect/${serviceId}/groups`,
+      {
+        headers: authHeaders(params.token),
+        timeout: resolveConnectedServicesServerApiTimeoutMs(),
+      },
+    );
+    if (response.status !== 200) throw new Error(`Server returned status ${response.status}`);
+    const parsed = ConnectedServiceAuthGroupListResponseV1Schema.safeParse(response.data);
+    if (!parsed.success) throw new Error('Invalid connected service auth group list response');
+    return parsed.data.groups;
+  } catch (error: unknown) {
+    const status = readAxiosStatus(error);
+    logServerEndpointFailure({
+      logger,
+      operation: 'Failed to list connected service auth groups',
+      error,
+    });
+    if (typeof status === 'number' && Number.isFinite(status)) {
+      throw createHttpStatusError(status, `Failed to list connected service auth groups (${status})`);
+    }
+    throw createCausePreservingError(
+      `Failed to list connected service auth groups: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      error,
+    );
   }
 }
 

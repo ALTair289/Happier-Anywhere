@@ -88,6 +88,9 @@ describe('Api server error handling', () => {
         'HAPPIER_API_CREATE_SESSION_RETRY_BASE_DELAY_MS',
         'HAPPIER_API_CREATE_SESSION_RETRY_MAX_DELAY_MS',
         'HAPPIER_E2E_DELAY_CREATE_SESSION_MS',
+        'HAPPIER_LOCAL_SERVER_URL',
+        'HAPPIER_PUBLIC_SERVER_URL',
+        'HAPPIER_SERVER_URL',
     ] as const;
     let envScope = createEnvKeyScope(envKeys);
 
@@ -101,6 +104,9 @@ describe('Api server error handling', () => {
             ['HAPPIER_API_CREATE_SESSION_RETRY_MAX_ATTEMPTS', '3'],
             ['HAPPIER_API_CREATE_SESSION_RETRY_BASE_DELAY_MS', '0'],
             ['HAPPIER_API_CREATE_SESSION_RETRY_MAX_DELAY_MS', '0'],
+            ['HAPPIER_LOCAL_SERVER_URL', undefined],
+            ['HAPPIER_PUBLIC_SERVER_URL', undefined],
+            ['HAPPIER_SERVER_URL', undefined],
         ]) as Readonly<Record<string, string>>);
 
         // Create a mock credential
@@ -121,6 +127,66 @@ describe('Api server error handling', () => {
     });
 
     describe('getOrCreateSession', () => {
+        it('declares the current session-sync protocol on the canonical create/load request', async () => {
+            mockPost.mockResolvedValue({
+                status: 201,
+                data: { session: { id: 's1' }, resolution: 'created' },
+            });
+
+            await api.getOrCreateSession({
+                tag: 'test-tag',
+                metadata: testMetadata as any,
+                state: null,
+            });
+
+            expect(mockPost).toHaveBeenCalledWith(
+                expect.stringContaining('/v1/sessions'),
+                expect.any(Object),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        'x-happier-client-kind': 'session-runner',
+                        'x-happier-session-sync-protocol': '2',
+                    }),
+                }),
+            );
+        });
+
+        it.each([
+            ['e2ee', undefined],
+            ['plain', 'plain'],
+        ] as const)('preserves the complete runtime-activity projection for %s sessions', async (_label, encryptionMode) => {
+            mockPost.mockResolvedValue({
+                status: 201,
+                data: {
+                    session: {
+                        id: 's-runtime-activity',
+                        seq: 0,
+                        ...(encryptionMode ? { encryptionMode } : {}),
+                        metadata: encryptionMode === 'plain' ? JSON.stringify(testMetadata) : testMetadata,
+                        metadataVersion: 1,
+                        agentState: null,
+                        agentStateVersion: 1,
+                        runtimeActivityState: 'idle',
+                        runtimeActivityActiveCount: 0,
+                        runtimeActivityObservedAt: 12_000,
+                        runtimeActivityRevision: 17,
+                    },
+                    resolution: 'created',
+                },
+            });
+
+            await expect(api.getOrCreateSession({
+                tag: 'runtime-activity-projection',
+                metadata: testMetadata as any,
+                state: null,
+            })).resolves.toMatchObject({
+                runtimeActivityState: 'idle',
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: 12_000,
+                runtimeActivityRevision: 17,
+            });
+        });
+
         it('delays session creation when HAPPIER_E2E_DELAY_CREATE_SESSION_MS is set', async () => {
             vi.useFakeTimers();
             envScope.patch({ HAPPIER_E2E_DELAY_CREATE_SESSION_MS: '1000' });

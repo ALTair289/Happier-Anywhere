@@ -76,7 +76,7 @@ describe('ApiClient connected services v3 credentials', () => {
   });
 
   it('posts plaintext credentials to the v3 connected services endpoint', async () => {
-    mockPost.mockResolvedValue({ status: 200, data: { success: true } });
+    mockPost.mockResolvedValue({ status: 200, data: { success: true, credentialRevision: 'csr_1234567890123456789012' } });
 
     const api = await ApiClient.create(createTestCredentials());
     const record = buildConnectedServiceCredentialRecord({
@@ -125,8 +125,63 @@ describe('ApiClient connected services v3 credentials', () => {
     expect(serializedLogs).not.toContain('plain-refresh-token');
   });
 
-  it('emits a visible diagnostic when the registered profile id diverges from the v3 route profile id', async () => {
-    mockPost.mockResolvedValue({ status: 200, data: { profileId: 'other-profile' } });
+  it('serializes an explicit expect-absent credential revision guard', async () => {
+    mockPost.mockResolvedValue({ status: 200, data: { success: true, credentialRevision: 'csr_1234567890123456789012' } });
+
+    const api = await ApiClient.create(createTestCredentials());
+    const record = buildConnectedServiceCredentialRecord({
+      now: 1_000,
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      kind: 'token',
+      token: { token: 'plain-token', providerAccountId: null, providerEmail: null },
+    });
+
+    await api.registerConnectedServiceCredentialPlain({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      content: { t: 'plain', v: record },
+      expectedCredentialRevision: null,
+    });
+
+    expect(axios.post).toHaveBeenCalledWith(
+      expect.stringContaining('/v3/connect/openai-codex/profiles/work/credential'),
+      expect.objectContaining({ expectedCredentialRevision: null }),
+      expect.any(Object),
+    );
+  });
+
+  it('preserves a definite credential write rejection as a sanitized status error', async () => {
+    mockPost.mockRejectedValueOnce(createAxiosResponseError({
+      status: 400,
+      data: { error: 'invalid_request' },
+    }));
+    const api = await ApiClient.create(createTestCredentials());
+    const record = buildConnectedServiceCredentialRecord({
+      now: 1_000,
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      kind: 'token',
+      token: { token: 'plain-token', providerAccountId: null, providerEmail: null },
+    });
+
+    await expect(api.registerConnectedServiceCredentialPlain({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      content: { t: 'plain', v: record },
+      expectedCredentialRevision: null,
+    })).rejects.toMatchObject({ response: { status: 400 } });
+  });
+
+  it('rejects noncanonical mutation responses instead of trusting route-divergent profile metadata', async () => {
+    mockPost.mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+        credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+        profileId: 'other-profile',
+      },
+    });
 
     const api = await ApiClient.create(createTestCredentials());
     const record = buildConnectedServiceCredentialRecord({
@@ -145,20 +200,13 @@ describe('ApiClient connected services v3 credentials', () => {
       },
     });
 
-    await api.registerConnectedServiceCredentialPlain({
+    await expect(api.registerConnectedServiceCredentialPlain({
       serviceId: 'openai-codex',
       profileId: 'work',
       content: { t: 'plain', v: record },
-    });
+    })).rejects.toThrow('Invalid connected service credential mutation response');
 
-    expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
-      '[API] Connected service credential registration profile mismatch',
-      {
-        serviceId: 'openai-codex',
-        routeProfileId: 'work',
-        registeredProfileId: 'other-profile',
-      },
-    );
+    expect(vi.mocked(logger.warn)).not.toHaveBeenCalled();
     const serializedLogs = JSON.stringify(vi.mocked(logger.warn).mock.calls);
     expect(serializedLogs).not.toContain('plain-access-token');
     expect(serializedLogs).not.toContain('plain-refresh-token');
@@ -218,7 +266,15 @@ describe('ApiClient connected services v3 credentials', () => {
   });
 
   it('uses the canonical v3 refresh lease endpoint', async () => {
-    mockPost.mockResolvedValue({ status: 200, data: { acquired: true, leaseUntil: 1234 } });
+    mockPost.mockResolvedValue({
+      status: 200,
+      data: {
+        acquired: true,
+        leaseUntil: 1234,
+        ownerId: 'machine-1:daemon-a',
+        credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+      },
+    });
 
     const api = await ApiClient.create(createTestCredentials());
     const leaseApi = api as unknown as {
@@ -228,7 +284,7 @@ describe('ApiClient connected services v3 credentials', () => {
         machineId: string;
         ownerId?: string;
         leaseMs: number;
-      }): Promise<{ acquired: boolean; leaseUntil: number }>;
+      }): Promise<{ acquired: boolean; leaseUntil: number; ownerId: string; credentialRevision: string }>;
     };
     const lease = await leaseApi.acquireConnectedServiceRefreshLease({
       serviceId: 'openai-codex',
@@ -238,7 +294,12 @@ describe('ApiClient connected services v3 credentials', () => {
       leaseMs: 10_000,
     });
 
-    expect(lease).toEqual({ acquired: true, leaseUntil: 1234 });
+    expect(lease).toEqual({
+      acquired: true,
+      leaseUntil: 1234,
+      ownerId: 'machine-1:daemon-a',
+      credentialRevision: 'csr_abcdefghijklmnopqrstuv',
+    });
     expect(axios.post).toHaveBeenCalledWith(
       expect.stringContaining('/v3/connect/openai-codex/profiles/work/refresh-lease'),
       { machineId: 'machine-1', ownerId: 'machine-1:daemon-a', leaseMs: 10_000 },
@@ -246,8 +307,36 @@ describe('ApiClient connected services v3 credentials', () => {
     );
   });
 
+  it('fences refresh lease acquisition and returns the authoritative credential revision', async () => {
+    mockPost.mockResolvedValue({
+      status: 200,
+      data: { acquired: true, leaseUntil: 2_000, ownerId: 'machine-a:daemon-a:attempt-a', credentialRevision: 'csr_1234567890123456789012' },
+    });
+    const api = await ApiClient.create(createTestCredentials());
+
+    await expect(api.acquireConnectedServiceRefreshLease({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      machineId: 'machine-a',
+      ownerId: 'machine-a:daemon-a:attempt-a',
+      leaseMs: 1_000,
+      expectedCredentialRevision: 'csr_abcdefghijklmnopqrstuv',
+    })).resolves.toEqual({
+      acquired: true,
+      leaseUntil: 2_000,
+      ownerId: 'machine-a:daemon-a:attempt-a',
+      credentialRevision: 'csr_1234567890123456789012',
+    });
+
+    expect(mockPost).toHaveBeenCalledWith(
+      expect.stringContaining('/v3/connect/openai-codex/profiles/work/refresh-lease'),
+      expect.objectContaining({ expectedCredentialRevision: 'csr_abcdefghijklmnopqrstuv' }),
+      expect.any(Object),
+    );
+  });
+
   it('posts normalized credential health without credential secrets', async () => {
-    mockPatch.mockResolvedValue({ status: 200, data: { success: true } });
+    mockPatch.mockResolvedValue({ status: 200, data: { success: true, credentialRevision: 'csr_1234567890123456789012' } });
 
     const api = await ApiClient.create(createTestCredentials());
     await api.updateConnectedServiceCredentialHealth({

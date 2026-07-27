@@ -7,6 +7,7 @@ import { logger } from '@/ui/logger';
 import { resetServerEndpointFailureLogSamplingForTests } from './client/serverEndpointFailureLog';
 import type { Credentials } from '@/persistence';
 import {
+  buildConnectedServiceCredentialRecord,
   buildProviderAccountUsageRecordId,
   type ConnectedServiceUsageSourceV1,
   type ProviderAccountUsageRecordKeyV1,
@@ -87,7 +88,7 @@ function createProviderAccountUsageSnapshot(): ProviderAccountUsageSnapshotV1 {
   };
 }
 
-function createConnectedServiceUsageSource(): ConnectedServiceUsageSourceV1 {
+function createConnectedServiceUsageSource(): Extract<ConnectedServiceUsageSourceV1, { bindingKind: 'group_member' }> {
   return {
     serviceId: 'openai-codex',
     profileId: 'work',
@@ -140,6 +141,48 @@ describe('ApiClient connected services quotas v3', () => {
 
     await expect(api.getAccountEncryptionMode()).resolves.toBe('plain');
     expect(mockGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('bypasses a cached account mode for an immediately guarded credential write', async () => {
+    mockGet
+      .mockResolvedValueOnce({ status: 200, data: { mode: 'plain', updatedAt: 1 } })
+      .mockResolvedValueOnce({ status: 200, data: { mode: 'e2ee', updatedAt: 2 } });
+    const api = await ApiClient.create(createTestCredentials());
+
+    await expect(api.getAccountEncryptionMode()).resolves.toBe('plain');
+    await expect(api.getAccountEncryptionMode({ refresh: true })).resolves.toBe('e2ee');
+
+    expect(mockGet).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['service', { serviceId: 'claude-subscription' as const, profileId: 'work' }],
+    ['profile', { serviceId: 'openai-codex' as const, profileId: 'other' }],
+  ])('rejects a valid v3 credential whose embedded %s does not match the requested binding', async (_field, embedded) => {
+    const record = buildConnectedServiceCredentialRecord({
+      now: 1_000,
+      serviceId: embedded.serviceId,
+      profileId: embedded.profileId,
+      kind: 'token',
+      token: {
+        token: 'credential-secret-not-for-errors',
+        providerAccountId: null,
+        providerEmail: null,
+      },
+    });
+    mockGet.mockResolvedValue({
+      status: 200,
+      data: {
+        credentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
+        content: { t: 'plain', v: record },
+      },
+    });
+
+    const api = await ApiClient.create(createTestCredentials());
+    await expect(api.getConnectedServiceCredentialPlain({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+    })).rejects.toThrow('Failed to get connected service credential: Invalid connected service credential response');
   });
 
   it('returns unknown when account encryption mode lookup fails', async () => {
@@ -378,6 +421,114 @@ describe('ApiClient connected services quotas v3', () => {
       }),
     );
     expect(String(vi.mocked(axios.get).mock.calls[0]?.[0])).not.toContain('/profiles/');
+  });
+
+  it('resolves the exact current provider-account usage source with its full ownership proof', async () => {
+    const snapshot = createProviderAccountUsageSnapshot();
+    const source = createConnectedServiceUsageSource();
+    mockGet.mockResolvedValue({
+      status: 200,
+      data: {
+        source,
+        recordId: snapshot.recordId,
+        providerAccountId: 'acct_live_codex',
+        fetchedAt: 1_000,
+        staleAfterMs: 300_000,
+      },
+    });
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await expect(api.resolveProviderAccountUsageSource({ source })).resolves.toEqual({
+      source,
+      recordId: snapshot.recordId,
+      providerAccountId: 'acct_live_codex',
+      fetchedAt: 1_000,
+      staleAfterMs: 300_000,
+    });
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.stringContaining('/v3/connect/provider-account-usage/sources/resolve'),
+      expect.objectContaining({
+        params: source,
+        headers: expect.objectContaining({
+          Authorization: 'Bearer happy-token',
+        }),
+      }),
+    );
+  });
+
+  it('returns null when the exact provider-account usage source is not current', async () => {
+    const source = createConnectedServiceUsageSource();
+    mockGet.mockRejectedValue(createAxiosResponseError({
+      status: 404,
+      data: { error: 'provider_account_usage_source_not_found' },
+    }));
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await expect(api.resolveProviderAccountUsageSource({ source })).resolves.toBeNull();
+  });
+
+  it('does not treat an unrelated HTTP 404 as authoritative exact-source absence', async () => {
+    const source = createConnectedServiceUsageSource();
+    mockGet.mockRejectedValue(createAxiosResponseError({
+      status: 404,
+      data: { error: 'route_not_found' },
+    }));
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await expect(api.resolveProviderAccountUsageSource({ source })).rejects.toMatchObject({
+      name: 'ConnectedServiceQuotaApiError',
+      kind: 'http',
+      status: 404,
+      retryable: false,
+    });
+  });
+
+  it('rejects malformed exact-source ownership proof as a protocol error', async () => {
+    const source = createConnectedServiceUsageSource();
+    mockGet.mockResolvedValue({
+      status: 200,
+      data: {
+        source,
+        recordId: 'not-a-record-id',
+        providerAccountId: 'acct_live_codex',
+        fetchedAt: 1_000,
+        staleAfterMs: 300_000,
+      },
+    });
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await expect(api.resolveProviderAccountUsageSource({ source })).rejects.toMatchObject({
+      name: 'ConnectedServiceQuotaApiError',
+      kind: 'protocol',
+      retryable: false,
+    });
+  });
+
+  it('rejects an exact-source response for a different source tuple', async () => {
+    const snapshot = createProviderAccountUsageSnapshot();
+    const source = createConnectedServiceUsageSource();
+    mockGet.mockResolvedValue({
+      status: 200,
+      data: {
+        source: { ...source, groupGeneration: source.groupGeneration! + 1 },
+        recordId: snapshot.recordId,
+        providerAccountId: 'acct_live_codex',
+        fetchedAt: 1_000,
+        staleAfterMs: 300_000,
+      },
+    });
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await expect(api.resolveProviderAccountUsageSource({ source })).rejects.toMatchObject({
+      name: 'ConnectedServiceQuotaApiError',
+      kind: 'protocol',
+      retryable: false,
+    });
   });
 
   it('classifies plaintext quota read timeouts as retryable', async () => {

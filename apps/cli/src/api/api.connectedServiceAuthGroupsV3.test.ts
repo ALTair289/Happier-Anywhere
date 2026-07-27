@@ -34,6 +34,7 @@ function authGroupResponse(activeProfileId: string, generation: number) {
       policy: { v: 1, autoSwitch: true },
       activeProfileId,
       generation,
+      runtimeStateRevision: 0,
       state: { v: 1 },
       members: [
         {
@@ -84,6 +85,39 @@ describe('ApiClient connected service auth groups v3', () => {
         headers: expect.objectContaining({ Authorization: 'Bearer happy-token' }),
       }),
     );
+  });
+
+  it('rejects an auth-group response without the required server-owned runtime-state revision', async () => {
+    const response = authGroupResponse('primary', 1);
+    delete (response.group as Partial<typeof response.group>).runtimeStateRevision;
+    mockGet.mockResolvedValue({ status: 200, data: response });
+    const api = await ApiClient.create({
+      token: 'happy-token',
+      encryption: { type: 'legacy' as const, secret: new Uint8Array(32) },
+    } as any);
+
+    await expect(api.getConnectedServiceAuthGroup({
+      serviceId: 'openai-codex',
+      groupId: 'main',
+    })).rejects.toThrow('Invalid connected service auth group response');
+  });
+
+  it('lists authoritative auth groups for one service through the v3 endpoint', async () => {
+    mockGet.mockResolvedValue({ status: 200, data: { groups: [authGroupResponse('primary', 1).group] } });
+    const api = await ApiClient.create({
+      token: 'happy-token',
+      encryption: { type: 'legacy' as const, secret: new Uint8Array(32) },
+    } as any);
+
+    await expect(api.listConnectedServiceAuthGroups({ serviceId: 'openai-codex' }))
+      .resolves.toEqual([expect.objectContaining({ groupId: 'main', generation: 1 })]);
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.stringContaining('/v3/connect/openai-codex/groups'),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer happy-token' }),
+      }),
+    );
+    expect(String((axios.get as any).mock.calls[0]?.[0])).not.toContain('/groups/undefined');
   });
 
   it('uses the connected-services server API timeout for auth group reads', async () => {
@@ -227,6 +261,7 @@ describe('ApiClient connected service auth groups v3', () => {
       serviceId: 'openai-codex',
       groupId: 'main',
       expectedGeneration: 1,
+      expectedRuntimeStateRevision: 0,
       memberStates: [
         {
           profileId: 'primary',
@@ -243,6 +278,7 @@ describe('ApiClient connected service auth groups v3', () => {
       expect.stringContaining('/v3/connect/openai-codex/groups/main/runtime-state'),
       {
         expectedGeneration: 1,
+        expectedRuntimeStateRevision: 0,
         memberStates: [
           {
             profileId: 'primary',

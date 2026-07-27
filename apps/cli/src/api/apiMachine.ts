@@ -20,12 +20,16 @@ import {
 import type { ScmConnectedAccountCredentialResolver } from '@/scm/types';
 import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
 import { backoff } from '@/utils/time';
+import { createConnectedServicesProjectionRetryScheduler } from './connectedServices/connectedServicesProjectionRetryScheduler';
+import { isConnectedServiceGenerationReconciliationNotAcknowledgeableError } from '@/daemon/connectedServices/accountGroups/generation/reconcileConnectedServiceAuthGroupGenerations';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { SOCKET_RPC_EVENTS } from '@happier-dev/protocol/socketRpc';
-import type {
-    DirectSessionTranscriptDeltaEphemeral,
-    MachineTransferReceiveEnvelope,
-    MachineTransferSendEnvelope,
+import {
+    type DirectSessionTranscriptDeltaEphemeral,
+    type MachineTransferReceiveEnvelope,
+    type MachineTransferSendEnvelope,
+    type ConnectedServiceExecutionAuthorityV1,
+    type ExactSessionTurnEndMutationV1,
 } from '@happier-dev/protocol';
 import { fetchChanges, fetchChangesAccountId } from './changes';
 import { readAccountChangesCursor, writeAccountChangesCursor } from '@/persistence';
@@ -33,13 +37,14 @@ import { createAuthenticationHttpStatusError, isAuthenticationError, isAuthentic
 import { serializeAxiosErrorForLog } from './client/serializeAxiosErrorForLog';
 import { runSupervisedRequest } from '@/api/connection/requestSupervision/runSupervisedRequest';
 import { handleRequestAuthenticationFailure } from '@/api/connection/requestSupervision/reportRequestOutcomeToSupervisor';
-import { emitSocketWithAck } from '@/session/transport/shared/socketAck';
+import { emitSocketWithAck, type EmitWithAckSocket } from '@/session/transport/shared/socketAck';
+import type { SessionMutationSocket } from './session/mutations/createSessionMutationOutbox';
 import {
-    createSessionMutationOutbox,
-    type SessionMutationOutbox,
-    type SessionMutationSocket,
-} from './session/mutations/createSessionMutationOutbox';
-import { createSessionEndMutation, createSessionTurnMutation } from './session/mutations/sessionMutationTypes';
+    createDaemonTerminalSessionMutationJournal,
+    createDaemonTerminalSessionMutationOutbox,
+    type DaemonTerminalSessionMutationOutbox,
+} from './session/mutations/daemonTerminalSessionMutationOutbox';
+import { recoverDaemonTerminalSessionMutationJournals } from './session/mutations/daemonTerminalSessionMutationDiscovery';
 
 import type { DaemonToServerEvents, ServerToDaemonEvents } from './machine/socketTypes';
 import { authorizeMachineRpcRequest } from './machine/machineRpcAuthorization';
@@ -51,14 +56,17 @@ import {
     DEFAULT_MANAGED_CONNECTION_POLICY,
     type ManagedConnectionState,
     type ManagedConnectionSupervisor,
+    type ReadinessProbeResult,
 } from '@happier-dev/connection-supervisor';
 import { createLoopbackReadinessProbe } from '@/api/connection/createLoopbackReadinessProbe';
 import { createMachineSocketTransport } from '@/api/machine/connection/createMachineSocketTransport';
+import { readCliClientUpgradeRequired } from '@/api/clientCompatibility/cliClientCompatibility';
 import { buildInstallationProofForMachine } from '@/daemon/identity/proof';
 import { readInstallationIdentityIfExistsSync } from '@/daemon/identity/store';
 import { readMachineOwnerConflictFromSocketError, type MachineOwnerConflictDetails } from '@/api/machine/machineOwnerConflict';
 import { readAccountSettingsVersionFromHint } from '@/settings/accountSettings/accountSettingsVersion';
 import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
+import { fetchAccountProfile } from '@/api/accountProfile';
 
 export type ApiMachineClientDeps = Readonly<{
     connectedAccounts?: ScmConnectedAccountCredentialResolver;
@@ -71,26 +79,48 @@ export type AccountSettingsVersionHintNotification = Readonly<{
     source: AccountSettingsVersionHintSource;
 }>;
 
-type MachineSessionEndPayload = Readonly<{
-    sid: string;
-    time: number;
-    exit?: unknown;
+export type PendingSessionActivationHintNotification = Readonly<{
+    sessionId: string;
+    requestId: string;
+    pendingVersion: number;
+    source: 'changes' | 'live';
+}>;
+
+export type ConnectedServicesProjectionChangeSource =
+    | 'startup'
+    | 'reconnect'
+    | 'changes'
+    | 'cursor-gone'
+    | 'page-limit'
+    | 'live';
+
+export type ConnectedServicesProjectionChangeNotification = Readonly<{
+    source: ConnectedServicesProjectionChangeSource;
+    executionAuthority: ConnectedServiceExecutionAuthorityV1;
+    signal: AbortSignal;
+    connectedServicesV2: unknown | null;
+    connectedServiceCredentialRevisionsV1: unknown | null;
 }>;
 
 type RpcLifecycleRegistration = Readonly<{
     dispose: () => Promise<void>;
 }>;
 
-function isMachineSessionEndPayload(value: unknown): value is MachineSessionEndPayload {
-    if (!value || typeof value !== 'object') {
-        return false;
-    }
-    const candidate = value as { sid?: unknown; time?: unknown };
-    return typeof candidate.sid === 'string' && typeof candidate.time === 'number';
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function classifyMachineTransportErrorToProbeResult(
+    error: unknown,
+): Exclude<ReadinessProbeResult, Readonly<{ status: 'ready' }>> | null {
+    if (!readCliClientUpgradeRequired(error)) {
+        return null;
+    }
+    return {
+        status: 'auth_failed',
+        statusCode: 426,
+        errorMessage: 'This Happier daemon must be upgraded before it can sync sessions.',
+    };
 }
 
 function readSocketConnectErrorDiagnostic(error: unknown): Record<string, unknown> {
@@ -132,13 +162,20 @@ export class ApiMachineClient {
     private rpcHandlerManager: RpcHandlerManager;
     private hasConnectedOnce = false;
     private accountIdPromise: Promise<string> | null = null;
-    private changesSyncInFlight: Promise<void> | null = null;
+    private readonly connectedServicesProjectionRetry = createConnectedServicesProjectionRetryScheduler();
+    private projectionSchedulingClosed = false;
     private updateListeners = new Set<(update: Update) => boolean | void>();
     private accountSettingsVersionHintListeners = new Set<(hint: AccountSettingsVersionHintNotification) => void | Promise<void>>();
+    private pendingSessionActivationHintListeners = new Set<(
+        hint: PendingSessionActivationHintNotification,
+    ) => void | Promise<void>>();
+    private connectedServicesProjectionChangeListeners = new Set<(
+        notification: ConnectedServicesProjectionChangeNotification,
+    ) => void | Promise<void>>();
     private machineTransferListeners = new Set<(payload: MachineTransferReceiveEnvelope) => void>();
     private connectionStateListeners = new Set<(state: ManagedConnectionState) => void>();
     private connectionSupervisor: ManagedConnectionSupervisor | null = null;
-    private sessionEndMutationOutboxes = new Map<string, SessionMutationOutbox>();
+    private daemonTerminalSessionMutationOutboxes = new Map<string, DaemonTerminalSessionMutationOutbox>();
     private readonly rpcLifecycleRegistrations: RpcLifecycleRegistration[] = [];
     private readonly machineRpcWorkingDirectory: string;
     private readonly filesystemAccessPolicy: FilesystemAccessPolicy;
@@ -160,7 +197,6 @@ export class ApiMachineClient {
         lastDisconnectedAt: null,
         lastErrorMessage: null,
     };
-
     private teardownActiveSocket(): void {
         if (!this.socket) {
             return;
@@ -212,6 +248,12 @@ export class ApiMachineClient {
             encryptionKey: this.machine.encryptionKey,
             encryptionVariant: this.machine.encryptionVariant,
             logger: (msg, data) => logger.debug(msg, data),
+            onRegistrationError: (error) => {
+                const probe = classifyMachineTransportErrorToProbeResult(error);
+                if (probe) {
+                    this.connectionSupervisor?.reportProbeResult?.(probe);
+                }
+            },
             authorizeRequest: authorizeMachineRpcRequest,
         });
 
@@ -257,6 +299,7 @@ export class ApiMachineClient {
 
     setRPCHandlers({
         spawnSession,
+        spawnSessionForHandoff,
         resolveSpawnSessionByNonce,
         stopSession,
         isSessionActive,
@@ -271,6 +314,7 @@ export class ApiMachineClient {
             rpcHandlerManager: this.rpcHandlerManager,
             handlers: {
                 spawnSession,
+                ...(spawnSessionForHandoff ? { spawnSessionForHandoff } : {}),
                 ...(resolveSpawnSessionByNonce ? { resolveSpawnSessionByNonce } : {}),
                 stopSession,
                 ...(isSessionActive ? { isSessionActive } : {}),
@@ -307,6 +351,32 @@ export class ApiMachineClient {
         };
     }
 
+    onPendingSessionActivationHint(
+        listener: (hint: PendingSessionActivationHintNotification) => void | Promise<void>,
+    ): () => void {
+        this.pendingSessionActivationHintListeners.add(listener);
+        return () => {
+            this.pendingSessionActivationHintListeners.delete(listener);
+        };
+    }
+
+    private async notifyPendingSessionActivationHint(
+        hint: PendingSessionActivationHintNotification,
+    ): Promise<void> {
+        for (const listener of this.pendingSessionActivationHintListeners) {
+            try {
+                await Promise.resolve(listener(hint));
+            } catch (error) {
+                logger.warn('[API MACHINE] Pending session activation listener failed; Pending custody retained', {
+                    sessionId: hint.sessionId,
+                    requestId: hint.requestId,
+                    source: hint.source,
+                    message: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
+    }
+
     private async notifyAccountSettingsVersionHint(hint: AccountSettingsVersionHintNotification): Promise<void> {
         for (const listener of this.accountSettingsVersionHintListeners) {
             try {
@@ -318,6 +388,46 @@ export class ApiMachineClient {
                     message: error instanceof Error ? error.message : String(error),
                 });
             }
+        }
+    }
+
+    onConnectedServicesProjectionChange(listener: (
+        notification: ConnectedServicesProjectionChangeNotification,
+    ) => void | Promise<void>): () => void {
+        this.connectedServicesProjectionChangeListeners.add(listener);
+        return () => {
+            this.connectedServicesProjectionChangeListeners.delete(listener);
+        };
+    }
+
+    private async notifyConnectedServicesProjectionChange(
+        notification: ConnectedServicesProjectionChangeNotification,
+    ): Promise<void> {
+        notification.signal.throwIfAborted();
+        const resolvedNotification = notification.connectedServicesV2 !== null
+            && notification.connectedServiceCredentialRevisionsV1 !== null
+            ? notification
+            : await (async (): Promise<ConnectedServicesProjectionChangeNotification> => {
+                const profile = await fetchAccountProfile({ token: this.token, signal: notification.signal });
+                notification.signal.throwIfAborted();
+                return {
+                    ...notification,
+                    connectedServicesV2: profile.connectedServicesV2,
+                    connectedServiceCredentialRevisionsV1: profile.connectedServiceCredentialRevisionsV1,
+                };
+            })();
+        for (const listener of this.connectedServicesProjectionChangeListeners) {
+            try {
+                await Promise.resolve(listener(resolvedNotification));
+            } catch (error) {
+                if (!isConnectedServiceGenerationReconciliationNotAcknowledgeableError(error)) {
+                    throw error;
+                }
+                logger.debug('[API MACHINE] Connected-services generation reconciliation awaits another domain event', {
+                    source: notification.source,
+                });
+            }
+            notification.signal.throwIfAborted();
         }
     }
 
@@ -441,71 +551,61 @@ export class ApiMachineClient {
     private createSessionEndMutationSocket(): SessionMutationSocket {
         return {
             connected: this.socket?.connected === true,
-            emit: (event: string, payload: unknown) => {
-                if (event !== 'session-end' || !this.socket || !isMachineSessionEndPayload(payload)) {
-                    return;
-                }
-                this.socket.emit('session-end', payload);
-            },
+            emit: () => {},
             emitWithAck: async () => {
                 throw new Error('Machine session-end mutation outbox does not support ack-based events');
             },
         };
     }
 
-    private getSessionEndMutationOutbox(sessionId: string): SessionMutationOutbox {
-        const existing = this.sessionEndMutationOutboxes.get(sessionId);
+    private getDaemonTerminalSessionMutationOutbox(sessionId: string): DaemonTerminalSessionMutationOutbox {
+        const existing = this.daemonTerminalSessionMutationOutboxes.get(sessionId);
         if (existing) return existing;
 
-        const outbox = createSessionMutationOutbox({
+        const outbox = createDaemonTerminalSessionMutationOutbox({
             token: this.token,
             sessionId,
             getSocket: () => this.createSessionEndMutationSocket(),
             requestReconnect: () => {},
         });
-        this.sessionEndMutationOutboxes.set(sessionId, outbox);
+        this.daemonTerminalSessionMutationOutboxes.set(sessionId, outbox);
         return outbox;
     }
 
-    enqueueSessionEndMutation(payload: MachineSessionEndPayload): void {
-        const sessionId = payload.sid.trim();
-        if (!sessionId) {
-            return;
-        }
-
-        void this.getSessionEndMutationOutbox(sessionId).enqueueSessionEnd(createSessionEndMutation({
-            sessionId,
-            observedAt: payload.time,
-            ...(payload.exit !== undefined ? { exit: payload.exit } : {}),
-        })).catch((error) => {
-            logger.warn('[API MACHINE] Failed to enqueue durable session-end mutation', {
-                error: serializeAxiosErrorForLog(error),
-            });
-        });
+    async enqueueDaemonTerminalExactTurnEnd(mutation: ExactSessionTurnEndMutationV1): Promise<void> {
+        await this.getDaemonTerminalSessionMutationOutbox(mutation.sessionId).enqueueExactTurnEnd(mutation);
     }
 
-    /**
-     * Durable daemon-side settlement of a dead runner's open canonical turn (Lane N1). Delivered
-     * as an `end_session` turn mutation through the per-session mutation outbox; the machine
-     * socket has no turn-mutation event, so delivery uses the HTTP turn route. The server no-ops
-     * when no turn is open or the open turn began after `time` (a replacement runner's turn).
-     */
-    enqueueSessionTurnSettlementMutation(payload: Readonly<{ sid: string; time: number }>): void {
-        const sessionId = payload.sid.trim();
-        if (!sessionId) {
-            return;
-        }
-
-        void this.getSessionEndMutationOutbox(sessionId).enqueueSessionTurn(createSessionTurnMutation({
-            sessionId,
-            action: 'end_session',
-            mutationId: `daemon-exit-turn-settlement:${sessionId}:${payload.time}`,
-            observedAt: payload.time,
-        })).catch((error) => {
-            logger.warn('[API MACHINE] Failed to enqueue durable session turn settlement mutation', {
-                error: serializeAxiosErrorForLog(error),
+    async recoverDaemonTerminalSessionMutationJournals(): Promise<void> {
+        const recoveredHandles = new Map<string, DaemonTerminalSessionMutationOutbox>();
+        try {
+            await recoverDaemonTerminalSessionMutationJournals({
+                activeServerDir: configuration.activeServerDir,
+                openHandle: (request) => {
+                    const existing = this.daemonTerminalSessionMutationOutboxes.get(request.sessionId);
+                    if (existing) return existing;
+                    const alreadyRecovered = recoveredHandles.get(request.sessionId);
+                    if (alreadyRecovered) return alreadyRecovered;
+                    const handle = createDaemonTerminalSessionMutationJournal({
+                        token: this.token,
+                        sessionId: request.sessionId,
+                        paths: request.paths,
+                        getSocket: () => this.createSessionEndMutationSocket(),
+                        requestReconnect: () => {},
+                    });
+                    recoveredHandles.set(request.sessionId, handle);
+                    this.daemonTerminalSessionMutationOutboxes.set(request.sessionId, handle);
+                    return handle;
+                },
             });
-        });
+        } catch (error) {
+            for (const [sessionId, handle] of recoveredHandles) {
+                if (this.daemonTerminalSessionMutationOutboxes.get(sessionId) === handle) {
+                    this.daemonTerminalSessionMutationOutboxes.delete(sessionId);
+                }
+            }
+            throw error;
+        }
     }
 
     connect(params?: {
@@ -520,6 +620,7 @@ export class ApiMachineClient {
         if (!this.connectionSupervisor) {
             this.connectionSupervisor = createManagedConnectionSupervisor({
                 ...DEFAULT_MANAGED_CONNECTION_POLICY,
+                classifyTransportErrorToProbeResult: classifyMachineTransportErrorToProbeResult,
                 createTransport: () => {
                     const serverUrl = resolveServerHttpBaseUrl();
                     const transportGeneration = this.activeTransportGeneration + 1;
@@ -587,11 +688,7 @@ export class ApiMachineClient {
                         });
                     });
 
-                    void this.syncChangesOnConnect({ reason: isReconnect ? 'reconnect' : 'connect' }).catch((error) => {
-                        logger.warn('[API MACHINE] /v2/changes sync failed', {
-                            message: error instanceof Error ? error.message : String(error),
-                        });
-                    });
+                    this.startChangesSyncWithRetry({ reason: isReconnect ? 'reconnect' : 'connect' });
                     this.startKeepAlive();
 
                     if (params?.onConnect) {
@@ -665,6 +762,9 @@ export class ApiMachineClient {
         });
 
         socket.on('update', (data: Update) => {
+            if (this.projectionSchedulingClosed || !this.isActiveTransportGeneration(transportGeneration) || socket !== this.socket) {
+                return;
+            }
             if (data.body.t === 'update-machine' && (data.body as UpdateMachineBody).machineId === this.machine.id) {
                 const update = data.body as UpdateMachineBody;
 
@@ -680,6 +780,27 @@ export class ApiMachineClient {
                     this.machine.daemonStateVersion = update.daemonState.version;
                 }
                 return;
+            }
+
+            if (data.body.t === 'update-account' && 'connectedServicesV2' in data.body) {
+                this.startChangesSyncWithRetry({ reason: 'reconnect' });
+            }
+
+            if (data.body.t === 'pending-changed') {
+                const requestId = typeof data.body.pendingActivationRequestId === 'string'
+                    ? data.body.pendingActivationRequestId.trim()
+                    : '';
+                const sessionId = typeof data.body.sessionId === 'string'
+                    ? data.body.sessionId.trim()
+                    : data.body.sid.trim();
+                if (requestId && sessionId) {
+                    void this.notifyPendingSessionActivationHint({
+                        sessionId,
+                        requestId,
+                        pendingVersion: data.body.pendingVersion,
+                        source: 'live',
+                    });
+                }
             }
 
             const handled = this.dispatchUpdate(data);
@@ -717,20 +838,23 @@ export class ApiMachineClient {
 
     async shutdown() {
         logger.debug('[API MACHINE] Shutting down');
-        this.stopKeepAlive();
-        this.socket = null;
+        this.projectionSchedulingClosed = true;
+        this.activeTransportGeneration += 1;
+        this.teardownActiveSocket();
+        this.connectedServicesProjectionRetry.close();
         if (this.connectionSupervisor) {
             await this.connectionSupervisor.stop();
         }
+        await this.connectedServicesProjectionRetry.waitForIdle();
         await this.rpcHandlerManager.waitForIdle();
         await this.disposeRpcLifecycleRegistrations();
-        const outboxes = Array.from(this.sessionEndMutationOutboxes.values());
-        this.sessionEndMutationOutboxes.clear();
+        const outboxes = Array.from(this.daemonTerminalSessionMutationOutboxes.values());
+        this.daemonTerminalSessionMutationOutboxes.clear();
         await Promise.all(outboxes.map(async (outbox) => {
             try {
                 await outbox.close();
             } catch (error) {
-                logger.debug('[API MACHINE] Failed to close session-end mutation outbox', {
+                logger.debug('[API MACHINE] Failed to close daemon terminal mutation outbox', {
                     error: serializeAxiosErrorForLog(error),
                 });
             }
@@ -754,7 +878,7 @@ export class ApiMachineClient {
         await this.rpcHandlerManager.waitForIdle();
     }
 
-    private async getAccountId(): Promise<string | null> {
+    private async getAccountId(signal?: AbortSignal): Promise<string | null> {
         if (this.accountIdPromise) {
             return await this.accountIdPromise.catch((error) => {
                 if (isAuthenticationError(error)) {
@@ -767,7 +891,7 @@ export class ApiMachineClient {
             });
         }
 
-        const request = () => fetchChangesAccountId({ token: this.token });
+        const request = () => fetchChangesAccountId({ token: this.token, ...(signal ? { signal } : {}) });
         const supervisor = this.connectionSupervisor;
         const p = supervisor
             ? runSupervisedRequest({
@@ -793,7 +917,7 @@ export class ApiMachineClient {
         }
     }
 
-    private async refreshMachineFromServer(): Promise<void> {
+    private async refreshMachineFromServer(signal?: AbortSignal): Promise<void> {
         try {
             const serverUrl = resolveServerHttpBaseUrl();
             const request = async () => {
@@ -803,6 +927,7 @@ export class ApiMachineClient {
                         'Content-Type': 'application/json',
                     },
                     timeout: 15_000,
+                    ...(signal ? { signal } : {}),
                     validateStatus: () => true,
                 });
                 if (isAuthenticationStatus(response.status)) {
@@ -859,7 +984,31 @@ export class ApiMachineClient {
         }
     }
 
-    private async syncChangesOnConnect(opts: { reason: 'connect' | 'reconnect' }): Promise<void> {
+    private async syncChangesOnConnect(
+        opts: { reason: 'connect' | 'reconnect' },
+        signal: AbortSignal = new AbortController().signal,
+    ): Promise<void> {
+        const executionAuthority = 'passive_projection' as const;
+        signal.throwIfAborted();
+        try {
+            await this.notifyConnectedServicesProjectionChange({
+                source: opts.reason === 'connect' ? 'startup' : 'reconnect',
+                executionAuthority,
+                signal,
+                connectedServicesV2: null,
+                connectedServiceCredentialRevisionsV1: null,
+            });
+        } catch (error) {
+            if (handleRequestAuthenticationFailure({
+                supervisor: this.connectionSupervisor,
+                error,
+                hadAuth: true,
+            })) {
+                return;
+            }
+            throw error;
+        }
+
         const enabled = (() => {
             const raw = process.env.HAPPY_ENABLE_V2_CHANGES;
             if (!raw) return true;
@@ -869,22 +1018,38 @@ export class ApiMachineClient {
             return;
         }
 
-        if (this.changesSyncInFlight) {
-            await this.changesSyncInFlight.catch(() => {});
-        }
-
-        const p = (async () => {
-            const accountId = await this.getAccountId();
-            if (!accountId) return;
+        await (async () => {
+            signal.throwIfAborted();
+            const accountId = await this.getAccountId(signal);
+            signal.throwIfAborted();
+            if (!accountId) throw new Error('account_changes_account_id_unavailable');
 
             const CHANGES_PAGE_LIMIT = 200;
             const after = await readAccountChangesCursor(accountId);
-            const result = await fetchChanges({ token: this.token, after, limit: CHANGES_PAGE_LIMIT });
+            const result = await fetchChanges({
+                token: this.token,
+                after,
+                limit: CHANGES_PAGE_LIMIT,
+                clientKind: 'daemon',
+                signal,
+            });
+            signal.throwIfAborted();
 
             if (result.status === 'cursor-gone') {
-                await this.refreshMachineFromServer();
+                await this.refreshMachineFromServer(signal);
+                signal.throwIfAborted();
                 await this.notifyAccountSettingsVersionHint({ settingsVersion: null, source: 'cursor-gone' });
+                signal.throwIfAborted();
+                await this.notifyConnectedServicesProjectionChange({
+                    source: 'cursor-gone',
+                    executionAuthority,
+                    signal,
+                    connectedServicesV2: null,
+                    connectedServiceCredentialRevisionsV1: null,
+                });
+                signal.throwIfAborted();
                 await writeAccountChangesCursor(accountId, result.currentCursor);
+                signal.throwIfAborted();
                 return;
             }
             if (result.status !== 'ok') {
@@ -899,7 +1064,7 @@ export class ApiMachineClient {
                 // Backwards compatibility: old servers may not support /v2/changes yet (e.g. 404).
                 // On reconnect, fall back to a snapshot refresh.
                 if (opts.reason === 'reconnect') {
-                    await this.refreshMachineFromServer();
+                    await this.refreshMachineFromServer(signal);
                 }
                 return;
             }
@@ -917,9 +1082,33 @@ export class ApiMachineClient {
             const highestAccountSettingsVersion = accountSettingsVersions.length > 0
                 ? Math.max(...accountSettingsVersions)
                 : null;
+            const hasConnectedServicesChange = changes.some((change) => {
+                if (change.kind !== 'account' || change.entityId !== 'self') return false;
+                const hint = asRecord(change.hint);
+                return hint?.connectedServices === true;
+            });
+            const pendingActivationHints = changes.flatMap((change): PendingSessionActivationHintNotification[] => {
+                if (change.kind !== 'session') return [];
+                const hint = asRecord(change.hint);
+                if (!hint) return [];
+                const requestId = typeof hint.pendingActivationRequestId === 'string'
+                    ? hint.pendingActivationRequestId.trim()
+                    : '';
+                const sessionId = change.entityId.trim();
+                const pendingVersion = hint.pendingVersion;
+                if (
+                    !requestId
+                    || !sessionId
+                    || typeof pendingVersion !== 'number'
+                    || !Number.isSafeInteger(pendingVersion)
+                    || pendingVersion < 0
+                ) return [];
+                return [{ sessionId, requestId, pendingVersion, source: 'changes' }];
+            });
 
             if (changes.length >= CHANGES_PAGE_LIMIT || hasRelevantMachineChange) {
-                await this.refreshMachineFromServer();
+                await this.refreshMachineFromServer(signal);
+                signal.throwIfAborted();
             }
             if (highestAccountSettingsVersion !== null) {
                 await this.notifyAccountSettingsVersionHint({
@@ -929,15 +1118,40 @@ export class ApiMachineClient {
             } else if (changes.length >= CHANGES_PAGE_LIMIT) {
                 await this.notifyAccountSettingsVersionHint({ settingsVersion: null, source: 'page-limit' });
             }
+            signal.throwIfAborted();
+            if (hasConnectedServicesChange || changes.length >= CHANGES_PAGE_LIMIT) {
+                await this.notifyConnectedServicesProjectionChange({
+                    source: hasConnectedServicesChange ? 'changes' : 'page-limit',
+                    executionAuthority,
+                    signal,
+                    connectedServicesV2: null,
+                    connectedServiceCredentialRevisionsV1: null,
+                });
+            }
+            for (const activationHint of pendingActivationHints) {
+                signal.throwIfAborted();
+                await this.notifyPendingSessionActivationHint(activationHint);
+            }
 
+            signal.throwIfAborted();
             await writeAccountChangesCursor(accountId, nextCursor);
+            signal.throwIfAborted();
         })();
+    }
 
-        this.changesSyncInFlight = p;
-        try {
-            await p;
-        } finally {
-            this.changesSyncInFlight = null;
-        }
+    private startChangesSyncWithRetry(opts: { reason: 'connect' | 'reconnect' }): void {
+        if (this.projectionSchedulingClosed) return;
+        this.connectedServicesProjectionRetry.schedule(async (signal) => {
+            try {
+                await this.syncChangesOnConnect(opts, signal);
+            } catch (error) {
+                if (!signal.aborted) {
+                    logger.warn('[API MACHINE] /v2/changes sync failed; retry scheduled', {
+                        message: error instanceof Error ? error.message : String(error),
+                    });
+                }
+                throw error;
+            }
+        }, { runImmediately: true });
     }
 }
