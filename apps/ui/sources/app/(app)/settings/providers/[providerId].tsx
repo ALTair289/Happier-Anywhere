@@ -60,6 +60,10 @@ import {
     resolveProviderStateSharingAgentIds,
 } from '@/components/settings/connectedServices/ConnectedServicesProviderStateSharingSettings';
 import { ProviderSettingsFields } from '@/components/settings/providers/ProviderSettingsFields';
+import {
+    readConnectedServiceProfileKindFromServices,
+    resolveConnectedServiceProfileActionRoute,
+} from '@/sync/domains/connectedServices/resolveConnectedServiceProfileActionRoute';
 
 const PROVIDER_AUTH_TERMINAL_TAB_ID = 'provider-auth-terminal';
 
@@ -171,6 +175,14 @@ const ProviderSettingsScreenInner = React.memo(function ProviderSettingsScreenIn
             connectedServicesDefaultAuthByAgentIdV1: next,
         } as Partial<typeof settings>);
     }, [applySettings]);
+    const dismissPoolAdoptionSuggestion = React.useCallback((key: string) => {
+        applySettings({
+            connectedServicesDefaultAuthPoolAdoptionDismissedByKey: {
+                ...(settings.connectedServicesDefaultAuthPoolAdoptionDismissedByKey ?? {}),
+                [key]: true,
+            },
+        } as Partial<typeof settings>);
+    }, [applySettings, settings.connectedServicesDefaultAuthPoolAdoptionDismissedByKey]);
     const normalizedProviderStateSharingSettings = React.useMemo(
         () => ConnectedServicesProviderStateSharingSettingsV1Schema.parse(settings.connectedServicesProviderStateSharingSettingsV1),
         [settings.connectedServicesProviderStateSharingSettingsV1],
@@ -530,10 +542,19 @@ const ProviderSettingsScreenInner = React.memo(function ProviderSettingsScreenIn
                                 pathname: '/settings/connected-services/[serviceId]',
                                 params: { serviceId },
                             })}
-                            onReconnectConnectedServiceProfile={(serviceId, profileId) => router.push({
-                                pathname: '/settings/connected-services/profile',
-                                params: { serviceId, profileId },
-                            })}
+                            onReconnectConnectedServiceProfile={(serviceId, profileId) => router.push(
+                                resolveConnectedServiceProfileActionRoute({
+                                    serviceId,
+                                    profileId,
+                                    profileKind: readConnectedServiceProfileKindFromServices({
+                                        connectedServicesV2: profile?.connectedServicesV2 ?? null,
+                                        serviceId,
+                                        profileId,
+                                    }),
+                                }),
+                            )}
+                            dismissedPoolAdoptionSuggestionKeys={settings.connectedServicesDefaultAuthPoolAdoptionDismissedByKey}
+                            onDismissPoolAdoptionSuggestion={dismissPoolAdoptionSuggestion}
                         />
                     </ItemGroup>
                 ) : null}

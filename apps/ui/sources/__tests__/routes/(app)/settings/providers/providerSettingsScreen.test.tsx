@@ -751,9 +751,9 @@ describe('ProviderSettingsScreen', () => {
 
     it('shows the shared connected-services default auth row for providers that support connected services', async () => {
         const screen = await renderProviderSettingsScreen();
-        const menu = screen.findAllByType('DropdownMenu' as any)
-            .find((node: any) => node.props?.itemTrigger?.itemProps?.testID === 'settings-connected-services-default-auth-codex');
-        expect(menu).toBeTruthy();
+        const row = screen.findAllByType('Item' as any)
+            .find((node: any) => node.props?.testID === 'settings-connected-services-default-auth-codex');
+        expect(row).toBeTruthy();
     });
 
     it('routes the provider default-auth chooser settings action to the selected connected service settings screen', async () => {
@@ -763,11 +763,12 @@ describe('ProviderSettingsScreen', () => {
             connectedServicesV2: [createCodexConnectedService({ profiles: [] })],
         };
         const screen = await renderProviderSettingsScreen();
-        const menu = screen.findAllByType('DropdownMenu' as any)
-            .find((node: any) => node.props?.itemTrigger?.itemProps?.testID === 'settings-connected-services-default-auth-codex');
-        expect(menu).toBeTruthy();
-
-        menu?.props?.onSelect?.('connected-service:openai-codex:connect');
+        const row = screen.findAllByType('Item' as any)
+            .find((node: any) => node.props?.testID === 'settings-connected-services-default-auth-codex');
+        expect(row).toBeTruthy();
+        row?.props?.onPress?.();
+        const modalDescriptor = modalShowSpy.mock.calls.at(-1)?.[0];
+        modalDescriptor?.props?.onOpenSettings?.('openai-codex');
         expect(routerPushSpy).toHaveBeenCalledWith({
             pathname: '/settings/connected-services/[serviceId]',
             params: { serviceId: 'openai-codex' },
