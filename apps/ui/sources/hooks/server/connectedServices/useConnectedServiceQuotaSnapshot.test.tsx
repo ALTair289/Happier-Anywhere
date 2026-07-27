@@ -645,7 +645,7 @@ describe('useConnectedServiceQuotaSnapshot', () => {
     }));
   });
 
-  it('targets the online machine that owns the connected-service profile when consuming recovery credit', async () => {
+  it('targets an online daemon without requiring profile-bound session ownership', async () => {
     fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
     const recoveryCredits = {
       kind: 'usage_limit_resets',
@@ -677,7 +677,7 @@ describe('useConnectedServiceQuotaSnapshot', () => {
 
     const hook = await mountHook({ serviceId: 'openai-codex', profileId: 'work' });
 
-    expect(hook.getCurrent().recoveryCreditMachineId).toBe('machine-owner');
+    expect(hook.getCurrent().recoveryCreditMachineId).toBe('machine-arbitrary');
     expect(hook.getCurrent().canConsumeRecoveryCredit).toBe(true);
 
     await act(async () => { await hook.getCurrent().consumeRecoveryCredit('pc-1'); });
@@ -685,13 +685,13 @@ describe('useConnectedServiceQuotaSnapshot', () => {
     expect(consumeQuotaRecoveryCreditSpy).toHaveBeenCalledWith(expect.objectContaining({
       serviceId: 'openai-codex',
       profileId: 'work',
-      machineId: 'machine-owner',
+      machineId: 'machine-arbitrary',
       providerCreditId: 'pc-1',
       sourceSnapshotFetchedAtMs: 1,
     }));
   });
 
-  it('disables recovery-credit consumption when no online machine owns the connected-service profile', async () => {
+  it('uses an available online daemon when no active session is bound to the recovery-credit profile', async () => {
     fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
     const recoveryCredits = {
       kind: 'usage_limit_resets',
@@ -720,12 +720,18 @@ describe('useConnectedServiceQuotaSnapshot', () => {
 
     const hook = await mountHook({ serviceId: 'openai-codex', profileId: 'work' });
 
-    expect(hook.getCurrent().recoveryCreditMachineId).toBeNull();
+    expect(hook.getCurrent().recoveryCreditMachineId).toBe('machine-arbitrary');
     expect(hook.getCurrent().canConsumeRecoveryCredit).toBe(true);
 
     await act(async () => { await hook.getCurrent().consumeRecoveryCredit('pc-1'); });
 
-    expect(consumeQuotaRecoveryCreditSpy).not.toHaveBeenCalled();
-    expect(hook.getCurrent().error).toBe('No active machine is available to apply this reset.');
+    expect(consumeQuotaRecoveryCreditSpy).toHaveBeenCalledWith(expect.objectContaining({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      machineId: 'machine-arbitrary',
+      providerCreditId: 'pc-1',
+      sourceSnapshotFetchedAtMs: 1,
+    }));
+    expect(hook.getCurrent().error).toBeNull();
   });
 });

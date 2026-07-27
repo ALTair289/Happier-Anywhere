@@ -103,7 +103,7 @@ export function useConnectedServiceQuotaSnapshot(params: Readonly<{
     const isStale = snapshot ? nowMs - snapshot.fetchedAt > snapshot.staleAfterMs : false;
     const canConsumeRecoveryCredit = credentialHealthUsable && snapshot !== null;
     const recoveryCreditSummary = summarizeConnectedServiceQuotaRecoveryCredits(snapshot?.recoveryCredits, nowMs);
-    const recoveryCreditMachineId = useConnectedServiceRecoveryCreditMachineTarget({ serviceId, profileId });
+    const recoveryCreditMachineId = useConnectedServiceRecoveryCreditMachineTarget();
 
     const [actionError, setActionError] = React.useState<string | null>(null);
     const [consumeRecoveryCreditPendingTarget, setConsumeRecoveryCreditPendingTarget] = React.useState<Readonly<{
