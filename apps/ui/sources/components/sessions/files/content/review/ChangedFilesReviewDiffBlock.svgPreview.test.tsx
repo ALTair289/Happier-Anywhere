@@ -71,10 +71,22 @@ vi.mock('@/components/ui/code/diff/reviewComments/DiffReviewCommentsViewer', () 
 
 vi.mock('react-native-svg', () => ({
     SvgXml: (props: any) => React.createElement('SvgXml', props),
+    SvgAst: (props: any) => React.createElement('SvgAst', props),
+    parse: (_xml: string, middleware?: (root: {
+        tag: string;
+        props: Record<string, unknown>;
+        children: [];
+        parent: null;
+        Tag: () => null;
+    }) => unknown) => {
+        const root = { tag: 'svg', props: {}, children: [] as [], parent: null, Tag: () => null };
+        middleware?.(root);
+        return root;
+    },
 }));
 
 describe('ChangedFilesReviewDiffBlock (svg previews)', () => {
-    it('renders an SvgXml preview for svg images on native when no diff is available', async () => {
+    it('renders a validated SvgAst preview for svg images on native when no diff is available', async () => {
         const loadedState = { status: 'loaded', diff: '', error: null } as const;
         const diffStateSource = {
             getDiffState: () => loadedState,
@@ -95,6 +107,7 @@ describe('ChangedFilesReviewDiffBlock (svg previews)', () => {
                     reviewCommentDrafts={[]}
                 />)).tree;
 
-        expect(tree.findAllByType('SvgXml' as any).length).toBe(1);
+        expect(tree.findAllByType('SvgAst' as any).length).toBe(1);
+        expect(tree.findAllByType('SvgXml' as any).length).toBe(0);
     });
 });

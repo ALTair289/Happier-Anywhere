@@ -2,11 +2,11 @@ import * as React from 'react';
 import { Platform, Pressable, useWindowDimensions, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
-import { SvgXml } from 'react-native-svg';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
 import { useSessionImagePreview } from '@/components/sessions/files/content/imagePreview/useSessionImagePreview';
+import { SafeNativeSvgXml } from '@/components/ui/media/SafeNativeSvgXml';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import type { CustomModalInjectedProps } from '@/modal';
@@ -110,7 +110,7 @@ function AttachmentImagePreviewCurrentImage(props: Readonly<{
 
     if (preview.status === 'loaded') {
         if (Platform.OS !== 'web' && preview.svgXml) {
-            return <SvgXml xml={preview.svgXml} width="100%" height="100%" />;
+            return <SafeNativeSvgXml xml={preview.svgXml} width="100%" height="100%" />;
         }
         return (
             <Image

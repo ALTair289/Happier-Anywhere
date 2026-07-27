@@ -1,8 +1,8 @@
 import * as React from 'react';
 import { Image, Platform, Pressable, View } from 'react-native';
-import { SvgXml } from 'react-native-svg';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
+import { SafeNativeSvgXml } from '@/components/ui/media/SafeNativeSvgXml';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
@@ -157,7 +157,7 @@ export function FileBinaryState({ theme, filePath, imagePreviewUri, imagePreview
                     }}
                 >
                     {svgXml ? (
-                        <SvgXml xml={svgXml} width="100%" height="100%" />
+                        <SafeNativeSvgXml xml={svgXml} width="100%" height="100%" />
                     ) : (
                         <Image
                             source={{ uri: imagePreviewUri }}

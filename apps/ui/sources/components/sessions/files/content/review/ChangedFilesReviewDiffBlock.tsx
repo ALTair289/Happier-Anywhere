@@ -1,8 +1,8 @@
 import * as React from 'react';
 import { Image, Platform, View, useWindowDimensions } from 'react-native';
-import { SvgXml } from 'react-native-svg';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
+import { SafeNativeSvgXml } from '@/components/ui/media/SafeNativeSvgXml';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
@@ -195,7 +195,7 @@ export const ChangedFilesReviewDiffBlock = React.memo((props: ChangedFilesReview
                             }}
                         >
                             {Platform.OS !== 'web' && imagePreview.svgXml ? (
-                                <SvgXml xml={imagePreview.svgXml} width="100%" height="100%" />
+                                <SafeNativeSvgXml xml={imagePreview.svgXml} width="100%" height="100%" />
                             ) : (
                                 <Image
                                     source={{ uri: imagePreview.uri }}

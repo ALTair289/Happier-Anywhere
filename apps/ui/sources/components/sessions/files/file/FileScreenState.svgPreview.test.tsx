@@ -27,10 +27,22 @@ vi.mock('@/constants/Typography', () => ({
 
 vi.mock('react-native-svg', () => ({
     SvgXml: (props: any) => React.createElement('SvgXml', props),
+    SvgAst: (props: any) => React.createElement('SvgAst', props),
+    parse: (_xml: string, middleware?: (root: {
+        tag: string;
+        props: Record<string, unknown>;
+        children: [];
+        parent: null;
+        Tag: () => null;
+    }) => unknown) => {
+        const root = { tag: 'svg', props: {}, children: [] as [], parent: null, Tag: () => null };
+        middleware?.(root);
+        return root;
+    },
 }));
 
 describe('FileBinaryState (svg previews)', () => {
-    it('renders an SvgXml preview for svg data uris on native', async () => {
+    it('renders a validated SvgAst preview for svg data uris on native', async () => {
         const { FileBinaryState } = await import('./FileScreenState');
 
         const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>';
@@ -55,6 +67,7 @@ describe('FileBinaryState (svg previews)', () => {
         let tree!: renderer.ReactTestRenderer;
         tree = (await renderScreen(<FileBinaryState theme={theme} filePath="icon.svg" imagePreviewUri={uri} />)).tree;
 
-        expect(tree.findAllByType('SvgXml' as any).length).toBe(1);
+        expect(tree.findAllByType('SvgAst' as any).length).toBe(1);
+        expect(tree.findAllByType('SvgXml' as any).length).toBe(0);
     });
 });
