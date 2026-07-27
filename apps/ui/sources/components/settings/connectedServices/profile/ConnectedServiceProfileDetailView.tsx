@@ -39,6 +39,7 @@ import {
 import { AccountBlock } from '../account/AccountBlock';
 import {
   isConnectedServiceCredentialReferencedByGroupError,
+  refreshConnectedServiceProfileAfterSupersededMutation,
   resolveConnectedServiceSettingsErrorMessage,
 } from '../errors/connectedServiceSettingsErrors';
 import { resolveConnectedServiceDisplayName } from '../model/resolveConnectedServiceDisplayName';
@@ -239,9 +240,13 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
     if (!ok) return;
     const disconnect = async (cleanup: boolean) => {
       const credentials = ensureCredentials();
+      const expectedCredentialRevision = profile.connectedServiceCredentialRevisionsV1.find((candidate) => (
+        candidate.serviceId === serviceId && candidate.profileId === profileId
+      ))?.credentialRevision;
       await deleteConnectedServiceCredentialForAccount(credentials, {
         serviceId,
         profileId,
+        expectedCredentialRevision,
         ...(cleanup ? { cleanupGroupReferences: true } : {}),
       });
       applySettings(pruneConnectedServiceProfilePreferencesForDeletedProfile({
@@ -270,12 +275,14 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
             await disconnect(true);
             return;
           } catch (retryError: unknown) {
+            await refreshConnectedServiceProfileAfterSupersededMutation(retryError, () => sync.refreshProfile());
             await Modal.alert(t('common.error'), resolveConnectedServiceSettingsErrorMessage(retryError));
             return;
           }
         }
         return;
       }
+      await refreshConnectedServiceProfileAfterSupersededMutation(error, () => sync.refreshProfile());
       await Modal.alert(t('common.error'), resolveConnectedServiceSettingsErrorMessage(error));
     }
   };

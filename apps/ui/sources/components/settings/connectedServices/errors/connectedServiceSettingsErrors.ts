@@ -23,6 +23,19 @@ export function isConnectedServiceCredentialReferencedByGroupError(error: unknow
   return isConnectedServiceApiErrorCode(error, 'connect_credential_referenced_by_group');
 }
 
+export function isConnectedServiceCredentialMutationSupersededError(error: unknown): boolean {
+  return isConnectedServiceApiErrorCode(error, 'connect_credential_mutation_superseded');
+}
+
+export async function refreshConnectedServiceProfileAfterSupersededMutation(
+  error: unknown,
+  refreshProfile: () => Promise<unknown>,
+): Promise<void> {
+  if (isConnectedServiceCredentialMutationSupersededError(error)) {
+    await refreshProfile();
+  }
+}
+
 export function resolveConnectedServiceRuntimeCooldownOverridePrompt(error: unknown): Readonly<{
   title: string;
   body: string;
@@ -51,6 +64,8 @@ export function resolveConnectedServiceSettingsErrorMessage(error: unknown): str
       case 'connect_credential_not_found':
         return t('connectedServices.detail.errors.credentialNotFound');
       case 'connect_credential_request_failed':
+        return t('connectedServices.detail.errors.credentialRequestFailed');
+      case 'connect_credential_mutation_superseded':
         return t('connectedServices.detail.errors.credentialRequestFailed');
       case 'connect_group_profile_runtime_cooldown':
         return reset

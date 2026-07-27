@@ -28,6 +28,7 @@ import {
 import {
   pollOpenAiCodexDeviceAuthViaProxy,
   startOpenAiCodexDeviceAuthViaProxy,
+  type OpenAiCodexDeviceAuthStartResponse,
 } from '@/sync/api/account/apiConnectedServicesV2';
 import { buildOauthRecordFromProxyPayload, parseConnectedServiceOauthProxyBundle } from '@/sync/domains/connectedServices/oauth/connectedServiceOauthProxyBundle';
 import { resolveConnectedServiceOauthErrorMessage } from '../resolveConnectedServiceOauthErrorMessage';
@@ -68,12 +69,7 @@ export const OpenAiCodexDeviceAuthView = React.memo(function OpenAiCodexDeviceAu
     keyPairRef.current = tweetnacl.box.keyPair();
   }
 
-  const [deviceAuth, setDeviceAuth] = React.useState<null | Readonly<{
-    deviceAuthId: string;
-    userCode: string;
-    intervalMs: number;
-    verificationUrl: string;
-  }>>(null);
+  const [deviceAuth, setDeviceAuth] = React.useState<OpenAiCodexDeviceAuthStartResponse | null>(null);
 
   const [starting, setStarting] = React.useState(false);
   const [polling, setPolling] = React.useState(false);
@@ -147,14 +143,10 @@ export const OpenAiCodexDeviceAuthView = React.memo(function OpenAiCodexDeviceAu
       setError(null);
       try {
         const credentials = ensureCredentials();
-        const publicKey = encodeBase64(keyPairRef.current!.publicKey, 'base64url');
-
         while (!cancelledRef.current) {
           const polled = await pollOpenAiCodexDeviceAuthViaProxy(credentials, {
-            publicKey,
-            deviceAuthId: deviceAuth.deviceAuthId,
-            userCode: deviceAuth.userCode,
-            intervalMs: deviceAuth.intervalMs,
+            auth: deviceAuth,
+            publicKey: encodeBase64(keyPairRef.current!.publicKey, 'base64url'),
           });
 
           if (cancelledRef.current) return;

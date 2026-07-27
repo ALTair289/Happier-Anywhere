@@ -1,8 +1,7 @@
 import React from 'react';
-import renderer, { act } from 'react-test-renderer';
+import renderer from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 import { renderScreen } from '@/dev/testkit';
-import { flushHookEffects } from '@/dev/testkit/hooks/flushHookEffects';
 import {
   installConnectedServiceDetailShellMocks,
   installConnectedServicesCommonModuleMocks,
@@ -16,14 +15,19 @@ const {
   confirmSpy,
   applySettingsSpy,
   deleteSpy,
+  refreshProfileSpy,
   disabledFeatureIds,
 } = vi.hoisted(() => ({
   alertSpy: vi.fn(async () => {}),
   confirmSpy: vi.fn(async () => true),
   applySettingsSpy: vi.fn(async () => {}),
   deleteSpy: vi.fn(async () => {
-    throw new Error('boom');
+    throw {
+      code: 'connect_credential_mutation_superseded',
+      status: 409,
+    };
   }),
+  refreshProfileSpy: vi.fn(async () => {}),
   disabledFeatureIds: new Set(['connectedServices.accountGroups', 'connectedServices.quotas']),
 }));
 
@@ -42,6 +46,10 @@ installConnectedServicesCommonModuleMocks({
     },
 });
 installConnectedServiceDetailShellMocks();
+
+vi.mock('@react-navigation/native', () => ({
+  useIsFocused: () => true,
+}));
 
 vi.mock('@/auth/context/AuthContext', () => ({
   useAuth: () => ({ credentials: { token: 't', secret: Buffer.from(new Uint8Array(32).fill(3)).toString('base64url') } }),
@@ -62,6 +70,13 @@ vi.mock('@/sync/store/hooks', async () => {
           profiles: [{ profileId: 'work', status: 'connected', providerEmail: null }],
         },
       ],
+      connectedServiceCredentialRevisionsV1: [
+        {
+          serviceId: 'claude-subscription',
+          profileId: 'work',
+          credentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
+        },
+      ],
     }),
     useSettings: () => ({
       connectedServicesDefaultProfileByServiceId: { 'claude-subscription': 'work' },
@@ -73,7 +88,7 @@ vi.mock('@/sync/store/hooks', async () => {
 });
 
 vi.mock('@/sync/sync', () => ({
-  sync: { refreshProfile: vi.fn(async () => {}), applySettings: vi.fn(async () => {}) },
+  sync: { refreshProfile: refreshProfileSpy, applySettings: vi.fn(async () => {}) },
 }));
 
 vi.mock('@/sync/store/settingsWriters', () => ({
@@ -105,13 +120,11 @@ describe('ConnectedServiceDetailView disconnect error handling', () => {
     const disconnect = actions.find((a) => a?.id === 'disconnect');
     expect(typeof disconnect?.onPress).toBe('function');
 
-    await act(async () => {
-      disconnect.onPress();
-    });
-    await flushHookEffects({ cycles: 4, turns: 4 });
+    await disconnect.onPress();
 
     expect(confirmSpy).toHaveBeenCalled();
     expect(deleteSpy).toHaveBeenCalled();
+    expect(refreshProfileSpy).toHaveBeenCalledTimes(1);
     expect(alertSpy).toHaveBeenCalled();
   });
 });

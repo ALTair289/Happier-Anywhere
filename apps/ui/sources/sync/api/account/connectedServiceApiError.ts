@@ -6,17 +6,23 @@ export type ConnectedServiceApiErrorFields = Readonly<{
   resetAtMs?: number;
   generation?: number;
   canTryAgain?: boolean;
+  credentialRevision?: string | null;
+  reason?: 'revision_mismatch' | 'refresh_lease_lost';
 }>;
 
 export class ConnectedServiceApiError extends HappyError {
   readonly resetAtMs?: number;
   readonly generation?: number;
+  readonly credentialRevision?: string | null;
+  readonly reason?: 'revision_mismatch' | 'refresh_lease_lost';
 
   constructor(fields: ConnectedServiceApiErrorFields) {
     super(fields.code, fields.canTryAgain === true, { status: fields.status, kind: 'server', code: fields.code });
     this.name = 'ConnectedServiceApiError';
     this.resetAtMs = fields.resetAtMs;
     this.generation = fields.generation;
+    this.credentialRevision = fields.credentialRevision;
+    this.reason = fields.reason;
     Object.setPrototypeOf(this, ConnectedServiceApiError.prototype);
   }
 }
@@ -54,6 +60,12 @@ export function createConnectedServiceApiError(
     resetAtMs: readNumberField(record, 'resetAtMs'),
     generation: readNumberField(record, 'generation'),
     canTryAgain: isRetryableConnectedServiceStatus(opts.status),
+    credentialRevision: typeof record?.credentialRevision === 'string' || record?.credentialRevision === null
+      ? record.credentialRevision
+      : undefined,
+    reason: record?.reason === 'revision_mismatch' || record?.reason === 'refresh_lease_lost'
+      ? record.reason
+      : undefined,
   });
 }
 
@@ -71,6 +83,12 @@ export function readConnectedServiceApiErrorFields(error: unknown): ConnectedSer
     status: typeof record.status === 'number' && Number.isFinite(record.status) ? record.status : undefined,
     resetAtMs: typeof record.resetAtMs === 'number' && Number.isFinite(record.resetAtMs) ? record.resetAtMs : undefined,
     generation: typeof record.generation === 'number' && Number.isFinite(record.generation) ? record.generation : undefined,
+    credentialRevision: typeof record.credentialRevision === 'string' || record.credentialRevision === null
+      ? record.credentialRevision
+      : undefined,
+    reason: record.reason === 'revision_mismatch' || record.reason === 'refresh_lease_lost'
+      ? record.reason
+      : undefined,
   };
 }
 

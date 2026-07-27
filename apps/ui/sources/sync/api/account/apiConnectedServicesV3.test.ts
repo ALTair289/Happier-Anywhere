@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AuthCredentials } from '@/auth/storage/tokenStorage';
-import { HappyError } from '@/utils/errors/errors';
 
 vi.mock('@/utils/timing/time', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/utils/timing/time')>();
@@ -48,12 +47,12 @@ describe('apiConnectedServicesV3', () => {
       if (url === 'https://api.example.test/health') {
         return { ok: true, status: 200, json: async () => ({ ok: true }) };
       }
-      return { ok: true, status: 200, json: async () => ({ success: true }) };
+      return { ok: true, status: 200, json: async () => ({ success: true, credentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS' }) };
     });
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
 
     const { registerConnectedServiceCredentialPlain } = await import('./apiConnectedServicesV3');
-    await registerConnectedServiceCredentialPlain(credentials, {
+    const result = await registerConnectedServiceCredentialPlain(credentials, {
       serviceId: 'openai-codex',
       profileId: 'work',
       record: {
@@ -67,6 +66,13 @@ describe('apiConnectedServicesV3', () => {
         oauth: null,
         token: { token: 'tok', providerAccountId: null, providerEmail: null, raw: null },
       },
+      revisionSemantics: 'revisioned',
+      expectedCredentialRevision: null,
+    });
+
+    expect(result).toEqual({
+      revisionSemantics: 'revisioned',
+      credentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -78,6 +84,57 @@ describe('apiConnectedServicesV3', () => {
     );
     const init = resolveNonHealthCall(fetchMock, 'https://api.example.test/v3/connect/openai-codex/profiles/work/credential');
     expect((init.headers as Headers).get('Authorization')).toBe('Bearer t');
+    expect(JSON.parse(String(init.body))).toEqual(expect.objectContaining({ expectedCredentialRevision: null }));
+  });
+
+  it('classifies exact server-v0.2.1 mutation success as legacy and unfenced', async () => {
+    mockServerConfig();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === 'https://api.example.test/health') {
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      // Exact strict body accepted by server-v0.2.1 commit
+      // 4913c1e533c872a0712ba1c25b3104fd470aacc2.
+      expect(JSON.parse(String(init?.body))).toEqual({
+        content: {
+          t: 'plain',
+          v: {
+            v: 1,
+            serviceId: 'github',
+            profileId: 'work',
+            kind: 'token',
+            createdAt: 1,
+            updatedAt: 1,
+            expiresAt: null,
+            oauth: null,
+            token: { token: 'token', providerAccountId: null, providerEmail: null, raw: null },
+          },
+        },
+      });
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const { registerConnectedServiceCredentialPlain } = await import('./apiConnectedServicesV3');
+    await expect(registerConnectedServiceCredentialPlain(credentials, {
+      serviceId: 'github',
+      profileId: 'work',
+      record: {
+        v: 1,
+        serviceId: 'github',
+        profileId: 'work',
+        kind: 'token',
+        createdAt: 1,
+        updatedAt: 1,
+        expiresAt: null,
+        oauth: null,
+        token: { token: 'token', providerAccountId: null, providerEmail: null, raw: null },
+      },
+      revisionSemantics: 'legacy_unfenced',
+    })).resolves.toEqual({
+      revisionSemantics: 'legacy_unfenced',
+      credentialRevision: null,
+    });
   });
 
   it('treats 404 not found as a successful v3 disconnect (idempotent)', async () => {
@@ -92,13 +149,17 @@ describe('apiConnectedServicesV3', () => {
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
 
     const { deleteConnectedServiceCredentialV3 } = await import('./apiConnectedServicesV3');
-    await expect(deleteConnectedServiceCredentialV3(credentials, { serviceId: 'anthropic', profileId: 'work' })).resolves.toBeUndefined();
+    await expect(deleteConnectedServiceCredentialV3(credentials, {
+      serviceId: 'anthropic',
+      profileId: 'work',
+      expectedCredentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
+    })).resolves.toBeUndefined();
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.example.test/v3/connect/anthropic/profiles/work/credential',
+      'https://api.example.test/v3/connect/anthropic/profiles/work/credential?expectedCredentialRevision=csr_0123456789ABCDEFGHJKMNPQRS',
       expect.objectContaining({ method: 'DELETE', headers: expect.any(Headers) }),
     );
-    const init = resolveNonHealthCall(fetchMock, 'https://api.example.test/v3/connect/anthropic/profiles/work/credential');
+    const init = resolveNonHealthCall(fetchMock, 'https://api.example.test/v3/connect/anthropic/profiles/work/credential?expectedCredentialRevision=csr_0123456789ABCDEFGHJKMNPQRS');
     expect((init.headers as Headers).get('Content-Type')).toBeNull();
   });
 
@@ -118,10 +179,11 @@ describe('apiConnectedServicesV3', () => {
       serviceId: 'claude-subscription',
       profileId: 'work',
       cleanupGroupReferences: true,
+      expectedCredentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.example.test/v3/connect/claude-subscription/profiles/work/credential?cleanupGroupReferences=true',
+      'https://api.example.test/v3/connect/claude-subscription/profiles/work/credential?cleanupGroupReferences=true&expectedCredentialRevision=csr_0123456789ABCDEFGHJKMNPQRS',
       expect.objectContaining({ method: 'DELETE', headers: expect.any(Headers) }),
     );
   });
@@ -144,7 +206,11 @@ describe('apiConnectedServicesV3', () => {
       if (url === 'https://api.example.test/health') {
         return { ok: true, status: 200, json: async () => ({ ok: true }) };
       }
-      return { ok: true, status: 200, json: async () => ({ content: { t: 'plain', v: record } }) };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS', content: { t: 'plain', v: record } }),
+      };
     });
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
 
@@ -155,6 +221,50 @@ describe('apiConnectedServicesV3', () => {
     });
 
     expect(res.content.t).toBe('plain');
+    expect(res.credentialRevision).toBe('csr_1123456789ABCDEFGHJKMNPQRS');
     expect(res.content.v).toEqual(expect.objectContaining({ kind: 'token' }));
+  });
+
+  it('rejects a plaintext credential whose embedded binding differs from the requested route', async () => {
+    mockServerConfig();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === 'https://api.example.test/health') {
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS',
+          content: {
+            t: 'plain',
+            v: {
+              v: 1,
+              serviceId: 'anthropic',
+              profileId: 'work',
+              kind: 'token',
+              createdAt: 1_000,
+              updatedAt: 1_000,
+              expiresAt: null,
+              oauth: null,
+              token: { token: 'tok', providerAccountId: null, providerEmail: null, raw: null },
+            },
+          },
+        }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const { getConnectedServiceCredentialPlain } = await import('./apiConnectedServicesV3');
+    await expect(getConnectedServiceCredentialPlain(credentials, {
+      serviceId: 'openai-codex',
+      profileId: 'work',
+    })).rejects.toMatchObject({
+      name: 'HappyError',
+      message: 'invalid response',
+      canTryAgain: false,
+      status: 200,
+      kind: 'server',
+    });
   });
 });

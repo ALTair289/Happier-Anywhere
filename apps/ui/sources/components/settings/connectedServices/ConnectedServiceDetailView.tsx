@@ -43,6 +43,7 @@ import { PoolsList } from './pools/PoolsList';
 import { SettingsHeaderAddButton } from '../navigation/SettingsHeaderAddButton';
 import {
   isConnectedServiceCredentialReferencedByGroupError,
+  refreshConnectedServiceProfileAfterSupersededMutation,
   resolveConnectedServiceSettingsErrorMessage,
 } from './errors/connectedServiceSettingsErrors';
 import { resolveConnectedServiceRuntimeGroupCapability } from './model/connectedServiceRuntimeFallbackCapability';
@@ -193,9 +194,13 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
     opts?: Readonly<{ cleanupGroupReferences?: boolean }>,
   ) => {
     const credentials = ensureCredentials();
+    const expectedCredentialRevision = profile.connectedServiceCredentialRevisionsV1.find((candidate) => (
+      candidate.serviceId === serviceId && candidate.profileId === profileId
+    ))?.credentialRevision;
     await deleteConnectedServiceCredentialForAccount(credentials, {
       serviceId: serviceId!,
       profileId,
+      expectedCredentialRevision,
       ...(opts?.cleanupGroupReferences ? { cleanupGroupReferences: true } : {}),
     });
     applySettings(pruneConnectedServiceProfilePreferencesForDeletedProfile({
@@ -208,6 +213,7 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
     invalidateConnectedServiceGroupsRefreshSignal();
   }, [
     applySettings,
+    profile.connectedServiceCredentialRevisionsV1,
     serviceId,
     settings.connectedServicesDefaultProfileByServiceId,
     settings.connectedServicesProfileLabelByKey,
@@ -281,12 +287,14 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
             await finishDisconnect(profileId, { cleanupGroupReferences: true });
             return;
           } catch (retryError: unknown) {
+            await refreshConnectedServiceProfileAfterSupersededMutation(retryError, () => sync.refreshProfile());
             await Modal.alert(t('common.error'), resolveConnectedServiceSettingsErrorMessage(retryError));
             return;
           }
         }
         return;
       }
+      await refreshConnectedServiceProfileAfterSupersededMutation(e, () => sync.refreshProfile());
       await Modal.alert(t('common.error'), resolveConnectedServiceSettingsErrorMessage(e));
     }
   };
@@ -582,7 +590,7 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
             onEditLabel: () => void handleEditProfileLabel(profileId),
             onReplaceToken: () => void handleReplaceToken(profileId),
             onReconnect: () => void handleConnectOauth(profileId),
-            onDisconnect: () => void handleDisconnect(profileId),
+            onDisconnect: () => handleDisconnect(profileId),
           });
           return (
             <AccountBlock

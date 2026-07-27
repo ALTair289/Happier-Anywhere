@@ -14,15 +14,23 @@ const refreshProfileSpy = vi.fn(async () => {});
 const storeCredentialSpy = vi.fn(async () => {});
 const clipboardSetSpy = vi.fn(async () => {});
 
-const startSpy = vi.fn(async () => ({
-  deviceAuthId: 'dev-1',
-  userCode: 'ABCD-EFGH',
-  intervalMs: 5000,
-  verificationUrl: 'https://auth.openai.com/codex/device',
-}));
+let startRecipientPublicKey = '';
+const startSpy = vi.fn(async (_credentials: any, params: { publicKey: string }) => {
+  startRecipientPublicKey = params.publicKey;
+  return {
+    transactionId: 'csda-1',
+    userCode: 'ABCD-EFGH',
+    intervalMs: 5000,
+    verificationUrl: 'https://auth.openai.com/codex/device',
+  };
+});
 
 const pollSpy = vi.fn(async (_credentials: any, params: any) => {
-  const recipientPublicKey = decodeBase64(params.publicKey, 'base64url');
+  expect(params).toEqual({
+    auth: expect.objectContaining({ transactionId: 'csda-1' }),
+    publicKey: startRecipientPublicKey,
+  });
+  const recipientPublicKey = decodeBase64(startRecipientPublicKey, 'base64url');
   const plaintextJson = JSON.stringify({
     serviceId: 'openai-codex',
     accessToken: 'access-1',
@@ -92,6 +100,7 @@ afterEach(() => {
   clipboardSetSpy.mockClear();
   startSpy.mockClear();
   pollSpy.mockClear();
+  startRecipientPublicKey = '';
 });
 
 describe('OpenAiCodexDeviceAuthView', () => {

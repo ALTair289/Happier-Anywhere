@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AuthCredentials } from '@/auth/storage/tokenStorage';
-import { HappyError } from '@/utils/errors/errors';
 
 vi.mock('@/utils/timing/time', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/utils/timing/time')>();
@@ -48,16 +47,22 @@ describe('apiConnectedServicesV2', () => {
         if (url === 'https://api.example.test/health') {
           return { ok: true, status: 200, json: async () => ({ ok: true }) };
         }
-        return { ok: true, status: 200, json: async () => ({ success: true }) };
+        return { ok: true, status: 200, json: async () => ({ success: true, credentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS' }) };
       });
 	    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
 
     const { registerConnectedServiceCredentialSealed } = await import('./apiConnectedServicesV2');
-    await registerConnectedServiceCredentialSealed(credentials, {
+    const result = await registerConnectedServiceCredentialSealed(credentials, {
       serviceId: 'openai-codex',
       profileId: 'work',
       sealed: { format: 'account_scoped_v1', ciphertext: 'c2VhbGVk' },
       metadata: { kind: 'oauth', providerEmail: 'user@example.com', providerAccountId: null, expiresAt: 123 },
+      expectedCredentialRevision: null,
+    });
+
+    expect(result).toEqual({
+      revisionSemantics: 'revisioned',
+      credentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -69,6 +74,7 @@ describe('apiConnectedServicesV2', () => {
     );
     const init = resolveNonHealthCall(fetchMock, 'https://api.example.test/v2/connect/openai-codex/profiles/work/credential');
     expect((init.headers as Headers).get('Authorization')).toBe('Bearer t');
+    expect(JSON.parse(String(init.body))).toEqual(expect.objectContaining({ expectedCredentialRevision: null }));
   });
 
   it('fetches a sealed credential record from the v2 endpoint', async () => {
@@ -82,6 +88,7 @@ describe('apiConnectedServicesV2', () => {
         ok: true,
         status: 200,
         json: async () => ({
+          credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS',
           sealed: { format: 'account_scoped_v1', ciphertext: 'cipher-1' },
           metadata: { kind: 'oauth', providerEmail: 'user@example.com', providerAccountId: null, expiresAt: 123 },
         }),
@@ -93,6 +100,7 @@ describe('apiConnectedServicesV2', () => {
     const result = await getConnectedServiceCredentialSealed(credentials, { serviceId: 'openai-codex', profileId: 'work' });
 
     expect(result.sealed.format).toBe('account_scoped_v1');
+    expect(result.credentialRevision).toBe('csr_1123456789ABCDEFGHJKMNPQRS');
     expect(result.sealed.ciphertext).toBe('cipher-1');
     expect(fetchMock).toHaveBeenCalledWith(
       'https://api.example.test/v2/connect/openai-codex/profiles/work/credential',
@@ -103,6 +111,67 @@ describe('apiConnectedServicesV2', () => {
     );
     const init = resolveNonHealthCall(fetchMock, 'https://api.example.test/v2/connect/openai-codex/profiles/work/credential');
     expect((init.headers as Headers).get('Authorization')).toBe('Bearer t');
+  });
+
+  it('classifies exact server-v0.2.1 sealed responses as legacy and unfenced', async () => {
+    mockServerConfig();
+    const fetchMock = vi.fn(async (input: unknown) => {
+      if (String(input) === 'https://api.example.test/health') {
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          sealed: { format: 'account_scoped_v1', ciphertext: 'cipher-1' },
+          metadata: { kind: 'token' },
+        }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const { getConnectedServiceCredentialSealed } = await import('./apiConnectedServicesV2');
+    await expect(getConnectedServiceCredentialSealed(credentials, {
+      serviceId: 'github',
+      profileId: 'work',
+    })).resolves.toEqual(expect.objectContaining({
+      revisionSemantics: 'legacy_unfenced',
+      credentialRevision: null,
+    }));
+  });
+
+  it.each([
+    ['unsupported sealed format', { format: 'future_format', ciphertext: 'cipher-1' }, { kind: 'oauth' }],
+    ['invalid metadata kind', { format: 'account_scoped_v1', ciphertext: 'cipher-1' }, { kind: 'future_kind' }],
+  ])('rejects %s in a sealed credential response', async (_case, sealed, metadata) => {
+    mockServerConfig();
+    const fetchMock = vi.fn(async (input: unknown) => {
+      if (String(input) === 'https://api.example.test/health') {
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS',
+          sealed,
+          metadata,
+        }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const { getConnectedServiceCredentialSealed } = await import('./apiConnectedServicesV2');
+    await expect(getConnectedServiceCredentialSealed(credentials, {
+      serviceId: 'openai-codex',
+      profileId: 'work',
+    })).rejects.toMatchObject({
+      name: 'HappyError',
+      message: 'invalid response',
+      canTryAgain: false,
+      status: 200,
+      kind: 'server',
+    });
   });
 
   it('treats 404 not found as a successful disconnect (idempotent)', async () => {
@@ -117,13 +186,17 @@ describe('apiConnectedServicesV2', () => {
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
 
     const { deleteConnectedServiceCredential } = await import('./apiConnectedServicesV2');
-    await expect(deleteConnectedServiceCredential(credentials, { serviceId: 'anthropic', profileId: 'work' })).resolves.toBeUndefined();
+    await expect(deleteConnectedServiceCredential(credentials, {
+      serviceId: 'anthropic',
+      profileId: 'work',
+      expectedCredentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
+    })).resolves.toBeUndefined();
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.example.test/v2/connect/anthropic/profiles/work/credential',
+      'https://api.example.test/v2/connect/anthropic/profiles/work/credential?expectedCredentialRevision=csr_0123456789ABCDEFGHJKMNPQRS',
       expect.objectContaining({ method: 'DELETE', headers: expect.any(Headers) }),
     );
-    const init = resolveNonHealthCall(fetchMock, 'https://api.example.test/v2/connect/anthropic/profiles/work/credential');
+    const init = resolveNonHealthCall(fetchMock, 'https://api.example.test/v2/connect/anthropic/profiles/work/credential?expectedCredentialRevision=csr_0123456789ABCDEFGHJKMNPQRS');
     expect((init.headers as Headers).get('Content-Type')).toBeNull();
   });
 
@@ -143,10 +216,11 @@ describe('apiConnectedServicesV2', () => {
       serviceId: 'claude-subscription',
       profileId: 'work',
       cleanupGroupReferences: true,
+      expectedCredentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.example.test/v2/connect/claude-subscription/profiles/work/credential?cleanupGroupReferences=true',
+      'https://api.example.test/v2/connect/claude-subscription/profiles/work/credential?cleanupGroupReferences=true&expectedCredentialRevision=csr_0123456789ABCDEFGHJKMNPQRS',
       expect.objectContaining({ method: 'DELETE', headers: expect.any(Headers) }),
     );
   });
@@ -204,7 +278,7 @@ describe('apiConnectedServicesV2', () => {
         ok: true,
         status: 200,
         json: async () => ({
-          deviceAuthId: 'dev-1',
+          transactionId: 'csda-1',
           userCode: 'ABCD-EFGH',
           intervalMs: 5000,
           verificationUrl: 'https://auth.openai.com/codex/device',
@@ -217,6 +291,7 @@ describe('apiConnectedServicesV2', () => {
     const res = await startOpenAiCodexDeviceAuthViaProxy(credentials, { publicKey: 'pk-1' });
 
     expect(res.userCode).toBe('ABCD-EFGH');
+    expect(res).toEqual(expect.objectContaining({ kind: 'transaction', transactionId: 'csda-1' }));
     expect(fetchMock).toHaveBeenCalledWith(
       'https://api.example.test/v2/connect/openai-codex/oauth/device/start',
       expect.objectContaining({ method: 'POST', headers: expect.any(Headers) }),
@@ -236,10 +311,14 @@ describe('apiConnectedServicesV2', () => {
 
     const { pollOpenAiCodexDeviceAuthViaProxy } = await import('./apiConnectedServicesV2');
     const res = await pollOpenAiCodexDeviceAuthViaProxy(credentials, {
+      auth: {
+        kind: 'transaction',
+        transactionId: 'csda-1',
+        userCode: 'ABCD-EFGH',
+        intervalMs: 5000,
+        verificationUrl: 'https://auth.openai.com/codex/device',
+      },
       publicKey: 'pk-1',
-      deviceAuthId: 'dev-1',
-      userCode: 'ABCD-EFGH',
-      intervalMs: 5000,
     });
 
     expect(res.status).toBe('pending');
@@ -247,5 +326,50 @@ describe('apiConnectedServicesV2', () => {
       'https://api.example.test/v2/connect/openai-codex/oauth/device/poll',
       expect.objectContaining({ method: 'POST', headers: expect.any(Headers) }),
     );
+    const init = resolveNonHealthCall(fetchMock, 'https://api.example.test/v2/connect/openai-codex/oauth/device/poll');
+    expect(JSON.parse(String(init.body))).toEqual({ transactionId: 'csda-1' });
+  });
+
+  it('uses the exact released 0.2.1 deviceAuthId poll shape when the start response is legacy', async () => {
+    mockServerConfig();
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url === 'https://api.example.test/health') {
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      if (url.endsWith('/oauth/device/start')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            deviceAuthId: 'released-device-1',
+            userCode: 'ABCD-EFGH',
+            intervalMs: 5000,
+            verificationUrl: 'https://auth.openai.com/codex/device',
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ status: 'pending', retryAfterMs: 5000 }) };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const {
+      pollOpenAiCodexDeviceAuthViaProxy,
+      startOpenAiCodexDeviceAuthViaProxy,
+    } = await import('./apiConnectedServicesV2');
+    const started = await startOpenAiCodexDeviceAuthViaProxy(credentials, { publicKey: 'pk-1' });
+    await pollOpenAiCodexDeviceAuthViaProxy(credentials, { auth: started, publicKey: 'pk-1' });
+
+    expect(started).toEqual(expect.objectContaining({
+      kind: 'released_v0_2_1',
+      deviceAuthId: 'released-device-1',
+    }));
+    const init = resolveNonHealthCall(fetchMock, 'https://api.example.test/v2/connect/openai-codex/oauth/device/poll');
+    expect(JSON.parse(String(init.body))).toEqual({
+      publicKey: 'pk-1',
+      deviceAuthId: 'released-device-1',
+      userCode: 'ABCD-EFGH',
+      intervalMs: 5000,
+    });
   });
 });

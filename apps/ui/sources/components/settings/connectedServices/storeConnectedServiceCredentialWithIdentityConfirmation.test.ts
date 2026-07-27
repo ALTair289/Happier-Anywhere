@@ -77,30 +77,11 @@ describe('storeConnectedServiceCredentialWithIdentityConfirmation', () => {
     expect(onStored).not.toHaveBeenCalled();
   });
 
-  it('rejects a credential record whose target differs from the initiated reconnect target', async () => {
-    const { storeConnectedServiceCredentialWithIdentityConfirmation } = await import(
-      './storeConnectedServiceCredentialWithIdentityConfirmation'
-    );
-    const mismatchedRecord = {
-      ...sampleRecord(),
-      profileId: 'other-profile',
-    };
-
-    await expect(storeConnectedServiceCredentialWithIdentityConfirmation(
-      credentials,
-      {
-        serviceId: 'openai-codex',
-        profileId: 'work',
-        record: mismatchedRecord,
-      },
-    )).rejects.toThrow('connected_service_reconnect_target_mismatch');
-
-    expect(storeMock).not.toHaveBeenCalled();
-    expect(confirmMock).not.toHaveBeenCalled();
-  });
-
   it('returns true after retrying with identity replacement when the follow-up effects fail', async () => {
-    storeMock.mockRejectedValueOnce(new Error('connect_reconnect_provider_identity_mismatch'));
+    const mismatch = Object.assign(new Error('connect_reconnect_provider_identity_mismatch'), {
+      expectedCredentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
+    });
+    storeMock.mockRejectedValueOnce(mismatch);
     storeMock.mockResolvedValueOnce(undefined);
     confirmMock.mockResolvedValueOnce(true);
     const onStored = vi.fn(async () => {
@@ -120,8 +101,38 @@ describe('storeConnectedServiceCredentialWithIdentityConfirmation', () => {
     expect(stored).toBe(true);
     expect(storeMock).toHaveBeenNthCalledWith(2, credentials, params, {
       allowProviderIdentityChange: true,
+      expectedCredentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
     });
     expect(onStored).toHaveBeenCalledWith(params);
+  });
+
+  it('preserves the expect-absent guard across identity confirmation', async () => {
+    const mismatch = Object.assign(new Error('connect_reconnect_provider_identity_mismatch'), {
+      expectedCredentialRevision: null,
+    });
+    storeMock.mockRejectedValueOnce(mismatch);
+    storeMock.mockRejectedValueOnce(Object.assign(new Error('connect_credential_mutation_superseded'), {
+      code: 'connect_credential_mutation_superseded',
+      credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS',
+    }));
+    confirmMock.mockResolvedValueOnce(true);
+
+    const { storeConnectedServiceCredentialWithIdentityConfirmation } = await import(
+      './storeConnectedServiceCredentialWithIdentityConfirmation'
+    );
+    const params = {
+      serviceId: 'openai-codex' as const,
+      profileId: 'work',
+      record: sampleRecord(),
+    };
+
+    await expect(storeConnectedServiceCredentialWithIdentityConfirmation(credentials, params)).rejects.toMatchObject({
+      code: 'connect_credential_mutation_superseded',
+    });
+    expect(storeMock).toHaveBeenNthCalledWith(2, credentials, params, {
+      allowProviderIdentityChange: true,
+      expectedCredentialRevision: null,
+    });
   });
 
   it('returns true when follow-up effects fail after credentials are stored', async () => {

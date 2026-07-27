@@ -29,6 +29,11 @@ const profileState = vi.hoisted(() => ({
         groups: [] as Array<Record<string, unknown>>,
       },
     ],
+    connectedServiceCredentialRevisionsV1: [{
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      credentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
+    }],
   } as Record<string, unknown>,
 }));
 const settingsState = vi.hoisted(() => ({
@@ -220,6 +225,11 @@ beforeEach(() => {
         groups: [],
       },
     ],
+    connectedServiceCredentialRevisionsV1: [{
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      credentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
+    }],
   };
   settingsState.current = {
     connectedServicesDefaultProfileByServiceId: { 'openai-codex': 'work' },
@@ -451,7 +461,11 @@ describe('ConnectedServiceProfileDetailView', () => {
 
     expect(connectedServiceCredentialSpies.deleteConnectedServiceCredentialForAccount).toHaveBeenCalledWith(
       expect.objectContaining({ token: 't' }),
-      { serviceId: 'openai-codex', profileId: 'work' },
+      {
+        serviceId: 'openai-codex',
+        profileId: 'work',
+        expectedCredentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
+      },
     );
     expect(applySettingsSpy).toHaveBeenCalledWith(
       expect.objectContaining({
