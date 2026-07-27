@@ -57,9 +57,6 @@ vi.mock('@/components/ui/layout/layout', () => ({
     layout: { maxWidth: 800 },
 }));
 
-vi.mock('@/components/sessions/SessionNoticeBanner', () => ({
-    SessionNoticeBanner: () => null,
-}));
 
 async function renderFooter(props: React.ComponentProps<typeof ChatFooter>) {
     return renderScreen(<ChatFooter {...props} />);
@@ -69,17 +66,6 @@ function findTextNode(screen: Awaited<ReturnType<typeof renderFooter>>, text: st
     return screen.findAll((node) => String(node.type) === 'Text' && node.props?.children === text)[0] ?? null;
 }
 
-function resolveStyleColor(style: unknown): string | undefined {
-    const styles = Array.isArray(style) ? style : [style];
-
-    for (const entry of styles) {
-        if (entry && typeof entry === 'object' && 'color' in entry && typeof entry.color === 'string') {
-            return entry.color.toLowerCase();
-        }
-    }
-
-    return undefined;
-}
 
 describe('ChatFooter (local control)', () => {
     afterEach(() => {
@@ -244,8 +230,6 @@ describe('ChatFooter (local control)', () => {
         expect(screen.getTextContent()).toContain('chatFooter.directSessionTakeoverAvailable');
         expect(screen.findByTestId('session-chatFooter-takeOverDirect')).not.toBeNull();
         expect(screen.findByTestId('session-chatFooter-takeOverPersist')).not.toBeNull();
-        expect(resolveStyleColor(findTextNode(screen, 'chatFooter.takeOverDirect')?.props.style)).toBe('#ffffff');
-        expect(resolveStyleColor(findTextNode(screen, 'chatFooter.takeOverPersist')?.props.style)).toBe('#ffffff');
 
         await act(async () => {
             screen.pressByTestId('session-chatFooter-takeOverDirect');

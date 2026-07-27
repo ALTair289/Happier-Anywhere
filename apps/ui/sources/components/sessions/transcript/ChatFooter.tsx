@@ -1,12 +1,8 @@
 import * as React from 'react';
-import { View, ViewStyle, TextStyle, Pressable } from 'react-native';
-import { Typography } from '@/constants/Typography';
-import { Ionicons } from '@expo/vector-icons';
-import { useUnistyles } from 'react-native-unistyles';
+import { View, ViewStyle } from 'react-native';
 import { t } from '@/text';
-import { SessionNoticeBanner, type SessionNoticeBannerProps } from '@/components/sessions/SessionNoticeBanner';
-import { layout } from '@/components/ui/layout/layout';
-import { Text } from '@/components/ui/text/Text';
+import { ComposerAuxiliaryFrame } from '@/components/sessions/shell/view/ComposerAuxiliaryFrame';
+import { SessionWarningActionBanner } from '@/components/sessions/shell/SessionWarningActionBanner';
 import type { SessionLocalControlState } from '@/sync/domains/session/control/sessionLocalControl';
 
 export type ChatFooterDirectControlState = Readonly<{
@@ -20,11 +16,13 @@ export type ChatFooterDirectControlState = Readonly<{
     onRequestTakeOverPersist?: () => void | Promise<void>;
 }> | null;
 
+type ChatFooterNotice = Readonly<{ title: string; body: string }>;
+
 interface ChatFooterProps {
     controlledByUser?: boolean;
     localControl?: SessionLocalControlState | null;
     permissionsInUiWhileLocal?: boolean;
-    notice?: Pick<SessionNoticeBannerProps, 'title' | 'body'> | null;
+    notice?: ChatFooterNotice | null;
     /**
      * UI-only ephemeral state while a local-controlled session is switching back to remote.
      * This is intentionally not persisted to the session transcript.
@@ -35,44 +33,11 @@ interface ChatFooterProps {
 }
 
 export const ChatFooter = React.memo((props: ChatFooterProps) => {
-    const { theme } = useUnistyles();
     const containerStyle: ViewStyle = {
         // Allow children to take full width so long banners can wrap instead of overflowing
         alignItems: 'stretch',
         paddingTop: 4,
         paddingBottom: 2,
-    };
-    const warningContainerStyle: ViewStyle = {
-        flexDirection: 'row',
-        alignItems: 'center',
-        flexWrap: 'wrap',
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-        backgroundColor: theme.colors.state.warning.background,
-        borderRadius: 8,
-        marginTop: 4,
-        marginHorizontal: 8,
-    };
-    const warningTextStyle: TextStyle = {
-        flex: 1,
-        fontSize: 12,
-        color: theme.colors.state.warning.foreground,
-        marginLeft: 6,
-        ...Typography.default()
-    };
-    const switchButtonStyle: ViewStyle = {
-        flexShrink: 0,
-        marginLeft: 10,
-        paddingHorizontal: 8,
-        paddingVertical: 4,
-        borderRadius: 6,
-        backgroundColor: theme.colors.state.warning.foreground,
-    };
-    const switchButtonTextStyle: TextStyle = {
-        fontSize: 12,
-        color: theme.colors.button.primary.tint,
-        fontWeight: '700',
-        ...Typography.default(),
     };
 
     const localControlBanner = React.useMemo(() => {
@@ -112,41 +77,29 @@ export const ChatFooter = React.memo((props: ChatFooterProps) => {
             return 'chatFooter.permissionsTerminalOnly';
         })();
 
+        const actionLabelKey = showSwitchToRemoteButton
+            ? 'chatFooter.switchToRemote'
+            : showDetachButton
+                ? 'chatFooter.detachLocalTerminal'
+                : null;
+        const actionTestID = showSwitchToRemoteButton
+            ? 'session-chatFooter-switchToRemote'
+            : showDetachButton
+                ? 'session-chatFooter-detachLocalTerminal'
+                : undefined;
+
         return (
-            <View style={{ width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
-                <View style={{ width: '100%', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
-                    <View style={warningContainerStyle}>
-                        <Ionicons
-                            name="information-circle"
-                            size={16}
-                            color={theme.colors.state.warning.foreground}
-                        />
-                        <Text selectable style={warningTextStyle}>
-                            {t(textKey)}
-                        </Text>
-                        {showSwitchToRemoteButton && (
-                            <Pressable
-                                testID="session-chatFooter-switchToRemote"
-                                accessibilityLabel={t('chatFooter.switchToRemote')}
-                                onPress={props.onRequestSwitchToRemote}
-                                style={switchButtonStyle}
-                            >
-                                <Text style={switchButtonTextStyle}>{t('chatFooter.switchToRemote')}</Text>
-                            </Pressable>
-                        )}
-                        {showDetachButton && (
-                            <Pressable
-                                testID="session-chatFooter-detachLocalTerminal"
-                                accessibilityLabel={t('chatFooter.detachLocalTerminal')}
-                                onPress={props.onRequestSwitchToRemote}
-                                style={switchButtonStyle}
-                            >
-                                <Text style={switchButtonTextStyle}>{t('chatFooter.detachLocalTerminal')}</Text>
-                            </Pressable>
-                        )}
-                    </View>
-                </View>
-            </View>
+            <ComposerAuxiliaryFrame>
+                <SessionWarningActionBanner
+                    testID="session-chatFooter-localControl"
+                    iconName="information-circle"
+                    body={t(textKey)}
+                    actionTestID={actionTestID}
+                    actionLabel={actionLabelKey ? t(actionLabelKey) : undefined}
+                    actionAccessibilityLabel={actionLabelKey ? t(actionLabelKey) : undefined}
+                    onActionPress={actionLabelKey ? props.onRequestSwitchToRemote : undefined}
+                />
+            </ComposerAuxiliaryFrame>
         );
     }, [
         props.controlSwitchTo,
@@ -154,11 +107,6 @@ export const ChatFooter = React.memo((props: ChatFooterProps) => {
         props.localControl,
         props.onRequestSwitchToRemote,
         props.permissionsInUiWhileLocal,
-        switchButtonStyle,
-        switchButtonTextStyle,
-        theme.colors.state.warning.foreground,
-        warningContainerStyle,
-        warningTextStyle,
     ]);
 
     const directModeBanner = React.useMemo(() => {
@@ -188,65 +136,44 @@ export const ChatFooter = React.memo((props: ChatFooterProps) => {
         })();
 
         return (
-            <View style={{ width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
-                <View style={{ width: '100%', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
-                    <View style={warningContainerStyle}>
-                        <Ionicons
-                            name="information-circle"
-                            size={16}
-                            color={theme.colors.state.warning.foreground}
-                        />
-                        <Text selectable style={warningTextStyle}>
-                            {t(textKey)}
-                        </Text>
-                        {showDirectAction && (
-                            <Pressable
-                                testID="session-chatFooter-takeOverDirect"
-                                accessibilityLabel={t('chatFooter.takeOverDirect')}
-                                onPress={props.directControl.onRequestTakeOverDirect}
-                                style={switchButtonStyle}
-                            >
-                                <Text style={switchButtonTextStyle}>{t('chatFooter.takeOverDirect')}</Text>
-                            </Pressable>
-                        )}
-                        {showPersistAction && (
-                            <Pressable
-                                testID="session-chatFooter-takeOverPersist"
-                                accessibilityLabel={t('chatFooter.takeOverPersist')}
-                                onPress={props.directControl.onRequestTakeOverPersist}
-                                style={switchButtonStyle}
-                            >
-                                <Text style={switchButtonTextStyle}>{t('chatFooter.takeOverPersist')}</Text>
-                            </Pressable>
-                        )}
-                    </View>
-                </View>
-            </View>
+            <ComposerAuxiliaryFrame>
+                <SessionWarningActionBanner
+                    testID="session-chatFooter-directControl"
+                    iconName="information-circle"
+                    body={t(textKey)}
+                    secondaryActions={showPersistAction
+                        ? [{
+                            key: 'takeOverPersist',
+                            testID: 'session-chatFooter-takeOverPersist',
+                            label: t('chatFooter.takeOverPersist'),
+                            accessibilityLabel: t('chatFooter.takeOverPersist'),
+                            onPress: props.directControl.onRequestTakeOverPersist!,
+                        }]
+                        : undefined}
+                    actionTestID={showDirectAction ? 'session-chatFooter-takeOverDirect' : undefined}
+                    actionLabel={showDirectAction ? t('chatFooter.takeOverDirect') : undefined}
+                    actionAccessibilityLabel={showDirectAction ? t('chatFooter.takeOverDirect') : undefined}
+                    onActionPress={showDirectAction ? props.directControl.onRequestTakeOverDirect : undefined}
+                />
+            </ComposerAuxiliaryFrame>
         );
-    }, [
-        props.directControl,
-        switchButtonStyle,
-        switchButtonTextStyle,
-        theme.colors.state.warning.foreground,
-        warningContainerStyle,
-        warningTextStyle,
-    ]);
+    }, [props.directControl]);
 
     return (
         <View style={containerStyle}>
             {directModeBanner}
             {localControlBanner}
-            {props.notice && (
-                <View style={{ width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
-                    <View style={{ width: '100%', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
-                        <SessionNoticeBanner
-                            title={props.notice.title}
-                            body={props.notice.body}
-                            style={{ marginTop: 10, marginHorizontal: 8 }}
-                        />
-                    </View>
-                </View>
-            )}
+            {props.notice ? (
+                <ComposerAuxiliaryFrame>
+                    <SessionWarningActionBanner
+                        testID="session-chatFooter-notice"
+                        tone="neutral"
+                        iconName={null}
+                        title={props.notice.title}
+                        body={props.notice.body}
+                    />
+                </ComposerAuxiliaryFrame>
+            ) : null}
         </View>
     );
 });
