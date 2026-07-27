@@ -13,29 +13,38 @@ export const MINIMUM_CLI_SESSION_USER_MESSAGE_RPC_VERSION = '0.1.0-dev.0';
 // Minimum CLI version that accepts the backendTarget-based spawn payload contract.
 // The protocol landed during 0.1.0 dev builds, before the 0.2.0 release line.
 export const MINIMUM_CLI_BACKEND_TARGET_SPAWN_VERSION = '0.1.0-dev.0';
-
-function normalizeComparableVersion(version: string): number[] {
+function normalizeComparableVersion(version: string): {
+    baseParts: number[];
+    prereleaseChannel: 'dev' | 'preview' | null;
+    prereleaseNumbers: number[];
+} {
     const trimmed = String(version ?? '').trim();
+    if (!trimmed) throw new Error('Invalid version');
     const [baseVersion, rawSuffix = ''] = trimmed.split('-', 2);
     const baseParts = baseVersion.split('.').map(Number);
+    if (baseParts.length === 0 || baseParts.some((part) => !Number.isInteger(part) || part < 0)) {
+        throw new Error('Invalid version');
+    }
 
     if (!rawSuffix) {
-        return baseParts;
+        return { baseParts, prereleaseChannel: null, prereleaseNumbers: [] };
     }
 
     const suffixParts = rawSuffix.split('.');
     const channel = suffixParts[0];
     if (channel !== 'dev' && channel !== 'preview') {
-        return baseParts;
+        throw new Error('Unsupported prerelease channel');
+    }
+    const prereleaseNumbers = suffixParts.slice(1).map(Number);
+    if (prereleaseNumbers.length === 0 || prereleaseNumbers.some((part) => !Number.isInteger(part) || part < 0)) {
+        throw new Error('Invalid prerelease version');
     }
 
-    const channelRank = channel === 'dev' ? 1 : 2;
-    const numericSuffixParts = suffixParts
-        .slice(1)
-        .map(Number)
-        .filter((part) => Number.isFinite(part));
-
-    return [...baseParts, channelRank, ...numericSuffixParts];
+    return {
+        baseParts,
+        prereleaseChannel: channel,
+        prereleaseNumbers,
+    };
 }
 
 /**
@@ -45,8 +54,10 @@ function normalizeComparableVersion(version: string): number[] {
  * @returns -1 if version1 < version2, 0 if equal, 1 if version1 > version2
  */
 export function compareVersions(version1: string, version2: string): number {
-    const v1Parts = normalizeComparableVersion(version1);
-    const v2Parts = normalizeComparableVersion(version2);
+    const v1 = normalizeComparableVersion(version1);
+    const v2 = normalizeComparableVersion(version2);
+    const v1Parts = [...v1.baseParts];
+    const v2Parts = [...v2.baseParts];
     
     // Pad with zeros if needed
     const maxLength = Math.max(v1Parts.length, v2Parts.length);
@@ -56,6 +67,23 @@ export function compareVersions(version1: string, version2: string): number {
     for (let i = 0; i < maxLength; i++) {
         if (v1Parts[i] > v2Parts[i]) return 1;
         if (v1Parts[i] < v2Parts[i]) return -1;
+    }
+
+    if (v1.prereleaseChannel === null && v2.prereleaseChannel !== null) return 1;
+    if (v1.prereleaseChannel !== null && v2.prereleaseChannel === null) return -1;
+    if (v1.prereleaseChannel === null && v2.prereleaseChannel === null) return 0;
+
+    const v1ChannelRank = v1.prereleaseChannel === 'dev' ? 1 : 2;
+    const v2ChannelRank = v2.prereleaseChannel === 'dev' ? 1 : 2;
+    if (v1ChannelRank > v2ChannelRank) return 1;
+    if (v1ChannelRank < v2ChannelRank) return -1;
+
+    const prereleaseLength = Math.max(v1.prereleaseNumbers.length, v2.prereleaseNumbers.length);
+    for (let i = 0; i < prereleaseLength; i++) {
+        const v1Part = v1.prereleaseNumbers[i] ?? 0;
+        const v2Part = v2.prereleaseNumbers[i] ?? 0;
+        if (v1Part > v2Part) return 1;
+        if (v1Part < v2Part) return -1;
     }
     
     return 0;
