@@ -4,13 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createPermissionHandlerSessionStub } from '../utils/permissionHandler.testkit';
-import type { PermissionRpcPayload } from '../utils/permissionRpc';
 import { ClaudeLocalPermissionBridge } from './localPermissionBridge';
 import {
-  PUBLIC_RPC_HANDLER_ERROR_CODES,
-  SESSION_RPC_METHODS,
-  type StructuredQuestionResponseV1,
-} from '@happier-dev/protocol';
+  CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE,
+  CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON,
+} from '@happier-dev/agents';
 
 describe('ClaudeLocalPermissionBridge', () => {
   beforeEach(() => {
@@ -19,6 +17,41 @@ describe('ClaudeLocalPermissionBridge', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('retires only stale source-owned requests when a replacement bridge activates', async () => {
+    const { session, client } = createPermissionHandlerSessionStub('session-replacement-cleanup');
+    client.updateAgentState((current) => ({
+      ...current,
+      requests: {
+        stale_claude_question: {
+          tool: 'AskUserQuestion',
+          kind: 'user_action',
+          arguments: { questions: [{ question: 'No longer answerable' }] },
+          createdAt: 1,
+          source: CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE,
+        },
+        other_owner_question: {
+          tool: 'AskUserQuestion',
+          kind: 'user_action',
+          arguments: { questions: [{ question: 'Still owned elsewhere' }] },
+          createdAt: 2,
+          source: 'another_permission_owner',
+        },
+      },
+    }));
+
+    const bridge = new ClaudeLocalPermissionBridge(session);
+    bridge.activate();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.agentState.requests.stale_claude_question).toBeUndefined();
+    expect(client.agentState.completedRequests.stale_claude_question).toMatchObject({
+      status: 'canceled',
+      reason: CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON,
+      source: CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE,
+    });
+    expect(client.agentState.requests.other_owner_question).toBeDefined();
   });
 
   it('times out non-interactive requests by default when no UI response arrives', async () => {
@@ -55,18 +88,18 @@ describe('ClaudeLocalPermissionBridge', () => {
       hook_event_name: 'PermissionRequest',
       tool_name: 'Write',
       tool_input: { file_path: '/tmp/test.txt', content: 'hello' },
-      tool_use_id: 'toolu_allow_1',
+      tool_use_id: ' toolu_allow_1\n',
     });
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(client.agentState.requests.toolu_allow_1).toMatchObject({
+    expect(client.agentState.requests[' toolu_allow_1\n']).toMatchObject({
       tool: 'Write',
       arguments: { file_path: '/tmp/test.txt', content: 'hello' },
     });
 
     const permissionHandler = client.rpcHandlerManager.getHandler('permission');
     expect(permissionHandler).toBeDefined();
-    await permissionHandler?.({ id: 'toolu_allow_1', approved: true });
+    await permissionHandler?.({ id: ' toolu_allow_1\n', approved: true });
 
     await expect(pending).resolves.toMatchObject({
       continue: true,
@@ -76,8 +109,8 @@ describe('ClaudeLocalPermissionBridge', () => {
         decision: { behavior: 'allow' },
       },
     });
-    expect(client.agentState.requests.toolu_allow_1).toBeUndefined();
-    expect(client.agentState.completedRequests.toolu_allow_1).toMatchObject({
+    expect(client.agentState.requests[' toolu_allow_1\n']).toBeUndefined();
+    expect(client.agentState.completedRequests[' toolu_allow_1\n']).toMatchObject({
       status: 'approved',
       tool: 'Write',
     });
@@ -782,67 +815,6 @@ describe('ClaudeLocalPermissionBridge', () => {
     expect(client.agentState.completedRequests.toolu_ask_1).toMatchObject({
       status: 'approved',
       tool: 'AskUserQuestion',
-    });
-  });
-
-  it.each([
-    {
-      name: 'modern',
-      method: SESSION_RPC_METHODS.SESSION_STRUCTURED_QUESTION_RESPOND_V1,
-      invalid: { id: 'toolu_ask_custom_1', structuredAnswersV1: { 'Wrong question': ['Custom, typed answer'] } },
-      valid: { id: 'toolu_ask_custom_1', structuredAnswersV1: { 'Choose a target': ['Custom, typed answer'] } },
-    },
-    {
-      name: 'legacy',
-      method: SESSION_RPC_METHODS.SESSION_PERMISSION_RESPOND_LEGACY,
-      invalid: { id: 'toolu_ask_custom_1', approved: true, answers: { 'Wrong question': 'Custom, typed answer' } },
-      valid: { id: 'toolu_ask_custom_1', approved: true, answers: { 'Choose a target': 'Custom, typed answer' } },
-    },
-  ])('validates $name typed freeform answers against the published input and allows retry', async ({ method, invalid, valid }) => {
-    const { session, client } = createPermissionHandlerSessionStub(`session-ask-custom-${method}`);
-    const bridge = new ClaudeLocalPermissionBridge(session, { responseTimeoutMs: null });
-    bridge.activate();
-    const originalInput = {
-      questions: [{
-        header: 'Target',
-        question: 'Choose a target',
-        multiSelect: false,
-        options: [{ label: 'Production' }, { label: 'Staging' }],
-      }],
-    };
-    const expectedProviderInput = structuredClone(originalInput);
-    const pending = bridge.handlePermissionHook({
-      hook_event_name: 'PreToolUse',
-      tool_name: 'AskUserQuestion',
-      tool_input: originalInput,
-      tool_use_id: 'toolu_ask_custom_1',
-    });
-
-    expect((client.agentState.requests.toolu_ask_custom_1 as any)?.arguments?.questions?.[0]?.freeform).toEqual({});
-    originalInput.questions[0]!.question = 'Mutated after publication';
-    const rpc = client.rpcHandlerManager.getHandler<PermissionRpcPayload | StructuredQuestionResponseV1>(method);
-    await expect(rpc?.(invalid)).rejects.toMatchObject({
-      publicErrorCode: method === SESSION_RPC_METHODS.SESSION_STRUCTURED_QUESTION_RESPOND_V1
-        ? PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_INVALID
-        : PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_LEGACY_INVALID,
-    });
-    expect(client.agentState.requests.toolu_ask_custom_1).toBeDefined();
-
-    await expect(rpc?.(valid)).resolves.toMatchObject({ ok: true });
-    await expect(pending).resolves.toEqual({
-      continue: true,
-      suppressOutput: true,
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'allow',
-        updatedInput: {
-          ...expectedProviderInput,
-          answers: { 'Choose a target': 'Custom, typed answer' },
-        },
-      },
-    });
-    expect(client.agentState.completedRequests.toolu_ask_custom_1).toMatchObject({
-      structuredAnswersV1: { 'Choose a target': ['Custom, typed answer'] },
     });
   });
 

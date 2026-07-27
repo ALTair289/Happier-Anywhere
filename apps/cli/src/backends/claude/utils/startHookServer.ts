@@ -162,6 +162,11 @@ export interface HookServerOptions {
      * Set to `null` to wait indefinitely (no terminal fallback).
      */
     permissionRequestTimeoutMs?: number | null;
+    /**
+     * When provided, bind this exact localhost port. Used by adopt-first recovery to re-own
+     * hook commands baked into an already-running Claude TUI.
+     */
+    requestedPort?: number;
 }
 
 export interface HookServer {
@@ -443,8 +448,10 @@ export async function startHookServer(options: HookServerOptions): Promise<HookS
             res.writeHead(404).end('not found');
         });
 
-        // Listen on random available port
-        server.listen(0, '127.0.0.1', () => {
+        const requestedPort = typeof options.requestedPort === 'number' && Number.isInteger(options.requestedPort) && options.requestedPort > 0
+            ? options.requestedPort
+            : 0;
+        server.listen(requestedPort, '127.0.0.1', () => {
             const address = server.address();
             if (!address || typeof address === 'string') {
                 reject(new Error('Failed to get server address'));

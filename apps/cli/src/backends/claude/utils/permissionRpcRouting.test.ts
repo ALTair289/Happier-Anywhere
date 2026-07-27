@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE } from '@happier-dev/agents';
+import { CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE } from '@happier-dev/agents';
 
 import type { SDKAssistantMessage } from '../sdk';
 import type { EnhancedMode } from '../loop';
@@ -196,7 +196,7 @@ describe('permission RPC routing', () => {
           toolInput: { questions: [{ question: 'How should Claude resume this session?' }] },
           createdAt: 1,
           kind: 'user_action',
-          source: CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE,
+          source: CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE,
         },
       },
     }));
@@ -228,7 +228,7 @@ describe('permission RPC routing', () => {
           toolInput: { questions: [{ question: 'How should Claude resume this session?' }] },
           createdAt: 1,
           kind: 'user_action',
-          source: CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE,
+          source: CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE,
         },
       },
     }));

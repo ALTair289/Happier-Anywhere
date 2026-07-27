@@ -21,6 +21,8 @@ import type { PermissionRpcPayload } from './permissionRpc';
 import { updateAgentStateBestEffort, updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
 import { configuration } from '@/configuration';
 import { waitForSessionMetadataRetryBackoff } from '@/agent/runtime/sessionMetadataWaitRetryBackoff';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
+import { readPendingLocalId } from '@happier-dev/protocol';
 import { cloneStringKeyedRecordToNullProto } from '@/api/session/agentStateRecords';
 import type { Metadata } from '@/api/types';
 import { resolveAgentRequestKind } from '@/agent/permissions/requestKind';
@@ -38,7 +40,7 @@ import {
 import {
     computeNextMetadataStringOverrideV1,
     isClaudeLocalPermissionBridgeAgentStateRequest,
-    isClaudeUnifiedTerminalResumeChoiceAgentStateRequest,
+    isClaudeUnifiedTerminalDialogChoiceAgentStateRequest,
     SESSION_MODE_OVERRIDE_KEY,
 } from '@happier-dev/agents';
 import { isChangeTitleToolLikeName } from '@happier-dev/protocol/tools/v2';
@@ -68,7 +70,7 @@ type PendingPermissionMetadata = {
 
 function isRequestOwnedOutsideRemotePermissionHandler(request: unknown): boolean {
     return isClaudeLocalPermissionBridgeAgentStateRequest(request)
-        || isClaudeUnifiedTerminalResumeChoiceAgentStateRequest(request);
+        || isClaudeUnifiedTerminalDialogChoiceAgentStateRequest(request);
 }
 
 export class PermissionHandler {
@@ -195,7 +197,7 @@ export class PermissionHandler {
 
     private noteExitPlanModeApproved(sourceLocalId: string | null): void {
         const nowMs = Date.now();
-        const localId = typeof sourceLocalId === 'string' ? sourceLocalId.trim() : '';
+        const localId = readPendingLocalId(sourceLocalId) ?? '';
         if (localId.length > 0) {
             this.exitedPlanModeLocalIds.set(localId, nowMs);
             this.pruneExitPlanModeLocalIds(nowMs);
@@ -210,7 +212,7 @@ export class PermissionHandler {
         const nowMs = Date.now();
         this.pruneExitPlanModeLocalIds(nowMs);
 
-        const normalized = typeof localId === 'string' ? localId.trim() : '';
+        const normalized = readPendingLocalId(localId) ?? '';
         if (normalized.length > 0) {
             const approvedAt = this.exitedPlanModeLocalIds.get(normalized);
             if (!approvedAt) return false;
@@ -688,7 +690,7 @@ export class PermissionHandler {
         // Approval flow
         //
 
-        const providedToolUseId = typeof options?.toolUseId === 'string' ? options.toolUseId.trim() : '';
+        const providedToolUseId = readNonBlankOpaqueIdentifier(options?.toolUseId) ?? '';
         let toolCallId = providedToolUseId.length > 0 ? providedToolUseId : this.resolveToolCallId(toolName, input);
         if (!toolCallId) { // What if we got permission before tool call
             await delay(1000);

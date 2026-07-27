@@ -149,4 +149,32 @@ describe('startHookServer (/hook/session-start authentication, A5-MED-2)', () =>
       hook_event_name: 'SessionStart',
     }));
   });
+
+  it('makes non-2xx hook delivery visible through a nonzero command exit', async () => {
+    const server = await startHookServer({
+      onSessionHook: vi.fn(),
+      permissionHookSecret: 'expected-secret',
+    });
+    servers.push(server);
+
+    const result = await runSessionForwarder({
+      port: server.port,
+      hookEventName: 'PostToolUse',
+      body: { session_id: 'rejected-hook' },
+    });
+    expect(result.code).not.toBe(0);
+  });
+
+  it('makes hook transport failure visible through a nonzero command exit', async () => {
+    const server = await startHookServer({ onSessionHook: vi.fn() });
+    const port = server.port;
+    server.stop();
+
+    const result = await runSessionForwarder({
+      port,
+      hookEventName: 'PostToolUse',
+      body: { session_id: 'unreachable-hook' },
+    });
+    expect(result.code).not.toBe(0);
+  });
 });

@@ -32,9 +32,6 @@ import {
 import { isChangeTitleToolLikeName } from '@happier-dev/protocol/tools/v2';
 import { isAskUserQuestionToolName } from '@happier-dev/protocol';
 import { withAskUserQuestionUiFreeformDefault } from './askUserQuestionFreeformDefault';
-import { resolveClaudePermissionHookTimeoutMs } from '../utils/permissionHookTimeout';
-
-export { DEFAULT_PROVIDER_HOOK_CEILING_MS } from '../utils/permissionHookTimeout';
 import { buildAskUserQuestionAnswersForClaude } from '../utils/askUserQuestionAnswersForClaude';
 import {
     normalizeLegacyStructuredQuestionAnswers,
@@ -42,6 +39,10 @@ import {
     type StructuredQuestionLike,
 } from '@/agent/questions/normalizeStructuredQuestionAnswersV1';
 import { normalizeAskUserQuestionInputForPublication } from '@/agent/questions/normalizeAskUserQuestionInput';
+import { resolveClaudePermissionHookTimeoutMs } from '../utils/permissionHookTimeout';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
+
+export { DEFAULT_PROVIDER_HOOK_CEILING_MS } from '../utils/permissionHookTimeout';
 
 type PendingPermissionRequest = {
     id: string;
@@ -148,6 +149,7 @@ export class ClaudeLocalPermissionBridge {
     }
 
     activate(): void {
+        this.retireStaleSourceOwnedRequests();
         this.session.getOrCreatePermissionRpcRouter().registerConsumer({
             name: 'claude-local-permission-bridge',
             tryHandlePermissionRpc: (payload) => this.tryHandlePermissionRpc(payload),
@@ -155,6 +157,18 @@ export class ClaudeLocalPermissionBridge {
         this.seedAllowlistFromAgentState();
         this.syncPermissionModeFromMetadataSnapshot();
         this.startMetadataWatcher();
+    }
+
+    private retireStaleSourceOwnedRequests(): void {
+        const requests = this.session.client.getAgentStateSnapshot?.()?.requests ?? {};
+        for (const [requestId, request] of Object.entries(requests)) {
+            if (!isClaudeLocalPermissionBridgeAgentStateRequest(request)) continue;
+            void this.requestStore.completeRequest({
+                requestId,
+                status: 'canceled',
+                reason: CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON,
+            });
+        }
     }
 
     dispose(): void {
@@ -1141,11 +1155,7 @@ export class ClaudeLocalPermissionBridge {
 
     private resolveRequestId(data: ClaudeToolHookData): string | null {
         const id = data.tool_use_id ?? data.toolUseId;
-        if (typeof id !== 'string') {
-            return null;
-        }
-        const trimmed = id.trim();
-        return trimmed.length > 0 ? trimmed : null;
+        return readNonBlankOpaqueIdentifier(id);
     }
 
     private resolveToolName(data: ClaudeToolHookData): string {

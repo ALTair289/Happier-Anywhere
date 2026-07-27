@@ -13,10 +13,10 @@ describe('PermissionHandler (provided toolUseId)', () => {
       'Read',
       { file_path: '/tmp/file.txt' },
       { permissionMode: 'default' } as any,
-      { signal: controller.signal, toolUseId: 'toolu_123' } as any,
+      { signal: controller.signal, toolUseId: ' toolu_123\n' } as any,
     );
 
-    expect(client.getAgentStateSnapshot().requests.toolu_123).toEqual(
+    expect(client.getAgentStateSnapshot().requests[' toolu_123\n']).toEqual(
       expect.objectContaining({
         tool: 'Read',
         arguments: { file_path: '/tmp/file.txt' },
@@ -27,7 +27,7 @@ describe('PermissionHandler (provided toolUseId)', () => {
     expect(permissionHandler).toBeDefined();
 
     await permissionHandler?.({
-      id: 'toolu_123',
+      id: ' toolu_123\n',
       approved: true,
       reason: '',
       mode: 'default',
@@ -40,4 +40,3 @@ describe('PermissionHandler (provided toolUseId)', () => {
     });
   });
 });
-

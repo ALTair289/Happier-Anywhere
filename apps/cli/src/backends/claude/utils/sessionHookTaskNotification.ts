@@ -9,6 +9,7 @@ import type { SessionHookData } from './startHookServer';
 
 export type ClaudeSessionHookTaskNotification = Readonly<{
   taskId: string;
+  toolUseId: string | null;
   status: string | null;
   terminal: boolean;
 }>;
@@ -28,6 +29,7 @@ export function readClaudeSessionHookTaskNotification(
   const status = normalizeClaudeAgentSdkProviderTaskStatus(notification?.status);
   return {
     taskId,
+    toolUseId: normalizeClaudeAgentSdkProviderTaskId(notification?.toolUseId),
     status,
     terminal: isTerminalClaudeAgentSdkProviderTaskStatus(status),
   };

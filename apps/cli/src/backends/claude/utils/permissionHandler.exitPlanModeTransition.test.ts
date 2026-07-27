@@ -67,6 +67,34 @@ describe('PermissionHandler (ExitPlanMode transition)', () => {
     expect((client.metadata as any).acpSessionModeOverrideV1?.modeId).toBeNull();
   });
 
+  it('does not share the ExitPlanMode approval latch across trimmed local-id aliases', async () => {
+    const { session, client } = createPermissionHandlerSessionStubWithMetadata({
+      sessionId: 's1',
+      metadata: { acpSessionModeOverrideV1: { v: 1, updatedAt: 1, modeId: 'plan' } },
+    });
+
+    const { PermissionHandler } = await import('./permissionHandler');
+    const handler = new PermissionHandler(session);
+    const controller = new AbortController();
+    const exitMode = { permissionMode: 'yolo', agentModeId: 'plan', localId: ' m1\n' } as EnhancedMode;
+
+    handler.onMessage(exitPlanToolUseMessage());
+    const exitPromise = handler.handleToolCall('ExitPlanMode', { plan: 'p1' }, exitMode, { signal: controller.signal });
+    await client.rpcHandlerManager.getHandler('permission')?.({ id: 'toolu_exit_1', approved: true } as any);
+    await expect(exitPromise).resolves.toEqual({ behavior: 'allow', updatedInput: { plan: 'p1' } });
+
+    const aliasMode = { ...exitMode, localId: 'm1' } as EnhancedMode;
+    const bashPromise = handler.handleToolCall(
+      'Bash',
+      { command: 'pwd' },
+      aliasMode,
+      { signal: controller.signal, toolUseId: 'toolu_bash_trim_alias' },
+    );
+    expect(Object.keys(client.agentState.requests)).toContain('toolu_bash_trim_alias');
+    await client.rpcHandlerManager.getHandler('permission')?.({ id: 'toolu_bash_trim_alias', approved: true } as any);
+    await expect(bashPromise).resolves.toMatchObject({ behavior: 'allow' });
+  });
+
   it('does not keep ExitPlanMode latch state across reset (prevents plan-mode bypass leakage)', async () => {
     const { session, client } = createPermissionHandlerSessionStubWithMetadata({
       sessionId: 's1',

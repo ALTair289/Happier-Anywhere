@@ -75,10 +75,16 @@ process.stdin.on('end', () => {
         }
     }, (res) => {
         res.resume(); // Drain response
+        res.on('end', () => {
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+                process.exitCode = 1;
+            }
+        });
     });
     
     req.on('error', () => {
-        // Silently ignore errors - don't break Claude
+        // A failed observer delivery must be visible to Claude instead of looking successful.
+        process.exitCode = 1;
     });
     
     req.end(body);

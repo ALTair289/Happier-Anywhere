@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -126,12 +126,29 @@ describe('generateHookPluginDir', () => {
 
     const hooksPath = join(pluginDir!, 'hooks', 'hooks.json');
     const parsed = JSON.parse(readFileSync(hooksPath, 'utf8')) as any;
-    const lifecycleHookNames = ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd', 'PostToolUse'];
+    const lifecycleHookNames = [
+      'SessionStart',
+      'UserPromptSubmit',
+      'Stop',
+      'StopFailure',
+      'SessionEnd',
+      'PostToolUse',
+      'SubagentStart',
+      'SubagentStop',
+    ];
     for (const hookName of lifecycleHookNames) {
       const command = parsed.hooks?.[hookName]?.[0]?.hooks?.[0]?.command as string;
       expect(command).toContain('session_hook_forwarder.cjs');
+      expect(command).toContain(pluginDir!);
       expect(command).toContain(hookName);
     }
+    expect(existsSync(join(pluginDir!, 'runtime-assets'))).toBe(true);
+    const permissionForwarderPaths = readFileSync(hooksPath, 'utf8').match(/[^"\s]*permission_hook_forwarder\.cjs/g) ?? [];
+    expect(permissionForwarderPaths).toHaveLength(0);
+    const runtimeAssetDirs = readdirSync(join(pluginDir!, 'runtime-assets'));
+    expect(runtimeAssetDirs).toHaveLength(1);
+    expect(existsSync(join(pluginDir!, 'runtime-assets', runtimeAssetDirs[0]!, 'session_hook_forwarder.cjs'))).toBe(true);
+    expect(existsSync(join(pluginDir!, 'runtime-assets', runtimeAssetDirs[0]!, 'permission_hook_forwarder.cjs'))).toBe(true);
     const command = parsed.hooks?.SessionStart?.[0]?.hooks?.[0]?.command as string;
     // Prefer execPath over `node` so hooks still work when PATH is minimal (common on Windows/GUI contexts).
     expect(command).toContain(process.execPath);
@@ -227,6 +244,7 @@ describe('generateHookPluginDir', () => {
     const parsed = JSON.parse(readFileSync(hooksPath, 'utf8')) as any;
     const permissionCommand = parsed.hooks?.PermissionRequest?.[0]?.hooks?.[0]?.command as string;
     expect(permissionCommand).toContain('permission_hook_forwarder.cjs');
+    expect(permissionCommand).toContain(pluginDir!);
     expect(permissionCommand).toContain('--secret-file');
     expect(permissionCommand).not.toContain(secret);
     const secretPath = permissionCommand.match(/--secret-file\s+"([^"]+)"/)?.[1];
@@ -246,7 +264,16 @@ describe('generateHookPluginDir', () => {
 
     const hooksPath = join(pluginDir!, 'hooks', 'hooks.json');
     const parsed = JSON.parse(readFileSync(hooksPath, 'utf8')) as any;
-    for (const hookName of ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd', 'PostToolUse']) {
+    for (const hookName of [
+      'SessionStart',
+      'UserPromptSubmit',
+      'Stop',
+      'StopFailure',
+      'SessionEnd',
+      'PostToolUse',
+      'SubagentStart',
+      'SubagentStop',
+    ]) {
       const command = parsed.hooks?.[hookName]?.[0]?.hooks?.[0]?.command as string;
       expect(command).toContain('session_hook_forwarder.cjs');
       expect(command).toContain('--secret-file');

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { join, resolve } from 'node:path';
 
 import { startHookServer } from './startHookServer';
@@ -72,12 +73,59 @@ async function runPermissionForwarder(params: {
   });
 }
 
+async function reservePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolvePromise, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolvePromise());
+  });
+  const address = server.address();
+  await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
+  if (!address || typeof address === 'string') {
+    throw new Error('failed to reserve port');
+  }
+  return address.port;
+}
+
 describe('startHookServer (session hook)', () => {
   const servers: Array<{ stop: () => void }> = [];
 
   afterEach(() => {
     for (const server of servers.splice(0, servers.length)) {
       server.stop();
+    }
+  });
+
+  it('binds an explicitly requested port', async () => {
+    const requestedPort = await reservePort();
+    const server = await startHookServer({
+      requestedPort,
+      onSessionHook: () => {},
+    });
+    servers.push(server);
+
+    expect(server.port).toBe(requestedPort);
+  });
+
+  it('fails cleanly when the requested port is already occupied', async () => {
+    const blocker = createServer();
+    await new Promise<void>((resolvePromise, reject) => {
+      blocker.once('error', reject);
+      blocker.listen(0, '127.0.0.1', () => resolvePromise());
+    });
+    const address = blocker.address();
+    if (!address || typeof address === 'string') {
+      await new Promise<void>((resolvePromise) => blocker.close(() => resolvePromise()));
+      throw new Error('failed to allocate occupied port');
+    }
+
+    try {
+      await expect(startHookServer({
+        requestedPort: address.port,
+        onSessionHook: () => {},
+      })).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    } finally {
+      await new Promise<void>((resolvePromise) => blocker.close(() => resolvePromise()));
     }
   });
 
