@@ -6,6 +6,7 @@ import type {
 } from '@happier-dev/protocol';
 
 import type { ProviderAccountUsagePersistenceScheduler } from '../../accountUsage/persistence';
+import { isProviderAccountUsageStoreMutationAccepted } from '../../accountUsage/store';
 import { buildProviderAccountUsageSnapshotFromConnectedServiceQuotaObservation } from '../../accountUsage/fromConnectedServiceQuotaObservation';
 import { authorizeProviderAccountUsageObservation } from '../../accountUsage/record';
 import { computeProviderAccountUsageSnapshotFingerprint } from '../../accountUsage/fingerprint';
@@ -85,6 +86,7 @@ export async function recordFetchedQuotaSnapshotAsAccountUsage(
     }
 
     let latest: ProviderAccountUsageSnapshotV1 | null = null;
+    let effectiveMutationRecorded = false;
     const persistenceSourcesByKey = new Map<string, ConnectedServiceUsageSourceV1>();
     const rememberPersistenceSources = (sources: readonly ConnectedServiceUsageSourceV1[]): void => {
       for (const source of sources) {
@@ -93,6 +95,19 @@ export async function recordFetchedQuotaSnapshotAsAccountUsage(
           : JSON.stringify(['profile', source.serviceId, source.profileId]);
         persistenceSourcesByKey.set(key, source);
       }
+    };
+    const recordSnapshot = (
+      snapshot: ProviderAccountUsageSnapshotV1,
+      observation: Readonly<{ sources?: readonly ConnectedServiceUsageSourceV1[] }> | undefined,
+    ): void => {
+      if (!store) {
+        latest = snapshot;
+        effectiveMutationRecorded = true;
+        return;
+      }
+      const result = store.recordSnapshot(snapshot, observation);
+      latest = store.resolveRecordId(result.recordId) ?? snapshot;
+      effectiveMutationRecorded ||= isProviderAccountUsageStoreMutationAccepted(result);
     };
     const profileSnapshot = buildProviderAccountUsageSnapshotFromConnectedServiceQuotaObservation({
       snapshot: input.snapshot,
@@ -112,12 +127,8 @@ export async function recordFetchedQuotaSnapshotAsAccountUsage(
       sourceProviderAccountId: input.sourceProviderAccountId,
     });
     if (authorizedProfileObservation?.sources?.length) rememberPersistenceSources(authorizedProfileObservation.sources);
-    if (store) {
-      const profileRecord = store.recordSnapshot(profileSnapshot, authorizedProfileObservation);
-      latest = store.resolveRecordId(profileRecord.recordId) ?? profileSnapshot;
-    } else {
-      latest = profileSnapshot;
-    }
+    recordSnapshot(profileSnapshot, authorizedProfileObservation);
+    latest ??= profileSnapshot;
 
     for (const groupId of displayOnlyGroupIds) {
       const groupSnapshot = buildProviderAccountUsageSnapshotFromConnectedServiceQuotaObservation({
@@ -139,12 +150,7 @@ export async function recordFetchedQuotaSnapshotAsAccountUsage(
         sourceProviderAccountId: input.sourceProviderAccountId,
       });
       if (authorizedGroupObservation?.sources?.length) rememberPersistenceSources(authorizedGroupObservation.sources);
-      if (store) {
-        const groupRecord = store.recordSnapshot(groupSnapshot, authorizedGroupObservation);
-        latest = store.resolveRecordId(groupRecord.recordId) ?? groupSnapshot;
-      } else {
-        latest = groupSnapshot;
-      }
+      recordSnapshot(groupSnapshot, authorizedGroupObservation);
     }
     for (const [groupId, groupGenerations] of groupGenerationsById.entries()) {
       for (const groupGeneration of groupGenerations) {
@@ -168,16 +174,11 @@ export async function recordFetchedQuotaSnapshotAsAccountUsage(
           sourceProviderAccountId: input.sourceProviderAccountId,
         });
         if (authorizedGroupObservation?.sources?.length) rememberPersistenceSources(authorizedGroupObservation.sources);
-        if (store) {
-          const groupRecord = store.recordSnapshot(groupSnapshot, authorizedGroupObservation);
-          latest = store.resolveRecordId(groupRecord.recordId) ?? groupSnapshot;
-        } else {
-          latest = groupSnapshot;
-        }
+        recordSnapshot(groupSnapshot, authorizedGroupObservation);
       }
     }
 
-    if (latest && input.persistDurably !== false) {
+    if (latest && effectiveMutationRecorded && input.persistDurably !== false) {
       if (context.accountUsagePersistence) {
         await context.accountUsagePersistence.recordInBandSnapshot(latest, {
           sources: [...persistenceSourcesByKey.values()],
@@ -194,7 +195,7 @@ export async function recordFetchedQuotaSnapshotAsAccountUsage(
       }
     }
 
-    if (latest) {
+    if (latest && effectiveMutationRecorded) {
       const notifiedTargets = new Set<string>();
       for (const target of input.groupTargets ?? []) {
         if (target.groupGeneration === null) continue;
@@ -219,4 +220,3 @@ export async function recordFetchedQuotaSnapshotAsAccountUsage(
 
     return latest;
   }
-
