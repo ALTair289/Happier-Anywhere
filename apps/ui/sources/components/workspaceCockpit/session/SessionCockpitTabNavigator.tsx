@@ -1,17 +1,15 @@
 import * as React from 'react';
 import {
     createBottomTabNavigator,
-    type BottomTabBarProps,
 } from '@react-navigation/bottom-tabs';
-import { NavigationContainer, NavigationIndependentTree } from '@react-navigation/native';
+import { NavigationContainer, NavigationIndependentTree, useIsFocused } from '@react-navigation/native';
+import { Platform, StyleSheet, View, type ViewProps } from 'react-native';
 
 import { usePersistSessionLastMobileSurface } from '@/sync/domains/state/storage';
-import { useDetailsTabCount } from '@/components/appShell/panes/hooks/useDetailsTabCount';
 
 import {
     type SessionMobileSurface,
 } from './sessionCockpitState';
-import { useSessionCockpitChromeRegister } from './SessionCockpitChromeRegistry';
 import { SessionCockpitSurfaceNavigationProvider } from './SessionCockpitSurfaceNavigation';
 import {
     SessionCockpitSurfaceScreen,
@@ -42,6 +40,8 @@ const SESSION_COCKPIT_TAB_SCREEN_OPTIONS = {
     freezeOnBlur: true,
     tabBarHideOnKeyboard: false,
 } as const;
+const renderHiddenTabBar = () => null;
+const WebInertView = View as React.ComponentType<ViewProps & Pick<React.HTMLAttributes<HTMLElement>, 'inert'>>;
 
 type SessionCockpitTabNavigatorProps = Omit<SessionCockpitSurfaceScreenProps, 'surface'> & Readonly<{
     initialSurface: SessionMobileSurface;
@@ -79,13 +79,7 @@ export const SessionCockpitTabNavigator = React.memo((props: SessionCockpitTabNa
                     backBehavior="history"
                     initialRouteName={initialSurface}
                     screenOptions={SESSION_COCKPIT_TAB_SCREEN_OPTIONS}
-                    tabBar={(tabBarProps) => (
-                        <SessionCockpitNavigatorChromeBridge
-                            {...tabBarProps}
-                            sessionId={props.sessionId}
-                            terminalTabAvailable={terminalTabAvailable}
-                        />
-                    )}
+                    tabBar={renderHiddenTabBar}
                 >
                     {surfaces.map((surface) => (
                         <Tab.Screen
@@ -96,16 +90,18 @@ export const SessionCockpitTabNavigator = React.memo((props: SessionCockpitTabNa
                                 : undefined}
                         >
                             {({ navigation }) => (
-                                <SessionCockpitSurfaceNavigationProvider
-                                    value={{
-                                        switchSurface: (targetSurface) => {
-                                            navigation.navigate(targetSurface);
-                                            persistSessionSurface(targetSurface);
-                                        },
-                                    }}
-                                >
-                                    <SessionCockpitSurfaceScreen {...props} surface={surface} />
-                                </SessionCockpitSurfaceNavigationProvider>
+                                <SessionCockpitSceneActivityBoundary surface={surface}>
+                                    <SessionCockpitSurfaceNavigationProvider
+                                        value={{
+                                            switchSurface: (targetSurface) => {
+                                                navigation.navigate(targetSurface);
+                                                persistSessionSurface(targetSurface);
+                                            },
+                                        }}
+                                    >
+                                        <SessionCockpitSurfaceScreen {...props} surface={surface} />
+                                    </SessionCockpitSurfaceNavigationProvider>
+                                </SessionCockpitSceneActivityBoundary>
                             )}
                         </Tab.Screen>
                     ))}
@@ -115,57 +111,32 @@ export const SessionCockpitTabNavigator = React.memo((props: SessionCockpitTabNa
     );
 });
 
-function normalizeSurface(value: unknown): SessionMobileSurface | null {
-    if (value === 'chat' || value === 'browse' || value === 'git' || value === 'navigation' || value === 'tabs' || value === 'terminal') {
-        return value;
-    }
-    return null;
-}
-
-const SessionCockpitNavigatorChromeBridge = React.memo((props: BottomTabBarProps & Readonly<{
-    sessionId: string;
-    terminalTabAvailable: boolean;
+const SessionCockpitSceneActivityBoundary = React.memo((props: Readonly<{
+    children: React.ReactNode;
+    surface: SessionMobileSurface;
 }>) => {
-    const register = useSessionCockpitChromeRegister();
-    const persistSessionLastMobileSurface = usePersistSessionLastMobileSurface();
-    const openDetailsTabCount = useDetailsTabCount(`session:${props.sessionId}`);
-    const activeSurface = normalizeSurface(props.state.routes[props.state.index]?.name) ?? 'chat';
+    const isFocused = useIsFocused();
+    const isWeb = Platform.OS === 'web';
 
-    const persistSessionSurface = React.useCallback((surface: SessionMobileSurface) => {
-        persistSessionLastMobileSurface(props.sessionId, surface);
-    }, [persistSessionLastMobileSurface, props.sessionId]);
+    return (
+        <WebInertView
+            testID={`session-cockpit-scene:${props.surface}`}
+            style={styles.scene}
+            collapsable={false}
+            inert={isWeb && !isFocused ? true : undefined}
+            aria-hidden={isWeb && !isFocused ? true : undefined}
+            accessibilityElementsHidden={isWeb ? undefined : !isFocused}
+            importantForAccessibility={isWeb ? undefined : (isFocused ? 'auto' : 'no-hide-descendants')}
+            pointerEvents={isFocused ? 'auto' : 'none'}
+        >
+            {props.children}
+        </WebInertView>
+    );
+});
 
-    const switchSurface = React.useCallback((surface: SessionMobileSurface) => {
-        const route = props.state.routes.find((candidate) => candidate.name === surface);
-        if (!route) return;
-
-        const event = props.navigation.emit({
-            type: 'tabPress',
-            target: route.key,
-            canPreventDefault: true,
-        });
-        if (event.defaultPrevented) return;
-
-        if (activeSurface !== surface) {
-            props.navigation.navigate(route.name);
-        }
-        persistSessionSurface(surface);
-    }, [activeSurface, persistSessionSurface, props.navigation, props.state.routes]);
-
-    React.useEffect(() => register({
-        sessionId: props.sessionId,
-        activeSurface,
-        terminalTabAvailable: props.terminalTabAvailable,
-        openDetailsTabCount,
-        switchSurface,
-    }), [
-        activeSurface,
-        openDetailsTabCount,
-        props.sessionId,
-        props.terminalTabAvailable,
-        register,
-        switchSurface,
-    ]);
-
-    return null;
+const styles = StyleSheet.create({
+    scene: {
+        flex: 1,
+        minHeight: 0,
+    },
 });

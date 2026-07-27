@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { act } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { renderScreen } from '@/dev/testkit';
@@ -12,7 +13,27 @@ const navigatorState = vi.hoisted(() => ({
     localSettingReads: [] as string[],
     persistedSurfaces: [] as Array<Readonly<{ sessionId: string; surface: string }>>,
     screenOptionsByName: {} as Record<string, Record<string, unknown> | null>,
+    surfaceSwitchers: [] as Array<(surface: 'chat' | 'browse' | 'git' | 'navigation' | 'tabs' | 'terminal') => void>,
 }));
+
+const navigationFocusState = vi.hoisted(() => {
+    let focused = true;
+    const listeners = new Set<() => void>();
+
+    return {
+        getSnapshot: () => focused,
+        setFocused: (nextFocused: boolean) => {
+            focused = nextFocused;
+            for (const listener of listeners) {
+                listener();
+            }
+        },
+        subscribe: (listener: () => void) => {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+        },
+    };
+});
 
 vi.mock('@react-navigation/native', () => ({
     NavigationContainer: ({ children, linking }: { children?: React.ReactNode; linking?: Record<string, unknown> }) => {
@@ -21,6 +42,11 @@ vi.mock('@react-navigation/native', () => ({
     },
     NavigationIndependentTree: ({ children }: { children?: React.ReactNode }) =>
         React.createElement('NavigationIndependentTree', null, children),
+    useIsFocused: () => React.useSyncExternalStore(
+        navigationFocusState.subscribe,
+        navigationFocusState.getSnapshot,
+        navigationFocusState.getSnapshot,
+    ),
 }));
 
 vi.mock('@react-navigation/bottom-tabs', () => ({
@@ -68,8 +94,16 @@ vi.mock('./SessionCockpitSurfaceScreen', () => ({
 }));
 
 vi.mock('./SessionCockpitSurfaceNavigation', () => ({
-    SessionCockpitSurfaceNavigationProvider: ({ children }: { children?: React.ReactNode }) =>
-        React.createElement(React.Fragment, null, children),
+    SessionCockpitSurfaceNavigationProvider: ({
+        children,
+        value,
+    }: {
+        children?: React.ReactNode;
+        value: { switchSurface: (surface: 'chat' | 'browse' | 'git' | 'navigation' | 'tabs' | 'terminal') => void };
+    }) => {
+        navigatorState.surfaceSwitchers.push(value.switchSurface);
+        return React.createElement(React.Fragment, null, children);
+    },
 }));
 
 vi.mock('./SessionCockpitChromeRegistry', () => ({
@@ -102,6 +136,8 @@ describe('SessionCockpitTabNavigator keyboard behavior', () => {
         navigatorState.localSettingReads = [];
         navigatorState.persistedSurfaces = [];
         navigatorState.screenOptionsByName = {};
+        navigatorState.surfaceSwitchers = [];
+        navigationFocusState.setFocused(true);
     });
 
     it('does not ask the native tab navigator to hide tab chrome during keyboard transitions', async () => {
@@ -153,7 +189,7 @@ describe('SessionCockpitTabNavigator keyboard behavior', () => {
             />,
         );
 
-        navigatorState.registeredChrome?.switchSurface('navigation');
+        navigatorState.surfaceSwitchers[0]?.('navigation');
 
         expect(navigatorState.localSettingReads).not.toContain('sessionLastMobileSurfaceBySessionId');
         expect(navigatorState.persistedSurfaces).toEqual([{ sessionId: 's1', surface: 'navigation' }]);
@@ -174,5 +210,83 @@ describe('SessionCockpitTabNavigator keyboard behavior', () => {
         expect(navigatorState.screenOptionsByName.chat).toEqual(expect.objectContaining({
             lazy: false,
         }));
+    });
+
+    it('keeps an inactive eager chat scene mounted while excluding its descendants, then restores activity on focus', async () => {
+        const { Platform } = await import('react-native');
+        const originalPlatform = Platform.OS;
+        Object.defineProperty(Platform, 'OS', { configurable: true, value: 'web' });
+        navigationFocusState.setFocused(false);
+
+        try {
+            const { SessionCockpitTabNavigator } = await import('./SessionCockpitTabNavigator');
+            const screen = await renderScreen(
+                <SessionCockpitTabNavigator
+                    initialSurface="navigation"
+                    scopeId="session:s1"
+                    sessionId="s1"
+                    terminalTabAvailable
+                />,
+            );
+
+            const inactiveChatScene = screen.findByTestId('session-cockpit-scene:chat');
+            expect(inactiveChatScene).not.toBeNull();
+            expect(screen.findAllByType('SessionCockpitSurfaceScreen').filter((node) => node.props.surface === 'chat')).toHaveLength(1);
+            expect(inactiveChatScene?.props).toEqual(expect.objectContaining({
+                inert: true,
+                'aria-hidden': true,
+                pointerEvents: 'none',
+            }));
+
+            await act(async () => {
+                navigationFocusState.setFocused(true);
+            });
+            expect(screen.findByTestId('session-cockpit-scene:chat')?.props).toEqual(expect.objectContaining({
+                inert: undefined,
+                'aria-hidden': undefined,
+                pointerEvents: 'auto',
+            }));
+            expect(screen.findAllByType('SessionCockpitSurfaceScreen').filter((node) => node.props.surface === 'chat')).toHaveLength(1);
+        } finally {
+            Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatform });
+        }
+    });
+
+    it('hides inactive native scene descendants from accessibility and pointer interaction', async () => {
+        const { Platform } = await import('react-native');
+        const originalPlatform = Platform.OS;
+        Object.defineProperty(Platform, 'OS', { configurable: true, value: 'ios' });
+        navigationFocusState.setFocused(false);
+
+        try {
+            const { SessionCockpitTabNavigator } = await import('./SessionCockpitTabNavigator');
+            const screen = await renderScreen(
+                <SessionCockpitTabNavigator
+                    initialSurface="navigation"
+                    scopeId="session:s1"
+                    sessionId="s1"
+                    terminalTabAvailable
+                />,
+            );
+
+            expect(screen.findByTestId('session-cockpit-scene:chat')?.props).toEqual(expect.objectContaining({
+                inert: undefined,
+                'aria-hidden': undefined,
+                accessibilityElementsHidden: true,
+                importantForAccessibility: 'no-hide-descendants',
+                pointerEvents: 'none',
+            }));
+
+            await act(async () => {
+                navigationFocusState.setFocused(true);
+            });
+            expect(screen.findByTestId('session-cockpit-scene:chat')?.props).toEqual(expect.objectContaining({
+                accessibilityElementsHidden: false,
+                importantForAccessibility: 'auto',
+                pointerEvents: 'auto',
+            }));
+        } finally {
+            Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatform });
+        }
     });
 });

@@ -8,6 +8,7 @@ import { useAppPaneScope } from '@/components/appShell/panes/hooks/useAppPaneSco
 import { renderScreen, standardCleanup } from '@/dev/testkit';
 import {
     SessionCockpitChromeRegistryProvider,
+    useSessionCockpitChromeRegistration,
     useSessionCockpitDismissingSessionId,
 } from './SessionCockpitChromeRegistry';
 import { SessionCockpitShell } from './SessionCockpitShell';
@@ -170,6 +171,12 @@ function DismissingSessionProbe() {
     return React.createElement('DismissingSessionProbe', { dismissingSessionId });
 }
 
+function CockpitRegistrationProbe() {
+    const registration = useSessionCockpitChromeRegistration();
+
+    return React.createElement('CockpitRegistrationProbe', { registration });
+}
+
 function SharedShellDismissHarness(props: Readonly<{ mounted?: boolean }>) {
     return (
         <AppPaneProvider>
@@ -308,6 +315,37 @@ describe('SessionCockpitSurfaceScreen', () => {
         expect(sessionView.props.routeServerId).toBe('server-b');
         expect(sessionView.props.routeAnchorOverride).toBe(true);
         expect(sessionView.props.chatBottomSpacing).toBe('none');
+    });
+
+    it('publishes the focused surface as the cockpit navigation owner', async () => {
+        const screen = await renderScreen(
+            <AppPaneProvider>
+                <SessionCockpitChromeRegistryProvider>
+                    <CockpitSurfaceHarness
+                        sessionId="s_1"
+                        scopeId="session:s_1"
+                        surface="chat"
+                        routeServerId="server-b"
+                        terminalTabAvailable
+                    />
+                    <CockpitRegistrationProbe />
+                </SessionCockpitChromeRegistryProvider>
+            </AppPaneProvider>,
+        );
+
+        const probe = screen.tree.findByType('CockpitRegistrationProbe' as never);
+        expect(probe.props.registration).toEqual(expect.objectContaining({
+            sessionId: 's_1',
+            activeSurface: 'chat',
+            terminalTabAvailable: true,
+        }));
+
+        await act(async () => {
+            probe.props.registration.switchSurface('terminal');
+        });
+
+        expect(bottomTabsState.navigations).toContain('terminal');
+        expect(screen.tree.findByProps({ testID: 'session-terminal-screen' } as never)).toBeTruthy();
     });
 
     it('does not let an inactive chat surface close the active cockpit pane state', async () => {

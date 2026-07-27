@@ -8,8 +8,10 @@ import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import {
     SessionCockpitBottomChromeHeightContext,
     useSessionCockpitBottomChromeHeight,
+    useSessionCockpitChromeRegister,
 } from '@/components/workspaceCockpit/session/SessionCockpitChromeRegistry';
 import { useAppPaneScope } from '@/components/appShell/panes/hooks/useAppPaneScope';
+import { useDetailsTabCount } from '@/components/appShell/panes/hooks/useDetailsTabCount';
 import type { AttachmentDraft } from '@/components/sessions/attachments/attachmentDraftModel';
 import { SessionDetailsPanel } from '@/components/sessions/panes/SessionDetailsPanel';
 import { SessionTranscriptNavigationPane } from '@/components/sessions/panes/SessionTranscriptNavigationPane';
@@ -56,6 +58,8 @@ export const SessionCockpitSurfaceScreen = React.memo((props: SessionCockpitSurf
     const isFocused = useIsFocused();
     const pane = useAppPaneScope(props.scopeId);
     const surfaceNavigation = useSessionCockpitSurfaceNavigation();
+    const registerCockpitChrome = useSessionCockpitChromeRegister();
+    const openDetailsTabCount = useDetailsTabCount(props.scopeId);
     const activeRightTabId = pane.scopeState?.right?.activeTabId ?? null;
     const rightIsOpen = pane.scopeState?.right?.isOpen ?? false;
     const detailsIsOpen = pane.scopeState?.details?.isOpen ?? false;
@@ -70,6 +74,30 @@ export const SessionCockpitSurfaceScreen = React.memo((props: SessionCockpitSurf
     const surfaceNavigationRef = React.useRef(surfaceNavigation);
     paneRef.current = pane;
     surfaceNavigationRef.current = surfaceNavigation;
+
+    const switchSurface = React.useCallback((surface: SessionMobileSurface) => {
+        surfaceNavigationRef.current?.switchSurface(surface);
+    }, []);
+
+    React.useEffect(() => {
+        if (!isFocused || !surfaceNavigation) return;
+        return registerCockpitChrome({
+            sessionId: props.sessionId,
+            activeSurface: props.surface,
+            terminalTabAvailable,
+            openDetailsTabCount,
+            switchSurface,
+        });
+    }, [
+        isFocused,
+        openDetailsTabCount,
+        props.sessionId,
+        props.surface,
+        registerCockpitChrome,
+        surfaceNavigation,
+        switchSurface,
+        terminalTabAvailable,
+    ]);
 
     const targetRightTabId = resolveSessionRightTabIdForSurface(props.surface, terminalTabAvailable);
     React.useEffect(() => {
