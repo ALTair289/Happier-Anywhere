@@ -17,6 +17,14 @@ import {
   MACHINE_TRANSFER_SERVER_ROUTED_MAX_BYTES_ENV_KEY,
   type TransferEndpointCandidate,
   SessionHandoffAbortRequestSchema,
+  SessionHandoffTargetResumeRequestV2Schema,
+  SessionHandoffTargetResumeResponseV2Schema,
+  SessionHandoffPrepareTargetRequestV2Schema,
+  SessionHandoffPrepareTargetResultGetRequestV2Schema,
+  SessionHandoffTargetConfirmRequestV2Schema,
+  SessionHandoffCommitRequestV2Schema,
+  SessionHandoffAbortRequestV2Schema,
+  SessionHandoffAbortResponseV2Schema,
   SessionHandoffCommitRequestSchema,
   SessionHandoffPrepareTargetRequestSchema,
   type SessionHandoffResumePlan,
@@ -101,9 +109,16 @@ import {
   resolveSessionHandoffPrepareTargetJobLeaseTtlMs,
   startSessionHandoffPrepareTargetJobLeaseHeartbeat,
   tryAcquireSessionHandoffPrepareTargetJobLease,
+  type SessionHandoffPrepareTargetJobLeaseHeartbeat,
 } from '../../session/handoff/prepare/sessionHandoffPrepareTargetJobLease';
+import { SESSION_HANDOFF_PREPARE_TARGET_JOB_RECOVERY_PROOF_TTL_MS } from '../../session/handoff/prepare/sessionHandoffPrepareTargetJobTiming';
 
 import type { RpcHandlerManager } from '../rpc/RpcHandlerManager';
+import type {
+  SpawnSessionOptions,
+  SpawnSessionResult,
+  SpawnSessionRunnerAcceptanceHooks,
+} from '../../rpc/handlers/registerSessionHandlers';
 import type { SessionHandoffProviderBundle } from '../../session/handoff/types';
 import { compareWorkspaceManifests } from '../../scm/sourceController/workspaceExportPackaging/compareWorkspaceManifests';
 const PREPARE_JOB_FAST_PATH_BUDGET_MS = 250;
@@ -243,6 +258,52 @@ function missingHandoffMetadataV2() {
     errorCode: 'missing_handoff_metadata_v2',
     error: 'Handoff metadata V2 is required to prepare the target',
   } as const;
+}
+
+function resolveDirectPeerPrepareAvailability(input: Readonly<{
+  request: SessionHandoffPrepareTargetRequest;
+  directPeerRequesterAvailable: boolean;
+  hasLocalProviderBundle: boolean;
+  localProviderBundleEndpointCandidates?: readonly TransferEndpointCandidate[];
+  hasLocalWorkspaceReplicationMetadata: boolean;
+  localWorkspaceManifestEndpointCandidates?: readonly TransferEndpointCandidate[];
+  nowMs: number;
+}>): Readonly<{
+  canUseProviderBundle: boolean;
+  canUseWorkspaceManifest: boolean;
+}> {
+  const metadata = input.request.handoffMetadataV2;
+  const providerEndpointCandidates =
+    metadata?.providerBundleTransferPublication?.endpointCandidates
+    ?? input.localProviderBundleEndpointCandidates
+    ?? input.request.endpointCandidates;
+  const manifestEndpointCandidates =
+    metadata?.workspaceReplicationManifestTransferPublication?.endpointCandidates
+    ?? input.localWorkspaceManifestEndpointCandidates
+    ?? (input.request.endpointCandidates.length
+      ? rewriteDirectPeerEndpointCandidatesForTransferId({
+          endpointCandidates: input.request.endpointCandidates,
+          transferId:
+            metadata?.workspaceReplicationManifestTransferPublication?.transferId
+            ?? buildSessionHandoffWorkspaceManifestTransferId({ handoffId: input.request.handoffId }),
+        })
+      : undefined);
+  const hasUsableProviderEndpointCandidates =
+    Array.isArray(providerEndpointCandidates)
+    && providerEndpointCandidates.some((candidate) => candidate.expiresAt >= input.nowMs);
+  const hasUsableManifestEndpointCandidates =
+    Array.isArray(manifestEndpointCandidates)
+    && manifestEndpointCandidates.some((candidate) => candidate.expiresAt >= input.nowMs);
+
+  return {
+    canUseProviderBundle:
+      input.hasLocalProviderBundle
+      || (input.directPeerRequesterAvailable && hasUsableProviderEndpointCandidates),
+    canUseWorkspaceManifest:
+      input.request.workspaceTransfer?.enabled !== true
+      || input.hasLocalWorkspaceReplicationMetadata
+      || (input.directPeerRequesterAvailable && hasUsableManifestEndpointCandidates),
+  };
 }
 
 function isMachineTransferTimeoutErrorMessage(message: string): boolean {
@@ -489,6 +550,7 @@ function buildPrepareJobRecord(input: Readonly<{
   abortedAtMs?: number;
   completedAtMs?: number;
   failedAtMs?: number;
+  lastErrorCode?: string;
   lastErrorMessage?: string;
   workspaceReplicationJobId?: string;
 }>): SessionHandoffPrepareTargetJobRecordInput {
@@ -501,11 +563,374 @@ function buildPrepareJobRecord(input: Readonly<{
     ...(input.abortedAtMs ? { abortedAtMs: input.abortedAtMs } : {}),
     ...(input.completedAtMs ? { completedAtMs: input.completedAtMs } : {}),
     ...(input.failedAtMs ? { failedAtMs: input.failedAtMs } : {}),
+    ...(input.lastErrorCode ? { lastErrorCode: input.lastErrorCode } : {}),
     ...(input.lastErrorMessage ? { lastErrorMessage: input.lastErrorMessage } : {}),
     ...(input.workspaceReplicationJobId ? { workspaceReplicationJobId: input.workspaceReplicationJobId } : {}),
     status: input.status,
     ...(input.prepareTargetRequest ? { prepareTargetRequest: input.prepareTargetRequest } : {}),
     ...(input.prepareTargetResult ? { prepareTargetResult: input.prepareTargetResult } : {}),
+  };
+}
+
+export function createUnregisteredSessionHandoffTargetResumeV2FoundationHandler(input: Readonly<{
+  activeServerDir: string;
+  spawnSessionForHandoff: (
+    options: SpawnSessionOptions,
+    hooks: SpawnSessionRunnerAcceptanceHooks,
+  ) => Promise<SpawnSessionResult>;
+}>): (raw: unknown) => Promise<unknown> {
+  const prepareJobStore = createSessionHandoffPrepareTargetJobStore({ activeServerDir: input.activeServerDir });
+
+  return async (raw: unknown): Promise<unknown> => {
+    const parsed = SessionHandoffTargetResumeRequestV2Schema.safeParse(raw);
+    if (!parsed.success) return invalidRequest();
+    const job = await prepareJobStore.findByHandoffId(parsed.data.handoffId);
+    if (!job) return { ok: false, errorCode: 'not_found' } as const;
+    if (
+      job.schemaVersion !== 2
+      || job.recordKind !== 'prepared_target'
+      || job.sessionId !== parsed.data.sessionId
+      || !job.prepareTargetResult
+    ) {
+      return { ok: false, errorCode: 'invalid_persisted_job' } as const;
+    }
+    if (job.terminal.status !== 'open') {
+      return { ok: false, errorCode: 'terminal_handoff' } as const;
+    }
+    if (job.resume.status === 'preexisting_unowned') {
+      return SessionHandoffTargetResumeResponseV2Schema.parse({
+        handoffId: job.handoffId,
+        sessionId: job.sessionId,
+        disposition: 'preexisting_or_adopted',
+      });
+    }
+    if (
+      (job.resume.status === 'attempted' || job.resume.status === 'confirmed')
+      && job.resume.attemptId !== parsed.data.attemptId
+    ) {
+      return { ok: false, errorCode: 'attempt_conflict' } as const;
+    }
+
+    const resumePlan = job.prepareTargetResult.resume;
+    let acceptedByHook = false;
+    const spawnResult = await input.spawnSessionForHandoff({
+      directory: resumePlan.directory,
+      backendTarget: { kind: 'builtInAgent', agentId: resumePlan.agent },
+      existingSessionId: job.sessionId,
+      resume: resumePlan.resume,
+      approvedNewDirectoryCreation: resumePlan.approvedNewDirectoryCreation,
+      attachMetadataIdentityPolicy: 'replace_with_runtime_identity',
+      spawnNonce: `session-handoff:${job.handoffId}:${parsed.data.attemptId}`,
+      transcriptStorage: resumePlan.transcriptStorage,
+      ...(resumePlan.environmentVariables ? { environmentVariables: resumePlan.environmentVariables } : {}),
+      ...(resumePlan.codexBackendMode ? { codexBackendMode: resumePlan.codexBackendMode } : {}),
+      ...(job.prepareTargetResult.agentRuntimeDescriptorV1
+        ? { agentRuntimeDescriptorV1: job.prepareTargetResult.agentRuntimeDescriptorV1 }
+        : {}),
+      ...(parsed.data.connectedServices ? { connectedServices: parsed.data.connectedServices } : {}),
+    }, {
+      onBeforeRunnerLaunchAccepted: async () => {
+        const transitioned = await prepareJobStore.transitionV2(job.jobId, (current) => {
+          if (
+            current.recordKind !== 'prepared_target'
+            || current.sessionId !== parsed.data.sessionId
+            || current.terminal.status !== 'open'
+          ) {
+            throw new Error('Handoff runner acceptance lost exact open target ownership');
+          }
+          if (current.resume.status === 'attempted' || current.resume.status === 'confirmed') {
+            if (current.resume.attemptId !== parsed.data.attemptId) {
+              throw new Error('Handoff runner acceptance attempt conflicts with durable ownership');
+            }
+            return null;
+          }
+          if (current.resume.status !== 'not_attempted') {
+            throw new Error('Handoff runner acceptance cannot claim a preexisting runner');
+          }
+          const acceptedAtMs = Date.now();
+          return {
+            ...current,
+            updatedAtMs: acceptedAtMs,
+            transitionRevision: current.transitionRevision + 1,
+            resume: { status: 'attempted', attemptId: parsed.data.attemptId, acceptedAtMs },
+          };
+        });
+        if (!transitioned || transitioned.recordKind !== 'prepared_target') {
+          throw new Error('Handoff runner acceptance job disappeared');
+        }
+        acceptedByHook = true;
+      },
+    });
+
+    if (spawnResult.type !== 'success') return spawnResult;
+    if (spawnResult.runnerAcceptance === 'preexisting_or_adopted' || !spawnResult.runnerAcceptance) {
+      const classified = await prepareJobStore.transitionV2(job.jobId, (current) => {
+        if (current.recordKind !== 'prepared_target' || current.resume.status !== 'not_attempted') {
+          return null;
+        }
+        return {
+          ...current,
+          updatedAtMs: Date.now(),
+          transitionRevision: current.transitionRevision + 1,
+          resume: { status: 'preexisting_unowned' },
+        };
+      });
+      if (!classified || classified.recordKind !== 'prepared_target') {
+        return { ok: false, errorCode: 'ambiguous_runner_ownership' } as const;
+      }
+      return SessionHandoffTargetResumeResponseV2Schema.parse({
+        handoffId: job.handoffId,
+        sessionId: job.sessionId,
+        disposition: 'preexisting_or_adopted',
+      });
+    }
+    if (spawnResult.runnerAcceptance === 'newly_accepted' && !acceptedByHook) {
+      return { ok: false, errorCode: 'ambiguous_runner_ownership' } as const;
+    }
+    const latest = await prepareJobStore.read(job.jobId);
+    if (
+      latest?.schemaVersion !== 2
+      || latest.recordKind !== 'prepared_target'
+      || (latest.resume.status !== 'attempted' && latest.resume.status !== 'confirmed')
+      || latest.resume.attemptId !== parsed.data.attemptId
+    ) {
+      return { ok: false, errorCode: 'ambiguous_runner_ownership' } as const;
+    }
+    return SessionHandoffTargetResumeResponseV2Schema.parse({
+      handoffId: job.handoffId,
+      sessionId: job.sessionId,
+      disposition: spawnResult.runnerAcceptance === 'same_request_runner'
+        ? 'same_request_runner'
+        : 'started_for_handoff',
+    });
+  };
+}
+
+// The production RPC registry wraps this foundation with canonical artifact cleanup and the
+// daemon-owned runner stop integration; direct construction remains useful for owner-level tests.
+export function createUnregisteredSessionHandoffAbortV2FoundationHandler(input: Readonly<{
+  activeServerDir: string;
+  stopSessionForHandoff?: (sessionId: string) => Promise<'stopped' | 'already_inactive' | 'failed'>;
+}>): (raw: unknown) => Promise<unknown> {
+  const prepareJobStore = createSessionHandoffPrepareTargetJobStore({ activeServerDir: input.activeServerDir });
+  const sourceExportStore = createSessionHandoffSourceExportStore({ activeServerDir: input.activeServerDir });
+
+  return async (raw: unknown): Promise<unknown> => {
+    const parsed = SessionHandoffAbortRequestSchema.safeParse(raw);
+    if (!parsed.success) return invalidRequest();
+
+    const persistedJob = await readPersistedPrepareJob({
+      handoffId: parsed.data.handoffId,
+      jobStore: prepareJobStore,
+    });
+    const persistedSourceExport = await sourceExportStore.load(parsed.data.handoffId);
+    if (!persistedJob && !persistedSourceExport) {
+      return { ok: false, errorCode: 'not_found' } as const;
+    }
+
+    const nowMs = Date.now();
+    const operationId = `abort_${randomUUID()}`;
+    const transitionRevision = persistedJob?.schemaVersion === 2
+      ? persistedJob.transitionRevision + 1
+      : 1;
+    const baseStatus = persistedJob?.status
+      ?? buildStartPendingStatus({ handoffId: parsed.data.handoffId, sourceStopState: 'already_inactive' });
+    const status: SessionHandoffStatus = {
+      ...baseStatus,
+      status: 'aborted',
+      recoveryActions: ['keep_stopped'],
+    };
+
+    if (persistedJob?.schemaVersion === 1) {
+      const { schemaVersion: _schemaVersion, ...legacyRecord } = persistedJob;
+      await prepareJobStore.writeLegacyCleanupUnavailableV2({
+        ...legacyRecord,
+        updatedAtMs: nowMs,
+        cancelRequestedAtMs: legacyRecord.cancelRequestedAtMs ?? nowMs,
+        abortedAtMs: nowMs,
+        transitionRevision,
+        resume: { status: 'legacy_unknown' },
+        terminal: { status: 'aborted', operationId, completedRevision: transitionRevision },
+        targetCleanup: { status: 'legacy_cleanup_unavailable' },
+        status,
+      });
+      return {
+        handoffId: parsed.data.handoffId,
+        status,
+        targetCleanup: { status: 'legacy_cleanup_unavailable' },
+      } as const;
+    }
+
+    if (persistedJob?.schemaVersion === 2 && persistedJob.recordKind === 'prepared_target') {
+      if (!persistedJob.sessionId) {
+        return { ok: false, errorCode: 'invalid_persisted_job' } as const;
+      }
+      if (persistedJob.terminal.status === 'completed' || persistedJob.terminal.status === 'aborted') {
+        return SessionHandoffAbortResponseV2Schema.parse({
+          handoffId: parsed.data.handoffId,
+          status: persistedJob.status,
+          targetCleanup: persistedJob.targetCleanup,
+        });
+      }
+      if (persistedJob.resume.status === 'attempted' || persistedJob.resume.status === 'confirmed') {
+        const claimed = persistedJob.terminal.status === 'aborting'
+          ? persistedJob
+          : await prepareJobStore.transitionV2(persistedJob.jobId, (current) => {
+            if (current.recordKind !== 'prepared_target') {
+              throw new Error('Prepared target abort cannot change record kind');
+            }
+            if (current.terminal.status !== 'open') {
+              throw new Error(`Cannot claim target cleanup in terminal state ${current.terminal.status}`);
+            }
+            const nextRevision = current.transitionRevision + 1;
+            return {
+              ...current,
+              updatedAtMs: nowMs,
+              cancelRequestedAtMs: current.cancelRequestedAtMs ?? nowMs,
+              transitionRevision: nextRevision,
+              terminal: { status: 'aborting', operationId, claimedRevision: nextRevision },
+              targetCleanup: { status: 'pending' },
+              status: { ...current.status, status: 'awaiting_recovery', recoveryActions: ['keep_stopped'] },
+            };
+          });
+        if (!claimed || claimed.recordKind !== 'prepared_target' || claimed.terminal.status !== 'aborting') {
+          return { ok: false, errorCode: 'invalid_persisted_job' } as const;
+        }
+
+        const cleanupAttemptedAtMs = Date.now();
+        const cleanupResult = input.stopSessionForHandoff
+          ? await input.stopSessionForHandoff(claimed.sessionId).catch(() => 'failed' as const)
+          : 'failed' as const;
+        if (cleanupResult === 'failed') {
+          const failed = await prepareJobStore.transitionV2(claimed.jobId, (current) => {
+            if (current.recordKind !== 'prepared_target' || current.terminal.status !== 'aborting') {
+              throw new Error('Target cleanup failure requires the durable abort claim');
+            }
+            return {
+              ...current,
+              updatedAtMs: cleanupAttemptedAtMs,
+              transitionRevision: current.transitionRevision + 1,
+              targetCleanup: {
+                status: 'failed',
+                reason: input.stopSessionForHandoff ? 'failed' : 'unreachable',
+                attemptedAtMs: cleanupAttemptedAtMs,
+              },
+              status: {
+                ...current.status,
+                status: 'awaiting_recovery',
+                recoveryActions: ['retry_target_cleanup', 'keep_stopped'],
+              },
+            };
+          });
+          if (!failed || failed.recordKind !== 'prepared_target') {
+            return { ok: false, errorCode: 'invalid_persisted_job' } as const;
+          }
+          return SessionHandoffAbortResponseV2Schema.parse({
+            handoffId: parsed.data.handoffId,
+            status: failed.status,
+            targetCleanup: failed.targetCleanup,
+          });
+        }
+
+        const provedAtMs = Date.now();
+        const completed = await prepareJobStore.transitionV2(claimed.jobId, (current) => {
+          if (current.recordKind !== 'prepared_target' || current.terminal.status !== 'aborting') {
+            throw new Error('Target cleanup completion requires the durable abort claim');
+          }
+          const nextRevision = current.transitionRevision + 1;
+          return {
+            ...current,
+            updatedAtMs: provedAtMs,
+            abortedAtMs: provedAtMs,
+            transitionRevision: nextRevision,
+            terminal: {
+              status: 'aborted',
+              operationId: current.terminal.operationId,
+              completedRevision: nextRevision,
+            },
+            targetCleanup: { status: 'proved_absent', proof: cleanupResult, provedAtMs },
+            status: {
+              ...current.status,
+              status: 'aborted',
+              recoveryActions: ['restart_on_source', 'keep_stopped'],
+            },
+          };
+        });
+        if (!completed || completed.recordKind !== 'prepared_target') {
+          return { ok: false, errorCode: 'invalid_persisted_job' } as const;
+        }
+        return SessionHandoffAbortResponseV2Schema.parse({
+          handoffId: parsed.data.handoffId,
+          status: completed.status,
+          targetCleanup: completed.targetCleanup,
+        });
+      }
+      const transitioned = await prepareJobStore.transitionV2(persistedJob.jobId, (current) => {
+        if (current.recordKind !== 'prepared_target') {
+          throw new Error('Prepared target abort cannot change record kind');
+        }
+        if (current.terminal.status === 'aborted') return null;
+        if (current.terminal.status !== 'open') {
+          throw new Error(`Cannot abort handoff job in terminal state ${current.terminal.status}`);
+        }
+        if (current.resume.status === 'attempted' || current.resume.status === 'confirmed') {
+          throw new Error('Target cleanup is required before aborting an owned target resume');
+        }
+        const nextTargetCleanup = current.resume.status === 'preexisting_unowned'
+          ? { status: 'not_owned' as const, reason: 'preexisting_or_adopted' as const }
+          : { status: 'not_owned' as const, reason: 'resume_not_attempted' as const };
+        const nextRevision = current.transitionRevision + 1;
+        return {
+          ...current,
+          updatedAtMs: nowMs,
+          cancelRequestedAtMs: current.cancelRequestedAtMs ?? nowMs,
+          abortedAtMs: nowMs,
+          transitionRevision: nextRevision,
+          terminal: { status: 'aborted', operationId, completedRevision: nextRevision },
+          targetCleanup: nextTargetCleanup,
+          status,
+        };
+      });
+      if (!transitioned || transitioned.recordKind !== 'prepared_target') {
+        return { ok: false, errorCode: 'invalid_persisted_job' } as const;
+      }
+      return SessionHandoffAbortResponseV2Schema.parse({
+        handoffId: parsed.data.handoffId,
+        status: transitioned.status,
+        targetCleanup: transitioned.targetCleanup,
+      });
+    }
+
+    if (persistedJob?.schemaVersion === 2) {
+      return {
+        handoffId: parsed.data.handoffId,
+        status: persistedJob.status,
+        targetCleanup: persistedJob.targetCleanup,
+      } as const;
+    }
+
+    const jobId = buildSourceExportOnlyPrepareJobId(parsed.data.handoffId);
+    const targetCleanup = { status: 'not_applicable' as const, reason: 'source_only' as const };
+    await prepareJobStore.writeSourceOnlyV2({
+      jobId,
+      handoffId: parsed.data.handoffId,
+      ...(persistedSourceExport?.sessionId ? { sessionId: persistedSourceExport.sessionId } : {}),
+      createdAtMs: persistedSourceExport?.exportedAtMs ?? nowMs,
+      updatedAtMs: nowMs,
+      cancelRequestedAtMs: nowMs,
+      abortedAtMs: nowMs,
+      transitionRevision,
+      resume: { status: 'not_applicable' },
+      terminal: { status: 'aborted', operationId, completedRevision: transitionRevision },
+      targetCleanup,
+      status: { ...status, jobId },
+    });
+    const durableStatus = { ...status, jobId };
+    return {
+      handoffId: parsed.data.handoffId,
+      status: durableStatus,
+      targetCleanup,
+    } as const;
   };
 }
 
@@ -875,6 +1300,10 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
   loadLocalSessionMetadata?: (sessionId: string) => Promise<SessionHandoffLocalMetadataSource | null>;
   loadSessionMetadata?: (sessionId: string) => Promise<Record<string, unknown> | null>;
   stopSessionForHandoff?: (sessionId: string) => Promise<'stopped' | 'already_inactive' | 'failed'>;
+  spawnSessionForHandoff?: (
+    options: SpawnSessionOptions,
+    hooks: SpawnSessionRunnerAcceptanceHooks,
+  ) => Promise<SpawnSessionResult>;
   exportSessionBundle?: (metadata: Record<string, unknown>) => Promise<Readonly<{
     providerBundle: SessionHandoffProviderBundle;
     targetPath: string;
@@ -943,6 +1372,15 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
   );
   const ephemeralServerRoutedPayloadSources = new Map<string, TransferPayloadSource>();
 
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_HANDOFF_CAPABILITY_V2_GET, async (raw: unknown) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length !== 0) return invalidRequest();
+    return {
+      protocolVersion: 2,
+      atomicTargetResume: params.spawnSessionForHandoff !== undefined,
+      targetCleanup: params.stopSessionForHandoff !== undefined,
+    } as const;
+  });
+
   const maybeRecoverPrepareTargetJobMissingRunner = async (
     job: SessionHandoffPrepareTargetJobRecord,
   ): Promise<SessionHandoffPrepareTargetJobRecord> => {
@@ -968,79 +1406,62 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
       jobId: job.jobId,
       ownerId: probeOwnerId,
       nowMs,
-      // Keep probe leases short so a crashed probe can't stall a real resume attempt.
-      ttlMs: 5_000,
+      ttlMs: SESSION_HANDOFF_PREPARE_TARGET_JOB_RECOVERY_PROOF_TTL_MS,
     });
 
     if (!leaseAttempt.acquired) {
       // Another daemon instance appears to hold the lease; keep the durable pending status.
       return job;
     }
-
-    await releaseSessionHandoffPrepareTargetJobLease({
-      activeServerDir: configuration.activeServerDir,
-      jobId: job.jobId,
-      ownerId: probeOwnerId,
-    }).catch(() => undefined);
-
-    if (job.cancelRequestedAtMs) {
-      // Preserve existing fail-closed behavior: if cancellation was requested and no runner/lease owner exists,
-      // mark the job aborted immediately instead of attempting a restart.
-    } else if (job.prepareTargetRequest && restartPrepareTargetJobFromPersistedRequest !== null) {
-      // Restart in the background. Callers can keep polling status/result without issuing a second PREPARE_TARGET call.
-      const restart = restartPrepareTargetJobFromPersistedRequest;
-      void restart(job.prepareTargetRequest).catch(() => undefined);
+    const probeLeaseId = leaseAttempt.lease?.leaseId;
+    if (!probeLeaseId) {
       return job;
     }
 
-    // With no active lease owner, the daemon cannot make forward progress without either:
-    // 1) a persisted prepareTargetRequest (so we can restart), or
-    // 2) a new PREPARE_TARGET call (so we can rehydrate the request inputs).
-    // Fail closed into recovery instead of reporting a status with no runner.
-    const recovered = await prepareJobStore.update(job.jobId, (current) => {
-      const { schemaVersion: _schemaVersion, ...rest } = current;
-      const previousProgress = rest.status.progress;
-      const nextProgress = previousProgress
-        ? {
-          ...previousProgress,
-          updatedAtMs: nowMs,
-          current: {
-            ...(previousProgress.current ?? {}),
-            phaseDetail: 'daemon_restart_missing_runner',
-          },
-        }
-        : previousProgress;
+    const probeLeaseHeartbeat = startSessionHandoffPrepareTargetJobLeaseHeartbeat({
+      activeServerDir: configuration.activeServerDir,
+      jobId: job.jobId,
+      ownerId: probeOwnerId,
+      leaseId: probeLeaseId,
+      ttlMs: SESSION_HANDOFF_PREPARE_TARGET_JOB_RECOVERY_PROOF_TTL_MS,
+      nowMs: () => Date.now(),
+    });
+    let probeLeaseReleased = false;
+    const releaseProbeLease = async (): Promise<void> => {
+      if (probeLeaseReleased) return;
+      probeLeaseReleased = true;
+      await probeLeaseHeartbeat.stop();
+      await releaseSessionHandoffPrepareTargetJobLease({
+        activeServerDir: configuration.activeServerDir,
+        jobId: job.jobId,
+        ownerId: probeOwnerId,
+        leaseId: probeLeaseId,
+      }).catch(() => undefined);
+    };
 
-      const recoveryMessage = 'Daemon restarted while the handoff prepare-target job was in progress';
-
-      if (rest.cancelRequestedAtMs) {
-        return {
-          ...rest,
-          updatedAtMs: nowMs,
-          abortedAtMs: rest.abortedAtMs ?? nowMs,
-          status: {
-            ...rest.status,
-            status: 'aborted',
-            ...(nextProgress ? { progress: nextProgress } : {}),
-          },
-          lastErrorMessage: rest.lastErrorMessage ?? recoveryMessage,
-        };
+    try {
+      if (job.cancelRequestedAtMs) {
+        // Preserve existing fail-closed behavior: if cancellation was requested and no runner/lease owner exists,
+        // mark the job aborted immediately instead of attempting a restart.
+      } else if (job.prepareTargetRequest && restartPrepareTargetJobFromPersistedRequest !== null) {
+        // A persisted request launches a real runner, so relinquish the absence-proof lease first.
+        await releaseProbeLease();
+        const restart = restartPrepareTargetJobFromPersistedRequest;
+        void restart(job.prepareTargetRequest).catch(() => undefined);
+        return job;
       }
 
-      return {
-        ...rest,
-        updatedAtMs: nowMs,
-        failedAtMs: rest.failedAtMs ?? nowMs,
-        status: {
-          ...rest.status,
-          status: 'awaiting_recovery',
-          ...(nextProgress ? { progress: nextProgress } : {}),
-        },
-        lastErrorMessage: rest.lastErrorMessage ?? recoveryMessage,
-      };
-    });
-
-    return recovered ?? job;
+      // Keep the absence-proof lease through the store's locked re-read/write. Without it, a real runner
+      // can acquire between the probe and this canonical recovery transition and be falsely terminalized.
+      const recovered = await prepareJobStore.recoverMissingRunner(job.jobId, nowMs, probeLeaseHeartbeat.proof);
+      const proofState = probeLeaseHeartbeat.getState();
+      if (proofState.status === 'error') {
+        throw proofState.error;
+      }
+      return recovered ?? job;
+    } finally {
+      await releaseProbeLease();
+    }
   };
 
 		  const waitForPersistedSourceExport = async (
@@ -1120,6 +1541,11 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
       ephemeralServerRoutedPayloadSources.delete(transferId);
       await disposeTransferPayloadSource(payloadSource).catch(() => undefined);
     }
+  };
+  const disposeTargetTransferArtifactsForHandoff = async (handoffId: string): Promise<void> => {
+    await disposeEphemeralServerRoutedPayloadSourcesForHandoff(handoffId);
+    params.directPeerTransfer?.clearPublishedTransfer(buildSessionHandoffProviderBundleTransferId(handoffId));
+    params.directPeerTransfer?.clearPublishedTransfer(buildSessionHandoffWorkspaceManifestTransferId({ handoffId }));
   };
   const loadRemoteSessionMetadata =
     params.loadSessionMetadata ??
@@ -1531,22 +1957,63 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
 	      params.machineTransferChannel !== undefined
 	      && parsed.data.preferredTransportStrategies.includes('server_routed_stream');
 
-	    const recordDeferredStartFailure = (error: unknown): void => {
+	    const normalizeDeferredStartFailure = (error: unknown): Readonly<{
+	      errorCode: 'source_stop_failed' | 'source_export_failed';
+	      errorMessage: string;
+	    }> => {
+	      if (error && typeof error === 'object') {
+	        const candidate = error as { errorCode?: unknown; error?: unknown; message?: unknown };
+	        if (candidate.errorCode === 'source_stop_failed') {
+	          return {
+	            errorCode: 'source_stop_failed',
+	            errorMessage: typeof candidate.error === 'string'
+	              ? candidate.error
+	              : typeof candidate.message === 'string'
+	                ? candidate.message
+	                : 'Failed to stop the active source session before handoff cutover',
+	          };
+	        }
+	      }
+	      return {
+	        errorCode: 'source_export_failed',
+	        errorMessage: error instanceof Error
+	          ? error.message
+	          : 'Failed to export session handoff state',
+	      };
+	    };
+
+	    const recordDeferredStartFailure = async (error: unknown): Promise<void> => {
 	      const nowMs = Date.now();
 	      const jobId = `start_${handoffId}`;
-	      const errorMessage = error instanceof Error ? error.message : 'Failed to export session handoff state';
-	      void prepareJobStore.write({
+	      const failure = normalizeDeferredStartFailure(error);
+	      await prepareJobStore.write({
 	        jobId,
 	        handoffId,
 	        createdAtMs: nowMs,
 	        updatedAtMs: nowMs,
 	        failedAtMs: nowMs,
-	        lastErrorMessage: errorMessage,
+	        lastErrorCode: failure.errorCode,
+	        lastErrorMessage: failure.errorMessage,
 	        status: {
 	          ...buildStartRecoveryStatus(handoffId),
 	          jobId,
 	        },
-	      }).catch(() => undefined);
+	      });
+	    };
+
+	    const observeDeferredStartFailure = (work: Promise<void>): void => {
+	      void work.catch((error) => {
+	        void recordDeferredStartFailure(error).catch((persistenceError) => {
+	          process.emitWarning(
+	            `Failed to persist deferred session-handoff start failure for ${handoffId}: ${
+	              persistenceError instanceof Error ? persistenceError.message : String(persistenceError)
+	            }`,
+	            {
+	              code: 'HAPPIER_SESSION_HANDOFF_DEFERRED_FAILURE_PERSISTENCE',
+	            },
+	          );
+	        });
+	      });
 	    };
 
 	    const buildDeferredResponseTargetPath = (): string | null => {
@@ -1611,8 +2078,14 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
 	        return fastPathOutcome;
 	      }
 
-	      deferredStartWorkPromise = fastPathPromise.then(() => undefined);
-	      void fastPathPromise.catch(recordDeferredStartFailure);
+	      deferredStartWorkPromise = fastPathPromise.then((outcome) => {
+	        if ('ok' in outcome && outcome.ok === false) {
+	          throw Object.assign(new Error(outcome.error), {
+	            errorCode: outcome.errorCode,
+	            error: outcome.error,
+	          });
+	        }
+	      });
 	      shouldDefer = true;
 	      return null;
 	    };
@@ -1817,7 +2290,10 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
 		                  ? await params.stopSessionForHandoff(parsed.data.sessionId)
 		                  : 'already_inactive';
 		              if (actualSourceStopState === 'failed') {
-		                throw new Error('Failed to stop the active source session before handoff cutover');
+		                throw Object.assign(
+		                  new Error('Failed to stop the active source session before handoff cutover'),
+		                  { errorCode: 'source_stop_failed' as const },
+		                );
 		              }
 
                   await prepareStartedHandoffState({
@@ -1844,9 +2320,9 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
                   throw error;
                 }
 		          })();
-		          void deferredStartWorkPromise.catch((error) => {
+		          deferredStartWorkPromise = deferredStartWorkPromise.catch((error) => {
                 params.directPeerTransfer?.clearPublishedTransfer(providerBundleCarrierTransferId);
-                recordDeferredStartFailure(error);
+                throw error;
               });
 		        } else {
 		          const exported = await exportSessionBundle(metadata);
@@ -1989,7 +2465,10 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
 			              ? await params.stopSessionForHandoff(parsed.data.sessionId)
 			              : 'already_inactive';
 			          if (actualSourceStopState === 'failed') {
-			            throw new Error('Failed to stop the active source session before handoff cutover');
+			            throw Object.assign(
+			              new Error('Failed to stop the active source session before handoff cutover'),
+			              { errorCode: 'source_stop_failed' as const },
+			            );
 			          }
 			          await prepareStartedHandoffState({
 			            handoffId,
@@ -1999,7 +2478,7 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
 			            ...(preExportedProviderBundle ? { preExportedProviderBundle } : {}),
 			          });
 			        })();
-			      void startWork.catch(recordDeferredStartFailure);
+			      observeDeferredStartFailure(startWork);
 
 		      return {
 		        handoffId,
@@ -2075,6 +2554,13 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
         status: persistedJob.status,
       };
     }
+    if (persistedJob?.schemaVersion === 2) {
+      return {
+        ok: false,
+        errorCode: 'upgrade_required',
+        error: 'The registered v1 prepare method cannot mutate a nonterminal v2 handoff job',
+      } as const;
+    }
     if (persistedJob && !isTerminalHandoffStatus(persistedJob.status)) {
       // If we already have an in-flight runner, return the durable status as-is.
       // Otherwise continue below: we'll restart the job runner against the existing job record.
@@ -2086,19 +2572,59 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
       }
     }
 
-    if (
-      parsed.data.negotiatedTransportStrategy === 'direct_peer'
-      && parsed.data.handoffMetadataV2 === undefined
-    ) {
-      const localSourceExport = await sourceExportStore.load(parsed.data.handoffId);
-      const hasLocalProviderBundle = Boolean(localSourceExport?.providerBundle);
-      const needsWorkspaceReplicationMetadata = parsed.data.workspaceTransfer?.enabled === true;
-      const hasLocalWorkspaceReplicationMetadata = Boolean(
-        localSourceExport?.workspaceManifest && localSourceExport.workspaceSourceRootPath,
-      );
+    let preflightLocalSourceExport: Awaited<ReturnType<typeof sourceExportStore.load>> | undefined;
+    let preflightLocalProviderBundle: SessionHandoffProviderBundle | null = null;
+    let preflightLocalWorkspaceReplicationMetadata: SessionHandoffWorkspaceReplicationMetadata | undefined;
+    if (parsed.data.negotiatedTransportStrategy === 'direct_peer') {
+      preflightLocalSourceExport = await sourceExportStore.load(parsed.data.handoffId);
+      try {
+        preflightLocalProviderBundle = preflightLocalSourceExport?.providerBundle
+          ? await readSessionHandoffProviderBundleFile(preflightLocalSourceExport.providerBundle.filePath)
+          : null;
+        preflightLocalWorkspaceReplicationMetadata =
+          preflightLocalSourceExport?.workspaceManifest && preflightLocalSourceExport.workspaceSourceRootPath
+            ? {
+                sourceRootPath: preflightLocalSourceExport.workspaceSourceRootPath,
+                manifest: await readWorkspaceReplicationManifestFromFile({
+                  transferId: preflightLocalSourceExport.workspaceManifest.transferId,
+                  filePath: preflightLocalSourceExport.workspaceManifest.filePath,
+                  sizeBytes: preflightLocalSourceExport.workspaceManifest.sizeBytes,
+                }),
+              }
+            : undefined;
+      } catch {
+        return {
+          ok: false,
+          errorCode: 'invalid_request',
+          error: 'Invalid session handoff transfer payload',
+        } as const;
+      }
 
-      if (!hasLocalProviderBundle || (needsWorkspaceReplicationMetadata && !hasLocalWorkspaceReplicationMetadata)) {
-        return missingHandoffMetadataV2();
+      if (parsed.data.handoffMetadataV2 === undefined) {
+        const needsWorkspaceReplicationMetadata = parsed.data.workspaceTransfer?.enabled === true;
+        if (
+          !preflightLocalProviderBundle
+          || (needsWorkspaceReplicationMetadata && !preflightLocalWorkspaceReplicationMetadata)
+        ) {
+          return missingHandoffMetadataV2();
+        }
+      }
+
+      if (parsed.data.allowServerRoutedFallback === false) {
+        const availability = resolveDirectPeerPrepareAvailability({
+          request: parsed.data,
+          directPeerRequesterAvailable: typeof params.directPeerTransfer?.requestPayloadFile === 'function',
+          hasLocalProviderBundle: Boolean(preflightLocalProviderBundle),
+          localProviderBundleEndpointCandidates:
+            preflightLocalSourceExport?.providerBundle?.endpointCandidates,
+          hasLocalWorkspaceReplicationMetadata: Boolean(preflightLocalWorkspaceReplicationMetadata),
+          localWorkspaceManifestEndpointCandidates:
+            preflightLocalSourceExport?.workspaceManifest?.endpointCandidates,
+          nowMs: Date.now(),
+        });
+        if (!availability.canUseProviderBundle || !availability.canUseWorkspaceManifest) {
+          return directPeerTransferUnavailable();
+        }
       }
     }
 
@@ -2161,7 +2687,8 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
     if (!runJob) {
       runJob = (async () => {
         let leaseAcquired = false;
-        let leaseHeartbeat: Readonly<{ stop: () => Promise<void> }> | null = null;
+        let leaseHeartbeat: SessionHandoffPrepareTargetJobLeaseHeartbeat | null = null;
+        let acquiredLeaseId: string | null = null;
 
         try {
         const assertPrepareJobNotCancelled = async (): Promise<void> => {
@@ -2181,12 +2708,17 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
           // Another daemon instance is responsible for advancing this durable job record.
           return;
         }
+        if (!leaseAttempt.lease?.leaseId) {
+          throw new Error('Acquired handoff prepare-target lease did not include an exact lease id');
+        }
 
         leaseAcquired = true;
+        acquiredLeaseId = leaseAttempt.lease.leaseId;
         leaseHeartbeat = startSessionHandoffPrepareTargetJobLeaseHeartbeat({
           activeServerDir: configuration.activeServerDir,
           jobId,
           ownerId: prepareTargetJobLeaseOwnerId,
+          leaseId: acquiredLeaseId,
           ttlMs: prepareTargetJobLeaseTtlMs,
           nowMs: () => Date.now(),
         });
@@ -2216,23 +2748,28 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
           const allowServerRoutedFallback = parsed.data.allowServerRoutedFallback !== false;
           const canFallbackToServerRouted = allowServerRoutedFallback && params.machineTransferChannel !== undefined;
           const directPeerRequester = params.directPeerTransfer?.requestPayloadFile;
-          const localSourceExport = await sourceExportStore.load(parsed.data.handoffId);
+          const localSourceExport =
+            preflightLocalSourceExport ?? await sourceExportStore.load(parsed.data.handoffId);
           const localProviderBundle =
-            localSourceExport?.providerBundle
-              ? await readSessionHandoffProviderBundleFile(localSourceExport.providerBundle.filePath).catch(() => null)
-              : null;
+            preflightLocalSourceExport !== undefined
+              ? preflightLocalProviderBundle
+              : localSourceExport?.providerBundle
+                ? await readSessionHandoffProviderBundleFile(localSourceExport.providerBundle.filePath).catch(() => null)
+                : null;
           const localProviderBundleEndpointCandidates = localSourceExport?.providerBundle?.endpointCandidates;
           const localWorkspaceReplicationMetadata =
-            localSourceExport?.workspaceManifest && localSourceExport.workspaceSourceRootPath
-              ? {
-                  sourceRootPath: localSourceExport.workspaceSourceRootPath,
-                  manifest: await readWorkspaceReplicationManifestFromFile({
-                    transferId: localSourceExport.workspaceManifest.transferId,
-                    filePath: localSourceExport.workspaceManifest.filePath,
-                    sizeBytes: localSourceExport.workspaceManifest.sizeBytes,
-                }),
-              }
-              : undefined;
+            preflightLocalSourceExport !== undefined
+              ? preflightLocalWorkspaceReplicationMetadata
+              : localSourceExport?.workspaceManifest && localSourceExport.workspaceSourceRootPath
+                ? {
+                    sourceRootPath: localSourceExport.workspaceSourceRootPath,
+                    manifest: await readWorkspaceReplicationManifestFromFile({
+                      transferId: localSourceExport.workspaceManifest.transferId,
+                      filePath: localSourceExport.workspaceManifest.filePath,
+                      sizeBytes: localSourceExport.workspaceManifest.sizeBytes,
+                  }),
+                }
+                : undefined;
           const localWorkspaceManifestEndpointCandidates = localSourceExport?.workspaceManifest?.endpointCandidates;
 
           const hasProviderBundleTransferPublication =
@@ -2265,46 +2802,17 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
           }
 
           if (actualTransportStrategy === 'direct_peer') {
-            const providerEndpointCandidates =
-              requestResolvedHandoffMetadataV2?.providerBundleTransferPublication?.endpointCandidates
-              ?? localProviderBundleEndpointCandidates;
-            const providerCandidatesFallback = providerEndpointCandidates ?? parsed.data.endpointCandidates;
-            const manifestEndpointCandidates =
-              requestResolvedHandoffMetadataV2?.workspaceReplicationManifestTransferPublication?.endpointCandidates
-              ?? localWorkspaceManifestEndpointCandidates
-              ?? (parsed.data.endpointCandidates.length
-                ? rewriteDirectPeerEndpointCandidatesForTransferId({
-                    endpointCandidates: parsed.data.endpointCandidates,
-                    transferId:
-                      requestResolvedHandoffMetadataV2?.workspaceReplicationManifestTransferPublication?.transferId
-                      ?? buildSessionHandoffWorkspaceManifestTransferId({ handoffId: parsed.data.handoffId }),
-                  })
-                : undefined);
+            const availability = resolveDirectPeerPrepareAvailability({
+              request: parsed.data,
+              directPeerRequesterAvailable: typeof directPeerRequester === 'function',
+              hasLocalProviderBundle: Boolean(localProviderBundle),
+              localProviderBundleEndpointCandidates,
+              hasLocalWorkspaceReplicationMetadata: Boolean(localWorkspaceReplicationMetadata),
+              localWorkspaceManifestEndpointCandidates,
+              nowMs: Date.now(),
+            });
 
-            const nowMs = Date.now();
-            const hasUsableProviderEndpointCandidates =
-              Array.isArray(providerCandidatesFallback)
-              && providerCandidatesFallback.some((candidate) => candidate.expiresAt >= nowMs);
-            const hasUsableManifestEndpointCandidates =
-              Array.isArray(manifestEndpointCandidates)
-              && manifestEndpointCandidates.some((candidate) => candidate.expiresAt >= nowMs);
-
-            const canUseDirectPeerForProviderBundle =
-              Boolean(localProviderBundle)
-              || (
-                typeof directPeerRequester === 'function'
-                && hasUsableProviderEndpointCandidates
-              );
-            const canUseDirectPeerForWorkspaceManifest =
-              resolvedWorkspaceTransfer?.enabled !== true
-              || !needsWorkspaceReplicationMetadata
-              || Boolean(localWorkspaceReplicationMetadata)
-              || (
-                typeof directPeerRequester === 'function'
-                && hasUsableManifestEndpointCandidates
-              );
-
-            if (!canUseDirectPeerForProviderBundle || !canUseDirectPeerForWorkspaceManifest) {
+            if (!availability.canUseProviderBundle || !availability.canUseWorkspaceManifest) {
               if (canFallbackToServerRouted) {
                 actualTransportStrategy = 'server_routed_stream';
               } else {
@@ -2518,11 +3026,12 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
         }
         } finally {
           await leaseHeartbeat?.stop().catch(() => undefined);
-          if (leaseAcquired) {
+          if (leaseAcquired && acquiredLeaseId) {
             await releaseSessionHandoffPrepareTargetJobLease({
               activeServerDir: configuration.activeServerDir,
               jobId,
               ownerId: prepareTargetJobLeaseOwnerId,
+              leaseId: acquiredLeaseId,
             }).catch(() => undefined);
           }
           // Only remove the in-memory runner if we still own the map entry. This prevents a
@@ -2577,6 +3086,137 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
 
   rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET, handlePrepareTargetRaw);
 
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET_V2, async (raw: unknown) => {
+    const parsed = SessionHandoffPrepareTargetRequestV2Schema.safeParse(raw);
+    if (!parsed.success) return invalidRequest();
+    const { sessionId, ...v1Request } = parsed.data;
+    const result = await handlePrepareTargetRaw(v1Request);
+    if (result && typeof result === 'object' && 'resume' in result && result.resume) {
+      const job = await prepareJobStore.findByHandoffId(parsed.data.handoffId);
+      if (!job) return { ok: false, errorCode: 'not_found' } as const;
+      await prepareJobStore.upgradeReadyV1ToPreparedV2({ jobId: job.jobId, sessionId });
+    }
+    return result;
+  });
+
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET_RESULT_GET_V2, async (raw: unknown) => {
+    const parsed = SessionHandoffPrepareTargetResultGetRequestV2Schema.safeParse(raw);
+    if (!parsed.success) return invalidRequest();
+    const job = await prepareJobStore.findByHandoffId(parsed.data.handoffId);
+    if (!job?.prepareTargetResult) return { ok: false, errorCode: 'not_found' } as const;
+    if (job.schemaVersion === 1) {
+      await prepareJobStore.upgradeReadyV1ToPreparedV2({ jobId: job.jobId, sessionId: parsed.data.sessionId });
+    } else if (job.recordKind !== 'prepared_target' || job.sessionId !== parsed.data.sessionId) {
+      return { ok: false, errorCode: 'invalid_persisted_job' } as const;
+    }
+    return job.prepareTargetResult;
+  });
+
+  if (params.spawnSessionForHandoff) {
+    rpcHandlerManager.registerHandler(
+      RPC_METHODS.DAEMON_SESSION_HANDOFF_TARGET_RESUME_V2,
+      createUnregisteredSessionHandoffTargetResumeV2FoundationHandler({
+        activeServerDir: configuration.activeServerDir,
+        spawnSessionForHandoff: params.spawnSessionForHandoff,
+      }),
+    );
+  }
+
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_HANDOFF_TARGET_CONFIRM_V2, async (raw: unknown) => {
+    const parsed = SessionHandoffTargetConfirmRequestV2Schema.safeParse(raw);
+    if (!parsed.success) return invalidRequest();
+    const job = await prepareJobStore.findByHandoffId(parsed.data.handoffId);
+    if (
+      !job || job.schemaVersion !== 2 || job.recordKind !== 'prepared_target'
+      || job.sessionId !== parsed.data.sessionId
+    ) return { ok: false, errorCode: 'invalid_persisted_job' } as const;
+    if (
+      job.terminal.status === 'open'
+      && job.resume.status === 'confirmed'
+      && job.resume.attemptId === parsed.data.attemptId
+    ) return job.status;
+    const confirmedAtMs = Date.now();
+    const transitioned = await prepareJobStore.transitionV2(job.jobId, (current) => {
+      if (
+        current.recordKind !== 'prepared_target'
+        || current.terminal.status !== 'open'
+        || current.resume.status !== 'attempted'
+        || current.resume.attemptId !== parsed.data.attemptId
+      ) throw new Error('Target confirmation does not match one open accepted handoff attempt');
+      return {
+        ...current,
+        updatedAtMs: confirmedAtMs,
+        transitionRevision: current.transitionRevision + 1,
+        resume: { ...current.resume, status: 'confirmed', confirmedAtMs },
+      };
+    });
+    return transitioned?.status ?? { ok: false, errorCode: 'not_found' };
+  });
+
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_HANDOFF_COMMIT_V2, async (raw: unknown) => {
+    const parsed = SessionHandoffCommitRequestV2Schema.safeParse(raw);
+    if (!parsed.success || (parsed.data.mode ?? 'target') !== 'target') return invalidRequest();
+    const job = await prepareJobStore.findByHandoffId(parsed.data.handoffId);
+    if (
+      !job || job.schemaVersion !== 2 || job.recordKind !== 'prepared_target'
+      || job.sessionId !== parsed.data.sessionId
+    ) return { ok: false, errorCode: 'invalid_persisted_job' } as const;
+    if (
+      job.terminal.status === 'completed'
+      && job.resume.status === 'confirmed'
+      && job.resume.attemptId === parsed.data.attemptId
+    ) {
+      await disposeTargetTransferArtifactsForHandoff(parsed.data.handoffId);
+      return { handoffId: parsed.data.handoffId, status: job.status };
+    }
+    const committedAtMs = Date.now();
+    const operationId = `commit_${randomUUID()}`;
+    const transitioned = await prepareJobStore.transitionV2(job.jobId, (current) => {
+      if (
+        current.recordKind !== 'prepared_target'
+        || current.terminal.status !== 'open'
+        || current.resume.status !== 'confirmed'
+        || current.resume.attemptId !== parsed.data.attemptId
+      ) throw new Error('Target commit requires the exact confirmed open handoff attempt');
+      const nextRevision = current.transitionRevision + 1;
+      return {
+        ...current,
+        updatedAtMs: committedAtMs,
+        completedAtMs: committedAtMs,
+        transitionRevision: nextRevision,
+        terminal: { status: 'completed', operationId, completedRevision: nextRevision },
+        status: { ...current.status, status: 'completed', recoveryActions: [] },
+      };
+    });
+    if (!transitioned) return { ok: false, errorCode: 'not_found' } as const;
+    await disposeTargetTransferArtifactsForHandoff(parsed.data.handoffId);
+    return { handoffId: parsed.data.handoffId, status: transitioned.status };
+  });
+
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_HANDOFF_ABORT_V2, async (raw: unknown) => {
+    const parsed = SessionHandoffAbortRequestV2Schema.safeParse(raw);
+    if (!parsed.success) return invalidRequest();
+    const job = await prepareJobStore.findByHandoffId(parsed.data.handoffId);
+    if (
+      !job || job.schemaVersion !== 2 || job.recordKind !== 'prepared_target'
+      || job.sessionId !== parsed.data.sessionId
+    ) return { ok: false, errorCode: 'invalid_persisted_job' } as const;
+    const result = await createUnregisteredSessionHandoffAbortV2FoundationHandler({
+      activeServerDir: configuration.activeServerDir,
+      stopSessionForHandoff: params.stopSessionForHandoff,
+    })({ handoffId: parsed.data.handoffId, reason: parsed.data.reason });
+    if (job.workspaceReplicationJobId) {
+      await workspaceReplicationAdapter.abortWorkspaceReplicationJob({
+        activeServerDir: configuration.activeServerDir,
+        jobId: job.workspaceReplicationJobId,
+      }).catch(() => undefined);
+    }
+    await disposeEphemeralServerRoutedPayloadSourcesForHandoff(parsed.data.handoffId);
+    params.directPeerTransfer?.clearPublishedTransfer(buildSessionHandoffProviderBundleTransferId(parsed.data.handoffId));
+    params.directPeerTransfer?.clearPublishedTransfer(buildSessionHandoffWorkspaceManifestTransferId({ handoffId: parsed.data.handoffId }));
+    return result;
+  });
+
   rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_HANDOFF_COMMIT, async (raw: unknown) => {
     const parsed = SessionHandoffCommitRequestSchema.safeParse(raw);
     if (!parsed.success) return invalidRequest();
@@ -2588,6 +3228,13 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
     });
     const persistedSourceExport = await sourceExportStore.load(parsed.data.handoffId);
     const currentStatus = persistedJob?.status;
+    if (persistedJob?.schemaVersion === 2) {
+      return {
+        ok: false,
+        errorCode: 'upgrade_required',
+        error: 'The registered v1 commit method cannot mutate a v2 handoff job',
+      } as const;
+    }
     if (
       mode === 'target'
       && currentStatus
@@ -2730,6 +3377,13 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
     });
     const persistedSourceExport = await sourceExportStore.load(parsed.data.handoffId);
     if (!persistedJob && !persistedSourceExport) return { ok: false, errorCode: 'not_found' } as const;
+    if (persistedJob?.schemaVersion === 2) {
+      return {
+        ok: false,
+        errorCode: 'upgrade_required',
+        error: 'The registered v1 abort method cannot mutate a v2 handoff job',
+      } as const;
+    }
 
     if (persistedJob?.workspaceReplicationJobId) {
       await workspaceReplicationAdapter.abortWorkspaceReplicationJob({
@@ -2753,6 +3407,7 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
         abortedAtMs,
         workspaceReplicationJobId: persistedJob.workspaceReplicationJobId,
         ...(persistedJob.failedAtMs ? { failedAtMs: persistedJob.failedAtMs } : {}),
+        ...(persistedJob.lastErrorCode ? { lastErrorCode: persistedJob.lastErrorCode } : {}),
         ...(persistedJob.lastErrorMessage ? { lastErrorMessage: persistedJob.lastErrorMessage } : {}),
         status,
         ...(persistedJob.prepareTargetResult ? {
@@ -2880,7 +3535,7 @@ export function registerMachineSessionHandoffRpcHandlers(params: Readonly<{
         }
 	        return {
 	          ok: false,
-	          errorCode: statusCode,
+	          errorCode: persistedJob.lastErrorCode ?? statusCode,
 	          error: persistedJob.lastErrorMessage ?? `Prepare-target job is ${statusCode}`,
 	        } as const;
 	      }

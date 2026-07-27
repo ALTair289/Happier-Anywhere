@@ -267,7 +267,9 @@ describe('rpcHandlers.sessionGoals', () => {
     });
     expect(parseUsageLimitResult(await handlers.get(RPC_METHODS.DAEMON_SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL)?.({
       sessionId: 'session-prefix',
-      issueFingerprint: null,
+      issueFingerprint: 'usage-limit:session-prefix:reset',
+      armedAtMs: 123,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
     }))).toEqual({
       ok: true,
       status: 'cancelled',
@@ -316,7 +318,9 @@ describe('rpcHandlers.sessionGoals', () => {
     });
     expect(sessionUsageLimitWaitResumeCancel).toHaveBeenCalledWith({
       sessionId: 'resolved-session',
-      issueFingerprint: null,
+      issueFingerprint: 'usage-limit:session-prefix:reset',
+      armedAtMs: 123,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
     });
     expect(sessionUsageLimitCheckNow).toHaveBeenCalledWith({
       sessionId: 'resolved-session',

@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { RPC_METHODS } from '@happier-dev/protocol/rpc';
 
@@ -31,6 +31,74 @@ class FakePtyProvider implements PtyProvider {
 }
 
 describe('registerMachineTerminalRpcHandlers', () => {
+  it('launches typed session attach through the current CLI entrypoint and daemon-owned terminal key', async () => {
+    const suiteDir = await mkdtemp(join(tmpdir(), 'happier-terminal-attach-'));
+    const provider = new FakePtyProvider();
+    const sessionManager = createTerminalPtySessionManager({
+      ptyProvider: provider,
+      env: { SHELL: '/bin/bash' } as any,
+      platform: 'linux',
+      now: () => 0,
+      config: {
+        maxSessions: 10,
+        idleTimeoutMs: 60_000,
+        bufferMaxBytes: 1_000_000,
+        bufferMaxEvents: 1000,
+        urlParseBufferLimit: 32_768,
+        maxWriteChunkBytes: 16_384,
+        defaultCols: 80,
+        defaultRows: 24,
+      },
+    });
+    const registered = new Map<string, (params: any) => Promise<any>>();
+    const rpcHandlerManager = {
+      registerHandler: (method: string, handler: (params: any) => Promise<any>) => registered.set(method, handler),
+    } as unknown as RpcHandlerManager;
+    const buildLaunchSpec = vi.fn(() => ({
+      runtime: 'binary' as const,
+      filePath: '/opt/happier/bin/happier',
+      args: ['attach', 'session-1'],
+      env: { HAPPIER_ATTACH_TEST: '1' },
+    }));
+
+    registerMachineTerminalRpcHandlers({
+      rpcHandlerManager,
+      deps: {
+        env: { HAPPIER_DAEMON_TERMINAL_ENABLED: '1' },
+        workingDirectory: suiteDir,
+        sessionManager,
+        buildHappyCliSubprocessLaunchSpecFn: buildLaunchSpec,
+      },
+    });
+
+    const ensure = registered.get(RPC_METHODS.DAEMON_TERMINAL_ENSURE)!;
+    const first = await ensure({
+      terminalKey: 'caller-must-not-own-this-key',
+      launch: { kind: 'session_attach', sessionId: 'session-1' },
+      cols: 90,
+      rows: 30,
+    });
+    const second = await ensure({
+      terminalKey: 'different-caller-key',
+      launch: { kind: 'session_attach', sessionId: 'session-1' },
+      cols: 100,
+      rows: 40,
+    });
+
+    expect(first).toEqual(expect.objectContaining({ ok: true, reused: false }));
+    expect(second).toEqual(expect.objectContaining({ ok: true, reused: true, terminalId: first.terminalId }));
+    expect(buildLaunchSpec).toHaveBeenCalledTimes(2);
+    expect(buildLaunchSpec).toHaveBeenCalledWith(['attach', 'session-1']);
+    expect(provider.spawned).toHaveLength(1);
+    expect(provider.spawned[0]).toEqual(expect.objectContaining({
+      file: '/opt/happier/bin/happier',
+      args: ['attach', 'session-1'],
+      options: expect.objectContaining({
+        env: expect.objectContaining({ HAPPIER_ATTACH_TEST: '1' }),
+      }),
+    }));
+  });
+
   it('fails closed when explicitly disabled', async () => {
     const registered = new Map<string, (params: any) => Promise<any>>();
     const rpcHandlerManager = {

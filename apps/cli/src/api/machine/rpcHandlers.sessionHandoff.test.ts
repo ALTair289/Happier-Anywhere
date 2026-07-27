@@ -1,4 +1,4 @@
-import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, watch, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,7 @@ import type {
   TransferEndpointCandidate,
 } from '@happier-dev/protocol';
 import { RPC_METHODS } from '@happier-dev/protocol/rpc';
+import { SessionHandoffAbortResponseV2Schema } from '@happier-dev/protocol';
 
 import { createEncryptedTransferChunkEnvelope } from '../../machines/transfer/transferChunkEncryption';
 import type { DirectPeerOnDemandTransferScope } from '../../machines/transfer/directPeerTransport';
@@ -19,10 +20,20 @@ import { requestServerRoutedTransferToFile } from '../../machines/transfer/serve
 import { createWorkspaceReplicationBaselineStore } from '../../workspaces/replication/baseline/workspaceReplicationBaselineStore';
 import { createWorkspaceReplicationJobStore } from '../../workspaces/replication/jobs/workspaceReplicationJobStore';
 import { createWorkspaceReplicationPackIdForDigests } from '../../workspaces/replication/transport/workspaceReplicationPackId';
+import {
+  createWorkspaceReplicationBlobPackBlobRecordHeaderBuffer,
+  createWorkspaceReplicationBlobPackEndMarkerBuffer,
+  createWorkspaceReplicationBlobPackHeaderBuffer,
+} from '../../workspaces/replication/transport/workspaceReplicationBlobPackFormatV1';
 import { createSessionHandoffPrepareTargetJobStore } from '../../session/handoff/prepare/sessionHandoffPrepareTargetJobStore';
+import {
+  releaseSessionHandoffPrepareTargetJobLease,
+  tryAcquireSessionHandoffPrepareTargetJobLease,
+} from '../../session/handoff/prepare/sessionHandoffPrepareTargetJobLease';
 import { buildSessionHandoffProviderBundleTransferId } from '../../session/handoff/sessionHandoffProviderBundleTransferPublication';
 import { createSessionHandoffSourceExportStore } from '../../session/handoff/state/sessionHandoffSourceExportStore';
 import { registerMachineSessionHandoffRpcHandlers } from './rpcHandlers.sessionHandoff';
+import { withJsonOwnerFileLock } from '../../utils/fs/jsonOwnerFileLock';
 
 type ExportSessionBundle = NonNullable<Parameters<typeof registerMachineSessionHandoffRpcHandlers>[0]['exportSessionBundle']>;
 type DirectPeerRequestPayloadFile = NonNullable<
@@ -321,7 +332,10 @@ function createLoopbackMachineTransferChannels() {
       },
     } as any;
 
-    registerMachineSessionHandoffRpcHandlers({ rpcHandlerManager });
+    registerMachineSessionHandoffRpcHandlers({
+      rpcHandlerManager,
+      spawnSessionForHandoff: vi.fn(async () => ({ type: 'success' as const, runnerAcceptance: 'newly_accepted' as const })),
+    });
 
     expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_START)).toBe(true);
     expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET)).toBe(true);
@@ -329,6 +343,12 @@ function createLoopbackMachineTransferChannels() {
     expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_COMMIT)).toBe(true);
     expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_ABORT)).toBe(true);
     expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_STATUS_GET)).toBe(true);
+    expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET_V2)).toBe(true);
+    expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET_RESULT_GET_V2)).toBe(true);
+    expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_TARGET_RESUME_V2)).toBe(true);
+    expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_TARGET_CONFIRM_V2)).toBe(true);
+    expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_COMMIT_V2)).toBe(true);
+    expect(registered.has(RPC_METHODS.DAEMON_SESSION_HANDOFF_ABORT_V2)).toBe(true);
   });
 
   it('fails closed when the persisted prepare-target job record is missing (resultGet uses job store only)', async () => {
@@ -512,6 +532,7 @@ function createLoopbackMachineTransferChannels() {
 
       const registered = new Map<string, (params: unknown) => Promise<any>>();
       registerHandlers({
+        // Boundary fixture: this test exercises RPC registration/dispatch only.
         rpcHandlerManager: {
           registerHandler: (method: string, handler: (params: unknown) => Promise<any>) => {
             registered.set(method, handler);
@@ -526,6 +547,213 @@ function createLoopbackMachineTransferChannels() {
     } finally {
       await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
       vi.doUnmock('@/configuration');
+    }
+  });
+
+  it('recovers a missing-runner v2 prepare-target job through status polling', async () => {
+    vi.resetModules();
+
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-v2-status-recovery-'));
+    try {
+      vi.doMock('@/configuration', () => ({
+        configuration: {
+          activeServerDir,
+          activeServerId: 'test_session_handoff_v2_status_recovery',
+        },
+      }));
+
+      const handoffId = 'handoff_v2_status_recovery';
+      const jobId = 'prepare_v2_status_recovery';
+      const prepareJobStore = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      await prepareJobStore.writePreparedV2({
+        jobId,
+        handoffId,
+        sessionId: 'session_v2_status_recovery',
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        transitionRevision: 0,
+        resume: { status: 'not_attempted' },
+        terminal: { status: 'open' },
+        targetCleanup: { status: 'not_required' },
+        status: {
+          handoffId,
+          jobId,
+          status: 'pending',
+          phase: 'staging_target',
+          recoveryActions: [],
+          progress: {
+            updatedAtMs: 1,
+            checkpoint: 'stage_target',
+            planned: {},
+            transferred: {},
+            applied: {},
+            remaining: {},
+            current: { phaseDetail: 'importing_workspace' },
+            resumable: false,
+          },
+        },
+      });
+
+      const registered = new Map<string, (params: unknown) => Promise<any>>();
+      const { registerMachineSessionHandoffRpcHandlers: registerHandlers } = await import('./rpcHandlers.sessionHandoff');
+      registerHandlers({
+        rpcHandlerManager: {
+          registerHandler: (method: string, handler: (params: unknown) => Promise<any>) => {
+            registered.set(method, handler);
+          },
+        } as any,
+      });
+
+      const statusGet = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_STATUS_GET);
+      expect(statusGet).toBeDefined();
+      await expect(statusGet!({ handoffId })).resolves.toMatchObject({
+        handoffId,
+        status: {
+          status: 'awaiting_recovery',
+          progress: { current: { phaseDetail: 'daemon_restart_missing_runner' } },
+        },
+      });
+      await expect(prepareJobStore.read(jobId)).resolves.toMatchObject({
+        schemaVersion: 2,
+        transitionRevision: 1,
+        status: { status: 'awaiting_recovery' },
+      });
+    } finally {
+      await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
+      vi.doUnmock('@/configuration');
+      vi.resetModules();
+    }
+  });
+
+  it('returns a final v2 terminal record unchanged through status and result polling', async () => {
+    vi.resetModules();
+
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-v2-final-polling-'));
+    try {
+      vi.doMock('@/configuration', () => ({
+        configuration: {
+          activeServerDir,
+          activeServerId: 'test_session_handoff_v2_final_polling',
+        },
+      }));
+
+      const handoffId = 'handoff_v2_final_polling';
+      const jobId = 'prepare_v2_final_polling';
+      const prepareJobStore = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      await prepareJobStore.writeSourceOnlyV2({
+        jobId,
+        handoffId,
+        sessionId: 'session_v2_final_polling',
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        abortedAtMs: 1,
+        transitionRevision: 1,
+        resume: { status: 'not_applicable' },
+        terminal: { status: 'aborted', operationId: 'abort_final_polling', completedRevision: 1 },
+        targetCleanup: { status: 'not_applicable', reason: 'source_only' },
+        status: {
+          handoffId,
+          jobId,
+          status: 'aborted',
+          phase: 'staging_target',
+          recoveryActions: ['keep_stopped'],
+        },
+      });
+      const before = await prepareJobStore.read(jobId);
+
+      const registered = new Map<string, (params: unknown) => Promise<any>>();
+      const { registerMachineSessionHandoffRpcHandlers: registerHandlers } = await import('./rpcHandlers.sessionHandoff');
+      registerHandlers({
+        rpcHandlerManager: {
+          registerHandler: (method: string, handler: (params: unknown) => Promise<any>) => {
+            registered.set(method, handler);
+          },
+        } as any,
+      });
+
+      const statusGet = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_STATUS_GET);
+      const resultGet = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET_RESULT_GET);
+      expect(statusGet).toBeDefined();
+      expect(resultGet).toBeDefined();
+      await expect(statusGet!({ handoffId })).resolves.toMatchObject({
+        handoffId,
+        status: { status: 'aborted' },
+      });
+      await expect(resultGet!({ handoffId })).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'aborted',
+      });
+      await expect(prepareJobStore.read(jobId)).resolves.toEqual(before);
+    } finally {
+      await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
+      vi.doUnmock('@/configuration');
+      vi.resetModules();
+    }
+  });
+
+  it('keeps the registered v1 prepare runner from mutating a v2 job', async () => {
+    vi.resetModules();
+
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-v1-prepare-v2-guard-'));
+    try {
+      vi.doMock('@/configuration', () => ({
+        configuration: {
+          activeServerDir,
+          activeServerId: 'test_session_handoff_v1_prepare_v2_guard',
+        },
+      }));
+
+      const handoffId = 'handoff_v1_prepare_v2_guard';
+      const jobId = 'prepare_v1_prepare_v2_guard';
+      const prepareJobStore = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      await prepareJobStore.writePreparedV2({
+        jobId,
+        handoffId,
+        sessionId: 'session_v1_prepare_v2_guard',
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        transitionRevision: 0,
+        resume: { status: 'not_attempted' },
+        terminal: { status: 'open' },
+        targetCleanup: { status: 'not_required' },
+        status: {
+          handoffId,
+          jobId,
+          status: 'pending',
+          phase: 'staging_target',
+          recoveryActions: [],
+        },
+      });
+      const before = await prepareJobStore.read(jobId);
+
+      const registered = new Map<string, (params: unknown) => Promise<any>>();
+      const { registerMachineSessionHandoffRpcHandlers: registerHandlers } = await import('./rpcHandlers.sessionHandoff');
+      registerHandlers({
+        rpcHandlerManager: {
+          registerHandler: (method: string, handler: (params: unknown) => Promise<any>) => {
+            registered.set(method, handler);
+          },
+        } as any,
+      });
+
+      const prepare = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET);
+      expect(prepare).toBeDefined();
+      await expect(prepare!({
+        handoffId,
+        sourceMachineId: 'machine_source',
+        targetMachineId: 'machine_target',
+        negotiatedTransportStrategy: 'server_routed_stream',
+        sourceSessionStorageMode: 'persisted',
+        targetPath: '/repo',
+      })).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'upgrade_required',
+      });
+      await expect(prepareJobStore.read(jobId)).resolves.toEqual(before);
+    } finally {
+      await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
+      vi.doUnmock('@/configuration');
+      vi.resetModules();
     }
   });
 
@@ -620,6 +848,357 @@ function createLoopbackMachineTransferChannels() {
     }
   });
 
+  it('classifies abort of a legacy ready target job as cleanup unavailable without stopping the target', async () => {
+    vi.resetModules();
+
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-abort-legacy-cleanup-'));
+    try {
+      vi.doMock('@/configuration', () => ({
+        configuration: {
+          activeServerDir,
+          activeServerId: 'test_session_handoff_abort_legacy_cleanup',
+        },
+      }));
+
+      const handoffId = 'handoff_abort_legacy_cleanup';
+      const prepareJobId = 'prepare_abort_legacy_cleanup';
+      const prepareJobStore = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      await prepareJobStore.write({
+        jobId: prepareJobId,
+        handoffId,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        status: {
+          handoffId,
+          status: 'ready_for_cutover',
+          phase: 'cutover',
+          jobId: prepareJobId,
+          recoveryActions: [],
+        },
+      });
+
+      // The current v1 job cannot persist sessionId or resume ownership. Its missing ownership must
+      // remain explicitly legacy-ambiguous rather than being guessed as v2 resume_not_attempted,
+      // and abort must never invoke this destructive operation.
+      const stopLegacyTargetSession = vi.fn(async () => 'stopped' as const);
+      const { createUnregisteredSessionHandoffAbortV2FoundationHandler } = await import('./rpcHandlers.sessionHandoff');
+      const abort = createUnregisteredSessionHandoffAbortV2FoundationHandler({
+        activeServerDir,
+        stopSessionForHandoff: stopLegacyTargetSession,
+      });
+      const result = SessionHandoffAbortResponseV2Schema.parse(await abort({ handoffId, reason: 'user_abort' }));
+      const repeatedResult = SessionHandoffAbortResponseV2Schema.parse(await abort({ handoffId, reason: 'user_abort_retry' }));
+
+      expect(stopLegacyTargetSession).not.toHaveBeenCalled();
+      expect(result.status.recoveryActions).not.toContain('restart_on_source');
+      expect(result.status.recoveryActions).not.toContain('retry_target_cleanup');
+      expect(result).toMatchObject({
+        targetCleanup: {
+          status: 'legacy_cleanup_unavailable',
+        },
+        status: {
+          status: 'aborted',
+          recoveryActions: ['keep_stopped'],
+        },
+      });
+      expect(repeatedResult).toMatchObject({
+        targetCleanup: { status: 'legacy_cleanup_unavailable' },
+        status: { status: 'aborted', recoveryActions: ['keep_stopped'] },
+      });
+
+      const persisted = await prepareJobStore.read(prepareJobId);
+      expect(persisted).toMatchObject({
+        targetCleanup: {
+          status: 'legacy_cleanup_unavailable',
+        },
+      });
+    } finally {
+      vi.doUnmock('@/configuration');
+      vi.resetModules();
+      await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('aborts a v2 not-attempted target job without stopping an unowned session', async () => {
+    vi.resetModules();
+
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-abort-v2-not-attempted-'));
+    try {
+      vi.doMock('@/configuration', () => ({
+        configuration: {
+          activeServerDir,
+          activeServerId: 'test_session_handoff_abort_v2_not_attempted',
+        },
+      }));
+
+      const handoffId = 'handoff_abort_v2_not_attempted';
+      const prepareJobId = 'prepare_abort_v2_not_attempted';
+      const prepareJobStore = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      await prepareJobStore.writePreparedV2({
+        jobId: prepareJobId,
+        handoffId,
+        sessionId: 'session_already_live_but_unowned',
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        transitionRevision: 0,
+        resume: { status: 'not_attempted' },
+        terminal: { status: 'open' },
+        targetCleanup: { status: 'not_required' },
+        status: {
+          handoffId,
+          status: 'ready_for_cutover',
+          phase: 'cutover',
+          jobId: prepareJobId,
+          recoveryActions: [],
+        },
+      });
+
+      const stopUnownedTargetSession = vi.fn(async () => 'stopped' as const);
+      const { createUnregisteredSessionHandoffAbortV2FoundationHandler } = await import('./rpcHandlers.sessionHandoff');
+      const abort = createUnregisteredSessionHandoffAbortV2FoundationHandler({
+        activeServerDir,
+        stopSessionForHandoff: stopUnownedTargetSession,
+      });
+      const result = SessionHandoffAbortResponseV2Schema.parse(await abort({ handoffId, reason: 'user_abort' }));
+      const persistedAfterFirstAbort = await prepareJobStore.read(prepareJobId);
+      const repeatedResult = SessionHandoffAbortResponseV2Schema.parse(await abort({ handoffId, reason: 'user_abort_retry' }));
+      const persistedAfterRepeatedAbort = await prepareJobStore.read(prepareJobId);
+
+      expect(stopUnownedTargetSession).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        targetCleanup: { status: 'not_owned', reason: 'resume_not_attempted' },
+        status: { status: 'aborted', recoveryActions: ['keep_stopped'] },
+      });
+      expect(repeatedResult).toEqual(result);
+      expect(persistedAfterRepeatedAbort).toEqual(persistedAfterFirstAbort);
+      expect(persistedAfterRepeatedAbort).toMatchObject({
+        schemaVersion: 2,
+        sessionId: 'session_already_live_but_unowned',
+        transitionRevision: 1,
+        terminal: { status: 'aborted' },
+        targetCleanup: { status: 'not_owned', reason: 'resume_not_attempted' },
+      });
+    } finally {
+      vi.doUnmock('@/configuration');
+      vi.resetModules();
+      await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('claims abort, stops an owned attempted target, and proves absence before allowing source restart', async () => {
+    vi.resetModules();
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-abort-v2-owned-'));
+    try {
+      const handoffId = 'handoff_abort_v2_owned';
+      const jobId = 'prepare_abort_v2_owned';
+      const store = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      await store.writePreparedV2({
+        jobId,
+        handoffId,
+        sessionId: 'session_owned',
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        transitionRevision: 0,
+        resume: { status: 'not_attempted' },
+        terminal: { status: 'open' },
+        targetCleanup: { status: 'not_required' },
+        status: { handoffId, status: 'ready_for_cutover', phase: 'cutover', jobId, recoveryActions: [] },
+      });
+      await store.transitionV2(jobId, (current) => ({
+        ...current,
+        updatedAtMs: 2,
+        transitionRevision: 1,
+        resume: { status: 'attempted', attemptId: 'attempt_owned', acceptedAtMs: 2 },
+      }));
+      const stop = vi.fn(async () => 'stopped' as const);
+      const { createUnregisteredSessionHandoffAbortV2FoundationHandler } = await import('./rpcHandlers.sessionHandoff');
+      const abort = createUnregisteredSessionHandoffAbortV2FoundationHandler({ activeServerDir, stopSessionForHandoff: stop });
+
+      const result = SessionHandoffAbortResponseV2Schema.parse(await abort({ handoffId, reason: 'confirmation_timeout' }));
+      expect(stop).toHaveBeenCalledExactlyOnceWith('session_owned');
+      expect(result).toMatchObject({
+        targetCleanup: { status: 'proved_absent', proof: 'stopped' },
+        status: { status: 'aborted', recoveryActions: ['restart_on_source', 'keep_stopped'] },
+      });
+      await expect(store.read(jobId)).resolves.toMatchObject({
+        transitionRevision: 3,
+        terminal: { status: 'aborted' },
+        targetCleanup: { status: 'proved_absent', proof: 'stopped' },
+      });
+    } finally {
+      await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('durably claims exact target ownership before the canonical runner launch and survives a lost spawn result', async () => {
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-resume-v2-'));
+    try {
+      const handoffId = 'handoff_resume_v2';
+      const jobId = 'prepare_resume_v2';
+      const sessionId = 'session_resume_v2';
+      const attemptId = 'attempt_resume_v2';
+      const store = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      const status = { handoffId, jobId, status: 'ready_for_cutover' as const, phase: 'cutover' as const, recoveryActions: [] };
+      await store.writePreparedV2({
+        jobId, handoffId, sessionId, createdAtMs: 1, updatedAtMs: 1, transitionRevision: 0,
+        resume: { status: 'not_attempted' }, terminal: { status: 'open' }, targetCleanup: { status: 'not_required' }, status,
+        prepareTargetResult: {
+          handoffId, status, remoteSessionId: 'remote_resume_v2',
+          directSource: { kind: 'claudeConfig', configDir: null, projectId: null },
+          resume: { directory: '/repo', agent: 'claude', resume: 'remote_resume_v2', transcriptStorage: 'direct', approvedNewDirectoryCreation: true },
+        },
+      });
+      const spawn = vi.fn(async (_options, hooks) => {
+        await expect(store.read(jobId)).resolves.toMatchObject({ resume: { status: 'not_attempted' } });
+        await hooks.onBeforeRunnerLaunchAccepted();
+        await expect(store.read(jobId)).resolves.toMatchObject({
+          transitionRevision: 1,
+          resume: { status: 'attempted', attemptId },
+        });
+        return { type: 'error' as const, errorCode: 'UNEXPECTED' as const, errorMessage: 'response_lost_after_launch' };
+      });
+      const { createUnregisteredSessionHandoffTargetResumeV2FoundationHandler } = await import('./rpcHandlers.sessionHandoff');
+      const resume = createUnregisteredSessionHandoffTargetResumeV2FoundationHandler({ activeServerDir, spawnSessionForHandoff: spawn });
+
+      await expect(resume({ handoffId, sessionId, attemptId })).resolves.toMatchObject({ type: 'error' });
+      await expect(store.read(jobId)).resolves.toMatchObject({ resume: { status: 'attempted', attemptId } });
+
+      const stop = vi.fn(async () => 'already_inactive' as const);
+      const { createUnregisteredSessionHandoffAbortV2FoundationHandler } = await import('./rpcHandlers.sessionHandoff');
+      const abort = createUnregisteredSessionHandoffAbortV2FoundationHandler({ activeServerDir, stopSessionForHandoff: stop });
+      await expect(abort({ handoffId, reason: 'recover_after_lost_spawn_result' })).resolves.toMatchObject({
+        targetCleanup: { status: 'proved_absent', proof: 'already_inactive' },
+        status: { recoveryActions: ['restart_on_source', 'keep_stopped'] },
+      });
+    } finally {
+      await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('classifies a preexisting target as permanently unowned without invoking the acceptance hook', async () => {
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-resume-v2-unowned-'));
+    try {
+      const handoffId = 'handoff_resume_v2_unowned';
+      const jobId = 'prepare_resume_v2_unowned';
+      const sessionId = 'session_resume_v2_unowned';
+      const store = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      const status = { handoffId, jobId, status: 'ready_for_cutover' as const, phase: 'cutover' as const, recoveryActions: [] };
+      await store.writePreparedV2({
+        jobId, handoffId, sessionId, createdAtMs: 1, updatedAtMs: 1, transitionRevision: 0,
+        resume: { status: 'not_attempted' }, terminal: { status: 'open' }, targetCleanup: { status: 'not_required' }, status,
+        prepareTargetResult: {
+          handoffId, status, remoteSessionId: 'remote_unowned',
+          directSource: { kind: 'claudeConfig', configDir: null, projectId: null },
+          resume: { directory: '/repo', agent: 'claude', resume: 'remote_unowned', transcriptStorage: 'direct', approvedNewDirectoryCreation: true },
+        },
+      });
+      const spawn = vi.fn(async (_options, _hooks) => ({
+        type: 'success' as const,
+        sessionId,
+        runnerAcceptance: 'preexisting_or_adopted' as const,
+      }));
+      const { createUnregisteredSessionHandoffTargetResumeV2FoundationHandler } = await import('./rpcHandlers.sessionHandoff');
+      const resume = createUnregisteredSessionHandoffTargetResumeV2FoundationHandler({ activeServerDir, spawnSessionForHandoff: spawn });
+      await expect(resume({ handoffId, sessionId, attemptId: 'attempt_unowned' })).resolves.toMatchObject({
+        disposition: 'preexisting_or_adopted',
+      });
+      await expect(store.read(jobId)).resolves.toMatchObject({
+        transitionRevision: 1,
+        resume: { status: 'preexisting_unowned' },
+      });
+      const stop = vi.fn(async () => 'stopped' as const);
+      const { createUnregisteredSessionHandoffAbortV2FoundationHandler } = await import('./rpcHandlers.sessionHandoff');
+      await createUnregisteredSessionHandoffAbortV2FoundationHandler({ activeServerDir, stopSessionForHandoff: stop })({ handoffId, reason: 'unowned' });
+      expect(stop).not.toHaveBeenCalled();
+    } finally {
+      await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('retries target artifact cleanup after a durable v2 commit survives a daemon restart', async () => {
+    vi.resetModules();
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-commit-v2-retry-'));
+    try {
+      vi.doMock('@/configuration', () => ({
+        configuration: {
+          activeServerDir,
+          activeServerId: 'test_session_handoff_commit_v2_retry',
+        },
+      }));
+      const handoffId = 'handoff_commit_v2_retry';
+      const jobId = 'prepare_commit_v2_retry';
+      const sessionId = 'session_commit_v2_retry';
+      const attemptId = 'attempt_commit_v2_retry';
+      const store = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      await store.writePreparedV2({
+        jobId,
+        handoffId,
+        sessionId,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        transitionRevision: 0,
+        resume: { status: 'not_attempted' },
+        terminal: { status: 'open' },
+        targetCleanup: { status: 'not_required' },
+        status: {
+          handoffId,
+          jobId,
+          status: 'ready_for_cutover',
+          phase: 'cutover',
+          recoveryActions: [],
+        },
+      });
+      await store.transitionV2(jobId, (current) => ({
+        ...current,
+        updatedAtMs: 2,
+        transitionRevision: 1,
+        resume: { status: 'attempted', attemptId, acceptedAtMs: 2 },
+      }));
+      await store.transitionV2(jobId, (current) => ({
+        ...current,
+        updatedAtMs: 3,
+        transitionRevision: 2,
+        resume: { status: 'confirmed', attemptId, acceptedAtMs: 2, confirmedAtMs: 3 },
+      }));
+      await store.transitionV2(jobId, (current) => ({
+        ...current,
+        updatedAtMs: 4,
+        completedAtMs: 4,
+        transitionRevision: 3,
+        terminal: { status: 'completed', operationId: 'commit_original', completedRevision: 3 },
+        status: { ...current.status, status: 'completed', phase: 'finalizing', recoveryActions: [] },
+      }));
+
+      const registered = new Map<string, (params: unknown) => Promise<any>>();
+      const clearPublishedTransfer = vi.fn();
+      const { registerMachineSessionHandoffRpcHandlers: registerHandlers } = await import('./rpcHandlers.sessionHandoff');
+      registerHandlers({
+        rpcHandlerManager: {
+          registerHandler: (method: string, handler: (params: unknown) => Promise<any>) => {
+            registered.set(method, handler);
+          },
+        } as any,
+        directPeerTransfer: {
+          publishTransfer: vi.fn(() => []),
+          clearPublishedTransfer,
+        },
+      });
+
+      const commitV2 = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_COMMIT_V2);
+      expect(commitV2).toBeDefined();
+      await expect(commitV2!({ handoffId, mode: 'target', sessionId, attemptId })).resolves.toMatchObject({
+        handoffId,
+        status: { status: 'completed' },
+      });
+      expect(clearPublishedTransfer).toHaveBeenCalledWith(`session-handoff:${handoffId}:provider-bundle-file`);
+      expect(clearPublishedTransfer).toHaveBeenCalledWith(`session-handoff:${handoffId}:workspace-manifest`);
+    } finally {
+      vi.doUnmock('@/configuration');
+      vi.resetModules();
+      await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
   it('persists terminal abort/commit status when only a persisted source-export exists (no prepare job)', async () => {
     vi.resetModules();
 
@@ -661,10 +1240,25 @@ function createLoopbackMachineTransferChannels() {
         exportedAtMs: 1,
       });
 
-      await abort!({ handoffId: abortHandoffId, reason: 'user_abort' });
+      const { createUnregisteredSessionHandoffAbortV2FoundationHandler } = await import('./rpcHandlers.sessionHandoff');
+      const abortV2 = createUnregisteredSessionHandoffAbortV2FoundationHandler({ activeServerDir });
+      const abortResult = SessionHandoffAbortResponseV2Schema.parse(
+        await abortV2({ handoffId: abortHandoffId, reason: 'user_abort' }),
+      );
+      expect(abortResult).toMatchObject({
+        targetCleanup: { status: 'not_applicable', reason: 'source_only' },
+        status: { status: 'aborted', recoveryActions: ['keep_stopped'] },
+      });
       await expect(statusGet!({ handoffId: abortHandoffId })).resolves.toMatchObject({
         handoffId: abortHandoffId,
         status: { status: 'aborted' },
+      });
+
+      const sourceOnlyPrepareJobStore = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      await expect(sourceOnlyPrepareJobStore.read(`source_${abortHandoffId}`)).resolves.toMatchObject({
+        schemaVersion: 2,
+        terminal: { status: 'aborted' },
+        targetCleanup: { status: 'not_applicable', reason: 'source_only' },
       });
 
       const commitHandoffId = 'handoff_source_export_commit_only';
@@ -682,6 +1276,37 @@ function createLoopbackMachineTransferChannels() {
         handoffId: commitHandoffId,
         status: { status: 'completed' },
       });
+
+      const v2HandoffId = 'handoff_registered_v1_must_not_downgrade_v2';
+      const v2JobId = 'prepare_registered_v1_must_not_downgrade_v2';
+      await sourceOnlyPrepareJobStore.writePreparedV2({
+        jobId: v2JobId,
+        handoffId: v2HandoffId,
+        sessionId: 'session_registered_v1_must_not_downgrade_v2',
+        createdAtMs: 5,
+        updatedAtMs: 5,
+        transitionRevision: 0,
+        resume: { status: 'not_attempted' },
+        terminal: { status: 'open' },
+        targetCleanup: { status: 'not_required' },
+        status: {
+          handoffId: v2HandoffId,
+          jobId: v2JobId,
+          status: 'ready_for_cutover',
+          phase: 'cutover',
+          recoveryActions: [],
+        },
+      });
+      const beforeRegisteredV1Mutations = await sourceOnlyPrepareJobStore.read(v2JobId);
+      await expect(commit!({ handoffId: v2HandoffId })).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'upgrade_required',
+      });
+      await expect(abort!({ handoffId: v2HandoffId, reason: 'user_abort' })).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'upgrade_required',
+      });
+      await expect(sourceOnlyPrepareJobStore.read(v2JobId)).resolves.toEqual(beforeRegisteredV1Mutations);
     } finally {
       await rm(activeServerDir, { recursive: true, force: true }).catch(() => undefined);
       vi.doUnmock('@/configuration');
@@ -1621,6 +2246,30 @@ function createLoopbackMachineTransferChannels() {
           ],
         },
       });
+      const workspaceBlob = Buffer.from('hello\n', 'utf8');
+      const requestPayloadFile = vi.fn<DirectPeerRequestPayloadFile>(async ({
+        destinationPath,
+        endpointCandidates,
+        openBody,
+      }) => {
+        expect(endpointCandidates).toEqual([
+          expect.objectContaining({ authorizationToken: 'test-token' }),
+        ]);
+        expect(openBody).toMatchObject({
+          t: 'workspace_replication_blob_pack_v1',
+          digests: [workspaceManifest.entries[0].digest],
+        });
+        await writeFile(destinationPath, Buffer.concat([
+          createWorkspaceReplicationBlobPackHeaderBuffer(),
+          createWorkspaceReplicationBlobPackBlobRecordHeaderBuffer({
+            digest: workspaceManifest.entries[0].digest,
+            sizeBytes: workspaceBlob.byteLength,
+          }),
+          workspaceBlob,
+          createWorkspaceReplicationBlobPackEndMarkerBuffer(),
+        ]));
+        return { destinationPath };
+      });
 
       registerTargetHandlers({
         rpcHandlerManager,
@@ -1640,7 +2289,7 @@ function createLoopbackMachineTransferChannels() {
         machineTransferChannel: channels.target,
         directPeerTransfer: {
           publishTransfer: vi.fn(() => []),
-          requestPayloadFile: vi.fn(),
+          requestPayloadFile,
           clearPublishedTransfer: vi.fn(),
         },
       });
@@ -1685,6 +2334,7 @@ function createLoopbackMachineTransferChannels() {
       }, { timeout: 15_000 });
 
       expect(latest.status.transportStrategy).toBe('direct_peer');
+      expect(requestPayloadFile).toHaveBeenCalledTimes(1);
       if (latest.status.jobId) {
         const jobRecord = await prepareJobStore.read(latest.status.jobId);
         expect(jobRecord?.lastErrorMessage ?? '').not.toMatch(/server-routed.*4096/i);
@@ -1747,6 +2397,117 @@ function createLoopbackMachineTransferChannels() {
     expect(stopSessionForHandoff).toHaveBeenCalledWith('sess_1');
     expect(exportSessionBundle).not.toHaveBeenCalled();
   });
+
+  it('durably preserves exact late source-start failure codes on both sides of the fast-path result shape', async () => {
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-late-start-failure-'));
+    vi.resetModules();
+    vi.doMock('@/configuration', () => ({
+      configuration: {
+        activeServerDir,
+        activeServerId: 'test_session_handoff_late_start_failure',
+        filesTransferSessionTtlMs: 2_000,
+        workspaceReplicationBlobPackTargetBytes: 4 * 1024 * 1024,
+        workspaceReplicationBlobPackMaxBlobs: 64,
+        workspaceReplicationBlobPackMaxSingleBlobBytes: 16 * 1024 * 1024,
+      },
+    }));
+
+    try {
+      const { registerMachineSessionHandoffRpcHandlers: registerHandlers } = await import('./rpcHandlers.sessionHandoff');
+      const registered = new Map<string, (params: unknown) => Promise<any>>();
+      const stopFailure = createDeferred<'already_inactive' | 'failed'>();
+      const exportFailure = createDeferred<'already_inactive' | 'failed'>();
+      const stopSessionForHandoff = vi.fn(async (sessionId: string) => (
+        sessionId === 'sess_late_stop_failure'
+          ? await stopFailure.promise
+          : await exportFailure.promise
+      ));
+      const exportSessionBundle = vi.fn(async (metadata: Record<string, unknown>) => {
+        if (metadata.claudeSessionId === 'claude_late_export_failure') {
+          throw new Error('late export exploded');
+        }
+        return {
+          providerBundle: {
+            providerId: 'claude' as const,
+            remoteSessionId: 'claude_late_stop_failure',
+            transcriptBase64: 'e30K',
+          },
+          targetPath: '/repo',
+        };
+      });
+      registerHandlers({
+        rpcHandlerManager: {
+          registerHandler: (method: string, handler: (params: unknown) => Promise<any>) => {
+            registered.set(method, handler);
+          },
+        } as any,
+        loadSessionMetadata: async (sessionId: string) => ({
+          machineId: 'machine_source',
+          path: '/repo',
+          flavor: 'claude',
+          claudeSessionId: sessionId === 'sess_late_export_failure'
+            ? 'claude_late_export_failure'
+            : 'claude_late_stop_failure',
+        }),
+        exportSessionBundle,
+        stopSessionForHandoff,
+        machineTransferChannel: {
+          onEnvelope: () => () => {},
+          sendEnvelope: () => {},
+        },
+      });
+      const start = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_START)!;
+      const statusGet = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_STATUS_GET)!;
+      const resultGet = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET_RESULT_GET)!;
+      const request = (sessionId: string) => ({
+        sessionId,
+        sourceMachineId: 'machine_source',
+        targetMachineId: 'machine_target',
+        sessionStorageMode: 'persisted',
+        preferredTransportStrategies: ['server_routed_stream'],
+        negotiatedTransportStrategy: 'server_routed_stream',
+        workspaceTransfer: {
+          enabled: true,
+          strategy: 'transfer_snapshot',
+          conflictPolicy: 'create_sibling_copy',
+          includeIgnoredMode: 'exclude',
+          ignoredIncludeGlobs: [],
+        },
+      });
+
+      const lateStopStarted = await start(request('sess_late_stop_failure'));
+      expect(lateStopStarted.status.status).toBe('pending');
+      stopFailure.resolve('failed');
+      await vi.waitFor(async () => {
+        await expect(resultGet({ handoffId: lateStopStarted.handoffId })).resolves.toMatchObject({
+          ok: false,
+          errorCode: 'source_stop_failed',
+          error: 'Failed to stop the active source session before handoff cutover',
+        });
+      });
+      await expect(statusGet({ handoffId: lateStopStarted.handoffId })).resolves.toMatchObject({
+        status: { status: 'awaiting_recovery' },
+      });
+
+      const lateExportStarted = await start(request('sess_late_export_failure'));
+      expect(lateExportStarted.status.status).toBe('pending');
+      exportFailure.resolve('already_inactive');
+      await vi.waitFor(async () => {
+        await expect(resultGet({ handoffId: lateExportStarted.handoffId })).resolves.toMatchObject({
+          ok: false,
+          errorCode: 'source_export_failed',
+          error: 'late export exploded',
+        });
+      });
+      await expect(statusGet({ handoffId: lateExportStarted.handoffId })).resolves.toMatchObject({
+        status: { status: 'awaiting_recovery' },
+      });
+    } finally {
+      vi.doUnmock('@/configuration');
+      vi.resetModules();
+      await rm(activeServerDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  }, 30_000);
 
   it('returns recovery-capable start failure details when export fails after the active source session has already been stopped', async () => {
     const registered = new Map<string, (params: unknown) => Promise<any>>();
@@ -2820,6 +3581,133 @@ function createLoopbackMachineTransferChannels() {
           phase: 'staging_target',
         },
       });
+    } finally {
+      vi.doUnmock('@/configuration');
+      vi.resetModules();
+      await rm(activeServerDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it('keeps polling missing-runner proof through the v1 recovery transition', async () => {
+    const activeServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-status-recovery-race-'));
+    const handoffId = 'handoff_status_recovery_race';
+    const prepareJobId = 'prepare_status_recovery_race';
+    const realRunnerOwnerId = 'real-runner:status-poll-race';
+
+    try {
+      vi.resetModules();
+      vi.doMock('@/configuration', () => ({
+        configuration: {
+          activeServerDir,
+          activeServerId: 'test_status_recovery_race',
+          workspaceReplicationBlobPackTargetBytes: 4 * 1024 * 1024,
+          workspaceReplicationBlobPackMaxBlobs: 64,
+          workspaceReplicationBlobPackMaxSingleBlobBytes: 16 * 1024 * 1024,
+        },
+      }));
+      const { registerMachineSessionHandoffRpcHandlers: registerHandlers } = await import('./rpcHandlers.sessionHandoff');
+      const prepareJobStore = createSessionHandoffPrepareTargetJobStore({ activeServerDir });
+      await prepareJobStore.write({
+        jobId: prepareJobId,
+        handoffId,
+        createdAtMs: 1,
+        updatedAtMs: 2,
+        status: {
+          handoffId,
+          jobId: prepareJobId,
+          status: 'pending',
+          phase: 'staging_target',
+          recoveryActions: [],
+        },
+      });
+
+      const registered = new Map<string, (params: unknown) => Promise<any>>();
+      registerHandlers({
+        rpcHandlerManager: {
+          registerHandler: (method: string, handler: (params: unknown) => Promise<any>) => {
+            registered.set(method, handler);
+          },
+        } as any,
+      });
+      const statusGet = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_STATUS_GET);
+      expect(statusGet).toBeDefined();
+
+      const releaseMutationLock = createDeferred<void>();
+      const mutationLockEntered = createDeferred<void>();
+      const mutationLock = withJsonOwnerFileLock({
+        lockPath: join(activeServerDir, 'session-handoff', 'prepare-target-jobs', `${prepareJobId}.json.lock`),
+        timeoutMs: 10_000,
+        staleAfterMs: 30_000,
+        errorCode: 'test_prepare_target_job_lock_timeout',
+      }, async () => {
+        mutationLockEntered.resolve();
+        await releaseMutationLock.promise;
+      });
+      await mutationLockEntered.promise;
+
+      const prepareJobsDirectory = join(activeServerDir, 'session-handoff', 'prepare-target-jobs');
+      const recoveryRecordLockPreparationPrefix = `${prepareJobId}.json.lock.owner-`;
+      const recordLockPreparationObserved = (async () => {
+        try {
+          for await (const event of watch(prepareJobsDirectory, { signal: AbortSignal.timeout(5_000) })) {
+            if (
+              typeof event.filename === 'string'
+              && event.filename.startsWith(recoveryRecordLockPreparationPrefix)
+            ) {
+              return;
+            }
+          }
+        } catch (error) {
+          throw new Error('Timed out waiting for recovery to contend on the prepare-target job record lock', {
+            cause: error,
+          });
+        }
+        throw new Error('Prepare-target job record lock watcher ended before recovery contention');
+      })();
+      const statusPromise = statusGet!({ handoffId });
+      const leaseOperationLockPath = join(
+        activeServerDir,
+        'session-handoff',
+        'prepare-target-jobs-staging',
+        prepareJobId,
+        'lease-operation.lock',
+      );
+      // The status path first acquires this same operation lock to create its proof lease.
+      // Waiting for its job-record lock attempt identifies the later recovery critical
+      // section, where proof validation has completed and the operation lock stays held.
+      await recordLockPreparationObserved;
+      const recoveryOwner = JSON.parse(await readFile(leaseOperationLockPath, 'utf8')) as Record<string, unknown>;
+      expect(recoveryOwner).toMatchObject({ pid: process.pid, ownerToken: expect.any(String) });
+      await rm(
+        join(activeServerDir, 'session-handoff', 'prepare-target-jobs-staging', prepareJobId, 'lease'),
+        { recursive: true, force: true },
+      );
+      let realRunnerSettled = false;
+      const realRunnerLeasePromise = tryAcquireSessionHandoffPrepareTargetJobLease({
+        activeServerDir,
+        jobId: prepareJobId,
+        ownerId: realRunnerOwnerId,
+        nowMs: Date.now(),
+        ttlMs: 60_000,
+      }).then((lease) => {
+        realRunnerSettled = true;
+        return lease;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(realRunnerSettled).toBe(false);
+      releaseMutationLock.resolve();
+      await mutationLock;
+      const result = await statusPromise;
+      const realRunnerLease = await realRunnerLeasePromise;
+      await releaseSessionHandoffPrepareTargetJobLease({
+        activeServerDir,
+        jobId: prepareJobId,
+        ownerId: realRunnerOwnerId,
+        leaseId: realRunnerLease.lease!.leaseId!,
+      });
+
+      expect(realRunnerLease.acquired).toBe(true);
+      expect(result.status?.status).toBe('awaiting_recovery');
     } finally {
       vi.doUnmock('@/configuration');
       vi.resetModules();
@@ -4848,10 +5736,11 @@ function createLoopbackMachineTransferChannels() {
       vi.resetModules();
       isolatedHome.restore();
       if (process.env.HAPPIER_DEBUG_KEEP_HANDOFF_TMP !== '1') {
-        await rm(sourcePath, { recursive: true, force: true });
-        await rm(sourceActiveServerDir, { recursive: true, force: true });
-        await rm(targetActiveServerDir, { recursive: true, force: true });
-        await rm(isolatedHome.homeDir, { recursive: true, force: true });
+        const cleanupOptions = { recursive: true, force: true, maxRetries: 5, retryDelay: 50 } as const;
+        await rm(sourcePath, cleanupOptions);
+        await rm(sourceActiveServerDir, cleanupOptions);
+        await rm(targetActiveServerDir, cleanupOptions);
+        await rm(isolatedHome.homeDir, cleanupOptions);
       }
     }
   });
@@ -6568,6 +7457,55 @@ function createLoopbackMachineTransferChannels() {
 
 	    expect(requestPayloadFile).toHaveBeenCalledTimes(1);
 	  });
+
+  it('rejects deterministically unavailable direct-peer prepare before persisting an accepted job', async () => {
+    const registered = new Map<string, (params: unknown) => Promise<any>>();
+    registerMachineSessionHandoffRpcHandlers({
+      rpcHandlerManager: {
+        registerHandler: (method: string, handler: (params: unknown) => Promise<any>) => {
+          registered.set(method, handler);
+        },
+      } as any,
+      directPeerTransfer: {
+        publishTransfer: vi.fn(() => []),
+        clearPublishedTransfer: vi.fn(),
+      },
+    });
+    const handoffId = `handoff_prevalidate_unavailable_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const prepare = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET);
+    const statusGet = registered.get(RPC_METHODS.DAEMON_SESSION_HANDOFF_STATUS_GET);
+
+    await expect(prepare!({
+      handoffId,
+      sourceMachineId: 'machine_source',
+      targetMachineId: 'machine_target',
+      negotiatedTransportStrategy: 'direct_peer',
+      allowServerRoutedFallback: false,
+      sourceSessionStorageMode: 'persisted',
+      targetPath: '/repo',
+      handoffMetadataV2: {
+        providerBundleTransferPublication: {
+          transferId: buildSessionHandoffProviderBundleTransferId(handoffId),
+          sizeBytes: 0,
+          manifestHash: `sha256:${'0'.repeat(64)}`,
+          endpointCandidates: [
+            buildDirectPeerEndpointCandidate({ transferId: handoffId }),
+          ],
+        },
+      },
+      endpointCandidates: [
+        buildDirectPeerEndpointCandidate({ transferId: handoffId }),
+      ],
+    })).resolves.toEqual({
+      ok: false,
+      errorCode: 'direct_peer_transfer_unavailable',
+      error: 'Direct peer transfer is unavailable and server-routed fallback is disabled',
+    });
+    await expect(statusGet!({ handoffId })).resolves.toEqual({
+      ok: false,
+      errorCode: 'not_found',
+    });
+  });
 
 		  it('fails closed when the persisted source-export record is corrupted (no silent transfer_not_found)', async () => {
 	    const sourceActiveServerDir = await mkdtemp(join(os.tmpdir(), 'happier-session-handoff-corrupt-source-export-'));

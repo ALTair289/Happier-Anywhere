@@ -277,6 +277,10 @@ async function executeUsageLimitRecoveryControl(params: Readonly<{
       ...(Object.prototype.hasOwnProperty.call(parsed.data, 'issueFingerprint')
         ? { issueFingerprint: parsed.data.issueFingerprint }
         : {}),
+      ...(typeof parsed.data.armedAtMs === 'number' ? { armedAtMs: parsed.data.armedAtMs } : {}),
+      ...(typeof parsed.data.runtimeAuthRecoveryAttemptId === 'string'
+        ? { runtimeAuthRecoveryAttemptId: parsed.data.runtimeAuthRecoveryAttemptId }
+        : {}),
       deps: params.deps,
     });
   }
@@ -314,6 +318,8 @@ async function executeResolvedUsageLimitRecoveryControl(params: Readonly<{
   operation: UsageLimitRecoveryOperation;
   sessionId: string;
   issueFingerprint?: string | null;
+  armedAtMs?: number;
+  runtimeAuthRecoveryAttemptId?: string;
   remember?: boolean;
   provider?: string;
   resumePromptMode?: 'standard' | 'off' | 'custom';
@@ -381,6 +387,10 @@ async function executeResolvedUsageLimitRecoveryControl(params: Readonly<{
       ? await actionDeps.sessionUsageLimitWaitResumeCancel({
         sessionId: transport.sessionId,
         ...(params.issueFingerprint !== undefined ? { issueFingerprint: params.issueFingerprint } : {}),
+        ...(typeof params.armedAtMs === 'number' ? { armedAtMs: params.armedAtMs } : {}),
+        ...(typeof params.runtimeAuthRecoveryAttemptId === 'string'
+          ? { runtimeAuthRecoveryAttemptId: params.runtimeAuthRecoveryAttemptId }
+          : {}),
       })
       : { ok: false, errorCode: 'action_not_supported', error: 'action_not_supported' };
     return normalizeUsageLimitRecoveryMachineResult({ sessionId: transport.sessionId, result });
