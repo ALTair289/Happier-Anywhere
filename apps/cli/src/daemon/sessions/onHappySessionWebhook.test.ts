@@ -267,6 +267,7 @@ describe('createOnHappySessionWebhook', () => {
     const tracked: TrackedSession = { pid: 792, startedBy: 'daemon' };
     let releaseReady!: () => void;
     const ready = new Promise<void>((resolve) => { releaseReady = resolve; });
+    const onTrackedSessionReported = vi.fn();
     const onWebhook = createOnHappySessionWebhook({
       pidToTrackedSession: new Map<number, TrackedSession>([[792, tracked]]),
       pidToAwaiter: new Map<number, (session: TrackedSession) => void>(),
@@ -274,6 +275,7 @@ describe('createOnHappySessionWebhook', () => {
       findHappyProcessByPidFn: async () => null,
       writeSessionMarkerFn: async () => {},
       onTrackedSessionReady: async () => await ready,
+      onTrackedSessionReported,
     });
 
     let acknowledged = false;
@@ -281,6 +283,10 @@ describe('createOnHappySessionWebhook', () => {
       .then(() => { acknowledged = true; });
     await Promise.resolve();
     expect(acknowledged).toBe(false);
+    expect(onTrackedSessionReported).toHaveBeenCalledWith(expect.objectContaining({
+      happySessionId: 'session-daemon-792',
+      pid: 792,
+    }));
     releaseReady();
     await report;
     expect(acknowledged).toBe(true);
