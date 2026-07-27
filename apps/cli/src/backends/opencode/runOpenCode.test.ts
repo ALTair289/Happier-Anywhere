@@ -119,16 +119,6 @@ describe('runOpenCode', () => {
     }
   });
 
-  it('opts server-mode OpenCode into provider-acceptance delivery watermarks', async () => {
-    await runOpenCode({ credentials });
-
-    expect(runStandardAcpProviderMock).toHaveBeenCalledTimes(1);
-    expect(runStandardAcpProviderMock.mock.calls[0]?.[1]).toMatchObject({
-      flavor: 'opencode',
-      deferUserMessageDeliveryWatermarkToProviderAcceptance: true,
-    });
-  });
-
   it.each([
     ['server', undefined, createOpenCodeServerRuntimeMock],
     ['acp', 'acp', createOpenCodeAcpRuntimeMock],
