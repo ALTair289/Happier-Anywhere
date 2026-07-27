@@ -27,6 +27,8 @@ const DEFAULT_IGNORES = [
   '/workspace',
   '.expo',
   'target',
+  '!packages/protocol/src/browser/target',
+  '!packages/protocol/src/browser/target/**',
   'Pods',
   '.next',
   '.runner-snapshots',

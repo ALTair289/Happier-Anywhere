@@ -379,6 +379,67 @@ test('supervisor keeps healthy targets and retries another target after its init
   }
 });
 
+test('supervisor retries when the only target bootstrap races its initial non-blocking sync', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-dev-target-initial-sync-race-'));
+  const credentialPath = join(root, 'access.key');
+  const target = {
+    name: 'linux',
+    platform: 'posix',
+    ssh: 'linux-ssh',
+    repoDir: '/home/dev/happier',
+    cliHomeDir: '/home/dev/.happier/linux',
+  };
+  let bootstrapAttempts = 0;
+  let notifyWorkerStarted;
+  const workerStarted = new Promise((resolve) => {
+    notifyWorkerStarted = resolve;
+  });
+  await writeFile(credentialPath, '{"token":"secret"}\n', { mode: 0o600 });
+  try {
+    const controller = await startStackDevTargets(
+      {
+        stackName: 'repo-test',
+        stackBaseDir: join(root, 'stack'),
+        sourceDir: '/source/happier',
+        localServerPort: 3005,
+        activeServerId: 'stack_repo-test__id_default',
+        credentialPath,
+        targets: [target],
+        env: {},
+      },
+      {
+        runProcess: async ({ command, args }) => {
+          if (
+            command === 'ssh'
+            && args.some((arg) => String(arg).includes('corepack yarn install'))
+          ) {
+            bootstrapAttempts += 1;
+            if (bootstrapAttempts === 1) return { code: 1 };
+          }
+          return { code: 0 };
+        },
+        spawnProcess: ({ label, command, args, env }) => {
+          const worker = { label, command, args, env, exitCode: null };
+          if (label === 'remote:linux') notifyWorkerStarted();
+          return worker;
+        },
+        stopProcess: async (worker) => {
+          worker.exitCode = 0;
+        },
+        waitForRetry: async () => {},
+        logger: { error() {} },
+      },
+    );
+
+    await workerStarted;
+    assert.equal(bootstrapAttempts, 2);
+    assert.deepEqual(controller.workers.map((worker) => worker.label), ['remote:linux']);
+    await controller.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('remote worker exit restarts its configured target lifecycle without restarting the local Stack', async () => {
   const root = await mkdtemp(join(tmpdir(), 'hstack-dev-target-reconnect-'));
   const credentialPath = join(root, 'access.key');
@@ -607,6 +668,10 @@ test('dev target supervisor owns Mutagen publication, remote bootstrap, auth see
     assert.match(
       calls.find((call) => call.command === 'mutagen' && call.args.includes('start')).env.MUTAGEN_SSH_PATH,
       /mutagen\/openssh$/,
+    );
+    assert.deepEqual(
+      calls.find((call) => call.command === 'mutagen' && call.args.includes('flush')).args,
+      ['sync', 'flush', '--skip-wait', 'happier-linux'],
     );
 
     await controller.close();

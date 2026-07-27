@@ -277,7 +277,7 @@ export async function startStackDevTargets(
           await runProcess({
             label: `remote:${target.name}`,
             command: 'mutagen',
-            args: ['sync', 'flush', resolveMutagenSessionName(target.name)],
+            args: ['sync', 'flush', '--skip-wait', resolveMutagenSessionName(target.name)],
             env: mutagenEnv,
           }),
           `${target.name} Mutagen initial flush`,
@@ -370,7 +370,11 @@ export async function startStackDevTargets(
     };
 
     await Promise.all(targets.map(startTarget));
-    if (workersByTarget.size === 0 && targetFailuresByTarget.size > 0) {
+    if (
+      workersByTarget.size === 0
+      && targetFailuresByTarget.size > 0
+      && [...targetFailuresByTarget.values()].every(({ phase }) => phase === 'sync')
+    ) {
       throw [...targetFailuresByTarget.values()].at(-1).error;
     }
 
