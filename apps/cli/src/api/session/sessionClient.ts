@@ -172,6 +172,7 @@ import {
 import {
     discardPendingQueueV2Messages,
     enqueuePendingQueueV2MessageViaHttp,
+    listPendingQueueV2DeliveryStatusesFromServer,
     listPendingQueueV2LocalIdsFromServer,
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer,
     materializeNextPendingQueueV2Message,
@@ -1641,6 +1642,42 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private async reconcileCanonicalPendingDeliveriesBeforeMaterialization(): Promise<boolean> {
+        const blockingLocalIds = [...this.canonicalPendingDeliveryByLocalId.keys()]
+            .filter((localId) => (
+                this.providerInputTerminalOutcomeByLocalId.get(localId) === 'accepted'
+                || !this.serverBlockedCanonicalPendingDeliveryLocalIds.has(localId)
+            ));
+        if (blockingLocalIds.length === 0) return true;
+
+        try {
+            const statuses = await listPendingQueueV2DeliveryStatusesFromServer({
+                token: this.token,
+                sessionId: this.sessionId,
+            });
+            const statusByLocalId = new Map(statuses.map((entry) => [entry.localId, entry.status]));
+            for (const localId of blockingLocalIds) {
+                const status = statusByLocalId.get(localId);
+                if (status !== undefined && status !== 'discarded') continue;
+                if (!this.canonicalPendingDeliveryByLocalId.has(localId)) continue;
+                logger.debug('[pendingQueue] exact terminal server truth retired local provider custody', {
+                    sessionId: this.sessionId,
+                    localId,
+                    serverStatus: status ?? 'absent',
+                });
+                // Unlike successful settlement or an exact committed replay, authoritative
+                // absence/discard proves there is no remaining Pending row whose acceptance
+                // this session client should expose.
+                this.acceptedProviderInputLocalIds.delete(localId);
+                this.clearCanonicalPendingDeliveryLocalState(localId);
+            }
+        } catch (error) {
+            logger.debug('[pendingQueue] exact local provider custody reconciliation failed closed', {
+                sessionId: this.sessionId,
+                localIds: blockingLocalIds,
+                error: serializeAxiosErrorForLog(error),
+            });
+        }
+
         return !this.hasMaterializationBlockingCanonicalPendingDelivery();
     }
 

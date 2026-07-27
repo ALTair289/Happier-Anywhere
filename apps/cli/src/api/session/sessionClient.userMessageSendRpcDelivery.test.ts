@@ -1153,6 +1153,9 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     }));
     await waitForCurrentPendingInputContract(client);
 
+    listPendingQueueV2DeliveryStatusesFromServerMock.mockResolvedValueOnce([
+      { localId: 'earlier-local', status: 'delivering' },
+    ]);
     (client as any).canonicalPendingDeliveryByLocalId.set('earlier-local', {
       mode: 'provider',
       unresolved: true,

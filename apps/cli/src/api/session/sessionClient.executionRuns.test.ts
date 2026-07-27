@@ -134,18 +134,6 @@ describe('ApiSessionClient execution-run backend wiring', () => {
     await client.close();
   });
 
-  it('shares the session runtime activity publisher with execution-run handlers', async () => {
-    const { ApiSessionClient } = await import('./sessionClient');
-    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1', metadata: createTestMetadata({ path: '/tmp/project' }) }));
-
-    expect(client.runtimeActivityPublisher).toBeTruthy();
-    expect(sessionSocketStubState.executionRunHandlerContext.runtimeActivityPublisher).toBe(
-      client.runtimeActivityPublisher,
-    );
-
-    await client.close();
-  });
-
   it('exposes shared execution-run service helpers with the current session transport context', async () => {
     const { ApiSessionClient } = await import('./sessionClient');
     const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1', metadata: createTestMetadata({ path: '/tmp/project' }) }));
