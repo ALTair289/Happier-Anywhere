@@ -271,6 +271,11 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
     const latestNativeTextRef = React.useRef(value);
     const controlledValueRef = React.useRef(value);
     const inputRef = React.useRef<React.ElementRef<typeof TextInput> | null>(null);
+    // Controlled `value` keeps the Fabric shadow tree's text in sync so native autogrow
+    // measurement works (an uncontrolled `defaultValue` input never re-measures on
+    // typing — the composer stops growing). Stale-echo protection lives with the value
+    // OWNERS (prompt rehydrate dirty-guard, focused-only draft persistence, editor
+    // flush-and-skip), so the controlled round-trip only ever carries our own emissions.
     if (controlledValueRef.current !== value) {
         const previousValue = controlledValueRef.current;
         const wasSelectionAtPreviousEnd = selectionRef.current.start === previousValue.length
