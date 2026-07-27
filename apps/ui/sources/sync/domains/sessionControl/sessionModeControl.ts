@@ -1,18 +1,11 @@
 import type { AgentId } from '@/agents/catalog/catalog';
 import { getAgentCore } from '@/agents/catalog/catalog';
 import type { Metadata } from '@/sync/domains/state/storageTypes';
-import {
-    LEGACY_ACP_SESSION_MODES_STATE_KEY,
-    LEGACY_ACP_SESSION_MODE_OVERRIDE_KEY,
-    parsePermissionIntentAlias,
-    readMetadataAliasValue,
-    SESSION_MODES_STATE_KEY,
-    SESSION_MODE_OVERRIDE_KEY,
-} from '@happier-dev/agents';
+import { parsePermissionIntentAlias } from '@happier-dev/agents';
 import { resolveRequestedSessionModeId } from '@happier-dev/protocol';
 import { tLoose } from '@/text';
 
-import { parseSessionModesState, parseSessionModeOverrideState } from './schema';
+import { readSessionModeOverrideState, readSessionModesState } from './readSessionControlMetadata';
 
 export function supportsSessionModeOverrides(agentId: AgentId): boolean {
     const kind = getAgentCore(agentId).sessionModes.kind;
@@ -70,11 +63,11 @@ function computeStaticSessionModePickerControl(params: {
     const defaultOption = options.find((o) => o.id === 'default') ?? null;
     if (!defaultOption) return null;
 
-    const modeOverride = parseSessionModeOverrideState(
-        readMetadataAliasValue((params.metadata as any) ?? {}, SESSION_MODE_OVERRIDE_KEY, LEGACY_ACP_SESSION_MODE_OVERRIDE_KEY),
-    );
+    const modeOverride = readSessionModeOverrideState(params.metadata);
     const legacy = computeLegacyRequestedModeIdFromPermissionMode(params.metadata);
-    const requestedModeId = modeOverride?.modeId ?? legacy ?? null;
+    const requestedModeId = modeOverride
+        ? (modeOverride.state === 'set' ? modeOverride.value : null)
+        : legacy ?? null;
     const requestedMode = requestedModeId ? options.find((mode) => mode.id === requestedModeId) ?? null : null;
 
     const currentModeId = 'default';
@@ -104,9 +97,7 @@ function computeDynamicSessionModePickerControlInternal(params: {
     const kind = getAgentCore(params.agentId).sessionModes.kind;
     if (kind !== 'acpAgentModes' && kind !== 'acpPolicyPresets') return null;
 
-    const state = parseSessionModesState(
-        readMetadataAliasValue((params.metadata as any) ?? {}, SESSION_MODES_STATE_KEY, LEGACY_ACP_SESSION_MODES_STATE_KEY),
-    );
+    const state = readSessionModesState(params.metadata);
     if (!state) return null;
     if (state.provider !== params.agentId) return null;
     if (state.availableModes.length === 0) return null;
@@ -115,11 +106,11 @@ function computeDynamicSessionModePickerControlInternal(params: {
     const currentModeId = state.currentModeId;
     if (!currentModeId) return null;
 
-    const modeOverride = parseSessionModeOverrideState(
-        readMetadataAliasValue((params.metadata as any) ?? {}, SESSION_MODE_OVERRIDE_KEY, LEGACY_ACP_SESSION_MODE_OVERRIDE_KEY),
-    );
+    const modeOverride = readSessionModeOverrideState(params.metadata);
     const legacy = computeLegacyRequestedModeIdFromPermissionMode(params.metadata);
-    const requestedModeId = modeOverride?.modeId ?? legacy ?? null;
+    const requestedModeId = modeOverride
+        ? (modeOverride.state === 'set' ? modeOverride.value : null)
+        : legacy ?? null;
     const effectiveModeId = requestedModeId ?? currentModeId;
 
     const currentMode = options.find((mode) => mode.id === currentModeId) ?? null;

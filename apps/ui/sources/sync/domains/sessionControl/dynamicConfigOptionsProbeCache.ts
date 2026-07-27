@@ -1,10 +1,10 @@
-import { normalizeAcpConfigOptionsArray, type AcpConfigOption } from '@/sync/acp/configOptionsControl';
+import { normalizeSessionConfigOptionsArray, type SessionConfigOption } from '@/sync/domains/sessionControl/configOptionsControl';
 import type { ProbedResourceSnapshot } from '@happier-dev/protocol';
 
 import { createPersistentProbedResourceCache } from '@/sync/runtime/probedResources/createPersistentProbedResourceCache';
 
 export type DynamicConfigOptionsProbeCacheEntry =
-    | Readonly<{ kind: 'success'; updatedAt: number; expiresAt: number; value: readonly AcpConfigOption[] }>
+    | Readonly<{ kind: 'success'; updatedAt: number; expiresAt: number; value: readonly SessionConfigOption[] }>
     | Readonly<{ kind: 'error'; updatedAt: number; expiresAt: number }>;
 
 export const DYNAMIC_CONFIG_OPTIONS_PROBE_SUCCESS_TTL_MS = 24 * 60 * 60_000;
@@ -15,13 +15,13 @@ const PERSIST_VERSION = 1;
 const PERSIST_MAX_ENTRIES = 200;
 const PERSIST_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
 
-function normalizePersistedConfigOptions(input: unknown): readonly AcpConfigOption[] | null {
+function normalizePersistedConfigOptions(input: unknown): readonly SessionConfigOption[] | null {
     if (Array.isArray(input) && input.length === 0) return [];
-    const normalized = normalizeAcpConfigOptionsArray(input);
+    const normalized = normalizeSessionConfigOptionsArray(input);
     return normalized ?? null;
 }
 
-const persistedCache = createPersistentProbedResourceCache<readonly AcpConfigOption[]>({
+const persistedCache = createPersistentProbedResourceCache<readonly SessionConfigOption[]>({
     cacheId: 'dynamic-config-options-probe-cache',
     persistKey: PERSIST_KEY,
     persistVersion: PERSIST_VERSION,
@@ -38,7 +38,7 @@ export function resetDynamicConfigOptionsProbeCacheForTests(): void {
 }
 
 export function readDynamicConfigOptionsProbeCache(key: string): DynamicConfigOptionsProbeCacheEntry | null {
-    const snap: ProbedResourceSnapshot<readonly AcpConfigOption[]> = persistedCache.getSnapshot(key);
+    const snap: ProbedResourceSnapshot<readonly SessionConfigOption[]> = persistedCache.getSnapshot(key);
     if (snap.dataUpdatedAt !== null && snap.data) {
         return {
             kind: 'success',
@@ -59,7 +59,7 @@ export function readDynamicConfigOptionsProbeCache(key: string): DynamicConfigOp
 
 export function writeDynamicConfigOptionsProbeCacheSuccess(
     key: string,
-    value: readonly AcpConfigOption[],
+    value: readonly SessionConfigOption[],
     nowMs = Date.now(),
 ): void {
     persistedCache.writeSuccess(key, value, nowMs);

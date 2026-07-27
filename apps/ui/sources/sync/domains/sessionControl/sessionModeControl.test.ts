@@ -86,6 +86,19 @@ describe('sessionModeControl', () => {
     expect(res?.effectiveModeId).toBe('plan');
   });
 
+  it('lets an explicit newer mode tombstone clear the legacy permission-mode fallback', async () => {
+    const { computeSessionModePickerControl } = await import('./sessionModeControl');
+    const metadata = createMetadata({
+      permissionMode: 'plan',
+      permissionModeUpdatedAt: 10,
+      acpSessionModeOverrideV1: { v: 1, updatedAt: 20, modeId: null },
+    } as any);
+
+    const res = computeSessionModePickerControl({ agentId: 'claude', metadata });
+    expect(res?.requestedModeId).toBeNull();
+    expect(res?.effectiveModeId).toBe('default');
+  });
+
   it('falls back to legacy ACP metadata keys when canonical keys are absent', async () => {
     const { computeSessionModePickerControl } = await import('./sessionModeControl');
     const metadata = createMetadata({
