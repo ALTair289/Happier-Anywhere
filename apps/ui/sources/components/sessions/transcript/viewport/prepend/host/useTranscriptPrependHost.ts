@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useCommittedTranscriptRef } from '@/components/sessions/transcript/viewport/lifecycle/host/useCommittedTranscriptRef';
 import { Platform } from 'react-native';
 import { sync } from '@/sync/sync';
 import type {
@@ -57,7 +58,9 @@ type TranscriptPrependHostDeps = Readonly<{
     commandHostRef: MutableRef<TranscriptViewportCommandHost | null>;
     currentSessionId: string;
     lastUserScrollIntentAtMsRef: MutableRef<number>;
+    listContentHeight: number;
     listContentHeightRef: MutableRef<number>;
+    listDataLength: number;
     listDataRef: MutableRef<readonly ChatTranscriptListItem[]>;
     listLayoutHeightRef: MutableRef<number>;
     listRef: MutableRef<ScrollableChatListRef | null>;
@@ -147,7 +150,10 @@ export function useTranscriptPrependHost(deps: TranscriptPrependHostDeps): Trans
     const lastPrependGrowthRestoreScrollTopRef = React.useRef<number | null>(null);
     const runWebIndexRecoveryRef = React.useRef<() => boolean>(() => false);
     const nativeTransactionRevisionRef = React.useRef(nativeTransactionRevision);
-    nativeTransactionRevisionRef.current = nativeTransactionRevision;
+    useCommittedTranscriptRef(
+        nativeTransactionRevisionRef,
+        nativeTransactionRevision,
+    );
     const [rangeReservePx, setRangeReservePx] = React.useState(0);
 
     const clearWebRangeReserve = React.useCallback(() => {
@@ -321,7 +327,7 @@ export function useTranscriptPrependHost(deps: TranscriptPrependHostDeps): Trans
         nativeOwner,
         resolveNativeObservationInput,
     ]);
-    applyNativeEffectsRef.current = applyNativeEffects;
+    useCommittedTranscriptRef(applyNativeEffectsRef, applyNativeEffects);
 
     const restoreWebPrependAnchorThroughViewportCommand = React.useCallback((
         anchor: WebTranscriptPrependAnchor,
@@ -403,7 +409,9 @@ export function useTranscriptPrependHost(deps: TranscriptPrependHostDeps): Trans
                         ? refreshWebTranscriptPrependAnchor(
                             effect.anchor,
                             metrics,
-                            resolveWebRefreshOptions(restoreResult.strategy),
+                            resolveWebRefreshOptions(
+                                'strategy' in restoreResult ? restoreResult.strategy : 'none',
+                            ),
                         )
                         : null;
                     const acceptEffects = webOwner.acceptRestoreResult({
@@ -418,12 +426,11 @@ export function useTranscriptPrependHost(deps: TranscriptPrependHostDeps): Trans
                 }
                 case 'execute-anchor-recovery':
                     if (webPrependRestoreOwner === 'renderer') break;
-                    executeCommandHostInput(deps.commandHostRef, {
-                        type: 'restore-anchor',
-                        sessionId: effect.sessionId,
-                        reason: 'prepend-restore',
+                    deps.commandHostRef.current?.restoreWebVisibleAnchor({
                         anchor: effect.anchor,
-                        itemOffsetPx: effect.itemOffsetPx,
+                        itemIndex: effect.index,
+                        reason: 'prepend-restore',
+                        sessionId: effect.sessionId,
                         animated: false,
                     });
                     break;
@@ -536,7 +543,7 @@ export function useTranscriptPrependHost(deps: TranscriptPrependHostDeps): Trans
         webPrependRestoreOwner,
         webOwner,
     ]);
-    applyWebEffectsRef.current = applyWebEffects;
+    useCommittedTranscriptRef(applyWebEffectsRef, applyWebEffects);
 
     const clearWebRestoreWindow = React.useCallback((
         outcome: TranscriptViewportTransactionOutcome,
@@ -733,7 +740,7 @@ export function useTranscriptPrependHost(deps: TranscriptPrependHostDeps): Trans
         webPrependRestoreOwner,
         webOwner,
     ]);
-    runWebIndexRecoveryRef.current = runWebIndexRecovery;
+    useCommittedTranscriptRef(runWebIndexRecoveryRef, runWebIndexRecovery);
 
     const observeWeb = React.useCallback(() => {
         if (webPrependRestoreOwner === 'renderer') return;
@@ -770,14 +777,14 @@ export function useTranscriptPrependHost(deps: TranscriptPrependHostDeps): Trans
 
     React.useLayoutEffect(() => {
         observeWeb();
-    }, [deps.listContentHeightRef.current, deps.listDataRef.current.length, observeWeb]);
+    }, [deps.listContentHeight, deps.listDataLength, observeWeb]);
 
     React.useLayoutEffect(() => {
         observeNative();
     }, [
         deps.currentSessionId,
-        deps.listContentHeightRef.current,
-        deps.listDataRef.current.length,
+        deps.listContentHeight,
+        deps.listDataLength,
         observeNative,
     ]);
 

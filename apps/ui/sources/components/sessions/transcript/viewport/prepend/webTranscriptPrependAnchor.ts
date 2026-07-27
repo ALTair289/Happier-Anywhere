@@ -17,10 +17,15 @@ export type WebTranscriptPrependAnchor = Readonly<{
     expiresAtMs: number;
 }>;
 
-export type WebTranscriptPrependRestoreResult = Readonly<{
-    didAdjustScroll: boolean;
-    strategy: 'anchor' | 'item' | 'growth' | 'none';
-}>;
+export type WebTranscriptPrependRestoreResult =
+    | Readonly<{
+        didAdjustScroll: boolean;
+        strategy: 'anchor' | 'item' | 'growth' | 'none';
+    }>
+    | Readonly<{
+        didAdjustScroll: false;
+        status: 'not_found';
+    }>;
 
 export type WebTranscriptViewportAnchorKind = 'message' | 'toolGroup' | 'item';
 
@@ -423,6 +428,14 @@ export function restoreWebTranscriptPrependAnchor(
     options: WebTranscriptScrollTopWriteOptions,
 ): WebTranscriptPrependRestoreResult {
     const { element } = anchor.metrics;
+    const hasKeyedAnchorTarget =
+        anchor.anchorTestId != null &&
+        typeof anchor.anchorTop === 'number' &&
+        Number.isFinite(anchor.anchorTop);
+    const hasKeyedItemTarget =
+        anchor.itemTestId != null &&
+        typeof anchor.itemTop === 'number' &&
+        Number.isFinite(anchor.itemTop);
 
     const restoreFromScrollHeightGrowth = (): WebTranscriptPrependRestoreResult | null => {
         const nextScrollHeight = element.scrollHeight;
@@ -444,7 +457,7 @@ export function restoreWebTranscriptPrependAnchor(
         }
     };
 
-    if (anchor.anchorTestId != null && anchor.anchorTop != null) {
+    if (hasKeyedAnchorTarget) {
         const nextTop = resolveVisibleAnchorTop({ container: element, anchorTestId: anchor.anchorTestId });
         if (typeof nextTop === 'number' && Number.isFinite(nextTop)) {
             const delta = Math.trunc(nextTop - anchor.anchorTop);
@@ -465,7 +478,7 @@ export function restoreWebTranscriptPrependAnchor(
         }
     }
 
-    if (anchor.itemTestId != null && anchor.itemTop != null) {
+    if (hasKeyedItemTarget) {
         const nextItemTop = resolveVisibleAnchorTop({ container: element, anchorTestId: anchor.itemTestId });
         if (typeof nextItemTop === 'number' && Number.isFinite(nextItemTop)) {
             const delta = Math.trunc(nextItemTop - anchor.itemTop);
@@ -484,6 +497,13 @@ export function restoreWebTranscriptPrependAnchor(
             }
             return { didAdjustScroll: false, strategy: 'item' };
         }
+    }
+
+    // A scroll-height delta can preserve a physical position, but it cannot preserve the
+    // captured logical row while FlashList's hot/cold window temporarily unmounts that row.
+    // Keep keyed restores write-free until the prepend owner materializes the saved identity.
+    if (hasKeyedAnchorTarget || hasKeyedItemTarget) {
+        return { didAdjustScroll: false, status: 'not_found' };
     }
 
     const growthResult = restoreFromScrollHeightGrowth();

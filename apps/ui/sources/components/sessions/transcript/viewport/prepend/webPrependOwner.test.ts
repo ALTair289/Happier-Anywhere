@@ -620,7 +620,7 @@ describe('web prepend owner', () => {
         });
     });
 
-    it('growth restore schedules index recovery until the anchor remounts or expires', () => {
+    it('keyed-missing restore materializes the captured row at its original relative offset until it remounts or expires', () => {
         const owner = createWebPrependOwner();
         beginPendingRestore(owner, {
             anchor: createAnchor({ expiresAtMs: 1500, stabilizeForMs: 500 }),
@@ -629,7 +629,7 @@ describe('web prepend owner', () => {
         owner.acceptRestoreResult({
             currentMetrics: createMetrics(),
             nowMs: 1100,
-            result: { didAdjustScroll: true, strategy: 'growth' },
+            result: { didAdjustScroll: false, status: 'not_found' },
             sessionId: 'session-a',
         });
 
@@ -659,9 +659,11 @@ describe('web prepend owner', () => {
         ]);
         expect(effectsOfType(recoveryEffects, 'execute-anchor-recovery')).toEqual([
             {
-                anchor: recoveryAnchor,
+                anchor: {
+                    ...recoveryAnchor,
+                    itemOffsetPx: 24,
+                },
                 index: 0,
-                itemOffsetPx: 0,
                 sessionId: 'session-a',
                 type: 'execute-anchor-recovery',
             },
@@ -675,7 +677,7 @@ describe('web prepend owner', () => {
         expiredOwner.acceptRestoreResult({
             currentMetrics: createMetrics(),
             nowMs: 1010,
-            result: { didAdjustScroll: true, strategy: 'growth' },
+            result: { didAdjustScroll: false, status: 'not_found' },
             sessionId: 'session-a',
         });
 

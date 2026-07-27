@@ -1,7 +1,10 @@
 import type {
     TranscriptViewportTelemetryObservationReason,
 } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
-import type { WebTranscriptPrependAnchor } from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
+import type {
+    WebTranscriptPrependAnchor,
+    WebTranscriptViewportAnchor,
+} from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
 import { resolvePendingWebPrependAnchorIndex } from './webTranscriptPrependAnchorIndex';
 import { resolveWebTranscriptPrependRangeReservePx } from '@/components/sessions/transcript/webTranscriptPrependRangeReserve';
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
@@ -112,9 +115,8 @@ export type WebPrependOwnerEffect =
         type: 'execute-web-prepend-restore';
     }>
     | Readonly<{
-        anchor: TranscriptViewportAnchorIdentity;
+        anchor: WebTranscriptViewportAnchor;
         index: number;
-        itemOffsetPx: 0;
         sessionId: string;
         type: 'execute-anchor-recovery';
     }>
@@ -325,16 +327,25 @@ export function createWebPrependOwner(): WebPrependOwner {
             currentItemIndex: params.currentItemIndex,
             items: params.items,
         });
-        if (index === undefined || params.recoveryAnchor == null) {
+        const itemOffsetPx = pendingAnchor.anchor.itemTop;
+        if (
+            index === undefined ||
+            params.recoveryAnchor == null ||
+            typeof itemOffsetPx !== 'number' ||
+            !Number.isFinite(itemOffsetPx)
+        ) {
             return [scheduleIndexRecoveryEffect(params.sessionId)];
         }
 
         return [
             { sessionId: params.sessionId, type: 'clear-web-index-recovery' },
             {
-                anchor: params.recoveryAnchor,
+                anchor: {
+                    ...params.recoveryAnchor,
+                    itemOffsetPx,
+                    messageId: params.recoveryAnchor.messageId ?? null,
+                },
                 index,
-                itemOffsetPx: 0,
                 sessionId: params.sessionId,
                 type: 'execute-anchor-recovery',
             },
@@ -585,7 +596,11 @@ function hasFiniteMetric(value: number): boolean {
 }
 
 function hasRecoverableAnchorIdentity(anchor: WebTranscriptPrependAnchor): boolean {
-    return anchor.anchorTestId != null || anchor.itemTestId != null;
+    return (
+        (anchor.anchorTestId != null || anchor.itemTestId != null) &&
+        typeof anchor.itemTop === 'number' &&
+        Number.isFinite(anchor.itemTop)
+    );
 }
 
 function isRecoverableAnchorStillMissing(result: WebPrependRestoreResult): boolean {
