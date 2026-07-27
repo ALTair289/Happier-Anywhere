@@ -14,7 +14,9 @@ import {
   buildRemoteBootstrapCommand,
   buildRemoteDaemonCommand,
   buildRemoteEnsureDirectoriesCommand,
+  buildRemoteForwardProbeCommand,
   buildRemoteInstallCredentialCommand,
+  buildSshTunnelArgs,
   buildSshWorkerArgs,
 } from './remote_commands.mjs';
 
@@ -153,6 +155,7 @@ export async function startStackDevTargets(
   await mkdir(mutagenDataDir, { recursive: true });
 
   const workersByTarget = new Map();
+  const tunnelsByTarget = new Map();
   const targetFailuresByTarget = new Map();
   const lifecycleTasks = [];
   let monitorWorker = null;
@@ -236,6 +239,7 @@ export async function startStackDevTargets(
 
     const startTarget = async (target, index) => {
       let phase = 'prepare';
+      let tunnel = null;
       try {
         if (target.limaInstance) {
           requireSuccessful(
@@ -344,12 +348,38 @@ export async function startStackDevTargets(
           activeServerId,
           stackName,
         });
+        phase = 'tunnel';
+        tunnel = spawnProcess({
+          label: `remote:${target.name}`,
+          command: 'ssh',
+          args: buildSshTunnelArgs(target, {
+            localServerPort,
+            remoteServerPort,
+            sshArgs: openSsh.sshArgs,
+          }),
+          env,
+        });
+        tunnelsByTarget.set(target.name, tunnel);
+        requireSuccessful(
+          await runProcess({
+            label: `remote:${target.name}`,
+            command: 'ssh',
+            args: [
+              ...openSsh.sshArgs,
+              '-o',
+              'BatchMode=yes',
+              target.ssh,
+              buildRemoteForwardProbeCommand(target, { remoteServerPort }),
+            ],
+            env,
+          }),
+          `${target.name} reverse tunnel readiness`,
+        );
+        phase = 'worker';
         const worker = spawnProcess({
           label: `remote:${target.name}`,
           command: 'ssh',
           args: buildSshWorkerArgs(target, {
-            localServerPort,
-            remoteServerPort,
             remoteCommand,
             sshArgs: openSsh.sshArgs,
           }),
@@ -359,6 +389,12 @@ export async function startStackDevTargets(
         targetFailuresByTarget.delete(target.name);
         return worker;
       } catch (error) {
+        if (tunnel) {
+          if (tunnelsByTarget.get(target.name) === tunnel) {
+            tunnelsByTarget.delete(target.name);
+          }
+          await stopProcess(tunnel).catch(() => {});
+        }
         targetFailuresByTarget.set(target.name, { name: target.name, phase, error });
         logger.error?.(
           `[dev-targets] ${target.name} ${phase} failed; continuing with other targets: ${
@@ -380,12 +416,15 @@ export async function startStackDevTargets(
 
     for (const [index, target] of targets.entries()) {
       const initialWorker = workersByTarget.get(target.name);
+      const initialTunnel = tunnelsByTarget.get(target.name);
       lifecycleTasks.push((async () => {
         let worker = initialWorker;
+        let tunnel = initialTunnel;
         while (!closed) {
-          if (worker) {
+          if (worker && tunnel) {
             const outcome = await Promise.race([
-              waitForProcess(worker).then((result) => ({ kind: 'exit', result })),
+              waitForProcess(worker).then((result) => ({ kind: 'worker-exit', result })),
+              waitForProcess(tunnel).then((result) => ({ kind: 'tunnel-exit', result })),
               closeRequested.then(() => ({ kind: 'close' })),
             ]);
             if (outcome.kind === 'close' || closed) return;
@@ -393,16 +432,24 @@ export async function startStackDevTargets(
             if (workersByTarget.get(target.name) === worker) {
               workersByTarget.delete(target.name);
             }
+            if (tunnelsByTarget.get(target.name) === tunnel) {
+              tunnelsByTarget.delete(target.name);
+            }
+            await Promise.allSettled([
+              stopProcess(worker),
+              stopProcess(tunnel),
+            ]);
             const code = String(outcome.result?.code ?? 'unknown');
             targetFailuresByTarget.set(target.name, {
               name: target.name,
-              phase: 'worker',
-              error: new Error(`${target.name} remote worker exited (code=${code})`),
+              phase: outcome.kind === 'tunnel-exit' ? 'tunnel' : 'worker',
+              error: new Error(`${target.name} remote ${outcome.kind} (code=${code})`),
             });
             logger.error?.(
-              `[dev-targets] ${target.name} remote worker exited (code=${code}); retrying target lifecycle`,
+              `[dev-targets] ${target.name} remote ${outcome.kind} (code=${code}); retrying target lifecycle`,
             );
             worker = null;
+            tunnel = null;
           }
 
           while (!closed) {
@@ -412,7 +459,8 @@ export async function startStackDevTargets(
             ]);
             if (retryOutcome === 'close' || closed) return;
             worker = await startTarget(target, index);
-            if (worker) break;
+            tunnel = tunnelsByTarget.get(target.name) ?? null;
+            if (worker && tunnel) break;
           }
         }
       })());
@@ -433,6 +481,9 @@ export async function startStackDevTargets(
         for (const worker of workersByTarget.values()) {
           await stopProcess(worker);
         }
+        for (const tunnel of tunnelsByTarget.values()) {
+          await stopProcess(tunnel);
+        }
         await Promise.allSettled(lifecycleTasks);
         await stopProcess(monitorWorker);
         await releaseProjectIfOwned('pause');
@@ -443,6 +494,9 @@ export async function startStackDevTargets(
     resolveCloseRequested();
     for (const worker of workersByTarget.values()) {
       await stopProcess(worker).catch(() => {});
+    }
+    for (const tunnel of tunnelsByTarget.values()) {
+      await stopProcess(tunnel).catch(() => {});
     }
     await stopProcess(monitorWorker).catch(() => {});
     if (projectStarted) {

@@ -5,6 +5,7 @@ import {
   buildRemoteBootstrapCommand,
   buildRemoteDoctorCommand,
   buildRemoteDaemonCommand,
+  buildSshTunnelArgs,
   buildSshWorkerArgs,
 } from './remote_commands.mjs';
 
@@ -92,15 +93,14 @@ test('remote daemon command reuses the Stack dev owner without the repo-local en
   assert.match(decodedPowerShell, /stack-state\/repo-local-dev/);
 });
 
-test('SSH worker owns the reverse tunnel to the existing local server', () => {
+test('SSH tunnel owns the reverse forward independently from the monitored worker command', () => {
   assert.deepEqual(
-    buildSshWorkerArgs(posix, {
+    buildSshTunnelArgs(posix, {
       localServerPort: 3005,
       remoteServerPort: 43005,
-      remoteCommand: 'bash -lc true',
     }),
     [
-      '-tt',
+      '-T',
       '-o',
       'BatchMode=yes',
       '-o',
@@ -109,16 +109,31 @@ test('SSH worker owns the reverse tunnel to the existing local server', () => {
       'ServerAliveInterval=15',
       '-o',
       'ServerAliveCountMax=3',
+      '-N',
       '-R',
       '127.0.0.1:43005:127.0.0.1:3005',
+      'happier-stack-linux',
+    ],
+  );
+
+  assert.deepEqual(
+    buildSshWorkerArgs(posix, {
+      remoteCommand: 'bash -lc true',
+    }),
+    [
+      '-tt',
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'ServerAliveInterval=15',
+      '-o',
+      'ServerAliveCountMax=3',
       'happier-stack-linux',
       'bash -lc true',
     ],
   );
 
   const windowsArgs = buildSshWorkerArgs(windows, {
-    localServerPort: 3005,
-    remoteServerPort: 43105,
     remoteCommand: 'powershell.exe -EncodedCommand example',
   });
   assert.equal(windowsArgs[0], '-T');

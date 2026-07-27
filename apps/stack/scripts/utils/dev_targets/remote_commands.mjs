@@ -160,12 +160,34 @@ export function buildRemoteDaemonCommand(target, { serverUrl, activeServerId, st
   );
 }
 
-export function buildSshWorkerArgs(
+export function buildRemoteForwardProbeCommand(target, { remoteServerPort }) {
+  const port = Math.trunc(Number(remoteServerPort));
+  if (target.platform === 'windows') {
+    return wrapRemoteScript(
+      target,
+      [
+        '$ErrorActionPreference = "Stop"',
+        '$client = [System.Net.Sockets.TcpClient]::new()',
+        `try { $client.Connect('127.0.0.1', ${port}) } finally { $client.Dispose() }`,
+      ].join('; '),
+    );
+  }
+  return wrapRemoteScript(
+    target,
+    [
+      'set -euo pipefail',
+      `exec 3<>/dev/tcp/127.0.0.1/${port}`,
+      'exec 3>&-',
+    ].join('; '),
+  );
+}
+
+export function buildSshTunnelArgs(
   target,
-  { localServerPort, remoteServerPort, remoteCommand, sshArgs = [] },
+  { localServerPort, remoteServerPort, sshArgs = [] },
 ) {
   return [
-    target.platform === 'windows' ? '-T' : '-tt',
+    '-T',
     ...sshArgs,
     '-o',
     'BatchMode=yes',
@@ -175,8 +197,26 @@ export function buildSshWorkerArgs(
     'ServerAliveInterval=15',
     '-o',
     'ServerAliveCountMax=3',
+    '-N',
     '-R',
     `127.0.0.1:${remoteServerPort}:127.0.0.1:${localServerPort}`,
+    target.ssh,
+  ];
+}
+
+export function buildSshWorkerArgs(
+  target,
+  { remoteCommand, sshArgs = [] },
+) {
+  return [
+    target.platform === 'windows' ? '-T' : '-tt',
+    ...sshArgs,
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'ServerAliveInterval=15',
+    '-o',
+    'ServerAliveCountMax=3',
     target.ssh,
     remoteCommand,
   ];

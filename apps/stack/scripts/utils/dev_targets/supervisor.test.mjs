@@ -341,7 +341,7 @@ test('supervisor keeps healthy targets and retries another target after its init
         spawnProcess: ({ label, command, args, env }) => {
           const worker = { label, command, args, env, exitCode: null };
           calls.push({ kind: 'spawn', ...worker });
-          if (label === 'remote:windows') notifyWindowsWorkerStarted();
+          if (label === 'remote:windows' && !args.includes('-N')) notifyWindowsWorkerStarted();
           return worker;
         },
         stopProcess: async (worker) => {
@@ -420,7 +420,7 @@ test('supervisor retries when the only target bootstrap races its initial non-bl
         },
         spawnProcess: ({ label, command, args, env }) => {
           const worker = { label, command, args, env, exitCode: null };
-          if (label === 'remote:linux') notifyWorkerStarted();
+          if (label === 'remote:linux' && !args.includes('-N')) notifyWorkerStarted();
           return worker;
         },
         stopProcess: async (worker) => {
@@ -490,7 +490,7 @@ test('remote worker exit restarts its configured target lifecycle without restar
           });
           const worker = { label, command, args, env, exitCode: null, completion, resolveCompletion };
           calls.push({ kind: 'spawn', label, command, args, env, worker });
-          if (!resolveFirstWorker) resolveFirstWorker = resolveCompletion;
+          if (!args.includes('-N') && !resolveFirstWorker) resolveFirstWorker = resolveCompletion;
           return worker;
         },
         stopProcess: async (worker) => {
@@ -510,6 +510,87 @@ test('remote worker exit restarts its configured target lifecycle without restar
     assert.equal(restarted, true, 'expected the target lifecycle to restart after its SSH worker exited');
     await controller.close();
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('remote worker exit is observed while its independent reverse tunnel remains open', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-dev-target-worker-tunnel-'));
+  const credentialPath = join(root, 'access.key');
+  const tunnels = [];
+  const workers = [];
+  let controller = null;
+  await writeFile(credentialPath, '{"token":"secret"}\n', { mode: 0o600 });
+
+  try {
+    controller = await startStackDevTargets(
+      {
+        stackName: 'repo-test',
+        stackBaseDir: join(root, 'stack'),
+        sourceDir: '/source/happier',
+        localServerPort: 3005,
+        activeServerId: 'stack_repo-test__id_default',
+        credentialPath,
+        targets: [{
+          name: 'linux',
+          platform: 'posix',
+          ssh: 'linux-ssh',
+          repoDir: '/home/dev/happier',
+          cliHomeDir: '/home/dev/.happier/linux',
+        }],
+        env: {},
+      },
+      {
+        runProcess: async () => ({ code: 0 }),
+        spawnProcess: ({ label, command, args, env }) => {
+          if (label === 'mutagen') {
+            return { label, command, args, env, exitCode: null };
+          }
+          let resolveCompletion;
+          const completion = new Promise((resolve) => {
+            resolveCompletion = resolve;
+          });
+          const child = {
+            label,
+            command,
+            args,
+            env,
+            exitCode: null,
+            completion,
+            resolveCompletion,
+          };
+          if (args.includes('-N')) tunnels.push(child);
+          else workers.push(child);
+          return child;
+        },
+        stopProcess: async (child) => {
+          if (!child || child.exitCode != null) return;
+          child.exitCode = 0;
+          child.resolveCompletion?.({ code: 0, signal: 'SIGINT' });
+        },
+        waitForRetry: async () => {},
+        logger: { error() {} },
+      },
+    );
+
+    assert.equal(tunnels.length, 1, 'reverse forwarding must have its own SSH lifetime');
+    assert.equal(workers.length, 1, 'the remote hstack command must have its own monitored SSH lifetime');
+    workers[0].exitCode = 1;
+    workers[0].resolveCompletion({ code: 1, signal: null });
+
+    const retried = await Promise.race([
+      new Promise((resolve) => {
+        const poll = () => {
+          if (workers.length >= 2 && tunnels.length >= 2) resolve(true);
+          else setTimeout(poll, 1);
+        };
+        poll();
+      }),
+      new Promise((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    assert.equal(retried, true);
+  } finally {
+    await controller?.close?.();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -658,9 +739,18 @@ test('dev target supervisor owns Mutagen publication, remote bootstrap, auth see
         'run:remote:linux',
         'run:remote:linux',
         'spawn:remote:linux',
+        'run:remote:linux',
+        'spawn:remote:linux',
       ],
     );
-    assert.match(calls.at(-1).args.join(' '), /-R 127\.0\.0\.1:43005:127\.0\.0\.1:3005/);
+    const tunnelSpawn = calls.find(
+      (call) => call.kind === 'spawn' && call.label === 'remote:linux' && call.args.includes('-N'),
+    );
+    const workerSpawn = calls.find(
+      (call) => call.kind === 'spawn' && call.label === 'remote:linux' && !call.args.includes('-N'),
+    );
+    assert.match(tunnelSpawn.args.join(' '), /-R 127\.0\.0\.1:43005:127\.0\.0\.1:3005/);
+    assert.doesNotMatch(workerSpawn.args.join(' '), /-R /);
     assert.ok(
       calls.filter((call) => call.command === 'ssh' || call.command === 'scp')
         .every((call) => call.args.includes('-F') && call.args.includes('ControlMaster=no')),
@@ -676,8 +766,8 @@ test('dev target supervisor owns Mutagen publication, remote bootstrap, auth see
 
     await controller.close();
     assert.deepEqual(
-      calls.slice(-3).map((call) => `${call.kind}:${call.label}`),
-      ['stop:remote:linux', 'stop:mutagen', 'run:mutagen'],
+      calls.slice(-4).map((call) => `${call.kind}:${call.label}`),
+      ['stop:remote:linux', 'stop:remote:linux', 'stop:mutagen', 'run:mutagen'],
     );
   } finally {
     await rm(root, { recursive: true, force: true });
