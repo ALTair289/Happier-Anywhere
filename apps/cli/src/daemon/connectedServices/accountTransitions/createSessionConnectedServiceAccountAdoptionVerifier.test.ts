@@ -52,7 +52,7 @@ describe('createSessionConnectedServiceAccountAdoptionVerifier', () => {
     });
   });
 
-  it('passes tracked materialized environment to provider verification when runtime selection lacks one', async () => {
+  it('does not inject stale tracked launch environment into a current runtime selection', async () => {
     let observedSelection: unknown;
     const adapter = {
       classifyRuntimeAuthFailure: () => null,
@@ -102,9 +102,7 @@ describe('createSessionConnectedServiceAccountAdoptionVerifier', () => {
     expect(observedSelection).toMatchObject({
       serviceId: 'claude-subscription',
       profileId: 'profile_target',
-      targetMaterializedEnv: {
-        CLAUDE_CONFIG_DIR: '/tmp/materialized-claude-config',
-      },
     });
+    expect(observedSelection).not.toHaveProperty('targetMaterializedEnv');
   });
 });

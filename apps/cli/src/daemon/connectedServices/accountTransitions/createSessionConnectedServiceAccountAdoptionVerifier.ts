@@ -21,13 +21,19 @@ function selectionHasMaterializedEnv(selection: unknown): boolean {
   );
 }
 
-function attachTrackedMaterializedEnvIfMissing(
+function attachPredecessorRuntimeLocationIfMissing(
   input: ConnectedServiceAccountAdoptionVerificationInput,
   selection: unknown,
 ): unknown {
+  if (input.runtimeAuthSelection !== null && input.runtimeAuthSelection !== undefined) {
+    return selection;
+  }
   const env = input.tracked.spawnOptions?.environmentVariables;
   const record = readRecord(selection);
   if (!record || !env || selectionHasMaterializedEnv(record)) return selection;
+  // A predecessor transition without a materialized current selection may need its
+  // launch environment to locate the runtime. This is location input only; current
+  // transitions must carry their own materialized target and the provider probe owns proof.
   return {
     ...record,
     targetMaterializedEnv: env,
@@ -56,7 +62,7 @@ export function createSessionConnectedServiceAccountAdoptionVerifier(deps?: Read
 
     return await adapter.verifyActiveAccount({
       target: { agentId: input.agentId },
-      selection: attachTrackedMaterializedEnvIfMissing(
+      selection: attachPredecessorRuntimeLocationIfMissing(
         input,
         input.runtimeAuthSelection ?? {
           serviceId: input.serviceId,

@@ -1,4 +1,8 @@
-import type { ConnectedServiceBindingsV1, ConnectedServiceId } from '@happier-dev/protocol';
+import type {
+  ConnectedServiceBindingsV1,
+  ConnectedServiceCredentialRevisionV1,
+  ConnectedServiceId,
+} from '@happier-dev/protocol';
 
 import type { CatalogAgentId } from '@/backends/types';
 import type { TrackedSession } from '@/daemon/types';
@@ -31,6 +35,16 @@ export type ConnectedServiceAccountTransitionVerificationResult =
       providerAccountId?: string | null;
       activeAccountId?: string | null;
       sharedAuthSurfaceId?: string | null;
+      credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
+      credentialFingerprint?: string | null;
+      generationApplication?: Readonly<{
+        serviceId: ConnectedServiceId;
+        groupId: string;
+        profileId: string;
+        generation: number;
+        credentialRevision: ConnectedServiceCredentialRevisionV1;
+        credentialFingerprint: string;
+      }>;
       proofStrength?: 'exact' | 'weak' | 'diagnostic';
       source?: string;
       reason?: string;
@@ -40,6 +54,8 @@ export type ConnectedServiceAccountTransitionVerificationResult =
       providerAccountId?: string | null;
       activeAccountId?: string | null;
       sharedAuthSurfaceId?: string | null;
+      credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
+      credentialFingerprint?: string | null;
       proofStrength?: 'exact' | 'weak' | 'diagnostic';
       source?: string;
       reason: string;
