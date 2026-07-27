@@ -81,6 +81,14 @@ export type SessionOpenLatchArmInput = Readonly<{
     shouldFollowBottom: boolean;
     webInitialPinRetryDelaysMs: readonly number[];
     webInitialPinStabilizeMs: number;
+    /**
+     * Hard bound on the whole web open phase: past `nowMs + delay`, the phase
+     * completes ('done') regardless of fill settlement, ending initial-open pin
+     * authority. The open is a bounded authority — a starved settlement (aborted,
+     * failed, or hung fill executor) must never leave it fighting the user
+     * (live capture 2026-07-20). Ignored on native (paint deadline owns that path).
+     */
+    webOpenPhaseDeadlineDelayMs: number;
 }>;
 
 export type SessionOpenHostFacts = Readonly<{

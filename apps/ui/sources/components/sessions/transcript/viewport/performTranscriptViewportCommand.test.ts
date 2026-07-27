@@ -204,6 +204,16 @@ type DepsOverrides = {
     shouldUseNativeHotColdSplit?: boolean;
     coldItemCount?: number;
     resolveRestoreAnchorIndex?: (anchor: { kind: 'message' | 'toolGroup' | 'item'; itemId: string; messageId?: string | null }) => number | null;
+    resolveRendererDataTarget?: (command: Extract<TranscriptViewportCommand, Readonly<{ kind: 'restore-anchor' | 'jump-to-seq' }>>) =>
+        | Readonly<{ kind: 'data'; index: number; itemId: string }>
+        | Readonly<{
+            kind: 'outside-data';
+            fallbackIndex: number | null;
+            itemId: string;
+            reason: 'projection-window' | 'renderer-edge';
+            targetSeq: number | null;
+        }>
+        | null;
     telemetryPlatform?: 'web' | 'ios' | 'android' | 'native-other';
     resolveJumpToSeqIndex?: (seq: number) => number | null;
 };
@@ -233,7 +243,6 @@ function buildDeps(overrides: DepsOverrides = {}): DepsBundle {
         listContentHeightRef: { current: overrides.listContentHeight ?? 1000 },
         listLayoutHeightRef: { current: overrides.listLayoutHeight ?? 400 },
         listDataRef: { current: overrides.listData ?? { length: overrides.listDataLength ?? 5 } },
-        itemsRef: { current: overrides.items ?? { length: overrides.itemsLength ?? 5 } },
         composerInsetHeightRef: { current: overrides.composerInsetHeight ?? 0 },
         nativeHotTailHeightRef: { current: overrides.nativeHotTailHeight ?? 0 },
         lastPinOffsetForIntentRef: { current: null },
@@ -242,17 +251,37 @@ function buildDeps(overrides: DepsOverrides = {}): DepsBundle {
         lastNativeRestoreIndexCommandRef,
         nativeMountSettleStable: true,
         telemetryPlatform: overrides.telemetryPlatform ?? 'ios',
-        shouldUseNativeHotColdSplit: overrides.shouldUseNativeHotColdSplit ?? false,
-        webHotColdCountsRef: {
-            current: {
-                coldCount: overrides.coldItemCount ?? 0,
-                hotCount: (overrides.shouldUseWebHotColdSplit ?? false) ? 1 : 0,
-            },
-        },
         clearWebPrependRangeReserve,
         resolveWebScrollMetrics: () => overrides.webMetrics ?? null,
-        resolveRestoreAnchorIndex: overrides.resolveRestoreAnchorIndex ?? (() => null),
-        resolveJumpToSeqIndex: overrides.resolveJumpToSeqIndex ?? (() => null),
+        resolveRendererDataTarget: overrides.resolveRendererDataTarget ?? ((command) => {
+            const fullIndex = command.kind === 'restore-anchor'
+                ? overrides.resolveRestoreAnchorIndex?.(command.target.anchor) ?? null
+                : overrides.resolveJumpToSeqIndex?.(command.seq) ?? null;
+            if (fullIndex == null) return null;
+            const itemId = overrides.items?.[fullIndex]?.id ?? `row-${fullIndex}`;
+            if (overrides.shouldUseWebHotColdSplit && fullIndex >= (overrides.coldItemCount ?? 0)) {
+                const coldCount = overrides.coldItemCount ?? 0;
+                return {
+                    kind: 'outside-data',
+                    fallbackIndex: coldCount > 0 ? coldCount - 1 : null,
+                    itemId,
+                    reason: 'renderer-edge',
+                    targetSeq: null,
+                };
+            }
+            if (overrides.shouldUseNativeHotColdSplit) {
+                const fullCount = overrides.itemsLength ?? overrides.items?.length ?? 5;
+                const coldCount = overrides.listDataLength ?? overrides.listData?.length ?? 5;
+                const canonicalIndex = fullCount - 1 - fullIndex;
+                const coldCanonicalIndex = Math.min(Math.max(0, canonicalIndex), Math.max(0, coldCount - 1));
+                return {
+                    kind: 'data',
+                    index: coldCount - 1 - coldCanonicalIndex,
+                    itemId,
+                };
+            }
+            return { kind: 'data', index: fullIndex, itemId };
+        }),
         recordViewportTelemetryEvent: (event) => {
             recorded.push(event as RecordedTelemetry);
         },
@@ -349,6 +378,48 @@ describe('performTranscriptViewportCommand', () => {
             expect(result).toBe(false);
             expect(bundle.recorded.filter((e) => e.type === 'scroll-write')).toHaveLength(0);
         });
+
+        it('defers to a live renderer-held end intent instead of re-writing the tail', () => {
+            // Open-landing capture 2026-07-22 (session cmrw2np7w): repeated driver pin
+            // writes raced the renderer verifyLanding corrections and Legend's own
+            // maintain-at-end while initial row measurement oscillated scrollHeight —
+            // three writers chasing different bottoms = the visible open jiggle.
+            // Native pin-bottom already routes through the renderer
+            // (scrollRendererToEnd latches and writes in one owner); the web DOM
+            // driver defers the same way once the renderer owns the tail. The FIRST
+            // pin (no live end hold) still writes and latches.
+            const metrics = createFakeWebScrollMetrics({ scrollHeight: 1000, clientHeight: 400, scrollTop: 10 });
+            const node = createFakeScrollNode();
+            (node as unknown as { hasLiveWebHold: (target: { kind: string }) => boolean }).hasLiveWebHold =
+                (target) => target.kind === 'end';
+            const bundle = buildDeps({ node, webMetrics: metrics });
+            const result = performTranscriptViewportCommand(
+                { kind: 'pin-bottom', sessionId: BASE_SESSION, reason: 'content-size-change', mode: 'follow-bottom' },
+                bundle.deps,
+            );
+            expect(result).toBe(true);
+            // No write: the renderer's held-'end' machinery owns the landing.
+            expect(metrics.element.scrollTop).toBe(10);
+            expect(bundle.recorded.filter((e) => e.type === 'scroll-write')).toHaveLength(0);
+        });
+
+        it('hands the first bottom landing to a renderer that can own the live tail', () => {
+            const metrics = createFakeWebScrollMetrics({ scrollHeight: 1000, clientHeight: 400, scrollTop: 10 });
+            const node = createFakeScrollNode({ withScrollToEnd: true });
+            (node as unknown as { hasLiveWebHold: (target: { kind: string }) => boolean }).hasLiveWebHold =
+                () => false;
+            const bundle = buildDeps({ node, webMetrics: metrics });
+
+            const result = performTranscriptViewportCommand(
+                { kind: 'pin-bottom', sessionId: BASE_SESSION, reason: 'jump-to-bottom', mode: 'jump-to-bottom' },
+                bundle.deps,
+            );
+
+            expect(result).toBe(true);
+            expect(node.endCalls).toEqual([{ animated: false }]);
+            expect(metrics.element.scrollTop).toBe(10);
+            expect(bundle.recorded.filter((event) => event.type === 'scroll-write')).toHaveLength(0);
+        });
     });
 
     describe('pin-bottom — native', () => {
@@ -402,9 +473,9 @@ describe('performTranscriptViewportCommand', () => {
             );
 
             expect(result).toBe(true);
-            expect(node.endCalls).toEqual([]);
+            expect(node.endCalls).toEqual([{ animated: false }]);
             expect(node.indexCalls).toHaveLength(0);
-            expect(node.offsetCalls).toEqual([{ offset: 600, animated: false }]);
+            expect(node.offsetCalls).toHaveLength(0);
             expect(lastWrite(bundle.recorded)).toMatchObject({
                 writer: 'native-scroll-to-offset',
                 reason: 'content-size-change',
@@ -457,14 +528,20 @@ describe('performTranscriptViewportCommand', () => {
                 .toEqual([575, 240, 300]);
         });
 
-        it('keeps standard Legend index commands in source-index space and skips FlashList hot-cold remapping', () => {
+        it('uses the renderer-data target projected before the standard Legend driver', () => {
             const node = createFakeScrollNode({ transcriptViewportCommandSpace: 'standard' });
             const resolveJumpToSeqIndex = vi.fn(() => 8);
+            const resolveRendererDataTarget = vi.fn(() => ({
+                kind: 'data' as const,
+                index: 0,
+                itemId: 'cold-row-0',
+            }));
             const bundle = buildDeps({
                 node,
                 itemsLength: 10,
                 listDataLength: 4,
                 resolveJumpToSeqIndex,
+                resolveRendererDataTarget,
                 shouldUseNativeHotColdSplit: true,
             });
 
@@ -479,10 +556,14 @@ describe('performTranscriptViewportCommand', () => {
             }, bundle.deps);
 
             expect(result).toBe(true);
-            expect(resolveJumpToSeqIndex).toHaveBeenCalledWith(42);
-            expect(node.indexCalls).toEqual([{ index: 8, animated: true, viewOffset: 32 }]);
+            expect(resolveRendererDataTarget).toHaveBeenCalledWith(expect.objectContaining({
+                kind: 'jump-to-seq',
+                seq: 42,
+            }));
+            expect(resolveJumpToSeqIndex).not.toHaveBeenCalled();
+            expect(node.indexCalls).toEqual([{ index: 0, animated: true, viewOffset: 32 }]);
             expect(bundle.lastNativeRestoreIndexCommandRef.current).toMatchObject({
-                index: 8,
+                index: 0,
                 reason: 'jump-to-seq',
                 sessionId: BASE_SESSION,
                 viewOffset: 32,
@@ -621,7 +702,7 @@ describe('performTranscriptViewportCommand', () => {
     describe('restore-distance — web', () => {
         beforeEach(() => setPlatform('web'));
 
-        it('preserve-live-tail-distance derives the web scrollTop target inside the web driver', () => {
+        it('preserve-live-tail-distance writes the live tail, never re-applying the captured drift', () => {
             const metrics = createFakeWebScrollMetrics({ scrollHeight: 2400, clientHeight: 500, scrollTop: 1495 });
             const bundle = buildDeps({ webMetrics: metrics });
             const result = performTranscriptViewportCommand(
@@ -635,14 +716,66 @@ describe('performTranscriptViewportCommand', () => {
                 bundle.deps,
             );
             expect(result).toBe(true);
-            // maxScrollTop (1900) - previously-held live-tail distance (10) = 1890.
-            expect(metrics.element.scrollTop).toBe(1890);
+            // The captured distance is a follow decision input, not a restore
+            // target: re-applying it drags a pinned viewport off the tail by the
+            // pre-write drift, and under per-frame streaming growth that loops
+            // into a ratchet (live capture 2026-07-21: 46→296px). A follow-bottom
+            // preserve lands on the live tail (maxScrollTop = 1900).
+            expect(metrics.element.scrollTop).toBe(1900);
             const write = lastWrite(bundle.recorded);
             expect(write.writer).toBe('web-dom-bottom');
             expect(write.reason).toBe('content-size-change');
             expect(write.mode).toBe('follow-bottom');
-            expect(write.targetOffsetY).toBe(1890);
-            expect(write.distanceFromBottom).toBe(10);
+            expect(write.targetOffsetY).toBe(1900);
+            expect(write.distanceFromBottom).toBe(0);
+        });
+
+        it('preserve-live-tail-distance defers to a live renderer-held end intent', () => {
+            // Same single-owner rule as pin-bottom: while the renderer holds the
+            // 'end' intent, its maintain/verify machinery owns tail follow, and a
+            // driver follow write is a second corrector reading a different
+            // scrollHeight snapshot (open-landing capture 2026-07-22).
+            const metrics = createFakeWebScrollMetrics({ scrollHeight: 2400, clientHeight: 500, scrollTop: 1495 });
+            const node = createFakeScrollNode();
+            (node as unknown as { hasLiveWebHold: (target: { kind: string }) => boolean }).hasLiveWebHold =
+                (target) => target.kind === 'end';
+            const bundle = buildDeps({ node, webMetrics: metrics });
+            const result = performTranscriptViewportCommand(
+                {
+                    kind: 'preserve-live-tail-distance',
+                    sessionId: BASE_SESSION,
+                    reason: 'content-size-change',
+                    mode: 'follow-bottom',
+                    previousDistanceFromLiveTailPx: 10,
+                },
+                bundle.deps,
+            );
+            expect(result).toBe(true);
+            expect(metrics.element.scrollTop).toBe(1495);
+            expect(bundle.recorded.filter((e) => e.type === 'scroll-write')).toHaveLength(0);
+        });
+
+        it('restore-distance at distance 0 defers to a live renderer-held end intent', () => {
+            // Distance 0 IS the live tail — the same single-owner rule as
+            // pin-bottom/preserve. Detached distances stay transaction-owned.
+            const metrics = createFakeWebScrollMetrics({ scrollHeight: 1000, clientHeight: 400, scrollTop: 100 });
+            const node = createFakeScrollNode();
+            (node as unknown as { hasLiveWebHold: (target: { kind: string }) => boolean }).hasLiveWebHold =
+                (target) => target.kind === 'end';
+            const bundle = buildDeps({ node, webMetrics: metrics });
+            const result = performTranscriptViewportCommand(
+                {
+                    kind: 'restore-distance',
+                    sessionId: BASE_SESSION,
+                    reason: 'entry-restore',
+                    mode: 'restore-distance',
+                    distanceFromLiveTailPx: 0,
+                },
+                bundle.deps,
+            );
+            expect(result).toBe(true);
+            expect(metrics.element.scrollTop).toBe(100);
+            expect(bundle.recorded.filter((e) => e.type === 'scroll-write')).toHaveLength(0);
         });
 
         it('restore-distance maps distance-from-live-tail to scrollTop via max - distance (non-legacy)', () => {
@@ -873,7 +1006,8 @@ describe('performTranscriptViewportCommand', () => {
         it('hot-tail target pins to web visual bottom (scrollHeight) instead of a cold index', () => {
             const metrics = createFakeWebScrollMetrics({ scrollHeight: 1000, clientHeight: 400, scrollTop: 0 });
             const node = createFakeScrollNode();
-            // coldCount 0 (degenerate/empty cold slice) → resolveWebColdListScrollTarget = pin_to_bottom.
+            // A degenerate/empty recycler target carries no fallback index, so the web
+            // driver preserves the compatibility behavior by landing at visual bottom.
             const bundle = buildDeps({
                 node,
                 webMetrics: metrics,
@@ -895,6 +1029,37 @@ describe('performTranscriptViewportCommand', () => {
             expect(metrics.element.scrollTop).toBe(600);
             expect(node.indexCalls).toHaveLength(0);
             expect(lastWrite(bundle.recorded).writer).toBe('web-dom-bottom');
+        });
+
+        it('tail-fallback restore defers to a live renderer-held end intent', () => {
+            // The entry-restore bottom fallback is a tail-targeting write like
+            // pin-bottom; during open it re-fires from the entry re-verify loop
+            // while the renderer already owns the tail (open-landing capture
+            // 2026-07-22) — defer under the same single-owner rule.
+            const metrics = createFakeWebScrollMetrics({ scrollHeight: 1000, clientHeight: 400, scrollTop: 0 });
+            const node = createFakeScrollNode();
+            (node as unknown as { hasLiveWebHold: (target: { kind: string }) => boolean }).hasLiveWebHold =
+                (target) => target.kind === 'end';
+            const bundle = buildDeps({
+                node,
+                webMetrics: metrics,
+                resolveRestoreAnchorIndex: () => 10,
+                shouldUseWebHotColdSplit: true,
+                coldItemCount: 0,
+            });
+            const result = performTranscriptViewportCommand(
+                {
+                    kind: 'restore-anchor',
+                    sessionId: BASE_SESSION,
+                    reason: 'entry-restore',
+                    mode: 'restore-anchor',
+                    target: { anchor: RESTORE_ANCHOR, itemOffsetPx: 0 },
+                },
+                bundle.deps,
+            );
+            expect(result).toBe(true);
+            expect(metrics.element.scrollTop).toBe(0);
+            expect(bundle.recorded.filter((e) => e.type === 'scroll-write')).toHaveLength(0);
         });
 
         it('cold restore target writes DOM scrollTop to the item anchor instead of RN-web scrollToIndex', () => {
@@ -940,16 +1105,18 @@ describe('performTranscriptViewportCommand', () => {
             expect(write.targetOffsetY).toBe(190);
         });
 
-        it('jump-to-seq reads the LIVE web hot/cold counts at command time (stale-closure guard)', () => {
-            // Jump commands run inside long async flows (window materialization + landing
-            // settle); a captured split flag/count remaps the write into the wrong index space
-            // when the window re-slices mid-flight (live RG1/RG2 wrong-space class).
+        it('arms the renderer-owned entry anchor hold after a successful web restore-anchor write', () => {
+            // Live A->B->A RED (2026-07-11): the entry restore wrote an anchor-aligned offset
+            // against estimate-based geometry (contentHeight 25938), then giant-row
+            // measurements collapsed the content ~5x with no owner re-verifying the anchor —
+            // the browser clamped scrollTop and the restored row was lost near the tail.
+            // restore-visible-anchor already arms the renderer hold; restore-anchor must too.
             const node = createFakeScrollNode();
+            const holdWebEntryAnchor = vi.fn();
+            (node as unknown as { holdWebEntryAnchor: unknown }).holdWebEntryAnchor = holdWebEntryAnchor;
             const webMetrics = createFakeWebScrollMetrics({
-                anchors: [{ testId: 'transcript-item-row-4', top: 220, bottom: 320 }],
+                anchors: [{ testId: 'transcript-item-row-2', top: 220, bottom: 320 }],
                 scrollTop: 50,
-                scrollHeight: 1600,
-                clientHeight: 400,
             });
             const bundle = buildDeps({
                 node,
@@ -961,18 +1128,68 @@ describe('performTranscriptViewportCommand', () => {
                     { id: 'row-3' },
                     { id: 'row-4' },
                 ],
-                shouldUseWebHotColdSplit: false,
-                coldItemCount: 0,
-                resolveJumpToSeqIndex: () => 6,
+                shouldUseWebHotColdSplit: true,
+                coldItemCount: 5,
+                resolveRestoreAnchorIndex: () => 2,
                 telemetryPlatform: 'web',
             });
-            // Split activates AFTER deps were built (mid-flight re-slice): full index 6 is a
-            // hot-tail row and must remap to the last cold row under the LIVE counts. With the
-            // stale captured counts (split inactive), index 6 has no listData row and the
-            // command dies as a wrong-space no-op.
-            (bundle.deps.webHotColdCountsRef as { current: { coldCount: number; hotCount: number } }).current = {
-                coldCount: 5,
-                hotCount: 2,
+            const result = performTranscriptViewportCommand(
+                {
+                    kind: 'restore-anchor',
+                    sessionId: BASE_SESSION,
+                    reason: 'entry-restore',
+                    mode: 'restore-anchor',
+                    target: { anchor: RESTORE_ANCHOR, itemOffsetPx: 80 },
+                },
+                bundle.deps,
+            );
+            expect(result).toBe(true);
+            expect(holdWebEntryAnchor).toHaveBeenCalledWith({
+                itemId: 'row-2',
+                itemOffsetPx: 80,
+                kind: 'message',
+                messageId: 'message-2',
+                reason: 'entry-restore',
+            });
+        });
+
+        it('jump-to-seq reads the live renderer-data projection at command time', () => {
+            // Jump commands run inside long async flows (window materialization + landing
+            // settle); a captured split flag/count remaps the write into the wrong index space
+            // when the window re-slices mid-flight (live RG1/RG2 wrong-space class).
+            const node = createFakeScrollNode();
+            const webMetrics = createFakeWebScrollMetrics({
+                anchors: [{ testId: 'transcript-item-row-4', top: 220, bottom: 320 }],
+                scrollTop: 50,
+                scrollHeight: 1600,
+                clientHeight: 400,
+            });
+            let currentTarget: Exclude<ReturnType<NonNullable<DepsOverrides['resolveRendererDataTarget']>>, null> = {
+                kind: 'data' as const,
+                index: 6,
+                itemId: 'row-6',
+            };
+            const bundle = buildDeps({
+                node,
+                webMetrics,
+                listData: [
+                    { id: 'row-0' },
+                    { id: 'row-1' },
+                    { id: 'row-2' },
+                    { id: 'row-3' },
+                    { id: 'row-4' },
+                ],
+                resolveRendererDataTarget: () => currentTarget,
+                telemetryPlatform: 'web',
+            });
+            // The projection changes after deps are built (mid-flight re-slice). The command
+            // must consume the current typed target rather than captured split counts.
+            currentTarget = {
+                kind: 'outside-data',
+                fallbackIndex: 4,
+                itemId: 'row-6',
+                reason: 'renderer-edge',
+                targetSeq: 331,
             };
             const result = performTranscriptViewportCommand(
                 {
@@ -1266,6 +1483,203 @@ describe('performTranscriptViewportCommand', () => {
             const write = lastWrite(bundle.recorded);
             expect(write.writer).toBe('web-dom-restore');
             expect(write.targetOffsetY).toBe(400);
+        });
+
+        it('jump-to-seq to an unloaded target revokes the renderer-held tail at dispatch', () => {
+            // Live capture 2026-07-23: jumping to a target outside the loaded window
+            // while pinned pages older content in for seconds with NO landing write;
+            // the surviving held-'end' re-pinned to the bottom through every prepend
+            // and the user ended at the tail instead of the jump target. The jump
+            // must revoke tail ownership at dispatch; the eventual landing arms the
+            // keyed hold as the new owner.
+            const node = createFakeScrollNode();
+            const releaseWebHeldIntent = vi.fn();
+            (node as unknown as { hasLiveWebHold: (target: { kind: string }) => boolean }).hasLiveWebHold =
+                (target) => target.kind === 'end';
+            (node as unknown as { releaseWebHeldIntent: typeof releaseWebHeldIntent }).releaseWebHeldIntent = releaseWebHeldIntent;
+            const bundle = buildDeps({
+                node,
+                webMetrics: createFakeWebScrollMetrics({ scrollHeight: 1000, clientHeight: 400, scrollTop: 600 }),
+                shouldUseWebHotColdSplit: true,
+                coldItemCount: 5,
+                resolveJumpToSeqIndex: () => null,
+            });
+            const result = performTranscriptViewportCommand(
+                {
+                    kind: 'jump-to-seq',
+                    sessionId: BASE_SESSION,
+                    reason: 'jump-to-seq',
+                    mode: 'jump-to-seq',
+                    seq: 999,
+                },
+                bundle.deps,
+            );
+            expect(result).toBe(false);
+            expect(releaseWebHeldIntent).toHaveBeenCalledTimes(1);
+        });
+
+        it('restore-anchor never revokes the renderer-held tail at dispatch', () => {
+            // Restores are transaction-owned landings, not user navigation: an entry
+            // restore racing a live pinned tail must not strip the tail owner.
+            const node = createFakeScrollNode();
+            const releaseWebHeldIntent = vi.fn();
+            (node as unknown as { hasLiveWebHold: (target: { kind: string }) => boolean }).hasLiveWebHold =
+                (target) => target.kind === 'end';
+            (node as unknown as { releaseWebHeldIntent: typeof releaseWebHeldIntent }).releaseWebHeldIntent = releaseWebHeldIntent;
+            const bundle = buildDeps({
+                node,
+                webMetrics: createFakeWebScrollMetrics({ scrollHeight: 1000, clientHeight: 400, scrollTop: 600 }),
+                shouldUseWebHotColdSplit: true,
+                coldItemCount: 0,
+                resolveRestoreAnchorIndex: () => 10,
+            });
+            performTranscriptViewportCommand(
+                {
+                    kind: 'restore-anchor',
+                    sessionId: BASE_SESSION,
+                    reason: 'entry-restore',
+                    mode: 'restore-anchor',
+                    target: { anchor: RESTORE_ANCHOR, itemOffsetPx: 0 },
+                },
+                bundle.deps,
+            );
+            expect(releaseWebHeldIntent).not.toHaveBeenCalled();
+        });
+
+        it('jump-to-seq hands landing ownership to the renderer by arming the target anchor hold', () => {
+            // Live capture 2026-07-22 (nav-rail jump while pinned): the jump wrote its
+            // target while the renderer kept its own held intent, and the two landing
+            // verifiers (renderer verifyLanding vs the jump re-verify loop) oscillated
+            // the viewport ±24px indefinitely. A jump command must take renderer
+            // ownership of its target exactly like pin-bottom takes the tail
+            // (scrollToEnd) and restore-anchor takes its anchor.
+            const node = createFakeScrollNode();
+            const holdWebEntryAnchor = vi.fn();
+            (node as unknown as { holdWebEntryAnchor: typeof holdWebEntryAnchor }).holdWebEntryAnchor = holdWebEntryAnchor;
+            const resolveJumpToSeqIndex = vi.fn(() => 3);
+            const bundle = buildDeps({
+                node,
+                webMetrics: createFakeWebScrollMetrics({
+                    anchors: [{ testId: 'transcript-item-row-3', top: 500, bottom: 620 }],
+                    scrollTop: 40,
+                }),
+                listData: [
+                    { id: 'row-0' },
+                    { id: 'row-1' },
+                    { id: 'row-2' },
+                    { id: 'row-3' },
+                    { id: 'row-4' },
+                ],
+                shouldUseWebHotColdSplit: true,
+                coldItemCount: 5,
+                resolveJumpToSeqIndex,
+            });
+            const result = performTranscriptViewportCommand(
+                {
+                    kind: 'jump-to-seq',
+                    sessionId: BASE_SESSION,
+                    reason: 'jump-to-seq',
+                    mode: 'jump-to-seq',
+                    seq: 42,
+                },
+                bundle.deps,
+            );
+            expect(result).toBe(true);
+            expect(holdWebEntryAnchor).toHaveBeenCalledWith({
+                itemId: 'row-3',
+                // item content-y (500 + 40) minus the landed target (400).
+                itemOffsetPx: 140,
+                kind: 'item',
+                messageId: null,
+                reason: 'jump-to-seq',
+            });
+        });
+
+        it('keeps an unmounted giant-tail jump in approach ownership until the exact target mounts', () => {
+            // Exact-current live A failure: the first early jump starts at the physical tail
+            // with only the giant final row mounted. Its measured-band extrapolation clamps
+            // the approach write to zero. That estimate-only approach is not a completed
+            // keyed landing: publishing an anchor here makes the next landing pass defer to
+            // a target hold whose row has never mounted, while the second user click succeeds
+            // only after the target window has settled.
+            const node = createFakeScrollNode();
+            const holdWebEntryAnchor = vi.fn();
+            (node as unknown as { holdWebEntryAnchor: typeof holdWebEntryAnchor }).holdWebEntryAnchor = holdWebEntryAnchor;
+            const listData = Array.from({ length: 46 }, (_, index) => ({ id: `row-${index}` }));
+            const bundle = buildDeps({
+                node,
+                webMetrics: createFakeWebScrollMetrics({
+                    anchors: [{
+                        testId: 'transcript-item-row-45',
+                        top: -28928,
+                        bottom: 382,
+                    }],
+                    scrollTop: 77778,
+                    scrollHeight: 78166,
+                    clientHeight: 388,
+                }),
+                listData,
+                telemetryPlatform: 'web',
+                resolveJumpToSeqIndex: () => 0,
+            });
+
+            const result = performTranscriptViewportCommand(
+                {
+                    kind: 'jump-to-seq',
+                    sessionId: BASE_SESSION,
+                    reason: 'jump-to-seq',
+                    mode: 'jump-to-seq',
+                    seq: 1,
+                    align: { kind: 'top-with-item-offset', itemOffsetPx: 24 },
+                },
+                bundle.deps,
+            );
+
+            expect(result).toBe(true);
+            expect(node.indexCalls).toEqual([{ index: 0, animated: false }]);
+            expect(bundle.webDomObservation.getState().observedScrollTop).toBe(0);
+            expect(holdWebEntryAnchor).not.toHaveBeenCalled();
+        });
+
+        it('jump-to-seq defers to a live renderer keyed hold for the same target instead of re-writing', () => {
+            // The post-landing re-verify loop re-issues jump-to-seq for seconds; once the
+            // renderer anchor hold owns the target, those re-writes must stand down or
+            // the two verifiers fight (same live capture as above).
+            const node = createFakeScrollNode();
+            (node as unknown as { hasLiveWebHold: (target: { kind: string; itemId?: string }) => boolean }).hasLiveWebHold =
+                (target) => target.kind === 'item' && target.itemId === 'row-3';
+            const resolveJumpToSeqIndex = vi.fn(() => 3);
+            const bundle = buildDeps({
+                node,
+                webMetrics: createFakeWebScrollMetrics({
+                    anchors: [{ testId: 'transcript-item-row-3', top: 500, bottom: 620 }],
+                    scrollTop: 40,
+                }),
+                listData: [
+                    { id: 'row-0' },
+                    { id: 'row-1' },
+                    { id: 'row-2' },
+                    { id: 'row-3' },
+                    { id: 'row-4' },
+                ],
+                shouldUseWebHotColdSplit: true,
+                coldItemCount: 5,
+                resolveJumpToSeqIndex,
+            });
+            const result = performTranscriptViewportCommand(
+                {
+                    kind: 'jump-to-seq',
+                    sessionId: BASE_SESSION,
+                    reason: 'jump-to-seq',
+                    mode: 'jump-to-seq',
+                    seq: 42,
+                },
+                bundle.deps,
+            );
+            expect(result).toBe(true);
+            // No write happened: the renderer hold owns the landing.
+            expect(bundle.webDomObservation.getState().observedScrollTop).not.toBe(400);
+            expect(bundle.recorded.filter((event) => event.type === 'scroll-write')).toHaveLength(0);
         });
 
         it('jump-to-seq cold target can align near the top for navigation user-turn jumps', () => {

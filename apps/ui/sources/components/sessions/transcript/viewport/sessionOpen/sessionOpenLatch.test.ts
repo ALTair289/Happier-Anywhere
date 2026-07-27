@@ -15,6 +15,7 @@ function armInput(overrides: Partial<SessionOpenLatchArmInput> = {}): SessionOpe
         shouldFollowBottom: entryKind === 'bottom',
         webInitialPinRetryDelaysMs: [50, 100],
         webInitialPinStabilizeMs: 250,
+        webOpenPhaseDeadlineDelayMs: 30_000,
         ...overrides,
     };
 }
@@ -57,6 +58,8 @@ describe('session open latch', () => {
         const latch = createSessionOpenLatch();
 
         latch.arm(armInput({ entryKind: 'jump', shouldFollowBottom: false }));
+        expect(latch.onJumpEntrySettled({ sessionId: 'session-a' })).toBe(true);
+        expect(latch.initialFillStatus()).toBe('done');
         const decision = latch.arm(armInput({
             entryKind: 'anchored',
             nowMs: 1_050,
@@ -76,6 +79,7 @@ describe('session open latch', () => {
         ]);
         expect(decision.phase).toBe('awaiting-data');
         expect(latch.disarmedReason()).toBeNull();
+        expect(latch.initialFillStatus()).toBe('idle');
     });
 
     it('disarms the positioning phase for route jump entries', () => {
@@ -96,8 +100,14 @@ describe('session open latch', () => {
 
         expect(arm.phase).toBe('disarmed');
         expect(latch.disarmedReason()).toBe('jump-entry');
+        expect(latch.initialFillStatus()).toBe('idle');
         expect(ready.effects.some((effect) => effect.type === 'request-initial-pin')).toBe(false);
         expect(ready.effects.some((effect) => effect.type === 'request-initial-fill')).toBe(false);
+        expect(latch.onJumpEntrySettled({ sessionId: 'stale-session' })).toBe(false);
+        expect(latch.initialFillStatus()).toBe('idle');
+        expect(latch.onJumpEntrySettled({ sessionId: 'session-a' })).toBe(true);
+        expect(latch.initialFillStatus()).toBe('done');
+        expect(latch.phase()).toBe('disarmed');
     });
 
     it('starts bottom positioning from host data/layout facts and schedules web retry deadlines without owning timers', () => {
@@ -302,6 +312,166 @@ describe('session open latch', () => {
         expect(latch.initialFillStatus()).toBe('done');
     });
 
+    it('completes the open (phase done) when a bottom entry is already scrollable at measured facts', () => {
+        // Monolith regression caught 2026-07-11 (SGM lane): the synchronous already-scrollable
+        // settle set initialFillStatus 'done' but left phase 'positioning', so the web
+        // initial-pin gate (phase() !== 'done') kept re-executing the bottom pin — a later
+        // followed-content growth was slammed to the EXACT bottom instead of preserving the
+        // user's small bottom distance. The synchronous settle must mirror
+        // onInitialFillSettled's phase transition.
+        const latch = createSessionOpenLatch();
+
+        latch.arm(armInput({
+            entryKind: 'bottom',
+            platform: 'web',
+            shouldFollowBottom: true,
+        }));
+        const ready = latch.onHostFacts({
+            contentHeight: 1_000,
+            hasEntrySliceWindow: false,
+            isLoaded: true,
+            isScrollable: true,
+            itemCount: 2,
+            layoutHeight: 100,
+            nowMs: 1_025,
+            sessionId: 'session-a',
+            userWantsPinned: true,
+        });
+
+        expect(latch.initialFillStatus()).toBe('done');
+        expect(ready.phase).toBe('done');
+        expect(latch.phase()).toBe('done');
+    });
+
+    it('routes an UNDERFILLED anchored entry through the fill duty instead of settling fill immediately (S-M)', () => {
+        // Live S-M (2026-07-11): a restored (anchored-entry) session whose displayable content
+        // is smaller than the viewport cannot scroll, so the scroll-triggered older-load can
+        // never arm — the user is stuck on a near-empty transcript even though older pages
+        // exist. The rework settled anchored fill 'done' unconditionally; underfilled anchored
+        // entries must run the same bounded fill-until-scrollable duty as bottom entries.
+        const latch = createSessionOpenLatch();
+
+        latch.arm(armInput({
+            entryKind: 'anchored',
+            platform: 'web',
+            shouldFollowBottom: false,
+        }));
+        const ready = latch.onHostFacts({
+            contentHeight: 80,
+            hasEntrySliceWindow: false,
+            isLoaded: true,
+            isScrollable: false,
+            itemCount: 1,
+            layoutHeight: 600,
+            nowMs: 1_025,
+            sessionId: 'session-a',
+            userWantsPinned: false,
+        });
+
+        expect(ready.effects.some((effect) => effect.type === 'request-initial-fill')).toBe(true);
+        expect(ready.effects.some((effect) => effect.type === 'request-entry-restore-attempt')).toBe(false);
+        expect(latch.initialFillStatus()).toBe('idle');
+
+        // The executor marks progress, loads older pages until scrollable/no-more, then settles:
+        // the anchored coordination (confirming + entry-restore attempt) happens exactly once,
+        // at fill settlement.
+        expect(latch.markInitialFillInProgress('session-a')).toBe(true);
+        const fill = latch.onInitialFillSettled({
+            nowMs: 1_030,
+            sessionId: 'session-a',
+        });
+        expect(fill.effects).toEqual([{ type: 'request-entry-restore-attempt' }]);
+        expect(fill.phase).toBe('confirming');
+    });
+
+    it('re-requests the anchored fill duty on later facts until the executor actually starts (S-M)', () => {
+        // The executor bails without marking progress when layout is not measured yet; the
+        // latch must keep requesting on subsequent facts instead of losing the duty.
+        const latch = createSessionOpenLatch();
+
+        latch.arm(armInput({
+            entryKind: 'anchored',
+            platform: 'web',
+            shouldFollowBottom: false,
+        }));
+        const first = latch.onHostFacts({
+            contentHeight: 80,
+            hasEntrySliceWindow: false,
+            isLoaded: true,
+            isScrollable: false,
+            itemCount: 1,
+            layoutHeight: 600,
+            nowMs: 1_025,
+            sessionId: 'session-a',
+            userWantsPinned: false,
+        });
+        const second = latch.onHostFacts({
+            contentHeight: 90,
+            hasEntrySliceWindow: false,
+            isLoaded: true,
+            isScrollable: false,
+            itemCount: 1,
+            layoutHeight: 600,
+            nowMs: 1_050,
+            sessionId: 'session-a',
+            userWantsPinned: false,
+        });
+
+        expect(first.effects.some((effect) => effect.type === 'request-initial-fill')).toBe(true);
+        expect(second.effects.some((effect) => effect.type === 'request-initial-fill')).toBe(true);
+
+        // Once the executor is in progress, the duty stops re-firing.
+        expect(latch.markInitialFillInProgress('session-a')).toBe(true);
+        const third = latch.onHostFacts({
+            contentHeight: 100,
+            hasEntrySliceWindow: false,
+            isLoaded: true,
+            isScrollable: false,
+            itemCount: 1,
+            layoutHeight: 600,
+            nowMs: 1_075,
+            sessionId: 'session-a',
+            userWantsPinned: false,
+        });
+        expect(third.effects.some((effect) => effect.type === 'request-initial-fill')).toBe(false);
+    });
+
+    it('expires the web open-phase authority at its deadline when fill settlement starves', () => {
+        // Live capture 2026-07-20 (web, heavy session): `initial-open` pin writes were
+        // still firing 60s after the open and fought user scrolling (72 writes during a
+        // 16-step upscroll). The initial fill's settlement never arrived (aborted or
+        // hung executor), the phase stayed 'positioning', and the host re-executed the
+        // open pin on every content tick. The open phase is a BOUNDED authority: it
+        // completes at its deadline even when settlement starves.
+        const latch = createSessionOpenLatch();
+        latch.arm(armInput({ webOpenPhaseDeadlineDelayMs: 5_000 }));
+        const facts = (nowMs: number) => latch.onHostFacts({
+            contentHeight: 4_000,
+            hasEntrySliceWindow: false,
+            isLoaded: true,
+            isScrollable: false,
+            itemCount: 20,
+            layoutHeight: 600,
+            nowMs,
+            sessionId: 'session-a',
+            userWantsPinned: true,
+        });
+
+        expect(facts(1_100).phase).toBe('positioning');
+        latch.markInitialFillInProgress('session-a');
+
+        // Settlement never arrives; before the deadline the authority stays open.
+        expect(facts(5_900).phase).toBe('positioning');
+
+        // At the deadline the open phase completes unconditionally: no further
+        // initial-open pin authority, and fill-gated consumers unblock.
+        const expired = facts(6_100);
+        expect(expired.phase).toBe('done');
+        expect(latch.initialFillStatus()).toBe('done');
+        expect(expired.effects).toEqual([]);
+        expect(facts(6_200).effects).toEqual([]);
+    });
+
     it('releases the native first-paint placeholder on its caller-clocked fallback deadline', () => {
         const latch = createSessionOpenLatch();
 
@@ -349,6 +519,85 @@ describe('session open latch', () => {
             sessionId: 'session-a',
             usesNativeFlashListBottomMaintenance: false,
         })).toBe(true);
+    });
+
+    it('holds the placeholder for a warm keep-alive entry while its restore transaction is pending (AUD live jiggle 2026-07-12)', () => {
+        // Live measured cascade on a warm same-session re-entry restoring a DETACHED
+        // position: blank transcript -> content pops at position A -> whole viewport
+        // shifts ~12-15px to position B 230ms later. Mechanism: the warm-instance
+        // suppression short-circuited ABOVE the open-restore hold, so the restore write
+        // and its post-measure correction ran in full view. A warm instance with an open
+        // entry-restore transaction and a pending initial-viewport observation must keep
+        // the placeholder until the restore settles (deadline-bounded like every other
+        // hold in this predicate).
+        const latch = createSessionOpenLatch();
+
+        latch.arm(armInput({
+            entryKind: 'anchored',
+            platform: 'native',
+            shouldFollowBottom: false,
+        }));
+
+        expect(latch.shouldShowNativeFirstPaintPlaceholder({
+            firstListPaintObserved: true,
+            hasOpenEntryRestoreTransaction: true,
+            isLoaded: true,
+            isWarmKeepAliveInstance: true,
+            itemCount: 120,
+            jumpToSeqActive: false,
+            lastPinOffsetForIntent: null,
+            nativeEntryRestorePaintReleased: false,
+            nativeInitialViewportPendingObservation: true,
+            nativeMountSettleDeadlineReached: false,
+            nativeMountSettleStable: false,
+            nativeViewportPaintObserved: false,
+            pinThresholdPx: 72,
+            sessionId: 'session-a',
+            usesNativeFlashListBottomMaintenance: false,
+        })).toBe(true);
+
+        // The settle deadline stays the bound: past it, the placeholder must not hang.
+        expect(latch.shouldShowNativeFirstPaintPlaceholder({
+            firstListPaintObserved: true,
+            hasOpenEntryRestoreTransaction: true,
+            isLoaded: true,
+            isWarmKeepAliveInstance: true,
+            itemCount: 120,
+            jumpToSeqActive: false,
+            lastPinOffsetForIntent: null,
+            nativeEntryRestorePaintReleased: false,
+            nativeInitialViewportPendingObservation: true,
+            nativeMountSettleDeadlineReached: true,
+            nativeMountSettleStable: false,
+            nativeViewportPaintObserved: false,
+            pinThresholdPx: 72,
+            sessionId: 'session-a',
+            usesNativeFlashListBottomMaintenance: false,
+        })).toBe(false);
+    });
+
+    it('keeps the instant warm reveal when no restore is pending', () => {
+        const latch = createSessionOpenLatch();
+
+        latch.arm(armInput({ platform: 'native' }));
+
+        expect(latch.shouldShowNativeFirstPaintPlaceholder({
+            firstListPaintObserved: true,
+            hasOpenEntryRestoreTransaction: false,
+            isLoaded: true,
+            isWarmKeepAliveInstance: true,
+            itemCount: 120,
+            jumpToSeqActive: false,
+            lastPinOffsetForIntent: 0,
+            nativeEntryRestorePaintReleased: false,
+            nativeInitialViewportPendingObservation: false,
+            nativeMountSettleDeadlineReached: false,
+            nativeMountSettleStable: false,
+            nativeViewportPaintObserved: false,
+            pinThresholdPx: 72,
+            sessionId: 'session-a',
+            usesNativeFlashListBottomMaintenance: false,
+        })).toBe(false);
     });
 
     it('releases the standard-space native first-paint placeholder on the fallback deadline', () => {

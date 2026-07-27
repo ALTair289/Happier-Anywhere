@@ -26,6 +26,7 @@ type ArmedState = Readonly<{
     webInitialPinRetryDelaysMs: readonly number[];
     webInitialPinRetryIndex: number;
     webInitialPinStabilizeMs: number;
+    webOpenPhaseDeadlineAtMs: number | null;
 }>;
 
 export type SessionOpenLatch = Readonly<{
@@ -40,6 +41,7 @@ export type SessionOpenLatch = Readonly<{
     markEntrySliceDegraded(sessionId: string): void;
     markInitialFillInProgress(sessionId: string): boolean;
     markNativeInitialViewportApplied(sessionId: string): Readonly<{ wasApplied: boolean }>;
+    onJumpEntrySettled(input: Readonly<{ sessionId: string }>): boolean;
     onHostFacts(facts: SessionOpenHostFacts): SessionOpenLatchDecision;
     onInitialFillSettled(input: SessionOpenInitialFillSettledInput): SessionOpenLatchDecision;
     onNativeFirstPaintFallbackDeadline(input: SessionOpenNativeFirstPaintFallbackInput): SessionOpenLatchDecision;
@@ -133,6 +135,9 @@ export function createSessionOpenLatch(): SessionOpenLatch {
                 webInitialPinRetryDelaysMs: input.webInitialPinRetryDelaysMs,
                 webInitialPinRetryIndex: 0,
                 webInitialPinStabilizeMs: Math.max(0, Math.trunc(input.webInitialPinStabilizeMs)),
+                webOpenPhaseDeadlineAtMs: input.platform === 'web'
+                    ? input.nowMs + Math.max(0, Math.trunc(input.webOpenPhaseDeadlineDelayMs))
+                    : null,
             };
             disarmedReason = input.entryKind === 'jump' ? 'jump-entry' : null;
             phase = input.entryKind === 'jump' ? 'disarmed' : 'awaiting-data';
@@ -183,9 +188,33 @@ export function createSessionOpenLatch(): SessionOpenLatch {
             nativeInitialViewportAppliedSession = { sessionId, applied: true };
             return { wasApplied };
         },
+        onJumpEntrySettled(input) {
+            if (
+                !armed ||
+                armed.sessionId !== input.sessionId ||
+                armed.entryKind !== 'jump' ||
+                initialFillStatus !== 'idle'
+            ) {
+                return false;
+            }
+            initialFillStatus = 'done';
+            return true;
+        },
         onHostFacts(facts) {
             if (!armed || armed.sessionId !== facts.sessionId) return decision();
             if (phase === 'disarmed' || phase === 'done') return decision();
+            // Bounded open authority: past the web open-phase deadline the open is
+            // over, whatever state its fill/settlement machinery died in. Leaving any
+            // non-done phase live keeps the host re-executing the initial-open pin on
+            // every content tick, fighting the user (live capture 2026-07-20).
+            if (
+                armed.webOpenPhaseDeadlineAtMs !== null &&
+                facts.nowMs >= armed.webOpenPhaseDeadlineAtMs
+            ) {
+                initialFillStatus = 'done';
+                phase = 'done';
+                return decision();
+            }
             if (!facts.isLoaded || facts.itemCount <= 0) {
                 phase = 'awaiting-data';
                 return decision();
@@ -238,10 +267,14 @@ export function createSessionOpenLatch(): SessionOpenLatch {
             ) {
                 // Already scrollable at the first measured facts: there is nothing for the
                 // initial fill to do. Settle the status immediately so fill-gated consumers
-                // (older pagination's 'fill-not-done' suspension) unblock. Renderers that
-                // measure content synchronously (Legend web) hit this branch; renderers that
-                // measure late (FlashList) go through request-initial-fill above instead.
+                // (older pagination's 'fill-not-done' suspension) unblock, and complete the
+                // phase exactly like `onInitialFillSettled` would for a bottom entry —
+                // leaving the phase at 'positioning' kept the web initial-pin gate
+                // (phase() !== 'done') live, and later followed-content growth was slammed
+                // to the exact bottom by a re-executed initial pin (monolith regression,
+                // 2026-07-11).
                 initialFillStatus = 'done';
+                phase = 'done';
             }
 
             if (
@@ -249,9 +282,22 @@ export function createSessionOpenLatch(): SessionOpenLatch {
                 initialFillStatus === 'idle' &&
                 !facts.hasEntrySliceWindow
             ) {
-                initialFillStatus = 'done';
-                phase = 'confirming';
-                effects.push({ type: 'request-entry-restore-attempt' });
+                if (!facts.isScrollable) {
+                    // S-M (2026-07-11): an UNDERFILLED anchored entry (displayable content
+                    // smaller than the viewport) cannot scroll, so the scroll-triggered
+                    // older-load can never arm and the user is stuck. Route it through the
+                    // same bounded fill-until-scrollable duty as bottom entries; the anchored
+                    // coordination (confirming + entry-restore attempt) happens at fill
+                    // settlement (`onInitialFillSettled`). The effect intentionally re-fires
+                    // on every facts tick until the executor marks progress: the executor
+                    // bails without marking when layout is unmeasured, and it is idempotent
+                    // through `markInitialFillInProgress`.
+                    effects.push({ type: 'request-initial-fill' });
+                } else {
+                    initialFillStatus = 'done';
+                    phase = 'confirming';
+                    effects.push({ type: 'request-entry-restore-attempt' });
+                }
             }
 
             return decision(effects);
@@ -287,7 +333,6 @@ export function createSessionOpenLatch(): SessionOpenLatch {
                 typeof input.lastPinOffsetForIntent === 'number' &&
                 Number.isFinite(input.lastPinOffsetForIntent) &&
                 input.lastPinOffsetForIntent > input.pinThresholdPx;
-            if (input.isWarmKeepAliveInstance && !warmFirstPaintDistanceAppearsOffBottom) return false;
 
             const holdForMountSettle =
                 followsBottom &&
@@ -297,6 +342,18 @@ export function createSessionOpenLatch(): SessionOpenLatch {
                 !input.nativeMountSettleDeadlineReached &&
                 input.nativeInitialViewportPendingObservation &&
                 (followsBottom || input.hasOpenEntryRestoreTransaction);
+            // A warm keep-alive instance reveals instantly ONLY when no restore is
+            // pending: a warm re-entry restoring a detached position still runs the full
+            // entry-restore write + post-measure correction, and suppressing the
+            // placeholder here exposed that sequence on screen (live measured cascade
+            // 2026-07-12: blank -> content at position A -> whole-viewport shift to B
+            // ~230ms later). The pending-viewport hold below is deadline-bounded by the
+            // mount-settle deadline, so this can never hang the reveal.
+            if (
+                input.isWarmKeepAliveInstance &&
+                !warmFirstPaintDistanceAppearsOffBottom &&
+                !holdForPendingViewport
+            ) return false;
             return !input.nativeViewportPaintObserved &&
                 !input.nativeEntryRestorePaintReleased &&
                 (
