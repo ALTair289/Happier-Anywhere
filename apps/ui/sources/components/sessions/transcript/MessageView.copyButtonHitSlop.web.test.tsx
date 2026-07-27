@@ -117,7 +117,11 @@ describe('MessageView (copy button hitSlop, web)', () => {
         expect(secondSelect).not.toBeNull();
         expect(secondSelect!.props.accessibilityRole).toBe('checkbox');
         expect(secondSelect!.props.accessibilityState).toEqual({ checked: false });
-        expect(screen.findByTestId('transcript-message-actions:m2')?.props.accessibilityElementsHidden).toBe(false);
+        const secondActionsOpacity = (screen.findByTestId('transcript-message-actions:m2')?.props.style as unknown[])
+            .flat(Infinity)
+            .map((entry) => (entry as { opacity?: { __getValue?: () => number } } | null)?.opacity)
+            .find((opacity) => typeof opacity?.__getValue === 'function');
+        expect(secondActionsOpacity?.__getValue?.()).toBe(1);
     });
 
     it('does not use hitSlop on web (avoids overlapping hit targets for sibling actions)', async () => {

@@ -88,7 +88,8 @@ vi.mock('@/components/tools/shell/views/ToolTimelineRow', () => ({
 }));
 
 vi.mock('@/components/sessions/transcript/messageCopyVisibility', () => ({
-    shouldShowMessageCopyButton: () => false,
+    shouldShowTranscriptRowActions: () => false,
+    shouldShowTranscriptRowPinAction: () => false,
 }));
 
 vi.mock('@/sync/sync', () => ({

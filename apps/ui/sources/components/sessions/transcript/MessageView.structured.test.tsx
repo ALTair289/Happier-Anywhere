@@ -1,12 +1,16 @@
 import React from 'react';
-import { act } from 'react-test-renderer';
+import renderer, { act } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPartialStorageModuleMock, renderScreen, standardCleanup } from '@/dev/testkit';
 import { createReducer } from '@/sync/reducer/reducer';
+import { deriveTranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 import { installMessageViewCommonModuleMocks } from './messageViewTestHelpers';
 
 const pathnameState = vi.hoisted(() => ({
     pathname: '/session/s1',
+}));
+const structuredRouterState = vi.hoisted(() => ({
+    push: vi.fn(),
 }));
 
 installMessageViewCommonModuleMocks({
@@ -24,14 +28,21 @@ installMessageViewCommonModuleMocks({
             Animated: {
                 Value: class AnimatedValue {
                     constructor(public _value: number) {}
+                    setValue(value: number) {
+                        this._value = value;
+                    }
+                    __getValue() {
+                        return this._value;
+                    }
                     interpolate() {
                         return this as any;
                     }
                 },
                 timing: (_value: any, _config: any) => ({
                     start: (cb?: any) => {
-                        cb?.();
+                        cb?.({ finished: true });
                     },
+                    stop: () => {},
                 }),
                 View: ({ children, ...props }: any) => React.createElement('AnimatedView', props, children),
             },
@@ -81,11 +92,11 @@ installMessageViewCommonModuleMocks({
         const { createExpoRouterMock } = await import('@/dev/testkit/mocks/router');
         const routerMock = createExpoRouterMock({
             pathname: () => pathnameState.pathname,
-            router: { push: routerPushSpy },
+            router: { push: structuredRouterState.push },
         });
         return {
             ...routerMock.module,
-            useRouter: () => ({ ...routerMock.state.router }),
+            useRouter: () => ({ push: structuredRouterState.push }),
         };
     },
     storage: async (importOriginal) =>
@@ -117,7 +128,8 @@ vi.mock('@/components/tools/shell/views/ToolTimelineRow', () => ({
 }));
 
 vi.mock('@/components/sessions/transcript/messageCopyVisibility', () => ({
-    shouldShowMessageCopyButton: () => false,
+    shouldShowTranscriptRowActions: () => false,
+    shouldShowTranscriptRowPinAction: () => false,
 }));
 
 const modalShowSpy = vi.fn();
@@ -188,6 +200,8 @@ let filesImagePreviewMaxBytes: number | null = null;
 let toolViewTimelineChromeMode: 'activity_feed' | 'cards' | null = null;
 
 afterEach(() => {
+    structuredRouterState.push = routerPushSpy;
+    routerPushSpy.mockReset();
     pathnameState.pathname = '/session/s1';
     thinkingDisplayMode = 'inline';
     thinkingInlinePresentation = 'full';
@@ -200,7 +214,94 @@ vi.mock('@/utils/sessions/discardedCommittedMessages', () => ({
     isCommittedMessageDiscarded: () => false,
 }));
 
-const routerPushSpy = vi.fn();
+const routerPushSpy = structuredRouterState.push;
+const sessionInteraction = deriveTranscriptInteraction({
+    kind: 'session',
+    accessLevel: null,
+    canApprovePermissions: true,
+    isSessionActive: true,
+});
+const publicInteraction = deriveTranscriptInteraction({ kind: 'public' });
+const viewOnlyInteraction = deriveTranscriptInteraction({
+    kind: 'session',
+    accessLevel: 'view',
+    canApprovePermissions: false,
+    isSessionActive: true,
+});
+
+function createStructuredToolMessage(
+    kind: 'plan_output.v1' | 'review_findings.v1' | 'review_findings.v2',
+    payload: Record<string, unknown>,
+) {
+    return {
+        kind: 'tool-call',
+        id: `msg-${kind}`,
+        localId: null,
+        createdAt: 1,
+        tool: {
+            id: `call-${kind}`,
+            name: 'SubAgentRun',
+            state: 'completed',
+            input: {},
+            createdAt: 1,
+            startedAt: 1,
+            completedAt: 2,
+            description: null,
+            result: { ok: true },
+        },
+        children: [],
+        meta: {
+            happier: {
+                kind,
+                payload,
+            },
+        },
+    };
+}
+
+function createPlanOutputMessage() {
+    return createStructuredToolMessage('plan_output.v1', {
+        runRef: { runId: 'run-plan', callId: 'call-plan', backendId: 'b1' },
+        summary: 'Plan summary.',
+        sections: [{ title: 'Approach', items: ['Step 1'] }],
+        risks: [],
+        milestones: [],
+        generatedAtMs: 1,
+    });
+}
+
+function createReviewFindingsMessage(kind: 'review_findings.v1' | 'review_findings.v2') {
+    return createStructuredToolMessage(kind, {
+        runRef: {
+            runId: `run-${kind}`,
+            callId: `call-${kind}`,
+            backendId: 'b1',
+            retentionPolicy: 'resumable',
+        },
+        summary: 'Review summary.',
+        ...(kind === 'review_findings.v2'
+            ? {
+                overviewMarkdown: '## Overview\n\nReview summary.',
+                questions: [],
+                assumptions: [],
+            }
+            : {}),
+        findings: [{
+            id: 'f1',
+            title: 'Nit',
+            severity: 'nit',
+            category: 'style',
+            filePath: 'src/foo.ts',
+            startLine: 1,
+            endLine: 1,
+            summary: 'Consider renaming.',
+        }],
+        triage: {
+            findings: [{ id: 'f1', status: 'accept' }],
+        },
+        generatedAtMs: 1,
+    });
+}
 
 describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
     it('renders a structured review-comments card when meta.happier.kind is review_comments.v1', async () => {
@@ -232,7 +333,6 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
                 },
             },
         };
-
         const screen = await renderScreen(
             <MessageView
                 message={message}
@@ -281,6 +381,7 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
                 message={message}
                 metadata={null}
                 sessionId="s1"
+                interaction={sessionInteraction}
             />
         );
         const screen = await renderScreen(renderMessage());
@@ -292,6 +393,97 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
 
         const secondJumpHandler = screen.tree.root.findByType(ReviewCommentsMessageCard as any).props.onJumpToAnchor;
         expect(secondJumpHandler).toBe(firstJumpHandler);
+    });
+
+    it('keeps the committed router authoritative through an abandoned same-session structured-row render', async () => {
+        const { MessageView } = await import('./MessageView');
+        const { ReviewCommentsMessageCard } = await import('../reviews/messages/ReviewCommentsMessageCard');
+        const routerA = vi.fn();
+        const routerB = vi.fn();
+        const neverSettles = new Promise<never>(() => {});
+        const message: any = {
+            kind: 'user-text',
+            id: 'm-review-comments',
+            localId: 'local-1',
+            text: 'review prompt',
+            displayText: 'Review comments (1)',
+            meta: {
+                happier: {
+                    kind: 'review_comments.v1',
+                    payload: {
+                        sessionId: 's1',
+                        comments: [{
+                            id: 'c1',
+                            filePath: 'src/foo.ts',
+                            source: 'file',
+                            body: 'Please refactor',
+                            createdAt: 1,
+                            anchor: { kind: 'fileLine', startLine: 12 },
+                            snapshot: { selectedLines: ['const x = 1;'], beforeContext: [], afterContext: [] },
+                        }],
+                    },
+                },
+            },
+        };
+        const updatedMessage = {
+            ...message,
+            displayText: 'Review comments (updated)',
+        };
+        const SuspendAfterRow = (props: Readonly<{ shouldSuspend: boolean }>) => {
+            if (props.shouldSuspend) throw neverSettles;
+            return null;
+        };
+        const renderMessage = (messageValue: typeof message, shouldSuspend = false) => (
+            <React.Suspense fallback={null}>
+                <MessageView
+                    message={messageValue}
+                    metadata={null}
+                    sessionId="s1"
+                    interaction={sessionInteraction}
+                />
+                <SuspendAfterRow shouldSuspend={shouldSuspend} />
+            </React.Suspense>
+        );
+        let tree!: renderer.ReactTestRenderer;
+
+        structuredRouterState.push = routerA;
+        await act(async () => {
+            tree = renderer.create(renderMessage(message), {
+                unstable_isConcurrent: true,
+            } as unknown as renderer.TestRendererOptions);
+        });
+        const committedAJump = tree.root.findByType(ReviewCommentsMessageCard as any).props.onJumpToAnchor;
+
+        structuredRouterState.push = routerB;
+        await act(async () => {
+            React.startTransition(() => {
+                tree.update(renderMessage(updatedMessage, true));
+            });
+            await Promise.resolve();
+        });
+
+        committedAJump({
+            filePath: 'src/foo.ts',
+            source: 'file',
+            anchor: { kind: 'fileLine', startLine: 12 },
+        });
+        expect(routerA).toHaveBeenCalledTimes(1);
+        expect(routerB).not.toHaveBeenCalled();
+
+        await act(async () => {
+            tree.update(renderMessage(updatedMessage));
+        });
+        const committedBJump = tree.root.findByType(ReviewCommentsMessageCard as any).props.onJumpToAnchor;
+        committedBJump({
+            filePath: 'src/foo.ts',
+            source: 'file',
+            anchor: { kind: 'fileLine', startLine: 12 },
+        });
+        expect(routerB).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            tree.unmount();
+        });
     });
 
     it('does not render the MarkdownView for structured user messages', async () => {
@@ -323,7 +515,14 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
             },
         };
 
-        const screen = await renderScreen(<MessageView message={message} metadata={null} sessionId="s1" />);
+        const screen = await renderScreen(
+            <MessageView
+                message={message}
+                metadata={null}
+                sessionId="s1"
+                interaction={sessionInteraction}
+            />,
+        );
 
         expect(screen.findAllByType('MarkdownView' as any)).toHaveLength(0);
     });
@@ -357,7 +556,14 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
             },
         };
 
-        const screen = await renderScreen(<MessageView message={message} metadata={null} sessionId="s1" />);
+        const screen = await renderScreen(
+            <MessageView
+                message={message}
+                metadata={null}
+                sessionId="s1"
+                interaction={sessionInteraction}
+            />,
+        );
 
         const bubbleViews = screen.findAll((node) => {
             if ((node as any).type !== 'View') return false;
@@ -430,7 +636,7 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
                                 path,
                                 mimeType: 'image/png',
                                 sizeBytes: 10,
-                                sha256: 'media-hash-1',
+                                sha256: 'a'.repeat(64),
                                 origin: { source: 'provider-generated', agentId: 'codex' },
                             },
                         ],
@@ -474,7 +680,7 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
                                 path,
                                 mimeType: 'image/webp',
                                 sizeBytes: 20,
-                                sha256: 'media-hash-2',
+                                sha256: 'b'.repeat(64),
                                 origin: { source: 'provider-generated', generationId: 'generation-2' },
                             },
                         ],
@@ -526,6 +732,39 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
 
         expect(screen.findByTestId('message-session-media-inline-images')).not.toBeNull();
         expect(screen.findByTestId(`message-session-media-inline-image:${path}`)).not.toBeNull();
+    });
+
+    it('renders a durable unavailable-media state without a clickable fake image', async () => {
+        const { MessageView } = await import('./MessageView');
+        const message: any = {
+            kind: 'agent-text',
+            id: 'agent-media-unavailable',
+            localId: null,
+            createdAt: 1,
+            text: '',
+            isThinking: false,
+            meta: {
+                happier: {
+                    kind: 'session_media.v1',
+                    payload: {
+                        media: [],
+                        unavailable: [{
+                            id: 'd'.repeat(64),
+                            role: 'output',
+                            category: 'generated',
+                            mediaKind: 'image',
+                            code: 'provider_file_unavailable',
+                            origin: { source: 'provider-generated' },
+                        }],
+                    },
+                },
+            },
+        };
+
+        const screen = await renderScreen(<MessageView message={message} metadata={null} sessionId="s1" />);
+
+        expect(screen.findByTestId('message-session-media-unavailable')).not.toBeNull();
+        expect(screen.findAllByTestId('message-session-media-inline-images')).toHaveLength(0);
     });
 
     it('renders attachments for structured review-comment messages that carry attachment metadata', async () => {
@@ -721,7 +960,14 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
         modalShowSpy.mockClear();
         routerPushSpy.mockClear();
 
-        const screen = await renderScreen(<MessageView message={message} metadata={null} sessionId="s1" />);
+        const screen = await renderScreen(
+            <MessageView
+                message={message}
+                metadata={null}
+                sessionId="s1"
+                interaction={sessionInteraction}
+            />,
+        );
 
         await screen.pressByTestIdAsync(`message-session-media-inline-image:${firstPath}`);
 
@@ -773,12 +1019,59 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
 
         routerPushSpy.mockClear();
 
-        const screen = await renderScreen(<MessageView message={message} metadata={null} sessionId="s1" />);
+        const screen = await renderScreen(
+            <MessageView
+                message={message}
+                metadata={null}
+                sessionId="s1"
+                interaction={sessionInteraction}
+            />,
+        );
 
         expect(screen.findByTestId('review-comments-jump:c1')).not.toBeNull();
         await screen.pressByTestIdAsync('review-comments-jump:c1');
 
         expect(routerPushSpy).toHaveBeenCalledWith('/session/s1/file?path=src%2Ffoo.ts&source=file&anchor=fileLine&startLine=12');
+    });
+
+    it('keeps structured public file actions inert when file access is not granted', async () => {
+        const { MessageView } = await import('./MessageView');
+        const message: any = {
+            kind: 'user-text',
+            localId: 'local-public-review',
+            text: 'review prompt',
+            displayText: 'Review comments (1)',
+            meta: {
+                happier: {
+                    kind: 'review_comments.v1',
+                    payload: {
+                        sessionId: 's1',
+                        comments: [{
+                            id: 'public-comment',
+                            filePath: 'src/private.ts',
+                            source: 'file',
+                            body: 'Public metadata',
+                            createdAt: 1,
+                            anchor: { kind: 'fileLine', startLine: 4 },
+                            snapshot: { selectedLines: ['secret'], beforeContext: [], afterContext: [] },
+                        }],
+                    },
+                },
+            },
+        };
+
+        routerPushSpy.mockClear();
+        const screen = await renderScreen(
+            <MessageView
+                message={message}
+                metadata={null}
+                sessionId="s1"
+                interaction={publicInteraction}
+            />,
+        );
+
+        expect(screen.findByTestId('review-comments-jump:public-comment')).toBeNull();
+        expect(routerPushSpy).not.toHaveBeenCalled();
     });
 
     it('renders a structured review-findings card for tool-call messages when meta.happier.kind is review_findings.v1', async () => {
@@ -1004,7 +1297,14 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
             },
         };
 
-        const screen = await renderScreen(<MessageView message={message} metadata={null} sessionId="s1" />);
+        const screen = await renderScreen(
+            <MessageView
+                message={message}
+                metadata={null}
+                sessionId="s1"
+                interaction={sessionInteraction}
+            />,
+        );
 
         expect(screen.findByTestId('adopt-plan-button')).not.toBeNull();
         await screen.pressByTestIdAsync('adopt-plan-button');
@@ -1062,7 +1362,14 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
             },
         };
 
-        const screen = await renderScreen(<MessageView message={message} metadata={null} sessionId="s1" />);
+        const screen = await renderScreen(
+            <MessageView
+                message={message}
+                metadata={null}
+                sessionId="s1"
+                interaction={sessionInteraction}
+            />,
+        );
         expect(screen.findByTestId('review-findings-header:f1')).not.toBeNull();
         await screen.pressByTestIdAsync('review-findings-header:f1');
 
@@ -1082,6 +1389,65 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
                 }),
             },
         });
+    });
+
+    it.each([
+        ['public', publicInteraction],
+        ['authenticated view-only', viewOnlyInteraction],
+    ] as const)('keeps plan adoption unavailable in %s transcripts', async (_surface, interaction) => {
+        submitMessageSpy.mockClear();
+        const { MessageView } = await import('./MessageView');
+
+        const screen = await renderScreen(
+            <MessageView
+                message={createPlanOutputMessage() as any}
+                metadata={null}
+                sessionId="s1"
+                interaction={interaction}
+            />,
+        );
+        const adopt = screen.findByTestId('adopt-plan-button');
+        if (adopt) {
+            await act(async () => {
+                await adopt.props.onPress?.();
+            });
+        }
+
+        expect(adopt).toBeNull();
+        expect(submitMessageSpy).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['public', publicInteraction],
+        ['authenticated view-only', viewOnlyInteraction],
+    ] as const)('keeps review v1/v2 mutations unavailable in %s transcripts', async (_surface, interaction) => {
+        submitMessageSpy.mockClear();
+        const { MessageView } = await import('./MessageView');
+
+        for (const kind of ['review_findings.v1', 'review_findings.v2'] as const) {
+            const screen = await renderScreen(
+                <MessageView
+                    message={createReviewFindingsMessage(kind) as any}
+                    metadata={null}
+                    sessionId="s1"
+                    interaction={interaction}
+                />,
+            );
+            await screen.pressByTestIdAsync('review-findings-header:f1');
+
+            const publishAccepted = screen.findByTestId('review-findings-publish-accepted');
+            if (publishAccepted) {
+                await act(async () => {
+                    await publishAccepted.props.onPress?.();
+                });
+            }
+
+            expect(screen.findByTestId('review-findings-apply-triage')).toBeNull();
+            expect(publishAccepted).toBeNull();
+            expect(screen.getTextContent()).not.toContain('session.reviewFindings.actions.askReviewer');
+        }
+
+        expect(submitMessageSpy).not.toHaveBeenCalled();
     });
 
     it('renders a thinking label for agent thinking messages and passes markdown through unchanged', async () => {
@@ -1193,5 +1559,27 @@ describe('MessageView (structured meta)', { timeout: 60_000 }, () => {
 
         expect(screen.findAllByType('MarkdownView' as any)).toHaveLength(0);
         expect(screen.findAllByType('ToolView' as any)).toHaveLength(0);
+    });
+
+    it('renders a translated accessible recovered-history indicator with source time', async () => {
+        const { MessageView } = await import('./MessageView');
+        const message: any = {
+            id: 'history-message',
+            kind: 'agent-text',
+            localId: null,
+            createdAt: 9_000,
+            sourceCreatedAt: 1_000,
+            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+            text: 'Recovered output',
+        };
+
+        const screen = await renderScreen(<MessageView message={message} metadata={null} sessionId="s1" />);
+        const indicator = screen.findByTestId('transcript-recovered-history:history-message');
+
+        expect(indicator).not.toBeNull();
+        expect(indicator?.props.accessibilityRole).toBe('text');
+        expect(indicator?.props.accessibilityLabel).toContain('message.recoveredHistory');
+        expect(String(indicator?.props.children)).toContain('message.recoveredHistory');
+        expect(String(indicator?.props.children)).not.toBe('message.recoveredHistory');
     });
 });

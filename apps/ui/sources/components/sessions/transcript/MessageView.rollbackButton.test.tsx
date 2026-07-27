@@ -74,7 +74,8 @@ vi.mock('@/components/markdown/MarkdownView', () => ({
 }));
 
 vi.mock('@/components/sessions/transcript/messageCopyVisibility', () => ({
-    shouldShowMessageCopyButton: () => true,
+    shouldShowTranscriptRowActions: () => true,
+    shouldShowTranscriptRowPinAction: () => true,
 }));
 
 vi.mock('@/components/sessions/transcript/structured/StructuredMessageBlock', () => ({

@@ -1,6 +1,6 @@
 import { flushHookEffects } from '@/dev/testkit/hooks/flushHookEffects';
 import React from 'react';
-import { act } from 'react-test-renderer';
+import renderer, { act } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { renderScreen, standardCleanup } from '@/dev/testkit';
@@ -167,7 +167,8 @@ vi.mock('@/components/markdown/MarkdownView', () => ({
 }));
 
 vi.mock('@/components/sessions/transcript/messageCopyVisibility', () => ({
-  shouldShowMessageCopyButton: () => copyButtonsVisible,
+  shouldShowTranscriptRowActions: () => copyButtonsVisible,
+  shouldShowTranscriptRowPinAction: () => copyButtonsVisible,
 }));
 
 vi.mock('@/sync/ops', () => ({
@@ -270,9 +271,9 @@ describe('MessageView (fork button)', () => {
     const actionContainer = getActionContainer(screen, 'm1');
     expect(actionContainer.props.pointerEvents).toBeUndefined();
 
-    const style = actionContainer.props.style;
-    const flattened = flattenStyleProp(style);
-    expect(flattened.pointerEvents).toBe('none');
+    // The row itself never captures pointer input; the hidden slot is what blocks clicks.
+    expect(flattenStyleProp(actionContainer.props.style).pointerEvents).toBe('box-none');
+    expect(flattenStyleProp(screen.findByTestId('transcript-message-actions:m1')?.props.style).pointerEvents).toBe('none');
   });
 
   it('does not pass pointerEvents prop on web transcript row containers', async () => {
@@ -298,10 +299,10 @@ describe('MessageView (fork button)', () => {
     const actionContainer = getActionContainer(screen, 'm1');
     expect(actionContainer.props.pointerEvents).toBeUndefined();
 
-    const style = actionContainer.props.style;
-    const flattened = flattenStyleProp(style);
-    expect(flattened.pointerEvents).toBe('auto');
+    const flattened = flattenStyleProp(actionContainer.props.style);
+    expect(flattened.pointerEvents).toBe('box-none');
     expect(flattened.zIndex).toBeUndefined();
+    expect(flattenStyleProp(screen.findByTestId('transcript-message-actions:m1')?.props.style).pointerEvents).toBe('auto');
   });
 
   it('renders fork button left of copy when replay is enabled and message has seq', async () => {
@@ -385,6 +386,96 @@ describe('MessageView (fork button)', () => {
       await stalePress();
     });
     expect(forkSessionSpy).not.toHaveBeenCalled();
+  });
+
+  it('renders the newly granted fork action in the first committed same-session render', async () => {
+    const { MessageView } = await import('./MessageView');
+    const message: any = { kind: 'agent-text', id: 'm1', createdAt: 1, text: 'hi', isThinking: false, seq: 5 };
+    const deniedInteraction = {
+      canSendMessages: false,
+      canApprovePermissions: false,
+      canFork: false,
+      permissionDisabledReason: 'public',
+      disableToolNavigation: true,
+    } as const;
+    const allowedInteraction = {
+      canSendMessages: true,
+      canApprovePermissions: true,
+      canFork: true,
+    } as const;
+    const screen = await renderScreen(
+      <MessageView message={message} metadata={null} sessionId="s1" interaction={deniedInteraction} />,
+    );
+    expect(screen.findByTestId('transcript-message-fork:m1')).toBeNull();
+
+    await act(async () => {
+      screen.tree.update(
+        <MessageView message={message} metadata={null} sessionId="s1" interaction={allowedInteraction} />,
+      );
+    });
+    expect(screen.tree.root.findAll(
+      (node) => node.props?.testID === 'transcript-message-fork:m1' && typeof node.props?.onPress === 'function',
+    )).toHaveLength(1);
+  });
+
+  it('keeps the committed fork grant authoritative through an abandoned same-session denied render', async () => {
+    forkSessionSpy.mockResolvedValue({ ok: false, errorMessage: 'expected test stop' });
+    const { MessageView } = await import('./MessageView');
+    const message: any = { kind: 'agent-text', id: 'm1', createdAt: 1, text: 'hi', isThinking: false, seq: 5 };
+    const allowedInteraction = {
+      canSendMessages: true,
+      canApprovePermissions: true,
+      canFork: true,
+    } as const;
+    const deniedInteraction = {
+      canSendMessages: false,
+      canApprovePermissions: false,
+      canFork: false,
+      permissionDisabledReason: 'public',
+      disableToolNavigation: true,
+    } as const;
+    const neverSettles = new Promise<never>(() => {});
+    const SuspendAfterRow = (props: Readonly<{ shouldSuspend: boolean }>) => {
+      if (props.shouldSuspend) throw neverSettles;
+      return null;
+    };
+    const renderMessage = (interaction: typeof allowedInteraction | typeof deniedInteraction, shouldSuspend = false) => (
+      <React.Suspense fallback={null}>
+        <MessageView message={message} metadata={null} sessionId="s1" interaction={interaction} />
+        <SuspendAfterRow shouldSuspend={shouldSuspend} />
+      </React.Suspense>
+    );
+    let tree!: renderer.ReactTestRenderer;
+
+    await act(async () => {
+      tree = renderer.create(renderMessage(allowedInteraction), {
+        unstable_isConcurrent: true,
+      } as unknown as renderer.TestRendererOptions);
+    });
+    const stalePress = tree.root.find(
+      (node) => node.props?.testID === 'transcript-message-fork:m1' && typeof node.props?.onPress === 'function',
+    ).props.onPress;
+
+    await act(async () => {
+      React.startTransition(() => {
+        tree.update(renderMessage(deniedInteraction, true));
+      });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await stalePress();
+    });
+    expect(forkSessionSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      tree.update(renderMessage(deniedInteraction));
+    });
+    expect(tree.root.findAll((node) => node.props?.testID === 'transcript-message-fork:m1')).toHaveLength(0);
+
+    await act(async () => {
+      tree.unmount();
+    });
   });
 
   it('does not render fork button when message seq is 0 (uncommitted)', async () => {

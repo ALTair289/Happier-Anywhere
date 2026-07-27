@@ -1,23 +1,34 @@
 import type { PlatformOSType } from 'react-native';
 
-export type MessageActionVisibilityInput = {
+/**
+ * Canonical visibility policy for transcript row actions (copy / select / fork /
+ * rollback / pin). One owner for every surface that reveals a row action, so a
+ * single row cannot end up with two competing reveal rules.
+ *
+ * Fine-pointer web hides the actions until the row is hovered, an action is
+ * hovered, or keyboard focus enters the action group. Touch platforms and web
+ * hosts whose PRIMARY pointer is coarse have no hover, so the actions stay
+ * visible there.
+ */
+export type TranscriptRowActionVisibilityInput = Readonly<{
     platformOS: PlatformOSType;
-    isMessageHovered: boolean;
-    isCopyButtonHovered: boolean;
+    isRowHovered: boolean;
+    isActionHovered: boolean;
+    isRowFocused?: boolean;
+    coarsePrimaryPointer?: boolean;
     selectionModeActive?: boolean;
-};
+    /** Pinned rows keep their pin visible without revealing the rest of the row. */
+    pinned?: boolean;
+}>;
 
-function shouldShowHoveredMessageAction(input: MessageActionVisibilityInput): boolean {
+export function shouldShowTranscriptRowActions(input: TranscriptRowActionVisibilityInput): boolean {
     if (input.selectionModeActive === true) return true;
-    if (input.platformOS === 'ios' || input.platformOS === 'android') return true;
     if (input.platformOS !== 'web') return true;
-    return input.isMessageHovered || input.isCopyButtonHovered;
+    if (input.coarsePrimaryPointer === true) return true;
+    return input.isRowHovered || input.isActionHovered || input.isRowFocused === true;
 }
 
-export function shouldShowMessageCopyButton(input: MessageActionVisibilityInput): boolean {
-    return shouldShowHoveredMessageAction(input);
-}
-
-export function shouldShowMessageSelectButton(input: MessageActionVisibilityInput): boolean {
-    return shouldShowHoveredMessageAction(input);
+export function shouldShowTranscriptRowPinAction(input: TranscriptRowActionVisibilityInput): boolean {
+    if (input.pinned === true) return true;
+    return shouldShowTranscriptRowActions(input);
 }

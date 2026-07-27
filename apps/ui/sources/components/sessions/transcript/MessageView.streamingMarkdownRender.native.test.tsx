@@ -76,7 +76,10 @@ vi.mock('@/components/sessions/transcript/structured/StructuredMessageBlock', ()
     renderStructuredMessage: () => null,
     StructuredMessageBlock: () => React.createElement('StructuredMessageBlock'),
 }));
-vi.mock('@/components/sessions/transcript/messageCopyVisibility', () => ({ shouldShowMessageCopyButton: () => false }));
+vi.mock('@/components/sessions/transcript/messageCopyVisibility', () => ({
+    shouldShowTranscriptRowActions: () => false,
+    shouldShowTranscriptRowPinAction: () => false,
+}));
 vi.mock('@/hooks/server/useFeatureEnabled', () => ({ useFeatureEnabled: () => true }));
 vi.mock('@/utils/sessions/discardedCommittedMessages', () => ({ isCommittedMessageDiscarded: () => false }));
 vi.mock('@/utils/url/sessionFileDeepLink', () => ({ buildSessionFileDeepLink: () => '' }));
@@ -208,8 +211,10 @@ describe('MessageView native streaming Markdown render', () => {
             await screen.update(renderStreamingMessage(createAgentMessage('Hello **world**')));
         });
         await flushHookEffects({ cycles: 2, turns: 2 });
+        // The paced reveal trails appended text while input is active; advance
+        // past the hold-back window and settle drain so the tail is revealed.
         await act(async () => {
-            vi.advanceTimersByTime(250);
+            vi.advanceTimersByTime(2000);
         });
         await flushHookEffects({ cycles: 3, turns: 3 });
 

@@ -23,6 +23,12 @@ installMessageViewCommonModuleMocks({
             Animated: {
                 Value: class AnimatedValue {
                     constructor(public _value: number) {}
+                    setValue(value: number) {
+                        this._value = value;
+                    }
+                    __getValue() {
+                        return this._value;
+                    }
                     interpolate() {
                         return this as any;
                     }
@@ -95,7 +101,10 @@ vi.mock('@/components/sessions/transcript/structured/StructuredMessageBlock', ()
     renderStructuredMessage: () => null,
     StructuredMessageBlock: () => React.createElement('StructuredMessageBlock'),
 }));
-vi.mock('@/components/sessions/transcript/messageCopyVisibility', () => ({ shouldShowMessageCopyButton: () => false }));
+vi.mock('@/components/sessions/transcript/messageCopyVisibility', () => ({
+    shouldShowTranscriptRowActions: () => false,
+    shouldShowTranscriptRowPinAction: () => false,
+}));
 vi.mock('@/hooks/server/useFeatureEnabled', () => ({ useFeatureEnabled: () => true }));
 vi.mock('@/utils/sessions/discardedCommittedMessages', () => ({ isCommittedMessageDiscarded: () => false }));
 vi.mock('@/utils/url/sessionFileDeepLink', () => ({ buildSessionFileDeepLink: () => '' }));
