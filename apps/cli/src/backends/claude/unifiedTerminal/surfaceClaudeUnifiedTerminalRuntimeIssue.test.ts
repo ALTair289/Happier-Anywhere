@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { TerminalHostStartupError } from '@/integrations/terminalHost/errors';
+import { ZellijActionTimeoutError } from '@/integrations/zellij/actions';
 import { ClaudeUnifiedTerminalManagedSettingsOptionError } from './buildClaudeUnifiedTerminalSpawn';
 import { ClaudeUnifiedTerminalHostDeadError } from './createClaudeUnifiedController';
+import { ClaudeUnifiedTerminalHookActivationError } from './claudeUnifiedHookActivation';
 import { ClaudeUnifiedTerminalReadinessTimeoutError } from './createClaudeUnifiedTerminalReadinessBridge';
 import { ClaudeUnifiedTerminalInjectionFailureError } from './terminalInjectionFailureError';
 
@@ -91,9 +93,11 @@ describe('surfaceClaudeUnifiedTerminalRuntimeIssue', () => {
 
   it('classifies host-dead, terminal injection-failure, readiness-timeout, and host-startup failures as runtime issues', () => {
     expect(isClaudeUnifiedTerminalRuntimeIssueError(new ClaudeUnifiedTerminalHostDeadError())).toBe(true);
+    expect(isClaudeUnifiedTerminalRuntimeIssueError(new ClaudeUnifiedTerminalHookActivationError())).toBe(true);
     expect(isClaudeUnifiedTerminalRuntimeIssueError(buildInjectionFailureError())).toBe(true);
     expect(isClaudeUnifiedTerminalRuntimeIssueError(buildReadinessTimeoutError())).toBe(true);
     expect(isClaudeUnifiedTerminalRuntimeIssueError(buildTerminalHostStartupError())).toBe(true);
+    expect(isClaudeUnifiedTerminalRuntimeIssueError(new ZellijActionTimeoutError('list-panes'))).toBe(true);
     expect(isClaudeUnifiedTerminalRuntimeIssueError(
       new ClaudeUnifiedTerminalManagedSettingsOptionError([
         { code: 'managed_settings_option', option: '--settings' },
@@ -163,6 +167,7 @@ describe('surfaceClaudeUnifiedTerminalRuntimeIssue', () => {
   it('surfaces a primary runtime issue through the session turn lifecycle for each classified error', async () => {
     for (const error of [
       new ClaudeUnifiedTerminalHostDeadError(),
+      new ClaudeUnifiedTerminalHookActivationError(),
       buildInjectionFailureError(),
       buildReadinessTimeoutError(),
       buildTerminalHostStartupError(),

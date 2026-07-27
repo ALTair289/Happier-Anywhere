@@ -1,9 +1,11 @@
 import { surfacePrimarySessionRuntimeIssue } from '@/agent/runtime/session/errors/surfacePrimarySessionRuntimeIssue';
 import { isTerminalHostStartupError } from '@/integrations/terminalHost/errors';
+import { isZellijActionTimeoutError } from '@/integrations/zellij/actions';
 import { logger } from '@/ui/logger';
 
 import { isClaudeUnifiedTerminalManagedSettingsOptionError } from './buildClaudeUnifiedTerminalSpawn';
 import { isClaudeUnifiedTerminalHostDeadError } from './createClaudeUnifiedController';
+import { isClaudeUnifiedTerminalHookActivationError } from './claudeUnifiedHookActivation';
 import { isClaudeUnifiedTerminalReadinessTimeoutError } from './createClaudeUnifiedTerminalReadinessBridge';
 import {
   isClaudeUnifiedTerminalProviderAcceptanceTimeoutError,
@@ -19,6 +21,8 @@ export function isClaudeUnifiedTerminalRuntimeIssueError(error: unknown): boolea
     || isClaudeUnifiedTerminalUnconfirmedSubmitFailureError(error)
     || isClaudeUnifiedTerminalProviderAcceptanceTimeoutError(error)
     || isClaudeUnifiedTerminalReadinessTimeoutError(error)
+    || isClaudeUnifiedTerminalHookActivationError(error)
+    || isZellijActionTimeoutError(error)
     || isTerminalHostStartupError(error)
     || isClaudeUnifiedTerminalManagedSettingsOptionError(error);
 }

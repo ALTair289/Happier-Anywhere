@@ -1,5 +1,4 @@
 import { resolveTerminalInjectionReadiness } from '@/agent/runtime/terminal/injection/arbiter';
-import { resolveTerminalPromptProviderAcceptanceTimeoutMs } from '@/agent/runtime/terminal/injection/promptWriteTimeout';
 import type { TerminalInputInjectionResult, TerminalLifecycleObservation, TerminalTurnState } from '@/agent/runtime/terminal/_types';
 import { isNonSteerablePromptPayload, parseSpecialCommand } from '@/cli/parsers/specialCommands';
 
@@ -28,7 +27,6 @@ type PendingProviderAcceptance<Mode> = Readonly<{
 
 const DEFAULT_INJECTION_RETRY_LIMIT = 3;
 const DEFAULT_INJECTION_RETRY_BASE_DELAY_MS = 250;
-const DEFAULT_PROVIDER_ACCEPTANCE_TIMEOUT_MS = 5_000;
 // A pending-queue prompt deferred while the turn is running is normally redrained
 // by the turn-end lifecycle hook. This bounded fallback wake re-evaluates the
 // deferral even if that hook never arrives, so the prompt cannot starve forever.
@@ -40,6 +38,13 @@ const DEFAULT_BUSY_TURN_FALLBACK_WAKE_MS = 15_000;
 // lifecycle activity is observed for this bounded window, the turn is treated as not
 // running and the prompt drains normally as a new turn (never as an in-flight steer).
 const DEFAULT_STALE_TURN_RECOVERY_MS = 30_000;
+// A deferral (readiness gate or adapter injection result) that carries NO retryAfterMs used to
+// park the head batch with no timer at all: scheduleRetryDrain(undefined) was a silent no-op, the
+// pump stayed paused on arbiter backpressure, and a claimed pending row wedged in "delivering"
+// forever (incidents cmres6qwl / cmr4ntzj3 — zellij pane_initializing deferrals omit retryAfterMs).
+// Every deferral now re-arms with at least this bounded fallback so the head is re-evaluated when
+// its blocking condition clears (pane ready, output quiet, permission resolved).
+const DEFAULT_DEFERRED_REDRIVE_FALLBACK_MS = 1_000;
 
 function normalizePromptText(value: string): string {
   return normalizeClaudeUnifiedPromptIdentityText(value);
@@ -71,7 +76,6 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
   maxWaitMs?: number | undefined;
   injectionRetryLimit?: number | undefined;
   injectionRetryBaseDelayMs?: number | undefined;
-  providerAcceptanceTimeoutMs?: number | undefined;
   busyTurnFallbackWakeMs?: number | undefined;
   /**
    * Bounded no-provider-activity window after which a 'running' turn is treated as stale and a
@@ -79,6 +83,12 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
    * additionally required whenever an in-flight steer evaluation was possible for the prompt.
    */
   staleTurnRecoveryMs?: number | undefined;
+  /**
+   * Fallback re-drive delay for deferrals that carry no retryAfterMs. A deferral must NEVER park
+   * the head without a wake: the pump is paused on arbiter backpressure while a batch waits, so a
+   * bare deferral wedges the whole pending queue (claimed row stuck "delivering" forever).
+   */
+  deferredRedriveFallbackMs?: number | undefined;
   /**
    * Canonical session turn lifecycle probe (Lane N2). The canonical lifecycle (the session
    * client's turn owner) is a stronger truth source than a one-frame screen parse: when it
@@ -102,6 +112,12 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
    */
   evaluateInFlightSteer?: ClaudeUnifiedInFlightSteerEvaluator<Mode> | undefined;
   /**
+   * Provider-adapter interrupt owner for an authenticated `interrupt_and_send`. The returned
+   * promise confirms the interrupt request completed; injection remains fenced until the
+   * lifecycle owner subsequently observes the old turn as idle.
+   */
+  interruptActiveTurn?: (() => Promise<void>) | undefined;
+  /**
    * Fired once per steered prompt when turn-end evidence arms its provider-acceptance expectation
    * (the queued prompt's UserPromptSubmit/JSONL row arrives only after the steered turn ends).
    */
@@ -112,14 +128,16 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
    * head so a provider-confirmed prompt cannot be injected a second time.
    */
   isPromptDeliveryAccepted?: ((batch: ClaudeUnifiedPromptBatch<Mode>) => boolean) | undefined;
+  /** Publishes the exact transient native-custody head; null removes the capability. */
+  onPendingInputInterruptAndRunLocalIdChange?: ((localId: string | null) => void) | undefined;
 }>): ClaudeUnifiedInputArbiter<Mode> {
   const queue: Array<ClaudeUnifiedPromptBatch<Mode>> = [];
   const nowMs = opts.nowMs ?? Date.now;
   const injectionRetryLimit = Math.max(0, Math.trunc(opts.injectionRetryLimit ?? DEFAULT_INJECTION_RETRY_LIMIT));
   const injectionRetryBaseDelayMs = Math.max(0, Math.trunc(opts.injectionRetryBaseDelayMs ?? DEFAULT_INJECTION_RETRY_BASE_DELAY_MS));
-  const providerAcceptanceTimeoutMs = Math.max(0, Math.trunc(opts.providerAcceptanceTimeoutMs ?? DEFAULT_PROVIDER_ACCEPTANCE_TIMEOUT_MS));
   const busyTurnFallbackWakeMs = Math.max(0, Math.trunc(opts.busyTurnFallbackWakeMs ?? DEFAULT_BUSY_TURN_FALLBACK_WAKE_MS));
   const staleTurnRecoveryMs = Math.max(0, Math.trunc(opts.staleTurnRecoveryMs ?? DEFAULT_STALE_TURN_RECOVERY_MS));
+  const deferredRedriveFallbackMs = Math.max(1, Math.trunc(opts.deferredRedriveFallbackMs ?? DEFAULT_DEFERRED_REDRIVE_FALLBACK_MS));
 
   let disposed = false;
   let turnState: TerminalTurnState = 'idle';
@@ -136,46 +154,112 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
   let headInputState: HeadInputState = null;
   let draining: Promise<void> | null = null;
   let retryDrainTimer: ReturnType<typeof setTimeout> | null = null;
-  let providerAcceptanceTimer: ReturnType<typeof setTimeout> | null = null;
-  let providerAcceptanceTimeoutContext: Readonly<{
-    timeoutMs: number;
-    result: Extract<TerminalInputInjectionResult, { status: 'failed' }>;
-  }> | null = null;
-  let providerAcceptanceCompactionGraceUsed = false;
   let retryAttempt = 0;
   let pendingProviderAcceptance: PendingProviderAcceptance<Mode> | null = null;
   let injectingProviderAcceptance: PendingProviderAcceptance<Mode> | null = null;
   let providerAcceptanceObservedDuringInjection: PendingProviderAcceptance<Mode> | null = null;
   let pendingAcceptanceCompletedCompaction = false;
-  let providerOutputObservedSincePendingAcceptance = false;
-  let ambiguousProviderAcceptanceFailure: PendingProviderAcceptance<Mode> | null = null;
-  const providerAcceptanceUnknownTerminalBatches = new Set<ClaudeUnifiedPromptBatch<Mode>>();
-  let ambiguousProviderAcceptanceRetryAttempt = 0;
+  // Terminal composer/queued-banner evidence proves only that Claude's TUI owns the bytes. Keep
+  // that custody outside the injection queue so later input can progress without re-injecting the
+  // same prompt, but do not retire provider delivery until separately matched provider evidence.
+  const terminalCustody = new Array<PendingProviderAcceptance<Mode>>();
   let lastInjectedNotifiedBatch: ClaudeUnifiedPromptBatch<Mode> | null = null;
   // An in-flight steer's provider acceptance (UserPromptSubmit/JSONL row) arrives only when Claude
-  // submits the queued prompt at TURN END. While this flag is set, the short provider-acceptance
-  // timeout is deferred; turn-end evidence arms it (and the normal ambiguous recovery thereafter).
+  // submits the queued prompt at TURN END. This state waits for independent lifecycle or screen
+  // evidence; elapsed time may re-check that evidence but never creates an acceptance outcome.
   let steerAcceptanceAwaitingTurnEnd = false;
-  let steerAcceptanceTimeoutResult: Extract<TerminalInputInjectionResult, { status: 'failed' }> | null = null;
   let steerTurnEndFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   const providerAcceptanceByBatch = new Map<ClaudeUnifiedPromptBatch<Mode>, ClaudeUnifiedPromptAcceptance>();
+  const interruptRequestedBatches = new WeakSet<object>();
+  let pendingQueuePumpStateVersion = 0;
+  const pendingQueuePumpStateChangeWaiters = new Set<(changed: boolean) => void>();
+
+  const readPendingInputInterruptAndRunLocalId = (): string | null => {
+    if (disposed || turnState !== 'running') return null;
+    const custodyHead = terminalCustody[0];
+    if (!custodyHead || custodyHead.acceptance.acceptedAs !== 'in_flight_steer') return null;
+    if (interruptRequestedBatches.has(custodyHead.batch)) return null;
+    const localIds = custodyHead.batch.userMessageLocalIds;
+    return localIds?.length === 1 && typeof localIds[0] === 'string' && localIds[0].length > 0
+      ? localIds[0]
+      : null;
+  };
+
+  const claimPendingInputInterruptAndRun = (localId: string): boolean => {
+    if (readPendingInputInterruptAndRunLocalId() !== localId) return false;
+    const custodyHead = terminalCustody[0];
+    if (!custodyHead) return false;
+    interruptRequestedBatches.add(custodyHead.batch);
+    publishPendingInputInterruptAndRunLocalId();
+    return true;
+  };
+  let publishedPendingInputInterruptAndRunLocalId: string | null | undefined;
+  const publishPendingInputInterruptAndRunLocalId = (): void => {
+    const localId = readPendingInputInterruptAndRunLocalId();
+    if (publishedPendingInputInterruptAndRunLocalId === localId) return;
+    publishedPendingInputInterruptAndRunLocalId = localId;
+    opts.onPendingInputInterruptAndRunLocalIdChange?.(localId);
+  };
 
   const providerAcceptancePendingCount = (): number =>
-    (pendingProviderAcceptance ? 1 : 0) +
-    (ambiguousProviderAcceptanceFailure ? 1 : 0);
+    pendingProviderAcceptance ? 1 : 0;
 
   const pendingInjectionCount = (): number =>
     queue.reduce((count, batch) => {
       if (pendingProviderAcceptance?.batch === batch) return count;
-      if (ambiguousProviderAcceptanceFailure?.batch === batch) return count;
-      if (providerAcceptanceUnknownTerminalBatches.has(batch)) return count;
       return count + 1;
     }, 0);
 
+  const pendingQueuePumpBackpressureState = (): string => (
+    `${pendingInjectionCount()}:${providerAcceptancePendingCount()}`
+  );
+  let publishedPendingQueuePumpBackpressureState = pendingQueuePumpBackpressureState();
+
+  const notifyPendingQueuePumpStateChanged = (): void => {
+    pendingQueuePumpStateVersion += 1;
+    for (const resolve of [...pendingQueuePumpStateChangeWaiters]) {
+      resolve(true);
+    }
+  };
+
+  const notifyPendingQueuePumpStateChangedIfNeeded = (): void => {
+    const nextState = pendingQueuePumpBackpressureState();
+    if (publishedPendingQueuePumpBackpressureState === nextState) return;
+    publishedPendingQueuePumpBackpressureState = nextState;
+    notifyPendingQueuePumpStateChanged();
+  };
+
+  const waitForPendingQueuePumpStateChange = async (options: Readonly<{
+    afterVersion: number;
+    abortSignal: AbortSignal;
+  }>): Promise<boolean> => {
+    if (disposed || options.abortSignal.aborted) return false;
+    if (options.afterVersion !== pendingQueuePumpStateVersion) return true;
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (changed: boolean): void => {
+        if (settled) return;
+        settled = true;
+        pendingQueuePumpStateChangeWaiters.delete(finish);
+        options.abortSignal.removeEventListener('abort', onAbort);
+        resolve(changed);
+      };
+      const onAbort = (): void => finish(false);
+      pendingQueuePumpStateChangeWaiters.add(finish);
+      options.abortSignal.addEventListener('abort', onAbort, { once: true });
+      // Close the snapshot-to-wait race even if the caller's captured version changed
+      // immediately before this waiter was installed.
+      if (options.afterVersion !== pendingQueuePumpStateVersion) {
+        finish(true);
+      }
+    });
+  };
+
   const snapshot = (): ClaudeUnifiedInputArbiterSnapshot => ({
+    pendingQueuePumpStateVersion,
     queuedCount: queue.length,
     pendingInjectionCount: pendingInjectionCount(),
-    terminalCustodyCount: 0,
+    terminalCustodyCount: terminalCustody.length,
     providerAcceptancePendingCount: providerAcceptancePendingCount(),
     disposed,
     turnState,
@@ -194,9 +278,6 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
       if (observation.state === 'running' || observation.state === 'finalizing') {
         outputObserved = true;
         lastOutputAtMs = observedAtMs;
-        if (pendingProviderAcceptance) {
-          providerOutputObservedSincePendingAcceptance = true;
-        }
       }
       if (observation.state === 'blocked_on_permission') {
         permissionBlocked = true;
@@ -216,29 +297,6 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
       compactionActive = observation.phase === 'started';
       if (pendingProviderAcceptance) {
         pendingAcceptanceCompletedCompaction = observation.phase === 'completed';
-        if (observation.phase === 'started') {
-          clearProviderAcceptanceTimer();
-          if (providerAcceptanceTimeoutContext) {
-            armProviderAcceptanceTimeout(
-              providerAcceptanceTimeoutContext.timeoutMs,
-              providerAcceptanceTimeoutContext.result,
-            );
-          }
-        } else {
-          clearProviderAcceptanceTimer();
-        }
-      } else if (
-        observation.phase === 'completed'
-        && ambiguousProviderAcceptanceFailure
-        && queue[0] === ambiguousProviderAcceptanceFailure.batch
-      ) {
-        pendingProviderAcceptance = ambiguousProviderAcceptanceFailure;
-        providerOutputObservedSincePendingAcceptance = false;
-        pendingAcceptanceCompletedCompaction = true;
-        ambiguousProviderAcceptanceFailure = null;
-        ambiguousProviderAcceptanceRetryAttempt = 0;
-        lastFailureReason = null;
-        headInputState = 'awaiting_provider_acceptance';
       }
       if (observation.phase === 'started') {
         lastDeferredReason = 'compaction';
@@ -247,9 +305,6 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
     }
     outputObserved = true;
     lastOutputAtMs = observedAtMs;
-    if (pendingProviderAcceptance) {
-      providerOutputObservedSincePendingAcceptance = true;
-    }
   };
 
   const observeUserTypingState = (state: Readonly<{ userTyping: boolean; observedAtMs?: number | undefined }>): void => {
@@ -272,12 +327,6 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
     retryDrainTimer = null;
   }
 
-  function clearProviderAcceptanceTimer(): void {
-    if (!providerAcceptanceTimer) return;
-    clearTimeout(providerAcceptanceTimer);
-    providerAcceptanceTimer = null;
-  }
-
   function clearSteerTurnEndFallbackTimer(): void {
     if (!steerTurnEndFallbackTimer) return;
     clearTimeout(steerTurnEndFallbackTimer);
@@ -286,7 +335,6 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
 
   function clearPendingSteerArming(): void {
     steerAcceptanceAwaitingTurnEnd = false;
-    steerAcceptanceTimeoutResult = null;
     clearSteerTurnEndFallbackTimer();
   }
 
@@ -312,12 +360,7 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
   function armSteerAcceptanceAfterTurnEnd(): void {
     if (!steerAcceptanceAwaitingTurnEnd || !pendingProviderAcceptance) return;
     const armedBatch = pendingProviderAcceptance.batch;
-    const timeoutResult = steerAcceptanceTimeoutResult ?? buildProviderAcceptanceTimeoutResult();
     clearPendingSteerArming();
-    scheduleProviderAcceptanceTimeout(
-      resolveProviderAcceptanceTimeoutMs(armedBatch),
-      timeoutResult,
-    );
     opts.onSteerAcceptanceArmed?.(armedBatch);
   }
 
@@ -364,15 +407,8 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
     queue.shift();
     if (pendingProviderAcceptance?.batch === batch) {
       pendingProviderAcceptance = null;
-      providerOutputObservedSincePendingAcceptance = false;
-      clearProviderAcceptanceTimer();
       clearPendingSteerArming();
     }
-    if (ambiguousProviderAcceptanceFailure?.batch === batch) {
-      ambiguousProviderAcceptanceFailure = null;
-      ambiguousProviderAcceptanceRetryAttempt = 0;
-    }
-    providerAcceptanceUnknownTerminalBatches.delete(batch);
     if (lastInjectedNotifiedBatch === batch) {
       lastInjectedNotifiedBatch = null;
     }
@@ -438,14 +474,33 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
     return await opts.onInjectionFailure?.(failure);
   }
 
-  function buildProviderAcceptanceTimeoutResult(): Extract<TerminalInputInjectionResult, { status: 'failed' }> {
+  function buildObservedProviderAcceptanceTerminalFailureResult(): Extract<TerminalInputInjectionResult, { status: 'failed' }> {
     return {
       status: 'failed',
-      reason: 'timeout',
+      reason: 'host_unreachable',
       phase: 'after_enter_unknown',
-      duplicateRisk: 'likely',
+      duplicateRisk: 'possible',
       recoverable: true,
     };
+  }
+
+  function buildExactDeliveryUnavailableResult(): Extract<TerminalInputInjectionResult, { status: 'failed' }> {
+    return {
+      status: 'failed',
+      reason: 'no_target',
+      phase: 'before_write',
+      duplicateRisk: 'none',
+      recoverable: false,
+    };
+  }
+
+  async function failExactDelivery(batch: ClaudeUnifiedPromptBatch<Mode>): Promise<'dropped' | 'parked'> {
+    const result = buildExactDeliveryUnavailableResult();
+    lastFailureReason = result.reason;
+    headInputState = 'failed_terminal';
+    const handling = await notifyInjectionFailure({ batch, result, failureState: 'failed_terminal' });
+    if (isClaimedPendingDeliveryHandling(handling) && dropClaimedPendingDeliveryBatch(batch)) return 'dropped';
+    return 'parked';
   }
 
   function isUnconfirmedSubmitFailure(
@@ -454,85 +509,6 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
     return result.reason === 'host_unreachable'
       && result.phase === 'after_enter_unknown'
       && result.recoverable === true;
-  }
-
-  function resolveProviderAcceptanceTimeoutMs(
-    batch: ClaudeUnifiedPromptBatch<Mode>,
-    result?: Extract<TerminalInputInjectionResult, { status: 'injected' }> | undefined,
-    baseTimeoutMs = providerAcceptanceTimeoutMs,
-  ): number {
-    return resolveTerminalPromptProviderAcceptanceTimeoutMs(batch.message, {
-      baseTimeoutMs,
-      ...(result ? { bytesWritten: result.bytesWritten } : {}),
-    });
-  }
-
-  function scheduleProviderAcceptanceTimeout(
-    timeoutMs: number,
-    result: Extract<TerminalInputInjectionResult, { status: 'failed' }>,
-  ): void {
-    providerAcceptanceTimeoutContext = { timeoutMs, result };
-    providerAcceptanceCompactionGraceUsed = false;
-    armProviderAcceptanceTimeout(timeoutMs, result);
-  }
-
-  function armProviderAcceptanceTimeout(
-    timeoutMs: number,
-    result: Extract<TerminalInputInjectionResult, { status: 'failed' }>,
-  ): void {
-    clearProviderAcceptanceTimer();
-    providerAcceptanceTimer = setTimeout(() => {
-      providerAcceptanceTimer = null;
-      void (async () => {
-        if (pendingProviderAcceptance && compactionActive) {
-          if (!providerAcceptanceCompactionGraceUsed) {
-            providerAcceptanceCompactionGraceUsed = true;
-            armProviderAcceptanceTimeout(timeoutMs, result);
-            return;
-          }
-        }
-        if (pendingProviderAcceptance) {
-          if (
-            pendingProviderAcceptance.acceptance.acceptedAs === 'new_turn'
-            && queue[0] === pendingProviderAcceptance.batch
-            && providerOutputObservedSincePendingAcceptance
-            && !isPendingQueueBatch(pendingProviderAcceptance.batch)
-          ) {
-            const outputAccepted = pendingProviderAcceptance;
-            queue.shift();
-            await acceptBatch(outputAccepted.batch, outputAccepted.acceptance);
-            return;
-          }
-          const timedOutAcceptance = pendingProviderAcceptance;
-          pendingProviderAcceptance = null;
-          providerOutputObservedSincePendingAcceptance = false;
-          ambiguousProviderAcceptanceFailure = timedOutAcceptance;
-          pendingAcceptanceCompletedCompaction = false;
-          providerAcceptanceTimeoutContext = null;
-          providerAcceptanceCompactionGraceUsed = false;
-          lastFailureReason = result.reason;
-          headInputState = 'failed_ambiguous';
-          const handling = await notifyInjectionFailure({
-            batch: timedOutAcceptance.batch,
-            result,
-            failureState: 'failed_ambiguous',
-          });
-          if (isClaimedPendingDeliveryHandling(handling)) {
-            if (dropClaimedPendingDeliveryBatch(timedOutAcceptance.batch)) {
-              scheduleRetryDrain(0);
-            }
-            return;
-          }
-          if (isPendingQueueBatch(timedOutAcceptance.batch)) {
-            return;
-          }
-          if (!isCompactPrompt(timedOutAcceptance.batch)) {
-            scheduleRetryDrain(0);
-          }
-        }
-      })().catch(() => undefined);
-    }, timeoutMs);
-    providerAcceptanceTimer.unref?.();
   }
 
   function resolvePromptAcceptance(state: TerminalTurnState): ClaudeUnifiedPromptAcceptance {
@@ -563,32 +539,21 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
   async function acceptBatch(
     batch: ClaudeUnifiedPromptBatch<Mode>,
     acceptance: ClaudeUnifiedPromptAcceptance,
-    options?: Readonly<{ preserveTerminalState?: boolean }> | undefined,
   ): Promise<void> {
     lastDeferredReason = null;
     lastFailureReason = null;
     clearCurrentHeadBlocker();
     headInputState = 'submitted';
     retryAttempt = 0;
-    ambiguousProviderAcceptanceRetryAttempt = 0;
-    if (options?.preserveTerminalState !== true) {
-      firstObservedAtMs = nowMs();
-      outputObserved = false;
-      lastOutputAtMs = null;
-      turnState = 'unknown';
-    }
     if (pendingProviderAcceptance?.batch === batch) {
       pendingProviderAcceptance = null;
-      providerOutputObservedSincePendingAcceptance = false;
       pendingAcceptanceCompletedCompaction = false;
-      clearProviderAcceptanceTimer();
       clearPendingSteerArming();
     }
-    if (ambiguousProviderAcceptanceFailure?.batch === batch) {
-      ambiguousProviderAcceptanceFailure = null;
-      ambiguousProviderAcceptanceRetryAttempt = 0;
+    const terminalCustodyIndex = terminalCustody.findIndex((entry) => entry.batch === batch);
+    if (terminalCustodyIndex >= 0) {
+      terminalCustody.splice(terminalCustodyIndex, 1);
     }
-    providerAcceptanceUnknownTerminalBatches.delete(batch);
     if (lastInjectedNotifiedBatch === batch) {
       lastInjectedNotifiedBatch = null;
     }
@@ -600,24 +565,57 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
     }
   }
 
+  async function acceptTerminalCustody(
+    custody: PendingProviderAcceptance<Mode>,
+  ): Promise<void> {
+    providerAcceptanceByBatch.delete(custody.batch);
+    clearInjectionAcceptanceForBatch(custody.batch);
+    await opts.onPromptAccepted?.(custody.batch, custody.acceptance);
+    // Acceptance for an older terminal-custody entry must not reset the retry/deferred state of a
+    // newer queue head. Only project the terminal result when no other delivery currently owns it.
+    if (!pendingProviderAcceptance && queue.length === 0) {
+      headInputState = terminalCustody.length > 0 ? 'terminal_custody' : 'submitted';
+    }
+  }
+
   function resolveQueueHeadKnownProviderDeliveryAcceptance(): ClaudeUnifiedPromptAcceptance | null {
     const next = queue[0];
     if (!next || !readPromptDeliveryAccepted(next)) return null;
     return pendingProviderAcceptance?.batch === next
       ? pendingProviderAcceptance.acceptance
-      : ambiguousProviderAcceptanceFailure?.batch === next
-        ? ambiguousProviderAcceptanceFailure.acceptance
-        : injectingProviderAcceptance?.batch === next
-          ? injectingProviderAcceptance.acceptance
-          : providerAcceptanceByBatch.get(next) ?? resolvePromptAcceptance(turnState);
+      : injectingProviderAcceptance?.batch === next
+        ? injectingProviderAcceptance.acceptance
+        : providerAcceptanceByBatch.get(next) ?? resolvePromptAcceptance(turnState);
   }
 
   async function confirmPromptAcceptedByProviderMatching(
     matcher: (batch: ClaudeUnifiedPromptBatch<Mode>) => boolean,
-    optsOverride?: Readonly<{ includeAmbiguousTimeout?: boolean }> | undefined,
+    optsOverride?: Readonly<{
+      includeTerminalCustody?: boolean;
+    }> | undefined,
   ): Promise<boolean> {
-    const pendingAcceptance = pendingProviderAcceptance
-      ?? (optsOverride?.includeAmbiguousTimeout ? ambiguousProviderAcceptanceFailure : null);
+    if (optsOverride?.includeTerminalCustody === true) {
+      const matchingBatches = new Set<ClaudeUnifiedPromptBatch<Mode>>();
+      for (const entry of terminalCustody) {
+        if (matcher(entry.batch)) matchingBatches.add(entry.batch);
+      }
+      for (const batch of queue) {
+        if (matcher(batch)) matchingBatches.add(batch);
+      }
+      // Prompt-only hooks carry no Pending localId. When more than one live delivery candidate
+      // matches the same prompt, choosing by FIFO would infer identity and a duplicate hook could
+      // settle its neighbor. Exact transcript identity may still resolve either row later.
+      if (matchingBatches.size !== 1) return false;
+      const [matchingBatch] = matchingBatches;
+      const terminalCustodyIndex = terminalCustody.findIndex((entry) => entry.batch === matchingBatch);
+      if (terminalCustodyIndex >= 0) {
+        const [confirmedCustody] = terminalCustody.splice(terminalCustodyIndex, 1);
+        if (!confirmedCustody) return false;
+        await acceptTerminalCustody(confirmedCustody);
+        return true;
+      }
+    }
+    const pendingAcceptance = pendingProviderAcceptance;
     if (!pendingAcceptance) {
       const injectingAcceptance = injectingProviderAcceptance;
       if (!injectingAcceptance) return false;
@@ -636,30 +634,26 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
   }
 
   async function confirmPromptAcceptedByProvider(): Promise<boolean> {
-    return confirmPromptAcceptedByProviderMatching(
-      (batch) => !isPendingQueueBatch(batch),
-      { includeAmbiguousTimeout: true },
-    );
+    return confirmPromptAcceptedByProviderMatching((batch) => !isPendingQueueBatch(batch));
   }
 
   async function observePromptCustodyByTerminal(batch: ClaudeUnifiedPromptBatch<Mode>): Promise<boolean> {
     if (disposed || queue[0] !== batch) return false;
-    const currentAcceptance = pendingProviderAcceptance
-      ?? (ambiguousProviderAcceptanceFailure?.batch === batch ? ambiguousProviderAcceptanceFailure : null);
+    const currentAcceptance = pendingProviderAcceptance;
     if (!currentAcceptance || currentAcceptance.batch !== batch) return false;
 
     queue.shift();
     if (pendingProviderAcceptance?.batch === batch) {
       pendingProviderAcceptance = null;
-      providerOutputObservedSincePendingAcceptance = false;
-      clearProviderAcceptanceTimer();
       clearPendingSteerArming();
     }
-    ambiguousProviderAcceptanceFailure = null;
-    ambiguousProviderAcceptanceRetryAttempt = 0;
     pendingAcceptanceCompletedCompaction = false;
     lastFailureReason = null;
-    await acceptBatch(batch, currentAcceptance.acceptance, { preserveTerminalState: true });
+    if (!terminalCustody.some((entry) => entry.batch === batch)) {
+      terminalCustody.push(currentAcceptance);
+    }
+    clearInjectionAcceptanceForBatch(batch);
+    headInputState = queue.length > 0 ? 'waiting_for_readiness' : 'terminal_custody';
     if (queue.length > 0) {
       scheduleRetryDrain(0);
     }
@@ -668,34 +662,26 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
 
   async function observePendingProviderAcceptanceTerminalFailure(): Promise<boolean> {
     if (disposed) return false;
-    const failedAcceptance = pendingProviderAcceptance
-      ?? (
-        ambiguousProviderAcceptanceFailure && queue[0] === ambiguousProviderAcceptanceFailure.batch
-          ? ambiguousProviderAcceptanceFailure
-          : null
-    );
+    const failedAcceptance = pendingProviderAcceptance;
     if (!failedAcceptance || queue[0] !== failedAcceptance.batch) return false;
 
     const { batch } = failedAcceptance;
-    const result = buildProviderAcceptanceTimeoutResult();
+    const result = buildObservedProviderAcceptanceTerminalFailureResult();
     if (pendingProviderAcceptance?.batch === batch) {
       pendingProviderAcceptance = null;
-      providerOutputObservedSincePendingAcceptance = false;
-      clearProviderAcceptanceTimer();
       clearPendingSteerArming();
     }
-    if (ambiguousProviderAcceptanceFailure?.batch === batch) {
-      ambiguousProviderAcceptanceFailure = null;
-      ambiguousProviderAcceptanceRetryAttempt = 0;
-    }
     pendingAcceptanceCompletedCompaction = false;
-    providerAcceptanceUnknownTerminalBatches.add(batch);
+    if (queue[0] === batch) {
+      queue.shift();
+      terminalCustody.push(failedAcceptance);
+    }
     lastFailureReason = result.reason;
-    headInputState = 'failed_terminal';
+    headInputState = queue.length > 0 ? 'waiting_for_readiness' : 'terminal_custody';
     const handling = await notifyInjectionFailure({
       batch,
       result,
-      failureState: 'failed_terminal',
+      failureState: 'failed_ambiguous',
     });
     if (isClaimedPendingDeliveryHandling(handling) && dropClaimedPendingDeliveryBatch(batch)) {
       scheduleRetryDrain(0);
@@ -715,23 +701,24 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         continue;
       }
       if (pendingProviderAcceptance) {
+        const submittedAcceptance = pendingProviderAcceptance;
+        if (!isCompactPrompt(submittedAcceptance.batch)) {
+          headInputState = 'awaiting_provider_acceptance';
+          return;
+        }
         if (compactionActive || !pendingAcceptanceCompletedCompaction) {
           headInputState = 'awaiting_provider_acceptance';
           return;
         }
-        const completedAcceptance = pendingProviderAcceptance;
         pendingProviderAcceptance = null;
-        providerOutputObservedSincePendingAcceptance = false;
         pendingAcceptanceCompletedCompaction = false;
-        clearProviderAcceptanceTimer();
         clearPendingSteerArming();
         // Compaction completion is provider acceptance of a pending /compact prompt.
         // Consume it so a PostCompact hook racing ahead of the compact_boundary
         // transcript row cannot leave /compact at the queue head and re-inject it.
-        // Regular prompts interrupted by compaction stay queued for re-injection.
-        if (queue[0] === completedAcceptance.batch && isCompactPrompt(completedAcceptance.batch)) {
+        if (queue[0] === submittedAcceptance.batch) {
           queue.shift();
-          await acceptBatch(completedAcceptance.batch, completedAcceptance.acceptance);
+          await acceptBatch(submittedAcceptance.batch, submittedAcceptance.acceptance);
           continue;
         }
       }
@@ -742,63 +729,37 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         return;
       }
       if (headInputState === 'failed_ambiguous' || headInputState === 'failed_terminal') {
-        if (
-          headInputState === 'failed_ambiguous'
-          && ambiguousProviderAcceptanceFailure
-          && queue[0] === ambiguousProviderAcceptanceFailure.batch
-          && readPromptDeliveryAccepted(ambiguousProviderAcceptanceFailure.batch)
-        ) {
-          const acceptedFailure = ambiguousProviderAcceptanceFailure;
-          pendingProviderAcceptance = null;
-          providerOutputObservedSincePendingAcceptance = false;
-          pendingAcceptanceCompletedCompaction = false;
-          ambiguousProviderAcceptanceFailure = null;
-          lastFailureReason = null;
-          queue.shift();
-          await acceptBatch(acceptedFailure.batch, acceptedFailure.acceptance);
-          continue;
-        }
-        if (
-          headInputState === 'failed_ambiguous'
-          && ambiguousProviderAcceptanceFailure
-          && queue[0] === ambiguousProviderAcceptanceFailure.batch
-          && !isPendingQueueBatch(ambiguousProviderAcceptanceFailure.batch)
-          && ambiguousProviderAcceptanceRetryAttempt < 1
-        ) {
-          ambiguousProviderAcceptanceRetryAttempt += 1;
-          pendingProviderAcceptance = null;
-          providerOutputObservedSincePendingAcceptance = false;
-          pendingAcceptanceCompletedCompaction = false;
-          ambiguousProviderAcceptanceFailure = null;
-          lastFailureReason = null;
-          headInputState = 'waiting_for_readiness';
-        } else {
-          if (
-            headInputState === 'failed_ambiguous'
-            && ambiguousProviderAcceptanceFailure
-            && queue[0] === ambiguousProviderAcceptanceFailure.batch
-          ) {
-            const failure = ambiguousProviderAcceptanceFailure;
-            pendingProviderAcceptance = null;
-            providerOutputObservedSincePendingAcceptance = false;
-            pendingAcceptanceCompletedCompaction = false;
-            ambiguousProviderAcceptanceFailure = null;
-            lastFailureReason = 'timeout';
-            headInputState = 'failed_terminal';
-            providerAcceptanceUnknownTerminalBatches.add(failure.batch);
-            const handling = await notifyInjectionFailure({
-              batch: failure.batch,
-              result: buildProviderAcceptanceTimeoutResult(),
-              failureState: 'failed_terminal',
-            });
-            if (isClaimedPendingDeliveryHandling(handling) && dropClaimedPendingDeliveryBatch(failure.batch)) {
-              continue;
-            }
-          }
-          return;
-        }
+        return;
       }
       const next = queue[0];
+      if (next.pendingProviderAction === 'steer' && turnState !== 'running') {
+        if (await failExactDelivery(next) === 'dropped') continue;
+        return;
+      }
+      if (next.pendingProviderAction === 'interrupt_and_send' && turnState === 'running') {
+        if (!opts.interruptActiveTurn) {
+          if (await failExactDelivery(next) === 'dropped') continue;
+          return;
+        }
+        if (!interruptRequestedBatches.has(next)) {
+          interruptRequestedBatches.add(next);
+          try {
+            await opts.interruptActiveTurn();
+          } catch {
+            if (await failExactDelivery(next) === 'dropped') continue;
+            return;
+          }
+        }
+        if (disposed || queue[0] !== next) continue;
+        if (turnState === 'running') {
+          lastDeferredReason = 'terminal_busy';
+          currentHeadBlocker = { kind: 'terminal_busy', source: 'readiness' };
+          headInputState = 'waiting_for_readiness';
+          scheduleRetryDrain(busyTurnFallbackWakeMs);
+          return;
+        }
+        continue;
+      }
       const bypassQuietWindowForRunningSteer = next?.origin.kind === 'ui_pending' && turnState === 'running';
       const readiness = resolveTerminalInjectionReadiness({
         nowMs: nowMs(),
@@ -817,7 +778,9 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         lastDeferredReason = readiness.reason;
         currentHeadBlocker = resolveReadinessBlocker(readiness.reason);
         headInputState = 'waiting_for_readiness';
-        scheduleRetryDrain(readiness.retryAfterMs);
+        // A deferral must never park without a wake (dropped-baton wedge): fall back to the
+        // bounded re-drive delay when the readiness evaluation supplied no retry hint.
+        scheduleRetryDrain(readiness.retryAfterMs ?? deferredRedriveFallbackMs);
         return;
       }
 
@@ -832,7 +795,11 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         let steerEvaluationAttempted = false;
         let steerTurnLikelyEnded = false;
         let canonicalTurnInactive = false;
-        if (opts.evaluateInFlightSteer && !isNonSteerablePrompt(next)) {
+        if (
+          (next.pendingProviderAction === 'steer' || next.pendingProviderAction === undefined)
+          && opts.evaluateInFlightSteer
+          && !isNonSteerablePrompt(next)
+        ) {
           steerEvaluationAttempted = true;
           try {
             const decision = await opts.evaluateInFlightSteer(next);
@@ -849,6 +816,10 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         if (disposed || queue[0] !== next) continue;
         if (turnState !== 'running') continue;
         if (!steerSafe) {
+          if (next.pendingProviderAction === 'steer') {
+            if (await failExactDelivery(next) === 'dropped') continue;
+            return;
+          }
           // Stale-turn recovery (incident cmq7pyqkj, L1): a 'running' state with NO provider
           // lifecycle activity for a bounded window is treated as stale (e.g. set from replayed
           // transcript rows after a respawn, with no live turn behind it). When the steer
@@ -891,12 +862,13 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
       if (injectingProviderAcceptance === injectionAcceptance) {
         injectingProviderAcceptance = null;
       }
+      const providerAcceptedDuringInjection =
+        providerAcceptanceObservedDuringInjection === injectionAcceptance;
       if (result.status === 'injected') {
         lastDeferredReason = null;
         lastFailureReason = null;
         clearCurrentHeadBlocker();
         pendingProviderAcceptance = injectionAcceptance;
-        providerOutputObservedSincePendingAcceptance = false;
         pendingAcceptanceCompletedCompaction = false;
         headInputState = 'awaiting_provider_acceptance';
         // Notify a successful injection at most once per batch. An ambiguous retry
@@ -905,9 +877,11 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         // terminal-typed prompt.
         if (lastInjectedNotifiedBatch !== next) {
           lastInjectedNotifiedBatch = next;
-          await opts.onPromptInjected?.(next, acceptance, result);
+          const handling = await opts.onPromptInjected?.(next, acceptance, result);
+          if (isClaimedPendingDeliveryHandling(handling) && dropClaimedPendingDeliveryBatch(next)) {
+            continue;
+          }
         }
-        const providerAcceptedDuringInjection = providerAcceptanceObservedDuringInjection === injectionAcceptance;
         clearProviderAcceptanceObservedDuringInjection(injectionAcceptance);
         if (pendingProviderAcceptance?.batch !== next || queue[0] !== next) {
           return;
@@ -918,17 +892,10 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
           return;
         }
         if (acceptance.acceptedAs === 'in_flight_steer') {
-          // Acceptance evidence arrives only at turn end; defer the acceptance timeout until
-          // turn-end evidence so a long steered turn cannot mark the prompt ambiguous (and
-          // retry/double-queue it) while it is still legitimately queued in the TUI.
+          // Acceptance evidence arrives only at turn end. The fallback wake observes independent
+          // lifecycle/screen evidence; elapsed time alone never manufactures a provider outcome.
           steerAcceptanceAwaitingTurnEnd = true;
-          steerAcceptanceTimeoutResult = buildProviderAcceptanceTimeoutResult();
           scheduleSteerTurnEndFallbackWake();
-        } else {
-          scheduleProviderAcceptanceTimeout(
-            resolveProviderAcceptanceTimeoutMs(next, result),
-            buildProviderAcceptanceTimeoutResult(),
-          );
         }
         return;
       }
@@ -937,14 +904,13 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         lastDeferredReason = result.reason;
         currentHeadBlocker = result.blocker ?? resolveReadinessBlocker(result.reason);
         pendingProviderAcceptance = null;
-        providerOutputObservedSincePendingAcceptance = false;
-        ambiguousProviderAcceptanceFailure = null;
-        ambiguousProviderAcceptanceRetryAttempt = 0;
         pendingAcceptanceCompletedCompaction = false;
-        clearProviderAcceptanceTimer();
         clearPendingSteerArming();
         headInputState = 'waiting_for_readiness';
-        scheduleRetryDrain(result.retryAfterMs);
+        // A deferral must never park without a wake (dropped-baton wedge, incident cmres6qwl:
+        // zellij pane_initializing deferrals omit retryAfterMs): fall back to the bounded
+        // re-drive delay so the head is re-evaluated when its blocking condition clears.
+        scheduleRetryDrain(result.retryAfterMs ?? deferredRedriveFallbackMs);
         return;
       }
       lastFailureReason = result.reason;
@@ -953,15 +919,10 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         retryAttempt,
         retryLimit: injectionRetryLimit,
         retryBaseDelayMs: injectionRetryBaseDelayMs,
-        providerAcceptanceTimeoutMs,
       });
       if (failureAction.kind === 'retry') {
         pendingProviderAcceptance = null;
-        providerOutputObservedSincePendingAcceptance = false;
-        ambiguousProviderAcceptanceFailure = null;
-        ambiguousProviderAcceptanceRetryAttempt = 0;
         pendingAcceptanceCompletedCompaction = false;
-        clearProviderAcceptanceTimer();
         clearPendingSteerArming();
         retryAttempt += 1;
         headInputState = 'failed_retryable';
@@ -970,14 +931,23 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
       }
       if (failureAction.kind === 'await_provider_confirmation') {
         if (isUnconfirmedSubmitFailure(result)) {
+          if (providerAcceptedDuringInjection && queue[0] === next) {
+            queue.shift();
+            await acceptBatch(next, acceptance);
+            return;
+          }
           pendingProviderAcceptance = null;
-          providerOutputObservedSincePendingAcceptance = false;
-          ambiguousProviderAcceptanceFailure = null;
-          ambiguousProviderAcceptanceRetryAttempt = 0;
           pendingAcceptanceCompletedCompaction = false;
-          clearProviderAcceptanceTimer();
           clearPendingSteerArming();
-          headInputState = 'failed_ambiguous';
+          // Enter was attempted, so this exact batch is no longer executable even when recording
+          // the server-side uncertainty fails. Keep its identity in the existing terminal-custody
+          // owner so an authenticated UserPromptSubmit/JSONL row arriving after the screen probe
+          // can still settle it without replaying provider input.
+          if (queue[0] === next) {
+            queue.shift();
+            terminalCustody.push(injectionAcceptance);
+          }
+          headInputState = queue.length > 0 ? 'waiting_for_readiness' : 'terminal_custody';
           let handling: ClaudeUnifiedPromptInjectionFailureHandling | undefined;
           try {
             handling = await notifyInjectionFailure({
@@ -995,47 +965,24 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
             }
           }
           if (!isHandledInjectionFailure(handling)) {
-            providerAcceptanceUnknownTerminalBatches.add(next);
             lastFailureReason = result.reason;
             return;
-          }
-          if (queue[0] === next) {
-            queue.shift();
-            providerAcceptanceByBatch.delete(next);
-            providerAcceptanceUnknownTerminalBatches.add(next);
-            lastFailureReason = result.reason;
-            headInputState = queue.length > 0 ? 'waiting_for_readiness' : null;
-            if (queue.length > 0) {
-              retryAttempt = 0;
-              continue;
-            }
           }
           return;
         }
         pendingProviderAcceptance = { batch: next, acceptance };
-        providerOutputObservedSincePendingAcceptance = false;
         pendingAcceptanceCompletedCompaction = false;
         headInputState = 'awaiting_provider_acceptance';
         if (acceptance.acceptedAs === 'in_flight_steer') {
-          // Same turn-end semantics as a successful steer write: the queued prompt cannot be
-          // accepted before the running turn ends, so defer the confirmation timeout too.
+          // Same turn-end semantics as a successful steer write: only independent turn-end
+          // evidence advances this state.
           steerAcceptanceAwaitingTurnEnd = true;
-          steerAcceptanceTimeoutResult = result;
           scheduleSteerTurnEndFallbackWake();
-        } else {
-          scheduleProviderAcceptanceTimeout(
-            resolveProviderAcceptanceTimeoutMs(next, undefined, failureAction.timeoutMs),
-            result,
-          );
         }
         return;
       }
       pendingProviderAcceptance = null;
-      providerOutputObservedSincePendingAcceptance = false;
-      ambiguousProviderAcceptanceFailure = null;
-      ambiguousProviderAcceptanceRetryAttempt = 0;
       pendingAcceptanceCompletedCompaction = false;
-      clearProviderAcceptanceTimer();
       clearPendingSteerArming();
       headInputState = 'failed_terminal';
       if (isDeterministicPreProviderInputRejection(result)) {
@@ -1098,46 +1045,83 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         return;
       }
       queue.push(batch);
+      notifyPendingQueuePumpStateChangedIfNeeded();
     },
-    observeLifecycle,
+    observeLifecycle(observation) {
+      observeLifecycle(observation);
+      publishPendingInputInterruptAndRunLocalId();
+    },
     observeUserTypingState,
     notifyTerminalComposerCleared,
-    observePromptCustodyByTerminal,
-    confirmPromptAcceptedByProvider,
-    confirmPromptAcceptedByProviderIf(matcher) {
-      return confirmPromptAcceptedByProviderMatching(matcher, { includeAmbiguousTimeout: true });
+    readPendingInputInterruptAndRunLocalId,
+    claimPendingInputInterruptAndRun,
+    async observePromptCustodyByTerminal(batch) {
+      try {
+        return await observePromptCustodyByTerminal(batch);
+      } finally {
+        notifyPendingQueuePumpStateChangedIfNeeded();
+        publishPendingInputInterruptAndRunLocalId();
+      }
     },
-    observePendingProviderAcceptanceTerminalFailure,
-    drainWhenSafe,
+    async confirmPromptAcceptedByProvider() {
+      try {
+        return await confirmPromptAcceptedByProvider();
+      } finally {
+        notifyPendingQueuePumpStateChangedIfNeeded();
+        publishPendingInputInterruptAndRunLocalId();
+      }
+    },
+    async confirmPromptAcceptedByProviderIf(matcher) {
+      try {
+        return await confirmPromptAcceptedByProviderMatching(matcher, {
+          includeTerminalCustody: true,
+        });
+      } finally {
+        notifyPendingQueuePumpStateChangedIfNeeded();
+        publishPendingInputInterruptAndRunLocalId();
+      }
+    },
+    async observePendingProviderAcceptanceTerminalFailure() {
+      try {
+        return await observePendingProviderAcceptanceTerminalFailure();
+      } finally {
+        notifyPendingQueuePumpStateChangedIfNeeded();
+      }
+    },
+    async drainWhenSafe() {
+      try {
+        await drainWhenSafe();
+      } finally {
+        notifyPendingQueuePumpStateChangedIfNeeded();
+      }
+    },
+    waitForPendingQueuePumpStateChange,
     snapshot,
     dispose() {
       disposed = true;
+      publishPendingInputInterruptAndRunLocalId();
+      notifyPendingQueuePumpStateChanged();
       clearRetryDrainTimer();
-      clearProviderAcceptanceTimer();
       clearPendingSteerArming();
       // Anything still queued is undeliverable by this arbiter; hand it back to the owner before
-      // clearing. Exception: a provider-acceptance-unknown terminal batch was already written and
-      // submitted to the provider-facing terminal, so returning it would risk duplicate execution.
+      // clearing. The provider-acceptance-pending batch was already written and submitted to the
+      // provider-facing terminal, so returning it would risk duplicate execution. Ambiguous attempts
+      // live outside this queue in terminal custody and are also never handed back.
+      const acceptancePendingBatch = pendingProviderAcceptance?.batch ?? null;
       const undelivered = queue.splice(0, queue.length);
       handBackUndeliverableBatches(
-        undelivered.filter((batch) => (
-          !providerAcceptanceUnknownTerminalBatches.has(batch)
-        )),
+        undelivered.filter((batch) => batch !== acceptancePendingBatch),
       );
       queue.length = 0;
       pendingProviderAcceptance = null;
-      providerOutputObservedSincePendingAcceptance = false;
       pendingAcceptanceCompletedCompaction = false;
-      ambiguousProviderAcceptanceFailure = null;
-      providerAcceptanceUnknownTerminalBatches.clear();
+      terminalCustody.length = 0;
       providerAcceptanceByBatch.clear();
       clearCurrentHeadBlocker();
       injectingProviderAcceptance = null;
       providerAcceptanceObservedDuringInjection = null;
-      ambiguousProviderAcceptanceRetryAttempt = 0;
       lastInjectedNotifiedBatch = null;
       headInputState = null;
-        clearCurrentHeadBlocker();
     },
   };
 }

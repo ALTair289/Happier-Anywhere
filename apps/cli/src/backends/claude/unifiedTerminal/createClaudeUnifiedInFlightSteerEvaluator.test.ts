@@ -387,6 +387,13 @@ describe('createClaudeUnifiedInFlightSteerEvaluator — availability snapshot te
     ]);
   });
 
+  it('proves the current session-level safe window before Pending claim without a prompt batch', async () => {
+    const { wiring, snapshots } = teeHarness(generatingScreen);
+
+    await expect(wiring.refreshAvailability()).resolves.toEqual({ available: true, reason: null });
+    expect(snapshots).toEqual([{ available: true, reason: null }]);
+  });
+
   it('does NOT tee a snapshot for the payload-specific permission-mode refusal (UI computes that locally)', async () => {
     const { wiring, snapshots } = teeHarness(generatingScreen);
 

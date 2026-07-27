@@ -44,4 +44,40 @@ describe('doesClaudeUnifiedPromptBatchMatchAcceptedTranscript', () => {
       },
     })).toBe(false);
   });
+
+  it('matches opaque local ids by exact bytes instead of trimmed aliases', () => {
+    const match = {
+      deliveryIdentity: { localIds: [' local-52\n'] },
+      acceptedPromptNormalizedText: 'same rendered text',
+    };
+
+    expect(doesClaudeUnifiedPromptBatchMatchAcceptedTranscript({
+      batch: {
+        message: 'same rendered text',
+        userMessageLocalIds: ['local-52'],
+      },
+      match,
+    })).toBe(false);
+
+    expect(doesClaudeUnifiedPromptBatchMatchAcceptedTranscript({
+      batch: {
+        message: 'different text',
+        userMessageLocalIds: [' local-52\n'],
+      },
+      match,
+    })).toBe(true);
+  });
+
+  it('rejects a whitespace-only identity instead of correlating it by bytes', () => {
+    expect(doesClaudeUnifiedPromptBatchMatchAcceptedTranscript({
+      batch: {
+        message: 'different text',
+        userMessageLocalIds: ['   '],
+      },
+      match: {
+        deliveryIdentity: { localIds: ['   '] },
+        acceptedPromptNormalizedText: 'accepted text',
+      },
+    })).toBe(false);
+  });
 });

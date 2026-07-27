@@ -1,6 +1,7 @@
 import type { ReadyNotificationTurnContext } from '@/agent/runtime/runPermissionModePromptLoop';
 import type { SessionClientPort } from '@/api/session/sessionClientPort';
 import { logger } from '@/ui/logger';
+import { TERMINAL_INPUT_QUIET_PERIOD_MS } from '@/agent/runtime/terminal/injection/arbiter';
 
 import type { EnhancedMode } from '../loop';
 import type { RawJSONLines } from '../types';
@@ -12,6 +13,7 @@ import {
 import { seedClaudeUnifiedPersistedPromptEchoes } from './promptEchoSeed';
 import { createClaudeOwnComposerTextLog, type ClaudeOwnComposerTextLog } from './ownComposerTextLog';
 import { normalizeClaudeUnifiedPromptIdentityText } from './promptIdentity';
+import type { ClaudeUnifiedNativeContinuationIntent } from './startupLifecycle';
 
 type ClaudeUnifiedSessionBindingClient = Pick<
   SessionClientPort,
@@ -36,6 +38,7 @@ type ClaudeUnifiedTerminalSessionBindingOptions<Mode extends EnhancedMode = Enha
   onTurnInterruptChanged?: ((handler: (() => Promise<void>) | null) => void) | undefined;
   onPromptTurnStarted?: (() => void | Promise<void>) | undefined;
   suppressor?: ClaudeUnifiedPromptEchoSuppressor | undefined;
+  providerResumeIdleReleaseDelayMs?: number | undefined;
 }>;
 
 export type ClaudeUnifiedTerminalSessionBinding<Mode extends EnhancedMode = EnhancedMode> = Readonly<{
@@ -55,11 +58,16 @@ export type ClaudeUnifiedTerminalSessionBinding<Mode extends EnhancedMode = Enha
    * respawned runner recognizes (and may clear) its predecessor's leftover composer injection.
    */
   ownComposerTexts: ClaudeOwnComposerTextLog;
-  noteNextInjectedPromptShouldSuppressEcho(): void;
+  noteNextInjectedPromptShouldSuppressEcho(
+    options?: Readonly<{ retainUntilObserved?: boolean | undefined }>,
+  ): void;
   noteNextInjectedPromptShouldImportEcho(): void;
   shouldSuppressTranscriptMessage(message: RawJSONLines): boolean;
   beginReadyNotificationTurn(): void;
   recordPromptTurnStarted(): Promise<void>;
+  recordProviderResumeStarted(input: ClaudeUnifiedNativeContinuationIntent): Promise<void>;
+  recordProviderResumeSessionStarted(): void;
+  recordProviderStartupReady(): Promise<void>;
   recordPromptTurnProgress(): Promise<void>;
   recordPromptTurnCompleted(): Promise<void>;
   recordPromptTurnCancelled(): Promise<void>;
@@ -76,7 +84,10 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
   });
   const nowMs = opts.nowMs ?? Date.now;
   const ownComposerTexts = createClaudeOwnComposerTextLog();
-  const acceptedPromptEchoSuppressionDecisions: boolean[] = [];
+  const acceptedPromptEchoSuppressionDecisions: Array<Readonly<{
+    suppress: boolean;
+    retainUntilObserved: boolean;
+  }>> = [];
   // A steered prompt's JSONL user echo only appears when Claude submits the queued prompt at TURN
   // END, which for long autonomous turns is far beyond the fixed accepted-prompt echo window. Track
   // steered echoes separately: unexpired until the steered turn completes (onReady), then bounded by
@@ -85,6 +96,36 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
   let readyTurnContext: ReadyNotificationTurnContext | undefined;
   let canonicalTurnOpen = false;
   let canonicalTurnStartPromise: Promise<void> | null = null;
+  let providerResumeBarrier: 'none' | 'provisional' | 'confirmed' = 'none';
+  let providerResumeSessionStarted = false;
+  let providerStartupReady = false;
+  let providerResumeIdleReleaseTimer: NodeJS.Timeout | null = null;
+  let providerResumeIdleReleasePromise: Promise<void> | null = null;
+
+  function clearProviderResumeIdleReleaseTimer(): void {
+    if (!providerResumeIdleReleaseTimer) return;
+    clearTimeout(providerResumeIdleReleaseTimer);
+    providerResumeIdleReleaseTimer = null;
+  }
+
+  function scheduleProviderResumeIdleRelease(): void {
+    if (providerResumeBarrier !== 'provisional' || !providerResumeSessionStarted || !providerStartupReady) return;
+    if (providerResumeIdleReleaseTimer) return;
+    const delayMs = Math.max(0, Math.trunc(
+      opts.providerResumeIdleReleaseDelayMs ?? TERMINAL_INPUT_QUIET_PERIOD_MS,
+    ));
+    providerResumeIdleReleaseTimer = setTimeout(() => {
+      providerResumeIdleReleaseTimer = null;
+      if (providerResumeBarrier !== 'provisional') return;
+      providerResumeBarrier = 'none';
+      const releasePromise = recordPromptTurnCancelled().finally(() => {
+        if (providerResumeIdleReleasePromise === releasePromise) {
+          providerResumeIdleReleasePromise = null;
+        }
+      });
+      providerResumeIdleReleasePromise = releasePromise;
+    }, delayMs);
+  }
 
   function armPendingSteerEchoExpiry(): void {
     const expiresAtMs = nowMs() + opts.acceptedPromptEchoWindowMs;
@@ -122,7 +163,18 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
     readyTurnContext = { turnToken, startSeqExclusive };
   }
 
-  async function recordPromptTurnStarted(): Promise<void> {
+  async function recordCanonicalTurnStarted(confirmProviderResume: boolean): Promise<void> {
+    // The idle-resume release terminalizes the provisional canonical turn asynchronously. A
+    // delayed exact resume prompt can arrive while that mutation is in flight; wait for the old
+    // turn to close before opening its successor, otherwise the start deduplicates against the old
+    // `canonicalTurnOpen` latch and the release then cancels the real resumed work.
+    if (confirmProviderResume && providerResumeIdleReleasePromise) {
+      await providerResumeIdleReleasePromise;
+    }
+    if (confirmProviderResume && providerResumeBarrier === 'provisional') {
+      providerResumeBarrier = 'confirmed';
+      clearProviderResumeIdleReleaseTimer();
+    }
     if (canonicalTurnOpen) {
       await canonicalTurnStartPromise;
       return;
@@ -145,6 +197,38 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
     await startPromise;
   }
 
+  async function recordPromptTurnStarted(): Promise<void> {
+    await recordCanonicalTurnStarted(true);
+  }
+
+  async function recordProviderResumeStarted(input: ClaudeUnifiedNativeContinuationIntent): Promise<void> {
+    if (providerResumeBarrier !== 'none' || canonicalTurnOpen) {
+      await canonicalTurnStartPromise;
+      return;
+    }
+    providerResumeBarrier = 'provisional';
+    providerResumeSessionStarted = false;
+    providerStartupReady = false;
+    logger.debug(`${opts.logPrefix}: Opening provisional Claude resume turn barrier`, {
+      origin: input.kind === 'resume_native' ? 'explicit_resume_native' : 'explicit_continue_native',
+      ...(input.kind === 'resume_native' ? { providerSessionId: input.providerSessionId } : {}),
+    });
+    await recordCanonicalTurnStarted(false);
+    providerResumeBarrier = canonicalTurnOpen ? 'provisional' : 'none';
+  }
+
+  function recordProviderResumeSessionStarted(): void {
+    if (providerResumeBarrier !== 'provisional') return;
+    providerResumeSessionStarted = true;
+    scheduleProviderResumeIdleRelease();
+  }
+
+  async function recordProviderStartupReady(): Promise<void> {
+    if (providerResumeBarrier !== 'provisional') return;
+    providerStartupReady = true;
+    scheduleProviderResumeIdleRelease();
+  }
+
   async function recordPromptTurnProgress(): Promise<void> {
     await canonicalTurnStartPromise;
     if (!canonicalTurnOpen) return;
@@ -164,6 +248,8 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
       logger.debug(`${opts.logPrefix}: Failed to record Claude unified turn completion (non-fatal)`, error);
     } finally {
       canonicalTurnOpen = false;
+      providerResumeBarrier = 'none';
+      clearProviderResumeIdleReleaseTimer();
     }
   }
 
@@ -179,6 +265,8 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
       logger.debug(`${opts.logPrefix}: Failed to record Claude unified turn failure (non-fatal)`, error);
     } finally {
       canonicalTurnOpen = false;
+      providerResumeBarrier = 'none';
+      clearProviderResumeIdleReleaseTimer();
     }
   }
 
@@ -191,23 +279,36 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
       logger.debug(`${opts.logPrefix}: Failed to record Claude unified turn cancellation (non-fatal)`, error);
     } finally {
       canonicalTurnOpen = false;
+      providerResumeBarrier = 'none';
+      clearProviderResumeIdleReleaseTimer();
     }
   }
 
   function notePromptTurnTerminal(): void {
     canonicalTurnOpen = false;
+    providerResumeBarrier = 'none';
+    clearProviderResumeIdleReleaseTimer();
   }
 
-  function noteNextInjectedPromptShouldSuppressEcho(): void {
-    acceptedPromptEchoSuppressionDecisions.push(true);
+  function noteNextInjectedPromptShouldSuppressEcho(
+    options?: Readonly<{ retainUntilObserved?: boolean | undefined }>,
+  ): void {
+    acceptedPromptEchoSuppressionDecisions.push({
+      suppress: true,
+      retainUntilObserved: options?.retainUntilObserved === true,
+    });
   }
 
   function noteNextInjectedPromptShouldImportEcho(): void {
-    acceptedPromptEchoSuppressionDecisions.push(false);
+    acceptedPromptEchoSuppressionDecisions.push({ suppress: false, retainUntilObserved: false });
   }
 
-  function shouldSuppressAcceptedPromptEcho(): boolean {
-    return acceptedPromptEchoSuppressionDecisions.shift() ?? true;
+  function readAcceptedPromptEchoSuppressionDecision(): Readonly<{
+    suppress: boolean;
+    retainUntilObserved: boolean;
+  }> {
+    return acceptedPromptEchoSuppressionDecisions.shift()
+      ?? { suppress: true, retainUntilObserved: false };
   }
 
   function shouldSuppressTranscriptMessage(message: RawJSONLines): boolean {
@@ -218,6 +319,13 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
     if (!promptEchoSuppressor.shouldSuppressTranscriptMessage(message)) return false;
     opts.session.recordClaudeJsonlMessageConsumed?.(message);
     return true;
+  }
+
+  function isAcceptedResumeSummaryCompactCommand(message: RawJSONLines): boolean {
+    if (message.type !== 'user') return false;
+    const content = message.message?.content;
+    return typeof content === 'string'
+      && normalizeClaudeUnifiedPromptIdentityText(content) === '/compact';
   }
 
   async function seedPersistedPromptEchoes(seedOpts: Readonly<{ nowMs?: number | undefined }> = {}): Promise<void> {
@@ -236,6 +344,14 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
       onMessage: (message) => {
         if (shouldSuppressTranscriptMessage(message)) return;
         opts.onMessage(message);
+        // Choosing Claude's native "resume from summary" option makes Claude submit `/compact`
+        // itself. Slash commands do not consistently emit UserPromptSubmit, but this exact
+        // provider-authored JSONL row proves the provisional resume is active. Confirm the
+        // canonical turn before the bounded idle-resume release can cancel real compaction.
+        if (isAcceptedResumeSummaryCompactCommand(message)) {
+          void recordPromptTurnStarted().then(recordPromptTurnProgress);
+          return;
+        }
         void recordPromptTurnProgress();
       },
       onReady: async () => {
@@ -254,9 +370,9 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
         opts.onTurnInterruptChanged?.(handler);
       },
       onTerminalPromptInjected: async (acceptedPrompt) => {
-        const suppressEcho = shouldSuppressAcceptedPromptEcho();
+        const suppressionDecision = readAcceptedPromptEchoSuppressionDecision();
         if (acceptedPrompt.acceptedAs === 'in_flight_steer') {
-          if (suppressEcho) {
+          if (suppressionDecision.suppress) {
             const normalizedText = normalizeClaudeUnifiedPromptIdentityText(acceptedPrompt.message);
             if (normalizedText.length > 0) {
               pendingSteerEchoes.push({ normalizedText, expiresAtMs: null });
@@ -265,8 +381,11 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
           await recordPromptTurnProgress();
           return;
         }
-        if (suppressEcho) {
-          promptEchoSuppressor.recordAcceptedPrompt(acceptedPrompt);
+        if (suppressionDecision.suppress) {
+          promptEchoSuppressor.recordAcceptedPrompt({
+            ...acceptedPrompt,
+            ...(suppressionDecision.retainUntilObserved ? { retainUntilObserved: true } : {}),
+          });
         }
         beginReadyNotificationTurn();
         await recordPromptTurnStarted();
@@ -281,6 +400,9 @@ export function bindClaudeUnifiedTerminalSession<Mode extends EnhancedMode = Enh
     shouldSuppressTranscriptMessage,
     beginReadyNotificationTurn,
     recordPromptTurnStarted,
+    recordProviderResumeStarted,
+    recordProviderResumeSessionStarted,
+    recordProviderStartupReady,
     recordPromptTurnProgress,
     recordPromptTurnCompleted,
     recordPromptTurnCancelled,

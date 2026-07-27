@@ -11,55 +11,19 @@ import type {
 
 function shouldPausePumpForArbiterBackpressure(snapshot: ClaudeUnifiedInputArbiterSnapshot): boolean {
   if (snapshot.pendingInjectionCount > 0) return true;
-  return snapshot.providerAcceptancePendingCount > snapshot.terminalCustodyCount;
+  return snapshot.providerAcceptancePendingCount > 0;
 }
-
-const DEFAULT_PAUSED_ARBITER_RECHECK_MS = 500;
-const DEFAULT_FAILURE_RETRY_BACKOFF_MS = 250;
-const DEFAULT_MAX_CONSECUTIVE_HANDLED_FAILURES = 3;
 
 type PumpOnceResult =
   | Readonly<{ kind: 'delivered' }>
-  | Readonly<{ kind: 'stopped' }>
-  | Readonly<{ kind: 'handled_failure'; error: unknown }>;
-
-function createPumpFailureBudgetExhaustedError(error: unknown, failureCount: number): Error & {
-  code: 'claude_unified_pending_queue_pump_failure_budget_exhausted';
-  failureCount: number;
-  cause: unknown;
-} {
-  return Object.assign(new Error('Claude unified pending queue pump failure budget exhausted'), {
-    name: 'ClaudeUnifiedPendingQueuePumpFailureBudgetExhaustedError',
-    code: 'claude_unified_pending_queue_pump_failure_budget_exhausted' as const,
-    failureCount,
-    cause: error,
-  });
-}
-
-async function waitForPausedArbiterRecheck(abortSignal: AbortSignal, delayMs: number): Promise<boolean> {
-  if (abortSignal.aborted) return false;
-  return await new Promise<boolean>((resolve) => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const finish = (keepGoing: boolean) => {
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      abortSignal.removeEventListener('abort', onAbort);
-      resolve(keepGoing);
-    };
-    const onAbort = () => finish(false);
-    abortSignal.addEventListener('abort', onAbort, { once: true });
-    timer = setTimeout(() => finish(!abortSignal.aborted), delayMs);
-  });
-}
+  | Readonly<{ kind: 'stopped' }>;
 
 export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readonly<{
   inputConsumer: ClaudeUnifiedInputConsumer<Mode>;
-  arbiter: Pick<ClaudeUnifiedInputArbiter<Mode>, 'enqueueUiMessage' | 'drainWhenSafe' | 'snapshot'>;
-  pausedArbiterRecheckMs?: number | undefined;
-  failureRetryBackoffMs?: number | undefined;
-  maxConsecutiveHandledFailures?: number | undefined;
+  arbiter: Pick<
+    ClaudeUnifiedInputArbiter<Mode>,
+    'enqueueUiMessage' | 'drainWhenSafe' | 'snapshot' | 'waitForPendingQueuePumpStateChange'
+  >;
   /**
    * Called when a batch was already pulled from the input consumer but the pump
    * can no longer deliver it (aborted/disposed mid-wait, e.g. host-death
@@ -76,6 +40,7 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
 }>): ClaudeUnifiedPendingQueuePump<Mode> {
   let disposed = false;
   let runPromise: Promise<void> | null = null;
+  let pausedWaitAbortController: AbortController | null = null;
 
   const pumpOnceDetailed = async (pumpOpts: { abortSignal: AbortSignal }): Promise<PumpOnceResult> => {
     if (disposed || pumpOpts.abortSignal.aborted) {
@@ -88,8 +53,8 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
       if (error instanceof PendingQueueMaterializationAuthError) {
         throw error;
       }
-      logger.debug('[unified]: pending queue pump input wait failed (non-fatal)', error);
-      return { kind: 'handled_failure', error };
+      logger.debug('[unified]: pending queue pump input wait stopped (non-fatal)', error);
+      return { kind: 'stopped' };
     }
     if (!batch) {
       return { kind: 'stopped' };
@@ -108,15 +73,21 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
         origin: { kind: 'ui_pending' },
         maxUserMessageSeq: batch.maxUserMessageSeq ?? null,
         userMessageLocalIds: batch.userMessageLocalIds ?? [],
+        ...(batch.pendingProviderAction ? { pendingProviderAction: batch.pendingProviderAction } : {}),
+        ...(batch.providerAcceptancePending === true ? { providerAcceptancePending: true } : {}),
       });
       await opts.arbiter.drainWhenSafe();
     } catch (error) {
       if (error instanceof PendingQueueMaterializationAuthError) {
         throw error;
       }
-      logger.debug('[unified]: pending queue pump delivery failed (non-fatal)', error);
+      // The arbiter is internal to this runner. A rejection here is not a
+      // materialization/wait delivery outage; it is an unexpected pump crash
+      // and remains fatal under controller supervision. Hand the consumed
+      // batch back first so that fatality never loses durable input.
+      logger.debug('[unified]: pending queue pump arbiter delivery failed', error);
       opts.onUndeliverableBatch?.(batch);
-      return { kind: 'handled_failure', error };
+      throw error;
     }
     return { kind: 'delivered' };
   };
@@ -126,42 +97,34 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
   };
 
   const run = async (runOpts: { abortSignal: AbortSignal }): Promise<void> => {
-    const pausedArbiterRecheckMs = Math.max(
-      1,
-      Math.trunc(opts.pausedArbiterRecheckMs ?? DEFAULT_PAUSED_ARBITER_RECHECK_MS),
-    );
-    const failureRetryBackoffMs = Math.max(
-      1,
-      Math.trunc(opts.failureRetryBackoffMs ?? DEFAULT_FAILURE_RETRY_BACKOFF_MS),
-    );
-    const maxConsecutiveHandledFailures = Math.max(
-      1,
-      Math.trunc(opts.maxConsecutiveHandledFailures ?? DEFAULT_MAX_CONSECUTIVE_HANDLED_FAILURES),
-    );
-    let consecutiveHandledFailures = 0;
     while (!disposed && !runOpts.abortSignal.aborted) {
       // Backpressure is local to the terminal arbiter: while a prompt is still waiting to be
       // injected or the head is waiting for provider acceptance, do not claim another durable
-      // pending row from the server. Terminal-custody acceptances are exempt because Claude owns
-      // those prompts and the arbiter can safely continue draining later input.
-      if (shouldPausePumpForArbiterBackpressure(opts.arbiter.snapshot())) {
-        const keepGoing = await waitForPausedArbiterRecheck(runOpts.abortSignal, pausedArbiterRecheckMs);
+      // pending row from the server. Terminal-custody entries are kept in their own ledger and do
+      // not create backpressure, but they never offset a newer head that still awaits acceptance.
+      const arbiterSnapshot = opts.arbiter.snapshot();
+      if (shouldPausePumpForArbiterBackpressure(arbiterSnapshot)) {
+        const waitAbortController = new AbortController();
+        pausedWaitAbortController = waitAbortController;
+        const onAbort = (): void => waitAbortController.abort(runOpts.abortSignal.reason);
+        runOpts.abortSignal.addEventListener('abort', onAbort, { once: true });
+        if (disposed || runOpts.abortSignal.aborted) {
+          waitAbortController.abort(runOpts.abortSignal.reason);
+        }
+        const keepGoing = await opts.arbiter.waitForPendingQueuePumpStateChange({
+          afterVersion: arbiterSnapshot.pendingQueuePumpStateVersion,
+          abortSignal: waitAbortController.signal,
+        }).finally(() => {
+          runOpts.abortSignal.removeEventListener('abort', onAbort);
+          if (pausedWaitAbortController === waitAbortController) {
+            pausedWaitAbortController = null;
+          }
+        });
         if (!keepGoing) return;
         continue;
       }
       const pumped = await pumpOnceDetailed(runOpts);
       if (pumped.kind === 'stopped') return;
-      if (pumped.kind === 'delivered') {
-        consecutiveHandledFailures = 0;
-        continue;
-      }
-
-      consecutiveHandledFailures += 1;
-      if (consecutiveHandledFailures >= maxConsecutiveHandledFailures) {
-        throw createPumpFailureBudgetExhaustedError(pumped.error, consecutiveHandledFailures);
-      }
-      const keepGoing = await waitForPausedArbiterRecheck(runOpts.abortSignal, failureRetryBackoffMs);
-      if (!keepGoing) return;
     }
   };
 
@@ -180,6 +143,7 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
     },
     dispose() {
       disposed = true;
+      pausedWaitAbortController?.abort('claude-unified-pending-queue-pump-dispose');
     },
   };
 }

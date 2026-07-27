@@ -2,7 +2,7 @@ import type { TerminalInputInjectionResult } from '@/agent/runtime/terminal/_typ
 
 export type ClaudeUnifiedInjectionFailureAction =
   | Readonly<{ kind: 'retry'; retryAfterMs: number }>
-  | Readonly<{ kind: 'await_provider_confirmation'; timeoutMs: number }>
+  | Readonly<{ kind: 'await_provider_confirmation' }>
   | Readonly<{ kind: 'terminal_failure' }>;
 
 export function classifyClaudeUnifiedInjectionFailure(
@@ -11,7 +11,6 @@ export function classifyClaudeUnifiedInjectionFailure(
     retryAttempt: number;
     retryLimit: number;
     retryBaseDelayMs: number;
-    providerAcceptanceTimeoutMs: number;
   }>,
 ): ClaudeUnifiedInjectionFailureAction {
   if (!failure.recoverable) {
@@ -19,10 +18,7 @@ export function classifyClaudeUnifiedInjectionFailure(
   }
 
   if (failure.duplicateRisk !== 'none') {
-    return {
-      kind: 'await_provider_confirmation',
-      timeoutMs: Math.max(0, Math.trunc(opts.providerAcceptanceTimeoutMs)),
-    };
+    return { kind: 'await_provider_confirmation' };
   }
 
   if (opts.retryAttempt >= opts.retryLimit) {

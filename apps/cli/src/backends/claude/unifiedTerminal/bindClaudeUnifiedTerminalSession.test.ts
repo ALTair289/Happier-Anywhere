@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { createSessionTurnLifecycle } from '@/agent/runtime/session/turn/lifecycle';
+import type { SessionTurnLifecycleController } from '@/agent/runtime/session/turn/types';
+import type { SessionTurnMutationV1 } from '@/api/session/mutations/sessionMutationTypes';
 import type { RawJSONLines } from '../types';
 import { bindClaudeUnifiedTerminalSession } from './bindClaudeUnifiedTerminalSession';
 
@@ -25,6 +28,7 @@ function createBinding(overrides: Partial<Parameters<typeof bindClaudeUnifiedTer
   const consumedMessages: RawJSONLines[] = [];
   const interruptChanges: Array<(() => Promise<void>) | null> = [];
   const readyContexts: unknown[] = [];
+  const onPromptTurnStarted = vi.fn();
   const fetchRecentTranscriptTextItemsForAcpImport = vi.fn(async (): Promise<Array<{
     role: 'user' | 'agent';
     text: string;
@@ -59,7 +63,7 @@ function createBinding(overrides: Partial<Parameters<typeof bindClaudeUnifiedTer
     onTurnInterruptChanged: (handler) => {
       interruptChanges.push(handler);
     },
-    onPromptTurnStarted: vi.fn(),
+    onPromptTurnStarted,
     ...overrides,
   });
   return {
@@ -68,6 +72,7 @@ function createBinding(overrides: Partial<Parameters<typeof bindClaudeUnifiedTer
     interruptChanges,
     observedMessages,
     readyContexts,
+    onPromptTurnStarted,
     session,
     sessionTurnLifecycle,
   };
@@ -88,6 +93,60 @@ describe('bindClaudeUnifiedTerminalSession', () => {
 
     expect(consumedMessages).toHaveLength(0);
     expect(observedMessages).toEqual([expect.objectContaining({ type: 'user' })]);
+  });
+
+  it('keeps a durable Pending echo suppressed through a long provider-owned resume compaction', async () => {
+    let nowMs = 1_000;
+    const { binding, consumedMessages, observedMessages } = createBinding({ nowMs: () => nowMs });
+
+    binding.noteNextInjectedPromptShouldSuppressEcho({ retainUntilObserved: true });
+    await binding.sessionOptions.onTerminalPromptInjected?.({
+      message: 'continue after the provider finishes compacting',
+      mode: { permissionMode: 'default', claudeUnifiedTerminalEnabled: true },
+      acceptedAs: 'new_turn',
+      turnStateAtInjection: 'idle',
+    });
+    nowMs = 150_000;
+    binding.sessionOptions.onMessage?.(userMessage(
+      'continue after the provider finishes compacting',
+      new Date(nowMs).toISOString(),
+    ));
+
+    expect(observedMessages).toEqual([]);
+    expect(consumedMessages).toEqual([expect.objectContaining({ type: 'user' })]);
+  });
+
+  it('suppresses a durable Pending echo behind an unmatched accepted control command', async () => {
+    let nowMs = 1_000;
+    const { binding, consumedMessages, observedMessages } = createBinding({ nowMs: () => nowMs });
+
+    binding.noteNextInjectedPromptShouldSuppressEcho({ retainUntilObserved: true });
+    await binding.sessionOptions.onTerminalPromptInjected?.({
+      message: '/effort high',
+      mode: { permissionMode: 'default', claudeUnifiedTerminalEnabled: true },
+      acceptedAs: 'new_turn',
+      turnStateAtInjection: 'idle',
+    });
+    binding.noteNextInjectedPromptShouldSuppressEcho({ retainUntilObserved: true });
+    await binding.sessionOptions.onTerminalPromptInjected?.({
+      message: 'ordinary Pending prompt',
+      mode: { permissionMode: 'default', claudeUnifiedTerminalEnabled: true },
+      acceptedAs: 'new_turn',
+      turnStateAtInjection: 'idle',
+    });
+
+    nowMs = 150_000;
+    binding.sessionOptions.onMessage?.(userMessage('ordinary Pending prompt', new Date(nowMs).toISOString()));
+    binding.sessionOptions.onMessage?.(userMessage('ordinary Pending prompt', new Date(nowMs + 1).toISOString()));
+    binding.sessionOptions.onMessage?.(userMessage('/effort high', new Date(nowMs + 2).toISOString()));
+
+    expect(consumedMessages).toEqual([
+      expect.objectContaining({ message: expect.objectContaining({ content: 'ordinary Pending prompt' }) }),
+      expect.objectContaining({ message: expect.objectContaining({ content: '/effort high' }) }),
+    ]);
+    expect(observedMessages).toEqual([
+      expect.objectContaining({ message: expect.objectContaining({ content: 'ordinary Pending prompt' }) }),
+    ]);
   });
 
   it('seeds persisted user echoes and does not suppress fresh terminal-origin prompts', async () => {
@@ -147,6 +206,123 @@ describe('bindClaudeUnifiedTerminalSession', () => {
     expect(readyContexts).toEqual([{ turnToken: 'ready-turn-1', startSeqExclusive: 41 }]);
   });
 
+  it('opens one provisional canonical barrier for native resume before provider hooks and releases an idle resume at startup readiness', async () => {
+    vi.useFakeTimers();
+    const { binding, sessionTurnLifecycle } = createBinding({ providerResumeIdleReleaseDelayMs: 800 });
+
+    try {
+      await binding.recordProviderResumeStarted({ kind: 'resume_native', providerSessionId: 'claude-session-resume-1' });
+      await binding.recordProviderResumeStarted({ kind: 'resume_native', providerSessionId: 'claude-session-resume-1' });
+
+      expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+      expect(sessionTurnLifecycle.completeTurn).not.toHaveBeenCalled();
+      expect(sessionTurnLifecycle.cancelTurn).not.toHaveBeenCalled();
+
+      binding.recordProviderResumeSessionStarted();
+      await binding.recordProviderStartupReady();
+      await vi.advanceTimersByTimeAsync(800);
+
+      expect(sessionTurnLifecycle.cancelTurn).toHaveBeenCalledTimes(1);
+      expect(sessionTurnLifecycle.completeTurn).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains a confirmed native resume barrier until the exact prompt terminal path settles it', async () => {
+    vi.useFakeTimers();
+    const { binding, sessionTurnLifecycle } = createBinding({ providerResumeIdleReleaseDelayMs: 800 });
+
+    try {
+      await binding.recordProviderResumeStarted({ kind: 'resume_native', providerSessionId: 'claude-session-resume-1' });
+      await binding.recordProviderStartupReady();
+      await vi.advanceTimersByTimeAsync(799);
+      // Generic readiness may precede SessionStart/UserPromptSubmit during native resume. It is
+      // not sufficient to clear the barrier by itself.
+      expect(sessionTurnLifecycle.cancelTurn).not.toHaveBeenCalled();
+      binding.recordProviderResumeSessionStarted();
+      await binding.sessionOptions.onProviderPromptStarted?.();
+      await vi.advanceTimersByTimeAsync(800);
+
+      expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+      expect(sessionTurnLifecycle.cancelTurn).not.toHaveBeenCalled();
+      expect(sessionTurnLifecycle.completeTurn).not.toHaveBeenCalled();
+
+      await binding.recordPromptTurnCompleted();
+      expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains a native resume barrier when the provider transcript accepts the resume-summary compact command', async () => {
+    vi.useFakeTimers();
+    const { binding, sessionTurnLifecycle } = createBinding({ providerResumeIdleReleaseDelayMs: 800 });
+
+    try {
+      await binding.recordProviderResumeStarted({ kind: 'resume_native', providerSessionId: 'claude-session-resume-1' });
+      binding.recordProviderResumeSessionStarted();
+      await binding.recordProviderStartupReady();
+
+      binding.sessionOptions.onMessage?.(userMessage('/compact', new Date(1_200).toISOString()));
+      await vi.advanceTimersByTimeAsync(800);
+
+      expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+      expect(sessionTurnLifecycle.cancelTurn).not.toHaveBeenCalled();
+      expect(sessionTurnLifecycle.completeTurn).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reopens the native resume turn after an in-flight idle release finishes', async () => {
+    vi.useFakeTimers();
+    const { binding, session } = createBinding({ providerResumeIdleReleaseDelayMs: 800 });
+    const mutations: SessionTurnMutationV1[] = [];
+    let releaseCancellation: (() => void) | undefined;
+    const realLifecycle = createSessionTurnLifecycle({
+      sessionId: 'happy-session-resume-1',
+      createId: (() => {
+        let id = 0;
+        return () => `resume-turn-${++id}`;
+      })(),
+      enqueueSessionTurn: async (mutation) => {
+        mutations.push(mutation);
+        if (mutation.action === 'cancel') {
+          await new Promise<void>((resolve) => {
+            releaseCancellation = resolve;
+          });
+        }
+      },
+    });
+    (session as unknown as { sessionTurnLifecycle: SessionTurnLifecycleController }).sessionTurnLifecycle = realLifecycle;
+
+    try {
+      await binding.recordProviderResumeStarted({ kind: 'resume_native', providerSessionId: 'claude-session-resume-1' });
+      binding.recordProviderResumeSessionStarted();
+      await binding.recordProviderStartupReady();
+      await vi.advanceTimersByTimeAsync(800);
+      expect(mutations.filter((mutation) => mutation.action === 'cancel')).toHaveLength(1);
+
+      let promptStartSettled = false;
+      const promptStart = Promise.resolve(binding.sessionOptions.onProviderPromptStarted?.()).then(() => {
+        promptStartSettled = true;
+      });
+      await Promise.resolve();
+
+      expect(promptStartSettled).toBe(false);
+      expect(mutations.filter((mutation) => mutation.action === 'begin')).toHaveLength(1);
+
+      releaseCancellation?.();
+      await promptStart;
+
+      expect(mutations.filter((mutation) => mutation.action === 'begin')).toHaveLength(2);
+      expect(mutations.filter((mutation) => mutation.action === 'cancel')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('touches the canonical turn on trusted provider and transcript progress without duplicate begin', async () => {
     const { binding, sessionTurnLifecycle } = createBinding();
 
@@ -163,8 +339,8 @@ describe('bindClaudeUnifiedTerminalSession', () => {
     expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
   });
 
-  it('touches but does not start a new canonical turn for steered prompt injection', async () => {
-    const { binding, sessionTurnLifecycle } = createBinding();
+  it('touches but does not start a new prompt lifecycle for steered prompt injection', async () => {
+    const { binding, onPromptTurnStarted, sessionTurnLifecycle } = createBinding();
 
     await binding.sessionOptions.onProviderPromptStarted?.();
     sessionTurnLifecycle.touchActiveTurn.mockClear();
@@ -177,6 +353,9 @@ describe('bindClaudeUnifiedTerminalSession', () => {
 
     expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
     expect(sessionTurnLifecycle.touchActiveTurn).toHaveBeenCalledWith({ provider: 'claude' });
+    // A steer belongs to the active turn, so it must not emit the optimistic thinking latch a
+    // second time. The hook lifecycle bridge therefore remains a serial true → false stream.
+    expect(onPromptTurnStarted).not.toHaveBeenCalled();
   });
 
   it('suppresses a steered prompt echo that arrives at turn end, beyond the fixed echo window', async () => {

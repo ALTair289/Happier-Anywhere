@@ -1,4 +1,5 @@
 import { normalizeClaudeUnifiedPromptIdentityText } from './promptIdentity';
+import { readPendingLocalId } from '@happier-dev/protocol';
 
 export type ClaudeUnifiedAcceptedPromptDeliveryIdentityLike = Readonly<{
   localIds?: readonly string[] | null | undefined;
@@ -29,10 +30,8 @@ function readValidSeqs(value: ClaudeUnifiedAcceptedPromptDeliveryIdentityLike | 
 function readValidLocalIds(value: ClaudeUnifiedAcceptedPromptDeliveryIdentityLike | null | undefined): Set<string> {
   const localIds = new Set<string>();
   for (const localId of value?.localIds ?? []) {
-    const normalized = typeof localId === 'string' ? localId.trim() : '';
-    if (normalized.length > 0) {
-      localIds.add(normalized);
-    }
+    const parsedLocalId = readPendingLocalId(localId);
+    if (parsedLocalId !== null) localIds.add(parsedLocalId);
   }
   return localIds;
 }
@@ -52,7 +51,7 @@ export function doesClaudeUnifiedPromptBatchMatchAcceptedTranscript(params: Read
     const batchSeq = params.batch.maxUserMessageSeq;
     if (typeof batchSeq === 'number' && seqs.has(batchSeq)) return true;
     return (params.batch.userMessageLocalIds ?? []).some((localId) => (
-      localIds.has(typeof localId === 'string' ? localId.trim() : '')
+      readPendingLocalId(localId) !== null && localIds.has(localId)
     ));
   }
 

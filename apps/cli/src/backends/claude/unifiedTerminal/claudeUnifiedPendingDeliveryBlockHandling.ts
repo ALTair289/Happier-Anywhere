@@ -1,23 +1,22 @@
 import type { PendingDeliveryBlocker } from '@/agent/runtime/session/pendingDelivery/undeliverableProviderPrompt';
 
 import type { ClaudeUnifiedDeliveryBlocker } from './_types';
+import type { ClaudeUnifiedDraftGuardStarvationInfo } from './createClaudeUnifiedPromptInjector';
 import {
   isClaudeUnifiedProviderUnavailablePromptDeliveryWindowActive,
-  promoteClaudeUnifiedProviderAcceptanceTimeoutBlockForUnavailableProvider,
   resolveClaudeUnifiedPendingDeliveryBlock,
   resolveClaudeUnifiedPendingDeliveryBlockForDeliveryBlocker,
   type ClaudeUnifiedProviderUnavailablePromptDeliveryWindow,
 } from './pendingDeliveryBlock';
 import { isClaudeUnifiedRuntimeControlUserDraftBlocker } from './runtimeControlIntegration';
 import { isClaudeUnifiedTerminalAmbiguousInjectionFailureError } from './terminalInjectionFailureError';
+import { isClaudeUnifiedDialogBlockedReason } from './tuiControls/dialogRegistry';
 
 export type ClaudeUnifiedTerminalRuntimeIssueHandlingResult =
   | boolean
   | void
   | Readonly<{ action: 'claimed_pending_delivery' }>
   | Readonly<{ action: 'surfaced_runtime_issue' }>;
-
-export type PendingDeliveryRetryer = (params: Readonly<{ localId: string }>) => Promise<boolean>;
 
 function canDurablyBlockSustainedClaudeUnifiedBlocker(params: Readonly<{
   blocker: ClaudeUnifiedDeliveryBlocker | null | undefined;
@@ -36,7 +35,44 @@ function canDurablyBlockSustainedClaudeUnifiedBlocker(params: Readonly<{
       typeof blockedReason === 'string' ? blockedReason : undefined,
     );
   }
+  if (blocker.kind === 'terminal_busy') {
+    return blocker.source === 'readiness' && isClaudeUnifiedDialogBlockedReason(blocker.detail);
+  }
   return false;
+}
+
+export function resolveClaudeUnifiedDraftGuardStarvationBlocker(
+  info: ClaudeUnifiedDraftGuardStarvationInfo,
+): ClaudeUnifiedDeliveryBlocker {
+  if (info.guardStatus === 'blocked_non_input_state') {
+    return {
+      kind: 'terminal_busy',
+      source: 'readiness',
+      detail: info.blockedReason ?? 'non_input_state',
+    };
+  }
+  if (info.guardStatus === 'clear_failed') {
+    return {
+      kind: 'own_leftover_clear_failed',
+      source: 'draft_guard',
+      guardStatus: info.guardStatus,
+      ...(info.draftLength !== undefined ? { draftLength: info.draftLength } : {}),
+    };
+  }
+  if (info.guardStatus === 'capture_style_unavailable') {
+    return {
+      kind: 'capture_ambiguous',
+      source: 'draft_guard',
+      guardStatus: info.guardStatus,
+      ...(info.draftLength !== undefined ? { draftLength: info.draftLength } : {}),
+    };
+  }
+  return {
+    kind: 'terminal_user_draft',
+    source: 'draft_guard',
+    guardStatus: info.guardStatus,
+    ...(info.draftLength !== undefined ? { draftLength: info.draftLength } : {}),
+  };
 }
 
 export type ClaudeUnifiedSustainedPendingDeliveryBlockHandler = Readonly<{
@@ -45,73 +81,28 @@ export type ClaudeUnifiedSustainedPendingDeliveryBlockHandler = Readonly<{
     blocker: ClaudeUnifiedDeliveryBlocker | null | undefined;
     isCanonicalTurnActive?: boolean | undefined;
   }>): Promise<boolean>;
-  retryBlockedRowsOnce(): Promise<void>;
-  dispose(): void;
+  wakePendingMaterialization(): void;
 }>;
 
 export function createClaudeUnifiedSustainedPendingDeliveryBlockHandler(params: Readonly<{
   blockPendingMessageDelivery?: PendingDeliveryBlocker | undefined;
-  retryPendingMessageDelivery?: PendingDeliveryRetryer | undefined;
+  wakePendingMaterialization?: (() => void) | undefined;
   logPrefix: string;
   logDebug: (message: string, error: unknown) => void;
 }>): ClaudeUnifiedSustainedPendingDeliveryBlockHandler {
-  const blockedLocalIds = new Set<string>();
-  let clearObservedWhileEmpty = false;
-  let pendingBlockWrites = 0;
-
-  const retryBlockedRows = async (): Promise<void> => {
-    if (blockedLocalIds.size === 0) {
-      if (pendingBlockWrites > 0) {
-        clearObservedWhileEmpty = true;
-      }
-      return;
-    }
-    clearObservedWhileEmpty = false;
-    const localIds = [...blockedLocalIds];
-    blockedLocalIds.clear();
-    if (!params.retryPendingMessageDelivery) return;
-    await Promise.all(localIds.map((localId) =>
-      params.retryPendingMessageDelivery?.({ localId }).catch((error) => {
-        params.logDebug(`${params.logPrefix}: failed to retry Claude unified terminal pending delivery (non-fatal)`, error);
-        return false;
-      }),
-    ));
-  };
-
   return {
     async blockForSustainedBlocker(blockParams): Promise<boolean> {
       if (!canDurablyBlockSustainedClaudeUnifiedBlocker(blockParams)) return false;
-      pendingBlockWrites += 1;
-      const blocked = await blockClaudeUnifiedPendingDeliveryForBlocker({
-          localIds: blockParams.localIds,
-          blocker: blockParams.blocker,
-          blockPendingMessageDelivery: params.blockPendingMessageDelivery,
-          logPrefix: params.logPrefix,
-          logDebug: params.logDebug,
-        })
-        .finally(() => {
-          pendingBlockWrites = Math.max(0, pendingBlockWrites - 1);
-        });
-      if (!blocked) return false;
-      const pendingDeliveryBlock = resolveClaudeUnifiedPendingDeliveryBlockForDeliveryBlocker({
+      return blockClaudeUnifiedPendingDeliveryForBlocker({
         localIds: blockParams.localIds,
         blocker: blockParams.blocker,
+        blockPendingMessageDelivery: params.blockPendingMessageDelivery,
+        logPrefix: params.logPrefix,
+        logDebug: params.logDebug,
       });
-      for (const localId of pendingDeliveryBlock?.localIds ?? []) {
-        blockedLocalIds.add(localId);
-      }
-      if (clearObservedWhileEmpty) {
-        await retryBlockedRows();
-      }
-      return true;
     },
-    async retryBlockedRowsOnce(): Promise<void> {
-      await retryBlockedRows();
-    },
-    dispose(): void {
-      blockedLocalIds.clear();
-      clearObservedWhileEmpty = false;
-      pendingBlockWrites = 0;
+    wakePendingMaterialization(): void {
+      params.wakePendingMaterialization?.();
     },
   };
 }
@@ -148,26 +139,27 @@ export async function handleClaudeUnifiedTerminalRuntimeIssuePendingDeliveryBloc
   onSurfacedRuntimeIssue?: (() => void | Promise<void>) | undefined;
 }>): Promise<ClaudeUnifiedTerminalRuntimeIssueHandlingResult> {
   const nowMs = params.nowMs?.() ?? Date.now();
-  let providerUnavailableWindow = params.providerUnavailableWindow;
-  if (!isClaudeUnifiedProviderUnavailablePromptDeliveryWindowActive(providerUnavailableWindow, nowMs)) {
-    providerUnavailableWindow = null;
+  if (!isClaudeUnifiedProviderUnavailablePromptDeliveryWindowActive(params.providerUnavailableWindow, nowMs)) {
     params.setProviderUnavailableWindow(null);
   }
 
-  const pendingDeliveryBlock = promoteClaudeUnifiedProviderAcceptanceTimeoutBlockForUnavailableProvider(
-    resolveClaudeUnifiedPendingDeliveryBlock(params.error),
-    providerUnavailableWindow,
-    nowMs,
-  );
+  const pendingDeliveryBlock = resolveClaudeUnifiedPendingDeliveryBlock(params.error);
   let didBlockPendingDelivery = false;
   if (pendingDeliveryBlock && params.blockPendingMessageDelivery) {
     didBlockPendingDelivery = await params.blockPendingMessageDelivery(pendingDeliveryBlock).catch((error) => {
       params.logDebug(`${params.logPrefix}: failed to block Claude unified terminal pending delivery (non-fatal)`, error);
       return false;
     });
-    if (didBlockPendingDelivery && pendingDeliveryBlock.reason !== 'provider_acceptance_timeout') {
+    if (didBlockPendingDelivery) {
       return { action: 'claimed_pending_delivery' };
     }
+  }
+
+  // An exact pre-write steer rejection describes only the attempted Pending input. If its
+  // durable block cannot be recorded, keep that input parked locally; the already-running
+  // foreground turn remains owned by Claude lifecycle evidence rather than bookkeeping failure.
+  if (pendingDeliveryBlock?.reason === 'steering_unavailable') {
+    return;
   }
 
   if (params.deferAmbiguousRuntimeIssue === true && isClaudeUnifiedTerminalAmbiguousInjectionFailureError(params.error)) {

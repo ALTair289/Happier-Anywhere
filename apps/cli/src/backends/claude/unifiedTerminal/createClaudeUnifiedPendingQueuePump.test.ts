@@ -5,6 +5,7 @@ import { createClaudeUnifiedPendingQueuePump } from './createClaudeUnifiedPendin
 import { PendingQueueMaterializationAuthError } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
 
 const createIdleSnapshot = () => ({
+  pendingQueuePumpStateVersion: 0,
   queuedCount: 0,
   pendingInjectionCount: 0,
   terminalCustodyCount: 0,
@@ -18,6 +19,15 @@ const createIdleSnapshot = () => ({
   currentHeadBlocker: null,
   headInputState: null,
 });
+
+async function waitForPendingQueuePumpStateChangeUntilAbort(options: Readonly<{
+  abortSignal: AbortSignal;
+}>): Promise<boolean> {
+  if (options.abortSignal.aborted) return false;
+  return await new Promise<boolean>((resolve) => {
+    options.abortSignal.addEventListener('abort', () => resolve(false), { once: true });
+  });
+}
 
 describe('createClaudeUnifiedPendingQueuePump', () => {
   afterEach(() => {
@@ -37,7 +47,7 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
 
     const pump = createClaudeUnifiedPendingQueuePump({
       inputConsumer: { waitForNextInput, drainPending },
-      arbiter: { enqueueUiMessage, drainWhenSafe, snapshot: vi.fn(createIdleSnapshot) },
+      arbiter: { enqueueUiMessage, drainWhenSafe, snapshot: vi.fn(createIdleSnapshot), waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort },
     });
 
     await pump.pumpOnce({ abortSignal: new AbortController().signal });
@@ -60,7 +70,7 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
         waitForNextInput: vi.fn(),
         drainPending,
       },
-      arbiter: { enqueueUiMessage: vi.fn(), drainWhenSafe: vi.fn(), snapshot: vi.fn(createIdleSnapshot) },
+      arbiter: { enqueueUiMessage: vi.fn(), drainWhenSafe: vi.fn(), snapshot: vi.fn(createIdleSnapshot), waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort },
     });
 
     await expect(pump.drainPending({ reason: 'unified-test' })).resolves.toEqual({
@@ -70,7 +80,8 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
     expect(drainPending).toHaveBeenCalledWith({ reason: 'unified-test' });
   });
 
-  it('does not prefetch another pending input while the arbiter head waits for provider acceptance', async () => {
+  it('does not prefetch while a newer head awaits provider acceptance alongside older terminal custody', async () => {
+    vi.useFakeTimers();
     const waitForNextInput = vi.fn()
       .mockResolvedValueOnce({
         message: 'old prompt awaiting Claude acceptance',
@@ -91,9 +102,10 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
     const snapshot = vi.fn()
       .mockReturnValueOnce(createIdleSnapshot())
       .mockReturnValue({
+        pendingQueuePumpStateVersion: 1,
         queuedCount: 1,
         pendingInjectionCount: 0,
-        terminalCustodyCount: 0,
+        terminalCustodyCount: 1,
         providerAcceptancePendingCount: 1,
         disposed: false,
         turnState: 'idle',
@@ -109,6 +121,7 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
         enqueueUiMessage,
         drainWhenSafe: vi.fn().mockResolvedValue(undefined),
         snapshot,
+        waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort,
       },
     });
 
@@ -116,6 +129,7 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
     const running = pump.start({ abortSignal: abortController.signal });
     await Promise.resolve();
     await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1);
 
     expect(waitForNextInput).toHaveBeenCalledTimes(1);
     expect(enqueueUiMessage).toHaveBeenCalledTimes(1);
@@ -128,7 +142,7 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
     await expect(running).resolves.toBeUndefined();
   });
 
-  it('unparks after the arbiter provider-acceptance deadline resolves a compaction-blocked head', async () => {
+  it('keeps unresolved provider acceptance in truthful custody regardless of elapsed time', async () => {
     vi.useFakeTimers();
     let nowMs = 10_000;
     const injectPrompt = vi.fn(async (batch) => ({
@@ -136,36 +150,34 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
       at: nowMs,
       bytesWritten: batch.message.length,
     }));
+    const onInjectionFailure = vi.fn(async () => ({ action: 'claimed_pending_delivery' as const }));
     const arbiter = createClaudeUnifiedInputArbiter({
       nowMs: () => nowMs,
       quietPeriodMs: 0,
-      providerAcceptanceTimeoutMs: 40,
       injectPrompt,
-      onInjectionFailure: vi.fn(async () => ({ action: 'claimed_pending_delivery' as const })),
+      onInjectionFailure,
     });
     arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
     arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
 
     const waitForNextInput = vi.fn()
       .mockResolvedValueOnce({
-        message: 'old prompt awaiting Claude acceptance',
+        message: 'prompt awaiting independent Claude acceptance evidence',
         mode: undefined,
         isolate: false,
         hash: 'h1',
         userMessageLocalIds: ['old-local'],
       })
       .mockResolvedValueOnce({
-        message: 'new prompt should unpark after timeout',
+        message: 'next prompt wakes only after arbiter state changes',
         mode: undefined,
         isolate: false,
         hash: 'h2',
-        userMessageLocalIds: ['new-local'],
-      })
-      .mockResolvedValueOnce(null);
+        userMessageLocalIds: ['next-local'],
+      });
     const pump = createClaudeUnifiedPendingQueuePump({
       inputConsumer: { waitForNextInput },
       arbiter,
-      pausedArbiterRecheckMs: 5,
     });
 
     const abortController = new AbortController();
@@ -175,28 +187,64 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
 
     expect(waitForNextInput).toHaveBeenCalledTimes(1);
     expect(injectPrompt).toHaveBeenCalledTimes(1);
-    arbiter.observeLifecycle({
-      type: 'compaction',
-      phase: 'started',
-      observedAtMs: nowMs,
-    } as Parameters<typeof arbiter.observeLifecycle>[0]);
-
-    nowMs += 85;
-    await vi.advanceTimersByTimeAsync(85);
+    nowMs += 60_000;
+    await vi.advanceTimersByTimeAsync(60_000);
     await Promise.resolve();
 
-    expect(waitForNextInput).toHaveBeenCalledTimes(2);
+    expect(onInjectionFailure).not.toHaveBeenCalled();
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
     expect(arbiter.snapshot()).toMatchObject({
       queuedCount: 1,
-      pendingInjectionCount: 1,
-      headInputState: 'waiting_for_readiness',
-      lastDeferredReason: 'compaction',
+      pendingInjectionCount: 0,
+      providerAcceptancePendingCount: 1,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+    await expect(arbiter.confirmPromptAcceptedByProviderIf(
+      (batch) => batch.userMessageLocalIds?.includes('old-local') === true,
+    )).resolves.toBe(true);
+    for (let index = 0; index < 10; index += 1) {
+      await Promise.resolve();
+    }
+
+    expect(waitForNextInput).toHaveBeenCalledTimes(2);
+    expect(injectPrompt).toHaveBeenCalledTimes(2);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      providerAcceptancePendingCount: 1,
+      headInputState: 'awaiting_provider_acceptance',
     });
     abortController.abort();
     await expect(running).resolves.toBeUndefined();
-    expect(injectPrompt.mock.calls.map(([batch]) => batch.message)).toEqual([
-      'old prompt awaiting Claude acceptance',
-    ]);
+  });
+
+  it('does not hand an unresolved provider-acceptance batch back for blind replay on dispose', async () => {
+    const onUndeliverableBatches = vi.fn();
+    const arbiter = createClaudeUnifiedInputArbiter({
+      quietPeriodMs: 0,
+      injectPrompt: vi.fn(async (batch) => ({
+        status: 'injected' as const,
+        at: 10_000,
+        bytesWritten: batch.message.length,
+      })),
+      onUndeliverableBatches,
+    });
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: 10_000 });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: 10_000 });
+    await arbiter.enqueueUiMessage({
+      message: 'written prompt whose provider outcome is unresolved',
+      mode: undefined,
+      origin: { kind: 'ui_pending' },
+      userMessageLocalIds: ['unresolved-local'],
+    });
+    await arbiter.drainWhenSafe();
+
+    expect(arbiter.snapshot()).toMatchObject({
+      providerAcceptancePendingCount: 1,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+    arbiter.dispose();
+
+    expect(onUndeliverableBatches).not.toHaveBeenCalled();
   });
 
   it('marks provider-acceptance pending batches as owned before arbiter delivery', async () => {
@@ -218,6 +266,7 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
         }),
         drainWhenSafe: vi.fn(),
         snapshot: vi.fn(createIdleSnapshot),
+        waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort,
       },
       onProviderAcceptancePendingPrompt: (batch) => {
         events.push(`owned:${batch.message}`);
@@ -230,6 +279,22 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
       'owned:prompt already claimed by pending-provider delivery',
       'enqueue',
     ]);
+  });
+
+  it('forwards the authenticated exact action into the Claude arbiter batch', async () => {
+    const enqueueUiMessage = vi.fn(async () => undefined);
+    const pump = createClaudeUnifiedPendingQueuePump({
+      inputConsumer: { waitForNextInput: vi.fn().mockResolvedValue({
+        message: 'steer exactly this', mode: undefined, isolate: false, hash: 'h',
+        userMessageLocalIds: ['exact-local'], pendingProviderAction: 'steer',
+      }) },
+      arbiter: { enqueueUiMessage, drainWhenSafe: vi.fn(), snapshot: vi.fn(createIdleSnapshot), waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort },
+    });
+    await pump.pumpOnce({ abortSignal: new AbortController().signal });
+    expect(enqueueUiMessage).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'steer exactly this',
+      pendingProviderAction: 'steer',
+    }));
   });
 
   it('continues pumping when provider-acceptance work is already in terminal custody', async () => {
@@ -255,11 +320,12 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
         drainWhenSafe: vi.fn().mockResolvedValue(undefined),
         snapshot: vi.fn(() => ({
           ...createIdleSnapshot(),
-          queuedCount: 1,
+          queuedCount: 0,
           terminalCustodyCount: 1,
-          providerAcceptancePendingCount: 1,
-          headInputState: 'submitted' as const,
+          providerAcceptancePendingCount: 0,
+          headInputState: 'terminal_custody' as const,
         })),
+        waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort,
       },
     });
 
@@ -272,18 +338,10 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
     ]);
   });
 
-  it('continues pumping after a handled input wait failure instead of resolving the runner', async () => {
+  it('parks after a consumer failure without starting a pump retry loop', async () => {
     vi.useFakeTimers();
     const error = new Error('pending materialization failed');
-    const waitForNextInput = vi.fn()
-      .mockRejectedValueOnce(error)
-      .mockResolvedValueOnce({
-        message: 'delivered after transient input failure',
-        mode: undefined,
-        isolate: false,
-        hash: 'after-failure',
-      })
-      .mockResolvedValueOnce(null);
+    const waitForNextInput = vi.fn().mockRejectedValueOnce(error);
     const enqueueUiMessage = vi.fn().mockResolvedValue(undefined);
     const pump = createClaudeUnifiedPendingQueuePump({
       inputConsumer: {
@@ -293,28 +351,20 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
         enqueueUiMessage,
         drainWhenSafe: vi.fn().mockResolvedValue(undefined),
         snapshot: vi.fn(createIdleSnapshot),
+        waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort,
       },
-      failureRetryBackoffMs: 1,
     });
 
     const startResult: unknown = pump.start({ abortSignal: new AbortController().signal });
-    const settled = vi.fn();
-    void Promise.resolve(startResult).then(settled, settled);
-
     expect(startResult).toBeInstanceOf(Promise);
-    await Promise.resolve();
-    expect(settled).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(1);
     await expect(startResult).resolves.toBeUndefined();
-    expect(waitForNextInput).toHaveBeenCalledTimes(3);
-    expect(enqueueUiMessage).toHaveBeenCalledWith(expect.objectContaining({
-      message: 'delivered after transient input failure',
-    }));
+    expect(waitForNextInput).toHaveBeenCalledTimes(1);
+    expect(enqueueUiMessage).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(waitForNextInput).toHaveBeenCalledTimes(1);
   });
 
-  it('hands back a failed delivery and continues pumping later batches', async () => {
-    vi.useFakeTimers();
+  it('hands back a failed delivery before propagating an unexpected arbiter failure', async () => {
     const error = new Error('drain failed');
     const onUndeliverableBatch = vi.fn();
     const waitForNextInput = vi.fn()
@@ -332,8 +382,7 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
       })
       .mockResolvedValueOnce(null);
     const drainWhenSafe = vi.fn()
-      .mockRejectedValueOnce(error)
-      .mockResolvedValueOnce(undefined);
+      .mockRejectedValueOnce(error);
     const enqueueUiMessage = vi.fn().mockResolvedValue(undefined);
     const pump = createClaudeUnifiedPendingQueuePump({
       inputConsumer: {
@@ -343,24 +392,21 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
         enqueueUiMessage,
         drainWhenSafe,
         snapshot: vi.fn(createIdleSnapshot),
+        waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort,
       },
       onUndeliverableBatch,
-      failureRetryBackoffMs: 1,
     });
 
-    const startResult: unknown = pump.start({ abortSignal: new AbortController().signal });
+    const startResult = pump.start({ abortSignal: new AbortController().signal });
 
-    expect(startResult).toBeInstanceOf(Promise);
-    await vi.advanceTimersByTimeAsync(1);
-    await expect(startResult).resolves.toBeUndefined();
+    await expect(startResult).rejects.toBe(error);
     expect(onUndeliverableBatch).toHaveBeenCalledWith(expect.objectContaining({
       message: 'from queue',
     }));
     expect(enqueueUiMessage.mock.calls.map(([batch]) => batch.message)).toEqual([
       'from queue',
-      'next queue item',
     ]);
-    expect(drainWhenSafe).toHaveBeenCalledTimes(2);
+    expect(drainWhenSafe).toHaveBeenCalledTimes(1);
   });
 
   it('rejects auth materialization failures so the launcher park-wait path can handle them', async () => {
@@ -373,44 +419,38 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
         enqueueUiMessage: vi.fn(),
         drainWhenSafe: vi.fn(),
         snapshot: vi.fn(createIdleSnapshot),
+        waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort,
       },
     });
 
     await expect(pump.start({ abortSignal: new AbortController().signal })).rejects.toBe(authError);
   });
 
-  it('rejects after a bounded run of handled delivery failures instead of silently stopping', async () => {
+  it('stops non-fatally without a retry counter or timer when its consumer rejects', async () => {
     vi.useFakeTimers();
-    const waitForNextInput = vi.fn()
-      .mockResolvedValue({
-        message: 'repeat failure',
-        mode: undefined,
-        isolate: false,
-        hash: 'repeat',
-      });
+    const transientWaitError = Object.assign(new Error('server materialization stalled'), {
+      localId: 'durable-pending-row',
+    });
+    const waitForNextInput = vi.fn().mockRejectedValueOnce(transientWaitError);
+    const enqueueUiMessage = vi.fn().mockResolvedValue(undefined);
     const pump = createClaudeUnifiedPendingQueuePump({
       inputConsumer: {
         waitForNextInput,
       },
       arbiter: {
-        enqueueUiMessage: vi.fn().mockResolvedValue(undefined),
-        drainWhenSafe: vi.fn().mockRejectedValue(new Error('persistent drain failure')),
+        enqueueUiMessage,
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
         snapshot: vi.fn(createIdleSnapshot),
+        waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort,
       },
-      onUndeliverableBatch: vi.fn(),
-      maxConsecutiveHandledFailures: 2,
-      failureRetryBackoffMs: 1,
     });
 
     const running = pump.start({ abortSignal: new AbortController().signal });
-    const rejected = expect(running).rejects.toMatchObject({
-      code: 'claude_unified_pending_queue_pump_failure_budget_exhausted',
-      failureCount: 2,
-    });
-
-    await vi.advanceTimersByTimeAsync(1);
-    await rejected;
-    expect(waitForNextInput).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(running).resolves.toBeUndefined();
+    expect(waitForNextInput).toHaveBeenCalledTimes(1);
+    expect(enqueueUiMessage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('hands an already-consumed batch back instead of dropping it when aborted during the input wait (silent queue-swallow fix)', async () => {
@@ -424,7 +464,7 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
           resolveInput = resolve;
         })),
       },
-      arbiter: { enqueueUiMessage, drainWhenSafe: vi.fn(), snapshot: vi.fn(createIdleSnapshot) },
+      arbiter: { enqueueUiMessage, drainWhenSafe: vi.fn(), snapshot: vi.fn(createIdleSnapshot), waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort },
       onUndeliverableBatch,
     });
 
@@ -449,7 +489,7 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
           resolveInput = resolve;
         })),
       },
-      arbiter: { enqueueUiMessage, drainWhenSafe: vi.fn(), snapshot: vi.fn(createIdleSnapshot) },
+      arbiter: { enqueueUiMessage, drainWhenSafe: vi.fn(), snapshot: vi.fn(createIdleSnapshot), waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort },
       onUndeliverableBatch,
     });
 
@@ -472,7 +512,7 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
           resolveInput = resolve;
         })),
       },
-      arbiter: { enqueueUiMessage: vi.fn(), drainWhenSafe: vi.fn(), snapshot: vi.fn(createIdleSnapshot) },
+      arbiter: { enqueueUiMessage: vi.fn(), drainWhenSafe: vi.fn(), snapshot: vi.fn(createIdleSnapshot), waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort },
     });
 
     const startResult = pump.start({ abortSignal: new AbortController().signal });
@@ -480,5 +520,32 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
     resolveInput(null);
 
     await expect(startResult).resolves.toBeUndefined();
+  });
+
+  it('resolves the running promise when disposed during an arbiter state-change wait', async () => {
+    const waitForPendingQueuePumpStateChange = vi.fn(waitForPendingQueuePumpStateChangeUntilAbort);
+    const pump = createClaudeUnifiedPendingQueuePump({
+      inputConsumer: { waitForNextInput: vi.fn() },
+      arbiter: {
+        enqueueUiMessage: vi.fn(),
+        drainWhenSafe: vi.fn(),
+        snapshot: vi.fn(() => ({
+          ...createIdleSnapshot(),
+          pendingQueuePumpStateVersion: 7,
+          providerAcceptancePendingCount: 1,
+          headInputState: 'awaiting_provider_acceptance' as const,
+        })),
+        waitForPendingQueuePumpStateChange,
+      },
+    });
+
+    const running = pump.start({ abortSignal: new AbortController().signal });
+    await Promise.resolve();
+    expect(waitForPendingQueuePumpStateChange).toHaveBeenCalledWith(expect.objectContaining({
+      afterVersion: 7,
+    }));
+
+    pump.dispose();
+    await expect(running).resolves.toBeUndefined();
   });
 });

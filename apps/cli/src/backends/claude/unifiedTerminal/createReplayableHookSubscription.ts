@@ -1,6 +1,26 @@
 import type { SessionHookData } from '../utils/startHookServer';
 import type { ClaudeUnifiedSessionHookSubscription } from './createClaudeUnifiedHookLifecycleBridge';
 
+const CLAUDE_SESSION_IDENTITY_REPORTED = Symbol('happier.claudeSessionIdentityReported');
+
+type ClaudeSessionHookWithIdentityOwnership = SessionHookData & Readonly<{
+  [CLAUDE_SESSION_IDENTITY_REPORTED]?: true;
+}>;
+
+export function markClaudeSessionHookIdentityReported(data: SessionHookData): SessionHookData {
+  const markedData = Object.isExtensible(data) ? data : { ...data };
+  Object.defineProperty(markedData, CLAUDE_SESSION_IDENTITY_REPORTED, {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
+  return markedData;
+}
+export function wasClaudeSessionHookIdentityReported(data: SessionHookData): boolean {
+  return (data as ClaudeSessionHookWithIdentityOwnership)[CLAUDE_SESSION_IDENTITY_REPORTED] === true;
+}
+
 export function createReplayableHookSubscription(
   subscribe: ClaudeUnifiedSessionHookSubscription | undefined,
 ): Readonly<{

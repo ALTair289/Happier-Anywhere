@@ -1,10 +1,11 @@
 import type { PendingQueueDeliveryBlockedReason } from '@/api/session/pendingQueueV2Transport';
+import { readPendingLocalId } from '@happier-dev/protocol';
 
 import type { NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
 import type { ClaudeUnifiedDeliveryBlocker } from './_types';
+import { isClaudeUnifiedDialogBlockedReason } from './tuiControls/dialogRegistry';
 import {
   isClaudeUnifiedTerminalInjectionFailureError,
-  isClaudeUnifiedTerminalProviderAcceptanceTimeoutError,
 } from './terminalInjectionFailureError';
 
 export type ClaudeUnifiedPendingDeliveryBlock = Readonly<{
@@ -77,31 +78,13 @@ export function isClaudeUnifiedProviderUnavailablePromptDeliveryWindowActive(
   return window !== null && nowMs < window.unavailableUntilMs;
 }
 
-export function promoteClaudeUnifiedProviderAcceptanceTimeoutBlockForUnavailableProvider(
-  block: ClaudeUnifiedPendingDeliveryBlock | null,
-  providerUnavailableWindow: ClaudeUnifiedProviderUnavailablePromptDeliveryWindow | null,
-  nowMs: number,
-): ClaudeUnifiedPendingDeliveryBlock | null {
-  if (
-    block?.reason !== 'provider_acceptance_timeout'
-    || !isClaudeUnifiedProviderUnavailablePromptDeliveryWindowActive(providerUnavailableWindow, nowMs)
-  ) {
-    return block;
-  }
-
-  return {
-    ...block,
-    reason: 'provider_unavailable_before_acceptance',
-  };
-}
-
 function readUserMessageLocalIds(error: unknown): string[] {
   const raw = (error as { userMessageLocalIds?: unknown }).userMessageLocalIds;
   if (!Array.isArray(raw)) return [];
   const seen = new Set<string>();
   const localIds: string[] = [];
   for (const value of raw) {
-    const localId = typeof value === 'string' ? value.trim() : '';
+    const localId = readPendingLocalId(value) ?? '';
     if (!localId || seen.has(localId)) continue;
     seen.add(localId);
     localIds.push(localId);
@@ -113,7 +96,7 @@ function normalizeLocalIds(localIds: readonly string[] | null | undefined): stri
   const seen = new Set<string>();
   const normalized: string[] = [];
   for (const value of localIds ?? []) {
-    const localId = typeof value === 'string' ? value.trim() : '';
+    const localId = readPendingLocalId(value) ?? '';
     if (!localId || seen.has(localId)) continue;
     seen.add(localId);
     normalized.push(localId);
@@ -153,6 +136,16 @@ export function resolveClaudeUnifiedPendingDeliveryBlockForDeliveryBlocker(param
     };
   }
 
+  if (
+    params.blocker.kind === 'terminal_busy'
+    && isClaudeUnifiedDialogBlockedReason(params.blocker.detail)
+  ) {
+    return {
+      localIds,
+      reason: 'runtime_config_blocked',
+    };
+  }
+
   return null;
 }
 
@@ -181,11 +174,19 @@ export function resolveClaudeUnifiedPendingDeliveryBlock(
   const phase = (error as { phase?: unknown }).phase;
   const duplicateRisk = (error as { duplicateRisk?: unknown }).duplicateRisk;
   const recoverable = (error as { recoverable?: unknown }).recoverable;
+  const pendingProviderAction = (error as { pendingProviderAction?: unknown }).pendingProviderAction;
 
-  if (isClaudeUnifiedTerminalProviderAcceptanceTimeoutError(error)) {
+  if (
+    failureState === 'failed_terminal'
+    && pendingProviderAction === 'steer'
+    && reason === 'no_target'
+    && phase === 'before_write'
+    && duplicateRisk === 'none'
+    && recoverable === false
+  ) {
     return {
       localIds,
-      reason: 'provider_acceptance_timeout',
+      reason: 'steering_unavailable',
     };
   }
 

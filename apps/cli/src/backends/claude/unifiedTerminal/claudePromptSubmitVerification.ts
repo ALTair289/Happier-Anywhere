@@ -2,15 +2,10 @@ import type { TerminalPromptSubmitVerificationPolicy } from '@/integrations/term
 import { normalizeCapturedScreen } from '@/integrations/terminalHost/controlCapture';
 
 import {
-  countPromptNewlines,
   parseClaudePastedTextMarkerLineCount,
   pastedTextLineCountMatchesPrompt,
 } from './claudePastedTextMarker';
 import { parseClaudeScreenState } from './tuiControls/screenState';
-
-export type ClaudePromptSubmitVerificationOptions = Readonly<{
-  verifySingleLineAfterSubmit?: boolean | undefined;
-}>;
 
 function normalizeNewlines(value: string): string {
   return value.replace(/\r\n?/g, '\n');
@@ -42,7 +37,7 @@ function isLikelyTerminalFooterLine(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed) return true;
   if (/^[─━═┄┈\-\s]+$/.test(trimmed)) return true;
-  if (/^(?:▶+|▸+|>>)\s/.test(trimmed)) return true;
+  if (/^(?:▶+|▸+|⏵+|>>)\s/.test(trimmed)) return true;
   return false;
 }
 
@@ -78,12 +73,8 @@ function shouldVerifyBeforeSubmit(promptText: string): boolean {
   return false;
 }
 
-function shouldVerifyAfterSubmit(
-  promptText: string,
-  options: ClaudePromptSubmitVerificationOptions,
-): boolean {
-  return options.verifySingleLineAfterSubmit === true
-    || countPromptNewlines(normalizeNewlines(promptText)) > 0;
+function shouldVerifyAfterSubmit(promptText: string): boolean {
+  return normalizeNewlines(promptText).trim().length > 0;
 }
 
 function verifyScreenBeforeSubmit(params: Readonly<{
@@ -126,17 +117,14 @@ function isExactPromptStillInComposerAfterSubmit(params: Readonly<{
   return composerContent === promptText;
 }
 
-export function createClaudePromptSubmitVerificationPolicy(
-  options: ClaudePromptSubmitVerificationOptions = {},
-): TerminalPromptSubmitVerificationPolicy {
+export function createClaudePromptSubmitVerificationPolicy(): TerminalPromptSubmitVerificationPolicy {
   return {
     shouldVerifyBeforeSubmit,
-    shouldVerifyAfterSubmit: (promptText) => shouldVerifyAfterSubmit(promptText, options),
+    shouldVerifyAfterSubmit,
     verifyScreenBeforeSubmit,
     isPromptStillPendingAfterSubmit: (params) => (
       isPromptStillPendingAfterSubmit(params)
-      || (options.verifySingleLineAfterSubmit === true
-        && isExactPromptStillInComposerAfterSubmit(params))
+      || isExactPromptStillInComposerAfterSubmit(params)
     ),
   };
 }

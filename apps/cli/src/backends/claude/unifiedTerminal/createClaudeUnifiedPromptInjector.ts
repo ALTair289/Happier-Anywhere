@@ -23,8 +23,18 @@ import { emitClaudeUnifiedInjectionDraftGuard, emitClaudeUnifiedInjectionOutcome
 // arm their own retry timer (live-proven starvation, runner pid 20327).
 const DRAFT_GUARD_RETRY_MS = 2_000;
 const DRAFT_GUARD_BACKOFF_RETRY_MS = 30_000;
-const DRAFT_GUARD_BACKOFF_THRESHOLD = 4;
-const DRAFT_GUARD_BACKOFF_MIN_EPISODE_MS = 15_000;
+export const DEFAULT_DRAFT_GUARD_STARVATION_THRESHOLD_MS = 15_000;
+const MIN_DRAFT_GUARD_STARVATION_THRESHOLD_MS = 1_000;
+const MAX_DRAFT_GUARD_STARVATION_THRESHOLD_MS = 5 * 60_000;
+
+function resolveDraftGuardStarvationThresholdMs(value: number | undefined): number {
+  const candidate = value ?? DEFAULT_DRAFT_GUARD_STARVATION_THRESHOLD_MS;
+  if (!Number.isFinite(candidate)) return DEFAULT_DRAFT_GUARD_STARVATION_THRESHOLD_MS;
+  return Math.min(
+    MAX_DRAFT_GUARD_STARVATION_THRESHOLD_MS,
+    Math.max(MIN_DRAFT_GUARD_STARVATION_THRESHOLD_MS, Math.trunc(candidate)),
+  );
+}
 
 /**
  * Outcome of the pre-injection composer guard (C11): screen-lite projection of
@@ -48,13 +58,14 @@ export type ClaudeUnifiedComposerDraftGuardOutcome = Readonly<{
 
 type ClaudeUnifiedDraftGuardBlockerStatus = Extract<
   ClaudeUnifiedComposerDraftGuardOutcome['status'],
-  'foreign_draft' | 'capture_style_unavailable' | 'clear_failed'
+  'foreign_draft' | 'capture_style_unavailable' | 'clear_failed' | 'blocked_non_input_state'
 >;
 
 export type ClaudeUnifiedDraftGuardStarvationInfo = Readonly<{
   consecutiveDeferrals: number;
   draftLength?: number | undefined;
   guardStatus: ClaudeUnifiedDraftGuardBlockerStatus;
+  blockedReason?: string | undefined;
   isCanonicalTurnActive?: boolean | undefined;
   originKind: 'ui_pending' | 'ui_immediate' | 'rpc';
   userMessageLocalIds?: readonly string[] | undefined;
@@ -114,12 +125,18 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
    * guard — the steer evaluator already owns that screen's draft policy.
    */
   composerDraftGuard?: (() => Promise<ClaudeUnifiedComposerDraftGuardOutcome>) | undefined;
+  /**
+   * Runs the existing runtime-control gate before draft classification. Controller-owned dialogs
+   * must be resolved here so the draft guard cannot starve the owner that would clear them.
+   */
+  beforeComposerDraftGuard?: (() => Promise<TerminalInputInjectionResult | null>) | undefined;
   nowMs?: (() => number) | undefined;
+  /** Configuration/test seam; values are clamped to the bounded production range. */
+  draftGuardStarvationThresholdMs?: number | undefined;
   onInjected?: ((batch: ClaudeUnifiedPromptBatch<Mode>) => void | Promise<void>) | undefined;
   /**
-   * Fired once per idle pre-injection draft-guard episode after the sustained-backoff threshold is
-   * reached. This gives the runner a structured surface for a user-visible stuck-draft notice while
-   * preserving the fail-closed guard for genuine drafts.
+   * Fired once per idle pre-injection guard episode after the sustained-backoff threshold is
+   * reached. This gives the runner a structured surface for a genuine draft or dialog blocker.
    */
   onDraftGuardStarvation?: ((info: ClaudeUnifiedDraftGuardStarvationInfo) => void) | undefined;
   onDraftGuardClear?: (() => void) | undefined;
@@ -127,6 +144,9 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
 }>): ClaudeUnifiedPromptInjector<Mode> {
   const createNonce = opts.createNonce ?? randomUUID;
   const nowMs = opts.nowMs ?? Date.now;
+  const draftGuardStarvationThresholdMs = resolveDraftGuardStarvationThresholdMs(
+    opts.draftGuardStarvationThresholdMs,
+  );
   let draftGuardDeferralCount = 0;
   let draftGuardDeferralStartedAtMs: number | null = null;
   let draftGuardStarvationEscalated = false;
@@ -153,9 +173,7 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
     const now = nowMs();
     draftGuardDeferralStartedAtMs ??= now;
     draftGuardDeferralCount += 1;
-    const sustained =
-      draftGuardDeferralCount >= DRAFT_GUARD_BACKOFF_THRESHOLD &&
-      now - draftGuardDeferralStartedAtMs >= DRAFT_GUARD_BACKOFF_MIN_EPISODE_MS;
+    const sustained = now - draftGuardDeferralStartedAtMs >= draftGuardStarvationThresholdMs;
     const starvationEscalatedNow = sustained && !draftGuardStarvationEscalated;
     if (starvationEscalatedNow) {
       draftGuardStarvationEscalated = true;
@@ -199,6 +217,25 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
       const text = preparedPrompt.text;
       const writeBudget = resolveTerminalPromptWriteBudget(text);
 
+      if (opts.beforeComposerDraftGuard) {
+        const gateResult = await opts.beforeComposerDraftGuard();
+        if (gateResult) {
+          if (opts.telemetry) {
+            emitClaudeUnifiedInjectionOutcome(opts.telemetry, {
+              result: gateResult,
+              hostKind: opts.inputInjection.hostKind,
+              multiline,
+              inputByteLength: writeBudget.byteLength,
+              inputNewlineCount: writeBudget.newlineCount,
+              writeTimeoutMs: writeBudget.timeoutMs,
+              originKind: batch.origin.kind,
+              ...(inFlightSteer ? { inFlightSteer: true } : {}),
+            });
+          }
+          return gateResult;
+        }
+      }
+
       if (opts.composerDraftGuard && !inFlightSteer) {
         const guard = await opts.composerDraftGuard();
         if (opts.telemetry && guard.status !== 'no_draft') {
@@ -206,10 +243,16 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
             status: guard.status,
             ...(guard.attempts !== undefined ? { attempts: guard.attempts } : {}),
             ...(guard.draftLength !== undefined ? { draftLength: guard.draftLength } : {}),
+            ...(guard.blockedReason !== undefined ? { blockedReason: guard.blockedReason } : {}),
             originKind: batch.origin.kind,
           });
         }
-        if (guard.status === 'foreign_draft' || guard.status === 'capture_style_unavailable' || guard.status === 'clear_failed') {
+        if (
+          guard.status === 'foreign_draft'
+          || guard.status === 'capture_style_unavailable'
+          || guard.status === 'clear_failed'
+          || guard.status === 'blocked_non_input_state'
+        ) {
           // Never write next to a draft we may not own: defer WITH a retry delay — an idle
           // session has no turn-end/readiness wake, so a bare deferral would starve the head
           // prompt forever (live-proven, runner pid 20327). After a sustained draft episode,
@@ -220,6 +263,7 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
               consecutiveDeferrals: deferral.consecutiveDeferrals,
               ...(guard.draftLength !== undefined ? { draftLength: guard.draftLength } : {}),
               guardStatus: guard.status,
+              ...(guard.blockedReason !== undefined ? { blockedReason: guard.blockedReason } : {}),
               isCanonicalTurnActive: readCanonicalTurnActive(),
               originKind: batch.origin.kind,
               userMessageLocalIds: batch.userMessageLocalIds ?? [],
@@ -230,6 +274,7 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
                 consecutiveDeferrals: starvationInfo.consecutiveDeferrals,
                 ...(starvationInfo.draftLength !== undefined ? { draftLength: starvationInfo.draftLength } : {}),
                 guardStatus: starvationInfo.guardStatus,
+                ...(starvationInfo.blockedReason !== undefined ? { blockedReason: starvationInfo.blockedReason } : {}),
                 originKind: starvationInfo.originKind,
               });
             }
@@ -237,18 +282,16 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
           }
           return {
             status: 'deferred',
-            reason: 'user_typing',
+            reason: guard.status === 'blocked_non_input_state' ? 'terminal_busy' : 'user_typing',
             retryAfterMs: deferral.retryAfterMs,
             blocker: resolveDraftGuardBlocker(guard) ?? undefined,
           };
         }
-        if (guard.status === 'provider_unavailable' || guard.status === 'blocked_non_input_state') {
+        if (guard.status === 'provider_unavailable') {
           return {
             status: 'deferred',
             reason: 'terminal_busy',
-            retryAfterMs: guard.status === 'provider_unavailable'
-              ? DRAFT_GUARD_BACKOFF_RETRY_MS
-              : DRAFT_GUARD_RETRY_MS,
+            retryAfterMs: DRAFT_GUARD_BACKOFF_RETRY_MS,
             blocker: resolveDraftGuardBlocker(guard) ?? undefined,
           };
         }

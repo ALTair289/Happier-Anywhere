@@ -354,7 +354,7 @@ function buildClaudeEnv(envOverlay: Readonly<Record<string, string>> | undefined
   const env = stripNestedSessionDetectionEnv(buildClaudeSubprocessEnv({
     envOverlay: {
       DISABLE_AUTOUPDATER: '1',
-      IS_DEMO: '1',
+      // Do not force IS_DEMO: Claude then hides workspace trust while still suppressing plugin hooks.
       ...(envOverlay ?? {}),
     },
   }));

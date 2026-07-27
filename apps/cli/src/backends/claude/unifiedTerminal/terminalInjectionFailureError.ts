@@ -7,6 +7,7 @@ export class ClaudeUnifiedTerminalInjectionFailureError extends Error {
   readonly phase: ClaudeUnifiedPromptInjectionFailure['result']['phase'];
   readonly duplicateRisk: ClaudeUnifiedPromptInjectionFailure['result']['duplicateRisk'];
   readonly recoverable: ClaudeUnifiedPromptInjectionFailure['result']['recoverable'];
+  readonly pendingProviderAction: ClaudeUnifiedPromptInjectionFailure['batch']['pendingProviderAction'];
   readonly maxUserMessageSeq: number | null;
   readonly userMessageLocalIds: readonly string[];
 
@@ -22,6 +23,7 @@ export class ClaudeUnifiedTerminalInjectionFailureError extends Error {
     this.phase = failure.result.phase;
     this.duplicateRisk = failure.result.duplicateRisk;
     this.recoverable = failure.result.recoverable;
+    this.pendingProviderAction = failure.batch.pendingProviderAction;
     this.maxUserMessageSeq = failure.batch.maxUserMessageSeq ?? null;
     this.userMessageLocalIds = [...(failure.batch.userMessageLocalIds ?? [])];
   }

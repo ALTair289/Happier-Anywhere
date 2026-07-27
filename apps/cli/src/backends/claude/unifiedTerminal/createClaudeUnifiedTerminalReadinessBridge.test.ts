@@ -10,7 +10,7 @@ import {
 import { createPermissionHandlerSessionStub } from '../utils/permissionHandler.testkit';
 import { createFakeControlPort } from './tuiControls/fakeControlPort';
 import { createClaudeUnifiedResumeChoiceStartupResolver } from './resumeChoice/claudeUnifiedResumeChoiceStartupResolver';
-import { ClaudeUnifiedResumeChoiceBroker } from './resumeChoice/claudeUnifiedResumeChoiceBroker';
+import { ClaudeUnifiedDialogChoiceBroker } from './dialogChoice/claudeUnifiedDialogChoiceBroker';
 
 const handle: TerminalHostHandle = {
   kind: 'zellij',
@@ -497,7 +497,7 @@ describe('createClaudeUnifiedTerminalReadinessBridge', () => {
     const port = createFakeControlPort({ captures: [effortChangeDialogHighScreen, boxedInteractiveClaudeScreen] });
     const resolveStartupDialog = createClaudeUnifiedResumeChoiceStartupResolver({
       choice: 'ask_every_time',
-      broker: new ClaudeUnifiedResumeChoiceBroker(session),
+      broker: new ClaudeUnifiedDialogChoiceBroker(session),
       port,
       wait: async () => undefined,
       settleMs: 1,
@@ -547,20 +547,24 @@ describe('createClaudeUnifiedTerminalReadinessBridge', () => {
     bridge.dispose();
   });
 
-  it('fails with diagnostics when the resume-choice resolver keeps waiting for a user action past the deadline', async () => {
+  it('pauses the readiness deadline while the exact live dialog waits for a user answer', async () => {
     vi.useFakeTimers();
     let nowMs = 0;
     const arbiter = createArbiter();
     const abortController = new AbortController();
-    const resolveStartupDialog = vi.fn().mockResolvedValue({ status: 'waiting_for_user' });
+    let waitingForUser = true;
+    const resolveStartupDialog = vi.fn().mockImplementation(() => (
+      waitingForUser ? { status: 'waiting_for_user' as const } : { status: 'unhandled' as const }
+    ));
+    const captureInputState = vi.fn().mockImplementation(async () => ({
+      stable: true,
+      currentInput: waitingForUser ? resumeChoiceDialogScreen : interactiveClaudeScreen,
+      observedAt: nowMs,
+    }));
     const bridge = createClaudeUnifiedTerminalReadinessBridge({
       hostAdapter: {
         evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 0 }),
-        captureInputState: vi.fn().mockResolvedValue({
-          stable: true,
-          currentInput: resumeChoiceDialogScreen,
-          observedAt: 0,
-        }),
+        captureInputState,
       },
       handle,
       arbiter,
@@ -583,19 +587,67 @@ describe('createClaudeUnifiedTerminalReadinessBridge', () => {
         await vi.advanceTimersByTimeAsync(10);
       }
 
-      expect(isClaudeUnifiedTerminalReadinessTimeoutError(rejection)).toBe(true);
-      expect((rejection as ClaudeUnifiedTerminalReadinessTimeoutError).diagnostics).toMatchObject({
-        hostAlive: true,
-        lastLivenessPaneAlive: true,
-      });
-      expect(resolveStartupDialog).toHaveBeenCalled();
+      expect(rejection).toBeUndefined();
       expect(arbiter.observeLifecycle).not.toHaveBeenCalled();
+
+      waitingForUser = false;
+      nowMs += 10;
+      await vi.advanceTimersByTimeAsync(10);
+      await started;
+
+      expect(rejection).toBeUndefined();
+      expect(resolveStartupDialog).toHaveBeenCalled();
+      expect(arbiter.observeLifecycle).toHaveBeenCalledWith({ type: 'output', observedAtMs: nowMs });
     } finally {
       abortController.abort();
       await vi.advanceTimersByTimeAsync(0);
       await started;
       bridge.dispose();
     }
+  });
+
+  it('resumes the readiness timeout after the human-wait dialog disappears without a ready composer', async () => {
+    vi.useFakeTimers();
+    let nowMs = 0;
+    let dialogVisible = true;
+    let rejection: unknown;
+    const bridge = createClaudeUnifiedTerminalReadinessBridge({
+      hostAdapter: {
+        evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 0 }),
+        captureInputState: vi.fn().mockImplementation(async () => ({
+          stable: true,
+          currentInput: dialogVisible ? resumeChoiceDialogScreen : 'Claude startup output without a composer',
+          observedAt: nowMs,
+        })),
+      },
+      handle,
+      arbiter: createArbiter(),
+      pollIntervalMs: 10,
+      timeoutMs: 20,
+      extendedTimeoutMs: 20,
+      progressGraceMs: 1,
+      nowMs: () => nowMs,
+      resolveStartupDialog: vi.fn().mockImplementation(() => (
+        dialogVisible ? { status: 'waiting_for_user' as const } : { status: 'unhandled' as const }
+      )),
+    });
+    const started = Promise.resolve(bridge.start({ abortSignal: new AbortController().signal }))
+      .catch((error: unknown) => { rejection = error; });
+
+    for (let i = 0; i < 5; i += 1) {
+      nowMs += 10;
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    expect(rejection).toBeUndefined();
+
+    dialogVisible = false;
+    for (let i = 0; i < 3; i += 1) {
+      nowMs += 10;
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    await started;
+    expect(isClaudeUnifiedTerminalReadinessTimeoutError(rejection)).toBe(true);
+    bridge.dispose();
   });
 
   it('fails with diagnostics when input-state capture never settles before the readiness deadline', async () => {

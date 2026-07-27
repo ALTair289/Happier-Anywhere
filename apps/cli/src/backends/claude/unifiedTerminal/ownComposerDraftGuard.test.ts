@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 import { createClaudeOwnComposerTextLog } from './ownComposerTextLog';
 import { clearOwnLeftoverComposerDraft } from './ownComposerDraftGuard';
+import { createClaudeResumeSummaryCompactResidueEpisode } from './resumeChoice/resumeSummaryCompactResidue';
 
 const OWN_TEXT = 'Reply with exactly: C11-baseline-ok';
 
@@ -324,6 +325,97 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
       wait: async () => undefined,
     });
     expect(result.status).toBe('foreign_draft');
+  });
+
+  it.each(['/compact', ' /compact', '/compact focus on the tests'])(
+    'never clears an independent user-typed %s draft without a resume-summary episode',
+    async (draft) => {
+      let clears = 0;
+      const result = await clearOwnLeftoverComposerDraft({
+        captureInputState: async () => ({ currentInput: idleScreen(draft) }),
+        sendClearKey: async () => {
+          clears += 1;
+        },
+        ownComposerTexts: ownLog('some earlier real prompt'),
+        resumeSummaryCompactResidue: createClaudeResumeSummaryCompactResidueEpisode(),
+        wait: async () => undefined,
+      });
+      expect(result.status).not.toBe('cleared');
+      expect(clears).toBe(0);
+    },
+  );
+
+  it('keeps resume-summary /compact provenance while generating, then consumes it only after verified empty', async () => {
+    const episode = createClaudeResumeSummaryCompactResidueEpisode();
+    episode.arm();
+    let clears = 0;
+
+    const generating = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: generatingScreen('/compact ') }),
+      sendClearKey: async () => {
+        clears += 1;
+      },
+      ownComposerTexts: ownLog(),
+      resumeSummaryCompactResidue: episode,
+      wait: async () => undefined,
+    });
+    expect(generating.status).toBe('generating');
+    expect(clears).toBe(0);
+
+    const captures = [idleScreen('/compact '), idleScreen('')];
+    const cleared = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: captures.shift() ?? idleScreen('') }),
+      sendClearKey: async () => {
+        clears += 1;
+      },
+      ownComposerTexts: ownLog(),
+      resumeSummaryCompactResidue: episode,
+      wait: async () => undefined,
+    });
+    expect(cleared).toMatchObject({ status: 'cleared', attempts: 1 });
+    expect(clears).toBe(1);
+
+    const secondCompact = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: idleScreen('/compact') }),
+      sendClearKey: async () => {
+        clears += 1;
+      },
+      ownComposerTexts: ownLog(),
+      resumeSummaryCompactResidue: episode,
+      wait: async () => undefined,
+    });
+    expect(secondCompact.status).not.toBe('cleared');
+    expect(clears).toBe(1);
+  });
+
+  it('cancels resume-summary ownership when different composer content appears', async () => {
+    const episode = createClaudeResumeSummaryCompactResidueEpisode();
+    episode.arm();
+    let clears = 0;
+    const captureInputState = async () => ({ currentInput: idleScreen('/compact') });
+
+    const different = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: idleScreen('/compact focus on tests') }),
+      sendClearKey: async () => {
+        clears += 1;
+      },
+      ownComposerTexts: ownLog(),
+      resumeSummaryCompactResidue: episode,
+      wait: async () => undefined,
+    });
+    expect(different.status).not.toBe('cleared');
+
+    const laterCompact = await clearOwnLeftoverComposerDraft({
+      captureInputState,
+      sendClearKey: async () => {
+        clears += 1;
+      },
+      ownComposerTexts: ownLog(),
+      resumeSummaryCompactResidue: episode,
+      wait: async () => undefined,
+    });
+    expect(laterCompact.status).not.toBe('cleared');
+    expect(clears).toBe(0);
   });
 
   it('reports capture_failed when the screen capture throws', async () => {

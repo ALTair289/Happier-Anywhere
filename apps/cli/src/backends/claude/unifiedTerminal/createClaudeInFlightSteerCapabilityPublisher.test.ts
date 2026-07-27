@@ -184,4 +184,23 @@ describe('createClaudeInFlightSteerCapabilityPublisher (lane P, O-design Seam A)
     vi.advanceTimersByTime(5000);
     expect(captured.writes).toBe(1);
   });
+
+  it('publishes and clears the exact transient native-custody local id', () => {
+    let now = 1_234;
+    const captured = capture();
+    const publisher = createClaudeInFlightSteerCapabilityPublisher({
+      session: captured.session,
+      nowMs: () => now,
+      minPublishIntervalMs: 0,
+    });
+
+    publisher.publishPendingInputInterruptAndRunLocalId('queued-local');
+    expect(captured.state.capabilities?.pendingInputInterruptAndRunLocalId).toBe('queued-local');
+    expect(captured.state.capabilities?.pendingInputInterruptAndRunStateAt).toBe(1_234);
+
+    now = 1_235;
+    publisher.publishPendingInputInterruptAndRunLocalId(null);
+    expect(captured.state.capabilities?.pendingInputInterruptAndRunLocalId).toBeNull();
+    expect(captured.state.capabilities?.pendingInputInterruptAndRunStateAt).toBe(1_235);
+  });
 });

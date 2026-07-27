@@ -38,8 +38,10 @@ export function createClaudeUnifiedController(opts: Readonly<{
   host: ClaudeUnifiedTerminalHost;
   pendingQueuePump: ClaudeUnifiedStartableDisposable;
   arbiter: Pick<ClaudeUnifiedInputArbiter, 'dispose'>;
+  observerBridge?: ClaudeUnifiedStartableDisposable | undefined;
   transcriptBridge?: ClaudeUnifiedStartableDisposable | undefined;
   onFatalError?: ((error: unknown) => void) | undefined;
+  onDisposeError?: ((error: unknown) => void) | undefined;
   initialLivenessTimeoutMs?: number | undefined;
   initialLivenessPollMs?: number | undefined;
   nowMs?: (() => number) | undefined;
@@ -51,28 +53,23 @@ export function createClaudeUnifiedController(opts: Readonly<{
   const initialLivenessPollMs = Math.max(1, Math.trunc(opts.initialLivenessPollMs ?? 50));
   const nowMs = opts.nowMs ?? Date.now;
 
-  const disposeOne = async (
-    disposable: ClaudeUnifiedDisposable | null | undefined,
-    firstError: unknown,
-  ): Promise<unknown> => {
+  const disposeOne = async (disposable: ClaudeUnifiedDisposable | null | undefined): Promise<void> => {
     try {
       await Promise.resolve(disposable?.dispose());
     } catch (error) {
-      return firstError ?? error;
+      opts.onDisposeError?.(error);
     }
-    return firstError;
   };
 
   const dispose = async (): Promise<void> => {
     if (disposed) return;
     disposed = true;
-    let firstError: unknown = null;
     abortController.abort('claude-unified-controller-dispose');
-    firstError = await disposeOne(opts.pendingQueuePump, firstError);
-    firstError = await disposeOne(opts.transcriptBridge, firstError);
-    firstError = await disposeOne(opts.arbiter, firstError);
-    firstError = await disposeOne(opts.host, firstError);
-    if (firstError) throw firstError;
+    await disposeOne(opts.pendingQueuePump);
+    await disposeOne(opts.transcriptBridge);
+    await disposeOne(opts.observerBridge);
+    await disposeOne(opts.arbiter);
+    await disposeOne({ dispose: opts.host.preserve });
   };
 
   const handleSupervisedFailure = (error: unknown): void => {
@@ -132,11 +129,15 @@ export function createClaudeUnifiedController(opts: Readonly<{
         throw error;
       }
       if (disposed) return;
-      if (!liveness.paneAlive) {
+      if (!liveness.paneAlive && liveness.probeInconclusive !== true) {
         await dispose().catch(() => undefined);
         throw new ClaudeUnifiedTerminalHostDeadError(liveness);
       }
       try {
+        if (opts.observerBridge) {
+          await Promise.resolve(opts.observerBridge.start({ abortSignal: abortController.signal }));
+        }
+        if (disposed) return;
         startSupervised(opts.transcriptBridge);
         startSupervised(opts.pendingQueuePump);
       } catch (error) {

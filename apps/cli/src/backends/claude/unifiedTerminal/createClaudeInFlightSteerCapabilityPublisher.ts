@@ -11,6 +11,7 @@ export type ClaudeInFlightSteerAvailabilitySnapshot = Readonly<{
 
 export type ClaudeInFlightSteerCapabilityPublisher = Readonly<{
   publish: (snapshot: ClaudeInFlightSteerAvailabilitySnapshot) => void;
+  publishPendingInputInterruptAndRunLocalId: (localId: string | null) => void;
   dispose: () => void;
 }>;
 
@@ -40,6 +41,7 @@ export function createClaudeInFlightSteerCapabilityPublisher(opts: Readonly<{
   let lastPublishAtMs: number | null = null;
   let pendingSnapshot: ClaudeInFlightSteerAvailabilitySnapshot | null = null;
   let trailingTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastPendingInputInterruptAndRunLocalId: string | null | undefined;
 
   function resolveReason(snapshot: ClaudeInFlightSteerAvailabilitySnapshot): InFlightSteerUnavailableReason | null {
     if (snapshot.available) return null;
@@ -97,12 +99,47 @@ export function createClaudeInFlightSteerCapabilityPublisher(opts: Readonly<{
         trailingTimer.unref?.();
       }
     },
+    publishPendingInputInterruptAndRunLocalId(localId) {
+      if (disposed || lastPendingInputInterruptAndRunLocalId === localId) return;
+      lastPendingInputInterruptAndRunLocalId = localId;
+      const stateAt = nowMs();
+      updateAgentStateBestEffort(
+        opts.session,
+        (currentState) => ({
+          ...currentState,
+          capabilities: {
+            ...(currentState.capabilities && typeof currentState.capabilities === 'object' ? currentState.capabilities : {}),
+            pendingInputInterruptAndRunLocalId: localId,
+            pendingInputInterruptAndRunStateAt: stateAt,
+          },
+        }),
+        '[unified]',
+        'pending_input_interrupt_and_run_capability',
+      );
+    },
     dispose() {
       if (trailingTimer !== null) {
         clearTimeout(trailingTimer);
         trailingTimer = null;
       }
       pendingSnapshot = null;
+      if (lastPendingInputInterruptAndRunLocalId !== undefined && lastPendingInputInterruptAndRunLocalId !== null) {
+        const stateAt = nowMs();
+        updateAgentStateBestEffort(
+          opts.session,
+          (currentState) => ({
+            ...currentState,
+            capabilities: {
+              ...(currentState.capabilities && typeof currentState.capabilities === 'object' ? currentState.capabilities : {}),
+              pendingInputInterruptAndRunLocalId: null,
+              pendingInputInterruptAndRunStateAt: stateAt,
+            },
+          }),
+          '[unified]',
+          'pending_input_interrupt_and_run_capability',
+        );
+      }
+      lastPendingInputInterruptAndRunLocalId = null;
       if (lastPublishedKey !== null) {
         write({ available: true, reason: null });
       }

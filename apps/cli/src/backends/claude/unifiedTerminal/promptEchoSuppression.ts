@@ -4,6 +4,7 @@ import { normalizeClaudeUnifiedPromptIdentityText } from './promptIdentity';
 export type ClaudeUnifiedAcceptedPrompt = Readonly<{
   message: string;
   acceptedAtMs?: number | undefined;
+  retainUntilObserved?: boolean | undefined;
 }>;
 
 export type ClaudeUnifiedPersistedUserPromptText = Readonly<{
@@ -24,7 +25,7 @@ export type ClaudeUnifiedPromptEchoSuppressorOptions = Readonly<{
 
 type AcceptedPromptEcho = Readonly<{
   normalizedText: string;
-  expiresAtMs: number;
+  expiresAtMs: number | null;
 }>;
 
 /**
@@ -58,7 +59,7 @@ export function createClaudeUnifiedPromptEchoSuppressor(
   function pruneExpiredAcceptedPromptEchoes(observedAtMs: number): void {
     while (acceptedPromptEchoes.length > 0) {
       const next = acceptedPromptEchoes[0];
-      if (!next || next.expiresAtMs >= observedAtMs) return;
+      if (!next || next.expiresAtMs === null || next.expiresAtMs >= observedAtMs) return;
       acceptedPromptEchoes.shift();
     }
   }
@@ -74,7 +75,7 @@ export function createClaudeUnifiedPromptEchoSuppressor(
           : nowMs();
       acceptedPromptEchoes.push({
         normalizedText,
-        expiresAtMs: acceptedAtMs + acceptedPromptEchoWindowMs,
+        expiresAtMs: input.retainUntilObserved ? null : acceptedAtMs + acceptedPromptEchoWindowMs,
       });
     },
 
@@ -103,9 +104,12 @@ export function createClaudeUnifiedPromptEchoSuppressor(
       if (normalizedContent.length === 0) return false;
       const observedAtMs = readMessageTimestampMs(message) ?? nowMs();
       pruneExpiredAcceptedPromptEchoes(observedAtMs);
-      const nextAcceptedEcho = acceptedPromptEchoes[0];
-      if (nextAcceptedEcho?.normalizedText === normalizedContent) {
-        acceptedPromptEchoes.shift();
+      const acceptedEchoIndex = acceptedPromptEchoes.findIndex(
+        (echo) => echo.normalizedText === normalizedContent
+          && (echo.expiresAtMs === null || echo.expiresAtMs >= observedAtMs),
+      );
+      if (acceptedEchoIndex >= 0) {
+        acceptedPromptEchoes.splice(acceptedEchoIndex, 1);
         return true;
       }
 

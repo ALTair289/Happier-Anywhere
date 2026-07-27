@@ -31,6 +31,10 @@ const DEFAULT_USER_DRAFT_ESCALATION_THRESHOLD = 4;
 const MAX_OWN_LEFTOVER_DRAFT_CLEAR_ATTEMPTS = 2;
 
 export type ClaudeUnifiedSteerUnavailableTeeReason = 'unsafe_window' | 'user_terminal_draft';
+export type ClaudeUnifiedSteerAvailabilitySnapshot = Readonly<{
+  available: boolean;
+  reason: ClaudeUnifiedSteerUnavailableTeeReason | null;
+}>;
 
 export type ClaudeUnifiedUserDraftStarvationInfo = Readonly<{
   consecutiveVetoes: number;
@@ -45,6 +49,8 @@ type ClaudeUnifiedDraftLikeVetoHandlingResult =
 
 export type ClaudeUnifiedInFlightSteerWiring<Mode extends EnhancedMode = EnhancedMode> = Readonly<{
   evaluateInFlightSteer: ClaudeUnifiedInFlightSteerEvaluator<Mode>;
+  /** Event-driven, payload-free screen proof used immediately before Pending claim. */
+  refreshAvailability: () => Promise<ClaudeUnifiedSteerAvailabilitySnapshot>;
   /** Arbiter callback: a steered prompt's provider-acceptance expectation armed on turn-end evidence. */
   onSteerAcceptanceArmed: (batch: ClaudeUnifiedPromptBatch<Mode>) => void;
   /**
@@ -91,7 +97,7 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
    * launcher can publish it to agentState. Payload-specific refusals (permission-mode change) are
    * deliberately NOT teed — the UI computes those locally and synchronously.
    */
-  onAvailabilitySnapshot?: ((snapshot: Readonly<{ available: boolean; reason: ClaudeUnifiedSteerUnavailableTeeReason | null }>) => void) | undefined;
+  onAvailabilitySnapshot?: ((snapshot: ClaudeUnifiedSteerAvailabilitySnapshot) => void) | undefined;
   /**
    * Lane X (incident cmq8y3nlx): exact-match classifier over texts WE wrote into the TUI. A
    * `user_draft` veto whose composer content matches is OUR OWN leftover (e.g. partial injection
@@ -167,6 +173,35 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
       screenState,
       userMessageLocalIds: batch?.userMessageLocalIds ?? [],
     });
+  }
+
+  async function refreshAvailability(): Promise<ClaudeUnifiedSteerAvailabilitySnapshot> {
+    const unavailable = (reason: ClaudeUnifiedSteerUnavailableTeeReason = 'unsafe_window') => {
+      const snapshot = { available: false, reason } as const;
+      teeAvailabilitySnapshot(snapshot.available, snapshot.reason);
+      return snapshot;
+    };
+    if (disposed) return unavailable();
+    const captureInputState = opts.hostAdapter.captureInputState;
+    if (!captureInputState) return unavailable();
+    try {
+      const inputState = await captureInputState(opts.handle);
+      const screen = parseClaudeScreenState(inputState.currentInput, { cursor: inputState.cursor });
+      observeScreen(screen);
+      const vetoReason = resolveClaudeScreenInFlightSteerVeto(screen);
+      if (vetoReason !== null) {
+        return unavailable(
+          vetoReason === 'user_draft' && userDraftEscalated
+            ? 'user_terminal_draft'
+            : 'unsafe_window',
+        );
+      }
+      const snapshot = { available: true, reason: null } as const;
+      teeAvailabilitySnapshot(snapshot.available, snapshot.reason);
+      return snapshot;
+    } catch {
+      return unavailable();
+    }
   }
 
   function scheduleQueuedBannerProbe(
@@ -365,6 +400,7 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
   }
 
   return {
+    refreshAvailability,
     async evaluateInFlightSteer(batch) {
       const captureInputState = opts.hostAdapter.captureInputState;
       const requestedPermissionMode = batch.mode?.permissionMode;

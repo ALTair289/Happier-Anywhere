@@ -398,7 +398,7 @@ describe('createClaudeUnifiedHostLivenessBridge', () => {
     abortController.abort();
   });
 
-  it('reports host death only after sustained liveness probe failures', async () => {
+  it('never reports host death for sustained liveness probe failures', async () => {
     vi.useFakeTimers();
     let nowMs = 100;
     const evaluateLiveness = vi.fn().mockRejectedValue(new Error('control plane unavailable'));
@@ -417,21 +417,98 @@ describe('createClaudeUnifiedHostLivenessBridge', () => {
 
     bridge.start({ abortSignal: abortController.signal });
 
-    // Failures at t=110, 120, 130, 140: streak starts at the first failure (110); threshold 35ms
-    // is crossed at the 145 poll.
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < 5; i += 1) {
       nowMs += 10;
       await vi.advanceTimersByTimeAsync(10);
       expect(onHostDead).not.toHaveBeenCalled();
     }
 
+    bridge.dispose();
+    abortController.abort();
+  });
+
+  it('escalates a sustained inconclusive live-host episode once without declaring death, then rearms after a successful probe', async () => {
+    vi.useFakeTimers();
+    let nowMs = 0;
+    const inconclusive = {
+      paneAlive: false,
+      probeInconclusive: true,
+      paneScreenDumpError: 'spawn /deleted-snapshot/zellij ENOENT',
+      observedAt: 0,
+    };
+    const evaluateLiveness = vi
+      .fn()
+      .mockResolvedValueOnce(inconclusive)
+      .mockResolvedValueOnce(inconclusive)
+      .mockResolvedValueOnce(inconclusive)
+      .mockResolvedValueOnce(inconclusive)
+      .mockResolvedValueOnce({ paneAlive: true, observedAt: 50 })
+      .mockResolvedValueOnce(inconclusive)
+      .mockResolvedValueOnce(inconclusive)
+      .mockResolvedValueOnce(inconclusive);
+    const onHostDead = vi.fn(async () => undefined);
+    const onProbeFailureStarvation = vi.fn(async () => undefined);
+    const bridge = createClaudeUnifiedHostLivenessBridge({
+      hostAdapter: { evaluateLiveness },
+      handle,
+      onHostDead,
+      onProbeFailureStarvation,
+      pollIntervalMs: 10,
+      confirmDeadPollIntervalMs: 10,
+      probeFailureStarvationMs: 20,
+      startupGraceMs: 0,
+      startupGraceActive: () => false,
+      nowMs: () => nowMs,
+    });
+    const abortController = new AbortController();
+
+    bridge.start({ abortSignal: abortController.signal });
+
+    for (let i = 0; i < 4; i += 1) {
+      nowMs += 10;
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    expect(onProbeFailureStarvation).toHaveBeenCalledTimes(1);
+    expect(onHostDead).not.toHaveBeenCalled();
+
     nowMs += 10;
     await vi.advanceTimersByTimeAsync(10);
-    expect(onHostDead).toHaveBeenCalledTimes(1);
-    expect(onHostDead).toHaveBeenCalledWith(expect.objectContaining({
-      code: 'claude_unified_terminal_host_dead',
-    }));
 
+    for (let i = 0; i < 3; i += 1) {
+      nowMs += 10;
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    expect(onProbeFailureStarvation).toHaveBeenCalledTimes(2);
+    expect(onHostDead).not.toHaveBeenCalled();
+
+    bridge.dispose();
+    abortController.abort();
+  });
+
+  it('never promotes an ENOENT probe-tool spawn failure to host death or relay disposal', async () => {
+    vi.useFakeTimers();
+    let nowMs = 100;
+    const spawnError = Object.assign(new Error('spawn /deleted-snapshot/zellij ENOENT'), { code: 'ENOENT' });
+    const onHostDead = vi.fn(async () => undefined);
+    const bridge = createClaudeUnifiedHostLivenessBridge({
+      hostAdapter: { evaluateLiveness: vi.fn().mockRejectedValue(spawnError) },
+      handle,
+      onHostDead,
+      pollIntervalMs: 10,
+      probeFailureConfirmDeadMs: 1,
+      startupGraceMs: 0,
+      startupGraceActive: () => false,
+      nowMs: () => nowMs,
+    });
+    const abortController = new AbortController();
+
+    bridge.start({ abortSignal: abortController.signal });
+    for (let i = 0; i < 5; i += 1) {
+      nowMs += 10;
+      await vi.advanceTimersByTimeAsync(10);
+    }
+
+    expect(onHostDead).not.toHaveBeenCalled();
     bridge.dispose();
     abortController.abort();
   });

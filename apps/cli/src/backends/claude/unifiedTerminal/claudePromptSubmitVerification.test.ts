@@ -11,15 +11,16 @@ describe('createClaudePromptSubmitVerificationPolicy', () => {
     expect(policy.shouldVerifyAfterSubmit('first line\nsecond line')).toBe(true);
   });
 
-  it('keeps single-line prompts on the fast submit path', () => {
+  it('verifies every non-empty single-line prompt after submit', () => {
     const policy = createClaudePromptSubmitVerificationPolicy();
 
     expect(policy.shouldVerifyBeforeSubmit('single line prompt')).toBe(false);
-    expect(policy.shouldVerifyAfterSubmit('single line prompt')).toBe(false);
+    expect(policy.shouldVerifyAfterSubmit('single line prompt')).toBe(true);
+    expect(policy.shouldVerifyAfterSubmit('   ')).toBe(false);
   });
 
-  it('can verify a single-line prompt that remains in the composer after submit', () => {
-    const policy = createClaudePromptSubmitVerificationPolicy({ verifySingleLineAfterSubmit: true });
+  it('detects a single-line prompt that remains exactly in the composer after submit', () => {
+    const policy = createClaudePromptSubmitVerificationPolicy();
     const prompt = 'Reply exactly with WIN-CLAUDE-UNIFIED-CS-AFTERFIX2-FIRST-20260629T1535Z and nothing else.';
 
     expect(policy.shouldVerifyAfterSubmit(prompt)).toBe(true);
@@ -47,7 +48,7 @@ describe('createClaudePromptSubmitVerificationPolicy', () => {
         '┄'.repeat(20),
         '› [Pasted text #1 +40 lines]',
         '─'.repeat(20),
-        '▶▶ auto mode on (shift+tab to cycle)',
+        '⏵⏵ auto mode on (shift+tab to cycle)',
       ].join('\n'),
     })).toBe(true);
   });

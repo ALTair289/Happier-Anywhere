@@ -29,6 +29,8 @@ export type ClaudeUnifiedPromptBatch<Mode = unknown> = Readonly<{
    * socket echo provides a durable seq.
    */
   userMessageLocalIds?: readonly string[];
+  pendingProviderAction?: import('@/agent/runtime/modeMessageQueue').PendingProviderAction;
+  providerAcceptancePending?: boolean;
 }>;
 
 export type ClaudeUnifiedPromptAcceptance = Readonly<{
@@ -45,7 +47,7 @@ export type ClaudeUnifiedPromptInjectedHandler<Mode = unknown> = (
   batch: ClaudeUnifiedPromptBatch<Mode>,
   acceptance: ClaudeUnifiedPromptAcceptance,
   result: Extract<TerminalInputInjectionResult, { status: 'injected' }>,
-) => void | Promise<void>;
+) => ClaudeUnifiedPromptInjectionFailureHandling | Promise<ClaudeUnifiedPromptInjectionFailureHandling>;
 
 export type ClaudeUnifiedPromptInjectionFailure<Mode = unknown> = Readonly<{
   batch: ClaudeUnifiedPromptBatch<Mode>;
@@ -110,15 +112,30 @@ export type ClaudeUnifiedInputArbiter<Mode = unknown> = Readonly<{
    */
   notifyTerminalComposerCleared(state?: Readonly<{ observedAtMs?: number | undefined }>): void;
   observePromptCustodyByTerminal(batch: ClaudeUnifiedPromptBatch<Mode>): Promise<boolean>;
+  /**
+   * Exact local id of the native queued-custody head that may be interrupted into the live turn.
+   * This is transient terminal truth, never a provider-acceptance or Pending settlement.
+   */
+  readPendingInputInterruptAndRunLocalId(): string | null;
+  /**
+   * Atomically revalidates and claims the exact current custody head. A successful claim is
+   * one-shot for the batch and authorizes only the provider-owned interrupt keypress.
+   */
+  claimPendingInputInterruptAndRun(localId: string): boolean;
   confirmPromptAcceptedByProvider(): Promise<boolean>;
   confirmPromptAcceptedByProviderIf(matcher: (batch: ClaudeUnifiedPromptBatch<Mode>) => boolean): Promise<boolean>;
   observePendingProviderAcceptanceTerminalFailure(): Promise<boolean>;
   drainWhenSafe(): Promise<void>;
+  waitForPendingQueuePumpStateChange(options: Readonly<{
+    afterVersion: number;
+    abortSignal: AbortSignal;
+  }>): Promise<boolean>;
   snapshot(): ClaudeUnifiedInputArbiterSnapshot;
   dispose(): Promise<void> | void;
 }>;
 
 export type ClaudeUnifiedInputArbiterSnapshot = Readonly<{
+  pendingQueuePumpStateVersion: number;
   queuedCount: number;
   pendingInjectionCount: number;
   terminalCustodyCount: number;
@@ -135,6 +152,7 @@ export type ClaudeUnifiedInputArbiterSnapshot = Readonly<{
     | 'waiting_for_readiness'
     | 'injecting'
     | 'awaiting_provider_acceptance'
+    | 'terminal_custody'
     | 'submitted'
     | 'failed_retryable'
     | 'failed_ambiguous'
@@ -156,7 +174,7 @@ export type ClaudeUnifiedInputConsumer<Mode> = Readonly<{
 
 export type ClaudeUnifiedTerminalHost = Readonly<{
   evaluateLiveness(): Promise<TerminalHostLiveness>;
-  dispose(): Promise<void> | void;
+  preserve(): Promise<void> | void;
 }>;
 
 export type ClaudeUnifiedDisposable = Readonly<{

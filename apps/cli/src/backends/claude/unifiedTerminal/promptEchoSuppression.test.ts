@@ -36,6 +36,57 @@ describe('createClaudeUnifiedPromptEchoSuppressor', () => {
     expect(suppressor.shouldSuppressTranscriptMessage(userMessage('same text', 16_001))).toBe(false);
   });
 
+  it('keeps a durable Pending echo suppressible through a long provider-owned resume compaction', () => {
+    const suppressor = createClaudeUnifiedPromptEchoSuppressor({
+      nowMs: () => 10_000,
+      acceptedPromptEchoWindowMs: 5_000,
+    });
+
+    suppressor.recordAcceptedPrompt({
+      message: 'continue after the provider finishes compacting',
+      retainUntilObserved: true,
+    });
+
+    expect(suppressor.shouldSuppressTranscriptMessage(userMessage(
+      'continue after the provider finishes compacting',
+      150_000,
+    ))).toBe(true);
+  });
+
+  it('suppresses the exact durable prompt echo behind an unmatched accepted control command', () => {
+    const suppressor = createClaudeUnifiedPromptEchoSuppressor({ nowMs: () => 10_000 });
+
+    suppressor.recordAcceptedPrompt({ message: '/effort high', retainUntilObserved: true });
+    suppressor.recordAcceptedPrompt({
+      message: 'continue after the provider finishes compacting',
+      retainUntilObserved: true,
+    });
+
+    expect(suppressor.shouldSuppressTranscriptMessage(userMessage(
+      'continue after the provider finishes compacting',
+      150_000,
+    ))).toBe(true);
+    expect(suppressor.shouldSuppressTranscriptMessage(userMessage(
+      'continue after the provider finishes compacting',
+      150_001,
+    ))).toBe(false);
+    expect(suppressor.shouldSuppressTranscriptMessage(userMessage('/effort high', 150_002))).toBe(true);
+    expect(suppressor.shouldSuppressTranscriptMessage(userMessage('/effort high', 150_003))).toBe(false);
+  });
+
+  it('does not suppress an expired prompt echo behind an unmatched durable control command', () => {
+    const suppressor = createClaudeUnifiedPromptEchoSuppressor({
+      nowMs: () => 10_000,
+      acceptedPromptEchoWindowMs: 5_000,
+    });
+
+    suppressor.recordAcceptedPrompt({ message: '/effort high', retainUntilObserved: true });
+    suppressor.recordAcceptedPrompt({ message: 'expired ordinary prompt' });
+
+    expect(suppressor.shouldSuppressTranscriptMessage(userMessage('expired ordinary prompt', 15_001))).toBe(false);
+    expect(suppressor.shouldSuppressTranscriptMessage(userMessage('/effort high', 15_002))).toBe(true);
+  });
+
   it('suppresses normalized accepted prompt echoes, not only byte-identical text', () => {
     const suppressor = createClaudeUnifiedPromptEchoSuppressor({
       nowMs: () => 1_000,

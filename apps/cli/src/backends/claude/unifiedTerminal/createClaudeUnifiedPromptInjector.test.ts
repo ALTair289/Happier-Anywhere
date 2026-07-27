@@ -258,6 +258,10 @@ describe('createClaudeUnifiedPromptInjector', () => {
       const telemetry = { emit: vi.fn() };
       const injector = createClaudeUnifiedPromptInjector({
         inputInjection: { hostKind: 'zellij', injectUserPrompt },
+        beforeComposerDraftGuard: async () => {
+          order.push('runtime-control');
+          return null;
+        },
         composerDraftGuard: async () => {
           order.push('guard');
           return { status: 'cleared', attempts: 1, draftLength: 35 };
@@ -269,7 +273,7 @@ describe('createClaudeUnifiedPromptInjector', () => {
       await expect(
         injector.injectPrompt({ message: 'next prompt', origin: { kind: 'ui_pending', clientId: 'c1' } }),
       ).resolves.toMatchObject({ status: 'injected' });
-      expect(order).toEqual(['guard', 'inject']);
+      expect(order).toEqual(['runtime-control', 'guard', 'inject']);
       expect(telemetry.emit).toHaveBeenCalledWith({
         name: 'unified.injection.draft_guard',
         properties: { status: 'cleared', attempts: 1, draftLength: 35, originKind: 'ui_pending' },
@@ -350,10 +354,12 @@ describe('createClaudeUnifiedPromptInjector', () => {
 
     it('defers non-input guard states as terminal busy instead of user typing', async () => {
       const injectUserPrompt = vi.fn();
+      const telemetry = { emit: vi.fn() };
       const injector = createClaudeUnifiedPromptInjector({
         inputInjection: { hostKind: 'zellij', injectUserPrompt },
         composerDraftGuard: async () => ({ status: 'blocked_non_input_state', blockedReason: 'switch_model_dialog' }),
         createNonce: () => 'nonce-1',
+        telemetry,
       });
 
       await expect(
@@ -369,6 +375,14 @@ describe('createClaudeUnifiedPromptInjector', () => {
         },
       });
       expect(injectUserPrompt).not.toHaveBeenCalled();
+      expect(telemetry.emit).toHaveBeenCalledWith({
+        name: 'unified.injection.draft_guard',
+        properties: {
+          status: 'blocked_non_input_state',
+          blockedReason: 'switch_model_dialog',
+          originKind: 'ui_pending',
+        },
+      });
     });
 
     // Live-proven starvation (runner pid 20327, 11:28): an idle session has no turn-end or
@@ -534,6 +548,58 @@ describe('createClaudeUnifiedPromptInjector', () => {
         isCanonicalTurnActive: true,
         originKind: 'ui_pending',
         userMessageLocalIds: [],
+      });
+    });
+
+    it('escalates a sustained dialog block once after the configured duration', async () => {
+      let nowMs = 0;
+      const onDraftGuardStarvation = vi.fn();
+      const telemetry = { emit: vi.fn() };
+      const injector = createClaudeUnifiedPromptInjector({
+        inputInjection: { hostKind: 'zellij', injectUserPrompt: vi.fn() },
+        composerDraftGuard: async () => ({
+          status: 'blocked_non_input_state' as const,
+          blockedReason: 'safeguard_pause_dialog',
+        }),
+        createNonce: () => 'nonce-1',
+        nowMs: () => nowMs,
+        draftGuardStarvationThresholdMs: 1_000,
+        onDraftGuardStarvation,
+        telemetry,
+        isCanonicalTurnActive: () => false,
+      });
+      const batch = {
+        message: 'next prompt',
+        origin: { kind: 'ui_pending' as const, clientId: 'c1' },
+        userMessageLocalIds: ['pending-dialog-local'],
+      };
+
+      await injector.injectPrompt(batch);
+      expect(onDraftGuardStarvation).not.toHaveBeenCalled();
+
+      nowMs = 1_001;
+      await injector.injectPrompt(batch);
+      nowMs = 2_001;
+      await injector.injectPrompt(batch);
+
+      expect(onDraftGuardStarvation).toHaveBeenCalledTimes(1);
+      expect(onDraftGuardStarvation).toHaveBeenCalledWith({
+        consecutiveDeferrals: 2,
+        guardStatus: 'blocked_non_input_state',
+        blockedReason: 'safeguard_pause_dialog',
+        isCanonicalTurnActive: false,
+        originKind: 'ui_pending',
+        userMessageLocalIds: ['pending-dialog-local'],
+      });
+      expect(telemetry.emit).toHaveBeenCalledWith({
+        name: 'unified.injection.draft_guard',
+        properties: {
+          status: 'starvation_escalated',
+          consecutiveDeferrals: 2,
+          guardStatus: 'blocked_non_input_state',
+          blockedReason: 'safeguard_pause_dialog',
+          originKind: 'ui_pending',
+        },
       });
     });
 

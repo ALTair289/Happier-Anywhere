@@ -4,9 +4,10 @@ import {
   resolveClaudeUnifiedPendingDeliveryBlock,
   resolveClaudeUnifiedPendingDeliveryBlockForDeliveryBlocker,
 } from './pendingDeliveryBlock';
+import { ClaudeUnifiedTerminalInjectionFailureError } from './terminalInjectionFailureError';
 
 describe('resolveClaudeUnifiedPendingDeliveryBlock', () => {
-  it('classifies after-enter provider acceptance timeouts as blocked pending delivery', () => {
+  it('does not create pending-delivery authority from elapsed provider-acceptance time', () => {
     const error = Object.assign(new Error('Claude unified terminal prompt submission could not be confirmed'), {
       code: 'claude_unified_terminal_injection_failed',
       failureState: 'failed_ambiguous',
@@ -17,10 +18,7 @@ describe('resolveClaudeUnifiedPendingDeliveryBlock', () => {
       userMessageLocalIds: ['pending-local-timeout', 'pending-local-timeout', 'pending-local-2'],
     });
 
-    expect(resolveClaudeUnifiedPendingDeliveryBlock(error)).toEqual({
-      localIds: ['pending-local-timeout', 'pending-local-2'],
-      reason: 'provider_acceptance_timeout',
-    });
+    expect(resolveClaudeUnifiedPendingDeliveryBlock(error)).toBeNull();
   });
 
   it('classifies recoverable after-enter host ambiguity as ambiguous blocked pending delivery', () => {
@@ -71,6 +69,53 @@ describe('resolveClaudeUnifiedPendingDeliveryBlock', () => {
     });
   });
 
+  it('classifies an exact pre-write steer with no active target as steering unavailable', () => {
+    const error = new ClaudeUnifiedTerminalInjectionFailureError({
+      batch: {
+        message: 'steer this active turn',
+        origin: { kind: 'ui_pending' },
+        pendingProviderAction: 'steer',
+        userMessageLocalIds: ['pending-local-steer'],
+      },
+      failureState: 'failed_terminal',
+      result: {
+        status: 'failed',
+        reason: 'no_target',
+        phase: 'before_write',
+        duplicateRisk: 'none',
+        recoverable: false,
+      },
+    });
+
+    expect(resolveClaudeUnifiedPendingDeliveryBlock(error)).toEqual({
+      localIds: ['pending-local-steer'],
+      reason: 'steering_unavailable',
+    });
+  });
+
+  it.each([
+    ['possible duplicate risk', { duplicateRisk: 'possible' }],
+    ['after-write failure', { phase: 'after_write_before_enter' }],
+    ['recoverable failure', { recoverable: true }],
+    ['missing pending identity', { userMessageLocalIds: [] }],
+    ['missing exact action provenance', { pendingProviderAction: undefined }],
+    ['another exact action', { pendingProviderAction: 'interrupt_and_send' }],
+  ])('does not reinterpret neighboring no-target failure with %s as steering unavailable', (_label, override) => {
+    const error = Object.assign(new Error('Claude unified terminal steer target is unavailable'), {
+      code: 'claude_unified_terminal_injection_failed',
+      failureState: 'failed_terminal',
+      reason: 'no_target',
+      phase: 'before_write',
+      duplicateRisk: 'none',
+      recoverable: false,
+      pendingProviderAction: 'steer',
+      userMessageLocalIds: ['pending-local-steer'],
+      ...override,
+    });
+
+    expect(resolveClaudeUnifiedPendingDeliveryBlock(error)).toBeNull();
+  });
+
   it('classifies host loss after writing a pending prompt as blocked pending delivery', () => {
     const error = Object.assign(new Error('Claude unified terminal prompt injection failed'), {
       code: 'claude_unified_terminal_injection_failed',
@@ -90,7 +135,7 @@ describe('resolveClaudeUnifiedPendingDeliveryBlock', () => {
 
   it('maps sustained head blockers to retryable pending delivery block reasons', () => {
     expect(resolveClaudeUnifiedPendingDeliveryBlockForDeliveryBlocker({
-      localIds: ['pending-local-draft', 'pending-local-draft', 'pending-local-2'],
+      localIds: ['pending-local-draft', ' pending-local-draft\n', 'pending-local-draft', 'pending-local-2'],
       blocker: {
         kind: 'terminal_user_draft',
         source: 'draft_guard',
@@ -98,7 +143,7 @@ describe('resolveClaudeUnifiedPendingDeliveryBlock', () => {
         draftLength: 12,
       },
     })).toEqual({
-      localIds: ['pending-local-draft', 'pending-local-2'],
+      localIds: ['pending-local-draft', ' pending-local-draft\n', 'pending-local-2'],
       reason: 'terminal_composer_draft',
     });
 
@@ -124,6 +169,18 @@ describe('resolveClaudeUnifiedPendingDeliveryBlock', () => {
     })).toEqual({
       localIds: ['pending-local-provider-unavailable'],
       reason: 'provider_unavailable_before_acceptance',
+    });
+
+    expect(resolveClaudeUnifiedPendingDeliveryBlockForDeliveryBlocker({
+      localIds: ['pending-local-dialog'],
+      blocker: {
+        kind: 'terminal_busy',
+        source: 'readiness',
+        detail: 'safeguard_pause_dialog',
+      },
+    })).toEqual({
+      localIds: ['pending-local-dialog'],
+      reason: 'runtime_config_blocked',
     });
   });
 });

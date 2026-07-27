@@ -1,35 +1,72 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { SessionRuntimeActivityPublisher } from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
+import type {
+  SessionRuntimeActivityContributionHandle,
+} from '@/session/runtimeActivity/types';
+import { createClaudeProviderActivityLedger } from '../providerActivity/createClaudeProviderActivityLedger';
+import { createClaudeProviderRuntimeActivityAdapter } from '../providerActivity/createClaudeProviderRuntimeActivityAdapter';
+import type { ClaudeWorkflowTaskReference } from '../workflows/claudeWorkflowTaskReference';
 import type { SessionHookData } from '../utils/startHookServer';
 import { createClaudeUnifiedHookLifecycleBridge } from './createClaudeUnifiedHookLifecycleBridge';
 
-function createRuntimeActivityPublisherHarness() {
-  const publisher: SessionRuntimeActivityPublisher = {
-    setSourceActive: vi.fn(async () => {}),
-    observeSource: vi.fn(async () => {}),
-    observeAmbientLiveness: vi.fn(async () => {}),
-    clearSource: vi.fn(async () => {}),
-    clearProviderSources: vi.fn(async () => {}),
-    clearAll: vi.fn(async () => {}),
-    reconcileSources: vi.fn(async () => {}),
-    getProjection: vi.fn(() => ({
-      runtimeActivityActiveCount: 0,
-      runtimeActivityObservedAt: null,
-      runtimeActivityExpiresAt: null,
-      runtimeActivitySourceClass: null,
-    })),
-    getSnapshot: vi.fn(() => ({
-      v: 1 as const,
-      observedAtMs: 0,
-      activeCount: 0,
-      sources: [],
-    })),
-  };
-  return { publisher };
-}
-
 describe('createClaudeUnifiedHookLifecycleBridge', () => {
+  it('emits no target Activity truth when the unified bridge is disposed', async () => {
+    const handle = {
+      report: vi.fn(async () => {}),
+      markUnknown: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } satisfies SessionRuntimeActivityContributionHandle;
+    const providerActivityLedger = createClaudeProviderActivityLedger();
+    const adapter = createClaudeProviderRuntimeActivityAdapter({
+      contributionHandle: handle,
+      providerActivityLedger,
+    });
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: () => () => undefined,
+      arbiter: {
+        observeLifecycle: vi.fn(),
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(true),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      runtimeActivityAdapter: adapter,
+      providerActivityLedger,
+    });
+
+    bridge.start({ abortSignal: new AbortController().signal });
+    bridge.dispose();
+    await Promise.resolve();
+
+    expect(handle.report).not.toHaveBeenCalled();
+    expect(handle.markUnknown).not.toHaveBeenCalled();
+  });
+
+  it('settles an accepted local command without waiting for provider submission hooks', async () => {
+    const observeLifecycle = vi.fn();
+    const drainWhenSafe = vi.fn().mockResolvedValue(undefined);
+    const onThinkingChange = vi.fn();
+    const onReady = vi.fn();
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: () => () => undefined,
+      arbiter: {
+        observeLifecycle,
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(true),
+        drainWhenSafe,
+      },
+      completionQuiescenceMs: 0,
+      onThinkingChange,
+      onReady,
+    });
+
+    await bridge.settleAttemptLocalCommandCompleted();
+
+    expect(onThinkingChange).toHaveBeenCalledWith(false);
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(observeLifecycle).toHaveBeenCalledWith({ type: 'turn_state', state: 'idle' });
+    expect(observeLifecycle).toHaveBeenCalledWith({ type: 'output' });
+    expect(drainWhenSafe).toHaveBeenCalledTimes(1);
+  });
+
   it('reconciles a provider-accepted prompt on UserPromptSubmit', async () => {
     let subscribedHook: ((data: SessionHookData) => void) | undefined;
     const confirmPromptAcceptedByProvider = vi.fn().mockResolvedValue(true);
@@ -161,6 +198,114 @@ describe('createClaudeUnifiedHookLifecycleBridge', () => {
     }
   });
 
+  it('keeps the first task notification after SessionStart resume foreground-inert', async () => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const onProviderPromptStarted = vi.fn();
+    const confirmPromptAcceptedByProvider = vi.fn().mockResolvedValue(true);
+    const observeLifecycle = vi.fn();
+    const onThinkingChange = vi.fn();
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle,
+        confirmPromptAcceptedByProvider,
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onProviderPromptStarted,
+      onThinkingChange,
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      hook({ hook_event_name: 'SessionStart', session_id: 'claude-session-id', source: 'resume' });
+      const continuation = {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: 'claude-session-id',
+        prompt_id: 'task-notification-prompt',
+        prompt: '<task-notification><task-id>agent_1</task-id><status>completed</status></task-notification>',
+      };
+      hook(continuation);
+      hook(continuation);
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(onProviderPromptStarted).not.toHaveBeenCalled();
+      expect(confirmPromptAcceptedByProvider).not.toHaveBeenCalled();
+      expect(onThinkingChange).not.toHaveBeenCalledWith(true);
+      expect(observeLifecycle).not.toHaveBeenCalledWith({ type: 'turn_state', state: 'running' });
+
+      bridge.observeTranscript({
+        type: 'user',
+        uuid: 'task-notification-row',
+        sessionId: 'claude-session-id',
+        promptId: 'task-notification-prompt',
+        isSidechain: false,
+        origin: { kind: 'task-notification' },
+        message: { content: continuation.prompt },
+      } as any);
+      bridge.observeTranscript({
+        type: 'assistant',
+        uuid: 'task-notification-reaction',
+        parentUuid: 'task-notification-row',
+        session_id: 'claude-session-id',
+        isSidechain: false,
+        message: {
+          stop_reason: 'tool_use',
+          content: [{ type: 'tool_use', id: 'toolu_reaction', name: 'Bash', input: {} }],
+        },
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(onThinkingChange).toHaveBeenCalledWith(true);
+        expect(observeLifecycle).toHaveBeenCalledWith({ type: 'turn_state', state: 'running' });
+      });
+      expect(onProviderPromptStarted).not.toHaveBeenCalled();
+      expect(confirmPromptAcceptedByProvider).not.toHaveBeenCalled();
+    } finally {
+      bridge.dispose();
+    }
+  });
+
+  it('does not attribute the first non-task native resume prompt to a pending delivery candidate', async () => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const onProviderPromptStarted = vi.fn();
+    const confirmPromptAcceptedByProvider = vi.fn().mockResolvedValue(true);
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => { subscribedHook = undefined; };
+      },
+      arbiter: {
+        observeLifecycle: vi.fn(),
+        confirmPromptAcceptedByProvider,
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onProviderPromptStarted,
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+      hook({ hook_event_name: 'SessionStart', session_id: 'claude-session-id', source: 'resume' });
+      hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id', prompt: 'native resumed prompt' });
+
+      await vi.waitFor(() => expect(onProviderPromptStarted).toHaveBeenCalledTimes(1));
+      expect(confirmPromptAcceptedByProvider).not.toHaveBeenCalled();
+    } finally {
+      bridge.dispose();
+    }
+  });
+
   it('waits for async provider prompt start before completing a terminal-originated turn', async () => {
     let subscribedHook: ((data: SessionHookData) => void) | undefined;
     let resolveProviderStarted: (() => void) | undefined;
@@ -238,14 +383,61 @@ describe('createClaudeUnifiedHookLifecycleBridge', () => {
       expect(hook).toBeTypeOf('function');
       if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
 
-      hook({ hook_event_name: 'PermissionRequest', session_id: 'claude-session-id', tool_use_id: 'toolu_1' });
+      hook({ hook_event_name: 'PermissionRequest', session_id: 'claude-session-id', tool_use_id: ' toolu_1\n' });
       expect(observeLifecycle).toHaveBeenCalledWith({ type: 'permission', blocked: true });
 
       hook({ hook_event_name: 'PostToolUse', session_id: 'claude-session-id', tool_use_id: 'toolu_1' });
+      expect(observeLifecycle).not.toHaveBeenCalledWith({ type: 'permission', blocked: false });
+
+      hook({ hook_event_name: 'PostToolUse', session_id: 'claude-session-id', tool_use_id: ' toolu_1\n' });
       expect(observeLifecycle).toHaveBeenCalledWith({ type: 'permission', blocked: false });
       await vi.waitFor(() => {
         expect(drainWhenSafe).toHaveBeenCalled();
       });
+    } finally {
+      bridge.dispose();
+    }
+  });
+
+  it('requests one dialog-screen observation after a primary PostToolUse hook but not a sidechain hook', () => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const onMainSessionScreenMayHaveChanged = vi.fn();
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle: vi.fn(),
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onMainSessionScreenMayHaveChanged,
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      expect(hook).toBeTypeOf('function');
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      hook({
+        hook_event_name: 'PostToolUse',
+        session_id: 'claude-session-id',
+        tool_use_id: 'sidechain-tool',
+        agent_id: 'agent-sidechain-1',
+      });
+      expect(onMainSessionScreenMayHaveChanged).not.toHaveBeenCalled();
+
+      hook({
+        hook_event_name: 'PostToolUse',
+        session_id: 'claude-session-id',
+        tool_use_id: 'main-tool',
+      });
+      expect(onMainSessionScreenMayHaveChanged).toHaveBeenCalledTimes(1);
     } finally {
       bridge.dispose();
     }
@@ -535,6 +727,93 @@ describe('createClaudeUnifiedHookLifecycleBridge', () => {
           recoverability: 'wait',
         }));
       });
+    } finally {
+      bridge.dispose();
+    }
+  });
+
+  it('routes a hook-only StopFailure(authentication_failed) into the runtime-auth failure owner', async () => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const onUsageLimitDetails = vi.fn();
+    const onRuntimeAuthFailureEvent = vi.fn();
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle: vi.fn(),
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onUsageLimitDetails,
+      onRuntimeAuthFailureEvent,
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      expect(hook).toBeTypeOf('function');
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
+      hook({
+        hook_event_name: 'StopFailure',
+        session_id: 'claude-session-id',
+        error: 'authentication_failed',
+        last_assistant_message: 'Not logged in · Please run /login',
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(onRuntimeAuthFailureEvent).toHaveBeenCalledWith(expect.objectContaining({
+          error: 'authentication_failed',
+        }));
+      });
+      // Auth-failed StopFailure is NOT a usage-limit — the usage-limit mapper must not fire for it.
+      expect(onUsageLimitDetails).not.toHaveBeenCalled();
+    } finally {
+      bridge.dispose();
+    }
+  });
+
+  it('does not route a sidechain StopFailure(authentication_failed) into the runtime-auth failure owner', async () => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const onRuntimeAuthFailureEvent = vi.fn();
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle: vi.fn(),
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onRuntimeAuthFailureEvent,
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      expect(hook).toBeTypeOf('function');
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
+      hook({
+        hook_event_name: 'StopFailure',
+        session_id: 'claude-session-id',
+        agent_id: 'agent_sidechain_1',
+        error: 'authentication_failed',
+      } as any);
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(onRuntimeAuthFailureEvent).not.toHaveBeenCalled();
     } finally {
       bridge.dispose();
     }
@@ -1015,276 +1294,5 @@ describe('createClaudeUnifiedHookLifecycleBridge', () => {
     }
   });
 
-  it('routes detached transcript activity to the runtime activity publisher without foreground lifecycle renewal', async () => {
-    let subscribedHook: ((data: SessionHookData) => void) | undefined;
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const onThinkingChange = vi.fn();
-    const bridge = createClaudeUnifiedHookLifecycleBridge({
-      subscribeClaudeSessionHooks: (callback) => {
-        subscribedHook = callback;
-        return () => {
-          subscribedHook = undefined;
-        };
-      },
-      arbiter: {
-        observeLifecycle: vi.fn(),
-        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(true),
-        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
-      },
-      completionQuiescenceMs: 0,
-      onThinkingChange,
-      runtimeActivityPublisher: runtimeActivity.publisher,
-    });
 
-    try {
-      bridge.start({ abortSignal: new AbortController().signal });
-      const hook = subscribedHook;
-      expect(hook).toBeTypeOf('function');
-      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
-
-      hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
-      bridge.observeTranscript({
-        type: 'user',
-        uuid: 'launch-detached-agent',
-        message: {
-          content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Async agent launched successfully.' }],
-        },
-        toolUseResult: { isAsync: true, status: 'async_launched', agentId: 'agent_1' },
-      } as any);
-      hook({ hook_event_name: 'Stop', session_id: 'claude-session-id' });
-      onThinkingChange.mockClear();
-
-      bridge.observeTranscript({
-        type: 'user',
-        uuid: 'agent-completed',
-        origin: { kind: 'task-notification', taskId: 'agent_1', status: 'completed' },
-        message: { content: '<task-notification><task-id>agent_1</task-id><status>completed</status></task-notification>' },
-      } as any);
-
-      await vi.waitFor(() => {
-        expect(runtimeActivity.publisher.setSourceActive).toHaveBeenCalledWith({
-          id: 'claude:provider-task:agent_1',
-          sourceClass: 'provider_detached_task',
-          providerId: 'claude',
-        });
-        expect(runtimeActivity.publisher.clearSource).toHaveBeenCalledWith(
-          'claude:provider-task:agent_1',
-          'claude_provider_task_terminal',
-        );
-      });
-      expect(onThinkingChange).not.toHaveBeenCalledWith(true);
-    } finally {
-      bridge.dispose();
-      await vi.waitFor(() => {
-        expect(runtimeActivity.publisher.clearProviderSources).toHaveBeenCalledWith(
-          'claude',
-          'claude_unified_bridge_dispose',
-        );
-      });
-    }
-  });
-
-  it('does not reopen foreground thinking for late Stop hooks that only report background activity', async () => {
-    let subscribedHook: ((data: SessionHookData) => void) | undefined;
-    const onThinkingChange = vi.fn();
-    const onReady = vi.fn();
-    const runtimeActivity = createRuntimeActivityPublisherHarness();
-    const bridge = createClaudeUnifiedHookLifecycleBridge({
-      subscribeClaudeSessionHooks: (callback) => {
-        subscribedHook = callback;
-        return () => {
-          subscribedHook = undefined;
-        };
-      },
-      arbiter: {
-        observeLifecycle: vi.fn(),
-        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
-        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
-      },
-      completionQuiescenceMs: 0,
-      onThinkingChange,
-      onReady,
-      runtimeActivityPublisher: runtimeActivity.publisher,
-    });
-
-    try {
-      bridge.start({ abortSignal: new AbortController().signal });
-      const hook = subscribedHook;
-      expect(hook).toBeTypeOf('function');
-      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
-
-      hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
-      bridge.observeTranscript({
-        type: 'assistant',
-        uuid: 'foreground-result',
-        message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Background task launched.' }] },
-      } as any);
-
-      await vi.waitFor(() => {
-        expect(onReady).toHaveBeenCalledTimes(1);
-      });
-      expect(onThinkingChange).toHaveBeenCalledWith(false);
-      onThinkingChange.mockClear();
-
-      hook({
-        hook_event_name: 'Stop',
-        session_id: 'claude-session-id',
-        background_tasks: [{ id: 'agent-1', type: 'shell', status: 'running' }],
-      });
-
-      await vi.waitFor(() => {
-        expect(runtimeActivity.publisher.setSourceActive).toHaveBeenCalledWith({
-          id: 'claude:provider-task:agent-1',
-          sourceClass: 'provider_detached_task',
-          providerId: 'claude',
-        });
-      });
-      expect(onThinkingChange).not.toHaveBeenCalledWith(true);
-      expect(onThinkingChange).not.toHaveBeenCalledWith(false);
-      expect(onReady).toHaveBeenCalledTimes(1);
-    } finally {
-      bridge.dispose();
-    }
-  });
-
-  describe('turn-stall screen probe', () => {
-    it('fires once after a foreground turn stays quiet for the configured interval', async () => {
-      vi.useFakeTimers();
-      let subscribedHook: ((data: SessionHookData) => void) | undefined;
-      const onStalled = vi.fn();
-      const bridge = createClaudeUnifiedHookLifecycleBridge({
-        subscribeClaudeSessionHooks: (callback) => {
-          subscribedHook = callback;
-          return () => {
-            subscribedHook = undefined;
-          };
-        },
-        arbiter: {
-          observeLifecycle: vi.fn(),
-          confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
-          drainWhenSafe: vi.fn().mockResolvedValue(undefined),
-        },
-        completionQuiescenceMs: 0,
-        turnStallScreenProbe: {
-          quietMs: 1_000,
-          maxAttempts: 1,
-          onStalled,
-        },
-      });
-
-      try {
-        bridge.start({ abortSignal: new AbortController().signal });
-        const hook = subscribedHook;
-        expect(hook).toBeTypeOf('function');
-        if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
-
-        hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
-        await vi.advanceTimersByTimeAsync(999);
-        expect(onStalled).not.toHaveBeenCalled();
-
-        await vi.advanceTimersByTimeAsync(1);
-        expect(onStalled).toHaveBeenCalledTimes(1);
-
-        await vi.advanceTimersByTimeAsync(2_000);
-        expect(onStalled).toHaveBeenCalledTimes(1);
-      } finally {
-        bridge.dispose();
-        vi.useRealTimers();
-      }
-    });
-
-    it('resets the bounded quiet interval when transcript output arrives', async () => {
-      vi.useFakeTimers();
-      let subscribedHook: ((data: SessionHookData) => void) | undefined;
-      const onStalled = vi.fn();
-      const bridge = createClaudeUnifiedHookLifecycleBridge({
-        subscribeClaudeSessionHooks: (callback) => {
-          subscribedHook = callback;
-          return () => {
-            subscribedHook = undefined;
-          };
-        },
-        arbiter: {
-          observeLifecycle: vi.fn(),
-          confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
-          drainWhenSafe: vi.fn().mockResolvedValue(undefined),
-        },
-        completionQuiescenceMs: 0,
-        turnStallScreenProbe: {
-          quietMs: 1_000,
-          maxAttempts: 1,
-          onStalled,
-        },
-      });
-
-      try {
-        bridge.start({ abortSignal: new AbortController().signal });
-        const hook = subscribedHook;
-        expect(hook).toBeTypeOf('function');
-        if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
-
-        hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
-        await vi.advanceTimersByTimeAsync(800);
-        bridge.observeTranscript({
-          type: 'assistant',
-          uuid: 'assistant-progress',
-          message: {
-            role: 'assistant',
-            content: [{ type: 'text', text: 'still working' }],
-          },
-        } as any);
-
-        await vi.advanceTimersByTimeAsync(999);
-        expect(onStalled).not.toHaveBeenCalled();
-
-        await vi.advanceTimersByTimeAsync(1);
-        expect(onStalled).toHaveBeenCalledTimes(1);
-      } finally {
-        bridge.dispose();
-        vi.useRealTimers();
-      }
-    });
-
-    it('cancels the quiet probe when the foreground turn completes before the interval', async () => {
-      vi.useFakeTimers();
-      let subscribedHook: ((data: SessionHookData) => void) | undefined;
-      const onStalled = vi.fn();
-      const bridge = createClaudeUnifiedHookLifecycleBridge({
-        subscribeClaudeSessionHooks: (callback) => {
-          subscribedHook = callback;
-          return () => {
-            subscribedHook = undefined;
-          };
-        },
-        arbiter: {
-          observeLifecycle: vi.fn(),
-          confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(true),
-          drainWhenSafe: vi.fn().mockResolvedValue(undefined),
-        },
-        completionQuiescenceMs: 0,
-        turnStallScreenProbe: {
-          quietMs: 1_000,
-          maxAttempts: 1,
-          onStalled,
-        },
-      });
-
-      try {
-        bridge.start({ abortSignal: new AbortController().signal });
-        const hook = subscribedHook;
-        expect(hook).toBeTypeOf('function');
-        if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
-
-        hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
-        await vi.advanceTimersByTimeAsync(500);
-        hook({ hook_event_name: 'Stop', session_id: 'claude-session-id', background_tasks: [] });
-        await vi.advanceTimersByTimeAsync(2_000);
-
-        expect(onStalled).not.toHaveBeenCalled();
-      } finally {
-        bridge.dispose();
-        vi.useRealTimers();
-      }
-    });
-  });
 });

@@ -4,6 +4,7 @@ import { createClaudeUnifiedController } from './createClaudeUnifiedController';
 import { createClaudeUnifiedPendingQueuePump } from './createClaudeUnifiedPendingQueuePump';
 
 const createIdleSnapshot = () => ({
+  pendingQueuePumpStateVersion: 0,
   queuedCount: 0,
   pendingInjectionCount: 0,
   terminalCustodyCount: 0,
@@ -17,6 +18,15 @@ const createIdleSnapshot = () => ({
   currentHeadBlocker: null,
   headInputState: null,
 });
+
+async function waitForPendingQueuePumpStateChangeUntilAbort(options: Readonly<{
+  abortSignal: AbortSignal;
+}>): Promise<boolean> {
+  if (options.abortSignal.aborted) return false;
+  return await new Promise<boolean>((resolve) => {
+    options.abortSignal.addEventListener('abort', () => resolve(false), { once: true });
+  });
+}
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -45,7 +55,7 @@ describe('createClaudeUnifiedController', () => {
     const controller = createClaudeUnifiedController({
       host: {
         evaluateLiveness: vi.fn().mockResolvedValue(liveness),
-        dispose: disposeHost,
+        preserve: disposeHost,
       },
       pendingQueuePump: {
         start: vi.fn(),
@@ -78,7 +88,7 @@ describe('createClaudeUnifiedController', () => {
     const controller = createClaudeUnifiedController({
       host: {
         evaluateLiveness: vi.fn().mockResolvedValue(liveness),
-        dispose: vi.fn().mockRejectedValue(new Error('cleanup failed')),
+        preserve: vi.fn().mockRejectedValue(new Error('cleanup failed')),
       },
       pendingQueuePump: {
         start: vi.fn(),
@@ -118,7 +128,7 @@ describe('createClaudeUnifiedController', () => {
     const controller = createClaudeUnifiedController({
       host: {
         evaluateLiveness,
-        dispose: disposeHost,
+        preserve: disposeHost,
       },
       pendingQueuePump: {
         start: pendingStart,
@@ -143,13 +153,46 @@ describe('createClaudeUnifiedController', () => {
     expect(disposeHost).not.toHaveBeenCalled();
   });
 
-  it('aborts producers before waiting for terminal host disposal', async () => {
+  it('degrades through an inconclusive initial probe without declaring or disposing a live host', async () => {
+    const disposeHost = vi.fn();
+    const pendingStart = vi.fn();
+    const transcriptStart = vi.fn();
+    const controller = createClaudeUnifiedController({
+      host: {
+        evaluateLiveness: vi.fn().mockResolvedValue({
+          paneAlive: false,
+          probeInconclusive: true,
+          observedAt: 1,
+        }),
+        preserve: disposeHost,
+      },
+      pendingQueuePump: {
+        start: pendingStart,
+        dispose: vi.fn(),
+      },
+      arbiter: {
+        dispose: vi.fn(),
+      },
+      transcriptBridge: {
+        start: transcriptStart,
+        dispose: vi.fn(),
+      },
+    });
+
+    await expect(controller.run()).resolves.toBeUndefined();
+
+    expect(transcriptStart).toHaveBeenCalledTimes(1);
+    expect(pendingStart).toHaveBeenCalledTimes(1);
+    expect(disposeHost).not.toHaveBeenCalled();
+  });
+
+  it('aborts producers before releasing terminal host ownership without destroying it', async () => {
     const disposeOrder: string[] = [];
-    let producerAbortObservedDuringHostDispose = false;
-    const orderedHostDispose = vi.fn(async () => {
+    let producerAbortObservedDuringHostRelease = false;
+    const orderedHostRelease = vi.fn(async () => {
       disposeOrder.push('host');
       await waitOneTurn();
-      producerAbortObservedDuringHostDispose = disposeOrder.includes('pump');
+      producerAbortObservedDuringHostRelease = disposeOrder.includes('pump');
     });
     const pumpDispose = vi.fn(async () => {
       disposeOrder.push('pump');
@@ -163,7 +206,7 @@ describe('createClaudeUnifiedController', () => {
     const controller = createClaudeUnifiedController({
       host: {
         evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
-        dispose: orderedHostDispose,
+        preserve: orderedHostRelease,
       },
       pendingQueuePump: {
         start: vi.fn(),
@@ -185,18 +228,18 @@ describe('createClaudeUnifiedController', () => {
     expect(pumpDispose).toHaveBeenCalledTimes(1);
     expect(transcriptDispose).toHaveBeenCalledTimes(1);
     expect(arbiterDispose).toHaveBeenCalledTimes(1);
-    expect(orderedHostDispose).toHaveBeenCalledTimes(1);
-    expect(producerAbortObservedDuringHostDispose).toBe(true);
+    expect(orderedHostRelease).toHaveBeenCalledTimes(1);
+    expect(producerAbortObservedDuringHostRelease).toBe(true);
     expect(disposeOrder).toEqual(['pump', 'transcript', 'arbiter', 'host']);
   });
 
-  it('starts the pending queue pump without waiting for async transcript bridge startup', async () => {
-    const transcriptStartup = createDeferred<void>();
+  it('keeps the pending queue pump closed until the provider observer installs', async () => {
+    const observerStartup = createDeferred<void>();
     const order: string[] = [];
     const controller = createClaudeUnifiedController({
       host: {
         evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
-        dispose: vi.fn(),
+        preserve: vi.fn(),
       },
       pendingQueuePump: {
         start: vi.fn(() => {
@@ -207,10 +250,10 @@ describe('createClaudeUnifiedController', () => {
       arbiter: {
         dispose: vi.fn(),
       },
-      transcriptBridge: {
+      observerBridge: {
         start: vi.fn(() => {
-          order.push('transcript-start');
-          return transcriptStartup.promise;
+          order.push('observer-start');
+          return observerStartup.promise;
         }),
         dispose: vi.fn(),
       },
@@ -219,10 +262,36 @@ describe('createClaudeUnifiedController', () => {
     const runPromise = controller.run();
     await Promise.resolve();
 
-    expect(order).toEqual(['transcript-start', 'pump-start']);
+    expect(order).toEqual(['observer-start']);
 
-    transcriptStartup.resolve();
+    observerStartup.resolve();
     await runPromise;
+    expect(order).toEqual(['observer-start', 'pump-start']);
+  });
+
+  it('does not start the pending queue pump when provider observer installation rejects', async () => {
+    const observerError = new Error('provider observer installation failed');
+    const pendingStart = vi.fn();
+    const controller = createClaudeUnifiedController({
+      host: {
+        evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
+        preserve: vi.fn(),
+      },
+      pendingQueuePump: {
+        start: pendingStart,
+        dispose: vi.fn(),
+      },
+      arbiter: {
+        dispose: vi.fn(),
+      },
+      observerBridge: {
+        start: vi.fn().mockRejectedValue(observerError),
+        dispose: vi.fn(),
+      },
+    });
+
+    await expect(controller.run()).rejects.toBe(observerError);
+    expect(pendingStart).not.toHaveBeenCalled();
   });
 
   it('starts the pending queue pump without waiting for its running task', async () => {
@@ -231,7 +300,7 @@ describe('createClaudeUnifiedController', () => {
     const controller = createClaudeUnifiedController({
       host: {
         evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
-        dispose: vi.fn(),
+        preserve: vi.fn(),
       },
       pendingQueuePump: {
         start: vi.fn(() => {
@@ -259,27 +328,31 @@ describe('createClaudeUnifiedController', () => {
     await runPromise;
   });
 
-  it('routes repeated pending queue input waiting failures through the fatal path after the pump budget', async () => {
+  it('keeps a healthy host alive when the pending pump parks after repeated input waiting failures', async () => {
     vi.useFakeTimers();
     const pumpError = new Error('pending queue materialization failed');
     const onFatalError = vi.fn();
+    const disposeHost = vi.fn();
     const pendingQueuePump = createClaudeUnifiedPendingQueuePump({
       inputConsumer: {
-        waitForNextInput: vi.fn().mockRejectedValue(pumpError),
+        waitForNextInput: vi.fn()
+          .mockRejectedValueOnce(pumpError)
+          .mockRejectedValueOnce(pumpError)
+          .mockRejectedValueOnce(pumpError)
+          .mockResolvedValueOnce(null),
       },
       arbiter: {
         enqueueUiMessage: vi.fn(),
         drainWhenSafe: vi.fn(),
         snapshot: vi.fn(createIdleSnapshot),
+        waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort,
       },
-      maxConsecutiveHandledFailures: 2,
-      failureRetryBackoffMs: 1,
     });
     try {
       const controller = createClaudeUnifiedController({
         host: {
           evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
-          dispose: vi.fn(),
+          preserve: disposeHost,
         },
         pendingQueuePump,
         arbiter: {
@@ -292,21 +365,16 @@ describe('createClaudeUnifiedController', () => {
       await Promise.resolve();
       expect(onFatalError).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(3);
 
-      expect(onFatalError).toHaveBeenCalledTimes(1);
-      expect(onFatalError).toHaveBeenCalledWith(expect.objectContaining({
-        code: 'claude_unified_pending_queue_pump_failure_budget_exhausted',
-        failureCount: 2,
-        cause: pumpError,
-      }));
+      expect(onFatalError).not.toHaveBeenCalled();
+      expect(disposeHost).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('routes repeated pending queue drain failures through the fatal path after the pump budget', async () => {
-    vi.useFakeTimers();
+  it('routes an unexpected pending queue arbiter crash through the fatal path', async () => {
     const drainError = new Error('pending queue drain failed');
     const onFatalError = vi.fn();
     const pendingQueuePump = createClaudeUnifiedPendingQueuePump({
@@ -322,38 +390,26 @@ describe('createClaudeUnifiedController', () => {
         enqueueUiMessage: vi.fn().mockResolvedValue(undefined),
         drainWhenSafe: vi.fn().mockRejectedValue(drainError),
         snapshot: vi.fn(createIdleSnapshot),
+        waitForPendingQueuePumpStateChange: waitForPendingQueuePumpStateChangeUntilAbort,
       },
-      maxConsecutiveHandledFailures: 2,
-      failureRetryBackoffMs: 1,
     });
-    try {
-      const controller = createClaudeUnifiedController({
-        host: {
-          evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
-          dispose: vi.fn(),
-        },
-        pendingQueuePump,
-        arbiter: {
-          dispose: vi.fn(),
-        },
-        onFatalError,
-      });
+    const controller = createClaudeUnifiedController({
+      host: {
+        evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
+        preserve: vi.fn(),
+      },
+      pendingQueuePump,
+      arbiter: {
+        dispose: vi.fn(),
+      },
+      onFatalError,
+    });
 
-      await expect(controller.run()).resolves.toBeUndefined();
-      await Promise.resolve();
-      expect(onFatalError).not.toHaveBeenCalled();
+    await expect(controller.run()).resolves.toBeUndefined();
+    await waitOneTurn();
 
-      await vi.advanceTimersByTimeAsync(1);
-
-      expect(onFatalError).toHaveBeenCalledTimes(1);
-      expect(onFatalError).toHaveBeenCalledWith(expect.objectContaining({
-        code: 'claude_unified_pending_queue_pump_failure_budget_exhausted',
-        failureCount: 2,
-        cause: drainError,
-      }));
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(onFatalError).toHaveBeenCalledTimes(1);
+    expect(onFatalError).toHaveBeenCalledWith(drainError);
   });
 
   it('ignores pending queue pump failures after disposal', async () => {
@@ -362,7 +418,7 @@ describe('createClaudeUnifiedController', () => {
     const controller = createClaudeUnifiedController({
       host: {
         evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
-        dispose: vi.fn(),
+        preserve: vi.fn(),
       },
       pendingQueuePump: {
         start: vi.fn(() => pumpFailure.promise),
@@ -391,7 +447,7 @@ describe('createClaudeUnifiedController', () => {
     expect(onFatalError).not.toHaveBeenCalled();
   });
 
-  it('continues disposing bridges when host disposal fails', async () => {
+  it('continues disposing bridges and never propagates host disposal failure', async () => {
     const hostError = new Error('host cleanup failed');
     const pumpDispose = vi.fn().mockResolvedValue(undefined);
     const transcriptDispose = vi.fn().mockResolvedValue(undefined);
@@ -399,7 +455,7 @@ describe('createClaudeUnifiedController', () => {
     const controller = createClaudeUnifiedController({
       host: {
         evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
-        dispose: vi.fn().mockRejectedValue(hostError),
+        preserve: vi.fn().mockRejectedValue(hostError),
       },
       pendingQueuePump: {
         start: vi.fn(),
@@ -415,7 +471,7 @@ describe('createClaudeUnifiedController', () => {
     });
 
     await controller.run();
-    await expect(controller.dispose()).rejects.toBe(hostError);
+    await expect(controller.dispose()).resolves.toBeUndefined();
 
     expect(pumpDispose).toHaveBeenCalledTimes(1);
     expect(transcriptDispose).toHaveBeenCalledTimes(1);

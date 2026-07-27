@@ -79,7 +79,13 @@ export type ClaudeUnifiedTelemetryEvent =
             | 'starvation_escalated';
           attempts?: number | undefined;
           draftLength?: number | undefined;
-          guardStatus?: 'foreign_draft' | 'capture_style_unavailable' | 'clear_failed' | undefined;
+          blockedReason?: TelemetryReason | undefined;
+          guardStatus?:
+            | 'foreign_draft'
+            | 'capture_style_unavailable'
+            | 'clear_failed'
+            | 'blocked_non_input_state'
+            | undefined;
           consecutiveDeferrals?: number | undefined;
           originKind: 'ui_pending' | 'ui_immediate' | 'rpc';
         }>;
@@ -107,6 +113,26 @@ export type ClaudeUnifiedTelemetryEvent =
         source: 'fd3_fetch_fallback';
         signal: 'fetch_start' | 'fetch_idle_clear';
         activeFetchCount: number;
+      }>;
+    }>
+  | Readonly<{
+      // Incident cmr377jsr (S1-F1): the bounded turn-end idle re-arm exhausted with a dialog still
+      // unresolved. Emitted once per episode so a residual silent-hang is observable, not silent.
+      name: 'unified.dialog.turn_end_idle_starvation';
+      properties: Readonly<{
+        shots: number;
+        windowMs: number;
+      }>;
+    }>
+  | Readonly<{
+      // Incident cmr3dpuka (S2-b): the mid-turn stall probe budget exhausted while the turn stayed
+      // active-but-stuck (e.g. an API-retry loop that never reaches turn-terminal), so a dialog stuck
+      // on the mid-turn screen (Fable safeguard chooser) went undetected. Emitted once per stall
+      // episode so the residual stuck-turn is observable — the mid-turn analog of the turn-end tail.
+      name: 'unified.dialog.turn_stall_starvation';
+      properties: Readonly<{
+        attempts: number;
+        windowMs: number;
       }>;
     }>
   | Readonly<{
@@ -258,6 +284,32 @@ export function emitClaudeUnifiedHostDead(
       ...(params.liveness?.paneScreenDumpTruncated !== undefined ? { paneScreenDumpTruncated: params.liveness.paneScreenDumpTruncated } : {}),
       ...(params.liveness?.paneScreenDumpError ? { paneScreenDumpErrorCaptured: true } : {}),
       observedAt: params.liveness?.observedAt ?? Date.now(),
+    },
+  });
+}
+
+export function emitClaudeUnifiedDialogTurnEndIdleStarvation(
+  telemetry: ClaudeUnifiedTelemetrySink,
+  properties: Extract<ClaudeUnifiedTelemetryEvent, { name: 'unified.dialog.turn_end_idle_starvation' }>['properties'],
+): void {
+  telemetry.emit({
+    name: 'unified.dialog.turn_end_idle_starvation',
+    properties: {
+      shots: Math.max(0, Math.trunc(properties.shots)),
+      windowMs: Math.max(0, Math.trunc(properties.windowMs)),
+    },
+  });
+}
+
+export function emitClaudeUnifiedDialogTurnStallStarvation(
+  telemetry: ClaudeUnifiedTelemetrySink,
+  properties: Extract<ClaudeUnifiedTelemetryEvent, { name: 'unified.dialog.turn_stall_starvation' }>['properties'],
+): void {
+  telemetry.emit({
+    name: 'unified.dialog.turn_stall_starvation',
+    properties: {
+      attempts: Math.max(0, Math.trunc(properties.attempts)),
+      windowMs: Math.max(0, Math.trunc(properties.windowMs)),
     },
   });
 }

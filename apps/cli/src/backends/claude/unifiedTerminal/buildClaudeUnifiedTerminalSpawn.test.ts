@@ -646,7 +646,7 @@ async function readOverlayFromArgs(args: readonly string[], hookSettingsPath: st
     ]);
   });
 
-  it('skips Claude Code onboarding so terminal-injected prompts reach the chat input on fresh hosts', async () => {
+  it('does not bypass Claude workspace trust because untrusted demo-mode sessions suppress plugin hooks', async () => {
     const spawn = await buildClaudeUnifiedTerminalSpawn({
       path: '/workspace/project',
       first: {
@@ -666,14 +666,13 @@ async function readOverlayFromArgs(args: readonly string[], hookSettingsPath: st
     });
 
     const launchSpec = await readLaunchSpecFromSpawn(spawn);
-    expect(launchSpec.env?.IS_DEMO).toBe('1');
+    expect(launchSpec.env?.IS_DEMO).toBeUndefined();
   });
 
   it('keeps unified terminal spawn env compact while preserving Claude auth and explicit child env keys', async () => {
     await withPatchedEnv({
       ANTHROPIC_API_KEY: 'sk-ant-test',
       CLAUDE_CONFIG_DIR: '/tmp/claude-config',
-      HAPPIER_DAEMON_INITIAL_PROMPT: 'x'.repeat(200_000),
       HUGE_UNRELATED_ENV: 'y'.repeat(200_000),
       MY_EXPLICIT_CHILD_ENV: 'kept',
       [HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR]: JSON.stringify(['MY_EXPLICIT_CHILD_ENV']),
@@ -707,10 +706,8 @@ async function readOverlayFromArgs(args: readonly string[], hookSettingsPath: st
       expect(launchSpec.env?.DISABLE_AUTOUPDATER).toBe('1');
       expect(launchSpec.envPassthroughKeys).toContain('ANTHROPIC_API_KEY');
       expect(spawn.spawnEnv.ANTHROPIC_API_KEY).toBe('sk-ant-test');
-      expect(spawn.spawnEnv.HAPPIER_DAEMON_INITIAL_PROMPT).toBeUndefined();
       expect(spawn.spawnEnv.HUGE_UNRELATED_ENV).toBeUndefined();
       expect(spawn.spawnEnv[HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR]).toBeUndefined();
-      expect(launchSpec.env?.HAPPIER_DAEMON_INITIAL_PROMPT).toBeUndefined();
       expect(launchSpec.env?.HUGE_UNRELATED_ENV).toBeUndefined();
       expect(launchSpec.env?.[HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR]).toBeUndefined();
     });
