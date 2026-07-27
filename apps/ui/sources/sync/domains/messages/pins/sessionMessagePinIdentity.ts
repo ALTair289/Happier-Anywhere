@@ -1,4 +1,4 @@
-import { isStableSessionMessageRouteId } from '../messageRouteIds';
+import { parseStableSessionMessageRouteId } from '../messageRouteIds';
 
 export type SessionMessagePinRole = 'user' | 'assistant' | 'tool' | 'system' | 'unknown';
 
@@ -63,8 +63,10 @@ export function normalizeSessionMessagePinRole(role: SessionMessagePinRole | str
 
 export function normalizeSessionMessagePinRouteMessageId(routeMessageId: string | null | undefined): string | null {
     if (typeof routeMessageId !== 'string') return null;
+    const parsed = parseStableSessionMessageRouteId(routeMessageId);
+    if (parsed?.kind === 'local') return `local:${parsed.value}`;
     const trimmed = routeMessageId.trim();
-    return isStableSessionMessageRouteId(trimmed) ? trimmed : null;
+    return parseStableSessionMessageRouteId(trimmed) ? trimmed : null;
 }
 
 export function buildSessionMessagePinIdentity(

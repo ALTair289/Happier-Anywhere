@@ -9,6 +9,18 @@ import {
 } from './sessionMessagePinIdentity';
 
 describe('session message pin identity', () => {
+    it('keeps whitespace-distinct opaque local route ids separate', () => {
+        const leading = buildSessionMessagePinIdentity({
+            sessionId: 'session-1', seq: 1, transcriptBlockIndex: null, routeMessageId: 'local: request-1', role: 'user',
+        });
+        const trailing = buildSessionMessagePinIdentity({
+            sessionId: 'session-1', seq: 1, transcriptBlockIndex: null, routeMessageId: 'local:request-1 ', role: 'user',
+        });
+        expect(leading?.kind === 'route-message-id' ? leading.routeMessageId : null).toBe('local: request-1');
+        expect(trailing?.kind === 'route-message-id' ? trailing.routeMessageId : null).toBe('local:request-1 ');
+        expect(leading).not.toEqual(trailing);
+    });
+
     it('prefers a stable route message id when the durable seq locator exists', () => {
         expect(buildSessionMessagePinIdentity({
             sessionId: ' session-1 ',
