@@ -16,15 +16,6 @@ type PrivateEventBackend = {
   handleEvent(event: Record<string, unknown>): void;
 };
 
-type PrivatePromptTimeoutBackend = PrivateEventBackend & {
-  sessionId: string | null;
-  ensureProcess(): Promise<void>;
-  sendCommand(
-    command: Readonly<{ type: string }>,
-    timeoutMs?: number,
-  ): Promise<{ type: 'response'; command: string; success: boolean; data?: unknown }>;
-};
-
 function makeTempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
@@ -732,69 +723,6 @@ describe('PiRpcBackend pending turn lifecycle', () => {
 
       await expect(backend.sendPrompt(session.sessionId, 'stall')).rejects.toThrow(/timed out waiting for pi turn completion/i);
       expect(messages.some((message) => message.type === 'status' && message.status === 'error')).toBe(true);
-    } finally {
-      await backend.dispose();
-    }
-  });
-
-  it('keeps a turn pending when the prompt RPC acknowledgement times out during compaction', async () => {
-    const workDir = makeTempDir('happier-pi-rpc-prompt-timeout-compaction-');
-    tempDirs.push(workDir);
-    const backend = new PiRpcBackend({
-      cwd: workDir,
-      command: process.execPath,
-      args: [],
-      env: {
-        HAPPIER_PI_RPC_AGENT_END_SETTLE_MS: '5',
-        HAPPIER_PI_RPC_LIVENESS_PROBE_TIMEOUT_MS: '20',
-      },
-    });
-    const messages: AgentMessage[] = [];
-    backend.onMessage((message) => messages.push(message));
-    const backendWithPrivate = backend as unknown as PrivatePromptTimeoutBackend;
-    backendWithPrivate.sessionId = 'pi-session-prompt-timeout';
-    backendWithPrivate.ensureProcess = async () => undefined;
-    backendWithPrivate.sendCommand = async (command) => {
-      if (command.type === 'prompt') {
-        setTimeout(() => backendWithPrivate.handleEvent({ type: 'compaction_start', reason: 'threshold' }), 0);
-        setTimeout(() => backendWithPrivate.handleEvent({ type: 'compaction_end', reason: 'threshold', willRetry: false, result: { tokensBefore: 1000 } }), 8);
-        setTimeout(() => backendWithPrivate.handleEvent({ type: 'agent_start' }), 16);
-        setTimeout(() => backendWithPrivate.handleEvent({
-          type: 'message_end',
-          message: {
-            role: 'assistant',
-            stopReason: 'stop',
-            content: [{ type: 'text', text: 'finished after compaction' }],
-          },
-        }), 24);
-        setTimeout(() => backendWithPrivate.handleEvent({ type: 'agent_end' }), 32);
-        await delay(12);
-        throw new Error('Timed out waiting for Pi RPC response (prompt)');
-      }
-
-      if (command.type === 'get_state') {
-        return {
-          type: 'response',
-          command: command.type,
-          success: true,
-          data: {
-            sessionId: 'pi-session-prompt-timeout',
-            isStreaming: false,
-            isCompacting: false,
-          },
-        };
-      }
-
-      return { type: 'response', command: command.type, success: true };
-    };
-
-    try {
-      await expect(Promise.race([
-        backend.sendPrompt('pi-session-prompt-timeout', 'compact before answering'),
-        rejectAfter(250, 'prompt did not settle after prompt response timeout'),
-      ])).resolves.toBeUndefined();
-      expect(messages.some((message) => message.type === 'status' && message.status === 'error')).toBe(false);
-      expect(messages.some((message) => message.type === 'status' && message.status === 'idle')).toBe(true);
     } finally {
       await backend.dispose();
     }
@@ -1558,18 +1486,20 @@ describe('PiRpcBackend pending turn lifecycle', () => {
     }
   });
 
-  it('does not complete a turn from agent_end while Pi still reports streaming', async () => {
-    const workDir = makeTempDir('happier-pi-rpc-agent-end-streaming-until-idle-');
+  it('completes exactly once from a final assistant and final agent_end even when get_state stays stale-busy', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-final-agent-end-stale-busy-');
     tempDirs.push(workDir);
     const fakeScript = writeFakePiRpcScript(
       workDir,
-      'fake-pi-rpc-agent-end-streaming-until-idle.js',
+      'fake-pi-rpc-final-agent-end-stale-busy.js',
       `
-      globalThis.__promptStartedAt = Date.now();
       out({ type: 'agent_start' });
-      setTimeout(() => out({ type: 'agent_end' }), 20);
+      setTimeout(() => out({ type: 'message_update', assistantMessageEvent: { type: 'text_delta' }, message: { role: 'assistant', content: [{ type: 'text', text: 'PI_IDLE_SECOND_ACCEPTED_20260723' }] } }), 5);
+      setTimeout(() => out({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'PI_IDLE_SECOND_ACCEPTED_20260723' }] } }), 10);
+      setTimeout(() => out({ type: 'turn_end' }), 15);
+      setTimeout(() => out({ type: 'agent_end', willRetry: false }), 20);
 `,
-      "isStreaming: Boolean(globalThis.__promptStartedAt && Date.now() - globalThis.__promptStartedAt < 180),",
+      'isStreaming: true, isCompacting: false,',
     );
 
     const backend = createBackend({
@@ -1581,20 +1511,27 @@ describe('PiRpcBackend pending turn lifecycle', () => {
         HAPPIER_PI_RPC_LIVENESS_PROBE_TIMEOUT_MS: '50',
       },
     });
+    const messages: AgentMessage[] = [];
+    backend.onMessage((message) => messages.push(message));
 
     try {
       const session = await backend.startSession();
       shortenPendingTurnTimeout(backend, 40);
+      const idleCountBeforePrompt = messages.filter(
+        (message) => message.type === 'status' && message.status === 'idle',
+      ).length;
 
-      const turn = backend.sendPrompt(session.sessionId, 'agent_end before provider idle');
       await expect(Promise.race([
-        turn.then(() => 'resolved'),
-        delay(90).then(() => 'still-pending'),
-      ])).resolves.toBe('still-pending');
-      await expect(Promise.race([
-        turn.then(() => 'resolved'),
-        delay(1000).then(() => 'hung'),
-      ])).resolves.toBe('resolved');
+        backend.sendPrompt(session.sessionId, 'final answer with stale provider state'),
+        rejectAfter(250, 'final Pi agent_end did not settle while get_state stayed stale-busy'),
+      ])).resolves.toBeUndefined();
+      expect(messages.filter(
+        (message) => message.type === 'status' && message.status === 'idle',
+      )).toHaveLength(idleCountBeforePrompt + 1);
+      expect(messages.some((message) => (
+        message.type === 'model-output'
+        && message.fullText === 'PI_IDLE_SECOND_ACCEPTED_20260723'
+      ))).toBe(true);
     } finally {
       await backend.dispose();
     }

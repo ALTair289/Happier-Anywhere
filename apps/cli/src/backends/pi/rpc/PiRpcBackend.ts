@@ -12,6 +12,10 @@ import type {
   SessionId,
   StartSessionResult,
 } from '@/agent/core';
+import {
+  AcpPromptSubmissionPhaseError,
+  type AcpPromptSubmissionEvidence,
+} from '@/agent/acp/AcpBackend';
 import { logger } from '@/ui/logger';
 import {
   HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY,
@@ -69,6 +73,8 @@ type PendingTurn = {
   compactionInProgress: boolean;
   /** True after Pi emitted `agent_end` but before Happier has proven the provider is idle. */
   agentEndObserved: boolean;
+  /** Activity epoch captured by the latest final `agent_end`, used to preserve late-event guards. */
+  agentEndActivityEpoch: number | null;
   /** True after Pi emitted `agent_start` for the prompt accepted by this pending turn. */
   agentStartObserved: boolean;
   /** Bumped on every Pi event so an in-flight liveness probe can detect stale state. */
@@ -96,10 +102,6 @@ type Deferred<T> = {
   resolve: (value: T) => void;
   reject: (error: Error) => void;
 };
-
-type PendingTurnStartGraceResult =
-  | { status: 'started' | 'completed' | 'timeout' }
-  | { status: 'rejected'; error: Error };
 
 function parseCompactInstructions(command: string): string | undefined {
   const trimmed = command.trim();
@@ -160,6 +162,13 @@ class PiRpcCommandResponseTimeoutError extends Error {
   }
 }
 
+class PiRpcPromptRejectedBeforeEffectError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PiRpcPromptRejectedBeforeEffectError';
+  }
+}
+
 function isPromptResponseTimeoutError(error: Error): boolean {
   if (error instanceof PiRpcCommandResponseTimeoutError) {
     return error.commandType === 'prompt';
@@ -183,7 +192,6 @@ const DEFAULT_PI_RPC_LIVENESS_PROBE_TIMEOUT_MS = 10_000;
 const DEFAULT_PI_RPC_MAX_SILENT_PROBES = 4;
 const DEFAULT_PI_RPC_PROMPT_COLLISION_IDLE_WAIT_MS = 30_000;
 const DEFAULT_PI_RPC_PROMPT_COLLISION_IDLE_POLL_MS = 250;
-const DEFAULT_PI_RPC_PROMPT_ACK_START_GRACE_MS = 2_500;
 const DEFAULT_PI_RPC_COMPACTION_AUTO_CONTINUE_MAX = 3;
 const DEFAULT_PI_RPC_COMPACTION_AUTO_CONTINUE_PROMPT =
   'Continue the interrupted work from the recovered provider context. Do not restart or repeat completed work.';
@@ -560,7 +568,6 @@ const PI_RPC_LIVENESS_PROBE_TIMEOUT_ENV = 'HAPPIER_PI_RPC_LIVENESS_PROBE_TIMEOUT
 const PI_RPC_MAX_SILENT_PROBES_ENV = 'HAPPIER_PI_RPC_MAX_SILENT_PROBES';
 const PI_RPC_PROMPT_COLLISION_IDLE_WAIT_ENV = 'HAPPIER_PI_RPC_PROMPT_COLLISION_IDLE_WAIT_MS';
 const PI_RPC_PROMPT_COLLISION_IDLE_POLL_ENV = 'HAPPIER_PI_RPC_PROMPT_COLLISION_IDLE_POLL_MS';
-const PI_RPC_PROMPT_ACK_START_GRACE_ENV = 'HAPPIER_PI_RPC_PROMPT_ACK_START_GRACE_MS';
 const PI_RPC_COMPACTION_AUTO_CONTINUE_MAX_ENV = 'HAPPIER_PI_RPC_COMPACTION_AUTO_CONTINUE_MAX';
 const PI_RPC_COMPACTION_AUTO_CONTINUE_PROMPT_ENV = 'HAPPIER_PI_RPC_COMPACTION_AUTO_CONTINUE_PROMPT';
 
@@ -889,8 +896,58 @@ export class PiRpcBackend implements AgentBackend {
   }
 
   async sendPrompt(sessionId: SessionId, prompt: string): Promise<void> {
+    await this.sendPromptWithAdmission(sessionId, prompt).completion;
+  }
+
+  async sendPromptWithEvidence(
+    sessionId: SessionId,
+    prompt: string,
+  ): Promise<AcpPromptSubmissionEvidence> {
+    const outcome = await this.sendPromptWithAdmission(sessionId, prompt).admission;
+    if (outcome.status === 'accepted') {
+      return { kind: 'accepted_without_exact_final_response' };
+    }
+    throw new AcpPromptSubmissionPhaseError(outcome.status, outcome.error);
+  }
+
+  sendPromptWithAdmission(sessionId: SessionId, prompt: string): Readonly<{
+    admission: Promise<
+      | { status: 'accepted' }
+      | { status: 'rejected_before_effect'; error: Error }
+      | { status: 'effect_may_have_occurred'; error: Error }
+    >;
+    completion: Promise<void>;
+  }> {
+    const admission = createDeferred<
+      | { status: 'accepted' }
+      | { status: 'rejected_before_effect'; error: Error }
+      | { status: 'effect_may_have_occurred'; error: Error }
+    >();
+    let admissionSettled = false;
+    const settleAdmission = (outcome: Awaited<typeof admission.promise>): void => {
+      if (admissionSettled) return;
+      admissionSettled = true;
+      admission.resolve(outcome);
+    };
+    const completion = this.sendPromptAndObserveCompletion(sessionId, prompt, settleAdmission);
+    void completion.catch((error: unknown) => {
+      settleAdmission({ status: 'rejected_before_effect', error: asError(error) });
+    });
+    return { admission: admission.promise, completion };
+  }
+
+  private async sendPromptAndObserveCompletion(
+    sessionId: SessionId,
+    prompt: string,
+    settleAdmission: (outcome:
+      | { status: 'accepted' }
+      | { status: 'rejected_before_effect'; error: Error }
+      | { status: 'effect_may_have_occurred'; error: Error }
+    ) => void,
+  ): Promise<void> {
     this.assertSession(sessionId);
     await this.ensureConnectedBrokerReady();
+    let providerSendAttempted = false;
 
     const barrier = createDeferred<void>();
     this.pendingTurnBarrier = barrier;
@@ -909,6 +966,7 @@ export class PiRpcBackend implements AgentBackend {
       if (maybeRestart) await maybeRestart;
       const message = prompt.trim();
       if (!message) {
+        settleAdmission({ status: 'rejected_before_effect', error: new Error('Prompt text is blank') });
         settleBarrier();
         return;
       }
@@ -920,103 +978,40 @@ export class PiRpcBackend implements AgentBackend {
 
       settleBarrier();
 
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        let turn: Promise<void> | null = null;
-        let promptSendAttempted = false;
-        let startGraceStatus: PendingTurnStartGraceResult['status'] | null = null;
-        try {
-          if (this.pendingTurn) {
-            if (attempt === 0) {
-              const existingPendingTurn = this.pendingTurn;
-              await this.waitForPromptCollisionToBecomeIdle();
-              if (this.pendingTurn === existingPendingTurn) {
-                await Promise.race([
-                  existingPendingTurn.promise.catch(() => undefined),
-                  delay(this.getAgentEndSettleMs() + this.getPromptCollisionIdlePollMs()),
-                ]);
-              }
-              continue;
-            }
-            throw new Error('Pi is already processing another prompt');
-          }
-          await this.ensureConnectedBrokerReadyForProviderCommand();
-          turn = this.createPendingTurn(this.getPendingTurnStallTimeoutMs());
-          promptSendAttempted = true;
-          await this.sendCommand({ type: 'prompt', message }, 30_000, { processAlreadyEnsured: true });
-          await turn;
-          return;
-        } catch (error) {
-          const promptError = asError(error);
-          const normalizedError = promptError.message.toLowerCase();
-          const isPromptCollisionError =
-            normalizedError.includes('already processing') || normalizedError.includes('streamingbehavior');
-
-          if (isPromptCollisionError && attempt === 0) {
-            if (turn) {
-              this.rejectPendingTurn(promptError);
-              await turn.catch(() => undefined);
-            }
-            await this.waitForPromptCollisionToBecomeIdle();
-            continue;
-          }
-
-          if (turn && isPromptResponseTimeoutError(promptError)) {
-            // The prompt write succeeded, but Pi did not acknowledge the prompt before entering a
-            // long provider phase (for example threshold compaction). At this point the turn stream
-            // is the source of truth: keep the pending turn alive so later compaction/tool/agent_end
-            // events can complete it instead of surfacing a false transport timeout to the user.
-            await turn;
-            return;
-          }
-
-          if (turn) {
-            const pending = this.pendingTurn;
-            if (!pending) {
-              await turn;
-              return;
-            }
-            const startGraceResult = await this.waitForPendingTurnStartGrace(pending);
-            startGraceStatus = startGraceResult.status;
-            if (startGraceResult.status === 'started' || startGraceResult.status === 'completed') {
-              await turn;
-              return;
-            }
-            if (startGraceResult.status === 'rejected') {
-              throw this.surfaceSendPromptCatchBoundaryError(startGraceResult.error, {
-                promptSendAttempted,
-                turnAllocated: turn !== null,
-                startGraceStatus,
-              });
-            }
-
-            this.rejectPendingTurn(promptError);
-            await turn.catch(() => undefined);
-          }
-
-          const canRecoverFromProcessExit =
-            attempt === 0 &&
-            !!this.sessionId &&
-            (normalizedError.includes('pi process exited') ||
-              normalizedError.includes('pi process terminated') ||
-              normalizedError.includes('failed to write pi rpc command') ||
-              normalizedError.includes('epipe'));
-
-          if (!canRecoverFromProcessExit) {
-            throw this.surfaceSendPromptCatchBoundaryError(promptError, {
-              promptSendAttempted,
-              turnAllocated: turn !== null,
-              startGraceStatus,
-            });
-          }
-
-          try {
-            await this.restartAndContinue();
-          } catch (restartError) {
-            throw asError(restartError);
-          }
+      if (this.pendingTurn) {
+        const existingPendingTurn = this.pendingTurn;
+        await this.waitForPromptCollisionToBecomeIdle();
+        if (this.pendingTurn === existingPendingTurn) {
+          await Promise.race([
+            existingPendingTurn.promise.catch(() => undefined),
+            delay(this.getAgentEndSettleMs() + this.getPromptCollisionIdlePollMs()),
+          ]);
         }
+        if (this.pendingTurn) throw new Error('Pi is already processing another prompt');
       }
+
+      await this.ensureConnectedBrokerReadyForProviderCommand();
+      const turn = this.createPendingTurn(this.getPendingTurnStallTimeoutMs());
+      providerSendAttempted = true;
+      try {
+        await this.sendCommand({ type: 'prompt', message }, 30_000, { processAlreadyEnsured: true });
+      } catch (error) {
+        const promptError = asError(error);
+        settleAdmission(promptError instanceof PiRpcPromptRejectedBeforeEffectError
+          ? { status: 'rejected_before_effect', error: promptError }
+          : { status: 'effect_may_have_occurred', error: promptError });
+        this.rejectPendingTurn(promptError);
+        await turn.catch(() => undefined);
+        throw promptError;
+      }
+      settleAdmission({ status: 'accepted' });
+      await turn;
+      return;
     } catch (error) {
+      const promptError = asError(error);
+      settleAdmission(providerSendAttempted
+        ? { status: 'effect_may_have_occurred', error: promptError }
+        : { status: 'rejected_before_effect', error: promptError });
       settleBarrier(asError(error));
       throw error;
     }
@@ -1450,46 +1445,6 @@ export class PiRpcBackend implements AgentBackend {
     });
   }
 
-  private surfaceSendPromptCatchBoundaryError(
-    error: Error,
-    context: Readonly<{
-      promptSendAttempted: boolean;
-      turnAllocated: boolean;
-      startGraceStatus: PendingTurnStartGraceResult['status'] | null;
-    }>,
-  ): Error {
-    const promptErrorExactGeneric = isExactGenericProviderSessionFailure(error.message);
-    const normalizedToPiDiagnostic = context.promptSendAttempted && promptErrorExactGeneric;
-
-    if (context.promptSendAttempted || context.turnAllocated) {
-      this.tracePiRpcFailureBoundary('send_prompt_error_caught', {
-        type: 'prompt_error',
-        command: 'prompt',
-        error: error.message,
-      }, {
-        promptSendAttempted: context.promptSendAttempted,
-        turnAllocated: context.turnAllocated,
-        startGraceStatus: context.startGraceStatus,
-        promptErrorExactGeneric,
-        normalizedToPiDiagnostic,
-      });
-    }
-
-    if (!normalizedToPiDiagnostic) return error;
-
-    const normalized = new Error(PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL);
-    this.emitMessage({
-      type: 'terminal-output',
-      data: PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL,
-    });
-    this.emitMessage({
-      type: 'status',
-      status: 'error',
-      detail: PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL,
-    });
-    return normalized;
-  }
-
   private handleStdoutLine(line: string): void {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -1547,19 +1502,16 @@ export class PiRpcBackend implements AgentBackend {
     if (!response.success) {
       this.openPromptRequestIds.delete(id);
       const rawDetail = asNonEmptyString(response.error) ?? `Pi RPC command failed: ${response.command}`;
-      const detail = pending.commandType === 'prompt' && isExactGenericProviderSessionFailure(rawDetail)
-        ? PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL
-        : rawDetail;
       if (pending.commandType === 'prompt') {
-        this.tracePiRpcFailureBoundary('pending_prompt_failure_response', response, { detail });
+        this.tracePiRpcFailureBoundary('pending_prompt_failure_response', response, { detail: rawDetail });
         this.emitMessage({
           type: 'terminal-output',
-          data: detail === PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL
-            ? detail
-            : `Pi RPC prompt failed: ${detail}`,
+          data: `Pi RPC prompt rejected before acceptance: ${rawDetail}`,
         });
+        pending.reject(new PiRpcPromptRejectedBeforeEffectError(rawDetail));
+        return;
       }
-      pending.reject(new Error(detail));
+      pending.reject(new Error(rawDetail));
       return;
     }
     if (pending.commandType === 'prompt') {
@@ -1733,10 +1685,12 @@ export class PiRpcBackend implements AgentBackend {
       if (this.pendingTurn) {
         if (normalizedEvent.willRetry === true || this.pendingTurn.recoverableAssistantErrorObserved) {
           this.pendingTurn.agentEndObserved = false;
+          this.pendingTurn.agentEndActivityEpoch = null;
           this.cancelPendingTurnAgentEndSettle(this.pendingTurn);
           this.armPendingTurnInactivityTimer(this.pendingTurn);
         } else {
           this.pendingTurn.agentEndObserved = true;
+          this.pendingTurn.agentEndActivityEpoch = this.pendingTurn.activityEpoch;
           this.schedulePendingTurnCompletion();
         }
       } else {
@@ -1916,6 +1870,7 @@ export class PiRpcBackend implements AgentBackend {
       compactionResumeTimeout: null,
       compactionInProgress: false,
       agentEndObserved: false,
+      agentEndActivityEpoch: null,
       agentStartObserved: false,
       activityEpoch: 0,
       consecutiveSilentProbes: 0,
@@ -2001,36 +1956,6 @@ export class PiRpcBackend implements AgentBackend {
       PI_RPC_PROMPT_COLLISION_IDLE_POLL_ENV,
       DEFAULT_PI_RPC_PROMPT_COLLISION_IDLE_POLL_MS,
     );
-  }
-
-  private getPromptAckStartGraceMs(): number {
-    return readPositiveIntegerEnv(
-      this.options.env,
-      PI_RPC_PROMPT_ACK_START_GRACE_ENV,
-      DEFAULT_PI_RPC_PROMPT_ACK_START_GRACE_MS,
-    );
-  }
-
-  private async waitForPendingTurnStartGrace(pending: PendingTurn): Promise<PendingTurnStartGraceResult> {
-    if (this.pendingTurn !== pending) return { status: 'completed' };
-    if (pending.agentStartObserved) return { status: 'started' };
-
-    const deadline = Date.now() + this.getPromptAckStartGraceMs();
-    const observedStart = (async (): Promise<PendingTurnStartGraceResult> => {
-      while (Date.now() < deadline) {
-        if (this.pendingTurn !== pending) return { status: 'completed' };
-        if (pending.agentStartObserved) return { status: 'started' };
-        await delay(Math.min(25, Math.max(1, deadline - Date.now())));
-      }
-      if (this.pendingTurn !== pending) return { status: 'completed' };
-      return pending.agentStartObserved ? { status: 'started' } : { status: 'timeout' };
-    })();
-
-    const completion: Promise<PendingTurnStartGraceResult> = pending.promise
-      .then(() => ({ status: 'completed' as const }))
-      .catch((error: unknown) => ({ status: 'rejected' as const, error: asError(error) }));
-
-    return Promise.race([completion, observedStart]);
   }
 
   private async waitForPromptCollisionToBecomeIdle(): Promise<void> {
@@ -2167,6 +2092,7 @@ export class PiRpcBackend implements AgentBackend {
     if (type === 'compaction_start') {
       pending.compactionInProgress = true;
       pending.agentEndObserved = false;
+      pending.agentEndActivityEpoch = null;
       pending.lastCompactionEnd = null;
       this.cancelPendingTurnAgentEndSettle(pending);
       this.cancelPendingTurnCompactionResume(pending);
@@ -2179,6 +2105,7 @@ export class PiRpcBackend implements AgentBackend {
     if (type === 'agent_start') {
       pending.compactionInProgress = false;
       pending.agentEndObserved = false;
+      pending.agentEndActivityEpoch = null;
       pending.agentStartObserved = true;
       pending.recoverableAssistantErrorObserved = false;
       pending.lastCompactionEnd = null;
@@ -2192,6 +2119,7 @@ export class PiRpcBackend implements AgentBackend {
     if (type === 'compaction_end') {
       pending.compactionInProgress = false;
       pending.agentEndObserved = false;
+      pending.agentEndActivityEpoch = null;
       pending.lastCompactionEnd = {
         payload: findContextCompactionPayload(mapPiRpcEventToAgentMessages(event)) ?? {
           type: 'context-compaction',
@@ -2367,6 +2295,10 @@ export class PiRpcBackend implements AgentBackend {
     }
 
     if (this.pendingTurn !== pending) return;
+    if (pending.compactionInProgress || !pending.agentEndObserved) {
+      this.armPendingTurnInactivityTimer(pending);
+      return;
+    }
     if (!state) {
       pending.consecutiveSilentProbes += 1;
       if (pending.consecutiveSilentProbes >= this.getMaxSilentProbes()) {
@@ -2376,7 +2308,14 @@ export class PiRpcBackend implements AgentBackend {
       this.armPendingTurnInactivityTimer(pending);
       return;
     }
-    if (state && (state.isStreaming === true || state.isCompacting === true)) {
+    const finalAssistantBoundaryIsCurrent = (
+      pending.lastAssistantStopReason === 'stop'
+      && pending.agentEndActivityEpoch === pending.activityEpoch
+    );
+    if (
+      state.isCompacting === true
+      || (state.isStreaming === true && !finalAssistantBoundaryIsCurrent)
+    ) {
       this.schedulePendingTurnCompletionBusyGrace(pending);
       return;
     }

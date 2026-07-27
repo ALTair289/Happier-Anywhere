@@ -1,7 +1,7 @@
 import type { PermissionMode } from '@/api/types';
 import { logger } from '@/ui/logger';
 import type { Credentials } from '@/persistence';
-import { initialMachineMetadata } from '@/daemon/startDaemon';
+import { initialMachineMetadata } from '@/daemon/machine/metadata';
 import { formatProviderPromptErrorMessage } from '@/agent/runtime/formatProviderPromptErrorMessage';
 import { runStandardAcpProvider, type StandardAcpProviderRunOptions } from '@/agent/runtime/runStandardAcpProvider';
 import { createPiAcpRuntime } from '@/backends/pi/acp/runtime';
@@ -23,7 +23,7 @@ export async function runPi(opts: StandardAcpProviderRunOptions & {
     machineMetadata: initialMachineMetadata,
     terminalDisplay: PiTerminalDisplay,
     resolvePermissionModeQueueKey: (permissionMode) => buildPiToolsForPermissionMode(permissionMode).join(','),
-    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake }) =>
+    createRuntime: ({ directory, machineId, session, messageBuffer, mcpServers, permissionHandler, setThinking, getPermissionMode, memoryRecallGuidanceEnabled, pendingQueueDrainMaxPopPerWake, providerInputConsumer }) =>
       createPiAcpRuntime({
         directory,
         machineId,
@@ -35,6 +35,7 @@ export async function runPi(opts: StandardAcpProviderRunOptions & {
         memoryRecallGuidanceEnabled,
         getPermissionMode,
         pendingQueueDrainMaxPopPerWake,
+        providerInputConsumer,
       }),
     onAttachMetadataSnapshotMissing: (error) => {
       logger.debug(

@@ -277,35 +277,35 @@ describe('resolvePiConnectedServiceSwitchContinuity', () => {
     });
   });
 
-  it('does not treat a broker selection identity as immediate provider adoption', async () => {
+  it('uses the request-time broker boundary for a brokered different-member switch', async () => {
     await expect(resolvePiConnectedServiceSwitchContinuity({
       sessionId: 'session-1',
       agentId: 'pi',
-      serviceId: 'openai',
+      serviceId: 'openai-codex',
       previousBinding: {
         source: 'connected',
         selection: 'profile',
-        serviceId: 'openai',
+        serviceId: 'openai-codex',
         profileId: 'old',
         groupId: null,
       },
       nextBinding: {
         source: 'connected',
         selection: 'profile',
-        serviceId: 'openai',
+        serviceId: 'openai-codex',
         profileId: 'new',
         groupId: null,
       },
       fromBindings: {
         v: 1,
         bindingsByServiceId: {
-          openai: { source: 'connected', selection: 'profile', profileId: 'old' },
+          'openai-codex': { source: 'connected', selection: 'profile', profileId: 'old' },
         },
       },
       toBindings: {
         v: 1,
         bindingsByServiceId: {
-          openai: { source: 'connected', selection: 'profile', profileId: 'new' },
+          'openai-codex': { source: 'connected', selection: 'profile', profileId: 'new' },
         },
       },
       runtimeAuthSelection: {
@@ -313,9 +313,6 @@ describe('resolvePiConnectedServiceSwitchContinuity', () => {
       },
       connectedServiceMaterializationIdentityV1: MATERIALIZATION_IDENTITY,
       vendorResumeId: 'pi-session-1',
-    })).resolves.toEqual({
-      mode: 'restart_shared_state_required',
-      reason: 'pi_exact_connected_service_selection_required',
-    });
+    })).resolves.toEqual({ mode: 'hot_apply' });
   });
 });

@@ -31,6 +31,14 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function hasBrokerRequestTimeSelection(params: ConnectedServiceSwitchContinuityParams): boolean {
+  if (params.serviceId !== 'openai-codex' && params.serviceId !== 'claude-subscription') return false;
+  if (!isConnectedToConnectedServiceSwitch(params)) return false;
+  const selection = params.runtimeAuthSelection;
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection)) return false;
+  return Boolean(asNonEmptyString((selection as Readonly<Record<string, unknown>>).brokerSelectionIdentity));
+}
+
 /**
  * Sanitized, secret-free summary of which required resume-continuity inputs were absent. Emits only
  * presence booleans (never the raw values: no home paths, vendor resume ids, env, or cwd) so a
@@ -79,6 +87,9 @@ export async function resolvePiConnectedServiceSwitchContinuity(
 ): Promise<ConnectedServiceSwitchContinuityResult> {
   if (!supportsService(params.serviceId)) {
     return { mode: 'unsupported', reason: 'unsupported_service' };
+  }
+  if (hasBrokerRequestTimeSelection(params)) {
+    return { mode: 'hot_apply' };
   }
   if (isSameConnectedServiceAuthGroup(params) || isExactSameConnectedServiceSelection(params)) {
     const targetMaterializedRoot = asNonEmptyString(params.targetMaterializedRoot);

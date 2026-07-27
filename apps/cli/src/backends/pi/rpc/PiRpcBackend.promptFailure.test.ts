@@ -1413,7 +1413,7 @@ describe('PiRpcBackend prompt error handling', () => {
 
       await expect(backend.sendPrompt(session.sessionId, 'hello')).rejects.toThrow(/OpenAI Codex auth failed/i);
       expect(diagnostics).toEqual([
-        expect.stringContaining('Pi RPC prompt failed: OpenAI Codex auth failed'),
+        expect.stringContaining('Pi RPC prompt rejected before acceptance: OpenAI Codex auth failed'),
       ]);
       expect(diagnostics.join('\n')).not.toContain('sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
     } finally {
@@ -1421,7 +1421,7 @@ describe('PiRpcBackend prompt error handling', () => {
     }
   });
 
-  it('surfaces immediate generic prompt failures as Pi provider diagnostics', async () => {
+  it('surfaces exact generic negative prompt responses as pre-acceptance rejection diagnostics', async () => {
     const workDir = makeTempDir('happier-pi-rpc-immediate-generic-failure-');
     tempDirs.push(workDir);
     const fakeScript = makeFakePiRpcImmediateGenericPromptFailureScript(workDir);
@@ -1439,87 +1439,13 @@ describe('PiRpcBackend prompt error handling', () => {
     try {
       const session = await backend.startSession();
 
-      await expect(backend.sendPrompt(session.sessionId, 'hello')).rejects.toThrow(
-        /Pi provider reported provider session failure after prompt acceptance/i,
-      );
+      await expect(backend.sendPrompt(session.sessionId, 'hello')).rejects.toThrow(/Provider session failed/i);
 
       expect(messages).toContainEqual(expect.objectContaining({
         type: 'terminal-output',
-        data: 'Pi provider reported provider session failure after prompt acceptance',
+        data: 'Pi RPC prompt rejected before acceptance: Provider session failed',
       }));
-      expect(JSON.stringify(messages)).not.toContain('"Provider session failed"');
     } finally {
-      await backend.dispose();
-    }
-  });
-
-  it('normalizes exact generic prompt catch-boundary failures and traces the catch branch', async () => {
-    const workDir = makeTempDir('happier-pi-rpc-generic-catch-boundary-');
-    tempDirs.push(workDir);
-    const fakeScript = makeFakePiRpcProcessScript(workDir);
-    const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
-
-    const backend = new PiRpcBackend({
-      cwd: workDir,
-      command: process.execPath,
-      args: [fakeScript],
-      env: {
-        HAPPIER_PI_RPC_FAILURE_TRACE: '1',
-        HAPPIER_PI_RPC_PROMPT_ACK_START_GRACE_MS: '1',
-      },
-    });
-
-    const messages: any[] = [];
-    backend.onMessage((message) => messages.push(message));
-
-    try {
-      const session = await backend.startSession();
-      const originalSendCommand = (backend as any).sendCommand.bind(backend) as (
-        command: { type: string },
-        timeoutMs?: number,
-        options?: Readonly<{ processAlreadyEnsured?: boolean }>,
-      ) => Promise<unknown>;
-      (backend as any).sendCommand = (
-        command: { type: string },
-        timeoutMs?: number,
-        options?: Readonly<{ processAlreadyEnsured?: boolean }>,
-      ) => {
-        if (command.type === 'prompt') {
-          return Promise.reject(new Error('Provider session failed'));
-        }
-        return originalSendCommand(command, timeoutMs, options);
-      };
-
-      await expect(backend.sendPrompt(session.sessionId, 'sensitive prompt marker')).rejects.toThrow(
-        /Pi provider reported provider session failure after prompt acceptance/i,
-      );
-
-      expect(messages).toContainEqual(expect.objectContaining({
-        type: 'terminal-output',
-        data: 'Pi provider reported provider session failure after prompt acceptance',
-      }));
-      expect(messages).toContainEqual(expect.objectContaining({
-        type: 'status',
-        status: 'error',
-        detail: 'Pi provider reported provider session failure after prompt acceptance',
-      }));
-
-      const tracePayloads = debugSpy.mock.calls
-        .filter(([message]) => message === '[pi] RPC failure trace')
-        .map(([, payload]) => payload as { branch?: string });
-      expect(tracePayloads).toContainEqual(expect.objectContaining({
-        branch: 'send_prompt_error_caught',
-        command: 'prompt',
-        promptSendAttempted: true,
-        turnAllocated: true,
-        promptErrorExactGeneric: true,
-        normalizedToPiDiagnostic: true,
-      }));
-      expect(tracePayloads.map((payload) => payload.branch)).not.toContain('pending_prompt_failure_response');
-      expect(tracePayloads.map((payload) => payload.branch)).not.toContain('turn_failed_event_matched');
-      expect(JSON.stringify(tracePayloads)).not.toContain('sensitive prompt marker');
-    } finally {
-      debugSpy.mockRestore();
       await backend.dispose();
     }
   });
@@ -1783,20 +1709,22 @@ describe('PiRpcBackend prompt error handling', () => {
       // classified runtime-auth failure to the daemon. We assert the escalation body's
       // stable contract via objectContaining (kind/service/profile/group + reset hints)
       // and that the report is bounded by a timeout, without pinning every diagnostic field.
-      expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionId: 'happy-session-usage-limit',
-          switchesThisTurn: 0,
-          classification: expect.objectContaining({
-            kind: 'usage_limit',
-            serviceId: 'claude-subscription',
-            profileId: 'claude-primary',
-            groupId: 'claude-main',
-            retryAfterMs: 150_000,
+      await vi.waitFor(() => {
+        expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionId: 'happy-session-usage-limit',
+            switchesThisTurn: 0,
+            classification: expect.objectContaining({
+              kind: 'usage_limit',
+              serviceId: 'claude-subscription',
+              profileId: 'claude-primary',
+              groupId: 'claude-main',
+              retryAfterMs: 150_000,
+            }),
           }),
-        }),
-        expect.objectContaining({ timeoutMs: expect.any(Number) }),
-      );
+          expect.objectContaining({ timeoutMs: expect.any(Number) }),
+        );
+      });
     } finally {
       await backend.dispose();
     }
@@ -1842,19 +1770,21 @@ describe('PiRpcBackend prompt error handling', () => {
       // Fail-closed escalation: a terminal compaction dependency failure that interrupted
       // genuinely-unfinished work MUST still escalate to the daemon (this is what guards the
       // Pi post-final-compaction reorder from silently swallowing real interruptions).
-      expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionId: 'happy-session-compaction-dependency',
-          switchesThisTurn: 0,
-          classification: expect.objectContaining({
-            kind: 'dependency_failure',
-            serviceId: 'openai-codex',
-            profileId: 'codex-primary',
-            groupId: 'codex-main',
+      await vi.waitFor(() => {
+        expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionId: 'happy-session-compaction-dependency',
+            switchesThisTurn: 0,
+            classification: expect.objectContaining({
+              kind: 'dependency_failure',
+              serviceId: 'openai-codex',
+              profileId: 'codex-primary',
+              groupId: 'codex-main',
+            }),
           }),
-        }),
-        expect.objectContaining({ timeoutMs: expect.any(Number) }),
-      );
+          expect.objectContaining({ timeoutMs: expect.any(Number) }),
+        );
+      });
     } finally {
       await backend.dispose();
     }
@@ -1940,7 +1870,7 @@ describe('PiRpcBackend prompt error handling', () => {
     }
   });
 
-  it('waits for Pi to become idle instead of steering prompt collisions', async () => {
+  it('does not retry an exact Pi busy rejection inside the provider adapter', async () => {
     const workDir = makeTempDir('happier-pi-rpc-busy-');
     tempDirs.push(workDir);
     const fakeScript = makeFakePiRpcBusyThenIdleScript(workDir);
@@ -1955,7 +1885,7 @@ describe('PiRpcBackend prompt error handling', () => {
 
     try {
       const session = await backend.startSession();
-      await expect(backend.sendPrompt(session.sessionId, 'follow-up')).resolves.toBeUndefined();
+      await expect(backend.sendPrompt(session.sessionId, 'follow-up')).rejects.toThrow(/already processing/i);
 
       const commandLog = readFileSync(commandLogPath, 'utf8')
         .trim()
@@ -1964,7 +1894,6 @@ describe('PiRpcBackend prompt error handling', () => {
         .map((line) => JSON.parse(line) as { type: string; message: string | null });
       expect(commandLog.filter((command) => command.type === 'steer')).toHaveLength(0);
       expect(commandLog.filter((command) => command.type === 'prompt').map((command) => command.message)).toEqual([
-        'follow-up',
         'follow-up',
       ]);
     } finally {

@@ -212,7 +212,7 @@ describe('createPiConnectedServiceRuntimeAuthAdapter', () => {
     });
   });
 
-  it('declines brokered hot apply without mutating daemon broker selection', async () => {
+  it('hot-applies a brokered member switch with exact generation/revision proof', async () => {
     const adapter = createPiConnectedServiceRuntimeAuthAdapter();
 
     expect(adapter.canHotApply({
@@ -220,7 +220,7 @@ describe('createPiConnectedServiceRuntimeAuthAdapter', () => {
       selection: {
         brokerSelectionIdentity: 'pi|connected|broker:1|claude-subscription:acct-old:',
       },
-    })).toEqual({ supported: false, recovery: 'restart_rematerialize' });
+    })).toEqual({ supported: true, recovery: 'provider_owned_broker_selection' });
 
     await expect(adapter.hotApply({
       target: { agentId: 'pi' },
@@ -232,13 +232,47 @@ describe('createPiConnectedServiceRuntimeAuthAdapter', () => {
         activeProfileId: 'profile-new',
         fallbackProfileId: 'profile-old',
         generation: 12,
-        record: { serviceId: 'claude-subscription', profileId: 'profile-new' },
+        credentialRevision: 'rev-new',
+        record: {
+          kind: 'oauth',
+          serviceId: 'claude-subscription',
+          profileId: 'profile-new',
+          oauth: { accessToken: 'access-new', providerAccountId: 'acct-new' },
+        },
       },
-    })).resolves.toEqual({ applied: false, reason: 'hot_apply_unsupported' });
+    })).resolves.toMatchObject({
+      applied: true,
+      recovery: 'provider_owned_broker_selection',
+      verification: {
+        status: 'verified',
+        proofStrength: 'exact',
+        providerAccountId: 'acct-new',
+        credentialRevision: 'rev-new',
+        generationApplication: {
+          serviceId: 'claude-subscription',
+          groupId: 'main',
+          profileId: 'profile-new',
+          generation: 12,
+          credentialRevision: 'rev-new',
+        },
+      },
+    });
 
     expect(getBrokerBridgeEffectiveSelectionForTest({
       selectionIdentity: 'pi|connected|broker:1|claude-subscription:acct-old:',
       serviceId: 'claude-subscription',
-    })).toBeNull();
+    })).toMatchObject({
+      selectionEpoch: 1,
+      selection: {
+        activeProfileId: 'profile-new',
+        credentialRevision: 'rev-new',
+      },
+    });
+  });
+
+  it('keeps unbrokered Pi restart-only', () => {
+    const adapter = createPiConnectedServiceRuntimeAuthAdapter();
+    expect(adapter.canHotApply({ target: { agentId: 'pi' }, selection: { serviceId: 'openai' } }))
+      .toEqual({ supported: false, recovery: 'restart_rematerialize' });
   });
 });

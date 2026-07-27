@@ -201,13 +201,12 @@ describe('PiRpcBackend connected-service broker preflight (fail-closed)', () => 
     expect(trackers.sentPromptCount).toBe(0);
   });
 
-  it('rechecks broker readiness before retrying a prompt after recoverable write failure respawns Pi', async () => {
+  it('does not retry a prompt after an ambiguous provider write failure', async () => {
     const { priv, trackers, sendPrompt } = createGatedBackend({
       [PI_BROKER_SELECTION_IDENTITY_ENV]: 'pi|connected|broker:1|anthropic:claude-pro:',
       [PI_BROKER_SELECTIONS_ENV]: serializePiBrokerSelections({
         anthropic: { serviceId: 'claude-subscription', profileId: 'claude-pro', accountId: null, planType: null },
       }),
-      HAPPIER_PI_RPC_PROMPT_ACK_START_GRACE_MS: '1',
     });
     priv.connectedBrokerPreflight = Promise.resolve({ ready: true });
     priv.ensureProcess = async () => {
@@ -233,9 +232,9 @@ describe('PiRpcBackend connected-service broker preflight (fail-closed)', () => 
       return { type: 'response', command: command.type, success: true };
     };
 
-    await expect(sendPrompt('hello')).rejects.toThrow(/broker_load_nonce_not_observed/);
+    await expect(sendPrompt('hello')).rejects.toThrow(/Failed to write Pi RPC command \(prompt\): EPIPE/);
     expect(trackers.ensureProcessReached).toBe(true);
-    expect(restartCount).toBe(1);
+    expect(restartCount).toBe(0);
     expect(trackers.sentPromptCount).toBe(1);
   });
 

@@ -58,7 +58,7 @@ function resolvePiLaunchSelectionForConnectedService(serviceId: string): PiConne
       return { provider: 'openai', startupModel: 'gpt-5.4', modelScope: 'openai/*' };
     case 'claude-subscription':
     case 'anthropic':
-      return { provider: 'anthropic', startupModel: 'claude-opus-4-8', modelScope: 'anthropic/*' };
+      return { provider: 'anthropic', startupModel: providers.claude.CURRENT_FLAGSHIP_CLAUDE_MODEL_ID, modelScope: 'anthropic/*' };
     default:
       return null;
   }
