@@ -29,7 +29,13 @@ type ActiveViewingSessionState = {
     visibleScopedSessionServerIdBySessionKey: Map<string, string>;
 };
 
+type ActiveViewingSessionResetState = {
+    version: number;
+    listeners: Set<() => void>;
+};
+
 const activeViewingSessionStateKey = '__HAPPIER_ACTIVE_VIEWING_SESSION_STATE__';
+const activeViewingSessionResetStateKey = '__HAPPIER_ACTIVE_VIEWING_SESSION_RESET_STATE__';
 
 function createActiveViewingSessionState(): ActiveViewingSessionState {
     return {
@@ -48,12 +54,35 @@ function getActiveViewingSessionState(): ActiveViewingSessionState {
     return host[activeViewingSessionStateKey];
 }
 
+function getActiveViewingSessionResetState(): ActiveViewingSessionResetState {
+    const host = globalThis as typeof globalThis & {
+        [activeViewingSessionResetStateKey]?: ActiveViewingSessionResetState;
+    };
+    host[activeViewingSessionResetStateKey] ??= {
+        version: 0,
+        listeners: new Set<() => void>(),
+    };
+    return host[activeViewingSessionResetStateKey];
+}
+
 const activeViewingSessionState = getActiveViewingSessionState();
 const visibleSessionRefCounts = activeViewingSessionState.visibleSessionRefCounts;
 const visibleSessionScopedRefCounts = activeViewingSessionState.visibleSessionScopedRefCounts;
 const visibleScopedSessionKeysBySessionId = activeViewingSessionState.visibleScopedSessionKeysBySessionId;
 const visibleScopedSessionServerIdsBySessionId = activeViewingSessionState.visibleScopedSessionServerIdsBySessionId;
 const visibleScopedSessionServerIdBySessionKey = activeViewingSessionState.visibleScopedSessionServerIdBySessionKey;
+const activeViewingSessionResetState = getActiveViewingSessionResetState();
+
+export function subscribeActiveViewingSessionReset(listener: () => void): () => void {
+    activeViewingSessionResetState.listeners.add(listener);
+    return () => {
+        activeViewingSessionResetState.listeners.delete(listener);
+    };
+}
+
+export function getActiveViewingSessionResetVersion(): number {
+    return activeViewingSessionResetState.version;
+}
 
 function normalizeText(value: unknown): string {
     return typeof value === 'string' ? value.trim() : '';
@@ -217,13 +246,22 @@ export const clearActiveViewingSessionId = (
     }
 };
 
-export const clearActiveViewingSessionsForServerScopeReset = (): void => {
+function clearActiveViewingSessions(options: Readonly<{ notifyMountedSurfaces: boolean }>): void {
     activeViewingSessionState.activeViewingSessionEntries = [];
     visibleSessionRefCounts.clear();
     visibleSessionScopedRefCounts.clear();
     visibleScopedSessionKeysBySessionId.clear();
     visibleScopedSessionServerIdsBySessionId.clear();
     visibleScopedSessionServerIdBySessionKey.clear();
+    if (!options.notifyMountedSurfaces) return;
+    activeViewingSessionResetState.version += 1;
+    for (const listener of activeViewingSessionResetState.listeners) {
+        listener();
+    }
+}
+
+export const clearActiveViewingSessionsForServerScopeReset = (): void => {
+    clearActiveViewingSessions({ notifyMountedSurfaces: true });
 };
 
 function isSessionRoutePathname(pathname: string | null | undefined): boolean {
@@ -241,7 +279,7 @@ export const clearActiveViewingSessionsForNonSessionRoute = (pathname: string | 
         || visibleScopedSessionServerIdsBySessionId.size > 0
         || visibleScopedSessionServerIdBySessionKey.size > 0;
     if (!hadViewingState) return false;
-    clearActiveViewingSessionsForServerScopeReset();
+    clearActiveViewingSessions({ notifyMountedSurfaces: false });
     return true;
 };
 
@@ -259,6 +297,17 @@ export const markSessionVisible = (sessionId: string, serverId?: string | null):
     if (identity.serverId) {
         addVisibleScopedSessionKey(identity.sessionId, identity.sessionKey, identity.serverId);
     }
+};
+
+export const registerSessionVisibleSurface = (sessionId: string, serverId?: string | null): (() => void) => {
+    const resetVersion = activeViewingSessionResetState.version;
+    markSessionVisible(sessionId, serverId);
+    return () => {
+        // A server-scope reset already released every hold from the prior generation.
+        // Its delayed React cleanup must not consume a newly registered hold.
+        if (activeViewingSessionResetState.version !== resetVersion) return;
+        markSessionHidden(sessionId, serverId);
+    };
 };
 
 function decrementVisibleScopedSession(identity: Readonly<{

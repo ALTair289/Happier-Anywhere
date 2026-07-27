@@ -1,14 +1,16 @@
 import * as React from 'react';
 
 import {
-    markSessionHidden,
-    markSessionVisible,
+    getActiveViewingSessionResetVersion,
+    registerSessionVisibleSurface,
+    subscribeActiveViewingSessionReset,
 } from '@/sync/domains/session/activeViewingSession';
 import { registerSessionTranscriptRetentionConsumer } from '@/sync/runtime/sessionRealtimeTranscriptConsumers';
 
 export type UseSessionSurfaceActivationInput = Readonly<{
     sessionId: string;
     serverId?: string | null;
+    onSessionVisible?: (sessionId: string) => void;
     surfaceFocused: boolean;
     /**
      * Whether this mounted surface is still part of the user-reachable surface set.
@@ -32,14 +34,24 @@ export function useSessionSurfaceActivation(
     input: UseSessionSurfaceActivationInput,
 ): UseSessionSurfaceActivationResult {
     const sessionId = normalizeSessionId(input.sessionId);
+    const visibilityResetVersion = React.useSyncExternalStore(
+        subscribeActiveViewingSessionReset,
+        getActiveViewingSessionResetVersion,
+        getActiveViewingSessionResetVersion,
+    );
 
     React.useLayoutEffect(() => {
         if (!sessionId || !input.surfaceVisible) return;
-        markSessionVisible(sessionId, input.serverId);
-        return () => {
-            markSessionHidden(sessionId, input.serverId);
-        };
-    }, [input.serverId, input.surfaceVisible, sessionId]);
+        const releaseVisibleSurface = registerSessionVisibleSurface(sessionId, input.serverId);
+        input.onSessionVisible?.(sessionId);
+        return releaseVisibleSurface;
+    }, [
+        input.onSessionVisible,
+        input.serverId,
+        input.surfaceVisible,
+        sessionId,
+        visibilityResetVersion,
+    ]);
 
     // Transcript retention hold (NOT gated on surfaceVisible by default): a
     // hidden-but-mounted back-stack SessionView still renders its transcript, so the

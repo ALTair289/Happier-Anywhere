@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as React from 'react';
+import { act } from 'react-test-renderer';
 
 import { renderHook, renderScreen, standardCleanup } from '@/dev/testkit';
 import {
+    clearActiveViewingSessionsForNonSessionRoute,
     clearActiveViewingSessionsForServerScopeReset,
     isSessionVisible,
 } from '@/sync/domains/session/activeViewingSession';
 import { createSessionTranscriptRetentionController } from '@/sync/engine/sessions/sessionTranscriptRetention';
+import { resolveSessionLiveConsumption } from '@/sync/runtime/sessionLiveConsumption';
 import {
     clearMountedSessionRealtimeTranscriptConsumers,
     readMountedSessionRealtimeTranscriptConsumerSessionIds,
@@ -75,6 +78,83 @@ describe('useSessionSurfaceActivation', () => {
             isVisible: false,
         });
         expect(isSessionVisible('shared-session', 'server-b')).toBe(false);
+    });
+
+    it('re-registers a still-mounted visible surface after server-scoped runtime state resets', async () => {
+        const onSessionVisible = vi.fn();
+        const hook = await renderHook((input: Parameters<typeof useSessionSurfaceActivation>[0]) => (
+            useSessionSurfaceActivation(input)
+        ), {
+            initialProps: {
+                sessionId: 'focused-session',
+                serverId: 'server-a',
+                onSessionVisible,
+                surfaceVisible: true,
+                surfaceFocused: true,
+            },
+        });
+
+        expect(isSessionVisible('focused-session', 'server-a')).toBe(true);
+        expect(onSessionVisible).toHaveBeenCalledTimes(1);
+        expect(onSessionVisible).toHaveBeenLastCalledWith('focused-session');
+
+        await act(async () => {
+            clearActiveViewingSessionsForServerScopeReset();
+        });
+
+        expect(isSessionVisible('focused-session', 'server-a')).toBe(true);
+        expect(onSessionVisible).toHaveBeenCalledTimes(2);
+        expect(onSessionVisible).toHaveBeenLastCalledWith('focused-session');
+        expect(resolveSessionLiveConsumption('focused-session', 'server-a')).toEqual({
+            isVisible: true,
+            isFullContentConsumer: true,
+        });
+        await hook.unmount();
+        expect(isSessionVisible('focused-session', 'server-a')).toBe(false);
+    });
+
+    it('does not reactivate a retained session when navigation explicitly clears visibility for a non-session route', async () => {
+        const onSessionVisible = vi.fn();
+        const hook = await renderHook(useSessionSurfaceActivation, {
+            initialProps: {
+                sessionId: 'retained-session',
+                serverId: 'server-a',
+                onSessionVisible,
+                surfaceVisible: true,
+                surfaceFocused: true,
+            },
+        });
+
+        expect(onSessionVisible).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            expect(clearActiveViewingSessionsForNonSessionRoute('/settings')).toBe(true);
+        });
+
+        expect(isSessionVisible('retained-session', 'server-a')).toBe(false);
+        expect(onSessionVisible).toHaveBeenCalledTimes(1);
+        await hook.unmount();
+    });
+
+    it('restores every mounted visibility hold without collapsing same-session refcounts', async () => {
+        const input = {
+            sessionId: 'shared-focused-session',
+            serverId: 'server-a',
+            surfaceVisible: true,
+            surfaceFocused: true,
+        };
+        const first = await renderHook(useSessionSurfaceActivation, { initialProps: input });
+        const second = await renderHook(useSessionSurfaceActivation, { initialProps: input });
+
+        await act(async () => {
+            clearActiveViewingSessionsForServerScopeReset();
+        });
+
+        expect(isSessionVisible('shared-focused-session', 'server-a')).toBe(true);
+        await first.unmount();
+        expect(isSessionVisible('shared-focused-session', 'server-a')).toBe(true);
+        await second.unmount();
+        expect(isSessionVisible('shared-focused-session', 'server-a')).toBe(false);
     });
 
     it('holds a transcript retention mount for the full component lifetime, including hidden-but-mounted back-stack surfaces', async () => {
