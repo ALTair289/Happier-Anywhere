@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 import type { AgentBackend, AgentMessage, AgentMessageHandler, SessionId, StartSessionResult, ToolCallId } from '@/agent/core';
 import type { PermissionMode } from '@/api/types';
 import { CodexMcpClient } from '@/backends/codex/codexMcpClient';
@@ -118,16 +119,16 @@ export function createCodexMcpExecutionRunBackend(args: Readonly<{
       args.permissionMode === 'default'
         ? { approvalPolicy: null as null, sandbox: null as null }
         : resolveCodexMcpPolicyForPermissionMode(args.permissionMode);
+    const modelId = readNonBlankSessionControlIdentifier(args.modelId);
+    const reasoningEffort = readNonBlankSessionControlIdentifier(args.reasoningEffort);
     return buildCodexMcpStartConfig({
       prompt,
       cwd: args.cwd,
       sandbox: policy.sandbox,
       approvalPolicy: policy.approvalPolicy,
       mcpServers: {},
-      ...(typeof args.modelId === 'string' && args.modelId.trim() ? { model: args.modelId.trim() } : {}),
-      ...(typeof args.reasoningEffort === 'string' && args.reasoningEffort.trim()
-        ? { modelReasoningEffort: args.reasoningEffort.trim() }
-        : {}),
+      ...(modelId !== null ? { model: modelId } : {}),
+      ...(reasoningEffort !== null ? { modelReasoningEffort: reasoningEffort } : {}),
     });
   };
 

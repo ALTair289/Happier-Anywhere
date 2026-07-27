@@ -127,12 +127,15 @@ describe('executionRunBackendFactory (codex) — per-run model + effort across t
       backendId: 'codex',
       permissionMode: 'read_only',
       modelId: 'gpt-5.5',
-      sessionConfigOptionOverrides: OVERRIDES,
+      sessionConfigOptionOverrides: {
+        ...OVERRIDES,
+        overrides: { reasoning_effort: { updatedAt: 1, value: ' high\t' } },
+      },
       start: { intent: 'delegate', retentionPolicy: 'resumable' },
       isolation: { env: { PATH: '/usr/bin', HAPPIER_CODEX_EXECUTION_RUN_TRANSPORT: 'mcp' } },
     } as any);
 
     expect(mcpCalls).toHaveLength(1);
-    expect(mcpCalls[0]).toMatchObject({ modelId: 'gpt-5.5', reasoningEffort: 'high' });
+    expect(mcpCalls[0]).toMatchObject({ modelId: 'gpt-5.5', reasoningEffort: ' high\t' });
   });
 });

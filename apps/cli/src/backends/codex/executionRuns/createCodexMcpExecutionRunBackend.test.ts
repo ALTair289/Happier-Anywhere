@@ -71,7 +71,7 @@ class FakeCodexMcpClient {
   async forceCloseSession(): Promise<void> {}
 }
 
-async function loadBackendWithFakeClient(state: FakeClientState) {
+async function loadBackendWithFakeClient(state: FakeClientState, options: Readonly<{ modelId?: string }> = {}) {
   vi.doMock('@/backends/codex/codexMcpClient', () => ({
     CodexMcpClient: class extends FakeCodexMcpClient {
       constructor() {
@@ -84,12 +84,28 @@ async function loadBackendWithFakeClient(state: FakeClientState) {
   return mod.createCodexMcpExecutionRunBackend({
     cwd: process.cwd(),
     permissionMode: 'read-only',
+    ...options,
   });
 }
 
 describe('createCodexMcpExecutionRunBackend', () => {
   beforeEach(() => {
     vi.resetModules();
+  });
+
+  it('forwards the configured model identifier to Codex without transforming its bytes', async () => {
+    const state: FakeClientState = {
+      vendorSessionId: 'vendor_session_model' as SessionId,
+      startCalls: [],
+      continueCalls: [],
+      emittedMessages: [],
+      instances: [],
+    };
+    const backend = await loadBackendWithFakeClient(state, { modelId: ' model-a\t' });
+    const started = await backend.startSession();
+    await backend.sendPrompt(started.sessionId, 'prompt');
+
+    expect(state.startCalls[0]?.config.model).toBe(' model-a\t');
   });
 
   it('does not apply a default response timeout when timeoutMs is omitted', async () => {

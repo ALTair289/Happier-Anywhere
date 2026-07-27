@@ -1,5 +1,6 @@
 import { readSpawnConfigOptionOverrideValue } from '@happier-dev/protocol';
 
+import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 import { createCodexAcpBackend } from '@/backends/codex/acp/backend';
 import { withExecutionRunBackendModelOptions } from '@/agent/executionRuns/runtime/applyExecutionRunBackendModelOptions';
 import { buildCodexAcpEnvOverrides } from '@/backends/codex/acp/env';
@@ -45,9 +46,7 @@ export const executionRunBackendFactory: ExecutionRunBackendFactory = (opts) => 
     opts.sessionConfigOptionOverrides,
     'reasoning_effort',
   );
-  const reasoningEffort = typeof reasoningEffortValue === 'string' && reasoningEffortValue.trim().length > 0
-    ? reasoningEffortValue.trim()
-    : undefined;
+  const reasoningEffort = readNonBlankSessionControlIdentifier(reasoningEffortValue) ?? undefined;
   const baseEnv = buildCodexExecutionRunBaseEnv(opts.isolation?.env);
   const env = buildCodexAcpEnvOverrides({ baseEnv, projectDir: opts.cwd });
   const permissionMode = permissionModeForExecutionRunPolicy(opts.permissionMode);
