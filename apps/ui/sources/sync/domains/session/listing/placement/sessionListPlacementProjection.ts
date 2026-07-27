@@ -12,7 +12,7 @@ import {
     type SessionListWorkingRetentionKeySource,
 } from './sessionListWorkingRetention';
 
-export type SessionListPlacementKind = 'none' | 'working' | 'background_working' | SessionListAttentionPromotionReason;
+export type SessionListPlacementKind = 'none' | 'working' | SessionListAttentionPromotionReason;
 
 /**
  * Item-level projection of a 'working' placement: 'working' means live
@@ -20,10 +20,10 @@ export type SessionListPlacementKind = 'none' | 'working' | 'background_working'
  * working group by retention while its signals are stale (rows render a
  * paused indicator for it). Both count as working placement for grouping.
  */
-export type SessionListWorkingPlacementReason = 'working' | 'working-retained' | 'background-working';
+export type SessionListWorkingPlacementReason = 'working' | 'working-retained';
 
 export function isSessionListWorkingPlacementReason(value: unknown): value is SessionListWorkingPlacementReason {
-    return value === 'working' || value === 'working-retained' || value === 'background-working';
+    return value === 'working' || value === 'working-retained';
 }
 
 export type SessionListPlacementProjection = Readonly<{
@@ -37,7 +37,6 @@ export function projectSessionListPlacement(params: Readonly<{
     nowMs: number;
     sessionKey?: string | null;
     retainedWorkingSessionKeys?: SessionListWorkingRetentionKeySource;
-    separateBackgroundWork?: boolean;
 }>): SessionListPlacementProjection {
     const runtimeStatus = deriveSessionRuntimePresentationState(params.session, params.nowMs);
     if (runtimeStatus.freshActionRequired) {
@@ -52,9 +51,6 @@ export function projectSessionListPlacement(params: Readonly<{
     if (runtimeStatus.working) {
         return createPlacement('working', null);
     }
-    if (runtimeStatus.backgroundActive) {
-        return createPlacement(params.separateBackgroundWork === true ? 'background_working' : 'working', null);
-    }
     if (isPrimarySessionFailure(params.session)) {
         return createPlacement(
             'failed',
@@ -63,6 +59,9 @@ export function projectSessionListPlacement(params: Readonly<{
                 params.session.latestTurnStatusObservedAt,
             ),
         );
+    }
+    if (runtimeStatus.isOnline && runtimeStatus.backgroundActive) {
+        return createPlacement('working', null);
     }
     if (isSessionListReadyForReview(params.session)) {
         return createPlacement(

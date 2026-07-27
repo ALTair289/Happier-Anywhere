@@ -22,10 +22,9 @@ import {
 } from './sessionListAttentionPromotion';
 
 export const WORKING_PLACEMENT_GROUP_KEY_V1 = 'working-placement-v1';
-export const BACKGROUND_WORKING_PLACEMENT_GROUP_KEY_V1 = 'background-working-placement-v1';
 
 type SessionIndexItem = Extract<SessionListIndexItem, { type: 'session' }>;
-type WorkingPlacementCandidateReason = 'working' | 'background_working';
+type WorkingPlacementCandidateReason = 'working';
 type PlacementReason = SessionListAttentionPromotionReason | WorkingPlacementCandidateReason;
 
 type PlacementCandidate<Reason extends PlacementReason> = Readonly<{
@@ -154,7 +153,6 @@ function resolveAttentionCandidate(params: Readonly<{
     });
     const reason = placement.kind === 'none'
         || placement.kind === 'working'
-        || placement.kind === 'background_working'
         ? null
         : placement.kind;
     if (!reason && !params.retainedKeys.has(key)) return null;
@@ -181,7 +179,6 @@ function resolveWorkingCandidate(params: Readonly<{
     retainedKeyRanks: ReadonlyMap<string, number>;
     resolveSessionRow: ResolveSessionListIndexRow;
     nowMs: number;
-    separateBackgroundWork?: boolean;
 }>): PlacementCandidate<WorkingPlacementCandidateReason> | null {
     const key = normalizeSessionListPlacementKey(params.item.serverId, params.item.sessionId);
     if (!key) return null;
@@ -191,10 +188,9 @@ function resolveWorkingCandidate(params: Readonly<{
         session: row,
         sessionKey: key,
         retainedWorkingSessionKeys: params.retainedKeys,
-        separateBackgroundWork: params.separateBackgroundWork,
         nowMs: params.nowMs,
     });
-    if (placement.kind !== 'working' && placement.kind !== 'background_working') return null;
+    if (placement.kind !== 'working') return null;
     return {
         item: params.item,
         key,
@@ -228,10 +224,7 @@ function createWithinGroupAttentionSessionItem(candidate: PlacementCandidate<Ses
     };
 }
 
-function resolveWorkingPlacementReason(candidate: PlacementCandidate<WorkingPlacementCandidateReason>): 'working' | 'working-retained' | 'background-working' {
-    if (candidate.reason === 'background_working') {
-        return 'background-working';
-    }
+function resolveWorkingPlacementReason(candidate: PlacementCandidate<WorkingPlacementCandidateReason>): 'working' | 'working-retained' {
     // Retained placement keeps the session in the working group after its
     // live signals went stale; rows use the distinct reason to render a
     // paused indicator instead of pretending live activity.
@@ -279,40 +272,6 @@ export type SessionListIndexPlacementResult = Readonly<{
     promotedCount: number;
     candidates: ReadonlyArray<PlacementCandidate<PlacementReason>>;
 }>;
-
-function isBackgroundWorkingCandidate(candidate: PlacementCandidate<WorkingPlacementCandidateReason>): boolean {
-    return candidate.reason === 'background_working';
-}
-
-function createGlobalWorkingPlacementItems(
-    candidates: ReadonlyArray<PlacementCandidate<WorkingPlacementCandidateReason>>,
-): SessionListIndexItem[] {
-    const foreground = candidates.filter((candidate) => !isBackgroundWorkingCandidate(candidate));
-    const background = candidates.filter(isBackgroundWorkingCandidate);
-    const out: SessionListIndexItem[] = [];
-    if (foreground.length > 0) {
-        out.push({
-            type: 'header',
-            title: t('sessionsList.workingSectionTitle'),
-            headerKind: 'working',
-            groupKey: WORKING_PLACEMENT_GROUP_KEY_V1,
-        });
-        out.push(...foreground.map(createGlobalWorkingSessionItem));
-    }
-    if (background.length > 0) {
-        out.push({
-            type: 'header',
-            title: t('sessionsList.backgroundWorkingSectionTitle'),
-            headerKind: 'working',
-            groupKey: BACKGROUND_WORKING_PLACEMENT_GROUP_KEY_V1,
-        });
-        out.push(...background.map((candidate) => ({
-            ...createGlobalWorkingSessionItem(candidate),
-            groupKey: BACKGROUND_WORKING_PLACEMENT_GROUP_KEY_V1,
-        })));
-    }
-    return out;
-}
 
 export type SessionListIndexAttentionPromotionResult = Readonly<{
     attentionItems: SessionListIndexItem[];
@@ -519,18 +478,11 @@ export function buildSessionListIndexWorkingPlacement(params: Readonly<{
         return null;
     }
 
-    const separateBackgroundWork = params.options.separateBackgroundWork === true;
     const result = buildSessionListIndexGlobalPlacement({
         source: params.source,
         retainedKeys: params.retainedKeys ?? resolveWorkingPlacementRetainedKeys(params.options),
         resolveSessionRow: params.resolveSessionRow,
-        lane: separateBackgroundWork
-            ? {
-                ...WORKING_LANE,
-                resolveCandidate: (candidateParams) =>
-                    resolveWorkingCandidate({ ...candidateParams, separateBackgroundWork: true }),
-            }
-            : WORKING_LANE,
+        lane: WORKING_LANE,
         nowMs: params.nowMs,
         header: {
             type: 'header',
@@ -541,11 +493,7 @@ export function buildSessionListIndexWorkingPlacement(params: Readonly<{
     });
     return result
         ? {
-            workingItems: separateBackgroundWork
-                ? createGlobalWorkingPlacementItems(
-                    result.candidates as ReadonlyArray<PlacementCandidate<WorkingPlacementCandidateReason>>,
-                )
-                : result.placementItems,
+            workingItems: result.placementItems,
             remainder: result.remainder,
             promotedCount: result.promotedCount,
         }

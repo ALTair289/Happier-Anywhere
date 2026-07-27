@@ -68,7 +68,6 @@ describe('projectSessionListPlacement', () => {
 
         expect(projectSessionListPlacement({
             nowMs,
-            separateBackgroundWork: true,
             session: makeSession({
                 active: true,
                 activeAt: nowMs - 1_000,
@@ -79,9 +78,9 @@ describe('projectSessionListPlacement', () => {
                 latestTurnStatusObservedAt: undefined,
                 lastRuntimeIssue: null,
                 runtimeActivityActiveCount: 0,
+                runtimeActivityState: 'idle',
                 runtimeActivityObservedAt: null,
-                runtimeActivityExpiresAt: null,
-                runtimeActivitySourceClass: null,
+                runtimeActivityRevision: 1,
             }),
         })).toEqual({
             kind: 'working',
@@ -90,7 +89,7 @@ describe('projectSessionListPlacement', () => {
         });
     });
 
-    it('uses live detached provider runtime activity for working placement after the foreground turn completed by default', () => {
+    it('places background activity in Working ahead of Ready after the foreground turn completed', () => {
         const nowMs = 10_000;
 
         expect(projectSessionListPlacement({
@@ -98,74 +97,68 @@ describe('projectSessionListPlacement', () => {
             session: makeSession({
                 active: true,
                 activeAt: nowMs - 180_000,
-                presence: 0,
-                thinking: false,
-                thinkingAt: 0,
-                latestTurnStatus: 'completed',
-                latestTurnStatusObservedAt: nowMs - 2_000,
-                lastRuntimeIssue: null,
-                runtimeActivityActiveCount: 1,
-                runtimeActivityObservedAt: nowMs - 1_000,
-                runtimeActivityExpiresAt: nowMs + 60_000,
-                runtimeActivitySourceClass: 'provider_detached_task',
-            }),
-        })).toEqual({
-            kind: 'working',
-            timestamp: null,
-            retainedWorking: false,
-        });
-    });
-
-    it('projects live detached provider runtime activity into a separate background working placement when requested', () => {
-        const nowMs = 10_000;
-
-        expect(projectSessionListPlacement({
-            nowMs,
-            separateBackgroundWork: true,
-            session: makeSession({
-                active: true,
-                activeAt: nowMs - 1_000,
                 presence: 'online',
                 thinking: false,
                 thinkingAt: 0,
                 latestTurnStatus: 'completed',
                 latestTurnStatusObservedAt: nowMs - 2_000,
                 lastRuntimeIssue: null,
+                runtimeActivityState: 'active',
                 runtimeActivityActiveCount: 1,
                 runtimeActivityObservedAt: nowMs - 1_000,
-                runtimeActivityExpiresAt: nowMs + 60_000,
-                runtimeActivitySourceClass: 'provider_detached_task',
+                runtimeActivityRevision: 1,
             }),
         })).toEqual({
-            kind: 'background_working',
+            kind: 'working',
             timestamp: null,
             retainedWorking: false,
         });
     });
 
-    it('does not use expired detached provider runtime activity for working placement', () => {
+    it('keeps canonical background activity in Working without an observedAt freshness lease', () => {
         const nowMs = 10_000;
 
         const placement = projectSessionListPlacement({
             nowMs,
             session: makeSession({
-                active: false,
+                active: true,
                 activeAt: nowMs - 180_000,
-                presence: 0,
+                presence: 'online',
                 thinking: false,
                 thinkingAt: 0,
                 latestTurnStatus: 'completed',
                 latestTurnStatusObservedAt: nowMs - 2_000,
                 lastRuntimeIssue: null,
+                runtimeActivityState: 'active',
                 runtimeActivityActiveCount: 1,
                 runtimeActivityObservedAt: nowMs - 180_000,
-                runtimeActivityExpiresAt: nowMs - 1,
-                runtimeActivitySourceClass: 'provider_detached_task',
+                runtimeActivityRevision: 1,
             }),
         });
 
-        expect(placement.kind).not.toBe('working');
+        expect(placement.kind).toBe('working');
         expect(placement.retainedWorking).toBe(false);
+    });
+
+    it.each([
+        ['offline', { active: false, presence: 0, archivedAt: null }],
+        ['archived', { active: true, presence: 'online' as const, archivedAt: 9_000 }],
+    ])('does not place %s retained background activity in Working', (_label, lifecycle) => {
+        const nowMs = 10_000;
+        const placement = projectSessionListPlacement({
+            nowMs,
+            session: makeSession({
+                ...lifecycle,
+                latestTurnStatus: null,
+                latestTurnStatusObservedAt: null,
+                runtimeActivityState: 'active',
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: nowMs - 1_000,
+                runtimeActivityRevision: 1,
+            }),
+        });
+
+        expect(placement.kind).toBe('none');
     });
 
     it('projects retained working placement for stale retained candidates', () => {
@@ -204,6 +197,10 @@ describe('projectSessionListPlacement', () => {
                 latestTurnStatus: 'failed',
                 latestTurnStatusObservedAt: nowMs - 5_000,
                 lastRuntimeIssue: usageLimitIssue,
+                runtimeActivityState: 'active',
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: nowMs - 1_000,
+                runtimeActivityRevision: 1,
             }),
         })).toEqual({
             kind: 'failed',

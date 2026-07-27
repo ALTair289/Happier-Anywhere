@@ -175,16 +175,16 @@ describe('buildSessionListRenderableFromSession', () => {
             thinking: false,
             thinkingAt: 0,
             presence: 'online',
-            runtimeActivityActiveCount: 1,
+            runtimeActivityActiveCount: 0,
+            runtimeActivityState: 'unknown',
             runtimeActivityObservedAt: 100,
-            runtimeActivityExpiresAt: 200,
-            runtimeActivitySourceClass: 'provider_detached_task',
+            runtimeActivityRevision: 8,
         } as Session);
 
-        expect(renderable.runtimeActivityActiveCount).toBe(1);
+        expect(renderable.runtimeActivityActiveCount).toBe(0);
+        expect(renderable.runtimeActivityState).toBe('unknown');
         expect(renderable.runtimeActivityObservedAt).toBe(100);
-        expect(renderable.runtimeActivityExpiresAt).toBe(200);
-        expect(renderable.runtimeActivitySourceClass).toBe('provider_detached_task');
+        expect(renderable.runtimeActivityRevision).toBe(8);
     });
 
     it('projects ready unread state onto renderable session rows', () => {
@@ -441,16 +441,16 @@ describe('buildSessionListRenderableFromSession', () => {
         const previous = buildRenderable({
             id: 's_runtime_activity_equality',
             runtimeActivityActiveCount: 1,
+            runtimeActivityState: 'active',
             runtimeActivityObservedAt: 100,
-            runtimeActivityExpiresAt: 200,
-            runtimeActivitySourceClass: 'provider_detached_task',
+            runtimeActivityRevision: 4,
         });
         const next = buildRenderable({
             id: 's_runtime_activity_equality',
             runtimeActivityActiveCount: 1,
+            runtimeActivityState: 'active',
             runtimeActivityObservedAt: 150,
-            runtimeActivityExpiresAt: 250,
-            runtimeActivitySourceClass: 'provider_detached_task',
+            runtimeActivityRevision: 5,
         });
 
         expect(areSessionListRenderablesEqual(previous, next)).toBe(false);
@@ -540,6 +540,36 @@ describe('buildSessionListRenderableFromSession', () => {
             kind: 'mark-unread',
             visible: true,
             targetState: 'unread',
+        });
+    });
+
+    it('preserves terminal-control serviceability in the session-list renderable projection', () => {
+        const renderable = buildSessionListRenderableFromSession({
+            id: 's_terminal_unservable', seq: 1, createdAt: 1, updatedAt: 1,
+            active: false, activeAt: 1, archivedAt: null,
+            metadata: {
+                path: '', host: '',
+                terminal: {
+                    mode: 'tmux', tmux: { target: 'happy:win-1' },
+                    controlServiceabilityV1: {
+                        v: 1,
+                        attachmentId: 'attachment-preserved',
+                        state: 'recoverable_unservable',
+                        observedAt: 123,
+                        reason: 'session_rpc_unavailable',
+                    },
+                },
+            },
+            metadataVersion: 1, agentState: null, agentStateVersion: 0,
+            latestTurnStatus: 'completed', thinking: false, thinkingAt: 0, presence: 1,
+        } satisfies Session);
+
+        expect(renderable.metadata?.terminalControlServiceabilityV1).toEqual({
+            v: 1,
+            attachmentId: 'attachment-preserved',
+            state: 'recoverable_unservable',
+            observedAt: 123,
+            reason: 'session_rpc_unavailable',
         });
     });
 

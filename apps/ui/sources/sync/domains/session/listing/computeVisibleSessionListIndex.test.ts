@@ -1131,7 +1131,7 @@ describe('computeVisibleSessionListIndex', () => {
         ]);
     });
 
-    it('promotes server-backed pinned rows into global attention and working groups while preserving pinned state', () => {
+    it('promotes server-backed pinned foreground and background work before pinned/ready placement', () => {
         const now = 1_000_000;
         const groupKey = 'server:s1:active:project:repo';
         const source: SessionListIndexItem[] = [
@@ -1155,8 +1155,15 @@ describe('computeVisibleSessionListIndex', () => {
                 's1:pinned-working': makeSessionRow('pinned-working', {
                     active: true,
                     presence: 'online',
-                    latestTurnStatus: 'in_progress',
+                    latestTurnStatus: 'completed',
                     latestTurnStatusObservedAt: now - 1_000,
+                    latestReadyEventSeq: 4,
+                    latestReadyEventAt: now - 1_000,
+                    lastViewedSessionSeq: 1,
+                    runtimeActivityState: 'active',
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: now - 10_000,
+                    runtimeActivityRevision: 1,
                     updatedAt: 20,
                 }),
                 's1:ready': makeSessionRow('ready', {
@@ -1201,6 +1208,7 @@ describe('computeVisibleSessionListIndex', () => {
             's:pinned-working:working:pinned:none:working',
             's:working:working:unpinned:none:working',
         ]);
+        expect(result.filter((item) => item.type === 'session' && item.sessionId === 'pinned-working')).toHaveLength(1);
     });
 
     it('promotes completed turns that are newer than the read cursor even without a ready event', () => {
@@ -1788,7 +1796,7 @@ describe('computeVisibleSessionListIndex', () => {
         ]);
     });
 
-    it('merges live background work into the working group by default while rows keep the background presentation', () => {
+    it('promotes foreground and background activity into the global working group', () => {
         const now = 1_000_000;
         const groupKey = 'server:s1:active:project:repo';
         const source: SessionListIndexItem[] = [
@@ -1810,15 +1818,15 @@ describe('computeVisibleSessionListIndex', () => {
                     updatedAt: 30,
                 }),
                 's1:background': makeSessionRow('background', {
-                    active: false,
+                    active: true,
                     activeAt: now - 10_000,
-                    presence: 0,
+                    presence: 'online',
                     latestTurnStatus: 'completed',
                     latestTurnStatusObservedAt: now - 5_000,
+                    runtimeActivityState: 'active',
                     runtimeActivityActiveCount: 1,
                     runtimeActivityObservedAt: now - 1_000,
-                    runtimeActivityExpiresAt: now + 60_000,
-                    runtimeActivitySourceClass: 'provider_detached_task',
+                    runtimeActivityRevision: 1,
                     updatedAt: 20,
                 }),
             }),
@@ -1841,7 +1849,7 @@ describe('computeVisibleSessionListIndex', () => {
         ]);
     });
 
-    it('separates live background work into its own group when requested', () => {
+    it('marks background activity as working alongside foreground work in within-group mode', () => {
         const now = 1_000_000;
         const groupKey = 'server:s1:active:project:repo';
         const source: SessionListIndexItem[] = [
@@ -1863,15 +1871,15 @@ describe('computeVisibleSessionListIndex', () => {
                     updatedAt: 30,
                 }),
                 's1:background': makeSessionRow('background', {
-                    active: false,
+                    active: true,
                     activeAt: now - 10_000,
-                    presence: 0,
+                    presence: 'online',
                     latestTurnStatus: 'completed',
                     latestTurnStatusObservedAt: now - 5_000,
+                    runtimeActivityState: 'active',
                     runtimeActivityActiveCount: 1,
                     runtimeActivityObservedAt: now - 1_000,
-                    runtimeActivityExpiresAt: now + 60_000,
-                    runtimeActivitySourceClass: 'provider_detached_task',
+                    runtimeActivityRevision: 1,
                     updatedAt: 20,
                 }),
             }),
@@ -1880,7 +1888,7 @@ describe('computeVisibleSessionListIndex', () => {
             sessionListGroupOrderV1: {},
             sessionListOrderingModeV1: 'custom',
             presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
-            workingPlacement: { mode: 'global', separateBackgroundWork: true } as any,
+            workingPlacement: { mode: 'withinGroups' },
             nowMs: now,
         })!;
 
@@ -1888,14 +1896,14 @@ describe('computeVisibleSessionListIndex', () => {
             ? `h:${item.headerKind}:${item.title}:${item.groupKey ?? 'none'}`
             : `s:${item.sessionId}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`
         ))).toEqual([
-            'h:working:Working:working-placement-v1',
-            's:foreground:working:working',
-            'h:working:Working in background:background-working-placement-v1',
-            's:background:working:background-working',
+            'h:active:Active:none',
+            'h:project:~/repo:server:s1:active:project:repo',
+            's:foreground:project:working',
+            's:background:project:working',
         ]);
     });
 
-    it('does not place expired detached runtime activity in the working groups', () => {
+    it('keeps long-running canonical background activity in Working without an observedAt lease', () => {
         const now = 1_000_000;
         const groupKey = 'server:s1:active:project:repo';
         const source: SessionListIndexItem[] = [
@@ -1908,15 +1916,15 @@ describe('computeVisibleSessionListIndex', () => {
             source,
             resolveSessionRow: makeResolver({
                 's1:background': makeSessionRow('background', {
-                    active: false,
+                    active: true,
                     activeAt: now - 10_000,
-                    presence: 0,
+                    presence: 'online',
                     latestTurnStatus: 'completed',
                     latestTurnStatusObservedAt: now - 5_000,
+                    runtimeActivityState: 'active',
                     runtimeActivityActiveCount: 1,
                     runtimeActivityObservedAt: now - 10_000,
-                    runtimeActivityExpiresAt: now - 1,
-                    runtimeActivitySourceClass: 'provider_detached_task',
+                    runtimeActivityRevision: 1,
                     updatedAt: 20,
                 }),
             }),
@@ -1925,7 +1933,7 @@ describe('computeVisibleSessionListIndex', () => {
             sessionListGroupOrderV1: {},
             sessionListOrderingModeV1: 'custom',
             presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
-            workingPlacement: { mode: 'global', separateBackgroundWork: true } as any,
+            workingPlacement: { mode: 'global' },
             nowMs: now,
         })!;
 
@@ -1933,9 +1941,8 @@ describe('computeVisibleSessionListIndex', () => {
             ? `h:${item.headerKind}:${item.title}`
             : `s:${item.sessionId}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`
         ))).toEqual([
-            'h:active:Active',
-            'h:project:~/repo',
-            's:background:project:none',
+            'h:working:Working',
+            's:background:working:working',
         ]);
     });
 

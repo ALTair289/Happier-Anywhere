@@ -2,7 +2,7 @@ import type { Metadata, Session } from '@/sync/domains/state/storageTypes';
 import { computeHasUnreadActivity } from '@/sync/domains/messages/unread';
 import type {
     PrimaryTurnStatusV1,
-    SessionRuntimeActivitySourceClassV1,
+    SessionRuntimeActivityState,
     SessionRuntimeIssueV1,
 } from '@happier-dev/protocol';
 import {
@@ -53,6 +53,14 @@ export interface SessionListRenderableMetadata {
         updatedAt: number;
     } | null;
     hiddenSystemSession?: boolean;
+    terminalControlServiceabilityV1?: {
+        v: 1;
+        attachmentId?: string;
+        state: 'servable' | 'recoverable_unservable' | 'unknown';
+        observedAt: number;
+        reason?: string;
+        retired?: boolean;
+    } | null;
 }
 
 export interface SessionListRenderableSession {
@@ -77,15 +85,16 @@ export interface SessionListRenderableSession {
     latestTurnId?: string | null;
     latestTurnStatus?: PrimaryTurnStatusV1 | null;
     latestTurnStatusObservedAt?: number | null;
+    runtimeActivityState?: SessionRuntimeActivityState | null;
     runtimeActivityActiveCount?: number;
     runtimeActivityObservedAt?: number | null;
-    runtimeActivityExpiresAt?: number | null;
-    runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
+    runtimeActivityRevision?: number | null;
     lastRuntimeIssue?: SessionRuntimeIssueV1 | null;
     rollbackEligibleTurnStarts?: readonly number[] | null;
     latestReadyEventSeq?: number | null;
     latestReadyEventAt?: number | null;
     optimisticThinkingAt?: number | null;
+    resumingAt?: number | null;
     thinkingGraceUntil?: number | null;
     owner?: string;
     accessLevel?: 'view' | 'edit' | 'admin';
@@ -179,6 +188,7 @@ export function buildSessionListRenderableMetadata(metadata: Metadata | null | u
         directSessionV1,
         readStateV1,
         hiddenSystemSession: metadata.systemSessionV1?.hidden === true,
+        terminalControlServiceabilityV1: metadata.terminal?.controlServiceabilityV1 ?? null,
     };
 }
 
@@ -239,15 +249,16 @@ export function buildSessionListRenderableFromSession(
         latestTurnId: readSessionLatestTurnId(session),
         latestTurnStatus,
         latestTurnStatusObservedAt,
+        runtimeActivityState: session.runtimeActivityState ?? null,
         runtimeActivityActiveCount: session.runtimeActivityActiveCount,
         runtimeActivityObservedAt: session.runtimeActivityObservedAt ?? null,
-        runtimeActivityExpiresAt: session.runtimeActivityExpiresAt ?? null,
-        runtimeActivitySourceClass: session.runtimeActivitySourceClass ?? null,
+        runtimeActivityRevision: session.runtimeActivityRevision ?? null,
         lastRuntimeIssue: readSessionLastRuntimeIssue(session),
         rollbackEligibleTurnStarts: readRollbackEligibleTurnStarts(session.rollbackEligibleTurnStarts),
         latestReadyEventSeq: readSessionReadyEventNumber(session, 'latestReadyEventSeq'),
         latestReadyEventAt: readSessionReadyEventNumber(session, 'latestReadyEventAt'),
         optimisticThinkingAt: session.optimisticThinkingAt ?? null,
+        resumingAt: session.resumingAt ?? null,
         thinkingGraceUntil: session.thinkingGraceUntil ?? null,
         owner: session.owner,
         accessLevel: session.accessLevel,
@@ -389,15 +400,16 @@ export function areSessionListRenderablesEqual(
         && (previous.latestTurnId ?? null) === (next.latestTurnId ?? null)
         && (previous.latestTurnStatus ?? null) === (next.latestTurnStatus ?? null)
         && (previous.latestTurnStatusObservedAt ?? null) === (next.latestTurnStatusObservedAt ?? null)
+        && (previous.runtimeActivityState ?? null) === (next.runtimeActivityState ?? null)
         && (previous.runtimeActivityActiveCount ?? null) === (next.runtimeActivityActiveCount ?? null)
         && (previous.runtimeActivityObservedAt ?? null) === (next.runtimeActivityObservedAt ?? null)
-        && (previous.runtimeActivityExpiresAt ?? null) === (next.runtimeActivityExpiresAt ?? null)
-        && (previous.runtimeActivitySourceClass ?? null) === (next.runtimeActivitySourceClass ?? null)
+        && (previous.runtimeActivityRevision ?? null) === (next.runtimeActivityRevision ?? null)
         && areSessionRuntimeIssuesEqual(previous.lastRuntimeIssue ?? null, next.lastRuntimeIssue ?? null)
         && areRollbackEligibleTurnStartsEqual(previous.rollbackEligibleTurnStarts, next.rollbackEligibleTurnStarts)
         && (previous.latestReadyEventSeq ?? null) === (next.latestReadyEventSeq ?? null)
         && (previous.latestReadyEventAt ?? null) === (next.latestReadyEventAt ?? null)
         && (previous.optimisticThinkingAt ?? null) === (next.optimisticThinkingAt ?? null)
+        && (previous.resumingAt ?? null) === (next.resumingAt ?? null)
         && (previous.thinkingGraceUntil ?? null) === (next.thinkingGraceUntil ?? null)
         && (previous.owner ?? null) === (next.owner ?? null)
         && (previous.accessLevel ?? null) === (next.accessLevel ?? null)
@@ -531,7 +543,7 @@ export function resolveSessionListRenderableAttentionPromotionPlacement(
 ): SessionListRenderableAttentionPromotionPlacement {
     const projection = projectSessionListPlacement({ session, nowMs });
     return {
-        kind: projection.kind === 'background_working' ? 'working' : projection.kind,
+        kind: projection.kind,
         timestamp: projection.timestamp,
     };
 }
@@ -706,10 +718,10 @@ export function didSessionListRenderableWarmCacheFieldsChange(
     if ((previous.latestTurnId ?? null) !== (next.latestTurnId ?? null)) return true;
     if ((previous.latestTurnStatus ?? null) !== (next.latestTurnStatus ?? null)) return true;
     if ((previous.latestTurnStatusObservedAt ?? null) !== (next.latestTurnStatusObservedAt ?? null)) return true;
+    if ((previous.runtimeActivityState ?? null) !== (next.runtimeActivityState ?? null)) return true;
     if ((previous.runtimeActivityActiveCount ?? null) !== (next.runtimeActivityActiveCount ?? null)) return true;
     if ((previous.runtimeActivityObservedAt ?? null) !== (next.runtimeActivityObservedAt ?? null)) return true;
-    if ((previous.runtimeActivityExpiresAt ?? null) !== (next.runtimeActivityExpiresAt ?? null)) return true;
-    if ((previous.runtimeActivitySourceClass ?? null) !== (next.runtimeActivitySourceClass ?? null)) return true;
+    if ((previous.runtimeActivityRevision ?? null) !== (next.runtimeActivityRevision ?? null)) return true;
     if (!areSessionRuntimeIssuesEqual(previous.lastRuntimeIssue ?? null, next.lastRuntimeIssue ?? null)) return true;
     if (!areRollbackEligibleTurnStartsEqual(previous.rollbackEligibleTurnStarts, next.rollbackEligibleTurnStarts)) return true;
     if ((previous.latestReadyEventSeq ?? null) !== (next.latestReadyEventSeq ?? null)) return true;
@@ -759,10 +771,10 @@ export function isSessionListRenderableWarmCacheProgressOnlyChange(
     if ((previous.latestTurnId ?? null) !== (next.latestTurnId ?? null)) return false;
     if ((previous.latestTurnStatus ?? null) !== (next.latestTurnStatus ?? null)) return false;
     if ((previous.latestTurnStatusObservedAt ?? null) !== (next.latestTurnStatusObservedAt ?? null)) return false;
+    if ((previous.runtimeActivityState ?? null) !== (next.runtimeActivityState ?? null)) return false;
     if ((previous.runtimeActivityActiveCount ?? null) !== (next.runtimeActivityActiveCount ?? null)) return false;
     if ((previous.runtimeActivityObservedAt ?? null) !== (next.runtimeActivityObservedAt ?? null)) return false;
-    if ((previous.runtimeActivityExpiresAt ?? null) !== (next.runtimeActivityExpiresAt ?? null)) return false;
-    if ((previous.runtimeActivitySourceClass ?? null) !== (next.runtimeActivitySourceClass ?? null)) return false;
+    if ((previous.runtimeActivityRevision ?? null) !== (next.runtimeActivityRevision ?? null)) return false;
     if (!areSessionRuntimeIssuesEqual(previous.lastRuntimeIssue ?? null, next.lastRuntimeIssue ?? null)) return false;
     if (!areRollbackEligibleTurnStartsEqual(previous.rollbackEligibleTurnStarts, next.rollbackEligibleTurnStarts)) return false;
     if ((previous.latestReadyEventSeq ?? null) !== (next.latestReadyEventSeq ?? null)) return false;
@@ -784,55 +796,6 @@ export function isSessionListRenderableWarmCacheProgressOnlyChange(
         || previous.activeAt !== next.activeAt;
 }
 
-export function isSessionListRenderableRuntimeActivityLeaseOnlyChange(input: Readonly<{
-    previous: SessionListRenderableSession | undefined;
-    next: SessionListRenderableSession | undefined;
-    nowMs: number;
-}>): input is Readonly<{
-    previous: SessionListRenderableSession;
-    next: SessionListRenderableSession;
-    nowMs: number;
-}> {
-    const { previous, next, nowMs } = input;
-    if (!previous || !next || previous === next) return false;
-    if ((previous.runtimeActivityActiveCount ?? null) !== (next.runtimeActivityActiveCount ?? null)) return false;
-    if ((previous.runtimeActivitySourceClass ?? null) !== (next.runtimeActivitySourceClass ?? null)) return false;
-    if (
-        (previous.runtimeActivityObservedAt ?? null) === (next.runtimeActivityObservedAt ?? null)
-        && (previous.runtimeActivityExpiresAt ?? null) === (next.runtimeActivityExpiresAt ?? null)
-    ) {
-        return false;
-    }
-
-    if (!areRuntimeActivityPresentationStatesEquivalent(previous, next, nowMs)) return false;
-    return areSessionListRenderablesEqual(
-        {
-            ...previous,
-            runtimeActivityObservedAt: next.runtimeActivityObservedAt,
-            runtimeActivityExpiresAt: next.runtimeActivityExpiresAt,
-        },
-        next,
-    );
-}
-
-function areRuntimeActivityPresentationStatesEquivalent(
-    previous: SessionListRenderableSession,
-    next: SessionListRenderableSession,
-    nowMs: number,
-): boolean {
-    const previousStatus = deriveSessionRuntimePresentationState(previous, nowMs);
-    const nextStatus = deriveSessionRuntimePresentationState(next, nowMs);
-    return previousStatus.activityState === nextStatus.activityState
-        && previousStatus.working === nextStatus.working
-        && previousStatus.backgroundActive === nextStatus.backgroundActive
-        && previousStatus.runtimeProjectionInProgress === nextStatus.runtimeProjectionInProgress
-        && previousStatus.runtimeActivelyWorking === nextStatus.runtimeActivelyWorking
-        && previousStatus.freshInProgress === nextStatus.freshInProgress
-        && previousStatus.freshThinking === nextStatus.freshThinking
-        && previousStatus.freshProviderRuntimeActivity === nextStatus.freshProviderRuntimeActivity
-        && previousStatus.freshPermissionRequired === nextStatus.freshPermissionRequired
-        && previousStatus.freshActionRequired === nextStatus.freshActionRequired;
-}
 
 function areRollbackEligibleTurnStartsEqual(
     previous: readonly number[] | null | undefined,
