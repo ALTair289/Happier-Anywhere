@@ -36,4 +36,14 @@ describe("mapPendingMessageRow", () => {
         });
         expect(mapped.requestedAction).toBeUndefined();
     });
+
+    it("projects claimed rows as awaiting provider acceptance without adding persisted state", () => {
+        expect(mapPendingMessageRow({
+            ...pendingRow({ v: 1, kind: "enqueue" }),
+            deliveryState: "delivering",
+        })).toMatchObject({
+            deliveryState: "delivering",
+            deliveryStatus: { status: "delivering", detail: "awaiting_acceptance" },
+        });
+    });
 });
