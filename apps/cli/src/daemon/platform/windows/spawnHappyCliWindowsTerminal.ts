@@ -8,5 +8,8 @@ export async function startHappySessionInWindowsTerminal(params: {
   windowId: string;
   title: string;
 }): Promise<{ ok: true; pid: number } | { ok: false; errorMessage: string }> {
-  return await startProcessInWindowsTerminal(params);
+  return await startProcessInWindowsTerminal({
+    ...params,
+    inheritParentEnv: false,
+  });
 }

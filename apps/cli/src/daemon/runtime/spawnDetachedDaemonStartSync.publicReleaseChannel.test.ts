@@ -9,6 +9,8 @@ const envScope = createEnvKeyScope([
   'HAPPIER_RELEASE_RING',
   'HAPPIER_RELEASE_CHANNEL',
   'HAPPIER_HOME_DIR',
+  'HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT',
+  'HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT',
 ]);
 
 describe('spawnDetachedDaemonStartSync', () => {
@@ -25,6 +27,8 @@ describe('spawnDetachedDaemonStartSync', () => {
       HAPPIER_RELEASE_RING: undefined,
       HAPPIER_RELEASE_CHANNEL: undefined,
       HAPPIER_HOME_DIR: '/tmp/happier-spawn-detached-test',
+      HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT: undefined,
+      HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT: undefined,
     });
     // Simulate invoking the CLI via the dev shim name.
     process.argv = ['node', '/Users/alice/.happier/bin/hdev', 'daemon', 'start'];

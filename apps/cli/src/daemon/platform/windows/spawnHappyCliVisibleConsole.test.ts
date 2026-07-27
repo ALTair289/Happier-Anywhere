@@ -25,6 +25,7 @@ function createFakeChildProcess(): SpawnMockChild {
 describe('startHappySessionInVisibleWindowsConsole', () => {
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('returns pid when powershell prints it', async () => {
@@ -43,6 +44,33 @@ describe('startHappySessionInVisibleWindowsConsole', () => {
 
     await expect(p).resolves.toEqual({ ok: true, pid: 12345 });
     expect(spawn).toHaveBeenCalled();
+  });
+
+  it('uses the provided launch env as the complete PowerShell environment', async () => {
+    vi.stubEnv('HAPPIER_TEST_AMBIENT_WINDOWS_SPAWN', 'ambient-only');
+    const child = createFakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+    const launchEnv = { PATH: 'C:\\canonical', FOO: 'bar' };
+
+    const pending = startHappySessionInVisibleWindowsConsole({
+      workingDirectory: 'C:\\repo',
+      env: launchEnv,
+      filePath: 'C:\\node\\node.exe',
+      args: ['--version'],
+    });
+
+    expect(spawn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Array),
+      expect.objectContaining({ env: launchEnv }),
+    );
+    expect(vi.mocked(spawn).mock.calls[0]?.[2]?.env).not.toHaveProperty(
+      'HAPPIER_TEST_AMBIENT_WINDOWS_SPAWN',
+    );
+
+    child.stdout.emit('data', Buffer.from('12345\r\n'));
+    child.emit('close', 0);
+    await expect(pending).resolves.toEqual({ ok: true, pid: 12345 });
   });
 
   it('returns error when pid is missing', async () => {

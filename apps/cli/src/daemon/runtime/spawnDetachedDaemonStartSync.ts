@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
+import { randomUUID } from 'node:crypto';
 
 import { getReleaseRingCatalogEntry } from '@happier-dev/release-runtime/releaseRings';
 import { configuration } from '@/configuration';
@@ -107,9 +108,10 @@ export async function spawnDetachedDaemonStartSync(
   options: Readonly<SpawnOptions & { startupSource?: DaemonStartupSource }> = {},
 ): Promise<ChildProcess> {
   const { startupSource, ...spawnOptions } = options;
-  const launchSpec = await resolveDaemonLaunchSpec(['daemon', 'start-sync']);
+  const launchEnv = spawnOptions.env ?? process.env;
+  const launchSpec = await resolveDaemonLaunchSpec(['daemon', 'start-sync'], launchEnv);
   const env = {
-    ...(spawnOptions.env ?? process.env),
+    ...launchEnv,
     ...(launchSpec.env ?? {}),
   };
 
@@ -123,6 +125,14 @@ export async function spawnDetachedDaemonStartSync(
     env.HAPPIER_DAEMON_STARTUP_SOURCE = startupSource;
   } else if (!String(env.HAPPIER_DAEMON_STARTUP_SOURCE ?? '').trim()) {
     env.HAPPIER_DAEMON_STARTUP_SOURCE = startupSource ?? 'manual';
+  }
+  if (startupSource === 'self-restart') {
+    if (!String(env.HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID ?? '').trim()) {
+      env.HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID = `self-restart-${randomUUID()}`;
+    }
+    if (!String(env.HAPPIER_DAEMON_SELF_RESTART_DEADLINE_MS ?? '').trim()) {
+      env.HAPPIER_DAEMON_SELF_RESTART_DEADLINE_MS = String(Date.now() + 60_000);
+    }
   }
 
   if (process.platform === 'win32') {

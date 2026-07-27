@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { dirname, join } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+
+import { withTempDir } from '@/testkit/fs/tempDir';
 
 const {
   ensureJavaScriptRuntimeExecutableMock,
@@ -20,10 +24,55 @@ vi.mock('@/runtime/resolvePackagedRuntimeEntrypoint', () => ({
   resolvePackagedRuntimeEntrypoint: resolvePackagedRuntimeEntrypointMock,
 }));
 
-vi.mock('@/utils/spawnHappyCLI', () => ({
-  resolveTsxImportHookSpecifier: resolveTsxImportHookSpecifierMock,
-  resolveCliTsxTsconfigPath: resolveCliTsxTsconfigPathMock,
-}));
+vi.mock('@/utils/spawnHappyCLI', async () => {
+  const actual = await vi.importActual<typeof import('@/utils/spawnHappyCLI')>('@/utils/spawnHappyCLI');
+  return {
+    ...actual,
+    resolveTsxImportHookSpecifier: resolveTsxImportHookSpecifierMock,
+    resolveCliTsxTsconfigPath: resolveCliTsxTsconfigPathMock,
+  };
+});
+
+function writeAdmittedDaemonStartupClosure(root: string): Readonly<{
+  entrypoint: string;
+  fingerprint: string;
+  runtimeStatePath: string;
+}> {
+  const distDir = join(root, 'dist');
+  mkdirSync(distDir, { recursive: true });
+  writeFileSync(join(distDir, 'chunk.mjs'), 'export const marker = "admitted";\n', 'utf8');
+  const entrypoint = join(distDir, 'index.mjs');
+  writeFileSync(entrypoint, 'import "./chunk.mjs";\nexport {};\n', 'utf8');
+
+  const scriptsDir = join(root, 'scripts');
+  mkdirSync(scriptsDir, { recursive: true });
+  for (const scriptName of [
+    'terminal_launch_spec_runner.cjs',
+    'claude_local_launcher.cjs',
+    'claude_remote_launcher.cjs',
+    'claude_launcher_runtime.cjs',
+    'childProcessOptions.cjs',
+    'ripgrep_launcher.cjs',
+    'node_pty_relay.cjs',
+  ]) {
+    writeFileSync(join(scriptsDir, scriptName), `module.exports = ${JSON.stringify(scriptName)};\n`, 'utf8');
+  }
+
+  const fingerprint = 'abcdef1234567890';
+  writeFileSync(join(dirname(entrypoint), '.build-manifest.json'), JSON.stringify({
+    fingerprint,
+    builtAt: '2026-07-26T00:00:00.000Z',
+    fileCount: 2,
+    toolVersion: '1',
+  }) + '\n', 'utf8');
+  const runtimeStatePath = join(root, 'stack.runtime.json');
+  writeFileSync(runtimeStatePath, JSON.stringify({
+    version: 1,
+    stackName: 'qa-agent-1',
+    daemon: {},
+  }) + '\n', 'utf8');
+  return { entrypoint, fingerprint, runtimeStatePath };
+}
 
 describe('resolveDaemonLaunchSpec', () => {
   afterEach(() => {
@@ -31,6 +80,10 @@ describe('resolveDaemonLaunchSpec', () => {
     vi.resetModules();
     delete process.env.HAPPIER_CLI_SUBPROCESS_ALLOW_TSX_FALLBACK;
     delete process.env.HAPPIER_CLI_SUBPROCESS_ENTRYPOINT;
+    delete process.env.HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT;
+    delete process.env.HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT;
+    delete process.env.HAPPIER_CLI_SUBPROCESS_STACK_RUNTIME_STATE_PATH;
+    delete process.env.HAPPIER_CLI_SUBPROCESS_RUNTIME;
     delete process.env.HAPPIER_CLI_SUBPROCESS_PREFER_TSX;
     delete process.env.HAPPIER_STACK_REPO_DIR;
     delete process.env.HAPPIER_STACK_CLI_ROOT_DIR;
@@ -302,6 +355,32 @@ describe('resolveDaemonLaunchSpec', () => {
       env: {
         TSX_TSCONFIG_PATH: '/opt/happier/apps/cli/tsconfig.json',
       },
+    });
+  });
+
+  it('launches the exact admitted stack dist generation instead of switching the detached child to source', async () => {
+    await withTempDir('happier-daemon-launch-admitted-', async (root) => {
+      const closure = writeAdmittedDaemonStartupClosure(root);
+      process.env.HAPPIER_STACK_REPO_DIR = '/repo';
+      process.env.HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT = closure.entrypoint;
+      process.env.HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT = '1111111111111111';
+      process.env.HAPPIER_CLI_SUBPROCESS_STACK_RUNTIME_STATE_PATH = closure.runtimeStatePath;
+      process.env.HAPPIER_CLI_SUBPROCESS_RUNTIME = 'node';
+      const successorEnv = {
+        ...process.env,
+        HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT: closure.fingerprint,
+      };
+
+      const mod = await import('./resolveDaemonLaunchSpec');
+      const result = await mod.resolveDaemonLaunchSpec(['daemon', 'start-sync'], successorEnv);
+
+      expect(result.filePath).toMatch(/[\\/]node(?:\.exe)?$/i);
+      expect(result.args).toEqual(expect.arrayContaining([
+        expect.stringMatching(/[\\/]\.runner-snapshots[\\/][a-f0-9]{16}[\\/]index\.mjs$/),
+        'daemon',
+        'start-sync',
+      ]));
+      expect(result.args).not.toContain('--import');
     });
   });
 
