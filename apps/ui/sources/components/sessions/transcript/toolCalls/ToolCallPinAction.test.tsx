@@ -17,14 +17,13 @@ function available(overrides: Partial<Extract<MessagePinAvailability, { status: 
         status: 'available',
         pinned: false,
         identityKey: 'route-message-id|s1|tool:call-1|block:2|tool',
-        pin: {
+        pinTarget: {
             version: 1,
             sessionId: 's1',
             seq: 5,
             transcriptBlockIndex: 2,
             routeMessageId: 'tool:call-1',
             role: 'tool',
-            pinnedAtMs: 1_000,
             label: null,
         },
         ...overrides,
@@ -137,7 +136,7 @@ describe('ToolCallPinAction', () => {
 
         expect(stopPropagation).toHaveBeenCalledTimes(1);
         expect(onToggle).toHaveBeenCalledTimes(1);
-        expect(onToggle).toHaveBeenCalledWith(target.pin);
+        expect(onToggle).toHaveBeenCalledWith({ ...target.pinTarget, pinnedAtMs: expect.any(Number) });
         expect(callOrder).toEqual(['stopPropagation', 'onToggle']);
     });
 

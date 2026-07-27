@@ -6,13 +6,12 @@ import type { ToolCallMessage } from '@/sync/domains/messages/messageTypes';
 import type { OpenApprovalArtifactForSession } from '@/sync/domains/artifacts/approvalArtifacts';
 
 import { TranscriptEnterWrapper } from '@/components/sessions/transcript/motion/TranscriptEnterWrapper';
-import { TRANSCRIPT_WEB_TOOL_CALL_PREPEND_ANCHOR_TEST_ID_PREFIX } from '@/components/sessions/transcript/webTranscriptPrependAnchor';
+import { TRANSCRIPT_WEB_TOOL_CALL_PREPEND_ANCHOR_TEST_ID_PREFIX } from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
 import {
     type TranscriptSessionCommonProps,
     useTranscriptSessionCommon,
 } from '@/components/sessions/transcript/transcriptSessionCommon';
-import { ToolCallPinAction } from '@/components/sessions/transcript/toolCalls/ToolCallPinAction';
-import { resolveMessagePinAvailability } from '@/components/sessions/transcript/messageActions/resolveMessagePinAvailability';
+import { resolveToolRowPinAction } from '@/components/sessions/transcript/toolCalls/ToolCallPinAction';
 import { resolveMessageRouteIdForDisplay } from '@/sync/domains/messages/messageRouteIds';
 import type { PersistedSessionMessagePinV1 } from '@/sync/domains/messages/pins/sessionMessagePins';
 import { useEnsureSidechainsLoaded } from '@/hooks/session/useEnsureSidechainsLoaded';
@@ -20,6 +19,7 @@ import { useEnsureSidechainsLoaded } from '@/hooks/session/useEnsureSidechainsLo
 import {
     renderGroupedToolCallRowContent,
     resolveGroupedPreviewSidechainIds,
+    shouldRenderGroupedToolCallWithMessageView,
 } from './groupedToolCallRowContent';
 import {
     resolveToolCallMessageForSession,
@@ -83,25 +83,22 @@ export const ToolCallsGroupUnitToolRowWithSessionCommon = React.memo(function To
         sidechainIds: previewSidechainIds,
     });
 
-    const nestedMessageId = props.interaction.disableToolNavigation
+    // A row rendered through MessageView resolves its own route id and pin, so this
+    // renderer must not compute a second copy of both for every render.
+    const rendersWithMessageView = shouldRenderGroupedToolCallWithMessageView(message, chromeMode, props.expanded);
+    const nestedMessageId = rendersWithMessageView || props.interaction.disableToolNavigation
         ? undefined
         : resolveMessageRouteIdForDisplay({ message, messagesById, reducerState });
-    const toolPinAvailability = React.useMemo(() => resolveMessagePinAvailability({
+    const toolPinAction = rendersWithMessageView ? null : resolveToolRowPinAction({
         sessionId: props.sessionId,
         seq: message.seq ?? null,
         transcriptBlockIndex: message.transcriptBlockIndex ?? null,
         routeMessageId: nestedMessageId ?? null,
-        role: 'tool',
-        pins: props.messagePins ?? [],
+        pins: props.messagePins,
         readOnlyContext: props.interaction.permissionDisabledReason === 'readOnly',
-    }), [message.seq, message.transcriptBlockIndex, nestedMessageId, props.interaction.permissionDisabledReason, props.messagePins, props.sessionId]);
-    const toolPinAction = props.onToggleToolPin && toolPinAvailability.status === 'available' ? (
-        <ToolCallPinAction
-            availability={toolPinAvailability}
-            onTogglePin={props.onToggleToolPin}
-            testID={`transcript-tool-call-pin:${message.id}`}
-        />
-    ) : null;
+        onTogglePin: props.onToggleToolPin,
+        testID: `transcript-tool-call-pin:${message.id}`,
+    });
 
     return (
         <ToolCallsGroupUnitRowFrame
