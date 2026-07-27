@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const machineRpcWithServerScopeMock = vi.hoisted(() => vi.fn());
+const handoffV2ControlRpcMock = vi.hoisted(() => vi.fn());
 const readMachineTargetForSessionMock = vi.hoisted(() => vi.fn());
 const getServerFeaturesSnapshotMock = vi.hoisted(() => vi.fn());
 const resumeSessionMock = vi.hoisted(() => vi.fn());
@@ -15,7 +16,18 @@ const storageGetStateMock = vi.hoisted(() => vi.fn());
 const storageApplySessionsMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../runtime/orchestration/serverScopedRpc/serverScopedMachineRpc', () => ({
-    machineRpcWithServerScope: machineRpcWithServerScopeMock,
+    machineRpcWithServerScope: (input: { method?: string }) => {
+        if (
+            input.method === 'daemon.sessionHandoff.capability.v2.get'
+            || input.method === 'daemon.sessionHandoff.targetResume.v2'
+            || input.method === 'daemon.sessionHandoff.targetConfirm.v2'
+            || input.method === 'daemon.sessionHandoff.commit.v2'
+            || input.method === 'daemon.sessionHandoff.abort.v2'
+        ) {
+            return handoffV2ControlRpcMock(input);
+        }
+        return machineRpcWithServerScopeMock(input);
+    },
 }));
 
 vi.mock('./sessionMachineTarget', () => ({
@@ -76,7 +88,68 @@ describe('sessionHandoffs ops', () => {
     beforeEach(() => {
         vi.resetModules();
         machineRpcWithServerScopeMock.mockReset();
-        machineRpcWithServerScopeMock.mockImplementation(async (input: any) => {
+        handoffV2ControlRpcMock.mockReset();
+        handoffV2ControlRpcMock.mockImplementation(async (input: {
+            method?: string;
+            payload?: Record<string, unknown>;
+        }) => {
+            const handoffId = typeof input?.payload?.handoffId === 'string'
+                ? input.payload.handoffId
+                : 'handoff_unknown';
+            if (input?.method === 'daemon.sessionHandoff.capability.v2.get') {
+                return { protocolVersion: 2, atomicTargetResume: true, targetCleanup: true };
+            }
+            if (input?.method === 'daemon.sessionHandoff.targetResume.v2') {
+                return {
+                    handoffId,
+                    sessionId: input.payload?.sessionId,
+                    disposition: 'started_for_handoff',
+                };
+            }
+            if (input?.method === 'daemon.sessionHandoff.targetConfirm.v2') {
+                return {
+                    handoffId,
+                    status: {
+                        handoffId,
+                        status: 'ready_for_cutover',
+                        phase: 'staging_target',
+                        recoveryActions: [],
+                    },
+                };
+            }
+            if (input?.method === 'daemon.sessionHandoff.commit.v2') {
+                return {
+                    handoffId,
+                    status: {
+                        handoffId,
+                        status: 'completed',
+                        phase: 'finalizing',
+                        recoveryActions: [],
+                    },
+                };
+            }
+            if (input?.method === 'daemon.sessionHandoff.abort.v2') {
+                return {
+                    handoffId,
+                    targetCleanup: {
+                        status: 'proved_absent',
+                        proof: 'already_inactive',
+                        provedAtMs: 1,
+                    },
+                    status: {
+                        handoffId,
+                        status: 'aborted',
+                        phase: 'cutover',
+                        recoveryActions: ['restart_on_source', 'keep_stopped'],
+                    },
+                };
+            }
+            throw new Error(`Unexpected v2 handoff control call: ${String(input?.method ?? '')}`);
+        });
+        machineRpcWithServerScopeMock.mockImplementation(async (input: {
+            method?: string;
+            payload?: Record<string, unknown>;
+        }) => {
             if (input?.method === 'daemon.sessionHandoff.commit') {
                 const handoffId = typeof input?.payload?.handoffId === 'string' ? input.payload.handoffId : 'handoff_unknown';
                 return {
@@ -318,7 +391,7 @@ describe('sessionHandoffs ops', () => {
 
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
             machineId: 'machine_target',
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             payload: expect.objectContaining({
                 targetPath: '/home/guest/wsrepl-large',
             }),
@@ -454,7 +527,7 @@ describe('sessionHandoffs ops', () => {
 
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
             machineId: 'machine_target',
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             payload: expect.objectContaining({
                 targetPath: '/Users/leeroy/wsrepl-large',
             }),
@@ -609,7 +682,7 @@ describe('sessionHandoffs ops', () => {
 
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
             machineId: 'machine_source',
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             payload: expect.objectContaining({
                 targetPath: '/Users/leeroy/wsrepl-large',
             }),
@@ -718,7 +791,7 @@ describe('sessionHandoffs ops', () => {
 
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
             machineId: 'machine_source',
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             payload: expect.objectContaining({
                 targetPath: '/Users/leeroy/wsrepl-large',
             }),
@@ -831,7 +904,7 @@ describe('sessionHandoffs ops', () => {
 
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
             machineId: 'machine_source',
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             payload: expect.objectContaining({
                 targetPath: '/Users/leeroy/wsrepl-large',
             }),
@@ -1306,10 +1379,6 @@ describe('sessionHandoffs ops', () => {
             .mockResolvedValueOnce({
                 handoffId: 'handoff_1',
                 status: { handoffId: 'handoff_1', status: 'completed', phase: 'finalizing', recoveryActions: [] },
-            })
-            .mockResolvedValueOnce({
-                handoffId: 'handoff_1',
-                status: { handoffId: 'handoff_1', status: 'completed', phase: 'finalizing', recoveryActions: [] },
             });
         getServerFeaturesSnapshotMock.mockResolvedValueOnce({
             status: 'ready',
@@ -1336,7 +1405,6 @@ describe('sessionHandoffs ops', () => {
                 capabilities: {},
             },
         });
-        resumeSessionMock.mockResolvedValueOnce({ type: 'success', sessionId: 'sess_1' });
         patchSessionMetadataWithRetryMock.mockImplementationOnce(async (_sessionId: string, updater: (metadata: Record<string, unknown>) => Record<string, unknown>) => {
             const updated = updater({
                 flavor: 'claude',
@@ -1387,13 +1455,17 @@ describe('sessionHandoffs ops', () => {
             },
         });
         expect(machineStopSessionMock).not.toHaveBeenCalled();
+        expect(handoffV2ControlRpcMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
+            machineId: 'machine_target',
+            method: 'daemon.sessionHandoff.capability.v2.get',
+        }));
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
             machineId: 'machine_source',
             method: 'daemon.sessionHandoff.start',
         }));
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
             machineId: 'machine_target',
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             preferScoped: true,
             payload: expect.objectContaining({
                 sourceMachineId: 'machine_source',
@@ -1409,20 +1481,15 @@ describe('sessionHandoffs ops', () => {
         expect(machineRpcWithServerScopeMock.mock.calls[1]?.[0]?.payload).not.toHaveProperty('endpointCandidates');
         expect(machineRpcWithServerScopeMock.mock.calls[1]?.[0]?.payload).not.toHaveProperty('workspaceBundle');
         expect(machineStopSessionMock).not.toHaveBeenCalled();
-        expect(resumeSessionMock).toHaveBeenCalledWith(expect.objectContaining({
-            sessionId: 'sess_1',
+        expect(resumeSessionMock).not.toHaveBeenCalled();
+        expect(handoffV2ControlRpcMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
             machineId: 'machine_target',
-            directory: '/home/guest/wsrepl-large-replication-9',
-            backendTarget: {
-                kind: 'builtInAgent',
-                agentId: 'claude',
+            method: 'daemon.sessionHandoff.targetResume.v2',
+            payload: {
+                handoffId: 'handoff_1',
+                sessionId: 'sess_1',
+                attemptId: 'target_handoff_1',
             },
-            resume: 'claude_session_1',
-            transcriptStorage: 'persisted',
-            attachMetadataIdentityPolicy: 'replace_with_runtime_identity',
-            preferRequestedMachineTarget: true,
-            preferScopedMachineRpc: true,
-            serverId: 'server_b',
         }));
         expect(waitForSessionHandoffTargetSessionActiveMock).toHaveBeenCalledWith({
             sessionId: 'sess_1',
@@ -1432,12 +1499,16 @@ describe('sessionHandoffs ops', () => {
             targetMachineId: 'machine_target',
         });
         expect(ensureSessionVisibleForMessageRouteMock).toHaveBeenCalledWith('sess_1', { forceRefresh: true });
-        expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(3, expect.objectContaining({
+        expect(handoffV2ControlRpcMock).toHaveBeenNthCalledWith(3, expect.objectContaining({
             machineId: 'machine_target',
-            method: 'daemon.sessionHandoff.commit',
-            payload: { handoffId: 'handoff_1', mode: 'target' },
+            method: 'daemon.sessionHandoff.targetConfirm.v2',
         }));
-        expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(4, expect.objectContaining({
+        expect(handoffV2ControlRpcMock).toHaveBeenNthCalledWith(4, expect.objectContaining({
+            machineId: 'machine_target',
+            method: 'daemon.sessionHandoff.commit.v2',
+            payload: { handoffId: 'handoff_1', mode: 'target', sessionId: 'sess_1', attemptId: 'target_handoff_1' },
+        }));
+        expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(3, expect.objectContaining({
             machineId: 'machine_source',
             method: 'daemon.sessionHandoff.commit',
             payload: expect.objectContaining({
@@ -1617,10 +1688,6 @@ describe('sessionHandoffs ops', () => {
                     approvedNewDirectoryCreation: true,
                 },
             })
-            .mockResolvedValueOnce({
-                handoffId: 'handoff_1',
-                status: { handoffId: 'handoff_1', status: 'completed', phase: 'finalizing', recoveryActions: [] },
-            })
             .mockImplementationOnce(async () => await cleanupPromise);
 
         getServerFeaturesSnapshotMock.mockResolvedValueOnce({
@@ -1674,10 +1741,11 @@ describe('sessionHandoffs ops', () => {
         });
 
         await vi.waitFor(() => {
-            expect(machineRpcWithServerScopeMock).toHaveBeenCalledTimes(4);
+            expect(machineRpcWithServerScopeMock).toHaveBeenCalledTimes(3);
+            expect(handoffV2ControlRpcMock).toHaveBeenCalledTimes(4);
         });
         // If `completeSessionHandoff(...)` does not await the source cleanup commit, it would be
-        // free to resolve immediately after issuing the 4th machine RPC.
+        // free to resolve immediately after issuing the source cleanup RPC.
         await new Promise((resolve) => setTimeout(resolve, 0));
         expect(settled).toBe(false);
 
@@ -1696,6 +1764,199 @@ describe('sessionHandoffs ops', () => {
                 recoveryActions: [],
             },
         });
+    });
+
+    it('returns an exact retry-only recovery phase when source cleanup fails after target commit', async () => {
+        machineRpcWithServerScopeMock
+            .mockResolvedValueOnce({
+                handoffId: 'handoff_cleanup_retry',
+                status: { handoffId: 'handoff_cleanup_retry', status: 'pending', phase: 'preparing', recoveryActions: [] },
+                endpointCandidates: [],
+                handoffMetadataV2: { workspaceReplicationSourceRootPath: '/source/repo' },
+                targetPath: '/target/repo',
+            })
+            .mockResolvedValueOnce({
+                handoffId: 'handoff_cleanup_retry',
+                status: {
+                    handoffId: 'handoff_cleanup_retry',
+                    status: 'ready_for_cutover',
+                    phase: 'staging_target',
+                    transportStrategy: 'server_routed_stream',
+                    recoveryActions: [],
+                },
+                remoteSessionId: 'claude_cleanup_retry',
+                directSource: { kind: 'claudeConfig', configDir: null, projectId: null },
+                resume: {
+                    directory: '/target/repo',
+                    agent: 'claude',
+                    resume: 'claude_cleanup_retry',
+                    transcriptStorage: 'persisted',
+                    approvedNewDirectoryCreation: true,
+                },
+            })
+            .mockResolvedValueOnce({
+                ok: false,
+                errorCode: 'source_cleanup_failed',
+                errorMessage: 'source cleanup failed',
+            });
+        getServerFeaturesSnapshotMock.mockResolvedValueOnce({
+            status: 'ready',
+            features: {
+                features: {
+                    sessions: { enabled: true, handoff: { enabled: true, serverRoutedTransfer: { enabled: true } } },
+                    machines: {
+                        enabled: true,
+                        transfer: {
+                            enabled: true,
+                            directPeer: { enabled: true },
+                            serverRouted: { enabled: true },
+                        },
+                    },
+                },
+                capabilities: {},
+            },
+        });
+        resumeSessionMock.mockResolvedValueOnce({ type: 'success', sessionId: 'sess_cleanup_retry' });
+
+        const { completeSessionHandoff } = await import('./sessionHandoffs');
+        await expect(completeSessionHandoff({
+            sessionId: 'sess_cleanup_retry',
+            sourceMachineId: 'machine_source',
+            targetMachineId: 'machine_target',
+            sessionStorageMode: 'persisted',
+            preferredTransportStrategies: ['direct_peer', 'server_routed_stream'],
+            sourceMetadata: {
+                flavor: 'claude',
+                path: '/source/repo',
+                host: 'source-host',
+                machineId: 'machine_source',
+                claudeSessionId: 'claude_cleanup_retry',
+            },
+            serverId: 'server_b',
+        })).resolves.toMatchObject({
+            ok: false,
+            handoffId: 'handoff_cleanup_retry',
+            errorCode: 'source_cleanup_failed',
+            status: {
+                handoffId: 'handoff_cleanup_retry',
+                status: 'completed',
+            },
+            recovery: {
+                handoffId: 'handoff_cleanup_retry',
+                actions: ['retry_source_cleanup'],
+                sourceCleanup: {
+                    machineId: 'machine_source',
+                    serverId: 'server_b',
+                    workspaceReplicationReverseSourceRootPath: '/target/repo',
+                    workspaceReplicationReverseTargetRootPath: '/source/repo',
+                },
+            },
+        });
+    });
+
+    it('returns committed cleanup recovery when normal post-cleanup target finalization rejects', async () => {
+        machineRpcWithServerScopeMock
+            .mockResolvedValueOnce({
+                handoffId: 'handoff_finalization_recovery',
+                status: {
+                    handoffId: 'handoff_finalization_recovery',
+                    status: 'pending',
+                    phase: 'preparing',
+                    recoveryActions: [],
+                },
+                endpointCandidates: [],
+                handoffMetadataV2: { workspaceReplicationSourceRootPath: '/source/repo' },
+                targetPath: '/target/repo',
+            })
+            .mockResolvedValueOnce({
+                handoffId: 'handoff_finalization_recovery',
+                status: {
+                    handoffId: 'handoff_finalization_recovery',
+                    status: 'ready_for_cutover',
+                    phase: 'staging_target',
+                    transportStrategy: 'server_routed_stream',
+                    recoveryActions: [],
+                },
+                remoteSessionId: 'claude_finalization_recovery',
+                directSource: { kind: 'claudeConfig', configDir: null, projectId: null },
+                resume: {
+                    directory: '/target/repo',
+                    agent: 'claude',
+                    resume: 'claude_finalization_recovery',
+                    transcriptStorage: 'persisted',
+                    approvedNewDirectoryCreation: true,
+                },
+            });
+        patchSessionMetadataWithRetryMock
+            .mockResolvedValueOnce(undefined)
+            .mockRejectedValueOnce(new Error('post-commit target publication failed'));
+        getServerFeaturesSnapshotMock.mockResolvedValueOnce({
+            status: 'ready',
+            features: {
+                features: {
+                    sessions: {
+                        enabled: true,
+                        handoff: { enabled: true, serverRoutedTransfer: { enabled: true } },
+                    },
+                    machines: {
+                        enabled: true,
+                        transfer: {
+                            enabled: true,
+                            directPeer: { enabled: true },
+                            serverRouted: { enabled: true },
+                        },
+                    },
+                },
+                capabilities: {},
+            },
+        });
+        resumeSessionMock.mockResolvedValueOnce({
+            type: 'success',
+            sessionId: 'sess_finalization_recovery',
+        });
+
+        const { completeSessionHandoff } = await import('./sessionHandoffs');
+        await expect(completeSessionHandoff({
+            sessionId: 'sess_finalization_recovery',
+            sourceMachineId: 'machine_source',
+            targetMachineId: 'machine_target',
+            sessionStorageMode: 'persisted',
+            preferredTransportStrategies: ['direct_peer', 'server_routed_stream'],
+            sourceMetadata: {
+                flavor: 'claude',
+                path: '/source/repo',
+                host: 'source-host',
+                machineId: 'machine_source',
+                claudeSessionId: 'claude_finalization_recovery',
+            },
+            serverId: 'server_b',
+        })).resolves.toMatchObject({
+            ok: false,
+            errorCode: 'target_finalization_failed',
+            errorMessage: 'post-commit target publication failed',
+            handoffId: 'handoff_finalization_recovery',
+            status: {
+                handoffId: 'handoff_finalization_recovery',
+                status: 'completed',
+            },
+            recovery: {
+                handoffId: 'handoff_finalization_recovery',
+                actions: ['retry_source_cleanup'],
+                sourceCleanup: {
+                    machineId: 'machine_source',
+                    serverId: 'server_b',
+                    workspaceReplicationReverseSourceRootPath: '/target/repo',
+                    workspaceReplicationReverseTargetRootPath: '/source/repo',
+                },
+                targetFinalization: expect.objectContaining({
+                    sessionId: 'sess_finalization_recovery',
+                    targetMachineId: 'machine_target',
+                }),
+            },
+        });
+        expect(machineRpcWithServerScopeMock.mock.calls.filter(
+            ([call]) => call.method === 'daemon.sessionHandoff.commit',
+        )).toHaveLength(1);
     });
 
     it('returns recovery when source handoff start fails after the source session has already been stopped', async () => {
@@ -1777,6 +2038,11 @@ describe('sessionHandoffs ops', () => {
                     agent: 'claude',
                     resume: 'claude_session_start_failure_after_stop',
                     transcriptStorage: 'persisted',
+                    serverId: 'server_b',
+                },
+                targetCleanup: {
+                    sessionId: 'sess_start_failure_after_stop',
+                    machineId: 'machine_target',
                     serverId: 'server_b',
                 },
             },
@@ -1881,19 +2147,25 @@ describe('sessionHandoffs ops', () => {
                     transcriptStorage: 'persisted',
                     serverId: 'server_b',
                 },
+                targetCleanup: {
+                    sessionId: 'sess_prepare_failure_after_stop',
+                    machineId: 'machine_target',
+                    serverId: 'server_b',
+                },
             },
         });
         expect(machineStopSessionMock).not.toHaveBeenCalled();
-        expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(3, expect.objectContaining({
+        expect(handoffV2ControlRpcMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
             machineId: 'machine_target',
-            method: 'daemon.sessionHandoff.abort',
+            method: 'daemon.sessionHandoff.abort.v2',
             payload: {
                 handoffId: 'handoff_prepare_failure_after_stop',
+                sessionId: 'sess_prepare_failure_after_stop',
                 reason: 'target_prepare_failed',
             },
             serverId: 'server_b',
         }));
-        expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(4, expect.objectContaining({
+        expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(3, expect.objectContaining({
             machineId: 'machine_source',
             method: 'daemon.sessionHandoff.abort',
             payload: {
@@ -3369,6 +3641,11 @@ describe('sessionHandoffs ops', () => {
                     transcriptStorage: 'persisted',
                     serverId: 'server_b',
                 },
+                targetCleanup: {
+                    sessionId: 'sess_server_routed_cutover_throw',
+                    machineId: 'machine_target',
+                    serverId: 'server_b',
+                },
             },
         });
         expect(currentMachineId).toBe('machine_source');
@@ -3403,7 +3680,7 @@ describe('sessionHandoffs ops', () => {
         expect(patchSessionMetadataWithRetryMock).not.toHaveBeenCalled();
     });
 
-    it('forwards codexBackendMode from the target resume payload when present', async () => {
+    it('uses the exact handoff-owned target resume when the prepared Codex payload carries a backend mode', async () => {
         machineRpcWithServerScopeMock
             .mockResolvedValueOnce({
                 handoffId: 'handoff_codex',
@@ -3476,7 +3753,6 @@ describe('sessionHandoffs ops', () => {
                 capabilities: {},
             },
         });
-        resumeSessionMock.mockResolvedValueOnce({ type: 'success', sessionId: 'sess_codex' });
         patchSessionMetadataWithRetryMock.mockResolvedValueOnce(undefined);
 
         const { completeSessionHandoff } = await import('./sessionHandoffs');
@@ -3495,21 +3771,18 @@ describe('sessionHandoffs ops', () => {
             },
         } as any);
 
-        expect(resumeSessionMock).toHaveBeenCalledWith(expect.objectContaining({
-            sessionId: 'sess_codex',
-            machineId: 'machine_target',
-            directory: '/repo',
-            backendTarget: {
-                kind: 'builtInAgent',
-                agentId: 'codex',
-            },
-            resume: 'codex_session_1',
-            transcriptStorage: 'persisted',
-            codexBackendMode: 'acp',
+        expect(handoffV2ControlRpcMock).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'daemon.sessionHandoff.targetResume.v2',
+            payload: expect.objectContaining({
+                handoffId: 'handoff_codex',
+                sessionId: 'sess_codex',
+                attemptId: 'target_handoff_codex',
+            }),
         }));
+        expect(resumeSessionMock).not.toHaveBeenCalled();
     });
 
-    it('prefers target agentRuntimeDescriptorV1 over the resume payload during handoff resume forwarding', async () => {
+    it('uses the exact handoff-owned target resume when prepared state carries a runtime descriptor', async () => {
         machineRpcWithServerScopeMock
             .mockResolvedValueOnce({
                 handoffId: 'handoff_codex_runtime_descriptor',
@@ -3588,7 +3861,6 @@ describe('sessionHandoffs ops', () => {
                 capabilities: {},
             },
         });
-        resumeSessionMock.mockResolvedValueOnce({ type: 'success', sessionId: 'sess_codex_runtime_descriptor' });
         patchSessionMetadataWithRetryMock.mockResolvedValueOnce(undefined);
 
         const { completeSessionHandoff } = await import('./sessionHandoffs');
@@ -3607,18 +3879,15 @@ describe('sessionHandoffs ops', () => {
             },
         } as any);
 
-        expect(resumeSessionMock).toHaveBeenCalledWith(expect.objectContaining({
-            sessionId: 'sess_codex_runtime_descriptor',
-            codexBackendMode: 'appServer',
-            agentRuntimeDescriptorV1: {
-                v: 1,
-                providerId: 'codex',
-                provider: {
-                    backendMode: 'appServer',
-                    vendorSessionId: 'codex_session_runtime_descriptor',
-                },
-            },
+        expect(handoffV2ControlRpcMock).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'daemon.sessionHandoff.targetResume.v2',
+            payload: expect.objectContaining({
+                handoffId: 'handoff_codex_runtime_descriptor',
+                sessionId: 'sess_codex_runtime_descriptor',
+                attemptId: 'target_handoff_codex_runtime_descriptor',
+            }),
         }));
+        expect(resumeSessionMock).not.toHaveBeenCalled();
     });
 
     it('retries target prepare when the target daemon rpc is transiently unavailable', async () => {
@@ -3653,6 +3922,7 @@ describe('sessionHandoffs ops', () => {
         let nowMs = 0;
         const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
         const result = await prepareTargetSessionHandoffWithRetry({
+            sessionId: 'session_test',
             handoffId: 'handoff_retry_prepare',
             sourceMachineId: 'machine_source',
             targetMachineId: 'machine_target',
@@ -3698,13 +3968,13 @@ describe('sessionHandoffs ops', () => {
         });
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
             machineId: 'machine_target',
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             preferScoped: true,
             timeoutMs: expect.any(Number),
         }));
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
             machineId: 'machine_target',
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             preferScoped: true,
             timeoutMs: expect.any(Number),
         }));
@@ -3725,6 +3995,7 @@ describe('sessionHandoffs ops', () => {
 
         const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
         const result = await prepareTargetSessionHandoffWithRetry({
+            sessionId: 'session_test',
             handoffId: 'handoff_missing_metadata_v2',
             sourceMachineId: 'machine_source',
             targetMachineId: 'machine_target',
@@ -3752,6 +4023,7 @@ describe('sessionHandoffs ops', () => {
 
         const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
         const result = await prepareTargetSessionHandoffWithRetry({
+            sessionId: 'session_test',
             handoffId: 'handoff_missing_metadata_v2_server_routed',
             sourceMachineId: 'machine_source',
             targetMachineId: 'machine_target',
@@ -3830,6 +4102,7 @@ describe('sessionHandoffs ops', () => {
         try {
             const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
             const result = await prepareTargetSessionHandoffWithRetry({
+                sessionId: 'session_test',
                 handoffId: 'handoff_retry_prepare_async',
                 sourceMachineId: 'machine_source',
                 targetMachineId: 'machine_target',
@@ -3876,11 +4149,11 @@ describe('sessionHandoffs ops', () => {
             });
             expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
                 machineId: 'machine_target',
-                method: 'daemon.sessionHandoff.prepareTarget',
+                method: 'daemon.sessionHandoff.prepareTarget.v2',
             }));
             expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
                 machineId: 'machine_target',
-                method: 'daemon.sessionHandoff.prepareTargetResult.get',
+                method: 'daemon.sessionHandoff.prepareTargetResult.get.v2',
                 timeoutMs: 10_000,
             }));
             expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(3, expect.objectContaining({
@@ -3890,7 +4163,7 @@ describe('sessionHandoffs ops', () => {
             }));
             expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(4, expect.objectContaining({
                 machineId: 'machine_target',
-                method: 'daemon.sessionHandoff.prepareTargetResult.get',
+                method: 'daemon.sessionHandoff.prepareTargetResult.get.v2',
                 timeoutMs: 10_000,
             }));
         } finally {
@@ -3954,6 +4227,7 @@ describe('sessionHandoffs ops', () => {
         try {
             const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
             const result = await prepareTargetSessionHandoffWithRetry({
+                sessionId: 'session_test',
                 handoffId: 'handoff_retry_prepare_ack_timeout',
                 sourceMachineId: 'machine_source',
                 targetMachineId: 'machine_target',
@@ -3981,11 +4255,11 @@ describe('sessionHandoffs ops', () => {
             });
             expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
                 machineId: 'machine_target',
-                method: 'daemon.sessionHandoff.prepareTarget',
+                method: 'daemon.sessionHandoff.prepareTarget.v2',
             }));
             expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
                 machineId: 'machine_target',
-                method: 'daemon.sessionHandoff.prepareTargetResult.get',
+                method: 'daemon.sessionHandoff.prepareTargetResult.get.v2',
             }));
             expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(3, expect.objectContaining({
                 machineId: 'machine_target',
@@ -4067,6 +4341,7 @@ describe('sessionHandoffs ops', () => {
         let nowMs = 0;
         const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
         const result = await prepareTargetSessionHandoffWithRetry({
+            sessionId: 'session_test',
             handoffId: 'handoff_retry_prepare_async_long_poll',
             sourceMachineId: 'machine_source',
             targetMachineId: 'machine_target',
@@ -4114,11 +4389,11 @@ describe('sessionHandoffs ops', () => {
         });
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
             machineId: 'machine_target',
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
         }));
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(6, expect.objectContaining({
             machineId: 'machine_target',
-            method: 'daemon.sessionHandoff.prepareTargetResult.get',
+            method: 'daemon.sessionHandoff.prepareTargetResult.get.v2',
         }));
     });
 
@@ -4199,6 +4474,7 @@ describe('sessionHandoffs ops', () => {
         let nowMs = 0;
         const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
         const result = await prepareTargetSessionHandoffWithRetry({
+            sessionId: 'session_test',
             handoffId: 'handoff_retry_prepare_progress_idle_timeout',
             sourceMachineId: 'machine_source',
             targetMachineId: 'machine_target',
@@ -4261,6 +4537,7 @@ describe('sessionHandoffs ops', () => {
         let nowMs = 0;
         const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
         const result = await prepareTargetSessionHandoffWithRetry({
+            sessionId: 'session_test',
             handoffId: 'handoff_retry_prepare_timeout',
             sourceMachineId: 'machine_source',
             targetMachineId: 'machine_target',
@@ -4318,6 +4595,7 @@ describe('sessionHandoffs ops', () => {
         let nowMs = 0;
         const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
         const result = await prepareTargetSessionHandoffWithRetry({
+            sessionId: 'session_test',
             handoffId: 'handoff_retry_prepare_budget_exhausted',
             sourceMachineId: 'machine_source',
             targetMachineId: 'machine_target',
@@ -4375,6 +4653,7 @@ describe('sessionHandoffs ops', () => {
         let nowMs = 0;
         const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
         const result = await prepareTargetSessionHandoffWithRetry({
+            sessionId: 'session_test',
             handoffId: 'handoff_retry_prepare_machine_key',
             sourceMachineId: 'machine_source',
             targetMachineId: 'machine_target',
@@ -4451,6 +4730,7 @@ describe('sessionHandoffs ops', () => {
         let nowMs = 0;
         const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
         const result = await prepareTargetSessionHandoffWithRetry({
+            sessionId: 'session_test',
             handoffId: 'handoff_retry_prepare_scoped_socket',
             sourceMachineId: 'machine_source',
             targetMachineId: 'machine_target',
@@ -4644,6 +4924,7 @@ describe('sessionHandoffs ops', () => {
 
         const { prepareTargetSessionHandoffWithRetry } = await import('./sessionHandoffs');
         const result = await prepareTargetSessionHandoffWithRetry({
+            sessionId: 'session_test',
             handoffId: 'handoff_error_only_prepare',
             sourceMachineId: 'machine_source',
             targetMachineId: 'machine_target',
@@ -4736,11 +5017,23 @@ describe('sessionHandoffs ops', () => {
                 capabilities: {},
             },
         });
-        resumeSessionMock.mockResolvedValueOnce({
-            type: 'error',
-            errorCode: 'SESSION_WEBHOOK_TIMEOUT',
-            errorMessage: 'timeout',
-        });
+        handoffV2ControlRpcMock
+            .mockResolvedValueOnce({ protocolVersion: 2, atomicTargetResume: true, targetCleanup: true })
+            .mockResolvedValueOnce({
+                ok: false,
+                errorCode: 'SESSION_WEBHOOK_TIMEOUT',
+                error: 'timeout',
+            })
+            .mockResolvedValueOnce({
+                handoffId: 'handoff_2',
+                targetCleanup: { status: 'proved_absent', proof: 'already_inactive', provedAtMs: 1 },
+                status: {
+                    handoffId: 'handoff_2',
+                    status: 'aborted',
+                    phase: 'cutover',
+                    recoveryActions: ['restart_on_source', 'keep_stopped'],
+                },
+            });
 
         const { completeSessionHandoff } = await import('./sessionHandoffs');
         const result = await completeSessionHandoff({
@@ -4772,6 +5065,11 @@ describe('sessionHandoffs ops', () => {
                     agent: 'claude',
                     resume: 'claude_session_2',
                     transcriptStorage: 'direct',
+                    serverId: null,
+                },
+                targetCleanup: {
+                    sessionId: 'sess_2',
+                    machineId: 'machine_target',
                     serverId: null,
                 },
             },
@@ -4896,6 +5194,11 @@ describe('sessionHandoffs ops', () => {
                     agent: 'claude',
                     resume: 'claude_session_2b',
                     transcriptStorage: 'persisted',
+                    serverId: null,
+                },
+                targetCleanup: {
+                    sessionId: 'sess_2b',
+                    machineId: 'machine_target',
                     serverId: null,
                 },
             },
@@ -5044,9 +5347,15 @@ describe('sessionHandoffs ops', () => {
                 recoveryActions: [],
             },
         });
-        expect(resumeSessionMock).toHaveBeenCalledWith(expect.objectContaining({
-            transcriptStorage: 'persisted',
+        expect(handoffV2ControlRpcMock).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'daemon.sessionHandoff.targetResume.v2',
+            payload: expect.objectContaining({
+                handoffId: 'handoff_3',
+                sessionId: 'sess_3',
+                attemptId: 'target_handoff_3',
+            }),
         }));
+        expect(resumeSessionMock).not.toHaveBeenCalled();
     });
 
     it('prepares server-routed handoff targets without inline bundles and with the source machine id', async () => {
@@ -5139,7 +5448,7 @@ describe('sessionHandoffs ops', () => {
         });
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
             machineId: 'machine_target',
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             payload: expect.objectContaining({
                 sourceMachineId: 'machine_source',
                 negotiatedTransportStrategy: 'server_routed_stream',
@@ -5258,7 +5567,7 @@ describe('sessionHandoffs ops', () => {
             },
         });
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             payload: expect.objectContaining({
                 negotiatedTransportStrategy: 'direct_peer',
                 allowServerRoutedFallback: false,
@@ -5378,7 +5687,7 @@ describe('sessionHandoffs ops', () => {
             }),
         }));
         expect(machineRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             payload: expect.objectContaining({
                 negotiatedTransportStrategy: 'direct_peer',
                 allowServerRoutedFallback: true,
@@ -5445,7 +5754,6 @@ describe('sessionHandoffs ops', () => {
                 errorCode: 'direct_peer_transfer_unavailable',
                 error: 'Direct peer transfer is unavailable and server-routed fallback is disabled',
             })
-            .mockResolvedValueOnce(undefined)
             .mockResolvedValueOnce(undefined)
             .mockResolvedValueOnce({
                 handoffId: 'handoff_cached_b',
@@ -5526,6 +5834,11 @@ describe('sessionHandoffs ops', () => {
                     transcriptStorage: 'persisted',
                     serverId: null,
                 },
+                targetCleanup: {
+                    sessionId: 'sess_cached_route',
+                    machineId: 'machine_target',
+                    serverId: null,
+                },
             },
         });
 
@@ -5540,9 +5853,9 @@ describe('sessionHandoffs ops', () => {
             },
         });
 
-        const secondPrepareCall = machineRpcWithServerScopeMock.mock.calls[5]?.[0];
+        const secondPrepareCall = machineRpcWithServerScopeMock.mock.calls[4]?.[0];
         expect(secondPrepareCall).toEqual(expect.objectContaining({
-            method: 'daemon.sessionHandoff.prepareTarget',
+            method: 'daemon.sessionHandoff.prepareTarget.v2',
             payload: expect.objectContaining({
                 negotiatedTransportStrategy: 'server_routed_stream',
                 allowServerRoutedFallback: true,
@@ -5552,7 +5865,7 @@ describe('sessionHandoffs ops', () => {
     });
 
     it('fails closed when direct peer is preferred but the server does not allow any preferred handoff transport', async () => {
-        machineRpcWithServerScopeMock.mockResolvedValueOnce({
+        handoffV2ControlRpcMock.mockResolvedValueOnce({
             handoffId: 'handoff_5',
             status: { handoffId: 'handoff_5', status: 'pending', phase: 'preparing', recoveryActions: [] },
             endpointCandidates: [],
@@ -5606,7 +5919,234 @@ describe('sessionHandoffs ops', () => {
         expect(machineRpcWithServerScopeMock).not.toHaveBeenCalled();
     });
 
+    it('fails closed before source restart when delayed target absence revalidation is ambiguous', async () => {
+        handoffV2ControlRpcMock.mockResolvedValueOnce({
+            handoffId: 'handoff_ambiguous',
+            targetCleanup: { status: 'failed', reason: 'ambiguous', attemptedAtMs: 1 },
+            status: { handoffId: 'handoff_ambiguous', status: 'awaiting_recovery', phase: 'cutover', recoveryActions: ['retry_target_cleanup', 'keep_stopped'] },
+        });
+        const { performSessionHandoffRecoveryAction } = await import('./sessionHandoffs');
+        await expect(performSessionHandoffRecoveryAction({
+            recovery: {
+                handoffId: 'handoff_ambiguous',
+                actions: ['restart_on_source', 'keep_stopped'],
+                targetCleanup: { machineId: 'machine_target', sessionId: 'session_1', serverId: null },
+                sourceResume: { sessionId: 'session_1', machineId: 'machine_source', directory: '/repo', agent: 'claude', transcriptStorage: 'persisted', serverId: null },
+            },
+            action: 'restart_on_source',
+        })).resolves.toEqual({ ok: false, error: 'Target absence could not be revalidated' });
+        expect(resumeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it('re-establishes and finalizes the target binding around the exact source-cleanup retry', async () => {
+        let currentMachineId = 'machine_source';
+        let currentPath = '/source/repo';
+        readMachineTargetForSessionMock.mockImplementation(() => ({
+            machineId: currentMachineId,
+            basePath: currentPath,
+        }));
+        storageGetStateMock.mockImplementation(() => ({
+            sessions: {
+                sess_cleanup_retry: {
+                    id: 'sess_cleanup_retry',
+                    active: true,
+                    metadata: {
+                        flavor: 'claude',
+                        machineId: currentMachineId,
+                        path: currentPath,
+                        claudeSessionId: 'claude_source',
+                    },
+                },
+            },
+            applySessions: (sessions: Array<{ metadata?: { machineId?: string; path?: string } }>) => {
+                storageApplySessionsMock(sessions);
+                const metadata = sessions[0]?.metadata;
+                if (typeof metadata?.machineId === 'string') currentMachineId = metadata.machineId;
+                if (typeof metadata?.path === 'string') currentPath = metadata.path;
+            },
+        }));
+        patchSessionMetadataWithRetryMock.mockImplementation(async (
+            _sessionId: string,
+            updater: (metadata: Record<string, unknown>) => Record<string, unknown>,
+        ) => {
+            const next = updater({
+                flavor: 'claude',
+                machineId: currentMachineId,
+                path: currentPath,
+                claudeSessionId: 'claude_source',
+            });
+            currentMachineId = String(next.machineId);
+            currentPath = String(next.path);
+        });
+        machineRpcWithServerScopeMock.mockResolvedValueOnce({
+            handoffId: 'handoff_cleanup_retry',
+            status: {
+                handoffId: 'handoff_cleanup_retry',
+                status: 'completed',
+                phase: 'finalizing',
+                recoveryActions: [],
+            },
+        });
+        const { performSessionHandoffRecoveryAction } = await import('./sessionHandoffs');
+
+        await expect(performSessionHandoffRecoveryAction({
+            recovery: {
+                handoffId: 'handoff_cleanup_retry',
+                actions: ['retry_source_cleanup'],
+                sourceCleanup: {
+                    machineId: 'machine_source',
+                    serverId: 'server_b',
+                    workspaceReplicationReverseSourceRootPath: '/target/repo',
+                    workspaceReplicationReverseTargetRootPath: '/source/repo',
+                },
+                targetFinalization: {
+                    sessionId: 'sess_cleanup_retry',
+                    sourceMachineId: 'machine_source',
+                    targetMachineId: 'machine_target',
+                    serverId: 'server_b',
+                    sourceMetadataForHandoff: {
+                        flavor: 'claude',
+                        host: 'source-host',
+                        machineId: 'machine_source',
+                        path: '/source/repo',
+                        claudeSessionId: 'claude_source',
+                    },
+                    providerId: 'claude',
+                    sessionStorageBefore: 'persisted',
+                    sessionStorageAfter: 'persisted',
+                    targetPath: '/target/repo',
+                    transportStrategy: 'server_routed_stream',
+                    completedAtMs: 42,
+                    targetRemoteSessionId: 'claude_target',
+                    targetDirectSource: {
+                        kind: 'claudeConfig',
+                        configDir: null,
+                        projectId: null,
+                    },
+                },
+            },
+            action: 'retry_source_cleanup',
+        })).resolves.toEqual({ ok: true });
+        expect(machineRpcWithServerScopeMock).toHaveBeenCalledTimes(1);
+        expect(machineRpcWithServerScopeMock).toHaveBeenCalledWith(expect.objectContaining({
+            machineId: 'machine_source',
+            method: 'daemon.sessionHandoff.commit',
+            serverId: 'server_b',
+            payload: {
+                handoffId: 'handoff_cleanup_retry',
+                mode: 'source_cleanup',
+                workspaceReplicationReverseSourceRootPath: '/target/repo',
+                workspaceReplicationReverseTargetRootPath: '/source/repo',
+            },
+        }));
+        expect(patchSessionMetadataWithRetryMock).toHaveBeenCalledTimes(2);
+        expect(ensureSessionVisibleForMessageRouteMock).toHaveBeenCalledTimes(2);
+        expect(stabilizeSessionHandoffTargetBindingMock).toHaveBeenCalledTimes(4);
+        expect(currentMachineId).toBe('machine_target');
+        expect(currentPath).toBe('/target/repo');
+        expect(resumeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it('keeps repeated pre/post-cleanup target-finalization rejection in exact cleanup recovery', async () => {
+        stabilizeSessionHandoffTargetBindingMock.mockResolvedValue({ ok: true });
+        patchSessionMetadataWithRetryMock
+            .mockRejectedValueOnce(new Error('pre-cleanup finalization failed'))
+            .mockResolvedValueOnce(undefined)
+            .mockRejectedValueOnce(new Error('post-cleanup finalization failed'))
+            .mockResolvedValueOnce(undefined)
+            .mockResolvedValueOnce(undefined);
+        const recovery = {
+            handoffId: 'handoff_cleanup_finalization_retry',
+            actions: ['retry_source_cleanup'] as const,
+            sourceCleanup: {
+                machineId: 'machine_source',
+                serverId: 'server_b',
+                workspaceReplicationReverseSourceRootPath: '/target/repo',
+                workspaceReplicationReverseTargetRootPath: '/source/repo',
+            },
+            targetFinalization: {
+                sessionId: 'sess_cleanup_finalization_retry',
+                sourceMachineId: 'machine_source',
+                targetMachineId: 'machine_target',
+                serverId: 'server_b',
+                sourceMetadataForHandoff: {
+                    flavor: 'claude',
+                    host: 'source-host',
+                    machineId: 'machine_source',
+                    path: '/source/repo',
+                    claudeSessionId: 'claude_source',
+                },
+                providerId: 'claude' as const,
+                sessionStorageBefore: 'persisted' as const,
+                sessionStorageAfter: 'persisted' as const,
+                targetPath: '/target/repo',
+                transportStrategy: 'server_routed_stream' as const,
+                completedAtMs: 42,
+                targetRemoteSessionId: 'claude_target',
+                targetDirectSource: {
+                    kind: 'claudeConfig',
+                    configDir: null,
+                    projectId: null,
+                },
+            },
+        };
+        const { performSessionHandoffRecoveryAction } = await import('./sessionHandoffs');
+
+        await expect(performSessionHandoffRecoveryAction({
+            recovery,
+            action: 'retry_source_cleanup',
+        })).resolves.toEqual({
+            ok: false,
+            error: 'pre-cleanup finalization failed',
+        });
+        expect(machineRpcWithServerScopeMock).not.toHaveBeenCalled();
+
+        await expect(performSessionHandoffRecoveryAction({
+            recovery,
+            action: 'retry_source_cleanup',
+        })).resolves.toEqual({
+            ok: false,
+            error: 'post-cleanup finalization failed',
+        });
+        expect(machineRpcWithServerScopeMock).toHaveBeenCalledTimes(1);
+
+        await expect(performSessionHandoffRecoveryAction({
+            recovery,
+            action: 'retry_source_cleanup',
+        })).resolves.toEqual({ ok: true });
+        expect(machineRpcWithServerScopeMock).toHaveBeenCalledTimes(2);
+        expect(machineRpcWithServerScopeMock.mock.calls.map(([call]) => call)).toEqual([
+            expect.objectContaining({
+                machineId: 'machine_source',
+                method: 'daemon.sessionHandoff.commit',
+                payload: expect.objectContaining({
+                    handoffId: 'handoff_cleanup_finalization_retry',
+                    mode: 'source_cleanup',
+                }),
+            }),
+            expect.objectContaining({
+                machineId: 'machine_source',
+                method: 'daemon.sessionHandoff.commit',
+                payload: expect.objectContaining({
+                    handoffId: 'handoff_cleanup_finalization_retry',
+                    mode: 'source_cleanup',
+                }),
+            }),
+        ]);
+        expect(resumeSessionMock).not.toHaveBeenCalled();
+    });
+
     it('preserves runtime descriptor and transport fields when restarting the source during recovery', async () => {
+        handoffV2ControlRpcMock.mockResolvedValueOnce({
+            handoffId: 'handoff_recover_runtime',
+            targetCleanup: { status: 'proved_absent', proof: 'already_inactive', provedAtMs: 1 },
+            status: {
+                handoffId: 'handoff_recover_runtime',
+                status: 'aborted',
+                phase: 'cutover',
+                recoveryActions: ['restart_on_source', 'keep_stopped'],
+            },
+        });
         resumeSessionMock.mockResolvedValueOnce({ type: 'ok' });
 
         const { performSessionHandoffRecoveryAction } = await import('./sessionHandoffs');
@@ -5614,6 +6154,11 @@ describe('sessionHandoffs ops', () => {
             recovery: {
                 handoffId: 'handoff_recover_runtime',
                 actions: ['restart_on_source', 'keep_stopped'],
+                targetCleanup: {
+                    machineId: 'machine_target',
+                    sessionId: 'sess_source',
+                    serverId: 'server_a',
+                },
                 sourceResume: {
                     sessionId: 'sess_source',
                     machineId: 'machine_source',
@@ -5641,6 +6186,15 @@ describe('sessionHandoffs ops', () => {
         });
 
         expect(result).toEqual({ ok: true });
+        expect(handoffV2ControlRpcMock).toHaveBeenCalledWith(expect.objectContaining({
+            machineId: 'machine_target',
+            method: 'daemon.sessionHandoff.abort.v2',
+            payload: {
+                handoffId: 'handoff_recover_runtime',
+                sessionId: 'sess_source',
+                reason: 'restart_on_source_revalidation',
+            },
+        }));
         expect(resumeSessionMock).toHaveBeenCalledWith(expect.objectContaining({
             agentRuntimeDescriptorV1: {
                 v: 1,

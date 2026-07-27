@@ -263,7 +263,7 @@ describe('runSessionHandoffUiFlow', () => {
     expect(result).toEqual({ ok: false, handled: true });
   });
 
-  it('surfaces recovery action failures through the retry confirm with the recovery error', async () => {
+  it('keeps a failed recovery in its recovery phase instead of rerunning the whole handoff', async () => {
     executeSessionHandoffActionMock.mockResolvedValueOnce({
       ok: false,
       error: 'resume_failed',
@@ -281,9 +281,10 @@ describe('runSessionHandoffUiFlow', () => {
         },
       },
     });
-    openSessionHandoffFailureRecoveryModalMock.mockResolvedValueOnce('restart_on_source');
+    openSessionHandoffFailureRecoveryModalMock
+      .mockResolvedValueOnce('restart_on_source')
+      .mockResolvedValueOnce(null);
     performSessionHandoffRecoveryActionMock.mockResolvedValueOnce({ ok: false, error: 'source_resume_failed' });
-    modalConfirmMock.mockResolvedValueOnce(false);
 
     const { runSessionHandoffUiFlow } = await import('./runSessionHandoffUiFlow');
     const result = await runSessionHandoffUiFlow({
@@ -309,14 +310,106 @@ describe('runSessionHandoffUiFlow', () => {
       },
       action: 'restart_on_source',
     });
-    expect(modalConfirmMock).toHaveBeenCalledWith(
-      'sessionHandoff.failure.title',
-      'source_resume_failed',
-      {
-        cancelText: 'common.cancel',
-        confirmText: 'common.retry',
-      },
-    );
+    expect(openSessionHandoffFailureRecoveryModalMock).toHaveBeenCalledTimes(2);
+    expect(openSessionHandoffFailureRecoveryModalMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      details: 'source_resume_failed',
+    }));
+    expect(executeSessionHandoffActionMock).toHaveBeenCalledTimes(1);
+    expect(modalConfirmMock).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: false, handled: true });
+  });
+
+  it('keeps post-commit source cleanup on its visible retry-only phase', async () => {
+    const recovery = {
+      handoffId: 'handoff_cleanup',
+      actions: ['retry_source_cleanup'],
+      sourceCleanup: {
+        machineId: 'machine_source',
+        serverId: 'server_a',
+        workspaceReplicationReverseSourceRootPath: '/target/repo',
+        workspaceReplicationReverseTargetRootPath: '/source/repo',
+      },
+    };
+    executeSessionHandoffActionMock.mockResolvedValueOnce({
+      ok: false,
+      error: 'source_cleanup_failed',
+      recovery,
+    });
+    openSessionHandoffFailureRecoveryModalMock
+      .mockResolvedValueOnce('retry_source_cleanup')
+      .mockResolvedValueOnce(null);
+    performSessionHandoffRecoveryActionMock.mockResolvedValueOnce({
+      ok: false,
+      error: 'source_cleanup_still_failed',
+    });
+
+    const { runSessionHandoffUiFlow } = await import('./runSessionHandoffUiFlow');
+    await expect(runSessionHandoffUiFlow({
+      execute: vi.fn() as any,
+      sessionId: 'sess_cleanup',
+      targetMachineId: 'machine_target',
+      context: { defaultSessionId: 'sess_cleanup', surface: 'ui_button', placement: 'session_info' } as any,
+    })).resolves.toEqual({ ok: false, handled: true });
+
+    expect(executeSessionHandoffActionMock).toHaveBeenCalledTimes(1);
+    expect(performSessionHandoffRecoveryActionMock).toHaveBeenCalledTimes(1);
+    expect(performSessionHandoffRecoveryActionMock).toHaveBeenCalledWith({
+      recovery,
+      action: 'retry_source_cleanup',
+    });
+    expect(openSessionHandoffFailureRecoveryModalMock).toHaveBeenLastCalledWith({
+      title: 'sessionHandoff.failure.title',
+      message: 'sessionHandoff.failure.message',
+      details: 'source_cleanup_still_failed',
+      recovery,
+    });
+    expect(modalConfirmMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps a rejected post-commit recovery attempt inside the committed recovery phase', async () => {
+    const recovery = {
+      handoffId: 'handoff_cleanup_rejection',
+      actions: ['retry_source_cleanup'],
+      sourceCleanup: {
+        machineId: 'machine_source',
+        serverId: 'server_a',
+        workspaceReplicationReverseSourceRootPath: '/target/repo',
+        workspaceReplicationReverseTargetRootPath: '/source/repo',
+      },
+    };
+    executeSessionHandoffActionMock.mockResolvedValueOnce({
+      ok: false,
+      error: 'source_cleanup_failed',
+      recovery,
+    });
+    openSessionHandoffFailureRecoveryModalMock
+      .mockResolvedValueOnce('retry_source_cleanup')
+      .mockResolvedValueOnce(null);
+    performSessionHandoffRecoveryActionMock.mockRejectedValueOnce(
+      new Error('target finalization rejected'),
+    );
+
+    const { runSessionHandoffUiFlow } = await import('./runSessionHandoffUiFlow');
+    await expect(runSessionHandoffUiFlow({
+      execute: vi.fn() as any,
+      sessionId: 'sess_cleanup_rejection',
+      targetMachineId: 'machine_target',
+      context: {
+        defaultSessionId: 'sess_cleanup_rejection',
+        surface: 'ui_button',
+        placement: 'session_info',
+      } as any,
+    })).resolves.toEqual({ ok: false, handled: true });
+
+    expect(executeSessionHandoffActionMock).toHaveBeenCalledTimes(1);
+    expect(performSessionHandoffRecoveryActionMock).toHaveBeenCalledTimes(1);
+    expect(openSessionHandoffFailureRecoveryModalMock).toHaveBeenCalledTimes(2);
+    expect(openSessionHandoffFailureRecoveryModalMock).toHaveBeenLastCalledWith({
+      title: 'sessionHandoff.failure.title',
+      message: 'sessionHandoff.failure.message',
+      details: 'target finalization rejected',
+      recovery,
+    });
+    expect(modalConfirmMock).not.toHaveBeenCalled();
   });
 });

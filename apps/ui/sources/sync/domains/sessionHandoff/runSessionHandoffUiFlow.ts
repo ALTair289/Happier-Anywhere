@@ -29,11 +29,21 @@ function normalizeErrorMessage(value: unknown): string {
     return t('sessionHandoff.failure.message');
 }
 
-function buildSessionHandoffRecoveryPresentation(error: unknown): Readonly<{
+function buildSessionHandoffRecoveryPresentation(
+    error: unknown,
+    recovery: Readonly<{ actions?: readonly string[] }>,
+): Readonly<{
     title: string;
     message: string;
     details: string;
 }> {
+    if (recovery.actions?.includes('retry_source_cleanup')) {
+        return {
+            title: t('sessionHandoff.failure.title'),
+            message: t('sessionHandoff.failure.message'),
+            details: normalizeErrorMessage(error),
+        };
+    }
     return {
         title: t('sessionHandoff.recovery.title'),
         message: t('sessionHandoff.recovery.messageAfterSourceStop'),
@@ -70,27 +80,40 @@ export async function runSessionHandoffUiFlow(
             }
             if (result.recovery) {
                 closeProgressModal();
-                const recoveryPresentation = buildSessionHandoffRecoveryPresentation(result.error);
-                const action = await openSessionHandoffFailureRecoveryModal({
-                    title: recoveryPresentation.title,
-                    message: recoveryPresentation.message,
-                    details: recoveryPresentation.details,
-                    recovery: result.recovery as any,
-                });
-                if (!action) {
-                    return { ok: false, handled: true };
+                let recoveryError = result.error;
+                while (true) {
+                    const recoveryPresentation = buildSessionHandoffRecoveryPresentation(
+                        recoveryError,
+                        result.recovery as any,
+                    );
+                    const action = await openSessionHandoffFailureRecoveryModal({
+                        title: recoveryPresentation.title,
+                        message: recoveryPresentation.message,
+                        details: recoveryPresentation.details,
+                        recovery: result.recovery as any,
+                    });
+                    if (!action) {
+                        return { ok: false, handled: true };
+                    }
+                    let recoveryResult: Awaited<
+                        ReturnType<typeof performSessionHandoffRecoveryAction>
+                    >;
+                    try {
+                        recoveryResult = await performSessionHandoffRecoveryAction({
+                            recovery: result.recovery as any,
+                            action,
+                        });
+                    } catch (error) {
+                        recoveryError = normalizeErrorMessage(
+                            error instanceof Error ? error.message : error,
+                        );
+                        continue;
+                    }
+                    if (recoveryResult.ok) {
+                        return { ok: false, handled: true };
+                    }
+                    recoveryError = normalizeErrorMessage(recoveryResult.error);
                 }
-                const recoveryResult = await performSessionHandoffRecoveryAction({
-                    recovery: result.recovery as any,
-                    action,
-                });
-                if (recoveryResult.ok) {
-                    return { ok: false, handled: true };
-                }
-                result = {
-                    ...result,
-                    error: normalizeErrorMessage(recoveryResult.error),
-                };
             }
 
             const shouldRetry = await Modal.confirm(

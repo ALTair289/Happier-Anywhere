@@ -1,10 +1,12 @@
 import {
     readServerEnabledBit,
     SessionHandoffCommitResponseSchema,
+    SessionHandoffAbortResponseV2Schema,
     SessionHandoffPrepareTargetResultGetResponseSchema,
     SessionHandoffPrepareTargetResponseSchema,
     SessionHandoffStartResponseSchema,
     SessionHandoffStatusSchema,
+    SessionHandoffTargetResumeResponseV2Schema,
     SPAWN_SESSION_ERROR_CODES,
 } from '@happier-dev/protocol';
 import type {
@@ -111,8 +113,77 @@ export type PerformSessionHandoffRecoveryActionResult =
     | Readonly<{ ok: true }>
     | Readonly<{ ok: false; error: string }>;
 
+type SessionHandoffTargetMetadataBuilder = (metadata: MetadataRecord) => MetadataRecord;
+
 function normalizeId(raw: unknown): string {
     return String(raw ?? '').trim();
+}
+
+function readSessionHandoffFailureMessage(error: unknown, fallback: string): string {
+    return error instanceof Error && error.message.trim() ? error.message : fallback;
+}
+
+async function finalizeSessionHandoffTargetBinding(params: Readonly<{
+    sessionId: string;
+    targetMachineId: string;
+    serverId: string | null;
+    sourceMetadata: MetadataRecord;
+    buildNextMetadata: SessionHandoffTargetMetadataBuilder;
+}>): Promise<void> {
+    const runtimeConfig = resolveSessionHandoffRuntimeConfig();
+    const reapplyOptimisticBinding = () => {
+        const currentMetadata = (
+            storage.getState().sessions?.[params.sessionId]?.metadata
+            ?? params.sourceMetadata
+        ) as MetadataRecord;
+        writeSessionMetadataToLocalSession(
+            params.sessionId,
+            params.buildNextMetadata(currentMetadata),
+        );
+    };
+    const stabilize = async () => {
+        const result = await stabilizeSessionHandoffTargetBinding({
+            readSession: () => readSessionHandoffSessionActivity(params.sessionId),
+            readTargetMachineId: () => readMachineControlTargetForSession(params.sessionId)?.machineId ?? null,
+            reapplyOptimisticBinding,
+            targetMachineId: params.targetMachineId,
+            timeoutMs: runtimeConfig.postCommitBindingStabilizationTimeoutMs,
+            pollIntervalMs: runtimeConfig.postCommitBindingStabilizationIntervalMs,
+            requiredStablePolls: runtimeConfig.postCommitBindingStablePolls,
+        });
+        if (!result.ok) reapplyOptimisticBinding();
+    };
+
+    reapplyOptimisticBinding();
+    await stabilize();
+    await sync.patchSessionMetadataWithRetry(
+        params.sessionId,
+        (metadata) => params.buildNextMetadata((metadata ?? params.sourceMetadata) as MetadataRecord),
+        { serverId: params.serverId },
+    );
+    await sync.ensureSessionVisibleForMessageRoute(params.sessionId, { forceRefresh: true });
+    reapplyOptimisticBinding();
+    await stabilize();
+}
+
+function buildRecoveryTargetMetadataBuilder(
+    plan: NonNullable<SessionHandoffRecoveryPlan['targetFinalization']>,
+): SessionHandoffTargetMetadataBuilder {
+    return (metadata) => buildSessionHandoffMetadataPatch({
+        metadata,
+        sourceMetadataForHandoff: plan.sourceMetadataForHandoff,
+        providerId: plan.providerId,
+        sourceMachineId: plan.sourceMachineId,
+        targetMachineId: plan.targetMachineId,
+        sessionStorageBefore: plan.sessionStorageBefore,
+        sessionStorageAfter: plan.sessionStorageAfter,
+        targetPath: plan.targetPath,
+        transportStrategy: plan.transportStrategy,
+        completedAtMs: plan.completedAtMs,
+        targetRemoteSessionId: plan.targetRemoteSessionId,
+        targetDirectSource: plan.targetDirectSource,
+        targetRuntimeDescriptor: plan.targetRuntimeDescriptor as AgentRuntimeDescriptorV1 | undefined,
+    });
 }
 
 function resolveTargetPreparePathForCrossPlatformHandoff(params: Readonly<{
@@ -407,6 +478,7 @@ export async function startSessionHandoffOnSourceWithRetry(
 }
 
 async function prepareTargetSessionHandoff(params: Readonly<{
+    sessionId: string;
     handoffId: string;
     sourceMachineId: string;
     targetMachineId: string;
@@ -448,8 +520,9 @@ async function prepareTargetSessionHandoffWithMachineRpcTimeout(
     try {
         const raw = await machineRpcWithServerScope<unknown, unknown>({
             machineId: params.targetMachineId,
-            method: RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET,
+            method: RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET_V2,
             payload: {
+                sessionId: params.sessionId,
                 handoffId: params.handoffId,
                 sourceMachineId: params.sourceMachineId,
                 targetMachineId: params.targetMachineId,
@@ -514,6 +587,7 @@ function hasPrepareTargetReadyPayload(
 
 async function pollPreparedTargetSessionHandoffResult(params: Readonly<{
     handoffId: string;
+    sessionId: string;
     targetMachineId: string;
     serverId?: string | null;
     timeoutMs: number;
@@ -564,9 +638,10 @@ async function pollPreparedTargetSessionHandoffResult(params: Readonly<{
         try {
             const rawResult = await machineRpcWithServerScope<unknown, unknown>({
                 machineId: params.targetMachineId,
-                method: RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET_RESULT_GET,
+                method: RPC_METHODS.DAEMON_SESSION_HANDOFF_PREPARE_TARGET_RESULT_GET_V2,
                 payload: {
                     handoffId: params.handoffId,
+                    sessionId: params.sessionId,
                 },
                 serverId,
                 timeoutMs: pollMachineRpcTimeoutMs,
@@ -701,6 +776,7 @@ export async function prepareTargetSessionHandoffWithRetry(
     }
     return await pollPreparedTargetSessionHandoffResult({
         handoffId: params.handoffId,
+        sessionId: params.sessionId,
         targetMachineId: params.targetMachineId,
         serverId: params.serverId,
         timeoutMs: pollTimeoutMs,
@@ -714,14 +790,18 @@ export async function prepareTargetSessionHandoffWithRetry(
     });
 }
 
-async function commitSessionHandoff(params: Readonly<{
+type SessionHandoffCommitParams = Readonly<{
     machineId: string;
     handoffId: string;
-    mode: 'target' | 'source_cleanup';
     serverId?: string | null;
     workspaceReplicationReverseSourceRootPath?: string | null;
     workspaceReplicationReverseTargetRootPath?: string | null;
-}>): Promise<
+}> & (
+    | Readonly<{ mode: 'target'; sessionId: string; attemptId: string }>
+    | Readonly<{ mode: 'source_cleanup'; sessionId?: never; attemptId?: never }>
+);
+
+async function commitSessionHandoff(params: SessionHandoffCommitParams): Promise<
     | Readonly<{ ok: true; response: SessionHandoffCommitResponse }>
     | Readonly<{ ok: false; errorCode: string; errorMessage: string }>
 > {
@@ -729,14 +809,19 @@ async function commitSessionHandoff(params: Readonly<{
     try {
         const reverseSourceRootPath = normalizeId(params.workspaceReplicationReverseSourceRootPath);
         const reverseTargetRootPath = normalizeId(params.workspaceReplicationReverseTargetRootPath);
-        const payload: Record<string, unknown> = { handoffId: params.handoffId, mode: params.mode };
+        const isTargetV2 = params.mode === 'target';
+        const payload: Record<string, unknown> = {
+            handoffId: params.handoffId,
+            mode: params.mode,
+            ...(isTargetV2 ? { sessionId: params.sessionId, attemptId: params.attemptId } : {}),
+        };
         if (reverseSourceRootPath && reverseTargetRootPath) {
             payload.workspaceReplicationReverseSourceRootPath = reverseSourceRootPath;
             payload.workspaceReplicationReverseTargetRootPath = reverseTargetRootPath;
         }
         const raw = await machineRpcWithServerScope<unknown, unknown>({
             machineId: params.machineId,
-            method: RPC_METHODS.DAEMON_SESSION_HANDOFF_COMMIT,
+            method: isTargetV2 ? RPC_METHODS.DAEMON_SESSION_HANDOFF_COMMIT_V2 : RPC_METHODS.DAEMON_SESSION_HANDOFF_COMMIT,
             payload,
             serverId: normalizeId(params.serverId) || null,
             timeoutMs: runtimeConfig.machineRpcTimeoutMs,
@@ -763,39 +848,100 @@ async function commitSessionHandoff(params: Readonly<{
     }
 }
 
+async function requireSafeSessionHandoffV2Target(params: Readonly<{
+    targetMachineId: string;
+    serverId?: string | null;
+}>): Promise<Readonly<{ ok: true }> | HandoffErrorResult> {
+    try {
+        const raw = await machineRpcWithServerScope<unknown, unknown>({
+            machineId: params.targetMachineId,
+            method: RPC_METHODS.DAEMON_SESSION_HANDOFF_CAPABILITY_V2_GET,
+            payload: {},
+            serverId: normalizeId(params.serverId) || null,
+            timeoutMs: resolveSessionHandoffRuntimeConfig().machineRpcPollTimeoutMs,
+            preferScoped: true,
+        });
+        const capability = raw as { protocolVersion?: unknown; atomicTargetResume?: unknown; targetCleanup?: unknown };
+        if (capability.protocolVersion === 2 && capability.atomicTargetResume === true && capability.targetCleanup === true) {
+            return { ok: true };
+        }
+    } catch {
+        // A missing/unreachable v2 peer must fail before source stop.
+    }
+    return unsupportedError('Target daemon does not support safe atomic session handoff v2');
+}
+
+async function resumeSessionHandoffTargetV2(params: Readonly<{
+    machineId: string;
+    handoffId: string;
+    sessionId: string;
+    attemptId: string;
+    connectedServices?: unknown;
+    serverId?: string | null;
+}>): Promise<Readonly<{ ok: true }> | HandoffErrorResult> {
+    try {
+        const raw = await machineRpcWithServerScope<unknown, unknown>({
+            machineId: params.machineId,
+            method: RPC_METHODS.DAEMON_SESSION_HANDOFF_TARGET_RESUME_V2,
+            payload: {
+                handoffId: params.handoffId,
+                sessionId: params.sessionId,
+                attemptId: params.attemptId,
+                ...(params.connectedServices !== undefined ? { connectedServices: params.connectedServices } : {}),
+            },
+            serverId: normalizeId(params.serverId) || null,
+            timeoutMs: resolveSessionHandoffRuntimeConfig().machineRpcTimeoutMs,
+            preferScoped: true,
+        });
+        const error = readRawSessionHandoffError(raw);
+        if (error) return { ok: false, errorCode: error.errorCode, errorMessage: error.errorMessage };
+        const parsed = SessionHandoffTargetResumeResponseV2Schema.safeParse(raw);
+        if (!parsed.success || parsed.data.disposition === 'preexisting_or_adopted') {
+            return unsupportedError('Target runner was preexisting or adopted and is not owned by this handoff');
+        }
+        return { ok: true };
+    } catch (error) {
+        return { ok: false, errorCode: 'UNEXPECTED', errorMessage: error instanceof Error ? error.message : 'Failed to resume handoff target' };
+    }
+}
+
 async function abortSessionHandoff(params: Readonly<{
     sourceMachineId: string;
     targetMachineId?: string | null;
     handoffId: string;
+    sessionId?: string;
     reason: string;
     serverId?: string | null;
-}>): Promise<void> {
+}>): Promise<boolean> {
     const runtimeConfig = resolveSessionHandoffRuntimeConfig();
-    const abortOnMachine = async (machineId: string): Promise<void> => {
+    let targetAbsenceProved = false;
+    if (params.targetMachineId && params.sessionId) {
+        try {
+            const raw = await machineRpcWithServerScope<unknown, unknown>({
+                machineId: params.targetMachineId,
+                method: RPC_METHODS.DAEMON_SESSION_HANDOFF_ABORT_V2,
+                payload: { handoffId: params.handoffId, sessionId: params.sessionId, reason: params.reason },
+                serverId: normalizeId(params.serverId) || null,
+                timeoutMs: runtimeConfig.machineRpcTimeoutMs,
+            });
+            const parsed = SessionHandoffAbortResponseV2Schema.safeParse(raw);
+            targetAbsenceProved = parsed.success && parsed.data.targetCleanup.status === 'proved_absent';
+        } catch {
+            targetAbsenceProved = false;
+        }
+    }
+    try {
         await machineRpcWithServerScope<unknown, unknown>({
-            machineId,
+            machineId: params.sourceMachineId,
             method: RPC_METHODS.DAEMON_SESSION_HANDOFF_ABORT,
-            payload: {
-                handoffId: params.handoffId,
-                reason: params.reason,
-            },
+            payload: { handoffId: params.handoffId, reason: params.reason },
             serverId: normalizeId(params.serverId) || null,
             timeoutMs: runtimeConfig.machineRpcTimeoutMs,
         });
-    };
-
-    const machineIds = [
-        normalizeId(params.targetMachineId),
-        normalizeId(params.sourceMachineId),
-    ].filter((machineId, index, values): machineId is string => Boolean(machineId) && values.indexOf(machineId) === index);
-
-    for (const machineId of machineIds) {
-        try {
-            await abortOnMachine(machineId);
-        } catch {
-            // Best-effort abort.
-        }
+    } catch {
+        // Source diagnostics are best effort; target absence remains the restart gate.
     }
+    return targetAbsenceProved;
 }
 
 export async function startSessionHandoff(options: StartSessionHandoffOptions): Promise<StartSessionHandoffResult> {
@@ -833,11 +979,17 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
             errorMessage: 'No reachable source machine target found for session handoff',
         };
     }
+    const targetV2Capability = await requireSafeSessionHandoffV2Target({
+        targetMachineId: options.targetMachineId,
+        serverId: options.serverId,
+    });
+    if (!targetV2Capability.ok) return targetV2Capability;
 
     const buildSourceRecovery = (handoffId: string) => buildSessionHandoffRecoveryPlan({
         handoffId,
         sessionId: options.sessionId,
         sourceMachineId: resolvedSourceMachineId,
+        targetMachineId: options.targetMachineId,
         sourceMetadata: options.sourceMetadata,
         sessionStorageMode: options.sessionStorageMode,
         serverId: options.serverId,
@@ -921,6 +1073,7 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
             : transport.negotiatedTransportStrategy;
 
     const prepared = await prepareTargetSessionHandoffWithRetry({
+        sessionId: options.sessionId,
         handoffId: started.response.handoffId,
         sourceMachineId: started.sourceMachineId,
         targetMachineId: options.targetMachineId,
@@ -993,16 +1146,17 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
             ) {
                 recordCachedDirectPeerRouteUnavailable(directPeerRouteInput, prepared.errorCode);
             }
-        await abortSessionHandoff({
+        const targetSafeForRestart = await abortSessionHandoff({
             sourceMachineId: started.sourceMachineId,
             targetMachineId: options.targetMachineId,
             handoffId: started.response.handoffId,
+            sessionId: options.sessionId,
             reason: prepared.errorCode,
             serverId: options.serverId,
         });
         return {
             ...prepared,
-            ...(sourceRecovery ? { recovery: sourceRecovery } : {}),
+            ...(targetSafeForRestart && sourceRecovery ? { recovery: sourceRecovery } : {}),
         };
     }
     if (prepareTransportStrategy === 'direct_peer' && directPeerEndpointCandidates.length > 0) {
@@ -1022,9 +1176,6 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
         phaseDetail: 'resuming_target_session',
     });
 
-    const preparedAgentRuntimeDescriptor = isAgentRuntimeDescriptorV1(preparedResponse.agentRuntimeDescriptorV1)
-        ? preparedResponse.agentRuntimeDescriptorV1
-        : undefined;
     const resumeConnectedServices = (() => {
         const metadata = (storage.getState().sessions?.[options.sessionId]?.metadata ?? options.sourceMetadata) as MetadataRecord | null;
         if (!metadata) return undefined;
@@ -1032,30 +1183,21 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
             ? (metadata as unknown as Record<string, unknown>).connectedServices
             : undefined;
     })();
-    const resumeResult = await resumeSession({
-        sessionId: options.sessionId,
+    const targetAttemptId = `target_${started.response.handoffId}`;
+    const resumeResult = await resumeSessionHandoffTargetV2({
         machineId: options.targetMachineId,
-        directory: preparedResponse.resume.directory,
-        backendTarget: { kind: 'builtInAgent', agentId: preparedResponse.resume.agent },
-        resume: preparedResponse.resume.resume,
-        attachMetadataIdentityPolicy: 'replace_with_runtime_identity',
-        preferRequestedMachineTarget: true,
-        preferScopedMachineRpc: true,
-        ...(preparedAgentRuntimeDescriptor ? { agentRuntimeDescriptorV1: preparedAgentRuntimeDescriptor } : {}),
-        ...(preparedResponse.resume.environmentVariables ? { environmentVariables: preparedResponse.resume.environmentVariables } : {}),
+        handoffId: started.response.handoffId,
+        sessionId: options.sessionId,
+        attemptId: targetAttemptId,
         ...(resumeConnectedServices !== undefined ? { connectedServices: resumeConnectedServices } : {}),
-        transcriptStorage: preparedResponse.resume.transcriptStorage,
-        ...buildCodexBackendTransportFields({
-            codexBackendMode: preparedResponse.resume.codexBackendMode,
-            agentRuntimeDescriptorV1: preparedAgentRuntimeDescriptor,
-        }),
-        ...(normalizeId(options.serverId) ? { serverId: normalizeId(options.serverId) } : {}),
+        serverId: options.serverId,
     });
-    if (resumeResult.type === 'error') {
-        await abortSessionHandoff({
+    if (!resumeResult.ok) {
+        const targetSafeForRestart = await abortSessionHandoff({
             sourceMachineId: started.sourceMachineId,
             targetMachineId: options.targetMachineId,
             handoffId: started.response.handoffId,
+            sessionId: options.sessionId,
             reason: resumeResult.errorCode,
             serverId: options.serverId,
         });
@@ -1063,7 +1205,7 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
             ok: false,
             errorCode: resumeResult.errorCode,
             errorMessage: resumeResult.errorMessage,
-            ...(sourceRecovery ? { recovery: sourceRecovery } : {}),
+            ...(targetSafeForRestart && sourceRecovery ? { recovery: sourceRecovery } : {}),
         };
     }
     const providerId = preparedResponse.resume.agent;
@@ -1085,6 +1227,25 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
         targetDirectSource: preparedResponse.directSource as unknown as Record<string, unknown>,
         targetRuntimeDescriptor: preparedResponse.agentRuntimeDescriptorV1,
     });
+    const targetFinalization: NonNullable<SessionHandoffRecoveryPlan['targetFinalization']> = {
+        sessionId: options.sessionId,
+        sourceMachineId: started.sourceMachineId,
+        targetMachineId: options.targetMachineId,
+        serverId,
+        sourceMetadataForHandoff: sourceMetadataForHandoffPatch,
+        providerId,
+        sessionStorageBefore: options.sessionStorageMode,
+        sessionStorageAfter: targetSessionStorageMode,
+        targetPath: preparedResponse.resume.directory,
+        transportStrategy:
+            prepared.response.status.transportStrategy ?? transport.negotiatedTransportStrategy,
+        completedAtMs,
+        targetRemoteSessionId: preparedResponse.remoteSessionId,
+        targetDirectSource: preparedResponse.directSource as unknown as Record<string, unknown>,
+        ...(preparedResponse.agentRuntimeDescriptorV1
+            ? { targetRuntimeDescriptor: preparedResponse.agentRuntimeDescriptorV1 }
+            : {}),
+    };
     const currentSessionMetadata = sourceMetadataForHandoffPatch;
     const restoreOptimisticBinding = applyOptimisticSessionHandoffBinding({
         sessionId: options.sessionId,
@@ -1118,10 +1279,11 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
         });
     } catch (error) {
         restoreOptimisticBinding?.();
-        await abortSessionHandoff({
+        const targetSafeForRestart = await abortSessionHandoff({
             sourceMachineId: started.sourceMachineId,
             targetMachineId: options.targetMachineId,
             handoffId: started.response.handoffId,
+            sessionId: options.sessionId,
             reason: 'target_session_not_active',
             serverId: options.serverId,
         });
@@ -1129,15 +1291,16 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
             ok: false,
             errorCode: 'target_session_not_active',
             errorMessage: error instanceof Error ? error.message : 'Failed to wait for session handoff target session',
-            ...(sourceRecovery ? { recovery: sourceRecovery } : {}),
+            ...(targetSafeForRestart && sourceRecovery ? { recovery: sourceRecovery } : {}),
         };
     }
     if (!targetSessionActive.ok) {
         restoreOptimisticBinding?.();
-        await abortSessionHandoff({
+        const targetSafeForRestart = await abortSessionHandoff({
             sourceMachineId: started.sourceMachineId,
             targetMachineId: options.targetMachineId,
             handoffId: started.response.handoffId,
+            sessionId: options.sessionId,
             reason: 'target_session_not_active',
             serverId: options.serverId,
         });
@@ -1145,8 +1308,34 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
             ok: false,
             errorCode: 'target_session_not_active',
             errorMessage: targetSessionActive.error,
-            ...(sourceRecovery ? { recovery: sourceRecovery } : {}),
+            ...(targetSafeForRestart && sourceRecovery ? { recovery: sourceRecovery } : {}),
         };
+    }
+
+    const confirmedRaw = await machineRpcWithServerScope<unknown, unknown>({
+        machineId: options.targetMachineId,
+        method: RPC_METHODS.DAEMON_SESSION_HANDOFF_TARGET_CONFIRM_V2,
+        payload: {
+            handoffId: started.response.handoffId,
+            sessionId: options.sessionId,
+            attemptId: targetAttemptId,
+        },
+        serverId: normalizeId(options.serverId) || null,
+        timeoutMs: runtimeConfig.machineRpcTimeoutMs,
+        preferScoped: true,
+    });
+    const confirmError = readRawSessionHandoffError(confirmedRaw);
+    if (confirmError) {
+        restoreOptimisticBinding?.();
+        const targetSafeForRestart = await abortSessionHandoff({
+            sourceMachineId: started.sourceMachineId,
+            targetMachineId: options.targetMachineId,
+            handoffId: started.response.handoffId,
+            sessionId: options.sessionId,
+            reason: confirmError.errorCode,
+            serverId: options.serverId,
+        });
+        return { ok: false, errorCode: confirmError.errorCode, errorMessage: confirmError.errorMessage, ...(targetSafeForRestart && sourceRecovery ? { recovery: sourceRecovery } : {}) };
     }
 
     await publishTargetMetadata();
@@ -1157,11 +1346,27 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
         machineId: options.targetMachineId,
         handoffId: started.response.handoffId,
         mode: 'target',
+        sessionId: options.sessionId,
+        attemptId: targetAttemptId,
         serverId: options.serverId,
     });
     if (!committed.ok) return committed;
     reportStatus(committed.response.status);
     reapplyOptimisticBinding();
+
+    const committedRecovery: SessionHandoffRecoveryPlan = {
+        handoffId: committed.response.handoffId,
+        actions: ['retry_source_cleanup'],
+        sourceCleanup: {
+            machineId: started.sourceMachineId,
+            serverId: normalizeId(options.serverId) || null,
+            workspaceReplicationReverseSourceRootPath:
+                normalizeId(preparedResponse.resume.directory) || null,
+            workspaceReplicationReverseTargetRootPath:
+                normalizeId(started.response.handoffMetadataV2?.workspaceReplicationSourceRootPath) || null,
+        },
+        targetFinalization,
+    };
 
     // Source-side cleanup must complete before we declare the handoff "done". If the source keeps
     // running, it can still publish metadata updates (including machine binding) that overwrite the
@@ -1176,34 +1381,35 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
         // workspace root, not a cross-platform rewrite of the target machine's prepare path.
         workspaceReplicationReverseTargetRootPath: started.response.handoffMetadataV2?.workspaceReplicationSourceRootPath ?? null,
     });
-    if (!sourceCleanup.ok) return sourceCleanup;
-
-    const stabilizedBinding = await stabilizeSessionHandoffTargetBinding({
-        readSession: () => readSessionHandoffSessionActivity(options.sessionId),
-        readTargetMachineId: () => readMachineControlTargetForSession(options.sessionId)?.machineId ?? null,
-        reapplyOptimisticBinding,
-        targetMachineId: options.targetMachineId,
-        timeoutMs: runtimeConfig.postCommitBindingStabilizationTimeoutMs,
-        pollIntervalMs: runtimeConfig.postCommitBindingStabilizationIntervalMs,
-        requiredStablePolls: runtimeConfig.postCommitBindingStablePolls,
-    });
-    if (!stabilizedBinding.ok) {
-        reapplyOptimisticBinding();
+    if (!sourceCleanup.ok) {
+        return {
+            ...sourceCleanup,
+            handoffId: committed.response.handoffId,
+            status: committed.response.status,
+            recovery: committedRecovery,
+        };
     }
-    await publishTargetMetadata();
-    await sync.ensureSessionVisibleForMessageRoute(options.sessionId, { forceRefresh: true });
-    reapplyOptimisticBinding();
-    const finalStabilizedBinding = await stabilizeSessionHandoffTargetBinding({
-        readSession: () => readSessionHandoffSessionActivity(options.sessionId),
-        readTargetMachineId: () => readMachineControlTargetForSession(options.sessionId)?.machineId ?? null,
-        reapplyOptimisticBinding,
-        targetMachineId: options.targetMachineId,
-        timeoutMs: runtimeConfig.postCommitBindingStabilizationTimeoutMs,
-        pollIntervalMs: runtimeConfig.postCommitBindingStabilizationIntervalMs,
-        requiredStablePolls: runtimeConfig.postCommitBindingStablePolls,
-    });
-    if (!finalStabilizedBinding.ok) {
-        reapplyOptimisticBinding();
+
+    try {
+        await finalizeSessionHandoffTargetBinding({
+            sessionId: options.sessionId,
+            targetMachineId: options.targetMachineId,
+            serverId,
+            sourceMetadata: options.sourceMetadata,
+            buildNextMetadata,
+        });
+    } catch (error) {
+        return {
+            ok: false,
+            errorCode: 'target_finalization_failed',
+            errorMessage: readSessionHandoffFailureMessage(
+                error,
+                'Failed to finalize session handoff target binding',
+            ),
+            handoffId: committed.response.handoffId,
+            status: committed.response.status,
+            recovery: committedRecovery,
+        };
     }
 
     return {
@@ -1215,14 +1421,98 @@ export async function completeSessionHandoff(options: CompleteSessionHandoffOpti
 
 export async function performSessionHandoffRecoveryAction(params: Readonly<{
     recovery: SessionHandoffRecoveryPlan;
-    action: 'restart_on_source' | 'keep_stopped';
+    action: 'restart_on_source' | 'keep_stopped' | 'retry_source_cleanup';
 }>): Promise<PerformSessionHandoffRecoveryActionResult> {
     if (params.action === 'keep_stopped') {
+        return { ok: true };
+    }
+    if (params.action === 'retry_source_cleanup') {
+        const sourceCleanup = params.recovery.sourceCleanup;
+        if (!sourceCleanup) {
+            return { ok: false, error: 'No exact source cleanup coordinates are available' };
+        }
+        const targetFinalization = params.recovery.targetFinalization;
+        if (!targetFinalization) {
+            return { ok: false, error: 'No exact target finalization coordinates are available' };
+        }
+        const buildNextMetadata = buildRecoveryTargetMetadataBuilder(targetFinalization);
+        try {
+            await finalizeSessionHandoffTargetBinding({
+                sessionId: targetFinalization.sessionId,
+                targetMachineId: targetFinalization.targetMachineId,
+                serverId: targetFinalization.serverId,
+                sourceMetadata: targetFinalization.sourceMetadataForHandoff,
+                buildNextMetadata,
+            });
+        } catch (error) {
+            return {
+                ok: false,
+                error: readSessionHandoffFailureMessage(
+                    error,
+                    'Failed to finalize session handoff target binding before source cleanup',
+                ),
+            };
+        }
+        const result = await commitSessionHandoff({
+            machineId: sourceCleanup.machineId,
+            handoffId: params.recovery.handoffId,
+            mode: 'source_cleanup',
+            serverId: sourceCleanup.serverId,
+            workspaceReplicationReverseSourceRootPath:
+                sourceCleanup.workspaceReplicationReverseSourceRootPath,
+            workspaceReplicationReverseTargetRootPath:
+                sourceCleanup.workspaceReplicationReverseTargetRootPath,
+        });
+        if (!result.ok) return { ok: false, error: result.errorMessage };
+        try {
+            await finalizeSessionHandoffTargetBinding({
+                sessionId: targetFinalization.sessionId,
+                targetMachineId: targetFinalization.targetMachineId,
+                serverId: targetFinalization.serverId,
+                sourceMetadata: targetFinalization.sourceMetadataForHandoff,
+                buildNextMetadata,
+            });
+        } catch (error) {
+            return {
+                ok: false,
+                error: readSessionHandoffFailureMessage(
+                    error,
+                    'Failed to finalize session handoff target binding after source cleanup',
+                ),
+            };
+        }
         return { ok: true };
     }
     const sourceResume = params.recovery.sourceResume;
     if (!sourceResume) {
         return { ok: false, error: 'No source recovery resume plan is available' };
+    }
+    const targetCleanup = params.recovery.targetCleanup;
+    if (!targetCleanup) {
+        return { ok: false, error: 'No exact target cleanup coordinates are available' };
+    }
+    try {
+        const raw = await machineRpcWithServerScope<unknown, unknown>({
+            machineId: targetCleanup.machineId,
+            method: RPC_METHODS.DAEMON_SESSION_HANDOFF_ABORT_V2,
+            payload: {
+                handoffId: params.recovery.handoffId,
+                sessionId: targetCleanup.sessionId,
+                reason: 'restart_on_source_revalidation',
+            },
+            serverId: targetCleanup.serverId,
+            timeoutMs: resolveSessionHandoffRuntimeConfig().machineRpcTimeoutMs,
+        });
+        const parsed = SessionHandoffAbortResponseV2Schema.safeParse(raw);
+        if (
+            !parsed.success
+            || parsed.data.targetCleanup.status !== 'proved_absent'
+            || !parsed.data.status.recoveryActions.includes('restart_on_source')
+        ) {
+            return { ok: false, error: 'Target absence could not be revalidated' };
+        }
+    } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : 'Target absence revalidation failed' };
     }
     const sourceAgentRuntimeDescriptor = isAgentRuntimeDescriptorV1(sourceResume.agentRuntimeDescriptorV1)
         ? sourceResume.agentRuntimeDescriptorV1

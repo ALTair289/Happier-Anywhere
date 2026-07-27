@@ -5,6 +5,23 @@ import type { Metadata } from '@/sync/domains/state/storageTypes';
 import { buildSessionHandoffRecoveryPlan } from './recoveryPlan';
 
 describe('buildSessionHandoffRecoveryPlan', () => {
+    it('projects exact target cleanup coordinates for delayed source restart revalidation', () => {
+        expect(buildSessionHandoffRecoveryPlan({
+            handoffId: 'handoff_1',
+            sessionId: 'session_1',
+            sourceMachineId: 'source_1',
+            targetMachineId: 'target_1',
+            sourceMetadata: { flavor: 'claude', path: '/repo', host: 'source-host', claudeSessionId: 'vendor_1' },
+            sessionStorageMode: 'persisted',
+            serverId: 'server_1',
+        })).toMatchObject({
+            targetCleanup: {
+                machineId: 'target_1',
+                sessionId: 'session_1',
+                serverId: 'server_1',
+            },
+        });
+    });
     it('resolves aliased flavors and vendor resume ids through the agent registry', () => {
         const sourceMetadata = {
             flavor: 'open-code',

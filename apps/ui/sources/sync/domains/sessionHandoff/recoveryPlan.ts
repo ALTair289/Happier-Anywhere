@@ -8,7 +8,10 @@ import { normalizeCodexBackendMode } from '@happier-dev/protocol';
 import { resolveAgentIdFromFlavor } from '@/agents/registry/registryCore';
 import type { Metadata } from '@/sync/domains/state/storageTypes';
 
-type SessionHandoffRecoveryAction = 'restart_on_source' | 'keep_stopped';
+export type SessionHandoffRecoveryAction =
+    | 'restart_on_source'
+    | 'keep_stopped'
+    | 'retry_source_cleanup';
 
 export type SessionHandoffSourceResumePlan = Readonly<{
     sessionId: string;
@@ -60,6 +63,33 @@ export type SessionHandoffRecoveryPlan = Readonly<{
     handoffId: string;
     actions: readonly SessionHandoffRecoveryAction[];
     sourceResume?: SessionHandoffSourceResumePlan;
+    targetCleanup?: Readonly<{
+        machineId: string;
+        sessionId: string;
+        serverId: string | null;
+    }>;
+    sourceCleanup?: Readonly<{
+        machineId: string;
+        serverId: string | null;
+        workspaceReplicationReverseSourceRootPath: string | null;
+        workspaceReplicationReverseTargetRootPath: string | null;
+    }>;
+    targetFinalization?: Readonly<{
+        sessionId: string;
+        sourceMachineId: string;
+        targetMachineId: string;
+        serverId: string | null;
+        sourceMetadataForHandoff: Metadata;
+        providerId: AgentId;
+        sessionStorageBefore: 'direct' | 'persisted';
+        sessionStorageAfter: 'direct' | 'persisted';
+        targetPath: string;
+        transportStrategy: 'direct_peer' | 'server_routed_stream';
+        completedAtMs: number;
+        targetRemoteSessionId: string;
+        targetDirectSource: Record<string, unknown>;
+        targetRuntimeDescriptor?: unknown;
+    }>;
 }>;
 
 function resolveVendorResumeId(metadata: Metadata): string | undefined {
@@ -73,6 +103,7 @@ export function buildSessionHandoffRecoveryPlan(input: Readonly<{
     handoffId: string;
     sessionId: string;
     sourceMachineId: string;
+    targetMachineId?: string;
     sourceMetadata: Metadata;
     sessionStorageMode: 'direct' | 'persisted';
     serverId?: string | null;
@@ -86,6 +117,13 @@ export function buildSessionHandoffRecoveryPlan(input: Readonly<{
     return {
         handoffId: input.handoffId,
         actions: ['restart_on_source', 'keep_stopped'],
+        ...(input.targetMachineId ? {
+            targetCleanup: {
+                machineId: input.targetMachineId,
+                sessionId: input.sessionId,
+                serverId: typeof input.serverId === 'string' ? input.serverId.trim() || null : null,
+            },
+        } : {}),
         sourceResume: {
             sessionId: input.sessionId,
             machineId: input.sourceMachineId,
