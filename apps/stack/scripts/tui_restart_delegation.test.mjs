@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 
 import {
   beginTuiRestartOperation,
+  createTuiRuntimeOwnershipTracker,
   resolveTuiShutdownChildren,
 } from './utils/tui/restart_operation.mjs';
 
@@ -67,6 +68,36 @@ function begin(harness, currentOperation = null) {
   });
 }
 
+test('TUI cleanup remains bound to the runtime owner admitted by its own child', () => {
+  const tracker = createTuiRuntimeOwnershipTracker({
+    runtimeOwnerBeforeSpawn: { ownerPid: 101, startedAt: '2026-07-21T07:50:00.000Z' },
+  });
+
+  tracker.observe({
+    runtimeOwner: { ownerPid: 101, startedAt: '2026-07-21T07:50:00.000Z' },
+    childActive: true,
+  });
+  assert.equal(tracker.getExpectedOwner(), null);
+
+  tracker.observe({
+    runtimeOwner: { ownerPid: 202, startedAt: '2026-07-21T08:00:00.000Z' },
+    childActive: true,
+  });
+  assert.deepEqual(tracker.getExpectedOwner(), {
+    ownerPid: 202,
+    startedAt: '2026-07-21T08:00:00.000Z',
+  });
+
+  tracker.observe({
+    runtimeOwner: { ownerPid: 303, startedAt: '2026-07-21T09:00:00.000Z' },
+    childActive: false,
+  });
+  assert.deepEqual(tracker.getExpectedOwner(), {
+    ownerPid: 202,
+    startedAt: '2026-07-21T08:00:00.000Z',
+  });
+});
+
 test('restart refuses to spawn until the incumbent runtime owner incarnation is known', () => {
   const harness = createHarness();
 
@@ -84,6 +115,26 @@ test('restart refuses to spawn until the incumbent runtime owner incarnation is 
   assert.equal(result.reason, 'missing_runtime_owner');
   assert.equal(harness.spawnArgs.length, 0);
   assert.match(harness.logs.at(-1), /current runtime owner evidence is unavailable/i);
+});
+
+test('restart recovers a terminal child when no runtime owner remains', () => {
+  const harness = createHarness();
+  harness.previousChild.exit(1);
+
+  const result = beginTuiRestartOperation({
+    previousChild: harness.previousChild,
+    previousRuntimeOwner: null,
+    restartArgs: ['stack', 'dev', 'exp1', '--watch', '--restart'],
+    spawnChild: harness.spawnChild,
+    trackChild: harness.trackChild,
+    log: harness.log,
+    refresh: harness.refresh,
+  });
+
+  assert.equal(result.started, true);
+  assert.equal(result.reason, 'started');
+  assert.deepEqual(harness.spawnArgs, [['stack', 'dev', 'exp1', '--watch', '--restart']]);
+  assert.equal(result.replacementChild, harness.replacementChild);
 });
 
 test('restart operation spawns the canonical candidate without terminating the previous child', () => {

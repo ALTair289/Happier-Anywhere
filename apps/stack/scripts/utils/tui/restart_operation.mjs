@@ -15,6 +15,30 @@ function isSameRuntimeOwnerIncarnation(left, right) {
   return Boolean(left && right && left.ownerPid === right.ownerPid && left.startedAt === right.startedAt);
 }
 
+export function createTuiRuntimeOwnershipTracker({ runtimeOwnerBeforeSpawn = null } = {}) {
+  const baseline = normalizeRuntimeOwnerIncarnation(runtimeOwnerBeforeSpawn);
+  let expectedOwner = null;
+
+  return {
+    observe({ runtimeOwner = null, childActive = false, replacementAdmitted = false } = {}) {
+      const observed = normalizeRuntimeOwnerIncarnation(runtimeOwner);
+      if (!observed) return false;
+      if (replacementAdmitted) {
+        expectedOwner = observed;
+        return true;
+      }
+      if (!expectedOwner && childActive && !isSameRuntimeOwnerIncarnation(observed, baseline)) {
+        expectedOwner = observed;
+        return true;
+      }
+      return false;
+    },
+    getExpectedOwner() {
+      return expectedOwner ? { ...expectedOwner } : null;
+    },
+  };
+}
+
 function uniqueActiveChildren(children) {
   const seen = new Set();
   const active = [];
@@ -44,7 +68,7 @@ export function beginTuiRestartOperation({
   }
 
   const incumbentRuntimeOwner = normalizeRuntimeOwnerIncarnation(previousRuntimeOwner);
-  if (!incumbentRuntimeOwner) {
+  if (!incumbentRuntimeOwner && isActiveChild(previousChild)) {
     log('restart: current runtime owner evidence is unavailable; wait for the stack summary to refresh');
     refresh();
     return { started: false, reason: 'missing_runtime_owner', operation: null };

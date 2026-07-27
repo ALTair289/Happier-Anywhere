@@ -51,7 +51,11 @@ import { reconcileDaemonPaneAfterDaemonStarts } from './utils/tui/daemon_pane_re
 import { buildScriptPtyArgs } from './utils/tui/script_pty_command.mjs';
 import { resolveTuiChildTerminationPlan } from './utils/tui/child_termination_plan.mjs';
 import { installTuiStdinErrorGuard } from './utils/tui/stdin_error_guard.mjs';
-import { beginTuiRestartOperation, resolveTuiShutdownChildren } from './utils/tui/restart_operation.mjs';
+import {
+  beginTuiRestartOperation,
+  createTuiRuntimeOwnershipTracker,
+  resolveTuiShutdownChildren,
+} from './utils/tui/restart_operation.mjs';
 import { checkDaemonStatePingAware } from './daemon.mjs';
 import { getObservedStackDaemonAsync } from './utils/stack/runtime_daemon_state.mjs';
 import { loadDevTargetsConfig } from './utils/dev_targets/config.mjs';
@@ -629,6 +633,12 @@ async function main() {
   let restartOperation = null;
   let observedRuntimeOwner = null;
   let tauriLaunchState = { cancelled: false };
+  const runtimeOwnerBeforeSpawn = stackName
+    ? await readStackRuntimeStateFile(getStackRuntimeStatePath(stackName)).catch(() => null)
+    : null;
+  const runtimeOwnershipTracker = createTuiRuntimeOwnershipTracker({
+    runtimeOwnerBeforeSpawn,
+  });
 
   const wantsPty = process.platform !== 'win32' && (await commandExists('script', { cwd: rootDir }));
   // In TUI mode, we intentionally do not forward keyboard input to the child process (stdin is ignored),
@@ -813,7 +823,12 @@ async function main() {
       observedRuntimeOwner = runtime
         ? { ownerPid: runtime.ownerPid, startedAt: runtime.startedAt }
         : null;
-      restartOperation?.observeRuntimeOwner?.(observedRuntimeOwner);
+      const replacementAdmitted = restartOperation?.observeRuntimeOwner?.(observedRuntimeOwner) === true;
+      runtimeOwnershipTracker.observe({
+        runtimeOwner: observedRuntimeOwner,
+        childActive: Boolean(child && child.exitCode == null && child.signalCode == null),
+        replacementAdmitted,
+      });
     }
     const idx = paneIndexById.get('summary');
     try {
@@ -1434,11 +1449,22 @@ async function main() {
     // stack-owned infra processes are stopped (server/expo/daemon) even if the child exits early.
     let cleanupError = null;
     if (stackName && isTuiStartLikeForwardedArgs(forwarded)) {
-      try {
-        await stopStackForTuiExit({ rootDir, stackName, json: false, noDocker: false });
-      } catch (e) {
-        cleanupError = e;
-        logOrch(`stop failed: ${e instanceof Error ? e.message : String(e)}`);
+      const expectedRuntimeOwner = runtimeOwnershipTracker.getExpectedOwner();
+      if (expectedRuntimeOwner) {
+        try {
+          await stopStackForTuiExit({
+            rootDir,
+            stackName,
+            json: false,
+            noDocker: false,
+            expectedRuntimeOwner,
+          });
+        } catch (e) {
+          cleanupError = e;
+          logOrch(`stop failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      } else {
+        logOrch('stop skipped: this TUI did not admit a runtime owner');
       }
     }
 
