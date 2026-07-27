@@ -5,7 +5,7 @@ import type {
 } from '@/rpc/handlers/registerSessionHandlers';
 
 import { startAutomationLeaseHeartbeat } from './automationLeaseHeartbeat';
-import { enqueueAndMaterializeAutomationPrompt } from './automationPendingQueueClient';
+import { enqueueAutomationPrompt } from './automationPendingQueueClient';
 import { runAutomationAgainstExistingSession } from './automationRunExistingSession';
 import { runAutomationAsNewSession } from './automationRunNewSession';
 import { parseAutomationTemplateExecution, type AutomationTemplateEncryption } from './automationTemplateExecution';
@@ -133,12 +133,7 @@ export async function executeClaimedRun(params: {
       ...template,
       existingSessionId: template.existingSessionId!,
     };
-    const newSessionTemplate = {
-      ...template,
-      ...(typeof template.prompt === 'string' && template.prompt.trim().length > 0
-        ? { initialPrompt: template.prompt }
-        : {}),
-    };
+    const newSessionTemplate = { ...template };
 
     const spawnResult = template.targetType === 'existing_session'
       ? await runAutomationAgainstExistingSession({
@@ -147,6 +142,8 @@ export async function executeClaimedRun(params: {
       })
       : await runAutomationAsNewSession({
         spawnSession,
+        runId: claimed.run.id,
+        ...(typeof template.prompt === 'string' ? { firstInputText: template.prompt } : {}),
         template: newSessionTemplate,
       });
 
@@ -165,7 +162,7 @@ export async function executeClaimedRun(params: {
         }
 
         try {
-          await enqueueAndMaterializeAutomationPrompt({
+          await enqueueAutomationPrompt({
             token,
             sessionId: template.existingSessionId!,
             prompt: template.prompt,

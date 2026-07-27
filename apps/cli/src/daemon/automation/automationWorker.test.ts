@@ -94,8 +94,6 @@ describe('automationWorker', () => {
       `happier-automation-worker-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`,
     );
 
-    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
-
     mockGet.mockRejectedValue(createAxios404('https://api.example.test/v2/automations/daemon/assignments'));
     mockPost.mockRejectedValue(createAxios404('https://api.example.test/v2/automations/runs/claim'));
 
@@ -114,54 +112,92 @@ describe('automationWorker', () => {
       } as NodeJS.ProcessEnv,
     });
 
-    // Drive a refresh directly to avoid relying on timers (and to surface any hangs deterministically).
-    await worker.refreshAssignments();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(mockGet).toHaveBeenCalledTimes(1);
 
-    expect(mockGet).toHaveBeenCalled();
-    expect(clearIntervalSpy).toHaveBeenCalled();
+    mockGet.mockClear();
+    await worker.refreshAssignments();
+    expect(mockGet).not.toHaveBeenCalled();
+
+    worker.handleServerUpdate({
+      id: 'u-1',
+      seq: 1,
+      createdAt: Date.now(),
+      body: {
+        t: 'automation-assignment-updated',
+        machineId: 'machine-1',
+        automationId: 'automation-1',
+        enabled: true,
+        updatedAt: Date.now(),
+      },
+    } as any);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(mockGet).not.toHaveBeenCalled();
 
     worker.stop();
   }, 60_000);
 
-  it('does not call claim when there are no enabled assignments', async () => {
-    vi.useFakeTimers();
-    try {
-      process.env.HAPPIER_SERVER_URL = 'https://api.example.test';
-      process.env.HAPPIER_WEBAPP_URL = 'https://app.example.test';
-      process.env.HAPPIER_HOME_DIR = join(
-        os.tmpdir(),
-        `happier-automation-worker-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`,
-      );
+  it('does not make time-driven requests after the startup assignment refresh', async () => {
+    process.env.HAPPIER_SERVER_URL = 'https://api.example.test';
+    process.env.HAPPIER_WEBAPP_URL = 'https://app.example.test';
+    process.env.HAPPIER_HOME_DIR = join(
+      os.tmpdir(),
+      `happier-automation-worker-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`,
+    );
 
-      mockGet.mockResolvedValue({ data: { assignments: [] } });
-      mockPost.mockResolvedValue({ data: { run: null, automation: null } });
+    mockGet.mockResolvedValue({
+      data: {
+        assignments: [{
+          machineId: 'machine-1',
+          enabled: true,
+          priority: 0,
+          updatedAt: Date.now(),
+          automation: {
+            id: 'automation-1',
+            name: 'A1',
+            enabled: true,
+            schedule: { kind: 'interval', scheduleExpr: null, everyMs: 60_000, timezone: null },
+            targetType: 'new_session',
+            templateCiphertext: 'ciphertext',
+            templateVersion: 1,
+            nextRunAt: null,
+            lastRunAt: null,
+            updatedAt: Date.now(),
+          },
+        }],
+      },
+    });
+    mockPost.mockResolvedValue({ data: { run: null, automation: null } });
 
-      const { reloadConfiguration } = await import('@/configuration');
-      reloadConfiguration();
+    const { reloadConfiguration } = await import('@/configuration');
+    reloadConfiguration();
 
-      const { startAutomationWorker } = await import('./automationWorker');
-      const worker = startAutomationWorker({
-        token: 'token-1',
-        machineId: 'machine-1',
-        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
-        spawnSession: vi.fn(async () => ({ type: 'error' as const, errorCode: 'SPAWN_FAILED' as const, errorMessage: 'noop' })),
-        env: {
-          HAPPIER_AUTOMATION_ASSIGNMENT_REFRESH_MS: '600000',
-          HAPPIER_AUTOMATION_CLAIM_POLL_MS: '1000',
-        } as NodeJS.ProcessEnv,
-      });
+    const { startAutomationWorker } = await import('./automationWorker');
+    const worker = startAutomationWorker({
+      token: 'token-1',
+      machineId: 'machine-1',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
+      spawnSession: vi.fn(async () => ({ type: 'error' as const, errorCode: 'SPAWN_FAILED' as const, errorMessage: 'noop' })),
+      env: {
+        HAPPIER_AUTOMATION_ASSIGNMENT_REFRESH_MS: '5000',
+        HAPPIER_AUTOMATION_CLAIM_POLL_MS: '1000',
+        HAPPIER_AUTOMATION_LEASE_MS: '5000',
+      } as NodeJS.ProcessEnv,
+    });
 
-      await worker.refreshAssignments();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(mockGet).toHaveBeenCalledTimes(1);
 
-      await vi.advanceTimersByTimeAsync(120_000);
+    mockGet.mockClear();
+    await new Promise((resolve) => setTimeout(resolve, 5_200));
+    const assignmentRequestCount = mockGet.mock.calls.length;
+    const claimRequestCount = mockPost.mock.calls.length;
+    worker.stop();
 
-      expect(mockPost).not.toHaveBeenCalled();
-
-      worker.stop();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+    expect(assignmentRequestCount).toBe(0);
+    expect(claimRequestCount).toBe(0);
+  }, 120_000);
 
   it('suppresses assignment refresh while paused and resumes it afterwards', async () => {
     process.env.HAPPIER_SERVER_URL = 'https://api.example.test';
@@ -188,6 +224,9 @@ describe('automationWorker', () => {
         HAPPIER_AUTOMATION_CLAIM_POLL_MS: '1000',
       } as NodeJS.ProcessEnv,
     });
+
+    await worker.refreshAssignments();
+    mockGet.mockClear();
 
     worker.pause();
     await worker.refreshAssignments();

@@ -7,6 +7,7 @@ import { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { encodeBase64, encryptLegacy } from '@/api/encryption';
 import { ExecutionBudgetRegistry } from '@/daemon/executionBudget/ExecutionBudgetRegistry';
+import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 
 import type { AutomationDaemonAssignmentsResponse } from './automationTypes';
 
@@ -562,7 +563,7 @@ describe('automationWorker integration', () => {
     }
   });
 
-  it('enqueues and materializes existing_session automation prompt when provided', async () => {
+  it('enqueues an existing_session automation prompt without daemon-side materialization', async () => {
     const now = Date.now();
     const template = buildEncryptedTemplateCiphertext({
       directory: '/tmp/happier-automation',
@@ -635,7 +636,7 @@ describe('automationWorker integration', () => {
         }),
       );
       expect(server.state.pendingEnqueue).toHaveLength(1);
-      expect(server.state.pendingMaterialize).toHaveLength(1);
+      expect(server.state.pendingMaterialize).toHaveLength(0);
       expect(server.state.failed).toHaveLength(0);
     } finally {
       worker.stop();
@@ -724,7 +725,7 @@ describe('automationWorker integration', () => {
           }),
         },
       }));
-      expect(server.state.pendingMaterialize).toHaveLength(1);
+      expect(server.state.pendingMaterialize).toHaveLength(0);
       expect(server.state.failed).toHaveLength(0);
     } finally {
       worker.stop();
@@ -733,7 +734,7 @@ describe('automationWorker integration', () => {
     }
   });
 
-  it('enqueues and materializes existing_session automation prompt', async () => {
+  it('does not add a later daemon materialization attempt for an enqueued automation prompt', async () => {
     const now = Date.now();
     const template = buildEncryptedTemplateCiphertext({
       directory: '/tmp/happier-automation',
@@ -801,7 +802,7 @@ describe('automationWorker integration', () => {
 	    try {
 	      await waitForCondition(() => server.state.succeeded.length === 1);
 	      expect(server.state.pendingEnqueue).toHaveLength(1);
-	      expect(server.state.pendingMaterialize).toHaveLength(1);
+	      expect(server.state.pendingMaterialize).toHaveLength(0);
 	      expect(server.state.failed).toHaveLength(0);
 	    } finally {
 	      worker.stop();
@@ -894,7 +895,7 @@ describe('automationWorker integration', () => {
     }
   });
 
-  it('passes new_session automation prompt to spawn options when provided', async () => {
+  it('spawns first and promotes a new_session automation prompt through Pending', async () => {
     const now = Date.now();
     const template = buildEncryptedTemplateCiphertext({
       directory: '/tmp/happier-automation',
@@ -940,7 +941,10 @@ describe('automationWorker integration', () => {
     vi.resetModules();
     const { startAutomationWorker } = await import('./automationWorker');
 
-    const spawnSession = vi.fn(async () => ({ type: 'success' as const, sessionId: 'session-automation-new-prompt' }));
+    const spawnSession = vi.fn(async (_options: SpawnSessionOptions) => ({
+      type: 'success' as const,
+      sessionId: 'session-automation-new-prompt',
+    }));
 
     const worker = startAutomationWorker({
       token: 'token-7',
@@ -961,9 +965,16 @@ describe('automationWorker integration', () => {
       expect(spawnSession).toHaveBeenCalledWith(
         expect.objectContaining({
           directory: '/tmp/happier-automation',
-          initialPrompt: 'Generate the daily maintenance summary.',
+          spawnNonce: 'automation:run-7',
+          pendingFirstInput: expect.objectContaining({
+            text: 'Generate the daily maintenance summary.',
+            localId: expect.stringMatching(/^spawn-first:/),
+          }),
         }),
       );
+      expect(spawnSession.mock.calls[0]?.[0]).not.toHaveProperty('initialPrompt');
+      expect(server.state.pendingEnqueue).toHaveLength(0);
+      expect(server.state.pendingMaterialize).toHaveLength(0);
       expect(server.state.failed).toHaveLength(0);
     } finally {
       worker.stop();
