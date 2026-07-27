@@ -94,4 +94,40 @@ describe('sessionConfigurationSeed', () => {
         expect(tempData.resumeSessionId).toBeUndefined();
         expect(tempData.checkoutCreationDraft).toBeNull();
     });
+
+    it('seeds from the newest valid aliases and honors a newer legacy mode tombstone', () => {
+        const tempData = buildNewSessionTempDataFromSessionConfiguration({
+            session: {
+                id: 'session-1',
+                encryptionMode: 'plain',
+                metadata: {
+                    path: '/workspace/source',
+                    host: 'source.local',
+                    flavor: 'codex',
+                    sessionModeOverrideV1: { v: 1, updatedAt: 10, modeId: 'plan' },
+                    acpSessionModeOverrideV1: { v: 1, updatedAt: 20, modeId: null },
+                    sessionConfigOptionOverridesV1: {
+                        v: 1,
+                        updatedAt: Number.NaN,
+                        overrides: { effort: { updatedAt: 10, value: 'low' } },
+                    },
+                    acpConfigOptionOverridesV1: {
+                        v: 1,
+                        updatedAt: 30,
+                        overrides: { effort: { updatedAt: 30, value: 'high' } },
+                    },
+                },
+                permissionMode: 'default',
+                permissionModeUpdatedAt: 1,
+            },
+            machineId: 'machine-target',
+        });
+
+        expect(tempData.acpSessionModeId).toBeNull();
+        expect(tempData.sessionConfigOptionOverrides).toEqual({
+            v: 1,
+            updatedAt: 30,
+            overrides: { effort: { updatedAt: 30, value: 'high' } },
+        });
+    });
 });
