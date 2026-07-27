@@ -210,6 +210,7 @@ export function getObservedStackDaemon(
   {
     cliHomeDir = '',
     internalServerUrl = '',
+    stackName = null,
     runtimeDaemonPid = null,
     runtimeDaemonPids = [],
     env = process.env,
@@ -221,7 +222,7 @@ export function getObservedStackDaemon(
 ) {
   const daemonState =
     typeof checkDaemonStateImpl === 'function' && String(cliHomeDir ?? '').trim()
-      ? checkDaemonStateImpl(cliHomeDir, { serverUrl: internalServerUrl, env })
+      ? checkDaemonStateImpl(cliHomeDir, { serverUrl: internalServerUrl, env, stackName })
       : null;
 
   return observeStackDaemonRuntime(
@@ -234,6 +235,7 @@ export async function getObservedStackDaemonAsync(
   {
     cliHomeDir = '',
     internalServerUrl = '',
+    stackName = null,
     runtimeDaemonPid = null,
     runtimeDaemonPids = [],
     env = process.env,
@@ -245,7 +247,7 @@ export async function getObservedStackDaemonAsync(
 ) {
   const daemonState =
     typeof checkDaemonStateImpl === 'function' && String(cliHomeDir ?? '').trim()
-      ? await checkDaemonStateImpl(cliHomeDir, { serverUrl: internalServerUrl, env })
+      ? await checkDaemonStateImpl(cliHomeDir, { serverUrl: internalServerUrl, env, stackName })
       : null;
 
   return observeStackDaemonRuntime(
@@ -415,10 +417,15 @@ export async function syncStackRuntimeDaemonPidFromDaemonState(
   const effectiveRuntimeDaemonPids = explicitRuntimeDaemonPids.length > 0
     ? explicitRuntimeDaemonPids
     : normalizeDaemonPidList(runtimeState?.processes?.daemonPids);
+  const stackName =
+    String(runtimeState?.stackName ?? '').trim()
+    || String(env?.HAPPIER_STACK_STACK ?? '').trim()
+    || null;
   const observed = await getObservedStackDaemonAsync(
     {
       cliHomeDir,
       internalServerUrl,
+      stackName,
       runtimeDaemonPid: effectiveRuntimeDaemonPid,
       runtimeDaemonPids: effectiveRuntimeDaemonPids,
       env,

@@ -737,7 +737,7 @@ test('change during a cycle runs exactly one trailing cycle with the latest sign
   ]);
 });
 
-test('a superseded cold-start-capable build reaches its executor while one trailing latest generation remains pending', async () => {
+test('a superseded activation-capable build reaches its executor while one trailing latest generation remains pending', async () => {
   const calls = [];
   const daemon = createDescriptor({ id: 'daemon:cli', target: 'daemon' });
   let onChange = null;
@@ -749,7 +749,7 @@ test('a superseded cold-start-capable build reaches its executor while one trail
           if (context.cycle === 1) {
             daemon.setSignature('2');
             await onChange({ eventType: 'change', filename: 'second.ts' });
-            return { ok: true, allowSupersededColdStart: true };
+            return { ok: true, allowSupersededActivation: true };
           }
           return { ok: true };
         },

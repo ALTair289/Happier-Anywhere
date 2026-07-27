@@ -560,6 +560,53 @@ test('syncStackRuntimeDaemonPidFromDaemonState adopts and persists an authentica
   )));
 });
 
+test('syncStackRuntimeDaemonPidFromDaemonState gives the ping-aware observer the runtime stack identity', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-observer-stack-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtimeStatePath = join(root, 'stack.runtime.json');
+  const cliHomeDir = join(root, 'cli');
+  await writeFile(runtimeStatePath, JSON.stringify({
+    version: 1,
+    stackName: 'remote-windows',
+    processes: {},
+  }) + '\n', 'utf8');
+
+  const observedOptions = [];
+  const result = await syncStackRuntimeDaemonPidFromDaemonState(
+    {
+      runtimeStatePath,
+      cliHomeDir,
+      internalServerUrl: 'http://127.0.0.1:3009',
+      env: {},
+    },
+    {
+      checkDaemonStateImpl: (_homeDir, options) => {
+        observedOptions.push(options);
+        return options.stackName === 'remote-windows'
+          ? {
+              status: 'running',
+              pid: 4242,
+              processInstanceFingerprint: 'win32-cim:stable',
+            }
+          : { status: 'unreachable', pid: 4242, reason: 'daemon_not_owned' };
+      },
+      isPidAliveImpl: () => true,
+      resolvePidStackOwnershipImpl: async (_pid, context) => (
+        context.processInstanceFingerprint === 'win32-cim:stable'
+          ? { owned: true, reason: 'process_instance' }
+          : { owned: null, reason: 'process-identity-unsupported' }
+      ),
+    },
+  );
+
+  assert.equal(observedOptions[0]?.stackName, 'remote-windows');
+  assert.equal(result.running, true);
+  assert.equal(result.pid, 4242);
+});
+
 test('syncStackRuntimeDaemonPidFromDaemonState rejects unowned daemon.state pid without marking runtime fallback running', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-unowned-state-'));
   t.after(async () => {

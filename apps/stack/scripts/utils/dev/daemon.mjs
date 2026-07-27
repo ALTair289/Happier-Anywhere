@@ -203,11 +203,13 @@ export function createHappyCliReloadExecutor({
 } = {}) {
   let successorDistClosureFingerprint = null;
   let successorPublicationSuperseded = false;
+  let successorActivationMayOutliveGeneration = false;
   return {
     target: 'daemon',
     async build(context = {}) {
       successorDistClosureFingerprint = null;
       successorPublicationSuperseded = false;
+      successorActivationMayOutliveGeneration = false;
       if (!startDaemon) {
         logger.warn('[local] watch: happier-cli reload skipped (daemon-disabled).');
         return { skipped: true, reason: 'daemon-disabled' };
@@ -248,15 +250,20 @@ export function createHappyCliReloadExecutor({
           `[local] watch: happier-cli build manifest is invalid (${distClosure.reason}); refusing to restart daemon to avoid runtime fingerprint drift.`
         );
       }
+      const adoptedConcurrentPublication = (
+        buildResult?.reason === 'concurrent_build_already_completed'
+        || buildResult?.reason === 'concurrent_build_superseded'
+      );
       if (buildResult?.current !== true) {
-        if (buildResult?.built === true) {
+        if (buildResult?.built === true || adoptedConcurrentPublication) {
           successorDistClosureFingerprint = distClosure.fingerprint;
           successorPublicationSuperseded = true;
+          successorActivationMayOutliveGeneration = true;
           logger.warn(
-            '[local] watch: happier-cli published a runnable build that newer edits already superseded; ' +
-              'it is eligible only for degraded recovery of an absent daemon while the latest generation remains pending.'
+            '[local] watch: happier-cli published or adopted a runnable build that newer edits already superseded; ' +
+              'activating it now while the reload coordinator builds the trailing latest generation.'
           );
-          return { ok: true, allowSupersededColdStart: true };
+          return { ok: true, allowSupersededActivation: true };
         }
         logger.warn(
           `[local] watch: happier-cli rebuild skipped (${buildResult.reason ?? 'unknown'}); keeping the current daemon running.`
@@ -264,14 +271,23 @@ export function createHappyCliReloadExecutor({
         return { skipped: true, reason: `cli-build-${buildResult.reason ?? 'unknown'}` };
       }
       successorDistClosureFingerprint = distClosure.fingerprint;
-      return { ok: true };
+      successorActivationMayOutliveGeneration = (
+        buildResult?.built === true
+        || adoptedConcurrentPublication
+      );
+      return {
+        ok: true,
+        ...(successorActivationMayOutliveGeneration
+          ? { allowSupersededActivation: true }
+          : {}),
+      };
     },
     async restart(context = {}) {
       if (!startDaemon || isShuttingDown?.()) return { skipped: true, reason: 'daemon-disabled' };
       const generationIsCurrent = async () =>
         typeof context.revalidateGeneration !== 'function' || context.revalidateGeneration();
       const coldStart = async () => {
-        if (!successorPublicationSuperseded && !await generationIsCurrent()) {
+        if (!successorActivationMayOutliveGeneration && !await generationIsCurrent()) {
           return { skipped: true, reason: 'stale-generation' };
         }
         if (successorPublicationSuperseded) {
@@ -308,13 +324,9 @@ export function createHappyCliReloadExecutor({
         stackName,
       });
       if (ping?.ok === true) {
-        if (successorPublicationSuperseded) {
-          logger.warn(
-            '[local] watch: runnable CLI publication is already superseded; preserving the healthy incumbent until the trailing latest generation is ready.'
-          );
-          return { skipped: true, reason: 'superseded-incumbent-healthy' };
+        if (!successorActivationMayOutliveGeneration && !await generationIsCurrent()) {
+          return { skipped: true, reason: 'stale-generation' };
         }
-        if (!await generationIsCurrent()) return { skipped: true, reason: 'stale-generation' };
         let replacement;
         try {
           replacement = await restartDaemonViaControlServerImpl({

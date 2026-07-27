@@ -361,14 +361,14 @@ export function startDevReloadCoordinator({
       await executor?.publishLifecycle?.({ phase: 'planned', plan });
     }
 
-    const supersededColdStartTargets = new Set();
+    const supersededActivationTargets = new Set();
     try {
       const restartTargets = [];
       for (const target of targets) {
         if (closed || isShuttingDown?.()) return;
         const result = await executorsByTarget.get(target)?.build?.(context);
-        if (result?.allowSupersededColdStart === true) {
-          supersededColdStartTargets.add(target);
+        if (target === 'daemon' && result?.allowSupersededActivation === true) {
+          supersededActivationTargets.add(target);
         }
         if (result?.skipped === true) continue;
         restartTargets.push(target);
@@ -390,7 +390,7 @@ export function startDevReloadCoordinator({
 
     if (!await context.revalidateGeneration()) {
       const canceledTargets = targets.filter((target) => (
-        !supersededColdStartTargets.has(target)
+        !supersededActivationTargets.has(target)
       ));
       for (const target of canceledTargets) {
         try {
@@ -403,7 +403,7 @@ export function startDevReloadCoordinator({
         }
       }
       context.restartTargets = (context.restartTargets ?? []).filter((target) => (
-        supersededColdStartTargets.has(target)
+        supersededActivationTargets.has(target)
       ));
       if (!context.restartTargets.length) return;
     }

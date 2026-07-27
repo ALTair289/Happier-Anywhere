@@ -285,7 +285,7 @@ test('reload executor restarts from an already-current dist and preserves the st
   assert.equal(restartCalls, 1, 'a watcher generation must not be consumed without activating the current dist');
 });
 
-test('reload executor retries lock contention and adopts the concurrently published CLI build', async (t) => {
+test('reload executor retries lock contention and activates the concurrently published CLI build even after newer edits', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-lock-adoption-'));
   t.after(async () => rm(root, { recursive: true, force: true }));
 
@@ -319,8 +319,8 @@ test('reload executor retries lock contention and adopts the concurrently publis
         }
         return {
           built: false,
-          current: true,
-          reason: 'concurrent_build_already_completed',
+          current: false,
+          reason: 'concurrent_build_superseded',
         };
       },
       pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
@@ -334,10 +334,13 @@ test('reload executor retries lock contention and adopts the concurrently publis
 
   assert.deepEqual(
     await executor.build({ revalidateGeneration: async () => true }),
-    { ok: true },
+    { ok: true, allowSupersededActivation: true },
   );
   assert.equal(buildCalls, 2);
-  assert.deepEqual(await executor.restart(), { restarted: true, mode: 'overlap' });
+  assert.deepEqual(
+    await executor.restart({ revalidateGeneration: async () => false }),
+    { restarted: true, mode: 'overlap' },
+  );
   assert.equal(restartCalls, 1);
 });
 
@@ -381,7 +384,7 @@ test('reload executor cold-starts an absent daemon from a runnable superseded pu
 
   assert.deepEqual(await executor.build(), {
     ok: true,
-    allowSupersededColdStart: true,
+    allowSupersededActivation: true,
   });
   assert.deepEqual(
     await executor.restart({ revalidateGeneration: async () => false }),
@@ -392,7 +395,7 @@ test('reload executor cold-starts an absent daemon from a runnable superseded pu
   assert.ok(warnings.some((message) => /superseded.*degraded/i.test(message)));
 });
 
-test('reload executor preserves a healthy incumbent instead of activating a superseded publication', async (t) => {
+test('reload executor activates a successful superseded publication over a healthy incumbent', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-superseded-incumbent-'));
   t.after(async () => rm(root, { recursive: true, force: true }));
 
@@ -424,6 +427,7 @@ test('reload executor preserves a healthy incumbent instead of activating a supe
       pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
       restartDaemonViaControlServerImpl: async () => {
         replacementCalls += 1;
+        return { status: 'restarting', previousPid: 111, pid: 222 };
       },
       logger: { log() {}, warn() {}, error() {} },
     },
@@ -431,13 +435,13 @@ test('reload executor preserves a healthy incumbent instead of activating a supe
 
   assert.deepEqual(await executor.build(), {
     ok: true,
-    allowSupersededColdStart: true,
+    allowSupersededActivation: true,
   });
   assert.deepEqual(
     await executor.restart({ revalidateGeneration: async () => false }),
-    { skipped: true, reason: 'superseded-incumbent-healthy' },
+    { restarted: true, mode: 'overlap' },
   );
-  assert.equal(replacementCalls, 0);
+  assert.equal(replacementCalls, 1);
 });
 
 test('reload executor persists the authenticated overlap successor for new and already-running restarts', async (t) => {
@@ -590,7 +594,7 @@ test('reload executor awaits a stale source generation after control ping before
       stackName: 'dev',
     },
     {
-      ensureCliBuiltImpl: async () => ({ built: true, current: true, reason: 'test' }),
+      ensureCliBuiltImpl: async () => ({ built: false, current: true, reason: 'cache_hit' }),
       pingDaemonImpl: async () => {
         notifyPingStarted();
         await pingBlocked;
@@ -704,7 +708,7 @@ test('reload executor cold-start carries the admitted build fingerprint into dae
     },
   );
 
-  assert.deepEqual(await executor.build(), { ok: true });
+  assert.deepEqual(await executor.build(), { ok: true, allowSupersededActivation: true });
   assert.deepEqual(await executor.restart(), { restarted: true, mode: 'cold-start' });
   assert.equal(coldStartArgs?.admittedDistClosureFingerprint, 'abcdef1234567890');
 });
