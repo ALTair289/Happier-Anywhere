@@ -87,7 +87,7 @@ describe('ClaudeRemoteSubagentFileCollector', () => {
         type: 'assistant',
         message: {
           role: 'assistant',
-          content: [{ type: 'tool_use', id: 'tool_agent_1', name: 'Agent', input: { team_name: 'team-test', name: 'Alpha' } }],
+          content: [{ type: 'tool_use', id: ' tool_agent_1\n', name: 'Agent', input: { team_name: 'team-test', name: 'Alpha' } }],
         },
         parent_tool_use_id: null,
         session_id: 'sess_1',
@@ -97,7 +97,7 @@ describe('ClaudeRemoteSubagentFileCollector', () => {
         type: 'user',
         message: {
           role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: 'tool_agent_1', content: 'Spawned.' }],
+          content: [{ type: 'tool_result', tool_use_id: ' tool_agent_1\n', content: 'Spawned.' }],
         },
         tool_use_result: { status: 'teammate_spawned', agent_id: agentId, team_name: 'team-test', name: 'Alpha' },
         parent_tool_use_id: null,
@@ -108,11 +108,11 @@ describe('ClaudeRemoteSubagentFileCollector', () => {
 
       expect(imported).toHaveLength(1);
       expect(imported[0]?.body?.type).toBe('assistant');
-      expect(imported[0]?.body?.sidechainId).toBe('tool_agent_1');
+      expect(imported[0]?.body?.sidechainId).toBe(' tool_agent_1\n');
       expect(imported[0]?.meta).toMatchObject({
         importedFrom: 'claude-subagent-file',
         claudeAgentId: agentId,
-        sidechainId: 'tool_agent_1',
+        sidechainId: ' tool_agent_1\n',
       });
     } finally {
       collector.cleanup();
@@ -370,6 +370,7 @@ describe('ClaudeRemoteSubagentFileCollector', () => {
 
       expect(imported).toHaveLength(1);
       expect(sourceActivity).toHaveBeenCalledWith({
+        status: 'active',
         sidechainId: 'tool_task_1',
         agentId,
         providerTaskIds: [providerTaskId, agentId, 'tool_task_1'],
@@ -378,6 +379,69 @@ describe('ClaudeRemoteSubagentFileCollector', () => {
 
       await collector.syncAll();
       expect(sourceActivity).toHaveBeenCalledTimes(1);
+    } finally {
+      collector.cleanup();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports terminal source activity when a followed subagent JSONL closes after completion', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happy-subagent-sidechain-terminal-'));
+    const agentId = 'aa5e728';
+    const providerTaskId = 'background_task_terminal';
+    const jsonlPath = join(dir, `agent-${agentId}.jsonl`);
+
+    await writeFile(jsonlPath, makeJsonl([{
+      type: 'assistant',
+      uuid: 'a1',
+      isSidechain: true,
+      agentId,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    }]), 'utf8');
+
+    const sourceActivity = vi.fn();
+    const collector = new ClaudeRemoteSubagentFileCollector({
+      emitImported: () => {},
+      onSourceActivity: sourceActivity,
+      watchFile: () => () => {},
+      followPolicy: { sidechainCompletionGraceMs: 1 },
+    });
+
+    try {
+      collector.observe(taskToolUseMessage());
+      collector.observe({
+        type: 'user',
+        tool_use_result: {
+          status: 'completed',
+          backgroundTaskId: providerTaskId,
+          agentId,
+          outputFile: jsonlPath,
+        },
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'tool_task_1',
+              content: 'Async agent completed successfully.',
+            },
+          ],
+        },
+        parent_tool_use_id: null,
+        session_id: 'sess_1',
+      } as any);
+
+      await collector.syncAll();
+
+      await waitFor(() => {
+        expect(sourceActivity).toHaveBeenCalledWith({
+          status: 'terminal',
+          sidechainId: 'tool_task_1',
+          agentId,
+          providerTaskIds: [providerTaskId, agentId, 'tool_task_1'],
+          resolvedJsonlPath: expect.stringContaining(`agent-${agentId}.jsonl`),
+        });
+      });
     } finally {
       collector.cleanup();
       await rm(dir, { recursive: true, force: true });

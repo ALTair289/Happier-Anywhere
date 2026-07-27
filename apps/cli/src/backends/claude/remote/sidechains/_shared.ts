@@ -1,5 +1,6 @@
 import type { RawJSONLines } from '@/backends/claude/types';
 import { LruSet, setBoundedMap } from '@/utils/collections/lru';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 export { LruSet, setBoundedMap };
 
@@ -89,7 +90,7 @@ export function markUuidSeenAndReturnIsDuplicate(params: {
   maxSeenUuidsPerSidechain: number;
   maxSidechains?: number;
 }): boolean {
-  const uuid = String(params.uuid ?? '').trim();
+  const uuid = readNonBlankOpaqueIdentifier(params.uuid) ?? '';
   if (!uuid) return false;
 
   const existing = params.seenUuidsBySidechainId.get(params.sidechainId) ?? null;

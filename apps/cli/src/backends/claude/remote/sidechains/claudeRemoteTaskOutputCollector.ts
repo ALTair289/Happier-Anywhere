@@ -1,4 +1,5 @@
 import type { SDKAssistantMessage, SDKMessage, SDKUserMessage } from '../../sdk';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 import type { ClaudeTaskOutputImportedMessage, ClaudeTaskOutputToolResultSummary } from './claudeTaskOutputSidechainImporter';
 import { ClaudeTaskOutputSidechainImporter } from './claudeTaskOutputSidechainImporter';
@@ -33,7 +34,7 @@ export class ClaudeRemoteTaskOutputCollector {
       if (!item || typeof item !== 'object') continue;
       if ((item as any).type !== 'tool_use') continue;
 
-      const toolUseId = String((item as any).id ?? '').trim();
+      const toolUseId = readNonBlankOpaqueIdentifier((item as any).id) ?? '';
       const toolName = String((item as any).name ?? '').trim();
       if (!toolUseId || !toolName) continue;
 
@@ -53,7 +54,7 @@ export class ClaudeRemoteTaskOutputCollector {
       if (!item || typeof item !== 'object') continue;
       if ((item as any).type !== 'tool_result') continue;
 
-      const toolUseId = String((item as any).tool_use_id ?? '').trim();
+      const toolUseId = readNonBlankOpaqueIdentifier((item as any).tool_use_id) ?? '';
       if (!toolUseId) continue;
 
       const toolResultText = coerceToolResultText(

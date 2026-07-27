@@ -17,8 +17,8 @@ describe('ClaudeRemoteTaskOutputCollector', () => {
       message: {
         role: 'assistant',
         content: [
-          { type: 'tool_use', id: 'tool_task_1', name: 'Task', input: { prompt: 'do work' } },
-          { type: 'tool_use', id: 'tool_taskoutput_1', name: 'TaskOutput', input: { task_id: 'agent_1', block: true } },
+          { type: 'tool_use', id: ' tool_task_1\n', name: 'Task', input: { prompt: 'do work' } },
+          { type: 'tool_use', id: ' tool_taskoutput_1\n', name: 'TaskOutput', input: { task_id: 'agent_1', block: true } },
         ],
       },
     } as any;
@@ -32,7 +32,7 @@ describe('ClaudeRemoteTaskOutputCollector', () => {
         content: [
           {
             type: 'tool_result',
-            tool_use_id: 'tool_taskoutput_1',
+            tool_use_id: ' tool_taskoutput_1\n',
             content: [
               {
                 type: 'text',
@@ -63,7 +63,7 @@ describe('ClaudeRemoteTaskOutputCollector', () => {
     expect(beforeMap.imported.length).toBe(0);
     expect(beforeMap.taskOutputToolResults).toEqual([
       expect.objectContaining({
-        toolUseId: 'tool_taskoutput_1',
+        toolUseId: ' tool_taskoutput_1\n',
         taskId: 'agent_1',
         importedCount: 0,
         bufferedCount: 1,
@@ -74,18 +74,18 @@ describe('ClaudeRemoteTaskOutputCollector', () => {
       type: 'user',
       message: {
         role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: 'tool_task_1', content: 'agentId=agent_1' }],
+        content: [{ type: 'tool_result', tool_use_id: ' tool_task_1\n', content: 'agentId=agent_1' }],
       },
     } as any;
 
     const afterMap = collector.observe(taskResult);
     expect(afterMap.taskOutputToolResults).toEqual([]);
     expect(afterMap.imported.length).toBe(1);
-    expect((afterMap.imported[0]?.body as any).sidechainId).toBe('tool_task_1');
+    expect((afterMap.imported[0]?.body as any).sidechainId).toBe(' tool_task_1\n');
     expect(afterMap.imported[0]?.meta).toEqual(
       expect.objectContaining({
         importedFrom: 'claude-taskoutput',
-        claudeTaskOutputToolUseId: 'tool_taskoutput_1',
+        claudeTaskOutputToolUseId: ' tool_taskoutput_1\n',
         claudeTaskId: 'agent_1',
         claudeAgentId: 'agent_1',
         claudeRemoteSessionId: 'sess_1',

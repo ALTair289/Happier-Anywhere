@@ -4,6 +4,7 @@ import { configuration } from '@/configuration';
 import { startFileWatcher } from '@/integrations/watcher/startFileWatcher';
 import { parseRawJsonLinesObject } from '@/backends/claude/utils/parseRawJsonLines';
 import type { JsonlFollowerMetricEvent } from '@/agent/localControl/jsonlFollowMetrics';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 import { extractAgentIdFromTaskResultText } from './extractAgentIdFromTaskResult';
 import {
@@ -30,6 +31,7 @@ type WatchFile = (file: string, onFileChange: (file: string) => void) => () => v
 type EmitImported = (body: RawJSONLines, meta: Record<string, unknown>) => void;
 
 export type ClaudeRemoteSubagentFileActivity = Readonly<{
+  status: 'active' | 'terminal';
   sidechainId: string;
   agentId: string;
   providerTaskIds: readonly string[];
@@ -51,6 +53,7 @@ type Entry = {
   controller: JsonlFollowController;
   createdAtMs: number;
   lastTouchedAtMs: number;
+  didEmitTerminalSourceActivity: boolean;
 };
 
 type PendingRegistration = {
@@ -103,6 +106,7 @@ export class ClaudeRemoteSubagentFileCollector {
 
   cleanup(): void {
     for (const entry of this.entriesBySidechainId.values()) {
+      this.emitTerminalSourceActivity(entry);
       void entry.controller.stop();
     }
     this.entriesBySidechainId.clear();
@@ -134,7 +138,7 @@ export class ClaudeRemoteSubagentFileCollector {
       if (!item || typeof item !== 'object') continue;
       if ((item as any).type !== 'tool_use') continue;
 
-      const toolUseId = String((item as any).id ?? '').trim();
+      const toolUseId = readNonBlankOpaqueIdentifier((item as any).id) ?? '';
       const toolName = String((item as any).name ?? '').trim();
       if (!toolUseId || !toolName) continue;
       if (this.closedSidechainIds.has(toolUseId)) continue;
@@ -173,7 +177,7 @@ export class ClaudeRemoteSubagentFileCollector {
       if (!item || typeof item !== 'object') continue;
       if ((item as any).type !== 'tool_result') continue;
 
-      const toolUseId = String((item as any).tool_use_id ?? '').trim();
+      const toolUseId = readNonBlankOpaqueIdentifier((item as any).tool_use_id) ?? '';
       if (!toolUseId) continue;
       if (this.closedSidechainIds.has(toolUseId)) continue;
 
@@ -290,7 +294,7 @@ export class ClaudeRemoteSubagentFileCollector {
     const existing = this.entriesBySidechainId.get(params.sidechainId);
     if (existing) {
       if (params.markCompletedAfterRegister) {
-        existing.controller.markCompleted();
+        this.markEntryCompleted(params.sidechainId);
       }
       return;
     }
@@ -334,6 +338,7 @@ export class ClaudeRemoteSubagentFileCollector {
           resolvedJsonlPath,
         }, value, { replaySuppressor }),
       }),
+      didEmitTerminalSourceActivity: false,
     };
 
     this.entriesBySidechainId.set(params.sidechainId, entry);
@@ -341,7 +346,7 @@ export class ClaudeRemoteSubagentFileCollector {
     await entry.controller.start();
     this.enforceFollowerCaps();
     if (params.markCompletedAfterRegister) {
-      entry.controller.markCompleted();
+      this.markEntryCompleted(params.sidechainId);
     }
   }
 
@@ -351,9 +356,32 @@ export class ClaudeRemoteSubagentFileCollector {
   }
 
   private closeEntry(sidechainId: string): void {
+    const entry = this.entriesBySidechainId.get(sidechainId);
+    if (entry) {
+      this.emitTerminalSourceActivity(entry);
+    }
     this.entriesBySidechainId.delete(sidechainId);
     this.seenUuidsBySidechainId.delete(sidechainId);
     this.rememberClosedSidechainId(sidechainId);
+  }
+
+  private emitSourceActivity(
+    entry: Readonly<Pick<Entry, 'sidechainId' | 'agentId' | 'providerTaskIds' | 'resolvedJsonlPath'>>,
+    status: ClaudeRemoteSubagentFileActivity['status'],
+  ): void {
+    this.onSourceActivity?.({
+      status,
+      sidechainId: entry.sidechainId,
+      agentId: entry.agentId,
+      providerTaskIds: entry.providerTaskIds,
+      resolvedJsonlPath: entry.resolvedJsonlPath,
+    });
+  }
+
+  private emitTerminalSourceActivity(entry: Entry): void {
+    if (entry.didEmitTerminalSourceActivity) return;
+    entry.didEmitTerminalSourceActivity = true;
+    this.emitSourceActivity(entry, 'terminal');
   }
 
   private rememberClosedSidechainId(sidechainId: string): void {
@@ -417,12 +445,7 @@ export class ClaudeRemoteSubagentFileCollector {
 
     markRecordAsSidechain(parsed, params.sidechainId);
 
-    this.onSourceActivity?.({
-      sidechainId: params.sidechainId,
-      agentId: params.agentId,
-      providerTaskIds: params.providerTaskIds,
-      resolvedJsonlPath: params.resolvedJsonlPath,
-    });
+    this.emitSourceActivity(params, 'active');
 
     this.emitImported(parsed, {
       importedFrom: 'claude-subagent-file',

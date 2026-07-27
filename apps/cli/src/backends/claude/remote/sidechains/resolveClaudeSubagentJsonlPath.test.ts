@@ -134,7 +134,7 @@ describe('resolveClaudeSubagentJsonlPath', () => {
             JSON.stringify({
                 agentType: 'general-purpose',
                 description: 'Audit socket trust & reconnect catch-up',
-                toolUseId: 'toolu_01USVDQwphn8xe3aV76Gh4iZ',
+                toolUseId: ' toolu_01USVDQwphn8xe3aV76Gh4iZ\n',
             }),
             'utf8',
         );
@@ -146,6 +146,14 @@ describe('resolveClaudeSubagentJsonlPath', () => {
                     claudeSessionId,
                     agentId: '',
                     sidechainId: 'toolu_01USVDQwphn8xe3aV76Gh4iZ',
+                }),
+            ).toBeNull();
+            expect(
+                resolveClaudeSubagentJsonlPath({
+                    projectDir,
+                    claudeSessionId,
+                    agentId: '',
+                    sidechainId: ' toolu_01USVDQwphn8xe3aV76Gh4iZ\n',
                 }),
             ).toBe(jsonlPath);
         } finally {

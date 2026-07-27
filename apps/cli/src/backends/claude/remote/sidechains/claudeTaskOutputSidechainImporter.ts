@@ -1,5 +1,6 @@
 import type { RawJSONLines } from '@/backends/claude/types';
 import { configuration } from '@/configuration';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 import { extractAgentIdFromTaskResultText } from './extractAgentIdFromTaskResult';
 import { parseTaskOutputJsonlText } from './parseTaskOutputJsonl';
@@ -79,7 +80,7 @@ export class ClaudeTaskOutputSidechainImporter {
   }
 
   observeToolUse(params: ObserveToolUseParams): void {
-    const toolUseId = String(params.toolUseId ?? '').trim();
+    const toolUseId = readNonBlankOpaqueIdentifier(params.toolUseId) ?? '';
     const toolName = String(params.toolName ?? '').trim();
     if (!toolUseId || !toolName) return;
 
@@ -95,7 +96,7 @@ export class ClaudeTaskOutputSidechainImporter {
   }
 
   ingestToolResult(params: IngestToolResultParams): IngestToolResultResult {
-    const toolUseId = String(params.toolUseId ?? '').trim();
+    const toolUseId = readNonBlankOpaqueIdentifier(params.toolUseId) ?? '';
     if (!toolUseId) return { imported: [], taskOutputSummary: null };
 
     const toolName = this.toolNameByToolUseId.get(toolUseId) ?? null;

@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, openSync, readSync, closeSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 function readFirstLineUtf8(filePath: string): string | null {
   let fd: number | null = null;
@@ -57,7 +58,7 @@ export function resolveClaudeSubagentJsonlPath(params: Readonly<{
   const sanitizedAgentId = String(params.agentId ?? '').trim();
 
   const subagentsDir = join(params.projectDir, sanitizedSessionId, 'subagents');
-  const sidechainId = typeof params.sidechainId === 'string' ? params.sidechainId.trim() : '';
+  const sidechainId = readNonBlankOpaqueIdentifier(params.sidechainId) ?? '';
   if (sidechainId) {
     const fromMeta = resolveJsonlPathFromToolUseMetadata(subagentsDir, sidechainId);
     if (fromMeta) return fromMeta;
@@ -130,7 +131,7 @@ function resolveJsonlPathFromToolUseMetadata(subagentsDir: string, sidechainId: 
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
     const toolUseId = (parsed as Record<string, unknown>).toolUseId;
-    if (typeof toolUseId !== 'string' || toolUseId.trim() !== sidechainId) continue;
+    if (readNonBlankOpaqueIdentifier(toolUseId) !== sidechainId) continue;
 
     const jsonlPath = join(subagentsDir, fileName.replace(/\.meta\.json$/, '.jsonl'));
     return existsSync(jsonlPath) ? jsonlPath : null;

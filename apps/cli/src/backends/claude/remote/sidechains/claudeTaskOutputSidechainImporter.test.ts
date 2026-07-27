@@ -12,26 +12,26 @@ describe('ClaudeTaskOutputSidechainImporter', () => {
 
     // Task tool call exists
     importer.observeToolUse({
-      toolUseId: 'tool_task_1',
+      toolUseId: ' tool_task_1\n',
       toolName: 'Task',
       input: { prompt: 'do the thing' },
     });
 
     // Task tool-result contains agentId for background task.
     importer.ingestToolResult({
-      toolUseId: 'tool_task_1',
+      toolUseId: ' tool_task_1\n',
       toolResultText: 'agentId: agent_123',
     });
 
     // TaskOutput call + result for that agentId
     importer.observeToolUse({
-      toolUseId: 'tool_taskoutput_1',
+      toolUseId: ' tool_taskoutput_1\n',
       toolName: 'TaskOutput',
       input: { task_id: 'agent_123', block: true, timeout: 2000 },
     });
 
     const res = importer.ingestToolResult({
-      toolUseId: 'tool_taskoutput_1',
+      toolUseId: ' tool_taskoutput_1\n',
       toolResultText: makeJsonl([
         {
           type: 'assistant',
@@ -51,7 +51,7 @@ describe('ClaudeTaskOutputSidechainImporter', () => {
     });
 
     expect(res.imported.length).toBe(1);
-    expect((res.imported[0]?.body as any).sidechainId).toBe('tool_task_1');
+    expect((res.imported[0]?.body as any).sidechainId).toBe(' tool_task_1\n');
     expect((res.imported[0]?.body as any).isSidechain).toBe(true);
     expect(res.imported[0]?.meta).toEqual(
       expect.objectContaining({
@@ -59,7 +59,7 @@ describe('ClaudeTaskOutputSidechainImporter', () => {
         claudeTaskId: 'agent_123',
         claudeAgentId: 'agent_123',
         claudeRemoteSessionId: 'sess_1',
-        claudeTaskOutputToolUseId: 'tool_taskoutput_1',
+        claudeTaskOutputToolUseId: ' tool_taskoutput_1\n',
       }),
     );
   });
