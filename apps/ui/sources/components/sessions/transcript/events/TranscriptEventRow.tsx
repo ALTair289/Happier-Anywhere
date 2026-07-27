@@ -76,6 +76,12 @@ function formatConnectedServiceSwitchAttemptSuccessText(event: Extract<AgentEven
     if (outcomeAction === 'credential_refreshed' || event.attemptedContinuityMode === 'credential_refresh') {
         return t('connectedServices.authSwitch.status.credentialsRefreshed');
     }
+    if (event.action === 'restart_requested' && event.outcome === 'observed' && outcomeAction === 'none') {
+        const diagnosticPresentation = resolveConnectedServiceUxDiagnosticPresentation(event.diagnostic);
+        return diagnosticPresentation
+            ? t(diagnosticPresentation.statusKey)
+            : t('connectedServices.diagnostics.status.connected_service_restart_requested');
+    }
     if (outcomeAction === 'restarted' || (!outcomeAction && event.action === 'restart_requested')) {
         return t('connectedServices.authSwitch.status.restarting');
     }

@@ -658,6 +658,30 @@ describe('TranscriptEventRow', () => {
         expect(serialized).not.toContain(t('connectedServices.authSwitch.status.restarting'));
     });
 
+    it('renders an observed restart request as requested, not completed or a generic switch', async () => {
+        const event = parseProtocolValidAgentEvent({
+            type: 'connected-service-account-switch-attempt',
+            ok: true,
+            action: 'restart_requested',
+            attemptedContinuityMode: 'restart',
+            outcome: 'observed',
+            outcomeAction: 'none',
+            diagnostic: {
+                code: 'connected_service_restart_requested',
+                failurePhase: 'restart',
+                source: 'transcript_switch_attempt',
+                retryable: true,
+                suggestedActions: [],
+            },
+        });
+
+        const screen = await renderScreen(<TranscriptEventRow event={event} />);
+        const serialized = JSON.stringify(screen.tree.toJSON());
+        expect(serialized).toContain(t('connectedServices.diagnostics.status.connected_service_restart_requested'));
+        expect(serialized).not.toContain(t('connectedServices.authSwitch.status.restarting'));
+        expect(serialized).not.toContain(t('connectedServices.authSwitch.confirmAction'));
+    });
+
     it('falls back safely for unknown connected-service switch diagnostics', async () => {
         const screen = await renderScreen(
             <TranscriptEventRow
