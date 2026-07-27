@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { View } from 'react-native';
+import * as ReactNavigation from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -75,6 +76,11 @@ function healthToStateVariant(health: AccountHealth): 'success' | 'warning' | 'd
     if (health === 'error') return 'danger';
     if (health === 'attention') return 'warning';
     return 'success';
+}
+
+function usePoolsScreenIsFocused(): boolean {
+    const useIsFocused = (ReactNavigation as { useIsFocused?: () => boolean }).useIsFocused;
+    return typeof useIsFocused === 'function' ? useIsFocused() : true;
 }
 
 export type SnapshotGauge = Readonly<{ capacityPct: number | null; rings: CapacityRingDatum[] }>;
@@ -162,7 +168,7 @@ const PoolRow = React.memo(function PoolRow(props: Readonly<{
     group: ConnectedServiceGroupViewModel;
     profiles: ReadonlyArray<ConnectedServiceGroupProfileLike>;
     profileLabelsByKey: Readonly<Record<string, string>>;
-    quotasEnabled: boolean;
+    quotaProbesActive: boolean;
     onOpenPool: (groupId: string) => void;
     /** Injected by {@link ItemGroup}'s divider distribution; forwarded to the row Item. */
     showDivider?: boolean;
@@ -282,7 +288,7 @@ const PoolRow = React.memo(function PoolRow(props: Readonly<{
                 <Text style={styles.metaSeparator}> · </Text>
                 <Text testID={`${rowTestId}:strategy`} style={styles.meta}>{strategyLabel}</Text>
             </View>
-            {props.quotasEnabled
+            {props.quotaProbesActive
                 ? group.members.map((member) => (
                     <PoolMemberProbe
                         key={member.profileId}
@@ -332,6 +338,8 @@ export type PoolsListProps = Readonly<{
  */
 export const PoolsList = React.memo(function PoolsList(props: PoolsListProps) {
     const { theme } = useUnistyles();
+    const isFocused = usePoolsScreenIsFocused();
+    const quotaProbesActive = props.quotasEnabled && isFocused;
     const pools = React.useMemo(
         () => parseConnectedServiceGroupViewModels(props.groups),
         [props.groups],
@@ -432,7 +440,7 @@ export const PoolsList = React.memo(function PoolsList(props: PoolsListProps) {
                         group={group}
                         profiles={props.profiles}
                         profileLabelsByKey={props.profileLabelsByKey}
-                        quotasEnabled={props.quotasEnabled}
+                        quotaProbesActive={quotaProbesActive}
                         onOpenPool={props.onOpenPool}
                     />
                 ))}

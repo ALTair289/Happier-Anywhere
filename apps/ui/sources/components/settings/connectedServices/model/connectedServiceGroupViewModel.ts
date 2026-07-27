@@ -1,4 +1,3 @@
-import type { ItemAction } from '@/components/ui/lists/itemActions';
 import { resolveConnectedServiceProfileLabel } from '@/sync/domains/connectedServices/connectedServiceProfilePreferences';
 import { resolveConnectedServiceCredentialHealthStatus } from '@/sync/domains/connectedServices/resolveConnectedServiceCredentialHealthStatus';
 import { t } from '@/text';
@@ -480,59 +479,4 @@ export function resolveConnectedServiceGroupRecoveryMode(
     return value === 'off' || value === 'wait_until_reset' || value === 'switch_then_resume' || value === 'switch_or_wait'
         ? value
         : CONNECTED_SERVICE_GROUP_DEFAULT_POLICY.recoveryMode;
-}
-
-export function buildConnectedServiceGroupMemberActions(params: Readonly<{
-    groupId: string;
-    activeProfileId: string | null | undefined;
-    member: ConnectedServiceGroupMemberViewModel;
-    accountFallbackEnabled: boolean;
-    accountFallbackDisabledSubtitle?: string;
-    onSetActiveMember: (profileId: string) => void;
-    onSetMemberEnabled: (member: ConnectedServiceGroupMemberViewModel, enabled: boolean) => void;
-    onEditMemberPriority: (member: ConnectedServiceGroupMemberViewModel) => void;
-    onRemoveMember: (member: ConnectedServiceGroupMemberViewModel) => void;
-}>): ItemAction[] {
-    const { groupId, member } = params;
-    const isActive = member.profileId === params.activeProfileId;
-    const canSetActive = !isActive && params.accountFallbackEnabled;
-    return [
-        {
-            id: `connected-services-group:${groupId}:member:${member.profileId}:action:set-active`,
-            title: isActive
-                ? t('connectedServices.detail.groupActions.activeMember')
-                : t('connectedServices.detail.groupActions.makeActive'),
-            subtitle: !isActive && !params.accountFallbackEnabled
-                ? params.accountFallbackDisabledSubtitle ?? t('connectedServices.detail.groupActions.accountFallbackDisabled')
-                : undefined,
-            icon: isActive ? 'radio-button-on-outline' : 'radio-button-off-outline',
-            disabled: !canSetActive,
-            onPress: canSetActive
-                ? () => params.onSetActiveMember(member.profileId)
-                : undefined,
-        },
-        {
-            id: member.enabled
-                ? `connected-services-group:${groupId}:member:${member.profileId}:action:disable`
-                : `connected-services-group:${groupId}:member:${member.profileId}:action:enable`,
-            title: member.enabled
-                ? t('connectedServices.detail.groupActions.disableMember')
-                : t('connectedServices.detail.groupActions.enableMember'),
-            icon: member.enabled ? 'pause-circle-outline' : 'play-circle-outline',
-            onPress: () => params.onSetMemberEnabled(member, !member.enabled),
-        },
-        {
-            id: `connected-services-group:${groupId}:member:${member.profileId}:action:priority`,
-            title: t('connectedServices.detail.groupActions.editPriority'),
-            icon: 'reorder-three-outline',
-            onPress: () => params.onEditMemberPriority(member),
-        },
-        {
-            id: `connected-services-group:${groupId}:member:${member.profileId}:action:remove`,
-            title: t('connectedServices.detail.groupActions.removeMember'),
-            icon: 'remove-circle-outline',
-            destructive: true,
-            onPress: () => params.onRemoveMember(member),
-        },
-    ];
 }

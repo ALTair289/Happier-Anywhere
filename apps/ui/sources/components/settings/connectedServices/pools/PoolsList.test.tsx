@@ -47,6 +47,7 @@ const {
   requestConnectedServiceQuotaSnapshotRefreshSpy,
   requestConnectedServiceQuotaSnapshotRefreshV3Spy,
   machineState,
+  navigationFocusState,
 } = vi.hoisted(() => ({
   fetchAccountEncryptionModeSpy: vi.fn<
     (...args: Parameters<typeof fetchAccountEncryptionMode>) => ReturnType<typeof fetchAccountEncryptionMode>
@@ -66,6 +67,7 @@ const {
   machineState: {
     machines: [{ id: 'machine-1', active: true }] as ReadonlyArray<{ id: string; active: boolean }>,
   },
+  navigationFocusState: { isFocused: true },
 }));
 vi.mock('@/sync/api/account/apiAccountEncryptionMode', () => ({
   fetchAccountEncryptionMode: fetchAccountEncryptionModeSpy,
@@ -83,6 +85,13 @@ vi.mock('@/sync/domains/state/storage', async () => {
   return {
     ...actual,
     useAllMachines: () => machineState.machines,
+  };
+});
+vi.mock('@react-navigation/native', async () => {
+  const { createReactNavigationNativeMock } = await import('@/dev/testkit/mocks/reactNavigation');
+  return {
+    ...createReactNavigationNativeMock(),
+    useIsFocused: () => navigationFocusState.isFocused,
   };
 });
 
@@ -182,6 +191,23 @@ function renderPools(overrides: RenderOverrides = {}) {
   );
 }
 
+function renderPoolsElement(overrides: RenderOverrides = {}) {
+  return (
+    <PoolsList
+      serviceId="anthropic"
+      profiles={overrides.profiles ?? profiles}
+      profileLabelsByKey={overrides.profileLabelsByKey ?? {}}
+      groups={overrides.groups ?? [buildGroup()]}
+      loadStatus={overrides.loadStatus}
+      quotasEnabled={overrides.quotasEnabled ?? false}
+      groupConfigurationSupported={overrides.groupConfigurationSupported ?? true}
+      onOpenPool={onOpenPool}
+      onCreatePool={onCreatePool}
+      onRetryLoad={onRetryLoad}
+    />
+  );
+}
+
 describe('PoolsList', () => {
   beforeEach(() => {
     __resetConnectedServiceQuotaSnapshotStore();
@@ -196,6 +222,7 @@ describe('PoolsList', () => {
     requestConnectedServiceQuotaSnapshotRefreshSpy.mockResolvedValue(true);
     requestConnectedServiceQuotaSnapshotRefreshV3Spy.mockResolvedValue(false);
     machineState.machines = [{ id: 'machine-1', active: true }];
+    navigationFocusState.isFocused = true;
   });
 
   afterEach(() => {
@@ -302,6 +329,42 @@ describe('PoolsList', () => {
     // rendered text of the count node rather than asserting its raw children.
     const warningCount = tree.findByTestId('connected-services-pool:pool-1:warnings:count');
     expect(flattenRenderedText(warningCount?.props.children)).toBe('1');
+  });
+
+  it('keeps quota probes idle while the pools screen is unfocused and resumes them on focus', async () => {
+    navigationFocusState.isFocused = false;
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    getConnectedServiceQuotaSnapshotPlainSpy.mockImplementation(async (_credentials, params) => (
+      lowCapacitySnapshot(params.profileId)
+    ));
+
+    const screen = await renderScreen(renderPoolsElement({
+      quotasEnabled: true,
+      groups: [buildGroup({
+        activeProfileId: 'work',
+        members: [{ profileId: 'work', enabled: true, priority: 100, state: {} }],
+      })],
+    }));
+
+    await flushHookEffects({ turns: 6 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).not.toHaveBeenCalled();
+    expect(screen.tree.findAllByTestId('connected-services-pool:pool-1:avatar:capacity')).toHaveLength(0);
+
+    navigationFocusState.isFocused = true;
+    await act(async () => {
+      screen.tree.update(renderPoolsElement({
+        quotasEnabled: true,
+        groups: [buildGroup({
+          activeProfileId: 'work',
+          members: [{ profileId: 'work', enabled: true, priority: 100, state: {} }],
+        })],
+      }));
+    });
+    await flushHookEffects({ turns: 6 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).toHaveBeenCalledTimes(1);
+    expect(screen.tree.findByTestId('connected-services-pool:pool-1:avatar:capacity')).toBeTruthy();
   });
 
   it('does not poll quota snapshots for auth-invalid pool members', async () => {

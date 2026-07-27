@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { t } from '@/text';
 
 import {
-    buildConnectedServiceGroupMemberActions,
     formatConnectedServiceGroupMemberSubtitle,
     formatConnectedServiceGroupSubtitle,
     parseConnectedServiceGroupViewModels,
@@ -278,44 +277,4 @@ describe('connectedServiceGroupViewModel', () => {
         })).toBe('Work account');
     });
 
-    it('builds the shared member action model with fallback-disabled safeguards', () => {
-        const onSetActiveMember = vi.fn();
-        const onSetMemberEnabled = vi.fn();
-        const onEditMemberPriority = vi.fn();
-        const onRemoveMember = vi.fn();
-        const [group] = parseConnectedServiceGroupViewModels([{
-            groupId: 'primary',
-            activeProfileId: 'work',
-            members: [{ profileId: 'backup', priority: 20, enabled: true }],
-        }]);
-
-        const actions = buildConnectedServiceGroupMemberActions({
-            groupId: group.groupId,
-            activeProfileId: group.activeProfileId,
-            member: group.members[0]!,
-            accountFallbackEnabled: false,
-            onSetActiveMember,
-            onSetMemberEnabled,
-            onEditMemberPriority,
-            onRemoveMember,
-        });
-
-        expect(actions[0]).toMatchObject({
-            id: 'connected-services-group:primary:member:backup:action:set-active',
-            disabled: true,
-        });
-
-        actions[0]!.onPress?.();
-        actions[1]!.onPress?.();
-        actions[2]!.onPress?.();
-        actions[3]!.onPress?.();
-
-        // F13/P6.12: with account fallback disabled the set-active action is
-        // inert (disabled + no onPress), so the handler must never fire.
-        expect(actions[0]!.onPress).toBeUndefined();
-        expect(onSetActiveMember).not.toHaveBeenCalled();
-        expect(onSetMemberEnabled).toHaveBeenCalledWith(group.members[0], false);
-        expect(onEditMemberPriority).toHaveBeenCalledWith(group.members[0]);
-        expect(onRemoveMember).toHaveBeenCalledWith(group.members[0]);
-    });
 });
