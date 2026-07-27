@@ -2,6 +2,10 @@ import {
   CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE,
   CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPES,
   CLAUDE_CODE_REQUIRED_OAUTH_SCOPES,
+  CLAUDE_OAUTH_PROFILE_BETA_HEADER,
+  CLAUDE_OAUTH_PROFILE_URL,
+  CLAUDE_OAUTH_TOKEN_URL,
+  normalizeClaudeOauthProfileEntitlement,
 } from '@happier-dev/agents';
 import {
   ConnectedServiceIdSchema,
@@ -27,6 +31,20 @@ export type ConnectedAccountOauthRefreshResponseIdentity = Readonly<{
   providerEmail?: string | null;
 }>;
 
+export type ConnectedAccountRefreshCredentialEvidence =
+  | Readonly<{
+      status: 'accepted';
+      raw: ConnectedServiceOauthCredentialRawMetadata | null;
+    }>
+  | Readonly<{
+      status: 'rejected';
+      providerStatus: number;
+      providerErrorCode: string | null;
+    }>
+  | Readonly<{
+      status: 'unavailable';
+    }>;
+
 export type ConnectedAccountOAuthDescriptor = Readonly<{
   clientIdEnv: string;
   defaultClientId: string;
@@ -50,6 +68,11 @@ export type ConnectedAccountOAuthDescriptor = Readonly<{
     idToken: string | null;
     payload: unknown;
   }>) => ConnectedAccountOauthRefreshResponseIdentity;
+  resolveRefreshCredentialEvidence?: (input: Readonly<{
+    accessToken: string;
+    fetcher: typeof fetch;
+    signal?: AbortSignal;
+  }>) => Promise<ConnectedAccountRefreshCredentialEvidence>;
 }>;
 
 export type ConnectedAccountOauthCredentialPayload = Readonly<{
@@ -90,6 +113,11 @@ export type ResolvedConnectedAccountOauthConfig = Readonly<{
     idToken: string | null;
     payload: unknown;
   }>) => ConnectedAccountOauthRefreshResponseIdentity;
+  resolveRefreshCredentialEvidence?: (input: Readonly<{
+    accessToken: string;
+    fetcher: typeof fetch;
+    signal?: AbortSignal;
+  }>) => Promise<ConnectedAccountRefreshCredentialEvidence>;
 }>;
 
 function resolveNonEmptyEnv(raw: string | undefined, fallback: string): string {
@@ -227,7 +255,7 @@ export const CONNECTED_ACCOUNT_DESCRIPTORS = [
       clientIdEnv: 'HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_CLIENT_ID',
       defaultClientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
       tokenUrlEnv: 'HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL',
-      defaultTokenUrl: 'https://console.anthropic.com/v1/oauth/token',
+      defaultTokenUrl: CLAUDE_OAUTH_TOKEN_URL,
       refreshTokenBody: 'json',
       scopes: CLAUDE_SUBSCRIPTION_OAUTH_SCOPES,
       mapCredentialPayload: ({ now, payload }) => {
@@ -243,6 +271,28 @@ export const CONNECTED_ACCOUNT_DESCRIPTORS = [
           providerEmail: readString(account.email_address),
           expiresAt: resolveExpiresAtFromPayload({ now, payload: data }),
           raw: resolveClaudeSubscriptionNativeOauthRaw(data),
+        };
+      },
+      resolveRefreshCredentialEvidence: async ({ accessToken, fetcher, signal }) => {
+        const response = await fetcher(CLAUDE_OAUTH_PROFILE_URL, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'anthropic-beta': CLAUDE_OAUTH_PROFILE_BETA_HEADER,
+          },
+          signal,
+        });
+        if (response.status === 401) {
+          return {
+            status: 'rejected',
+            providerStatus: response.status,
+            providerErrorCode: null,
+          };
+        }
+        if (!response.ok) return { status: 'unavailable' };
+        return {
+          status: 'accepted',
+          raw: normalizeClaudeOauthProfileEntitlement(await response.json()),
         };
       },
     },
@@ -364,6 +414,9 @@ export function resolveConnectedAccountOauthConfig(
     scopes: oauth.scopes,
     ...(oauth.extractRefreshResponseIdentity
       ? { extractRefreshResponseIdentity: oauth.extractRefreshResponseIdentity }
+      : {}),
+    ...(oauth.resolveRefreshCredentialEvidence
+      ? { resolveRefreshCredentialEvidence: oauth.resolveRefreshCredentialEvidence }
       : {}),
   };
 }
