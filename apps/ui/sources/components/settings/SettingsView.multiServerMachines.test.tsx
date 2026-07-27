@@ -22,6 +22,7 @@ const settingsViewMultiServerMachinesState = vi.hoisted(() => ({
         linkedProviders: [],
         connectedServices: [],
         connectedServicesV2: [],
+        connectedServiceCredentialRevisionsV1: [],
     },
 }));
 

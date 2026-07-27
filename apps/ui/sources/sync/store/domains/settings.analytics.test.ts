@@ -35,6 +35,7 @@ vi.mock('@/sync/domains/state/persistence', async (importOriginal) => {
             linkedProviders: [],
             connectedServices: [],
             connectedServicesV2: [],
+            connectedServiceCredentialRevisionsV1: [],
         }),
         saveLocalSettings: mocks.saveLocalSettings,
         savePurchases: mocks.savePurchases,

@@ -20,6 +20,7 @@ export const profileDefaults: Profile = {
     linkedProviders: [],
     connectedServices: [],
     connectedServicesV2: [],
+    connectedServiceCredentialRevisionsV1: [],
 };
 Object.freeze(profileDefaults);
 

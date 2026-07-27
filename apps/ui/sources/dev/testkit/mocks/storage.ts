@@ -26,6 +26,7 @@ const testkitProfileDefaults = Object.freeze({
     linkedProviders: [],
     connectedServices: [],
     connectedServicesV2: [],
+    connectedServiceCredentialRevisionsV1: [],
 } satisfies Profile);
 
 export async function createStorageModuleMock(options: CreateStorageModuleMockOptions): Promise<StorageModule> {

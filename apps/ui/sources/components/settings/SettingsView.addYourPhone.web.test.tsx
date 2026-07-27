@@ -167,6 +167,7 @@ vi.mock('@/sync/domains/profiles/profile', () => ({
         linkedProviders: [],
         connectedServices: [],
         connectedServicesV2: [],
+        connectedServiceCredentialRevisionsV1: [],
     },
     getDisplayName: () => null,
     getAvatarUrl: () => null,

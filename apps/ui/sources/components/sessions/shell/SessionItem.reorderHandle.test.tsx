@@ -53,6 +53,7 @@ installSessionShellCommonModuleMocks({
                     linkedProviders: [],
                     connectedServices: [],
                     connectedServicesV2: [],
+                    connectedServiceCredentialRevisionsV1: [],
                 }),
                 useSession: () => null,
             },

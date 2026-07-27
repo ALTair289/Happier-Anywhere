@@ -106,6 +106,7 @@ vi.mock('@/sync/domains/state/persistence', () => ({
     linkedProviders: [{ id: 'github', displayName: null, login: null, avatarUrl: null }],
     connectedServices: [],
     connectedServicesV2: [],
+    connectedServiceCredentialRevisionsV1: [],
   }),
   loadSyncReliabilityEvents: loadSyncReliabilityEventsMock,
 }));

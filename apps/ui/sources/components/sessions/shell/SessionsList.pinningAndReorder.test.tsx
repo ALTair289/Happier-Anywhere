@@ -126,6 +126,7 @@ installSessionShellCommonModuleMocks({
                     linkedProviders: [],
                     connectedServices: [],
                     connectedServicesV2: [],
+                    connectedServiceCredentialRevisionsV1: [],
                 }),
                 useAllMachines: () => mockMachinesState.current,
                 useMachineDisplayById: () => Object.fromEntries(mockMachinesState.current.map((machine) => [

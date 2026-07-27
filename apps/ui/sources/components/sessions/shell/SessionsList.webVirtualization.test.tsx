@@ -72,6 +72,7 @@ const STABLE_PROFILE = {
     linkedProviders: [],
     connectedServices: [],
     connectedServicesV2: [],
+    connectedServiceCredentialRevisionsV1: [],
 };
 
 const groupKey = 'server:server_a:day:2026-02-17';
