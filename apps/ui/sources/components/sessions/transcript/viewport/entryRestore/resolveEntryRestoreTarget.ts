@@ -98,9 +98,6 @@ export function resolveEntryRestoreTarget<TItem>(
         const anchor = params.snapshot.anchor;
         const anchorMessageId = anchor?.messageId?.trim() ?? '';
         if (anchor && anchorMessageId) {
-            if (!isReachableAnchorOffset(anchor.itemOffsetPx, params.contentMeasured.layoutHeight)) {
-                return { kind: 'bottom' };
-            }
             return {
                 kind: 'slice',
                 anchorMessageId,
@@ -132,9 +129,6 @@ export function resolveEntryRestoreTarget<TItem>(
 
     const anchor = params.snapshot.anchor;
     if (anchor) {
-        if (!isReachableAnchorOffset(anchor.itemOffsetPx, layoutHeight)) {
-            return { kind: 'bottom' };
-        }
         const exactTarget = toAnchorTarget(
             params.anchorIndexResolver(anchor, params.items),
             anchor.itemOffsetPx,
@@ -197,13 +191,6 @@ function toAnchorTarget(
 
 function normalizeDimension(value: number): number {
     return Number.isFinite(value) ? value : 0;
-}
-
-function isReachableAnchorOffset(itemOffsetPx: number, layoutHeight: number): boolean {
-    if (!Number.isFinite(itemOffsetPx)) return false;
-    const normalizedLayoutHeight = normalizeDimension(layoutHeight);
-    if (normalizedLayoutHeight <= 0) return true;
-    return itemOffsetPx > -normalizedLayoutHeight && itemOffsetPx < normalizedLayoutHeight;
 }
 
 function resolveDurableAnchorSeqHint(

@@ -16,6 +16,7 @@ import { renderHook } from '@/dev/testkit';
 import { createEntryRestoreOwner } from '@/components/sessions/transcript/viewport/entryRestore/entryRestoreOwner';
 import { createSessionOpenLatch } from '@/components/sessions/transcript/viewport/sessionOpen/sessionOpenLatch';
 import { resolveTranscriptRenderWindowProjection } from '@/components/sessions/transcript/viewport/window/resolveTranscriptRenderWindowProjection';
+import { createTranscriptWindowGapItem } from '@/components/sessions/transcript/viewport/window/transcriptWindowGapItem';
 import type { ChatTranscriptListItem } from '@/components/sessions/transcript/chatListTypes';
 import { useTranscriptEntryHost } from './useTranscriptEntryHost';
 
@@ -41,11 +42,13 @@ function createStableMembers() {
     const items: readonly ChatTranscriptListItem[] = [];
     const renderWindowProjection = resolveTranscriptRenderWindowProjection<ChatTranscriptListItem>({
         activeThinkingMessageId: null,
+        createWindowGapItem: createTranscriptWindowGapItem,
         entrySliceWindow: null,
         expandedToolCallsAnchorMessageIds: new Set<string>(),
         items,
         listOrientation: 'standard',
         platformOS: 'ios',
+        rendererKind: 'legendList',
         sessionId: 's1',
         targetWindowState: {
             isWindowMode: false,
@@ -63,6 +66,7 @@ function createStableMembers() {
         transcriptWebHotTailItemCount: 0,
     });
     return {
+        activeTargetWindowTargetRef: { current: null },
         anchorLookupExhaustedRef: { current: false },
         anchorLookupInFlightRef: { current: false },
         anchorLookupLoadCountRef: { current: 0 },
@@ -81,6 +85,7 @@ function createStableMembers() {
         entrySliceWindowRef: { current: null },
         executeViewportCommand: vi.fn(() => true),
         hasNativeContentMeasurementForCurrentSession: vi.fn(() => false),
+        initialBottomPositionOwner: 'app' as const,
         initialFillAbortRef: { current: null },
         initialWebPinStabilizingRef: { current: false },
         invalidateViewportAnchorCapture: vi.fn(),
@@ -97,11 +102,14 @@ function createStableMembers() {
         loadOlder: vi.fn(async () => null),
         markNativeInitialViewportAppliedForCurrentSession: vi.fn(),
         nativeMountSettleDeadlineReachedRef: { current: false },
+        nativeMountSettleStable: false,
         observeMountSettleMetrics: vi.fn(),
         pinToBottom: vi.fn(() => true),
         pinToBottomRespectingNativeMountSettle: vi.fn(),
         recordRestoreDecisionTelemetry: vi.fn(),
+        recordEntryOwnerOutcome: vi.fn(),
         recordViewportTelemetryEvent: vi.fn(),
+        rendererKind: 'flashList' as const,
         renderWindowProjection,
         requestBottomFollowScheduledWriteRef: { current: () => {} },
         resolveEntryRestoreOwnerAnchor: vi.fn(() => null),

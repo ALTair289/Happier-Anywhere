@@ -92,6 +92,7 @@ export type EntryRestoreOwnerEffect =
         type: 'clear-entry-slice-window';
     }>
     | Readonly<{
+        targetSeq: number | null;
         type: 'request-bounded-materialization';
     }>
     | Readonly<{
@@ -190,6 +191,14 @@ export type EntryRestoreOwnerNativeHostFactsInput = Readonly<{
     contentHeight: number;
     distanceFromBottom: number;
     layoutHeight: number;
+    /**
+     * True once the native mount-settle window declared row measurements quiescent.
+     * Distance restores judged below the issued content height stay withheld until
+     * this flips — then alignment is judged against the SETTLED geometry so the
+     * transaction's single correction lands at the real position instead of the
+     * estimate-space one (live clamp-to-tail defect, 2026-07-13).
+     */
+    mountSettleStable?: boolean;
     nowMs: number;
     observedOffsetY: number;
     resolveAnchorObservation(anchor: EntryRestoreOwnerAnchor): EntryRestoreTransactionObservation | null;
@@ -294,14 +303,20 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
             return [];
         }
         if (target.kind === 'materialize-then-anchor') {
-            return materializeEffects('missing-anchor', 'restore-anchor', distanceFromBottom, params);
+            return materializeEffects(
+                'missing-anchor',
+                'restore-anchor',
+                distanceFromBottom,
+                target.anchorSeqHint,
+                params,
+            );
         }
         if (
             target.kind === 'distance-oneshot' &&
             distanceFromBottom > Math.max(0, Math.trunc(params.contentHeight - params.layoutHeight)) &&
             params.canMaterializeOlder
         ) {
-            return materializeEffects('not-ready', 'restore-distance', distanceFromBottom, params);
+            return materializeEffects('not-ready', 'restore-distance', distanceFromBottom, null, params);
         }
 
         if (target.kind === 'none') {
@@ -575,7 +590,13 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
         const sliceIndex = params.slice.renderedAnchorIndex ?? null;
         if (renderedAnchor == null || sliceIndex == null) {
             if (params.canMaterializeOlder && params.restoredViewport?.anchorSeqLoaded !== true) {
-                return materializeEffects('missing-anchor', 'restore-anchor', params.distanceFromBottom, params);
+                return materializeEffects(
+                    'missing-anchor',
+                    'restore-anchor',
+                    params.distanceFromBottom,
+                    params.slice.target?.anchorSeq ?? null,
+                    params,
+                );
             }
             return null;
         }
@@ -817,7 +838,13 @@ function resolveNativeHostObservation(
     });
     if (matches) return { status: 'aligned' };
     if (params.contentHeight + params.tolerancePx < context.issuedContentHeight) {
-        return null;
+        // Content below the issued height is normally mid-churn (rows still
+        // measuring): withhold judgment. But once mount settle declares the
+        // geometry quiescent, "below issued" means the issue-time height was
+        // estimate-INFLATED and will never be reached again — withholding
+        // forever leaves the clamped viewport at the tail with the correction
+        // budget unspent. Judge the settled geometry instead.
+        return params.mountSettleStable === true ? { status: 'misaligned' } : null;
     }
     return { status: 'misaligned' };
 }
@@ -942,12 +969,22 @@ function materializeEffects<TItem>(
     reason: TranscriptViewportTelemetryObservationReason,
     mode: Extract<TranscriptViewportMode, 'restore-anchor' | 'restore-distance'>,
     distanceFromBottom: number,
+    targetSeq: number | null,
     params: EntryRestoreOwnerAttemptInput<TItem>,
 ): readonly EntryRestoreOwnerEffect[] {
     return [
-        { type: 'request-bounded-materialization' },
+        {
+            targetSeq: normalizeMaterializationTargetSeq(targetSeq),
+            type: 'request-bounded-materialization',
+        },
         restoreDecisionEffect(reason, mode, distanceFromBottom, params),
     ];
+}
+
+function normalizeMaterializationTargetSeq(value: number | null): number | null {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    const seq = Math.trunc(value);
+    return seq > 0 ? seq : null;
 }
 
 function restoreDecisionEffect<TItem>(

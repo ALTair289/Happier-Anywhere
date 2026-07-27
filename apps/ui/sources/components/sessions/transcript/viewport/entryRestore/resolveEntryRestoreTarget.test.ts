@@ -88,14 +88,14 @@ describe('resolve entry restore target', () => {
         }))).toEqual({ kind: 'anchor', index: 1, itemOffsetPx: 84 });
     });
 
-    it('degrades unreachable persisted anchor offsets to bottom instead of restoring off-viewport', () => {
+    it('preserves finite giant-row offsets until measured target geometry can confirm reachability', () => {
         expect(resolveEntryRestoreTarget(buildParams({
             snapshot: {
                 shouldFollowBottom: false,
                 offsetY: 1_900,
                 anchor: { itemId: 'msg:m-20', messageId: 'm-20', itemOffsetPx: 2_900 },
             },
-        }))).toEqual({ kind: 'bottom' });
+        }))).toEqual({ kind: 'anchor', index: 1, itemOffsetPx: 2_900 });
 
         expect(resolveEntryRestoreTarget(buildParams({
             snapshot: {
@@ -103,7 +103,17 @@ describe('resolve entry restore target', () => {
                 offsetY: 1_900,
                 anchor: { itemId: 'msg:m-20', messageId: 'm-20', itemOffsetPx: -900 },
             },
-        }))).toEqual({ kind: 'bottom' });
+        }))).toEqual({ kind: 'anchor', index: 1, itemOffsetPx: -900 });
+    });
+
+    it('preserves a visible anchor two viewports inside a giant row', () => {
+        expect(resolveEntryRestoreTarget(buildParams({
+            snapshot: {
+                shouldFollowBottom: false,
+                offsetY: 2_000,
+                anchor: { itemId: 'msg:m-20', messageId: 'm-20', itemOffsetPx: -2_000 },
+            },
+        }))).toEqual({ kind: 'anchor', index: 1, itemOffsetPx: -2_000 });
     });
 
     it('falls back to the nearest surviving item when the anchor message was pruned', () => {

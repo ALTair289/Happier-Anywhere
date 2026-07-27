@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useCommittedTranscriptRef } from '@/components/sessions/transcript/viewport/lifecycle/host/useCommittedTranscriptRef';
 import { Platform } from 'react-native';
 import { sync, type SessionViewportAnchorSnapshot } from '@/sync/sync';
 import { resolveSessionEntryViewportState } from '@/components/sessions/transcript/scroll/resolveSessionEntryBottomFollow';
@@ -26,6 +27,7 @@ import type {
 import type { TranscriptViewportCommandController } from '@/components/sessions/transcript/viewport/createTranscriptViewportCommandController';
 import type { TranscriptViewportTransactionOutcome } from '@/components/sessions/transcript/viewport/transcriptViewportOwnership';
 import type { TranscriptViewportChangeState } from '@/components/sessions/transcript/chatListTypes';
+import type { TranscriptExitEntrySnapshot } from '@/components/sessions/transcript/viewport/lifecycle/transcriptSameSessionHandoff';
 
 type MutableRef<T> = { current: T };
 type SessionEntryRenderResetEffects = TranscriptLifecycleHostSessionEntryPlan['renderResetEffects'];
@@ -69,7 +71,6 @@ export type TranscriptSessionEntryLifecycleDeps = Readonly<{
     anchorLookupInFlightRef: MutableRef<boolean>;
     anchorLookupLoadCountRef: MutableRef<number>;
     cancelScheduledPinToBottom(): void;
-    clearNativePaintReleaseTimeoutsForSessionEntry(): void;
     clearWebPrependRestoreWindow(outcome: TranscriptViewportTransactionOutcome): void;
     closeEntryViewportOwnership(outcome: TranscriptViewportTransactionOutcome): void;
     commitBottomFollowModeState(next: TranscriptBottomFollowModeState): void;
@@ -111,12 +112,21 @@ export type TranscriptSessionEntryLifecycleDeps = Readonly<{
     pendingNativeMountSettleBottomPinHostRef: MutableRef<MutableRef<boolean> | null>;
     resetBottomFollowPinRecordsForSessionEntry(latestActivityKey: string | null | undefined): void;
     resetBottomFollowPinStateForSessionOpenArm(latestActivityKey: string | null | undefined): void;
-    resetInitialFillForSessionEntry(): void;
     resetNativeMountSettleFlagsForSessionEntry(): void;
+    /**
+     * Reset the native first-paint reveal flags (viewport-paint-observed +
+     * entry-restore-paint-released) for the NEW entry. These are per-ENTRY reveal
+     * state: a warm keep-alive re-entry into the same session re-arms and may run a
+     * fresh restore transaction, and stale true flags from the previous entry forced
+     * the placeholder off while that restore's write + post-measure correction ran on
+     * screen (live measured cascade 2026-07-12).
+     */
+    resetNativeFirstPaintRevealStateForSessionEntry(): void;
     resetNativeSessionViewportLifecycle(sessionId: string): void;
     resetOlderPaginationForSessionEntry(): void;
-    resetTransientSessionEntryUiState(): void;
     resetViewportAnchorCaptureForSessionEntry(): void;
+    sameSessionHandoffClaimedViewportRef: MutableRef<TranscriptExitEntrySnapshot | null>;
+    sameSessionHandoffViewportForRender: TranscriptExitEntrySnapshot | null;
     scheduleFirstSessionOpenWebInitialPinRetryRef: MutableRef<(() => void) | null>;
     sessionEntryViewportRef: MutableRef<SessionEntryViewportRefValue>;
     sessionId: string;
@@ -137,11 +147,60 @@ export type TranscriptSessionEntryLifecycle = Readonly<{
     ): void;
     applySessionOpenArmResetPlan(plan: SessionOpenArmResetPlan): void;
     applySessionOpenDisposeResetPlan(plan: SessionOpenDisposeResetPlan): void;
+    /**
+     * Render-time entry intent from the immutable per-(sessionId,jumpToSeq) snapshot: true when
+     * this session's entry follows the live tail. This is the canonical basis for Legend's
+     * initial tail placement — the live bottom-follow mode ref lags one render behind on
+     * warm-instance session switches.
+     */
+    entryShouldFollowBottomForRender: boolean;
+    /**
+     * Immutable persisted anchor for this render's detached entry. Presentation consumes this
+     * same snapshot instead of rereading live sync state after child layout effects.
+     */
+    entryAnchorForRender: SessionViewportAnchorSnapshot | null;
 }>;
 
 export function useTranscriptSessionEntryLifecycle(
     deps: TranscriptSessionEntryLifecycleDeps,
 ): TranscriptSessionEntryLifecycle {
+    // Capture entry intent during the parent render. Renderer children run their layout effects
+    // before this host's layout effect and can publish provisional at-end facts while their empty
+    // geometry mounts. Those facts may update the live sync viewport, but they must not rewrite
+    // the immutable snapshot that this specific entry transaction was opened to restore.
+    const entryViewportSnapshotForRenderRef = React.useRef<{
+        jumpToSeq: number | null;
+        sessionId: string;
+        snapshot: ReturnType<typeof readSessionViewportForEntry>;
+    } | null>(null);
+    const entryJumpToSeq = deps.jumpToSeq ?? null;
+    const handoffViewportForRender = entryJumpToSeq === null
+        ? deps.sameSessionHandoffViewportForRender
+        : null;
+    const handoffSnapshotForRender = handoffViewportForRender
+        ? {
+            ...handoffViewportForRender,
+            lastUpdatedAt: handoffViewportForRender.capturedAtMs,
+            source: 'observed' as const,
+        }
+        : null;
+    const committedEntryViewportSnapshot = entryViewportSnapshotForRenderRef.current;
+    const entryViewportSnapshotForRender =
+        committedEntryViewportSnapshot?.sessionId === deps.sessionId &&
+        committedEntryViewportSnapshot.jumpToSeq === entryJumpToSeq
+            ? committedEntryViewportSnapshot
+            : {
+            jumpToSeq: entryJumpToSeq,
+            sessionId: deps.sessionId,
+            snapshot: handoffSnapshotForRender ?? readSessionViewportForEntry(deps.sessionId),
+        };
+    useCommittedTranscriptRef(
+        entryViewportSnapshotForRenderRef,
+        entryViewportSnapshotForRender,
+    );
+    const resolvedEntryViewportForRender = resolveSessionEntryViewportState(
+        entryViewportSnapshotForRender.snapshot,
+    );
     const resetTransientSessionEntryUiState = React.useCallback(() => {
         deps.clearWebPrependRestoreWindow('abandoned-identity');
         deps.setExpandedToolCallsAnchorMessageIds(new Set());
@@ -246,7 +305,16 @@ export function useTranscriptSessionEntryLifecycle(
     ]);
 
     React.useLayoutEffect(() => {
-        const entryViewportSnapshot = readSessionViewportForEntry(deps.sessionId);
+        const claimedHandoffViewport = entryJumpToSeq === null
+            ? deps.sameSessionHandoffClaimedViewportRef.current
+            : null;
+        const entryViewportSnapshot = claimedHandoffViewport
+            ? {
+                ...claimedHandoffViewport,
+                lastUpdatedAt: claimedHandoffViewport.capturedAtMs,
+                source: 'observed' as const,
+            }
+            : entryViewportSnapshotForRender.snapshot;
         const resolvedEntryViewport = resolveSessionEntryViewportState<SessionViewportAnchorSnapshot>(
             entryViewportSnapshot,
         );
@@ -293,6 +361,10 @@ export function useTranscriptSessionEntryLifecycle(
             shouldFollowBottom,
             webInitialPinRetryDelaysMs: webInitialPinRetryPlan.retryDelaysMs,
             webInitialPinStabilizeMs: webInitialPinRetryPlan.stabilizeMaxMs,
+            // Matches the fill executor's absolute ceiling plus the pin stabilize
+            // window: past this, the open phase is over no matter what.
+            webOpenPhaseDeadlineDelayMs:
+                tuning.transcriptInitialFillBudgetMs * 5 + webInitialPinRetryPlan.stabilizeMaxMs,
         });
         deps.sessionEntryViewportRef.current = {
             sessionId: deps.sessionId,
@@ -333,19 +405,41 @@ export function useTranscriptSessionEntryLifecycle(
         deps.commitBottomFollowModeState,
         deps.isLoaded,
         deps.initialBottomPositionOwner,
+        entryViewportSnapshotForRender.snapshot,
         deps.jumpToSeq,
         deps.lifecycleHost,
         deps.sessionId,
         deps.sessionOpenLatch,
     ]);
 
+    const resetInitialFillForSessionEntry = React.useCallback(() => {
+        deps.initialFillAbortRef.current?.abort();
+        deps.initialFillAbortRef.current = null;
+    }, [deps.initialFillAbortRef]);
+    const clearNativePaintReleaseTimeoutsForSessionEntry = React.useCallback(() => {
+        const nativeFirstPaintFallbackReleaseTimeout = deps.nativeFirstPaintFallbackReleaseTimeoutRef.current;
+        if (nativeFirstPaintFallbackReleaseTimeout) {
+            deps.nativeFirstPaintFallbackReleaseTimeoutRef.current = null;
+            clearTimeout(nativeFirstPaintFallbackReleaseTimeout.timeoutId);
+        }
+        const nativeEntryRestorePaintReleaseTimeout = deps.nativeEntryRestorePaintReleaseTimeoutRef.current;
+        if (nativeEntryRestorePaintReleaseTimeout) {
+            deps.nativeEntryRestorePaintReleaseTimeoutRef.current = null;
+            clearTimeout(nativeEntryRestorePaintReleaseTimeout.timeoutId);
+        }
+    }, [
+        deps.nativeEntryRestorePaintReleaseTimeoutRef,
+        deps.nativeFirstPaintFallbackReleaseTimeoutRef,
+    ]);
+
     const applySessionOpenArmResetPlan = React.useCallback((plan: SessionOpenArmResetPlan): void => {
         if (plan.sessionId !== deps.sessionId) return;
         deps.resetViewportAnchorCaptureForSessionEntry();
-        deps.resetInitialFillForSessionEntry();
+        resetInitialFillForSessionEntry();
         deps.resetNativeMountSettleFlagsForSessionEntry();
+        deps.resetNativeFirstPaintRevealStateForSessionEntry();
         deps.hideOlderLoadSpinner();
-        deps.clearNativePaintReleaseTimeoutsForSessionEntry();
+        clearNativePaintReleaseTimeoutsForSessionEntry();
         deps.resetOlderPaginationForSessionEntry();
         deps.cancelScheduledPinToBottom();
         resetTransientSessionEntryUiState();
@@ -387,26 +481,26 @@ export function useTranscriptSessionEntryLifecycle(
         }
     }, [
         applySessionEntryViewportApplyEffects,
+        clearNativePaintReleaseTimeoutsForSessionEntry,
         consumeSessionOpenArmEntryViewportState,
         deps.cancelScheduledPinToBottom,
-        deps.clearNativePaintReleaseTimeoutsForSessionEntry,
         deps.hideOlderLoadSpinner,
         deps.initialBottomPositionOwner,
         deps.latestCommittedActivityKey,
-        deps.resetInitialFillForSessionEntry,
         deps.resetNativeMountSettleFlagsForSessionEntry,
         deps.resetNativeSessionViewportLifecycle,
         deps.resetOlderPaginationForSessionEntry,
         deps.resetViewportAnchorCaptureForSessionEntry,
         deps.sessionId,
         deps.webDomObservation,
+        resetInitialFillForSessionEntry,
         resetTransientSessionEntryUiState,
     ]);
 
     const applySessionOpenDisposeResetPlan = React.useCallback((plan: SessionOpenDisposeResetPlan): void => {
         if (plan.reason !== 'session-switch' && plan.reason !== 'disposed') return;
-        deps.resetInitialFillForSessionEntry();
-        deps.clearNativePaintReleaseTimeoutsForSessionEntry();
+        resetInitialFillForSessionEntry();
+        clearNativePaintReleaseTimeoutsForSessionEntry();
         deps.cancelScheduledPinToBottom();
         const pendingNativeMountSettleBottomPinRef = deps.pendingNativeMountSettleBottomPinHostRef.current;
         if (pendingNativeMountSettleBottomPinRef) {
@@ -414,14 +508,19 @@ export function useTranscriptSessionEntryLifecycle(
         }
     }, [
         deps.cancelScheduledPinToBottom,
-        deps.clearNativePaintReleaseTimeoutsForSessionEntry,
         deps.pendingNativeMountSettleBottomPinHostRef,
-        deps.resetInitialFillForSessionEntry,
+        clearNativePaintReleaseTimeoutsForSessionEntry,
+        resetInitialFillForSessionEntry,
     ]);
 
     return {
         applySessionEntryViewportApplyEffects,
         applySessionOpenArmResetPlan,
         applySessionOpenDisposeResetPlan,
+        entryAnchorForRender:
+            entryJumpToSeq === null && !resolvedEntryViewportForRender.shouldFollowBottom
+                ? resolvedEntryViewportForRender.anchor
+                : null,
+        entryShouldFollowBottomForRender: resolvedEntryViewportForRender.shouldFollowBottom,
     };
 }

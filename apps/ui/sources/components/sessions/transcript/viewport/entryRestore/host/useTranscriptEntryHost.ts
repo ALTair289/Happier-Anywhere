@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useCommittedTranscriptRef } from '@/components/sessions/transcript/viewport/lifecycle/host/useCommittedTranscriptRef';
 import { Platform } from 'react-native';
 import { getStorage } from '@/sync/domains/state/storage';
 import type { Message } from '@/sync/domains/messages/messageTypes';
@@ -39,6 +40,7 @@ import type {
     SessionOpenArmResetPlan,
     SessionOpenDisposeResetPlan,
     SessionOpenEntryKind,
+    SessionOpenInitialBottomPositionOwner,
     SessionOpenLatchEffect,
 } from '@/components/sessions/transcript/viewport/sessionOpen/types';
 import {
@@ -62,7 +64,9 @@ import type {
     TranscriptPrependOlderLoadResult,
 } from '@/components/sessions/transcript/viewport/prepend/host/runTranscriptPrependOlderLoad';
 import type { TranscriptRenderWindowProjection } from '@/components/sessions/transcript/viewport/window/resolveTranscriptRenderWindowProjection';
+import type { TranscriptJumpTarget } from '@/components/sessions/transcript/viewport/jump/transcriptJumpTargetTypes';
 import { waitForVisualUpdateWithTimeout } from '@/components/sessions/transcript/pagination/waitForVisualUpdateWithTimeout';
+import type { TranscriptListRendererKind } from '@/components/sessions/transcript/viewport/shell/renderer/types';
 
 type MutableRef<T> = { current: T };
 type LoadOlderOptions = TranscriptPrependOlderLoadOptions;
@@ -126,6 +130,7 @@ type SessionEntryViewportApplyEffect = Readonly<{
 }>;
 
 type TranscriptEntryHostDeps = Readonly<{
+    activeTargetWindowTargetRef: MutableRef<TranscriptJumpTarget | null>;
     anchorLookupExhaustedRef: MutableRef<boolean>;
     anchorLookupInFlightRef: MutableRef<boolean>;
     anchorLookupLoadCountRef: MutableRef<number>;
@@ -150,6 +155,7 @@ type TranscriptEntryHostDeps = Readonly<{
     entrySliceWindowRef: MutableRef<EntrySliceWindow>;
     executeViewportCommand(command: TranscriptViewportCommand): boolean;
     hasNativeContentMeasurementForCurrentSession(): boolean;
+    initialBottomPositionOwner: SessionOpenInitialBottomPositionOwner;
     initialFillAbortRef: MutableRef<AbortController | null>;
     initialWebPinStabilizingRef: MutableRef<boolean>;
     invalidateViewportAnchorCapture(): void;
@@ -171,10 +177,15 @@ type TranscriptEntryHostDeps = Readonly<{
     loadOlder(options?: LoadOlderOptions): Promise<TranscriptPrependOlderLoadResult | null>;
     markNativeInitialViewportAppliedForCurrentSession(): void;
     nativeMountSettleDeadlineReachedRef: MutableRef<boolean>;
+    nativeMountSettleStable: boolean;
     observeMountSettleMetrics(): void;
     pinThresholdPx: number;
     pinToBottom(reason: TranscriptViewportTelemetryScrollReason): boolean;
     pinToBottomRespectingNativeMountSettle(reason: TranscriptViewportTelemetryScrollReason): void;
+    recordEntryOwnerOutcome(params: Readonly<{
+        outcome: 'confirmed' | 'fallback';
+        sessionId: string;
+    }>): void;
     recordRestoreDecisionTelemetry(
         reason: TranscriptViewportTelemetryObservationReason,
         params?: RestoreDecisionTelemetryParams,
@@ -186,6 +197,7 @@ type TranscriptEntryHostDeps = Readonly<{
         }>,
         options?: Readonly<{ sessionId?: string }>,
     ): void;
+    rendererKind: TranscriptListRendererKind;
     renderWindowProjection: TranscriptRenderWindowProjection<ChatTranscriptListItem>;
     requestBottomFollowScheduledWriteRef: MutableRef<(
         previousWebMetrics?: WebTranscriptScrollMetrics | null,
@@ -240,6 +252,7 @@ export type TranscriptEntryHost = Readonly<{
         contentHeight: number;
         distanceFromBottom: number;
         layoutHeight: number;
+        mountSettleStable?: boolean;
         nowMs: number;
         offsetY: number;
         rawOffsetY?: number;
@@ -300,6 +313,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
                 case 'execute-command': {
                     let issued = false;
                     let scrollToIndexRequested = false;
+                    let usedWebDistanceFallback = false;
                     if (effect.command.type === 'restore-web-anchor-through-command') {
                         const restoreResult = deps.restoreWebViewportAnchorThroughViewportCommand({
                             anchor: {
@@ -349,6 +363,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
                                     });
                                     issued = deps.executeViewportCommand(fallbackCommand);
                                     if (issued) {
+                                        usedWebDistanceFallback = true;
                                         deps.applyEntryRestoreOwnerEffectsRef.current(deps.entryRestoreOwner.observeWeb({
                                             contentHeight: fallbackMetrics.scrollHeight,
                                             layoutHeight: fallbackMetrics.clientHeight,
@@ -371,16 +386,16 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
                                 : command;
                         issued = deps.executeViewportCommand(commandWithContentHeight);
                     }
-                    if (!issued) {
+                    if (Platform.OS === 'web' && usedWebDistanceFallback) {
+                        deps.recordEntryOwnerOutcome({
+                            outcome: 'fallback',
+                            sessionId: deps.sessionId,
+                        });
+                    }
+                    if (!issued && !scrollToIndexRequested) {
                         deps.applyEntryRestoreOwnerEffectsRef.current(deps.entryRestoreOwner.markInitialCommandFailed({
                             sessionId: deps.sessionId,
                         }));
-                        if (scrollToIndexRequested) {
-                            const attemptRef = deps.attemptEntryRestoreRef;
-                            setTimeout(() => {
-                                attemptRef.current?.();
-                            }, 300);
-                        }
                     }
                     break;
                 }
@@ -427,7 +442,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
                     deps.setEntrySliceWindow(null);
                     break;
                 case 'request-bounded-materialization':
-                    requestBoundedEntryViewportMaterialization();
+                    requestBoundedEntryViewportMaterialization(effect.targetSeq);
                     break;
                 case 'request-bottom-follow-write':
                     if (effect.sessionId === deps.sessionId) {
@@ -435,6 +450,10 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
                     }
                     break;
                 case 'close-entry-ownership':
+                    deps.recordEntryOwnerOutcome({
+                        outcome: effect.outcome === 'confirmed' ? 'confirmed' : 'fallback',
+                        sessionId: deps.sessionId,
+                    });
                     deps.closeEntryViewportOwnership(effect.outcome);
                     break;
                 case 'record-restore-decision':
@@ -475,6 +494,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.markNativeInitialViewportAppliedForCurrentSession,
         deps.sessionId,
         deps.recordRestoreDecisionTelemetry,
+        deps.recordEntryOwnerOutcome,
         deps.recordViewportTelemetryEvent,
         deps.resolveViewportCommand,
         deps.resolveWebScrollMetrics,
@@ -482,7 +502,10 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.scheduleNativePaintReleaseForEntryRestore,
         deps.updateNativeInitialViewportPendingObservation,
     ]);
-    deps.applyEntryRestoreOwnerEffectsRef.current = applyEntryRestoreOwnerEffects;
+    useCommittedTranscriptRef(
+        deps.applyEntryRestoreOwnerEffectsRef,
+        applyEntryRestoreOwnerEffects,
+    );
 
     const resolveEntryRestoreDeadlineMs = React.useCallback((): number => {
         const tuning = sync.getSyncTuning();
@@ -500,7 +523,10 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         applyEntryRestoreOwnerEffects,
         deps.entryRestoreOwner,
     ]);
-    deps.disposeEntryRestoreTransactionForExitRef.current = disposeEntryRestoreTransactionForExit;
+    useCommittedTranscriptRef(
+        deps.disposeEntryRestoreTransactionForExitRef,
+        disposeEntryRestoreTransactionForExit,
+    );
 
     const canRequestBoundedEntryViewportMaterialization = React.useCallback((): boolean => {
         if (deps.anchorLookupExhaustedRef.current) return false;
@@ -508,7 +534,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         return deps.anchorLookupLoadCountRef.current < sync.getSyncTuning().transcriptViewportAnchorOlderLookupMaxLoads;
     }, []);
 
-    const requestBoundedEntryViewportMaterialization = React.useCallback((): boolean => {
+    const requestBoundedEntryViewportMaterialization = React.useCallback((targetSeq?: number | null): boolean => {
         if (deps.anchorLookupInFlightRef.current) return true;
         if (deps.anchorLookupExhaustedRef.current) return false;
         const maxLoads = sync.getSyncTuning().transcriptViewportAnchorOlderLookupMaxLoads;
@@ -517,11 +543,26 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.anchorLookupLoadCountRef.current += 1;
         fireAndForget((async () => {
             let shouldRetryRestore = false;
+            const requestedSessionId = deps.sessionId;
             try {
-                const result = await deps.loadOlder({ preservePrependViewport: false, showLoadingIndicator: false });
-                shouldRetryRestore = true;
-                if (result && (result.status === 'no_more' || result.hasMore === false)) {
-                    deps.anchorLookupExhaustedRef.current = true;
+                if (typeof targetSeq === 'number' && Number.isFinite(targetSeq) && targetSeq > 0) {
+                    const normalizedTargetSeq = Math.trunc(targetSeq);
+                    const target = { kind: 'seq' as const, seq: normalizedTargetSeq };
+                    const result = await sync.loadTargetWindowMessages(requestedSessionId, target, {
+                        direction: 'initial',
+                    });
+                    if (deps.currentSessionIdRef.current !== requestedSessionId) return;
+                    if (result?.status === 'loaded' && result.targetPresent) {
+                        deps.activeTargetWindowTargetRef.current = target;
+                        shouldRetryRestore = true;
+                    }
+                } else {
+                    const result = await deps.loadOlder({ preservePrependViewport: false, showLoadingIndicator: false });
+                    if (deps.currentSessionIdRef.current !== requestedSessionId) return;
+                    shouldRetryRestore = true;
+                    if (result && (result.status === 'no_more' || result.hasMore === false)) {
+                        deps.anchorLookupExhaustedRef.current = true;
+                    }
                 }
                 await Promise.resolve();
                 await Promise.resolve();
@@ -533,7 +574,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
             }
         })(), { tag: 'ChatList.restoreEntryAnchorLookup' });
         return true;
-    }, [deps.loadOlder]);
+    }, [deps.activeTargetWindowTargetRef, deps.currentSessionIdRef, deps.loadOlder, deps.sessionId]);
 
     const verifyWebEntryRestoreTransaction = React.useCallback(() => {
         if (Platform.OS !== 'web') return;
@@ -582,6 +623,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         contentHeight: number;
         distanceFromBottom: number;
         layoutHeight: number;
+        mountSettleStable?: boolean;
         nowMs: number;
         offsetY: number;
         rawOffsetY?: number;
@@ -592,6 +634,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
             contentHeight: params.contentHeight,
             distanceFromBottom: params.distanceFromBottom,
             layoutHeight: params.layoutHeight,
+            mountSettleStable: params.mountSettleStable,
             nowMs: params.nowMs,
             observedOffsetY: params.offsetY,
             resolveAnchorObservation: (anchor) => {
@@ -671,6 +714,44 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         }
     }, [applyEntryRestoreOwnerEffects, deps.entryRestoreOwner, observeNativeEntryRestoreHostFacts, deps.sessionId, deps.updateNativeViewportPaintObserved]);
 
+    // Settle-edge re-confirmation: estimate-space distance restores can only be judged
+    // against SETTLED geometry, and the clamp that drags a stale offset to the tail
+    // produces no scroll events afterwards — without this feed, an open transaction
+    // whose content shrank below the issued height would never see an observation
+    // again (live clamp-to-tail defect, 2026-07-13).
+    React.useEffect(() => {
+        if (Platform.OS === 'web') return;
+        if (!deps.nativeMountSettleStable) return;
+        if (!deps.entryRestoreOwner.hasOpenTransaction(deps.sessionId)) return;
+        const contentHeight = deps.listContentHeightRef.current;
+        const layoutHeight = deps.listLayoutHeightRef.current;
+        const offsetY = readNativeAbsoluteScrollOffset(deps.listRef.current);
+        if (offsetY == null || contentHeight <= 0 || layoutHeight <= 0) return;
+        const effects = observeNativeEntryRestoreHostFacts({
+            contentHeight,
+            distanceFromBottom: Math.max(0, Math.trunc(contentHeight - layoutHeight - offsetY)),
+            layoutHeight,
+            mountSettleStable: true,
+            nowMs: Date.now(),
+            offsetY,
+        });
+        if (effects.length === 0) return;
+        applyEntryRestoreOwnerEffects(effects);
+        if (effects.some((effect) => effect.type === 'native-initial-viewport-applied')) {
+            deps.updateNativeViewportPaintObserved(true);
+        }
+    }, [
+        applyEntryRestoreOwnerEffects,
+        deps.entryRestoreOwner,
+        deps.listContentHeightRef,
+        deps.listLayoutHeightRef,
+        deps.listRef,
+        deps.nativeMountSettleStable,
+        deps.sessionId,
+        deps.updateNativeViewportPaintObserved,
+        observeNativeEntryRestoreHostFacts,
+    ]);
+
     const runEntryRestoreAttempt = React.useCallback((): void => {
         const entryViewport = deps.sessionEntryViewportRef.current;
         if (!entryViewport || entryViewport.sessionId !== deps.sessionId) return;
@@ -681,6 +762,31 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         const exactAnchorSourceIndex = anchor
             ? resolveTranscriptViewportAnchorIndex({ anchor, items })
             : null;
+        const exactAnchorItem = exactAnchorSourceIndex == null ? null : items[exactAnchorSourceIndex] ?? null;
+        const exactAnchorRendererTarget = exactAnchorItem
+            ? deps.renderWindowProjection.indexMap.resolveRendererTargetForItemId(exactAnchorItem.id)
+            : null;
+        if (
+            exactAnchorRendererTarget?.kind === 'outside-data'
+            && exactAnchorRendererTarget.reason === 'projection-window'
+            && exactAnchorRendererTarget.targetSeq != null
+        ) {
+            const metrics = Platform.OS === 'web' && anchor ? deps.resolveWebScrollMetrics() : null;
+            const exactAnchorIsMountedInWebDom = metrics != null && anchor != null
+                ? resolveWebTranscriptViewportAnchorAlignment({
+                    container: metrics.element,
+                    anchor: {
+                        itemId: anchor.itemId,
+                        itemOffsetPx: anchor.itemOffsetPx,
+                        kind: anchor.kind,
+                        messageId: anchor.messageId ?? null,
+                    },
+                }).status !== 'not_found'
+                : false;
+            if (!exactAnchorIsMountedInWebDom) {
+                if (requestBoundedEntryViewportMaterialization(exactAnchorRendererTarget.targetSeq)) return;
+            }
+        }
         const nearestAnchorSourceIndex = anchor ? deps.resolveNearestSurvivingViewportAnchorIndexFromItems(anchor, items) : null;
         const toCommandIndex = (sourceIndex: number | null): number | null => {
             if (sourceIndex == null) return null;
@@ -732,6 +838,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         };
         const sliceTarget: EntryRestoreSliceTarget | null =
             Platform.OS !== 'web' &&
+            deps.rendererKind === 'flashList' &&
             !deps.sessionOpenLatch.isEntrySliceDegraded(deps.sessionId) &&
             anchor &&
             typeof anchor.messageId === 'string' &&
@@ -804,6 +911,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.entryRestoreOwner,
         deps.isViewportAnchorSeqLoaded,
         deps.jumpToSeq,
+        deps.rendererKind,
         deps.renderWindowProjection,
         deps.resolveEntryRestoreOwnerAnchor,
         deps.resolveNearestSurvivingViewportAnchorIndexFromItems,
@@ -812,9 +920,10 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.sessionOpenLatch,
         resolveEntryRestoreCanonicalMetrics,
         resolveEntryRestoreDeadlineMs,
+        requestBoundedEntryViewportMaterialization,
         verifyWebEntryRestoreTransaction,
     ]);
-    deps.attemptEntryRestoreRef.current = runEntryRestoreAttempt;
+    useCommittedTranscriptRef(deps.attemptEntryRestoreRef, runEntryRestoreAttempt);
 
     React.useLayoutEffect(() => {
         runEntryRestoreAttempt();
@@ -834,7 +943,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
     ]);
 
     const beginSessionOpenWebBottomEntry = React.useCallback((deadlineMs: number): boolean => {
-        if (Platform.OS !== 'web') return false;
+        if (Platform.OS !== 'web' || deps.initialBottomPositionOwner !== 'app') return false;
         if (deps.entryRestoreOwner.hasOpenTransaction(deps.sessionId)) return true;
         const metrics = deps.resolveWebScrollMetrics();
         if (!metrics) return false;
@@ -847,9 +956,17 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
             sessionId: deps.sessionId,
         }));
         return deps.entryRestoreOwner.hasOpenTransaction(deps.sessionId);
-    }, [applyEntryRestoreOwnerEffects, deps.entryRestoreOwner, deps.pinToBottom, deps.resolveWebScrollMetrics, deps.sessionId]);
+    }, [
+        applyEntryRestoreOwnerEffects,
+        deps.entryRestoreOwner,
+        deps.initialBottomPositionOwner,
+        deps.pinToBottom,
+        deps.resolveWebScrollMetrics,
+        deps.sessionId,
+    ]);
 
     const executeSessionOpenInitialPinAttempt = React.useCallback((): boolean => {
+        if (deps.initialBottomPositionOwner !== 'app') return true;
         if (Platform.OS === 'web') {
             if (deps.wantsPinnedRef.current === false) {
                 deps.applyEntryRestoreOwnerEffectsRef.current(deps.entryRestoreOwner.preempt({
@@ -882,6 +999,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.applyEntryRestoreOwnerEffectsRef,
         deps.autoPinDelayMs,
         deps.entryRestoreOwner,
+        deps.initialBottomPositionOwner,
         deps.initialWebPinStabilizingRef,
         deps.lastUserScrollIntentAtMsRef,
         deps.pinToBottom,
@@ -891,9 +1009,26 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         verifyWebEntryRestoreTransaction,
     ]);
 
+    // The retry chain's whole life is the open stabilize envelope (armAtMs +
+    // stabilizeMaxMs — the same bound the web bottom-entry transaction uses).
+    // Without this bound the chain restarted forever after the open: any render
+    // with an empty retry handle re-armed it against the minutes-old arm
+    // timestamp, replaying the whole plan as an immediate initial-open write
+    // burst that fed observation -> state churn -> re-render -> restart
+    // (self-sustaining ~2Hz storm, live capture 2026-07-20).
+    const isSessionOpenWebInitialPinEnvelopeOpen = React.useCallback((): boolean => {
+        if (deps.initialBottomPositionOwner !== 'app') return false;
+        const { stabilizeMaxMs } = resolveSessionOpenWebInitialPinRetryPlan(sync.getSyncTuning());
+        return Date.now() - deps.sessionOpenWebInitialPinRetryArmAtMsRef.current <= stabilizeMaxMs;
+    }, [
+        deps.initialBottomPositionOwner,
+        deps.sessionOpenWebInitialPinRetryArmAtMsRef,
+    ]);
+
     const scheduleSessionOpenWebInitialPinRetry = React.useCallback((deadlineAtMs: number, retryIndex = 0): void => {
-        if (Platform.OS !== 'web') return;
+        if (Platform.OS !== 'web' || deps.initialBottomPositionOwner !== 'app') return;
         if (deps.jumpToSeqActiveRef.current) return;
+        if (!isSessionOpenWebInitialPinEnvelopeOpen()) return;
         const existing = deps.sessionOpenWebInitialPinRetryTimeoutRef.current;
         if (existing) {
             if (existing.sessionId === deps.sessionId && existing.deadlineAtMs <= deadlineAtMs) return;
@@ -907,6 +1042,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
             deps.sessionOpenWebInitialPinRetryTimeoutRef.current = null;
             if (handle.sessionId !== deps.currentSessionIdRef.current) return;
             if (deps.jumpToSeqActiveRef.current) return;
+            if (!isSessionOpenWebInitialPinEnvelopeOpen()) return;
             const completed = executeSessionOpenInitialPinAttempt();
             if (
                 !completed &&
@@ -942,6 +1078,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.autoPinDelayMs,
         deps.currentSessionIdRef,
         deps.entryRestoreOwner,
+        deps.initialBottomPositionOwner,
         deps.initialWebPinStabilizingRef,
         deps.jumpToSeqActiveRef,
         deps.lastUserScrollIntentAtMsRef,
@@ -951,10 +1088,17 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.sessionOpenWebInitialPinRetryTimeoutRef,
         deps.wantsPinnedRef,
         executeSessionOpenInitialPinAttempt,
+        isSessionOpenWebInitialPinEnvelopeOpen,
     ]);
 
     const scheduleFirstSessionOpenWebInitialPinRetry = React.useCallback((): void => {
-        if (Platform.OS !== 'web' || deps.sessionOpenWebInitialPinRetryTimeoutRef.current) return;
+        if (
+            Platform.OS !== 'web' ||
+            deps.initialBottomPositionOwner !== 'app' ||
+            deps.sessionOpenWebInitialPinRetryTimeoutRef.current
+        ) {
+            return;
+        }
         const [retryDelayMs] = resolveSessionOpenWebInitialPinRetryPlan(sync.getSyncTuning()).retryDelaysMs;
         if (typeof retryDelayMs !== 'number' || !Number.isFinite(retryDelayMs)) return;
         scheduleSessionOpenWebInitialPinRetry(
@@ -962,36 +1106,45 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
             0,
         );
     }, [
+        deps.initialBottomPositionOwner,
         deps.sessionOpenWebInitialPinRetryArmAtMsRef,
         deps.sessionOpenWebInitialPinRetryTimeoutRef,
         scheduleSessionOpenWebInitialPinRetry,
     ]);
-    deps.scheduleFirstSessionOpenWebInitialPinRetryRef.current = scheduleFirstSessionOpenWebInitialPinRetry;
+    useCommittedTranscriptRef(
+        deps.scheduleFirstSessionOpenWebInitialPinRetryRef,
+        scheduleFirstSessionOpenWebInitialPinRetry,
+    );
 
-    React.useEffect(() => {
-        if (
-            Platform.OS !== 'web' ||
-            !deps.sessionId ||
-            !deps.isLoaded ||
-            deps.jumpToSeq != null ||
-            (
-                deps.sessionEntryViewportRef.current !== null &&
-                (
-                    deps.sessionEntryViewportRef.current.sessionId !== deps.sessionId ||
-                    deps.sessionEntryViewportRef.current.shouldFollowBottom === false
-                )
-            ) ||
-            deps.entryRestoreOwner.hasOpenTransaction(deps.sessionId)
-        ) {
-            return;
+    const cancelSessionOpenWebInitialPinRetry = React.useCallback((): void => {
+        const scheduled = deps.sessionOpenWebInitialPinRetryTimeoutRef.current;
+        if (scheduled) {
+            deps.sessionOpenWebInitialPinRetryTimeoutRef.current = null;
+            clearTimeout(scheduled.timeoutId);
         }
-        scheduleFirstSessionOpenWebInitialPinRetry();
+        deps.initialWebPinStabilizingRef.current = false;
     }, [
-        deps.entryRestoreOwner,
-        deps.isLoaded,
-        deps.jumpToSeq,
-        deps.sessionEntryViewportRef,
-        deps.sessionId,
+        deps.initialWebPinStabilizingRef,
+        deps.sessionOpenWebInitialPinRetryTimeoutRef,
+    ]);
+    React.useEffect(() => {
+        if (deps.initialBottomPositionOwner !== 'app') {
+            cancelSessionOpenWebInitialPinRetry();
+        }
+        return cancelSessionOpenWebInitialPinRetry;
+    }, [
+        cancelSessionOpenWebInitialPinRetry,
+        deps.initialBottomPositionOwner,
+    ]);
+    React.useEffect(() => () => {
+        if (
+            deps.scheduleFirstSessionOpenWebInitialPinRetryRef.current ===
+            scheduleFirstSessionOpenWebInitialPinRetry
+        ) {
+            deps.scheduleFirstSessionOpenWebInitialPinRetryRef.current = null;
+        }
+    }, [
+        deps.scheduleFirstSessionOpenWebInitialPinRetryRef,
         scheduleFirstSessionOpenWebInitialPinRetry,
     ]);
 
@@ -999,9 +1152,11 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         for (const effect of effects) {
             switch (effect.type) {
                 case 'apply-arm-reset-plan':
+                    cancelSessionOpenWebInitialPinRetry();
                     deps.applySessionOpenArmResetPlan(effect.plan);
                     continue;
                 case 'apply-dispose-reset-plan':
+                    cancelSessionOpenWebInitialPinRetry();
                     deps.applySessionOpenDisposeResetPlan(effect.plan);
                     continue;
                 case 'hold-native-first-paint-placeholder':
@@ -1035,6 +1190,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         }
     }, [
         beginSessionOpenWebBottomEntry,
+        cancelSessionOpenWebInitialPinRetry,
         deps.applySessionOpenArmResetPlan,
         deps.applySessionOpenDisposeResetPlan,
         deps.nativeMountSettleDeadlineReachedRef,
@@ -1046,95 +1202,10 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         scheduleSessionOpenWebInitialPinRetry,
         verifyWebEntryRestoreTransaction,
     ]);
-    deps.applySessionOpenLatchEffectsRef.current = applySessionOpenLatchEffects;
-
-    React.useLayoutEffect(() => {
-        if (!deps.sessionId || !deps.isLoaded || deps.jumpToSeq != null) return;
-        const sessionEntryViewport = deps.sessionEntryViewportRef.current;
-        if (
-            Platform.OS === 'web' &&
-            deps.sessionOpenLatch.phase() !== 'done' &&
-            (
-                sessionEntryViewport === null ||
-                (
-                    sessionEntryViewport.sessionId === deps.sessionId &&
-                    sessionEntryViewport.shouldFollowBottom !== false
-                )
-            )
-        ) {
-            const completed = executeSessionOpenInitialPinAttempt();
-            if (!completed) scheduleFirstSessionOpenWebInitialPinRetry();
-        }
-        applySessionOpenLatchEffects(deps.sessionOpenLatch.onHostFacts({
-            contentHeight: deps.listContentHeightRef.current,
-            hasEntrySliceWindow: deps.entrySliceWindowRef.current?.sessionId === deps.sessionId,
-            isLoaded: deps.isLoaded,
-            isScrollable: false,
-            itemCount: deps.listDataLength,
-            layoutHeight: deps.listLayoutHeightRef.current,
-            nowMs: Date.now(),
-            sessionId: deps.sessionId,
-            userWantsPinned: deps.wantsPinnedRef.current,
-        }).effects);
-    }, [
+    useCommittedTranscriptRef(
+        deps.applySessionOpenLatchEffectsRef,
         applySessionOpenLatchEffects,
-        deps.entrySliceWindowRef,
-        deps.isLoaded,
-        deps.jumpToSeq,
-        deps.listContentHeightRef,
-        deps.listDataLength,
-        deps.listLayoutHeightRef,
-        deps.sessionEntryViewportRef,
-        deps.sessionId,
-        deps.sessionOpenLatch,
-        deps.wantsPinnedRef,
-        executeSessionOpenInitialPinAttempt,
-        scheduleFirstSessionOpenWebInitialPinRetry,
-    ]);
-
-    React.useEffect(() => {
-        if (!deps.sessionId || !deps.isLoaded || deps.jumpToSeq != null) return;
-        const sessionEntryViewport = deps.sessionEntryViewportRef.current;
-        if (
-            Platform.OS === 'web' &&
-            deps.sessionOpenLatch.phase() !== 'done' &&
-            (
-                sessionEntryViewport === null ||
-                (
-                    sessionEntryViewport.sessionId === deps.sessionId &&
-                    sessionEntryViewport.shouldFollowBottom !== false
-                )
-            )
-        ) {
-            const completed = executeSessionOpenInitialPinAttempt();
-            if (!completed) scheduleFirstSessionOpenWebInitialPinRetry();
-        }
-        applySessionOpenLatchEffects(deps.sessionOpenLatch.onHostFacts({
-            contentHeight: deps.listContentHeightRef.current,
-            hasEntrySliceWindow: deps.entrySliceWindowRef.current?.sessionId === deps.sessionId,
-            isLoaded: deps.isLoaded,
-            isScrollable: false,
-            itemCount: deps.listDataLength,
-            layoutHeight: deps.listLayoutHeightRef.current,
-            nowMs: Date.now(),
-            sessionId: deps.sessionId,
-            userWantsPinned: deps.wantsPinnedRef.current,
-        }).effects);
-    }, [
-        applySessionOpenLatchEffects,
-        deps.entrySliceWindowRef,
-        deps.isLoaded,
-        deps.jumpToSeq,
-        deps.listContentHeightRef,
-        deps.listDataLength,
-        deps.listLayoutHeightRef,
-        deps.sessionEntryViewportRef,
-        deps.sessionId,
-        deps.sessionOpenLatch,
-        deps.wantsPinnedRef,
-        executeSessionOpenInitialPinAttempt,
-        scheduleFirstSessionOpenWebInitialPinRetry,
-    ]);
+    );
 
     const requestSessionOpenInitialFill = React.useCallback(() => {
         if (!deps.isLoaded) return;
@@ -1147,7 +1218,11 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         const controller = new AbortController();
         deps.initialFillAbortRef.current = controller;
         const signal = controller.signal;
-        const shouldPinDuringInitialFill = deps.sessionEntryViewportRef.current?.shouldFollowBottom !== false;
+        const shouldFollowBottomDuringInitialFill =
+            deps.sessionEntryViewportRef.current?.shouldFollowBottom !== false;
+        const shouldPinDuringInitialFill =
+            deps.initialBottomPositionOwner === 'app' &&
+            shouldFollowBottomDuringInitialFill;
         fireAndForget((async () => {
             if (shouldPinDuringInitialFill) {
                 deps.pinToBottomRespectingNativeMountSettle('initial-open');
@@ -1165,30 +1240,58 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
                 transcriptInitialFillMaxNoProgressLoads: tuning.transcriptInitialFillMaxNoProgressLoads,
             });
             let consecutiveNoProgressLoads = 0;
-            while (true) {
-                if (signal.aborted) return;
-                if (deps.isScrollable() && deps.committedMessagesCount > 0) break;
-                if (deps.entrySliceWindowRef.current?.sessionId === deps.sessionId) break;
-                if (Date.now() - startedAtMs >= budgetMs) break;
-                const result = await deps.loadOlder({ preservePrependViewport: false, showLoadingIndicator: false });
-                if (!result) break;
-                if (result.status === 'no_more') break;
-                const madeProgress = result.status === 'loaded' && result.loaded > 0;
-                consecutiveNoProgressLoads = madeProgress ? 0 : consecutiveNoProgressLoads + 1;
-                await Promise.resolve();
-                await Promise.resolve();
-                if (shouldPinDuringInitialFill && deps.wantsPinnedRef.current) {
-                    deps.pinToBottomRespectingNativeMountSettle('initial-open');
+            // ONE fill-sufficiency contract, displayable-content based (S-L/S-M 2026-07-11):
+            // sufficiency is scrollability of the DISPLAYED main lane (the break below), so the
+            // bound must be displayable too. Older pages can legitimately apply only
+            // sidechain-routed raw events that never render in the main transcript, and a
+            // wall-clock budget anchored at the fill start starved exactly those sessions into
+            // an underfilled, unscrollable (= stuck, no older-load trigger) transcript. The
+            // budget now bounds time WITHOUT displayable progress (main-lane content height
+            // growth); raw page progress keeps the stuck-server guard, and an absolute ceiling
+            // bounds pathological fills. Removal condition: DR-029 readiness redesign
+            // (POST-BURN) owning a first-class fill/readiness pipeline.
+            const absoluteFillDeadlineMs = startedAtMs + budgetMs * 5;
+            let lastDisplayableProgressAtMs = startedAtMs;
+            let displayableContentHeightBaselinePx = deps.listContentHeightRef.current;
+            // Settlement is load-bearing: the latch keeps the whole open phase (and
+            // with it the web initial-open pin authority) alive until it settles. An
+            // abort or a failed/rejected load must therefore STILL settle — an
+            // unsettled exit left 'positioning' live forever and the host re-executed
+            // the open pin against user scrolling (live capture 2026-07-20). Settling
+            // a superseded session is safe: the latch ignores mismatched sessions.
+            try {
+                while (true) {
+                    if (signal.aborted) return;
+                    if (deps.isScrollable() && deps.committedMessagesCount > 0) break;
+                    if (deps.entrySliceWindowRef.current?.sessionId === deps.sessionId) break;
+                    if (Date.now() - lastDisplayableProgressAtMs >= budgetMs) break;
+                    if (Date.now() >= absoluteFillDeadlineMs) break;
+                    const result = await deps.loadOlder({ preservePrependViewport: false, showLoadingIndicator: false });
+                    if (!result) break;
+                    if (result.status === 'no_more') break;
+                    const madeProgress = result.status === 'loaded' && result.loaded > 0;
+                    consecutiveNoProgressLoads = madeProgress ? 0 : consecutiveNoProgressLoads + 1;
+                    await Promise.resolve();
+                    await Promise.resolve();
+                    const displayableContentHeightPx = deps.listContentHeightRef.current;
+                    if (displayableContentHeightPx > displayableContentHeightBaselinePx + 1) {
+                        displayableContentHeightBaselinePx = displayableContentHeightPx;
+                        lastDisplayableProgressAtMs = Date.now();
+                    }
+                    if (shouldPinDuringInitialFill && deps.wantsPinnedRef.current) {
+                        deps.pinToBottomRespectingNativeMountSettle('initial-open');
+                    }
+                    if (consecutiveNoProgressLoads >= maxNoProgressLoads) break;
                 }
-                if (consecutiveNoProgressLoads >= maxNoProgressLoads) break;
+            } finally {
+                applySessionOpenLatchEffects(deps.sessionOpenLatch.onInitialFillSettled({
+                    nowMs: Date.now(),
+                    sessionId: deps.sessionId,
+                }).effects);
             }
             if (signal.aborted) return;
-            applySessionOpenLatchEffects(deps.sessionOpenLatch.onInitialFillSettled({
-                nowMs: Date.now(),
-                sessionId: deps.sessionId,
-            }).effects);
             deps.observeMountSettleMetrics();
-            if (!shouldPinDuringInitialFill) {
+            if (!shouldFollowBottomDuringInitialFill) {
                 runEntryRestoreAttempt();
                 verifyWebEntryRestoreTransaction();
             }
@@ -1198,10 +1301,12 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.committedMessagesCount,
         deps.entrySliceWindowRef,
         deps.initialFillAbortRef,
+        deps.initialBottomPositionOwner,
         deps.isLoaded,
         deps.isScrollable,
         deps.jumpToSeq,
         deps.listContentHeight,
+        deps.listContentHeightRef,
         deps.listLayoutHeight,
         deps.loadOlder,
         deps.observeMountSettleMetrics,
@@ -1214,10 +1319,10 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         runEntryRestoreAttempt,
         verifyWebEntryRestoreTransaction,
     ]);
-    requestSessionOpenInitialFillRef.current = requestSessionOpenInitialFill;
-    React.useEffect(() => {
-        requestSessionOpenInitialFill();
-    }, [requestSessionOpenInitialFill]);
+    useCommittedTranscriptRef(
+        requestSessionOpenInitialFillRef,
+        requestSessionOpenInitialFill,
+    );
 
     React.useEffect(() => {
         if (!deps.sessionId) return;

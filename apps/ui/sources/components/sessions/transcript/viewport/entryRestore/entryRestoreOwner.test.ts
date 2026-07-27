@@ -269,6 +269,84 @@ describe('entry restore owner', () => {
         ]);
     });
 
+    it('carries the normalized durable sequence when a missing native slice anchor needs materialization', () => {
+        const owner = createEntryRestoreOwner();
+
+        const effects = owner.attempt({
+            ...baseAttempt,
+            canMaterializeOlder: true,
+            exactAnchorIndex: null,
+            nearestAnchorIndex: null,
+            restoredViewport: {
+                ...baseAttempt.restoredViewport,
+                anchorSeqLoaded: false,
+            },
+            slice: {
+                anchorRowId: null,
+                capable: true,
+                renderedAnchor: null,
+                renderedAnchorIndex: null,
+                target: {
+                    anchorItemOffsetPx: 84,
+                    anchorMessageId: 'm-20',
+                    anchorSeq: 20.9,
+                    kind: 'slice',
+                },
+                writeFree: false,
+            },
+        });
+
+        expect(effects).toContainEqual({
+            targetSeq: 20,
+            type: 'request-bounded-materialization',
+        });
+    });
+
+    it('carries the durable anchor sequence for regular identity materialization', () => {
+        const owner = createEntryRestoreOwner();
+
+        const effects = owner.attempt({
+            ...baseAttempt,
+            canMaterializeOlder: true,
+            exactAnchorIndex: null,
+            nearestAnchorIndex: null,
+            restoredViewport: {
+                ...baseAttempt.restoredViewport,
+                anchor: {
+                    ...anchor,
+                    seq: 20,
+                },
+                anchorSeqLoaded: false,
+            },
+        });
+
+        expect(effects).toContainEqual({
+            targetSeq: 20,
+            type: 'request-bounded-materialization',
+        });
+    });
+
+    it('keeps distance-only growth targetless even when bounded materialization is available', () => {
+        const owner = createEntryRestoreOwner();
+
+        const effects = owner.attempt({
+            ...baseAttempt,
+            canMaterializeOlder: true,
+            exactAnchorIndex: null,
+            nearestAnchorIndex: null,
+            restoredViewport: {
+                ...baseAttempt.restoredViewport,
+                anchor: null,
+                offsetY: 3000,
+            },
+        });
+
+        expect(effects).toContainEqual({
+            targetSeq: null,
+            type: 'request-bounded-materialization',
+        });
+    });
+
     it('disposeForExit telemeters the transaction session and does not schedule current-session paint effects', () => {
         const owner = createEntryRestoreOwner();
         owner.attempt(baseAttempt);
@@ -320,6 +398,72 @@ describe('entry restore owner', () => {
                 type: 'execute-command',
             },
         ]);
+    });
+
+    it('re-anchors a distance restore once settled measurements shrink content below the issued height', () => {
+        // Live capture 2026-07-13 (Happier-Perf sim, streaming session): the open fill
+        // measured content at an estimate-inflated 13708px, the persisted distance (177px
+        // from bottom) was written as an absolute offset into that space, then real row
+        // measurements shrank content to 9216px. The offset clamped to the bottom
+        // (distance 0) and the shrink direction blacked out every observation — the
+        // transaction never spent its correction and the viewport landed at the tail.
+        const owner = createEntryRestoreOwner();
+        owner.attempt({
+            ...baseAttempt,
+            contentHeight: 13708,
+            layoutHeight: 690,
+            exactAnchorIndex: null,
+            restoredViewport: {
+                ...baseAttempt.restoredViewport,
+                anchor: null,
+                offsetY: 177,
+            },
+        });
+
+        const hostFacts = (overrides: Readonly<{
+            contentHeight?: number;
+            mountSettleStable?: boolean;
+            nowMs?: number;
+        }>) => ({
+            contentHeight: 9216,
+            distanceFromBottom: 0,
+            layoutHeight: 690,
+            nowMs: 1300,
+            observedOffsetY: 8527,
+            resolveAnchorObservation: () => null,
+            resolveSliceObservation: () => null,
+            sessionId: 'session-a',
+            tolerancePx: 32,
+            ...overrides,
+        });
+
+        // Mid-churn (mount settle not yet stable): judgment stays withheld — no writes.
+        expect(executeEffects(owner.observeNativeHostFacts(hostFacts({ mountSettleStable: false })))).toEqual([]);
+
+        // Post-settle: the still-open transaction re-judges in distance space and spends
+        // its single correction against the SETTLED geometry.
+        expect(executeEffects(owner.observeNativeHostFacts(hostFacts({ mountSettleStable: true, nowMs: 1400 })))).toEqual([
+            {
+                command: {
+                    animated: false,
+                    contentHeight: 9216,
+                    distanceFromLiveTailPx: 177,
+                    reason: 'entry-restore',
+                    sessionId: 'session-a',
+                    type: 'restore-distance',
+                },
+                type: 'execute-command',
+            },
+        ]);
+
+        // The single-correction budget is spent (anti-storm invariant E1): further churn
+        // holds ownership without writing.
+        expect(executeEffects(owner.observeNativeHostFacts(hostFacts({
+            contentHeight: 9000,
+            mountSettleStable: true,
+            nowMs: 1500,
+        })))).toEqual([]);
+        expect(owner.telemetryState('session-a')).toBe('open');
     });
 
     it('requires exact bottom confirmation for web bottom entry restore before closing', () => {
