@@ -9,7 +9,7 @@ import { installClaudeSessionSubagentCommonModuleMocks } from './claudeSessionSu
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-const sendMessageSpy = vi.fn(async () => undefined);
+const submitMessageSpy = vi.fn(async () => undefined);
 
 installClaudeSessionSubagentCommonModuleMocks();
 
@@ -20,7 +20,7 @@ vi.mock('@/components/ui/text/Text', () => ({
 
 vi.mock('@/sync/runtime/getSyncSingleton', () => ({
     getSyncSingleton: () => ({
-        sendMessage: sendMessageSpy,
+        submitMessage: submitMessageSpy,
     }),
 }));
 
@@ -44,7 +44,7 @@ describe('ClaudeAgentTeamLaunchCard', () => {
 
         await screen.pressByTestIdAsync('session-subagent-launch-claude-team');
 
-        expect(sendMessageSpy).toHaveBeenCalledWith(
+        expect(submitMessageSpy).toHaveBeenCalledWith(
             's1',
             'Create team qa-team',
             'Create team qa-team',
@@ -59,7 +59,8 @@ describe('ClaudeAgentTeamLaunchCard', () => {
                 },
             }),
             {
-                bypassPendingQueueReason: 'subagent_control_command',
+                callerSurface: 'subagent_control',
+                forceImmediate: true,
             },
         );
     });
