@@ -5,6 +5,10 @@ import {
 } from '@/sync/domains/sessionControl/configOptionsControl';
 
 import { collectNewSessionModelScopedOptionIds } from './collectNewSessionModelScopedOptionIds';
+import {
+    readNonBlankSessionControlIdentifier,
+    readSessionControlValueId,
+} from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 type NewSessionModelOptionWithConfigOptions = Readonly<{
     value: string;
@@ -16,8 +20,8 @@ function normalizeOverrideValues(
 ): Readonly<Record<string, string>> {
     const normalized: Record<string, string> = {};
     for (const [configId, value] of Object.entries(overrides ?? {})) {
-        const normalizedConfigId = configId.trim();
-        const normalizedValue = typeof value === 'string' ? value.trim() : '';
+        const normalizedConfigId = readNonBlankSessionControlIdentifier(configId) ?? '';
+        const normalizedValue = readSessionControlValueId(value) ?? '';
         if (!normalizedConfigId || !normalizedValue) continue;
         normalized[normalizedConfigId] = normalizedValue;
     }

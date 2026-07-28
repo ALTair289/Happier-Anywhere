@@ -25,6 +25,7 @@ import {
     type FavoriteModelSelectionV1,
 } from '@/sync/domains/models/favoriteModelSelections';
 import { t } from '@/text';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 export type NewSessionEngineOptionDetailProps = Readonly<{
     backendTarget: BackendTargetRefV1;
@@ -58,8 +59,7 @@ export type NewSessionEngineOptionDetailProps = Readonly<{
 }>;
 
 function normalizeSelectedOptionId(value: string | null | undefined): string {
-    const trimmed = typeof value === 'string' ? value.trim() : '';
-    return trimmed.length > 0 ? trimmed : 'default';
+    return readNonBlankSessionControlIdentifier(value) ?? 'default';
 }
 
 function resolveEffectiveModelLabel(
@@ -117,7 +117,7 @@ function removeModelScopedConfigControls(params: Readonly<{
         return params.controls;
     }
 
-    const filtered = params.controls.filter((control) => !modelScopedOptionIds.has(control.option.id.trim()));
+    const filtered = params.controls.filter((control) => !modelScopedOptionIds.has(control.option.id));
     return filtered.length > 0 ? filtered : null;
 }
 
