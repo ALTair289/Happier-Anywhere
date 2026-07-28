@@ -163,6 +163,86 @@ export async function readDaemonControlState({
   return { ok: true, statePath, state, pid, httpPort, controlToken };
 }
 
+async function readDaemonControlStateForPlatform({
+  input,
+  platform,
+  readDaemonControlStateImpl,
+}) {
+  let controlState = await readDaemonControlStateImpl(input);
+  let windowsOwnershipBootstrap = false;
+  if (
+    !controlState.ok
+    && platform === 'win32'
+    && controlState.reason === 'daemon_not_owned'
+    && controlState.ownershipReason === 'process-identity-unsupported'
+  ) {
+    controlState = await readDaemonControlStateImpl({
+      ...input,
+      resolvePidStackOwnershipImpl: null,
+    });
+    windowsOwnershipBootstrap = controlState.ok === true;
+  }
+  return { controlState, windowsOwnershipBootstrap };
+}
+
+async function proveWindowsDaemonControlState({
+  controlState,
+  windowsOwnershipBootstrap,
+  timeoutMs,
+  daemonControlPostImpl,
+  readProcessInstanceFingerprintImpl,
+}) {
+  if (!windowsOwnershipBootstrap) {
+    return { ok: true, ping: null, processInstanceFingerprint: null };
+  }
+
+  const expectedRuntimeId = String(controlState.state?.runtimeId ?? '').trim();
+  const processInstanceFingerprintBefore = String(
+    readProcessInstanceFingerprintImpl(controlState.pid) ?? '',
+  ).trim();
+  if (!expectedRuntimeId || !processInstanceFingerprintBefore) {
+    return {
+      ok: false,
+      reason: expectedRuntimeId
+        ? 'process_instance_unavailable'
+        : 'daemon_runtime_identity_unavailable',
+      pid: controlState.pid,
+    };
+  }
+
+  let ping;
+  try {
+    ping = await daemonControlPostImpl({
+      httpPort: controlState.httpPort,
+      path: '/ping',
+      controlToken: controlState.controlToken,
+      timeoutMs,
+    });
+  } catch {
+    return { ok: false, reason: 'ping_failed', pid: controlState.pid };
+  }
+
+  const processInstanceFingerprintAfter = String(
+    readProcessInstanceFingerprintImpl(controlState.pid) ?? '',
+  ).trim();
+  if (
+    !processInstanceFingerprintMatches(
+      processInstanceFingerprintBefore,
+      processInstanceFingerprintAfter,
+    )
+  ) {
+    return { ok: false, reason: 'process_instance_changed', pid: controlState.pid };
+  }
+  if (String(ping?.runtimeId ?? '').trim() !== expectedRuntimeId) {
+    return { ok: false, reason: 'daemon_runtime_identity_mismatch', pid: controlState.pid };
+  }
+  return {
+    ok: true,
+    ping,
+    processInstanceFingerprint: processInstanceFingerprintBefore,
+  };
+}
+
 export function isDaemonControlRestartUnavailableError(error) {
   const path = String(error?.daemonControlPath ?? error?.path ?? '').trim();
   if (path && path !== '/restart') return false;
@@ -193,68 +273,37 @@ export async function pingDaemon({
     env,
     stackName,
   };
-  let controlState = await readDaemonControlStateImpl(input);
-  let windowsOwnershipBootstrap = false;
-  if (
-    !controlState.ok
-    && platform === 'win32'
-    && controlState.reason === 'daemon_not_owned'
-    && controlState.ownershipReason === 'process-identity-unsupported'
-  ) {
-    controlState = await readDaemonControlStateImpl({
-      ...input,
-      resolvePidStackOwnershipImpl: null,
+  const { controlState, windowsOwnershipBootstrap } =
+    await readDaemonControlStateForPlatform({
+      input,
+      platform,
+      readDaemonControlStateImpl,
     });
-    windowsOwnershipBootstrap = controlState.ok === true;
-  }
   if (!controlState.ok) return controlState;
   if (Number.isFinite(Number(excludePid)) && controlState.pid === Number(excludePid)) {
     return { ok: false, reason: 'pid_unchanged', pid: controlState.pid };
   }
-  const expectedRuntimeId = String(controlState.state?.runtimeId ?? '').trim();
-  const processInstanceFingerprintBefore = windowsOwnershipBootstrap
-    ? String(readProcessInstanceFingerprintImpl(controlState.pid) ?? '').trim()
-    : '';
-  if (windowsOwnershipBootstrap && (!expectedRuntimeId || !processInstanceFingerprintBefore)) {
-    return {
-      ok: false,
-      reason: expectedRuntimeId
-        ? 'process_instance_unavailable'
-        : 'daemon_runtime_identity_unavailable',
-      pid: controlState.pid,
-    };
-  }
+  const windowsProof = await proveWindowsDaemonControlState({
+    controlState,
+    windowsOwnershipBootstrap,
+    timeoutMs,
+    daemonControlPostImpl,
+    readProcessInstanceFingerprintImpl,
+  });
+  if (!windowsProof.ok) return windowsProof;
   try {
-    const ping = await daemonControlPostImpl({
-      httpPort: controlState.httpPort,
-      path: '/ping',
-      controlToken: controlState.controlToken,
-      timeoutMs,
-    });
-    if (windowsOwnershipBootstrap) {
-      const processInstanceFingerprintAfter = String(
-        readProcessInstanceFingerprintImpl(controlState.pid) ?? '',
-      ).trim();
-      if (
-        !processInstanceFingerprintMatches(
-          processInstanceFingerprintBefore,
-          processInstanceFingerprintAfter,
-        )
-      ) {
-        return { ok: false, reason: 'process_instance_changed', pid: controlState.pid };
-      }
-      if (String(ping?.runtimeId ?? '').trim() !== expectedRuntimeId) {
-        return { ok: false, reason: 'daemon_runtime_identity_mismatch', pid: controlState.pid };
-      }
-    }
+    const ping = windowsProof.ping ?? await daemonControlPostImpl({
+        httpPort: controlState.httpPort,
+        path: '/ping',
+        controlToken: controlState.controlToken,
+        timeoutMs,
+      });
     const distClosureFingerprint = String(ping?.distClosureFingerprint ?? '').trim().toLowerCase();
     return {
       ok: true,
       pid: controlState.pid,
       state: controlState.state,
-      processInstanceFingerprint: windowsOwnershipBootstrap
-        ? processInstanceFingerprintBefore
-        : null,
+      processInstanceFingerprint: windowsProof.processInstanceFingerprint,
       distClosureFingerprint: /^[a-f0-9]{16}$/.test(distClosureFingerprint)
         ? distClosureFingerprint
         : null,
@@ -278,20 +327,38 @@ export async function restartDaemonViaControlServer({
   daemonControlPostImpl = daemonControlPost,
   pingDaemonImpl = null,
   delayImpl = delay,
+  platform = process.platform,
+  readProcessInstanceFingerprintImpl = readProcessInstanceFingerprintSync,
 }) {
   const normalizedSuccessorDistClosureFingerprint = normalizeSuccessorDistClosureFingerprint(
     successorDistClosureFingerprint,
   );
   const confirmTimeoutMs = resolveDaemonRestartConfirmTimeoutMs(env, timeoutMs);
   const controlPostTimeoutMs = Math.max(100, Number(requestTimeoutMs) || DEFAULT_DAEMON_CONTROL_POST_TIMEOUT_MS);
-  const controlState = await readDaemonControlStateImpl({
+  const controlStateInput = {
     cliHomeDir,
     serverUrl: serverUrl ?? internalServerUrl ?? '',
     env,
     stackName,
-  });
+  };
+  const { controlState, windowsOwnershipBootstrap } =
+    await readDaemonControlStateForPlatform({
+      input: controlStateInput,
+      platform,
+      readDaemonControlStateImpl,
+    });
   if (!controlState.ok) {
     throw new Error(`daemon control /restart unavailable (${controlState.reason})`);
+  }
+  const windowsProof = await proveWindowsDaemonControlState({
+    controlState,
+    windowsOwnershipBootstrap,
+    timeoutMs: controlPostTimeoutMs,
+    daemonControlPostImpl,
+    readProcessInstanceFingerprintImpl,
+  });
+  if (!windowsProof.ok) {
+    throw new Error(`daemon control /restart unavailable (${windowsProof.reason})`);
   }
   const restartResult = await daemonControlPostImpl({
     httpPort: controlState.httpPort,
@@ -311,8 +378,10 @@ export async function restartDaemonViaControlServer({
   const probeReplacement = typeof pingDaemonImpl === 'function'
     ? pingDaemonImpl
     : async (input) => await pingDaemon(input, {
+        platform,
         readDaemonControlStateImpl,
         daemonControlPostImpl,
+        readProcessInstanceFingerprintImpl,
       });
   const deadline = Date.now() + Math.max(100, confirmTimeoutMs);
   let lastReason = 'state_unchanged';

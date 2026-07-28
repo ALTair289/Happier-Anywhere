@@ -1,4 +1,5 @@
 import { dirname, join } from 'node:path';
+import { readProcessInstanceFingerprintSync } from '../../../../../packages/cli-common/processInstance.mjs';
 import { resolvePidStackOwnership } from '../proc/ownership.mjs';
 import {
   isPidAlive,
@@ -106,6 +107,7 @@ function createDaemonPidOwnershipEligibility({
   authenticatedDaemonPid = null,
   authenticatedProcessInstanceFingerprint = null,
   resolvePidStackOwnershipImpl,
+  readProcessInstanceFingerprintSyncImpl = readProcessInstanceFingerprintSync,
 } = {}) {
   if (typeof resolvePidStackOwnershipImpl !== 'function') return null;
   const ownershipContext = resolveStackIdentityForDaemonPidOwnership({
@@ -130,7 +132,21 @@ function createDaemonPidOwnershipEligibility({
       ...ownershipContext,
       ...(processInstanceFingerprint ? { processInstanceFingerprint } : {}),
     });
-    return ownership?.owned === true;
+    if (ownership?.owned === true) return true;
+    if (
+      ownership?.owned == null
+      && trustedFingerprint
+      && normalizeDaemonPid(pid) === normalizeDaemonPid(authenticatedDaemonPid)
+    ) {
+      try {
+        return readProcessInstanceFingerprintSyncImpl(pid, {
+          expectedFingerprint: trustedFingerprint,
+        }) === trustedFingerprint;
+      } catch {
+        return false;
+      }
+    }
+    return false;
   };
 }
 
@@ -351,6 +367,7 @@ export async function readStackRuntimeStateWithDaemonSync(
     checkDaemonStateImpl = null,
     isPidAliveImpl = isPidAlive,
     resolvePidStackOwnershipImpl = resolvePidStackOwnership,
+    readProcessInstanceFingerprintSyncImpl = readProcessInstanceFingerprintSync,
     readStackRuntimeStateFileImpl = readStackRuntimeStateFile,
     recordStackRuntimeUpdateImpl = recordStackRuntimeUpdate,
   } = {},
@@ -376,6 +393,7 @@ export async function readStackRuntimeStateWithDaemonSync(
       checkDaemonStateImpl,
       isPidAliveImpl,
       resolvePidStackOwnershipImpl,
+      readProcessInstanceFingerprintSyncImpl,
       readStackRuntimeStateFileImpl,
       recordStackRuntimeUpdateImpl,
     },
@@ -403,6 +421,7 @@ export async function syncStackRuntimeDaemonPidFromDaemonState(
     checkDaemonStateImpl = null,
     isPidAliveImpl = isPidAlive,
     resolvePidStackOwnershipImpl = resolvePidStackOwnership,
+    readProcessInstanceFingerprintSyncImpl = readProcessInstanceFingerprintSync,
     readStackRuntimeStateFileImpl = readStackRuntimeStateFile,
     recordStackRuntimeUpdateImpl = recordStackRuntimeUpdate,
   } = {},
@@ -446,6 +465,7 @@ export async function syncStackRuntimeDaemonPidFromDaemonState(
       || observed.daemonState?.processInstanceFingerprint
       || null,
     resolvePidStackOwnershipImpl,
+    readProcessInstanceFingerprintSyncImpl,
   });
 
   let acceptedObserved = observed;
@@ -488,8 +508,27 @@ export async function syncStackRuntimeDaemonPidFromDaemonState(
       || observed.daemonState?.processInstanceFingerprint
       || null,
   };
-  if (shouldSyncFingerprint) {
-    recordOptions.daemonDistFingerprint = acceptedObserved.pid ? daemonDistFingerprint : null;
+  if (acceptedObserved.running) {
+    const desiredFingerprint = shouldSyncFingerprint
+      ? normalizeDaemonDistFingerprint(daemonDistFingerprint)
+      : null;
+    const observedFingerprint = normalizeDaemonDistFingerprint(
+      acceptedObserved.daemonState?.distClosureFingerprint,
+    );
+    if (desiredFingerprint || observedFingerprint) {
+      recordOptions.daemonDistFingerprint = observedFingerprint || desiredFingerprint;
+    } else if (shouldSyncFingerprint) {
+      recordOptions.daemonDistFingerprint = null;
+    }
+  } else if (acceptedObserved.pid) {
+    const observedFingerprint = normalizeDaemonDistFingerprint(
+      acceptedObserved.daemonState?.distClosureFingerprint,
+    );
+    if (observedFingerprint) {
+      recordOptions.daemonDistFingerprint = observedFingerprint;
+    }
+  } else {
+    recordOptions.daemonDistFingerprint = null;
   }
 
   const pidToRecord = acceptedObserved.pid;

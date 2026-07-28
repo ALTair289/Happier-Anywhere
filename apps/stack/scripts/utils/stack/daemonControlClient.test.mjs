@@ -103,6 +103,78 @@ test('pingDaemon bootstraps Windows ownership from an authenticated matching dae
   assert.equal(ownershipAttempts[1], null);
 });
 
+test('restartDaemonViaControlServer reuses the authenticated Windows runtime proof before restarting', async () => {
+  let restartPosted = false;
+  const ownershipAttempts = [];
+  const fingerprints = [
+    'win32-cim:old',
+    'win32-cim:old',
+    'win32-cim:new',
+    'win32-cim:new',
+  ];
+
+  const result = await restartDaemonViaControlServer({
+    cliHomeDir: 'C:/Users/test/.happier/target',
+    internalServerUrl: 'http://127.0.0.1:3009',
+    stackName: 'remote-windows',
+    timeoutMs: 100,
+    pollMs: 1,
+    delayImpl: async () => {},
+    platform: 'win32',
+    readDaemonControlStateImpl: async (input) => {
+      ownershipAttempts.push(input.resolvePidStackOwnershipImpl);
+      const state = restartPosted
+        ? {
+            pid: 4343,
+            httpPort: 4322,
+            controlToken: 'replacement-token',
+            runtimeId: 'runtime-new',
+          }
+        : {
+            pid: 4242,
+            httpPort: 4321,
+            controlToken: 'state-token',
+            runtimeId: 'runtime-old',
+          };
+      return input.resolvePidStackOwnershipImpl === null
+        ? {
+            ok: true,
+            state,
+            pid: state.pid,
+            httpPort: state.httpPort,
+            controlToken: state.controlToken,
+          }
+        : {
+            ok: false,
+            reason: 'daemon_not_owned',
+            ownershipReason: 'process-identity-unsupported',
+            pid: state.pid,
+          };
+    },
+    daemonControlPostImpl: async ({ path, httpPort }) => {
+      if (path === '/restart') {
+        assert.equal(httpPort, 4321);
+        restartPosted = true;
+        return { status: 'restarting' };
+      }
+      if (path === '/ping') {
+        return {
+          status: 'ok',
+          runtimeId: httpPort === 4321 ? 'runtime-old' : 'runtime-new',
+        };
+      }
+      throw new Error(`unexpected path ${path}`);
+    },
+    readProcessInstanceFingerprintImpl: () => fingerprints.shift() ?? null,
+  });
+
+  assert.equal(result.status, 'restarting');
+  assert.equal(result.previousPid, 4242);
+  assert.equal(result.pid, 4343);
+  assert.equal(result.processInstanceFingerprint, 'win32-cim:new');
+  assert.ok(ownershipAttempts.includes(null));
+});
+
 test('readDaemonControlState rejects a live daemon pid that is not owned by the current stack', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'hstack-daemon-control-unowned-'));
   t.after(async () => {

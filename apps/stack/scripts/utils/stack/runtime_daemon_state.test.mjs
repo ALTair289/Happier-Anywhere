@@ -560,6 +560,54 @@ test('syncStackRuntimeDaemonPidFromDaemonState adopts and persists an authentica
   )));
 });
 
+test('syncStackRuntimeDaemonPidFromDaemonState accepts an authenticated Windows daemon when env inspection is unsupported', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-windows-authenticated-fallback-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtimeStatePath = join(root, 'stack.runtime.json');
+  const cliHomeDir = join(root, 'cli');
+  await writeFile(runtimeStatePath, JSON.stringify({
+    version: 1,
+    stackName: 'remote-windows',
+    processes: {},
+  }) + '\n', 'utf8');
+
+  const result = await syncStackRuntimeDaemonPidFromDaemonState(
+    {
+      runtimeStatePath,
+      cliHomeDir,
+      internalServerUrl: 'http://127.0.0.1:3009',
+      env: {},
+    },
+    {
+      checkDaemonStateImpl: () => ({
+        status: 'running',
+        pid: 4242,
+        processInstanceFingerprint: 'win32-cim:authenticated',
+      }),
+      isPidAliveImpl: () => true,
+      resolvePidStackOwnershipImpl: async () => ({
+        status: 'inconclusive',
+        owned: null,
+        reason: 'process-identity-unsupported',
+      }),
+      readProcessInstanceFingerprintSyncImpl: () => 'win32-cim:authenticated',
+    },
+  );
+
+  assert.equal(result.running, true);
+  assert.equal(result.pid, 4242);
+
+  const persisted = JSON.parse(await readFile(runtimeStatePath, 'utf8'));
+  assert.equal(persisted.processes.daemonPid, 4242);
+  assert.equal(
+    persisted.processInstances.processes.daemonPid.fingerprint,
+    'win32-cim:authenticated',
+  );
+});
+
 test('syncStackRuntimeDaemonPidFromDaemonState gives the ping-aware observer the runtime stack identity', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-observer-stack-'));
   t.after(async () => {
@@ -741,6 +789,45 @@ test('syncStackRuntimeDaemonPidFromDaemonState preserves the recorded dist finge
   const runtime = JSON.parse(await readFile(runtimeStatePath, 'utf-8'));
   assert.equal(runtime?.processes?.daemonPid, 222);
   assert.equal(runtime?.daemon?.distClosureFingerprint, 'fingerprint-before-sync');
+});
+
+test('syncStackRuntimeDaemonPidFromDaemonState records the authenticated daemon build fingerprint when callers omit it', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-observed-fingerprint-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtimeStatePath = join(root, 'stack.runtime.json');
+  await writeFile(runtimeStatePath, JSON.stringify({
+    version: 1,
+    stackName: 'dev',
+    processes: {},
+    daemon: {
+      distClosureFingerprint: 'fingerprint-before-sync',
+    },
+  }) + '\n', 'utf8');
+
+  const result = await syncStackRuntimeDaemonPidFromDaemonState(
+    {
+      runtimeStatePath,
+      cliHomeDir: join(root, 'cli'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      env: {},
+    },
+    {
+      checkDaemonStateImpl: () => ({
+        status: 'running',
+        pid: 222,
+        distClosureFingerprint: 'fingerprint-from-daemon',
+      }),
+      isPidAliveImpl: () => true,
+      resolvePidStackOwnershipImpl: acceptAllStackOwnership,
+    },
+  );
+
+  assert.equal(result.daemonDistFingerprint, 'fingerprint-from-daemon');
+  const runtime = JSON.parse(await readFile(runtimeStatePath, 'utf8'));
+  assert.equal(runtime.daemon.distClosureFingerprint, 'fingerprint-from-daemon');
 });
 
 test('daemon sync rejects fingerprint and running observation when the authenticated pid dies before publication', async (t) => {
