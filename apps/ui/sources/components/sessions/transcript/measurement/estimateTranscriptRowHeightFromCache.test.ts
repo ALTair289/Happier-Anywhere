@@ -74,7 +74,11 @@ describe('estimateTranscriptRowHeightFromCache', () => {
         expect(estimateTranscriptRowHeightFromCache({ reconciler, signature: pending })).toBe(214);
     });
 
-    it('does not serve a shrink-capable row a height measured from a DIFFERENT shape', () => {
+    // RE-AUTHORED (W-1). The previous title — "does not serve a shrink-capable row a height
+    // measured from a DIFFERENT shape" — pinned the RESERVATION rule onto the ESTIMATE, which are
+    // opposite contracts (see the module doc). The reservation half is the real blank-space guard
+    // and is asserted here verbatim; the estimate half was the web scroll regression and is inverted.
+    it('releases the FORCING floor on a shape change but still predicts from the row\'s own measurement', () => {
         const reconciler = createTranscriptMeasurementReconciler({
             cache: createTestTranscriptItemHeightCache(),
         });
@@ -84,9 +88,111 @@ describe('estimateTranscriptRowHeightFromCache', () => {
             rowState: 'pending-action',
         });
         reconciler.recordMeasuredHeight({ signature: pending, heightPx: 214 });
-        // The queue drained 3 -> 1: same item, new content shape. The stale 214px must not be served.
+        // The queue drained 3 -> 1: same item, new content shape.
         const drained = { ...pending, structuralKey: 'structural-2' };
-        expect(estimateTranscriptRowHeightFromCache({ reconciler, signature: drained })).toBeUndefined();
+        // Reservation (a forcing `minHeight` that self-fulfils): still released. Do not weaken —
+        // re-serving it here is exactly the stranded-blank-space defect E-3 fixed.
+        expect(reconciler.resolveReservation(drained)).toBeUndefined();
+        // Estimate (a prediction the renderer replaces on the row's next onLayout): the row's own
+        // last measurement at this width/font is the best available predictor. `undefined` here
+        // sends the renderer to the flat content heuristic and moves every row below it.
+        expect(estimateTranscriptRowHeightFromCache({ reconciler, signature: drained })).toBe(214);
+    });
+});
+
+/**
+ * W-1 — the web scroll regression oracle.
+ *
+ * `ChatListInternal.tsx` wires the vendored Legend `getItemSizeVersion` prop to the FULL row
+ * signature key, so an OFFSCREEN row whose `structuralKey` moves has its measured size DELETED
+ * from `sizesKnown` and is re-sized from `getEstimatedItemSize`
+ * (`patches/@legendapp+list+3.3.3.patch` → `validateItemSizeVersion`). Legend then lays rows out by
+ * accumulation, `positions[i+1] = positions[i] + size_i`; the repo's real-Legend integration test
+ * `viewport/shell/renderer/legendListRenderer.real.integration.test.tsx`
+ * ("uses the current item-size version estimate for an offscreen measured key…") pins that exact
+ * arithmetic against the installed package.
+ *
+ * The oracle below therefore models the renderer's content model, not a re-implementation of it:
+ * the anchored row's absolute offset is the sum of the sizes the app itself hands the renderer for
+ * every preceding row. A row that has already been measured and whose PAINTED height did not change
+ * must not move the anchor when its shape key moves — residual displacement 0.
+ */
+describe('W-1 · an offscreen shape change must not displace the anchored row', () => {
+    const ROW_COUNT = 40;
+    const ANCHOR_INDEX = 30;
+    const RENDER_WINDOW_ROWS = 8;
+    const NATURAL_ROW_HEIGHT_PX = 420;
+
+    type ScrollModelRow = {
+        item: TranscriptRowShellItem;
+        naturalHeightPx: number;
+        signature: TranscriptItemHeightValiditySignature;
+    };
+
+    function buildToolRows(): ScrollModelRow[] {
+        return Array.from({ length: ROW_COUNT }, (_value, index): ScrollModelRow => ({
+            item: { kind: 'message', id: `row-${index}`, messageId: `tool-${index}` } as TranscriptRowShellItem,
+            naturalHeightPx: NATURAL_ROW_HEIGHT_PX,
+            signature: buildSignature({
+                itemId: `row-${index}`,
+                kind: 'message:tool',
+                // A tool row's structural key is its message revision (`transcriptRowShellSignature.ts`).
+                structuralKey: `tool-${index}:r1`,
+                // Running / permission-pending tool rows are pinned to 'tool-progress' and never
+                // reach 'stable', so the exact-height cache structurally cannot hold them.
+                rowState: 'tool-progress',
+            }),
+        }));
+    }
+
+    // The exact composition `ChatListInternal.tsx` hands Legend as `getEstimatedItemSize`.
+    function resolveRendererSize(
+        reconciler: ReturnType<typeof createTranscriptMeasurementReconciler>,
+        row: ScrollModelRow,
+    ): number {
+        const estimate = estimateTranscriptRowHeightFromCache({ reconciler, signature: row.signature })
+            ?? estimateTranscriptRowHeightFromContent({ getMessageById: () => null, item: row.item });
+        return estimate ?? NATURAL_ROW_HEIGHT_PX;
+    }
+
+    function anchorOffsetPx(
+        reconciler: ReturnType<typeof createTranscriptMeasurementReconciler>,
+        rows: readonly ScrollModelRow[],
+    ): number {
+        let offset = 0;
+        for (let index = 0; index < ANCHOR_INDEX; index += 1) {
+            offset += resolveRendererSize(reconciler, rows[index]!);
+        }
+        return offset;
+    }
+
+    it('keeps the anchored row\'s offset fixed when rows scrolled past change shape offscreen', () => {
+        const reconciler = createTranscriptMeasurementReconciler({
+            cache: createTestTranscriptItemHeightCache(),
+        });
+        const rows = buildToolRows();
+
+        // Scroll the render window across the whole list: every row mounts, measures, unmounts.
+        for (let start = 0; start + RENDER_WINDOW_ROWS <= ROW_COUNT; start += 1) {
+            for (let index = start; index < start + RENDER_WINDOW_ROWS; index += 1) {
+                const row = rows[index]!;
+                reconciler.recordMeasuredHeight({ signature: row.signature, heightPx: row.naturalHeightPx });
+            }
+        }
+
+        const offsetBefore = anchorOffsetPx(reconciler, rows);
+        expect(offsetBefore).toBe(ANCHOR_INDEX * NATURAL_ROW_HEIGHT_PX);
+
+        // Ten tools ABOVE the viewport settle running -> completed while offscreen: the revision
+        // bumps, the shape key moves, the PAINTED height is unchanged. Nothing the user can see
+        // moved, so the anchor must not move either.
+        const settled = rows.map((row, index): ScrollModelRow => (
+            index < 10
+                ? { ...row, signature: { ...row.signature, structuralKey: `tool-${index}:r2` } }
+                : row
+        ));
+
+        expect(anchorOffsetPx(reconciler, settled) - offsetBefore).toBe(0);
     });
 });
 

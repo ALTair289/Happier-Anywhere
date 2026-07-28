@@ -1,7 +1,10 @@
 import type { Message } from '@/sync/domains/messages/messageTypes';
 
 import type { TranscriptItemHeightValiditySignature } from './transcriptItemHeightCache';
-import type { TranscriptMeasurementReconciler } from './transcriptMeasurementReconciler';
+import {
+    TRANSCRIPT_GROWING_ROW_STATES,
+    type TranscriptMeasurementReconciler,
+} from './transcriptMeasurementReconciler';
 import { collectMessageIdsFromTurn, type TranscriptRowShellItem } from './transcriptRowShellSignature';
 
 /**
@@ -16,23 +19,38 @@ import { collectMessageIdsFromTurn, type TranscriptRowShellItem } from './transc
  * A GROWING row's floor (`streaming`, `thinking`) is NOT a size: the reconciler
  * deliberately carries that floor across content shapes, so it is a lower bound on a
  * row whose content is still arriving, and the content estimate below tracks the live
- * text better. Every other row state is shrink-capable, and for those the reconciler
- * only ever serves a floor recorded from the row's CURRENT structural shape — i.e. the
- * row's own last measurement at this width/font. That is a real measurement, not a
- * prediction; it is served through the floor because the exact-height cache is
+ * text better. Every other row state is shrink-capable, and for those this estimate is
+ * the row's own last measurement at this width/font — a real measurement, not a
+ * prediction. It cannot come from the exact-height cache alone, because that cache is
  * stable-only and a row that never reaches `stable` (every `pending-action` row:
- * `pending-queue`, `pending-user-action`, `action-draft`) structurally cannot enter it.
+ * `pending-queue`, `pending-user-action`, `action-draft`, and every `tool-progress`
+ * row) structurally cannot enter it.
+ *
+ * W-1: an estimate and a reservation are OPPOSITE contracts over that same measurement
+ * and must not be read through one call. A reservation is a forcing, self-fulfilling
+ * `minHeight` style, so it is released the instant a shrink-capable row's shape moves
+ * (`isFloorShapeValid`) — otherwise a shrunk row strands blank space. An estimate is
+ * discarded by that row's very next onLayout, so releasing it buys nothing and costs
+ * everything: `ChatListInternal` wires the vendored Legend `getItemSizeVersion` to the
+ * full signature key, so an OFFSCREEN row whose shape moves has its measured size
+ * deleted and is re-sized from this estimate. Returning `undefined` there sent already
+ * scrolled-past rows to the flat content heuristic below (a settled tool row: real
+ * ~420px, heuristic 56px), collapsing the content above the viewport and pulling the
+ * user's scroll position backwards. `resolveLastMeasuredHeight` is therefore read for
+ * exactly the case the reservation refuses.
  */
 export function estimateTranscriptRowHeightFromCache(params: Readonly<{
     reconciler: TranscriptMeasurementReconciler;
     signature: TranscriptItemHeightValiditySignature;
 }>): number | undefined {
     const reservation = params.reconciler.resolveReservation(params.signature);
-    if (!reservation) return undefined;
-    if (reservation.kind === 'exact') return reservation.minHeight;
-    return params.signature.rowState === 'streaming' || params.signature.rowState === 'thinking'
-        ? undefined
-        : reservation.minHeight;
+    if (reservation?.kind === 'exact') return reservation.minHeight;
+    // Consume the reconciler's set rather than re-listing the growing states here: it is the
+    // single owner of that decision (`isFloorShapeValid` reads the same set), so a future state
+    // cannot silently diverge between the reservation producer and this estimate consumer.
+    if (TRANSCRIPT_GROWING_ROW_STATES.has(params.signature.rowState)) return undefined;
+    if (reservation) return reservation.minHeight;
+    return params.reconciler.resolveLastMeasuredHeight(params.signature);
 }
 
 // Conservative text-flow constants for rows never measured in this app run. Estimates
@@ -94,9 +112,17 @@ export function estimateTranscriptRowHeightFromContent(params: Readonly<{
         );
     }
     if (item.kind === 'pending-queue') {
+        // The row a SEND creates. It renders one text block per queued and per discarded message,
+        // reading `displayText ?? text` (`PendingMessagesTranscriptBlock.tsx:46`) — estimate from
+        // the SAME string the row renders, or a message with a distinct display form is mis-sized.
+        // Iterate both arrays directly: `getEstimatedItemSize` runs per row per render, so the
+        // concatenated copy would be a per-row allocation in a hot path.
         let total = 0;
-        for (const message of [...item.pendingMessages, ...item.discardedMessages]) {
-            total += estimateTextBlockPx(message.displayText ?? message.text);
+        for (const pendingMessage of item.pendingMessages) {
+            total += estimateTextBlockPx(pendingMessage.displayText ?? pendingMessage.text);
+        }
+        for (const discardedMessage of item.discardedMessages) {
+            total += estimateTextBlockPx(discardedMessage.displayText ?? discardedMessage.text);
         }
         return Math.min(ESTIMATE_MAX_ROW_PX, Math.max(ESTIMATE_COMPACT_ROW_PX, total));
     }

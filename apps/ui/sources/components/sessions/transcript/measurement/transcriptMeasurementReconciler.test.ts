@@ -606,3 +606,67 @@ describe('E-3 · every shrink-capable row releases its stale floor (RC-C + RC-P)
         expect(reconciler.resolveReservation(signature)).toEqual({ kind: 'floor', minHeight: 210 });
     });
 });
+
+/**
+ * W-1 — releasing the floor must release the FORCING reservation only.
+ *
+ * The reconciler has two consumers with opposite needs for the same stored height:
+ * `resolveTranscriptRowShellHeight` turns it into a real `minHeight` style (self-fulfilling, so it
+ * must be released the moment the shape moves — E-3), while the renderer's virtualization estimate
+ * only PREDICTS a row it has not mounted (replaced by that row's next onLayout, so releasing it
+ * throws away the only real measurement the app has and moves every row below it).
+ */
+describe('W-1 · last-measured height survives a floor release for prediction only', () => {
+    function toolRow(structuralKey: string): TranscriptItemHeightValiditySignature {
+        return stableSignature({
+            itemId: 'group-1#tool:tool-1',
+            kind: 'tool-group-tool',
+            structuralKey,
+            rowState: 'tool-progress',
+        });
+    }
+
+    it('keeps the row\'s own measurement readable after the shape moves, without re-serving the floor', () => {
+        const reconciler = createTestTranscriptMeasurementReconciler();
+        const running = toolRow('tool-1:r1');
+        reconciler.recordMeasuredHeight({ signature: running, heightPx: 420 });
+
+        const completed = toolRow('tool-1:r2');
+        expect(reconciler.resolveReservation(completed)).toBeUndefined();
+        expect(reconciler.resolveLastMeasuredHeight(completed)).toBe(420);
+    });
+
+    it('re-seeds the readable measurement from the row\'s next real layout', () => {
+        const reconciler = createTestTranscriptMeasurementReconciler();
+        const running = toolRow('tool-1:r1');
+        reconciler.recordMeasuredHeight({ signature: running, heightPx: 420 });
+
+        // The row mounts at its new shape and genuinely measures shorter: the prediction follows
+        // the measurement down, exactly like the reservation does.
+        const completed = toolRow('tool-1:r2');
+        reconciler.recordMeasuredHeight({ signature: completed, heightPx: 96 });
+        expect(reconciler.resolveLastMeasuredHeight(completed)).toBe(96);
+        expect(reconciler.resolveReservation(completed)).toEqual({ kind: 'floor', minHeight: 96 });
+    });
+
+    it('reports nothing for a never-measured row or a different geometry', () => {
+        const reconciler = createTestTranscriptMeasurementReconciler();
+        const running = toolRow('tool-1:r1');
+        reconciler.recordMeasuredHeight({ signature: running, heightPx: 420 });
+
+        expect(reconciler.resolveLastMeasuredHeight({ ...running, itemId: 'group-1#tool:tool-2' })).toBeUndefined();
+        expect(reconciler.resolveLastMeasuredHeight({ ...running, widthBucket: 'width:900' })).toBeUndefined();
+    });
+
+    it('reports nothing while a mounted row is reset-pending', () => {
+        const reconciler = createTestTranscriptMeasurementReconciler();
+        const running = toolRow('tool-1:r1');
+        reconciler.recordMeasuredHeight({ signature: running, heightPx: 420 });
+
+        // `TranscriptRowShell`'s layout effect: the row is mounted and about to re-measure this
+        // frame, so there is no measurement to predict from.
+        const completed = toolRow('tool-1:r2');
+        reconciler.resetReservationForStructuralChange({ itemId: completed.itemId, signature: completed });
+        expect(reconciler.resolveLastMeasuredHeight(completed)).toBeUndefined();
+    });
+});

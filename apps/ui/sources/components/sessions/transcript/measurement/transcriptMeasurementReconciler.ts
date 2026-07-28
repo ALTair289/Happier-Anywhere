@@ -62,6 +62,24 @@ export type TranscriptMeasurementReconciler = Readonly<{
     /** R2. Sole reservation producer. Exact for stable rows; monotonic per-item floor for non-stable; undefined if unknown. */
     resolveReservation(signature: TranscriptItemHeightValiditySignature): TranscriptRowHeightReservation | undefined;
 
+    /**
+     * R2b. The row's own last recorded onLayout height at this item+geometry, **independent of the
+     * content shape it was measured from** — a PREDICTION, never a reservation.
+     *
+     * A reservation becomes a real `minHeight` style and is self-fulfilling, so it must be released
+     * the instant a shrink-capable row's shape moves ({@link isFloorShapeValid}); a prediction is
+     * only what the renderer virtualizes an UNMOUNTED row with until that row's next onLayout
+     * replaces it. Fusing the two made a released floor delete the app's only real measurement of a
+     * row, so the renderer re-sized already-scrolled-past rows from a flat content heuristic and
+     * dragged every row below them (W-1 web scroll regression).
+     *
+     * Returns `undefined` for a never-measured or reset-pending row. For a GROWING row
+     * ({@link TRANSCRIPT_GROWING_ROW_STATES}) the stored value is a deliberate cross-shape PEAK
+     * rather than a size, so it is not a valid prediction — callers filter those states first
+     * (`estimateTranscriptRowHeightFromCache`).
+     */
+    resolveLastMeasuredHeight(signature: TranscriptItemHeightValiditySignature): number | undefined;
+
     /** Record a committed measurement (from onLayout). Updates exact (stable) or the monotonic per-item floor. */
     recordMeasuredHeight(input: Readonly<{
         signature: TranscriptItemHeightValiditySignature;
@@ -255,6 +273,14 @@ export function createTranscriptMeasurementReconciler(
                 return resolveFloorReservation(signature);
             }
             return resolveFloorReservation(signature);
+        },
+
+        resolveLastMeasuredHeight(signature) {
+            const floor = floorsByKey.get(buildFloorKey(signature));
+            if (floor === undefined || floor.minHeight === null || !isValidHeight(floor.minHeight)) {
+                return undefined;
+            }
+            return floor.minHeight;
         },
 
         recordMeasuredHeight(input) {
