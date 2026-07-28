@@ -119,6 +119,20 @@ describe('sessionRunnerRestart', () => {
         });
     });
 
+    it('preserves typed non-destructive refresh unsupported instead of generic ineligible', async () => {
+        const { normalizeRestartSessionRunnerResult } = await import('./sessionRunnerRestart');
+        expect(normalizeRestartSessionRunnerResult({
+            ok: false,
+            status: 'ineligible',
+            sessionId: 'sess-1',
+            reasonCode: 'non_destructive_refresh_unsupported',
+        }, 'fallback')).toEqual({
+            ok: false,
+            status: 'refresh_unsupported',
+            sessionId: 'sess-1',
+        });
+    });
+
     it('fetches daemon-owned session runner runtime status through the status RPC', async () => {
         machineRpcWithServerScopeMock.mockResolvedValueOnce({
             v: 1,
@@ -183,5 +197,146 @@ describe('sessionRunnerRestart', () => {
             sessionId: 's1',
             machineId: 'machine-1',
         })).resolves.toBeNull();
+    });
+});
+
+function makeRuntimeState(overrides: Readonly<{
+    pid?: number | null;
+    versionState?: 'current' | 'stale' | 'unknown';
+    processCommandHash?: string | null;
+}> = {}) {
+    return {
+        v: 1 as const,
+        sessionId: 's1',
+        machineId: 'machine-1',
+        daemonId: 'daemon-1',
+        observedAtMs: 123,
+        runner: {
+            pid: overrides.pid === undefined ? 123 : overrides.pid,
+            runtimeId: 'version:cli-old',
+            cliVersion: 'cli-old',
+            entrypointVersion: 'cli-old',
+            processCommandHash: overrides.processCommandHash === undefined ? 'hash-old' : overrides.processCommandHash,
+            entrypointSource: 'process_command' as const,
+            startedBy: 'daemon' as const,
+            startingMode: 'remote' as const,
+        },
+        daemon: {
+            cliVersion: 'cli-new',
+            startedWithCliVersion: 'cli-new',
+            currentEntrypointVersion: 'version:cli-new',
+            currentEntrypointSource: 'launch_spec' as const,
+        },
+        versionState: overrides.versionState ?? 'stale',
+        statusSource: 'daemon_tracking' as const,
+        plannedRestart: { supported: true, eligible: true, disabledReason: null },
+    };
+}
+
+describe('didSessionRunnerRestartLand', () => {
+    it('treats a runner now on the current CLI as landed', async () => {
+        const { didSessionRunnerRestartLand } = await import('./sessionRunnerRestart');
+        expect(didSessionRunnerRestartLand({
+            state: makeRuntimeState({ versionState: 'current', pid: 123 }),
+            expectedRunnerPid: 123,
+        })).toBe(true);
+    });
+
+    it('treats a replaced runner PID as landed even before version is re-attested', async () => {
+        const { didSessionRunnerRestartLand } = await import('./sessionRunnerRestart');
+        expect(didSessionRunnerRestartLand({
+            state: makeRuntimeState({ versionState: 'unknown', pid: 456 }),
+            expectedRunnerPid: 123,
+        })).toBe(true);
+    });
+
+    it('does not treat the unchanged stale runner as landed', async () => {
+        const { didSessionRunnerRestartLand } = await import('./sessionRunnerRestart');
+        expect(didSessionRunnerRestartLand({
+            state: makeRuntimeState({ versionState: 'stale', pid: 123 }),
+            expectedRunnerPid: 123,
+        })).toBe(false);
+        expect(didSessionRunnerRestartLand({ state: null, expectedRunnerPid: 123 })).toBe(false);
+    });
+});
+
+describe('restartStaleSessionRunnerWithObserve', () => {
+    const baseRequest = {
+        sessionId: 's1',
+        machineId: 'machine-1',
+        serverId: 'server-1',
+        expectedRunnerPid: 123,
+        expectedProcessCommandHash: 'hash-old',
+        expectedRunnerEntrypointIdentity: 'version:cli-old',
+    } as const;
+
+    it('returns a successful restart without observing', async () => {
+        const { restartStaleSessionRunnerWithObserve } = await import('./sessionRunnerRestart');
+        const restart = vi.fn(async () => ({ ok: true as const, status: 'restarted' as const, sessionId: 's1' }));
+        const getStatus = vi.fn(async () => null);
+
+        await expect(restartStaleSessionRunnerWithObserve(baseRequest, {
+            restart,
+            getStatus,
+            sleep: async () => {},
+        })).resolves.toEqual({ ok: true, status: 'restarted', sessionId: 's1' });
+        expect(getStatus).not.toHaveBeenCalled();
+    });
+
+    it('does not observe definitive negatives such as busy', async () => {
+        const { restartStaleSessionRunnerWithObserve } = await import('./sessionRunnerRestart');
+        const restart = vi.fn(async () => ({ ok: false as const, status: 'busy' as const, sessionId: 's1' }));
+        const getStatus = vi.fn(async () => null);
+
+        await expect(restartStaleSessionRunnerWithObserve(baseRequest, {
+            restart,
+            getStatus,
+            sleep: async () => {},
+        })).resolves.toEqual({ ok: false, status: 'busy', sessionId: 's1' });
+        expect(getStatus).not.toHaveBeenCalled();
+    });
+
+    it('reports success when an ack-lost failure is followed by an observed restart landing', async () => {
+        const { restartStaleSessionRunnerWithObserve } = await import('./sessionRunnerRestart');
+        const restart = vi.fn(async () => ({
+            ok: false as const,
+            status: 'failure' as const,
+            sessionId: 's1',
+            error: 'The operation was aborted due to timeout',
+        }));
+        // First poll: still the old runner (respawn not finished). Second poll: new runner.
+        const getStatus = vi.fn()
+            .mockResolvedValueOnce(makeRuntimeState({ versionState: 'stale', pid: 123 }))
+            .mockResolvedValueOnce(makeRuntimeState({ versionState: 'current', pid: 456 }));
+
+        await expect(restartStaleSessionRunnerWithObserve(baseRequest, {
+            restart,
+            getStatus,
+            sleep: async () => {},
+            observeAttempts: 4,
+            observeIntervalMs: 0,
+        })).resolves.toEqual({ ok: true, status: 'restarted', sessionId: 's1' });
+        expect(getStatus).toHaveBeenCalledTimes(2);
+        expect(getStatus).toHaveBeenLastCalledWith({
+            sessionId: 's1',
+            machineId: 'machine-1',
+            serverId: 'server-1',
+        });
+    });
+
+    it('preserves the failure when the runner never restarts within the observe window', async () => {
+        const { restartStaleSessionRunnerWithObserve } = await import('./sessionRunnerRestart');
+        const failure = { ok: false as const, status: 'failure' as const, sessionId: 's1' };
+        const restart = vi.fn(async () => failure);
+        const getStatus = vi.fn(async () => makeRuntimeState({ versionState: 'stale', pid: 123 }));
+
+        await expect(restartStaleSessionRunnerWithObserve(baseRequest, {
+            restart,
+            getStatus,
+            sleep: async () => {},
+            observeAttempts: 3,
+            observeIntervalMs: 0,
+        })).resolves.toEqual(failure);
+        expect(getStatus).toHaveBeenCalledTimes(3);
     });
 });

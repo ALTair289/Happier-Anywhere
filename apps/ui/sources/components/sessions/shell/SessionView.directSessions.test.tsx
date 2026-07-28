@@ -591,7 +591,7 @@ vi.mock('@/sync/ops/sessionUsageLimitRecovery', () => ({
 }));
 vi.mock('@/sync/ops/sessionRunnerRestart', () => ({
   getSessionRunnerRuntimeStatus: (request: unknown) => getSessionRunnerRuntimeStatusSpy(request),
-  restartStaleSessionRunner: (request: unknown) => restartStaleSessionRunnerSpy(request),
+  restartStaleSessionRunnerWithObserve: (request: unknown) => restartStaleSessionRunnerSpy(request),
 }));
 vi.mock('@/sync/ops/connectedServiceQuotaRecoveryCredits', () => ({
   connectedServiceQuotaRecoveryCreditConsume: connectedServiceQuotaRecoveryCreditConsumeSpy,

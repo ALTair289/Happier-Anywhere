@@ -273,7 +273,7 @@ import {
 } from '@/sync/domains/sessionRunnerRuntime/sessionRunnerRuntimeStatus';
 import {
     getSessionRunnerRuntimeStatus,
-    restartStaleSessionRunner,
+    restartStaleSessionRunnerWithObserve,
     type RestartStaleSessionRunnerResult,
 } from '@/sync/ops/sessionRunnerRestart';
 import {
@@ -688,6 +688,8 @@ function SessionAuthRecoveryBanner({ message, style }: Readonly<{
             title={t('connect.restoreAccount')}
             body={message}
             actionLabel={t('connect.restoreAccount')}
+        case 'refresh_unsupported':
+            return 'ineligible';
             actionAccessibilityLabel={t('connect.restoreAccount')}
             onActionPress={() => router.push('/restore')}
             style={style}
@@ -2840,7 +2842,7 @@ function SessionViewLoaded({
 
         const fingerprint = staleSessionRunnerStatus.fingerprint;
         setStaleSessionRunnerOperationStatus({ fingerprint, status: 'pending' });
-        const result = await restartStaleSessionRunner({
+        const result = await restartStaleSessionRunnerWithObserve({
             sessionId: staleSessionRunnerStatus.sessionId,
             machineId: staleSessionRunnerStatus.machineId,
             serverId: sessionRouteServerId,

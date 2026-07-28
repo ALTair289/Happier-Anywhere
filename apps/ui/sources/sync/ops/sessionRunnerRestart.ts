@@ -42,6 +42,7 @@ type RestartStaleSessionRunnerSkipStatus = Extract<
 export type RestartStaleSessionRunnerStatus =
     | RestartStaleSessionRunnerSuccessStatus
     | RestartStaleSessionRunnerSkipStatus
+    | 'refresh_unsupported'
     | 'failure';
 
 export type RestartStaleSessionRunnerResult =
@@ -94,6 +95,12 @@ export function normalizeRestartSessionRunnerResult(
         }
         if (result.status === 'unsupported_daemon') {
             return { ok: false, status: 'unsupported_daemon', sessionId: result.sessionId };
+        }
+        if (
+            result.status === 'ineligible'
+            && result.reasonCode === 'non_destructive_refresh_unsupported'
+        ) {
+            return { ok: false, status: 'refresh_unsupported', sessionId: result.sessionId };
         }
         if (INELIGIBLE_STATUSES.has(result.status)) {
             return { ok: false, status: 'ineligible', sessionId: result.sessionId };
@@ -149,6 +156,83 @@ export async function restartStaleSessionRunner(
             error: errorCode ?? (error instanceof Error ? error.message : 'session_runner_restart_failed'),
         };
     }
+}
+
+/**
+ * Restart operations are accepted-then-observed: the daemon signals the tracked runner to exit and
+ * respawns it on the current CLI asynchronously. A single "restarted" ack rides a control-plane
+ * request that can be torn down (transport timeout / severed socket) before the respawn completes,
+ * so a succeeding restart can surface to the caller as a generic `failure`. `didSessionRunnerRestartLand`
+ * lets the caller confirm the outcome from the daemon-owned runtime status instead of trusting the
+ * possibly-lost ack: the targeted stale runner is gone once the runtime is re-attested `current` or a
+ * new live process has replaced the PID we asked to restart.
+ */
+export function didSessionRunnerRestartLand(input: Readonly<{
+    state: SessionRunnerRuntimeStateV1 | null;
+    expectedRunnerPid: number;
+}>): boolean {
+    const state = input.state;
+    if (!state) return false;
+    if (state.versionState === 'current') return true;
+    const pid = state.runner.pid;
+    const expectedRunnerPid = input.expectedRunnerPid;
+    return (
+        typeof pid === 'number'
+        && pid > 0
+        && Number.isInteger(expectedRunnerPid)
+        && expectedRunnerPid > 0
+        && pid !== expectedRunnerPid
+    );
+}
+
+export type RestartStaleSessionRunnerWithObserveDeps = Readonly<{
+    restart?: (request: RestartStaleSessionRunnerRequest) => Promise<RestartStaleSessionRunnerResult>;
+    getStatus?: (request: GetSessionRunnerRuntimeStatusRequest) => Promise<SessionRunnerRuntimeStateV1 | null>;
+    sleep?: (ms: number) => Promise<void>;
+    observeAttempts?: number;
+    observeIntervalMs?: number;
+}>;
+
+const DEFAULT_RESTART_OBSERVE_ATTEMPTS = 8;
+const DEFAULT_RESTART_OBSERVE_INTERVAL_MS = 1_500;
+
+/**
+ * Restart the stale runner, then — only when the ack came back as an ambiguous `failure`
+ * (transport timeout / severed ack channel / spawn ambiguity) — observe the daemon-owned runtime
+ * status to see whether the restart actually landed. Definitive negatives (busy, ineligible,
+ * runner_identity_changed, version_unknown, unsupported_daemon) mean the runner was NOT restarted and
+ * are surfaced unchanged, so their dedicated UX is preserved. This prevents the false-negative where a
+ * succeeding restart tears down its own ack channel and the caller reports failure on a working op.
+ */
+export async function restartStaleSessionRunnerWithObserve(
+    request: RestartStaleSessionRunnerRequest,
+    deps: RestartStaleSessionRunnerWithObserveDeps = {},
+): Promise<RestartStaleSessionRunnerResult> {
+    const restart = deps.restart ?? restartStaleSessionRunner;
+    const getStatus = deps.getStatus ?? getSessionRunnerRuntimeStatus;
+    const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
+    const attempts = Math.max(1, Math.trunc(deps.observeAttempts ?? DEFAULT_RESTART_OBSERVE_ATTEMPTS));
+    const intervalMs = Math.max(0, Math.trunc(deps.observeIntervalMs ?? DEFAULT_RESTART_OBSERVE_INTERVAL_MS));
+
+    const result = await restart(request);
+    if (result.ok) return result;
+    // Only an ambiguous `failure` is eligible for observe; every other negative is a definitive answer.
+    if (result.status !== 'failure') return result;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const state = await getStatus({
+            sessionId: request.sessionId,
+            machineId: request.machineId,
+            serverId: request.serverId ?? null,
+        });
+        if (didSessionRunnerRestartLand({ state, expectedRunnerPid: request.expectedRunnerPid })) {
+            return { ok: true, status: 'restarted', sessionId: request.sessionId };
+        }
+        if (attempt < attempts - 1 && intervalMs > 0) {
+            await sleep(intervalMs);
+        }
+    }
+    return result;
 }
 
 export async function getSessionRunnerRuntimeStatus(
