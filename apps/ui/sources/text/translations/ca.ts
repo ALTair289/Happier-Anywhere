@@ -5084,6 +5084,7 @@ deps: {
                     viewLess: 'Mostra\'n menys',
                   steerNow: 'Insereix ara',
                   sendNow: 'Envia ara',
+                  sendToAgentNow: 'Envia-ho ara a l’agent',
                   sendNowInterrupt: 'Envia ara (interromp)',
                   interruptAndRunNow: 'Interromp i executa ara',
                   continueWaiting: 'Continua esperant',
@@ -5120,7 +5121,9 @@ deps: {
               sendConfirm: {
                   title: 'Envia ara?',
                   interruptTitle: 'Envia ara (interrompre)?',
+                  backgroundTitle: 'Vols enviar-ho ara a l’agent?',
                   body: 'Això aturarà el torn actual i enviarà aquest missatge immediatament.',
+                  backgroundBody: 'L’agent rebrà aquest missatge ara. El treball en segon pla continuarà.',
                   resumeBody: 'Això reprendrà la sessió i enviarà aquest missatge immediatament.',
               },
               discarded: {

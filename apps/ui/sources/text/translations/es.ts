@@ -5418,6 +5418,7 @@ export const es: TranslationStructure = {
             viewLess: "Ver menos",
           steerNow: "Insertar ahora",
           sendNow: "Enviar ahora",
+          sendToAgentNow: "Enviar al agente ahora",
           sendNowInterrupt: "Enviar ahora (interrumpir)",
           interruptAndRunNow: "Interrumpir y ejecutar ahora",
           continueWaiting: "Seguir esperando",
@@ -5454,7 +5455,9 @@ export const es: TranslationStructure = {
         sendConfirm: {
           title: "¿Enviar ahora?",
           interruptTitle: "¿Enviar ahora (interrumpir)?",
+          backgroundTitle: "¿Enviar al agente ahora?",
           body: "Esto detendrá el turno actual y enviará este mensaje inmediatamente.",
+          backgroundBody: "El agente recibirá este mensaje ahora. El trabajo en segundo plano continuará.",
           resumeBody: "Esto reanudará la sesión y enviará este mensaje inmediatamente.",
         },
         discarded: {

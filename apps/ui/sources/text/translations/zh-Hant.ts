@@ -4648,6 +4648,7 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                     viewLess: '收起',
                     steerNow: '立即引導',
                     sendNow: '立即傳送',
+                    sendToAgentNow: '立即傳送給代理',
                     sendNowInterrupt: '立即傳送（中斷）',
                     interruptAndRunNow: '中斷並立即執行',
                     continueWaiting: '繼續等待',
@@ -4684,7 +4685,9 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                 sendConfirm: {
                     title: '立即傳送？',
                     interruptTitle: '立即傳送（中斷）？',
+                    backgroundTitle: '立即傳送給代理？',
                     body: '這會停止目前回合，並立即傳送此訊息。',
+                    backgroundBody: '代理會立即收到此訊息。背景工作將繼續。',
                     resumeBody: '這將恢復工作階段並立即傳送此訊息。',
                 },
                 discarded: {

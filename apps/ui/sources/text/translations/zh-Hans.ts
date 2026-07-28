@@ -5235,6 +5235,7 @@ export const zhHans: TranslationStructure = {
             viewLess: "收起",
           steerNow: "立即插入",
           sendNow: "立即发送",
+          sendToAgentNow: "立即发送给智能体",
           sendNowInterrupt: "立即发送（中断）",
           interruptAndRunNow: "中断并立即运行",
           continueWaiting: "继续等待",
@@ -5271,7 +5272,9 @@ export const zhHans: TranslationStructure = {
         sendConfirm: {
           title: "立即发送？",
           interruptTitle: "立即发送（中断）？",
+          backgroundTitle: "立即发送给智能体？",
           body: "这会停止当前轮次并立即发送此消息。",
+          backgroundBody: "智能体将立即收到此消息。后台工作将继续。",
           resumeBody: "这将恢复会话并立即发送此消息。",
         },
         discarded: {

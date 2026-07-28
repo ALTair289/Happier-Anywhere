@@ -5440,6 +5440,7 @@ export const pl: TranslationStructure = {
             viewLess: "Pokaż mniej",
           steerNow: "Wstaw teraz",
           sendNow: "Wyślij teraz",
+          sendToAgentNow: "Wyślij teraz do agenta",
           sendNowInterrupt: "Wyślij teraz (przerwij)",
           interruptAndRunNow: "Przerwij i uruchom teraz",
           continueWaiting: "Czekaj dalej",
@@ -5476,7 +5477,9 @@ export const pl: TranslationStructure = {
         sendConfirm: {
           title: "Wyślij teraz?",
           interruptTitle: "Wyślij teraz (przerwij)?",
+          backgroundTitle: "Wysłać teraz do agenta?",
           body: "To przerwie bieżącą turę i wyśle tę wiadomość natychmiast.",
+          backgroundBody: "Agent otrzyma tę wiadomość teraz. Praca w tle będzie kontynuowana.",
           resumeBody: "To wznowi sesję i natychmiast wyśle tę wiadomość.",
         },
         discarded: {

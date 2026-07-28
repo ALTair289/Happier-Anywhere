@@ -5894,6 +5894,7 @@ export const ru: TranslationStructure = {
             viewLess: "Показать меньше",
           steerNow: "Направить сейчас",
           sendNow: "Отправить сейчас",
+          sendToAgentNow: "Отправить агенту сейчас",
           sendNowInterrupt: "Отправить сейчас (прервать)",
           interruptAndRunNow: "Прервать и запустить сейчас",
           continueWaiting: "Продолжить ожидание",
@@ -5930,7 +5931,9 @@ export const ru: TranslationStructure = {
         sendConfirm: {
           title: "Отправить сейчас?",
           interruptTitle: "Отправить сейчас (прервать)?",
+          backgroundTitle: "Отправить агенту сейчас?",
           body: "Это остановит текущий ход и отправит сообщение немедленно.",
+          backgroundBody: "Агент получит это сообщение сейчас. Фоновая работа продолжится.",
           resumeBody: "Это возобновит сеанс и немедленно отправит сообщение.",
         },
         discarded: {

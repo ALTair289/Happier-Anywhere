@@ -5066,6 +5066,7 @@ export const en = {
                 viewLess: 'View less',
                 steerNow: 'Steer now',
                 sendNow: 'Send now',
+                sendToAgentNow: 'Send to agent now',
                 sendNowInterrupt: 'Send now (interrupt)',
                 interruptAndRunNow: 'Interrupt and run now',
                 continueWaiting: 'Continue waiting',
@@ -5102,7 +5103,9 @@ export const en = {
             sendConfirm: {
                 title: 'Send now?',
                 interruptTitle: 'Send now (interrupt)?',
+                backgroundTitle: 'Send to agent now?',
                 body: 'This will stop the current turn and send this message immediately.',
+                backgroundBody: 'The agent will receive this now. Background work will continue.',
                 resumeBody: 'This will resume the session and send this message immediately.',
             },
             discarded: {

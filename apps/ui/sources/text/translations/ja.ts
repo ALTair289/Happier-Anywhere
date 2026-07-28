@@ -5687,6 +5687,7 @@ localTailscale: {
             viewLess: "折りたたむ",
           steerNow: "今すぐ挿入",
           sendNow: "今すぐ送信",
+          sendToAgentNow: "今すぐエージェントに送信",
           sendNowInterrupt: "今すぐ送信（中断）",
           interruptAndRunNow: "中断して今すぐ実行",
           continueWaiting: "このまま待つ",
@@ -5723,7 +5724,9 @@ localTailscale: {
         sendConfirm: {
           title: "今すぐ送信しますか？",
           interruptTitle: "今すぐ送信（中断）しますか？",
+          backgroundTitle: "今すぐエージェントに送信しますか？",
           body: "現在のターンを停止し、このメッセージをすぐに送信します。",
+          backgroundBody: "エージェントはこのメッセージを今すぐ受信します。バックグラウンド作業は続行されます。",
           resumeBody: "セッションを再開し、このメッセージをすぐに送信します。",
         },
         discarded: {
