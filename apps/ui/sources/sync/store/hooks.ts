@@ -47,6 +47,12 @@ import {
 import type { ReviewCommentDraft } from '../domains/input/reviewComments/reviewCommentTypes';
 import type { SessionActionDraft } from '../domains/sessionActions/sessionActionDraftTypes';
 import { buildSessionMessageRouteId, resolveSessionMessageRouteId } from '../domains/messages/messageRouteIds';
+import {
+  buildMessageLegacySignature,
+  buildMessageRefsSelectionKey,
+  createMessagesByRefsSelector,
+  type MessageStoreRef,
+} from './messageSelection';
 import { useApplyLocalSettings, useApplySettings } from './settingsWriters';
 import type { PrimaryTurnStatusV1 } from '@happier-dev/protocol';
 import type { StorageState } from './types';
@@ -84,6 +90,8 @@ import { readStoredSessionMessagesFromStateLike } from '../domains/messages/read
 import { registerSessionTranscriptDerivedCacheClear } from '../runtime/sessionTranscriptDerivedCaches';
 import type { MachineDisplayRenderable } from '../domains/machines/machineDisplayRenderable';
 import type { AgentEvent } from '../typesRaw';
+
+export type { MessageStoreRef } from './messageSelection';
 
 const EMPTY_OPEN_APPROVAL_SESSION_IDS: ReadonlyArray<string> = Object.freeze([]);
 const EMPTY_OPEN_APPROVAL_ARTIFACTS_FOR_SESSION: ReadonlyArray<OpenApprovalArtifactForSession> = Object.freeze([]);
@@ -915,25 +923,6 @@ export function useSessionPendingMessages(
   );
 }
 
-const legacyMessageSignatureCache = new WeakMap<Message, Readonly<{
-  messagesVersion: number;
-  signature: string;
-}>>();
-
-function buildMessageLegacySignature(message: Message | null, messagesVersion: number): string {
-  if (!message) return 'null';
-  const cached = legacyMessageSignatureCache.get(message);
-  if (cached && cached.messagesVersion === messagesVersion) return cached.signature;
-  let signature: string;
-  try {
-    signature = JSON.stringify(message) ?? 'null';
-  } catch {
-    signature = `${message.id}:${message.kind}:${message.createdAt}`;
-  }
-  legacyMessageSignatureCache.set(message, { messagesVersion, signature });
-  return signature;
-}
-
 export function useSessionReviewCommentsDrafts(sessionId: string): ReviewCommentDraft[] {
   return getStorage()(
     useShallow((state) => state.reviewCommentsDraftsBySessionId[sessionId] ?? emptyReviewCommentDrafts)
@@ -977,6 +966,18 @@ export function useMessage(sessionId: string, messageId: string): Message | null
   ).message;
 }
 
+export function useMessagesByRefs(messageRefs: readonly MessageStoreRef[]): readonly (Message | null)[] {
+  const selectionKey = React.useMemo(
+    () => buildMessageRefsSelectionKey(messageRefs),
+    [messageRefs],
+  );
+  const selector = React.useMemo(
+    () => createMessagesByRefsSelector(messageRefs.slice()),
+    [selectionKey],
+  );
+  return getStorage()(selector).messages;
+}
+
 export function useResolvedSessionMessageRouteId(sessionId: string, routeMessageId: string): string | null {
   const messagesById = useSessionMessagesById(sessionId);
   const version = useSessionMessagesVersion(sessionId, true);
@@ -1005,99 +1006,16 @@ export function useSessionMessageRouteId(sessionId: string, messageId: string): 
   }, [messageId, messagesById, reducerState, version]);
 }
 
-type MessagesByIdsSelectorSnapshot = Readonly<{
-  messages: Message[];
-}>;
-
-const EMPTY_MESSAGES_BY_IDS_SELECTOR_SNAPSHOT: MessagesByIdsSelectorSnapshot = Object.freeze({
-  messages: emptyArray as Message[],
-});
-
-function buildMessageIdsSelectionKey(messageIds: readonly string[]): string {
-  if (!Array.isArray(messageIds) || messageIds.length === 0) return '';
-  return messageIds.map((messageId) => `${messageId.length}:${messageId}`).join('|');
-}
-
-function areMessageRefsEqual(
-  previous: readonly (Message | undefined)[] | null,
-  next: readonly (Message | undefined)[],
-): boolean {
-  if (previous === null) return false;
-  if (previous.length !== next.length) return false;
-  for (let index = 0; index < next.length; index += 1) {
-    if (previous[index] !== next[index]) return false;
-  }
-  return true;
-}
-
-function createMessagesByIdsSelector(
-  sessionId: string,
-  selectedMessageIds: readonly string[],
-): (state: StorageState) => MessagesByIdsSelectorSnapshot {
-  let previousSignature: string | null = null;
-  let previousMessageRefs: readonly (Message | undefined)[] | null = null;
-  let previousSnapshot: MessagesByIdsSelectorSnapshot | null = null;
-
-  return (state) => {
-    if (selectedMessageIds.length === 0) {
-      return EMPTY_MESSAGES_BY_IDS_SELECTOR_SNAPSHOT;
-    }
-
-    const session = state.sessionMessages[sessionId];
-    if (!session) {
-      previousSignature = null;
-      previousMessageRefs = null;
-      previousSnapshot = null;
-      return EMPTY_MESSAGES_BY_IDS_SELECTOR_SNAPSHOT;
-    }
-
-    const messageRefs: Array<Message | undefined> = [];
-    const messages: Message[] = [];
-    const signatureParts: string[] = [];
-    const revisionsById = session.messageRevisionsById ?? null;
-    const legacyMessagesVersion = session.messagesVersion ?? 0;
-
-    for (const messageId of selectedMessageIds) {
-      const message = session.messagesById[messageId];
-      const revision = revisionsById?.[messageId];
-      messageRefs.push(message);
-      if (message) messages.push(message);
-      signatureParts.push(messageId);
-      if (typeof revision === 'number' && Number.isFinite(revision)) {
-        signatureParts.push(`r:${Math.trunc(revision)}`);
-      } else {
-        signatureParts.push(`l:${buildMessageLegacySignature(message ?? null, legacyMessagesVersion)}`);
-      }
-    }
-
-    const signature = signatureParts.join('\u0000');
-    if (
-      previousSnapshot !== null
-      && previousSignature === signature
-      && areMessageRefsEqual(previousMessageRefs, messageRefs)
-    ) {
-      return previousSnapshot;
-    }
-
-    previousSignature = signature;
-    previousMessageRefs = messageRefs;
-    previousSnapshot = {
-      messages: messages.length > 0 ? messages : (emptyArray as Message[]),
-    };
-    return previousSnapshot;
-  };
-}
-
 export function useMessagesByIds(sessionId: string, messageIds: readonly string[]): Message[] {
-  const messageIdsKey = React.useMemo(() => buildMessageIdsSelectionKey(messageIds), [messageIds]);
-  const selector = React.useMemo(
-    () => createMessagesByIdsSelector(
-      sessionId,
-      Array.isArray(messageIds) && messageIds.length > 0 ? messageIds.slice() : [],
-    ),
-    [messageIdsKey, sessionId],
+  const messageRefs = React.useMemo(
+    () => (Array.isArray(messageIds) ? messageIds : []).map((messageId) => ({ sessionId, messageId })),
+    [messageIds, sessionId],
   );
-  return getStorage()(selector).messages;
+  const selectedMessages = useMessagesByRefs(messageRefs);
+  return React.useMemo(() => {
+    const messages = selectedMessages.filter((message): message is Message => message !== null);
+    return messages.length > 0 ? messages : (emptyArray as Message[]);
+  }, [selectedMessages]);
 }
 
 export function useSessionUsage(sessionId: string) {

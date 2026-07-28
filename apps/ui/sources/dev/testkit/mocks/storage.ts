@@ -88,6 +88,7 @@ export function createStorageModuleStub<TOverrides extends object>(overrides: TO
     } satisfies NonNullable<ReturnType<StorageModule['useSessionOrganizationProjection']>>;
     const sessionTranscriptIds = [] as string[];
     const sessionMessagesById = {} as ReturnType<StorageModule['useSessionMessagesById']>;
+    const messagesByRefs = [] as ReturnType<StorageModule['useMessagesByRefs']>;
     const sessionMessagesReducerState = null as unknown as ReturnType<StorageModule['useSessionMessagesReducerState']>;
     const connectedServiceAccountSwitchEvents = [] as ReturnType<StorageModule['useSessionConnectedServiceAccountSwitchEvents']>;
     const subagentSourceMessages = [] as ReturnType<StorageModule['useSessionSubagentSourceMessages']>;
@@ -139,6 +140,7 @@ export function createStorageModuleStub<TOverrides extends object>(overrides: TO
         useLocalSettingMutable,
         useSessionMessages: () => ({ messages: [], isLoaded: true } as const),
         useSessionMessagesById: () => sessionMessagesById,
+        useMessagesByRefs: () => messagesByRefs,
         useSessionMessagesReducerState: () => sessionMessagesReducerState,
         useSessionConnectedServiceAccountSwitchEvents: () => connectedServiceAccountSwitchEvents,
         useSessionTranscriptIds: () => ({ ids: sessionTranscriptIds, isLoaded: true } as const),
