@@ -169,9 +169,10 @@ function filterNormalizedEventRoleOutput(
 function isClaudeLocalCommandText(text: unknown): boolean {
     if (typeof text !== 'string') return false;
     const trimmed = text.trim();
-    if (trimmed.startsWith('<local-command-caveat>')) return true;
-    if (trimmed.startsWith('<local-command-stdout>')) return true;
-    return trimmed.startsWith('<command-name>');
+    // Boundary compatibility only: raw Claude JSONL classification is owned by the CLI
+    // `controlCommandRows` + `isClaudeInternalTranscriptMessage` path.
+    const prefixes = ['<local-command-caveat>', '<command-name>', '<local-command-stdout>'] as const;
+    return prefixes.some((prefix) => trimmed.startsWith(prefix));
 }
 
 function isClaudeLocalCommandTranscriptValue(value: unknown): boolean {

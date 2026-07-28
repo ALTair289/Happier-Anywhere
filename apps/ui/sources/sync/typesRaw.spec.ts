@@ -1554,11 +1554,21 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
                     text: '<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>',
                 },
             };
+            const effortCommand = {
+                role: 'user',
+                content: {
+                    type: 'text',
+                    text: '<command-name>/effort</command-name>\n<command-message>effort</command-message>\n<command-args></command-args>',
+                },
+            };
             const modelStdout = {
                 role: 'user',
                 content: {
                     type: 'text',
-                    text: '<local-command-stdout>Set model to Opus 4.8 and saved as your default for new sessions</local-command-stdout>',
+                    text: [
+                        '<local-command-stdout>Set model to Opus 4.8 and saved as your default for new sessions',
+                        'Additional genuine multi-line Claude local-command stdout</local-command-stdout>',
+                    ].join('\n'),
                 },
             };
             const plainCompactPrompt = {
@@ -1572,6 +1582,7 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             expect(normalizeRawMessage('msg-local-command-caveat', null, Date.now(), localCommandCaveat)).toBeNull();
             expect(normalizeRawMessage('msg-compact-command', null, Date.now(), compactCommand)).toBeNull();
             expect(normalizeRawMessage('msg-model-command', null, Date.now(), modelCommand)).toBeNull();
+            expect(normalizeRawMessage('msg-effort-command', null, Date.now(), effortCommand)).toBeNull();
             expect(normalizeRawMessage('msg-model-stdout', null, Date.now(), modelStdout)).toBeNull();
             expect(normalizeRawMessage('msg-plain-compact-prompt', null, Date.now(), plainCompactPrompt)).not.toBeNull();
         });
