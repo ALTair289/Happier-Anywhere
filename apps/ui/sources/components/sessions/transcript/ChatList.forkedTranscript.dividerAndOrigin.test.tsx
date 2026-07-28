@@ -116,6 +116,28 @@ afterEach(() => {
     standardCleanup();
 });
 
+// ChatListInternal reads session-screen navigation focus for the S-E reveal
+// revalidation; keep this host suite navigation-context-free.
+vi.mock('@/components/sessions/shell/useSessionScreenIsFocused', () => ({
+    useSessionScreenIsFocused: () => true,
+}));
+
+// This suite documents flash_v2 semantics (N2c row decomposition, FlashList fill
+// loop) and reads the captured FlashList props; pin the FlashList escape hatch like
+// the monolith regression lane now that default composition is Legend. Without the
+// pin the suite mounted the REAL @legendapp/list package (requestAnimationFrame
+// crash) — the documented stale-mock class from the 2026-07-10 review.
+vi.mock('@/sync/runtime/syncTuning', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/sync/runtime/syncTuning')>();
+    return {
+        ...actual,
+        loadSyncTuning: () => ({
+            ...actual.loadSyncTuning(),
+            transcriptLegendListSpikeSurface: 'flashList' as const,
+        }),
+    };
+});
+
 vi.mock('@/components/ui/lists/flashListCompat/FlashListCompat', async () => {
     const { createCapturingFlashListMock } = await import('@/dev/testkit/mocks/flashList');
     const flashListMock = createCapturingFlashListMock({ renderItems: true });

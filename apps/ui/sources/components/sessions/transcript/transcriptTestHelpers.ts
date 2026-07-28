@@ -7,6 +7,7 @@ type TranscriptStorageModuleFactory = (
 ) => unknown | Promise<unknown>;
 
 type InstallTranscriptCommonModuleMocksOptions = Readonly<{
+    legendList?: TranscriptModuleFactory;
     modal?: TranscriptModuleFactory;
     reactNative?: TranscriptModuleFactory;
     storage?: TranscriptStorageModuleFactory;
@@ -18,6 +19,7 @@ const transcriptModuleState = vi.hoisted(() => ({
     modalMockRef: { current: null as any },
     options: {
         modal: undefined as TranscriptModuleFactory | undefined,
+        legendList: undefined as TranscriptModuleFactory | undefined,
         reactNative: undefined as TranscriptModuleFactory | undefined,
         storage: undefined as TranscriptStorageModuleFactory | undefined,
         text: undefined as TranscriptModuleFactory | undefined,
@@ -53,6 +55,7 @@ export function installTranscriptCommonModuleMocks(
 
     transcriptModuleState.options = {
         modal: options.modal,
+        legendList: options.legendList,
         reactNative: options.reactNative,
         storage: options.storage,
         text: options.text,
@@ -68,6 +71,21 @@ export function installTranscriptCommonModuleMocks(
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
         return createReactNativeWebMock();
     });
+
+    vi.mock('@legendapp/list/react-native', async () => {
+        const activeOptions = transcriptModuleState.options;
+        if (activeOptions.legendList) {
+            return await activeOptions.legendList();
+        }
+        const { createCapturingLegendListMock } = await import('@/dev/testkit/mocks/legendList');
+        return createCapturingLegendListMock().module;
+    });
+
+    // ChatListInternal reads session-screen navigation focus for the S-E reveal
+    // revalidation; keep the transcript host suites navigation-context-free.
+    vi.mock('@/components/sessions/shell/useSessionScreenIsFocused', () => ({
+        useSessionScreenIsFocused: () => true,
+    }));
 
     vi.mock('react-native-unistyles', async () => {
         const activeOptions = transcriptModuleState.options;

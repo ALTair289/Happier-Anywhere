@@ -6,7 +6,7 @@ import { Stack } from 'expo-router';
 import { useKeyboardHandler, useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller';
 import Animated, { runOnJS, useSharedValue } from 'react-native-reanimated';
 import { FlashList } from '@/components/ui/lists/flashListCompat/FlashListCompat';
-import { LegendList } from '@legendapp/list';
+import { LegendList } from '@legendapp/list/react-native';
 
 type ListType = 'flash' | 'flat' | 'legend';
 type PaddingType = 'animated' | 'non-animated' | 'header-footer';

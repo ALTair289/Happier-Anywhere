@@ -12,6 +12,7 @@ export * from './harness/composerKeyboardScaffoldHarness';
 export * from './harness/popoverHarness';
 export * from './harness/rootLayoutTestkit';
 export * from './harness/serverScopedContextHarness';
+export * from './harness/sidechainTranscriptListHarness';
 export * from './harness/settingsViewHarness';
 export * from './harness/socketHarness';
 export * from './harness/toolCallsGroupHarness';

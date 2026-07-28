@@ -109,6 +109,40 @@ describe('renderer visible source index range', () => {
         expect(listRef.current?.readVisibleSourceIndexRange?.()).toEqual({ startIndex: 1, endIndex: 2 });
     });
 
+    // Legend sets `start`/`end` (its no-buffer visible window) to NULL whenever its
+    // last calculation found no row intersecting the viewport — the viewport parked
+    // in an allocation gap or past the measured content end, which is exactly the
+    // state a target-window replace can leave behind. `Number.isFinite(null)` is
+    // false, so the seam reported "unmeasured" for a MEASURED frame and kept
+    // reporting it until something recalculated: navigation froze on a stale anchor
+    // with rows still mounted.
+    it('answers from the Legend buffered band when its visible window measured empty', async () => {
+        legendState = { start: null, end: null, startBuffered: 1, endBuffered: 3 };
+
+        const listRef = await mountRenderer(legendListRenderer);
+
+        expect(listRef.current?.readVisibleSourceIndexRange?.()).toEqual({ startIndex: 1, endIndex: 3 });
+    });
+
+    it('still reports no measurement when Legend has neither a visible nor a buffered band', async () => {
+        legendState = { start: null, end: null, startBuffered: null, endBuffered: null };
+
+        const listRef = await mountRenderer(legendListRenderer);
+
+        expect(listRef.current?.readVisibleSourceIndexRange?.()).toBeNull();
+    });
+
+    // Legend's FULL recalculation assigns `endBuffered` only after it has found a
+    // no-buffer start, so a viewport intersecting no row can leave a half band.
+    // That is not a window: answering it would mean inventing an end index.
+    it('still reports no measurement when Legend left only half a buffered band', async () => {
+        legendState = { start: null, end: null, startBuffered: 1, endBuffered: null };
+
+        const listRef = await mountRenderer(legendListRenderer);
+
+        expect(listRef.current?.readVisibleSourceIndexRange?.()).toBeNull();
+    });
+
     it('reports no measurement instead of row 0 when the Legend surface has no state yet', async () => {
         legendState = null;
 

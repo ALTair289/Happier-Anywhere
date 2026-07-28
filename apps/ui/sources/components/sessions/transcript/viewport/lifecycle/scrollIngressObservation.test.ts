@@ -241,6 +241,40 @@ describe('observeTranscriptScrollIngress', () => {
         expect(genuineUserMovementByCall).toEqual([false, true]);
     });
 
+    it('classifies native user authority from the drag fact, the only user signal a native scroll frame carries', () => {
+        const genuineUserMovementByCall: boolean[] = [];
+        const observeWebTranscriptNavigationVisibility = (input: Readonly<{ genuineUserMovement: boolean }>) => {
+            genuineUserMovementByCall.push(input.genuineUserMovement);
+        };
+        // RN puts `isTrusted` on the SYNTHETIC event wrapper, never on the
+        // native scroll payload this ingress receives, so a native frame must
+        // never be classified from it.
+        const nativeScrollEvent = {
+            contentOffset: { y: 400 },
+            contentSize: { height: 2_000 },
+            layoutMeasurement: { height: 500 },
+        } as const;
+
+        // The landing's own programmatic write: no drag is open, so the jump's
+        // landed anchor must survive the frame.
+        observeTranscriptScrollIngress(webScrollIngressInput({
+            eventNativeEvent: nativeScrollEvent,
+            platform: 'native',
+        }), scrollIngressCallbacks({ observeWebTranscriptNavigationVisibility }));
+
+        expect(genuineUserMovementByCall).toEqual([false]);
+
+        // The reader drags the list away: `onScrollBeginDrag` opened a native
+        // drag before this frame, which releases the landing immediately.
+        observeTranscriptScrollIngress(webScrollIngressInput({
+            eventNativeEvent: nativeScrollEvent,
+            nativeListDragActive: true,
+            platform: 'native',
+        }), scrollIngressCallbacks({ observeWebTranscriptNavigationVisibility }));
+
+        expect(genuineUserMovementByCall).toEqual([false, true]);
+    });
+
     it('publishes the release for a renderer whose movement fact only arrives after the promotion gate', () => {
         const genuineUserMovementByCall: boolean[] = [];
 

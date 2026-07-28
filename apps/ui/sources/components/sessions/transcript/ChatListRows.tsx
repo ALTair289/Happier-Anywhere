@@ -136,6 +136,12 @@ export const TranscriptRowShell = React.memo(function TranscriptRowShell(props: 
         () => buildTranscriptItemHeightSignatureKey(props.signature),
         [props.signature],
     );
+    // Both refs initialise to the CURRENT signature, so `previousSignatureForReservation` is
+    // `undefined` on first render by construction: a freshly mounted row genuinely has no previous
+    // signature to diff, so no delta check can run here. Stale-floor protection on mount is therefore
+    // NOT this component's job — the reconciler scopes each floor to the content shape it was
+    // recorded from and refuses to serve a shrink-capable row a floor from a different shape. Do not
+    // try to synthesize a previous signature here (a remount at a warm width would still miss it).
     const lastSignatureKeyRef = React.useRef(signatureKey);
     const lastSignatureRef = React.useRef(props.signature);
     const previousSignatureForReservation =

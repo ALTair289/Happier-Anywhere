@@ -1146,6 +1146,24 @@ function LegendListTranscriptRendererInner<TItem>(
             return false;
         }
 
+        // INITIAL PLACEMENT IS THE LIBRARY'S. Legend resolves a scrollToIndex target from its
+        // own position table (`positions[index]`), and an unresolved entry collapses the target
+        // to offset 0. On a cold/bulk hydration that table is still empty for the tail while
+        // Legend's own bootstrap is converging, so an adapter request issued in that window
+        // does not approach the tail — it pins the viewport at the HEAD, and Legend's bootstrap
+        // dispatch then has to teleport away from it. That pair is the measured web open
+        // defect: full content height with scrollTop 0, a short hold, then a jump to the tail.
+        // Withhold the request until the library can resolve the target; the settle loop is
+        // already polling, and by the time Legend's bootstrap lands the tail is normally
+        // materialized and no adapter write is issued at all.
+        const tailPosition = state.positionAtIndex?.(lastIndex);
+        if (
+            lastIndex > 0
+            && (typeof tailPosition !== 'number' || !Number.isFinite(tailPosition) || tailPosition <= 0)
+        ) {
+            return true;
+        }
+
         // A cold bulk hydration can leave Legend's mounted range at the old head while its
         // truncated DOM is already physically at *that DOM's* bottom. scrollHeight therefore
         // cannot prove held-end settlement until the actual final data index is materialized.
@@ -2508,9 +2526,29 @@ function LegendListTranscriptRendererInner<TItem>(
     const readVisibleSourceIndexRange = React.useCallback((): TranscriptRendererVisibleSourceIndexRange | null => {
         const state = legendListRef.current?.getState();
         if (!state) return null;
-        if (!Number.isFinite(state.start) || !Number.isFinite(state.end)) return null;
-        const startIndex = toSourceIndex(state.start, dataLength, projectChronologicalIndex);
-        const endIndex = toSourceIndex(state.end, dataLength, projectChronologicalIndex);
+        // `start`/`end` are Legend's NO-BUFFER window, and it sets them to null
+        // whenever its last calculation found no row intersecting the viewport —
+        // the viewport parked in an allocation gap or past the measured content
+        // end, which is what a target-window replace can leave behind. That is a
+        // measured answer, not an unmeasured frame, and nothing recomputes it
+        // without a further scroll/data/size event: treating it as "no
+        // measurement" froze navigation on the pre-jump anchor with rows still
+        // mounted. The buffered band comes from the same calculation and is the
+        // nearest rendered content, so it answers for those frames.
+        //
+        // Bound: this covers Legend's cached-range recalculation, which rewrites
+        // only the no-buffer window and leaves the band intact. Its FULL
+        // recalculation rewrites both, and only assigns `endBuffered` once it has
+        // found a no-buffer start — so a viewport intersecting no row there leaves
+        // no band either and this still reports unmeasured. Verified against the
+        // installed @legendapp/list 3.3.3; no live capture attributes the reported
+        // incident to that state, so it is deliberately NOT answered by a guessed
+        // range here.
+        const start = Number.isFinite(state.start) ? state.start : state.startBuffered;
+        const end = Number.isFinite(state.end) ? state.end : state.endBuffered;
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+        const startIndex = toSourceIndex(start, dataLength, projectChronologicalIndex);
+        const endIndex = toSourceIndex(end, dataLength, projectChronologicalIndex);
         return {
             startIndex: Math.min(startIndex, endIndex),
             endIndex: Math.max(startIndex, endIndex),

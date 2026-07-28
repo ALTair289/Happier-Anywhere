@@ -485,7 +485,7 @@ async function renderInvertedChatList() {
 }
 
 async function renderInvertedChatListWithViewportChange(
-    onViewportChange: (state: { isPinned: boolean; offsetY: number; shouldRestoreViewport?: boolean }) => void,
+    onViewportChange: (state: Readonly<{ isPinned: boolean; offsetY?: number; shouldRestoreViewport?: boolean }>) => void,
 ) {
     const { ChatList } = await import('./ChatList');
     return renderFlashListChatList(
@@ -1694,11 +1694,15 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             await screen.settle({ cycles: 1, turns: 2 });
 
             expect(targetWindowMockState.loadTargetWindowMessages).not.toHaveBeenCalled();
-            expect(listDataIds(screen)).toEqual(['m336', 'm335', 'm334', 'm333', 'm332', 'm331', 'm330', 'm329', 'm328', 'm327']);
+            expect(listDataIds(screen)).toEqual([
+                'transcript-window-gap:target:session-1:331:newer',
+                'm336', 'm335', 'm334', 'm333', 'm332', 'm331', 'm330', 'm329', 'm328', 'm327',
+                'transcript-window-gap:target:session-1:331:older',
+            ]);
             expect(fileFlashListRefHandle.scrollToOffset).not.toHaveBeenCalled();
             expect(fileFlashListRefHandle.scrollToEnd).not.toHaveBeenCalled();
             expect(fileFlashListRefHandle.scrollToIndex).toHaveBeenCalledWith({
-                index: 5,
+                index: 6,
                 animated: true,
                 viewPosition: 0.5,
             });
@@ -1767,7 +1771,10 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             });
             await screen.settle({ cycles: 1, turns: 3 });
 
-            expect(listDataIds(screen)).toEqual(['m3', 'm2', 'm1']);
+            expect(listDataIds(screen)).toEqual([
+                'transcript-window-gap:target:session-1:1:newer',
+                'm3', 'm2', 'm1',
+            ]);
             const props = screen.requireCapturedFlashListProps();
 
             await act(async () => {
@@ -1790,7 +1797,10 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
                 { kind: 'seq', seq: 1 },
                 expect.objectContaining({ direction: 'newer' }),
             );
-            expect(listDataIds(screen)).toEqual(['m5', 'm4', 'm3', 'm2', 'm1']);
+            expect(listDataIds(screen)).toEqual([
+                'transcript-window-gap:target:session-1:1:newer',
+                'm5', 'm4', 'm3', 'm2', 'm1',
+            ]);
 
             await act(async () => {
                 screen.requireCapturedFlashListProps().onStartReached?.();
@@ -1869,6 +1879,7 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
                 contentHeight: 2000,
                 flushOptions: { cycles: 1, turns: 2 },
             });
+            await screen.triggerLoad(12, { turns: 1 });
 
             await act(async () => {
                 screen.requireCapturedFlashListProps().onEndReached?.();
@@ -1934,7 +1945,11 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
                 contentHeight: 2000,
                 flushOptions: { cycles: 1, turns: 2 },
             });
-            expect(listDataIds(screen)).toEqual(['m336', 'm335', 'm334', 'm333', 'm332', 'm331', 'm330', 'm329', 'm328', 'm327']);
+            expect(listDataIds(screen)).toEqual([
+                'transcript-window-gap:target:session-1:331:newer',
+                'm336', 'm335', 'm334', 'm333', 'm332', 'm331', 'm330', 'm329', 'm328', 'm327',
+                'transcript-window-gap:target:session-1:331:older',
+            ]);
 
             flashListChatListHarnessState.sessionMessagesState = {
                 isLoaded: true,

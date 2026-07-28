@@ -245,7 +245,7 @@ vi.mock('@/components/sessions/transcript/webTranscriptScrollMetrics', () => ({
 
 vi.mock('@/components/sessions/transcript/web/WebTranscriptSplitFooter', async () => await import('./web/WebTranscriptSplitFooter'));
 
-vi.mock('@/components/sessions/transcript/webTranscriptPrependAnchor', () => ({
+vi.mock('@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor', () => ({
     captureWebTranscriptPrependAnchor: () => null,
     refreshWebTranscriptPrependAnchor: (anchor: any) => anchor,
     restoreWebTranscriptPrependAnchor: () => ({ strategy: 'none' }),

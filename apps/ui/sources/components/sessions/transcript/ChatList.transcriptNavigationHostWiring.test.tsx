@@ -224,6 +224,7 @@ vi.mock('@/hooks/ui/useReducedMotionPreference', () => ({
 vi.mock('@/components/markdown/enriched/preloadEnrichedMarkdownRuntime', () => ({
     isEnrichedMarkdownRuntimePreloaded: () => true,
     preloadEnrichedMarkdownRuntime: () => Promise.resolve(),
+    useEnrichedMarkdownRuntimeStatus: () => 'ready',
 }));
 
 vi.mock('@/sync/domains/state/agentStateCapabilities', () => ({
@@ -331,7 +332,7 @@ describe('ChatList transcript navigation host wiring', () => {
         fetchUserMessageHistoryPageMock.mockReset();
         fetchUserMessageHistoryPageMock.mockResolvedValue({
             status: 'loaded',
-            entries: [],
+            rows: [],
             hasMore: false,
             nextBeforeSeq: null,
         });
@@ -414,8 +415,6 @@ describe('ChatList transcript navigation host wiring', () => {
         ]);
         const { transcriptNavigationPaneStore } = await import('./navigation/transcriptNavigationPaneStore');
         const paneSnapshot = transcriptNavigationPaneStore.get('session-1');
-        expect(paneSnapshot.entries).toBe(latestRailProps?.entries);
-        expect(paneSnapshot.activeEntryId).toBeNull();
         expect(typeof paneSnapshot.onEntryPress).toBe('function');
         screen.pressByTestId('mounted-nav-entry:user-turn:7');
 
@@ -494,7 +493,7 @@ describe('ChatList transcript navigation host wiring', () => {
 
         const { transcriptNavigationPaneStore } = await import('./navigation/transcriptNavigationPaneStore');
         const paneSnapshot = transcriptNavigationPaneStore.get('session-1');
-        const farEntry = paneSnapshot.entries.find((entry) => entry.seq === 500);
+        const farEntry = capturedNavigationRailProps.at(-1)?.entries.find((entry) => entry.seq === 500);
         expect(farEntry).toBeDefined();
         const onEntryPress = paneSnapshot.onEntryPress;
         expect(onEntryPress).toBeTypeOf('function');
@@ -682,7 +681,15 @@ describe('ChatList transcript navigation host wiring', () => {
         seedTranscriptMessages();
         fetchUserMessageHistoryPageMock.mockResolvedValue({
             status: 'loaded',
-            entries: [{ seq: 3, createdAt: 30, text: 'Earlier remote prompt' }],
+            // Page rows are newest-first, as `fetchUserMessageHistoryPage` emits them.
+            rows: [{
+                messageId: 'remote-3',
+                routeMessageId: 'server:remote-3',
+                seq: 3,
+                createdAt: 30,
+                role: 'user' as const,
+                text: 'Earlier remote prompt',
+            }],
             hasMore: false,
             nextBeforeSeq: null,
         });
@@ -706,7 +713,7 @@ describe('ChatList transcript navigation host wiring', () => {
         });
 
         expect(fetchUserMessageHistoryPageMock).toHaveBeenCalledWith('session-1', {
-            limit: 25,
+            limit: 40,
             beforeSeq: 7,
         });
         const latestRailProps = capturedNavigationRailProps.at(-1);
@@ -741,7 +748,7 @@ describe('ChatList transcript navigation host wiring', () => {
         ]);
 
         const { transcriptNavigationPaneStore } = await import('./navigation/transcriptNavigationPaneStore');
-        expect(transcriptNavigationPaneStore.get('session-1').entries).toBe(latestRailProps?.entries);
+        expect(transcriptNavigationPaneStore.get('session-1').onEntryPress).toBeTypeOf('function');
 
         screen.pressByTestId('mounted-nav-entry:user-turn:3');
         await act(async () => {
@@ -749,9 +756,11 @@ describe('ChatList transcript navigation host wiring', () => {
             await Promise.resolve();
         });
 
+        // A remote history row carries a stable server route id, so the jump targets that row
+        // directly and keeps its seq only as a hint.
         expect(loadTargetWindowMessagesMock).toHaveBeenCalledWith(
             'session-1',
-            { kind: 'seq', seq: 3 },
+            { kind: 'route-message-id', routeMessageId: 'server:remote-3', seqHint: 3 },
             expect.objectContaining({ direction: 'older' }),
         );
         expect(loadOlderMessagesMock).not.toHaveBeenCalled();

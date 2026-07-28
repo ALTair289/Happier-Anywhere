@@ -220,12 +220,16 @@ export function observeTranscriptScrollIngress(
     });
     if (!observation) return { consumed: true, observation: null };
 
-    // Native user authority is the trusted-gesture flag; Legend hands web frames
-    // its own canonical classification up front. Both are known before the first
-    // publish, so a released landing publishes containment on this very frame.
+    // Native user authority is the OPEN DRAG: `onScrollBeginDrag` fires only for a
+    // real finger drag (never for the app's own programmatic write), and RN puts
+    // `isTrusted` on the synthetic event wrapper — the native scroll payload this
+    // ingress receives carries none, so it can only ever answer `false` here.
+    // Legend hands web frames its own canonical classification up front. Both are
+    // known before the first publish, so a released landing publishes containment
+    // on this very frame.
     callbacks.observeWebTranscriptNavigationVisibility({
         genuineUserMovement: observation.platform === 'native'
-            ? observation.isTrusted
+            ? input.nativeListDragActive === true
             : input.webMovementFact?.isGenuineUserMovement === true,
     });
 

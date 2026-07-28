@@ -296,6 +296,46 @@ describe('chatListHarness', () => {
         expect((globalThis as any).HTMLElement).toBe(previousHTMLElement);
     });
 
+    it('provides the document event and focus boundary used by web transcript keyboard ownership', async () => {
+        const harnessModule = await import('./chatListHarness');
+        const withFlashListChatListWebScrollerDom = Reflect.get(harnessModule, 'withFlashListChatListWebScrollerDom');
+        const createFlashListChatListWebElement = Reflect.get(harnessModule, 'createFlashListChatListWebElement');
+        const FlashListChatListWebElement = Reflect.get(harnessModule, 'FlashListChatListWebElement');
+
+        expect(typeof withFlashListChatListWebScrollerDom).toBe('function');
+        expect(typeof createFlashListChatListWebElement).toBe('function');
+        expect(typeof FlashListChatListWebElement).toBe('function');
+        if (
+            typeof withFlashListChatListWebScrollerDom !== 'function'
+            || typeof createFlashListChatListWebElement !== 'function'
+            || typeof FlashListChatListWebElement !== 'function'
+        ) {
+            return;
+        }
+
+        const scroller = createFlashListChatListWebElement(null, { top: 0, bottom: 300 });
+        await withFlashListChatListWebScrollerDom(
+            scroller,
+            async () => {
+                const installedDocument = globalThis.document;
+                const onKeyDown = vi.fn();
+
+                expect(installedDocument.activeElement).toBe(installedDocument.body);
+                installedDocument.addEventListener('keydown', onKeyDown, true);
+                installedDocument.dispatchEvent(new Event('keydown'));
+                expect(onKeyDown).toHaveBeenCalledTimes(1);
+
+                scroller.focus({ preventScroll: true });
+                expect(installedDocument.activeElement).toBe(scroller);
+
+                installedDocument.removeEventListener('keydown', onKeyDown, true);
+                installedDocument.dispatchEvent(new Event('keydown'));
+                expect(onKeyDown).toHaveBeenCalledTimes(1);
+            },
+            { HTMLElement: FlashListChatListWebElement },
+        );
+    });
+
     it('renders a FlashList chat list inside the installed web scroller DOM and returns the harness', async () => {
         vi.doMock('@/components/sessions/transcript/ChatList', () => ({
             ChatList: () => React.createElement('MockChatList'),

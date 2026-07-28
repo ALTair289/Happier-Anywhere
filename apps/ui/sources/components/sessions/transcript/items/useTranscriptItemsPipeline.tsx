@@ -910,9 +910,74 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
         });
     const [firstPaintDeadlineElapsedSessionId, setFirstPaintDeadlineElapsedSessionId] =
         React.useState<string | null>(null);
+    // Web Legend owns the whole initial placement of a bottom-entry open, and it finishes AFTER
+    // the fact this policy used to release on. `finishInitialScroll` sets `readyToRender` and
+    // calls `onLoad` in one block, and only then flushes the deferred at-end maintenance whose
+    // physical write lands one animation frame later (`@legendapp/list` react-native.web
+    // `setInitialRenderState` / `doMaintainScrollAtEnd`). Releasing on `onLoad` therefore reveals
+    // the transcript at the bootstrap-dispatched offset and lets the next library write move it
+    // under the reader — the web open flicker. The renderer already confirms the physical landing
+    // (`observeInitialPresentationSettlement` -> held-'end' bottom check); this is its consumer.
+    const [initialPlacementSettledSessionId, setInitialPlacementSettledSessionId] =
+        React.useState<string | null>(null);
+    const recordInitialPlacementSettled = React.useCallback((params: Readonly<{
+        sessionId: string;
+    }>) => {
+        setInitialPlacementSettledSessionId((previous) => (
+            previous === params.sessionId ? previous : params.sessionId
+        ));
+    }, []);
+    // Only the web Legend renderer produces the landing fact, and only for an unkeyed (bottom)
+    // entry — a keyed entry keeps its existing entry join, which already spans the same window.
+    // Every other configuration must never acquire this hold, or it would wait for a fact that is
+    // never produced and burn the bound instead of releasing at the first presentable frame.
+    const initialPlacementPending =
+        entryPresentationKey == null &&
+        platformOS === 'web' &&
+        rendererKind === 'legendList' &&
+        isLoaded &&
+        itemCount > 0 &&
+        initialPlacementSettledSessionId !== sessionId;
+    // Whether this entry has already had painted rows revealed on screen. Every remaining cover
+    // fact needs `isLoaded`, so on a warm/SWR open they all arm one or more renders AFTER the
+    // cached rows painted and this policy uncovered them; without this record they would put the
+    // placeholder back over content the reader is looking at. It is written only from a committed
+    // render, so a superseded intermediate render cannot claim a reveal the reader never saw; that
+    // is what keeps a native cold open covered while its rows paint at A and the entry placement
+    // moves them to B.
+    //
+    // It is scoped to the session ENTRY, exactly like every other entry fact here: the session id
+    // changing drops it, and so does an entry re-arm on an unchanged session id — jump -> return,
+    // bottom <-> anchored — through `resetFirstPaintRevealRecordForSessionEntry`, the member this
+    // record contributes to the entry-reset family that also clears the native reveal facts. Each
+    // drop bumps a generation, so a commit that observed the PREVIOUS entry's reveal cannot write
+    // it back after the reset (the entry re-arm runs in a layout effect, ahead of this record's
+    // own passive write for that same commit).
+    const revealedPaintedContentRef = React.useRef<Readonly<{
+        generation: number;
+        revealed: boolean;
+        sessionId: string;
+    }>>({ generation: 0, revealed: false, sessionId });
+    if (revealedPaintedContentRef.current.sessionId !== sessionId) {
+        revealedPaintedContentRef.current = {
+            generation: revealedPaintedContentRef.current.generation + 1,
+            revealed: false,
+            sessionId,
+        };
+    }
+    const resetFirstPaintRevealRecordForSessionEntry = React.useCallback(() => {
+        revealedPaintedContentRef.current = {
+            generation: revealedPaintedContentRef.current.generation + 1,
+            revealed: false,
+            sessionId: revealedPaintedContentRef.current.sessionId,
+        };
+    }, []);
+    const renderedRevealRecordGeneration = revealedPaintedContentRef.current.generation;
     const presentation = resolveTranscriptFirstPaintPresentation({
         deadlineElapsed: firstPaintDeadlineElapsedSessionId === sessionId,
-        entryPlacementPending,
+        // One placement fact: whichever owner is placing this session's entry viewport. The
+        // keyed join and the bottom-entry landing are mutually exclusive by construction above.
+        entryPlacementPending: entryPlacementPending || initialPlacementPending,
         firstListPaintObserved,
         // Only the web Legend renderer reports an onLoad first-paint fact; the other
         // configurations have no such fact and must not be held waiting for one.
@@ -931,7 +996,22 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
             itemCount > 0 &&
             webMarkdownRuntimeStatus === 'pending',
         nativePlacementPending,
+        paintedContentRevealed: revealedPaintedContentRef.current.revealed,
         routeHydrationPending: routeHydrationPending && isLoaded && itemCount > 0,
+    });
+    // A reveal only counts once the list has reported its paint and rows exist: that is the
+    // evidence the reader can actually see transcript content rather than an empty viewport.
+    const revealedPaintedContent =
+        !presentation.covered && firstListPaintObserved && itemCount > 0;
+    // Deliberately unconditioned: an entry reset can drop the record while `revealedPaintedContent`
+    // and the session id both stay unchanged, and a dependency-gated effect would then never write
+    // the new entry's own reveal back. The generation check makes the write belong to the entry the
+    // render observed, so a commit superseded by a reset cannot restore a stale reveal.
+    React.useEffect(() => {
+        if (!revealedPaintedContent) return;
+        const record = revealedPaintedContentRef.current;
+        if (record.revealed || record.generation !== renderedRevealRecordGeneration) return;
+        revealedPaintedContentRef.current = { ...record, revealed: true };
     });
     const showFirstPaintPlaceholder = presentation.covered;
     const showRouteHydrationFirstPaintPlaceholder =
@@ -1002,6 +1082,8 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
         nativeFirstPaintReleasedWithoutListLoad,
         onEntryPlacementEvent,
         recordEntryOwnerOutcome,
+        recordInitialPlacementSettled,
+        resetFirstPaintRevealRecordForSessionEntry,
         showFirstPaintPlaceholder,
         showRouteHydrationFirstPaintPlaceholder,
     };

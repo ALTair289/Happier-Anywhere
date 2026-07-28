@@ -8,6 +8,7 @@ type FlashListChatListHarnessStorageModuleFactory = (
 
 type InstallFlashListChatListCommonModuleMocksOptions = Readonly<{
     flashList?: FlashListChatListHarnessModuleFactory;
+    legendList?: FlashListChatListHarnessModuleFactory;
     reactNative?: FlashListChatListHarnessModuleFactory;
     storage?: FlashListChatListHarnessStorageModuleFactory;
     unistyles?: FlashListChatListHarnessModuleFactory;
@@ -16,6 +17,7 @@ type InstallFlashListChatListCommonModuleMocksOptions = Readonly<{
 const flashListChatListHarnessModuleState = vi.hoisted(() => ({
     options: {
         flashList: undefined as FlashListChatListHarnessModuleFactory | undefined,
+        legendList: undefined as FlashListChatListHarnessModuleFactory | undefined,
         reactNative: undefined as FlashListChatListHarnessModuleFactory | undefined,
         storage: undefined as FlashListChatListHarnessStorageModuleFactory | undefined,
         unistyles: undefined as FlashListChatListHarnessModuleFactory | undefined,
@@ -27,6 +29,7 @@ export function installFlashListChatListCommonModuleMocks(
 ) {
     flashListChatListHarnessModuleState.options = {
         flashList: options.flashList,
+        legendList: options.legendList,
         reactNative: options.reactNative,
         storage: options.storage,
         unistyles: options.unistyles,
@@ -41,6 +44,15 @@ export function installFlashListChatListCommonModuleMocks(
         return {
             FlashList: () => null,
         };
+    });
+
+    vi.mock('@legendapp/list/react-native', async () => {
+        const activeOptions = flashListChatListHarnessModuleState.options;
+        if (activeOptions.legendList) {
+            return await activeOptions.legendList();
+        }
+        const { createLegendChatListModuleMock } = await import('@/dev/testkit/harness/chatListHarness');
+        return createLegendChatListModuleMock();
     });
 
     vi.mock('@/components/ui/lists/flashListCompat/FlashListCompat', async () => {
@@ -66,6 +78,20 @@ export function installFlashListChatListCommonModuleMocks(
     vi.mock('@/utils/platform/responsive', () => ({
         useHeaderHeight: () => 0,
     }));
+
+    vi.mock('@/components/sessions/shell/useSessionScreenIsFocused', async () => {
+        const React = await import('react');
+        const {
+            flashListChatListHarnessState,
+            subscribeChatListHarnessSessionScreenFocus,
+        } = await import('@/dev/testkit/harness/chatListHarness');
+        return {
+            useSessionScreenIsFocused: () => React.useSyncExternalStore(
+                subscribeChatListHarnessSessionScreenFocus,
+                () => flashListChatListHarnessState.sessionScreenIsFocused !== false,
+            ),
+        };
+    });
 
     vi.mock('react-native-unistyles', async () => {
         const activeOptions = flashListChatListHarnessModuleState.options;

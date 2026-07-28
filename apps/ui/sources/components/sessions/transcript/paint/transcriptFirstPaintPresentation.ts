@@ -10,6 +10,12 @@
  * - a loaded, empty transcript is terminal — it shows its empty state, never a placeholder;
  * - the single bounded deadline reveals with a named fallback outcome; it never claims the paint
  *   or placement it was waiting for actually happened;
+ * - an entry whose painted rows this policy already revealed is never covered again. Covering a
+ *   first paint is a loading state; covering rows the reader is already looking at is a blink,
+ *   which is the defect the placeholder exists to prevent. This matters because every remaining
+ *   cover fact needs loaded data, so on a warm/SWR open they can only arm AFTER cached rows have
+ *   painted and been revealed. A cold entry never reaches this rule before its first reveal, so
+ *   a native entry placement still covers the paint-at-A -> settle-at-B write it exists to hide;
  * - rows that already painted stay visible while their session refreshes (cached/SWR content is
  *   never re-covered by route hydration).
  */
@@ -34,6 +40,10 @@ export type TranscriptFirstPaintPresentation =
  * Owner-local terminal facts. Each one is produced by the owner that can also end it:
  * data availability (`isLoaded`/`itemCount`/`routeHydrationPending`), first list paint,
  * the Markdown runtime (ready or failed both end it), keyed placement, native placement.
+ *
+ * `paintedContentRevealed` is the one fact this policy produces itself: the consumer records,
+ * per session entry, that a committed frame revealed painted rows. It adds no new owner and no
+ * new lifecycle — it is this policy's own history, scoped to the entry the facts describe.
  */
 export type TranscriptFirstPaintFacts = Readonly<{
     deadlineElapsed: boolean;
@@ -44,6 +54,7 @@ export type TranscriptFirstPaintFacts = Readonly<{
     itemCount: number;
     markdownRuntimePending: boolean;
     nativePlacementPending: boolean;
+    paintedContentRevealed: boolean;
     routeHydrationPending: boolean;
 }>;
 
@@ -55,6 +66,12 @@ export function resolveTranscriptFirstPaintPresentation(
     }
     if (facts.deadlineElapsed) {
         return { covered: false, outcome: 'deadline-fallback' };
+    }
+    // Evaluated ahead of every cover fact: once this entry has shown painted rows, no later
+    // pending fact may take the screen back. Both rules above it are reveals too, so nothing
+    // here can turn a revealed transcript covered again.
+    if (facts.paintedContentRevealed) {
+        return { covered: false, outcome: 'content-presentable' };
     }
     if (facts.nativePlacementPending) {
         return { covered: true, reason: 'native-placement' };

@@ -666,6 +666,10 @@ describe('Legend transcript renderer adapter', () => {
         vi.stubGlobal('window', {
             getComputedStyle: () => ({ overflowX: 'hidden', overflowY: 'auto' }),
         });
+        // Legend fills its position table for the WHOLE list on a data change, mounted or not
+        // (`updateItemPositions` runs from index 0), so an unmounted tail still has a resolved
+        // offset. The adapter's fallback is allowed to target it precisely because of that.
+        legendStateOverride = { positionAtIndex: (index: number) => index * 197 };
 
         const { legendListRenderer } = await import('./legendListRenderer');
         const Renderer = legendListRenderer.Component;
@@ -2785,6 +2789,11 @@ describe('Legend transcript renderer adapter', () => {
             isAtEnd: true,
             isNearEnd: true,
             isWithinMaintainScrollAtEndThreshold: true,
+            // Legend resolves an offset for every index after a data change, including the
+            // appended one it has not mounted yet. The adapter's one-shot materialization
+            // targets that resolved offset; without one there is nothing to target and
+            // placement stays with the library.
+            positionAtIndex: (index: number) => index * 600,
             scroll: 600,
             scrollLength: 600,
             start: 0,
@@ -2847,6 +2856,11 @@ describe('Legend transcript renderer adapter', () => {
             isAtEnd: true,
             isNearEnd: true,
             isWithinMaintainScrollAtEndThreshold: true,
+            // Legend resolves an offset for every index after a data change, including the
+            // appended one it has not mounted yet. The adapter's one-shot materialization
+            // targets that resolved offset; without one there is nothing to target and
+            // placement stays with the library.
+            positionAtIndex: (index: number) => index * 600,
             scroll: 600,
             scrollLength: 600,
             start: 0,

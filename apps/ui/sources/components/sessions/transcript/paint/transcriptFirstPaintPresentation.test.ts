@@ -17,6 +17,7 @@ function facts(overrides: Partial<TranscriptFirstPaintFacts> = {}): TranscriptFi
         itemCount: 10,
         markdownRuntimePending: false,
         nativePlacementPending: false,
+        paintedContentRevealed: false,
         routeHydrationPending: false,
         ...overrides,
     };
@@ -68,6 +69,38 @@ describe('transcript first-paint presentation policy', () => {
             markdownRuntimePending: true,
             nativePlacementPending: true,
             routeHydrationPending: true,
+        }))).toEqual({ covered: false, outcome: 'loaded-empty' });
+    });
+
+    it('never re-covers an entry whose painted rows this policy already revealed', () => {
+        for (const candidate of coveringFactsByReason) {
+            expect(resolveTranscriptFirstPaintPresentation({
+                ...candidate.facts,
+                paintedContentRevealed: true,
+            })).toEqual({ covered: false, outcome: 'content-presentable' });
+        }
+    });
+
+    it('still covers the same pending facts before the entry has revealed anything', () => {
+        for (const candidate of coveringFactsByReason) {
+            expect(resolveTranscriptFirstPaintPresentation({
+                ...candidate.facts,
+                paintedContentRevealed: false,
+            })).toEqual({ covered: true, reason: candidate.reason });
+        }
+    });
+
+    it('keeps naming the deadline reveal after the entry has revealed its content', () => {
+        expect(resolveTranscriptFirstPaintPresentation(facts({
+            deadlineElapsed: true,
+            nativePlacementPending: true,
+            paintedContentRevealed: true,
+        }))).toEqual({ covered: false, outcome: 'deadline-fallback' });
+        expect(resolveTranscriptFirstPaintPresentation(facts({
+            isLoaded: true,
+            itemCount: 0,
+            nativePlacementPending: true,
+            paintedContentRevealed: true,
         }))).toEqual({ covered: false, outcome: 'loaded-empty' });
     });
 

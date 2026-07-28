@@ -46,15 +46,7 @@ import {
     planTranscriptBlankRecoveryObservation,
     type TranscriptBlankRecoveryEffect,
 } from '@/components/sessions/transcript/viewport/visibility/blankRecoveryOwner';
-import {
-    getTranscriptNavigationVisibilityStore,
-    useTranscriptNavigationVisibilityHasSubscribers,
-} from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityStore';
-import {
-    publishTranscriptNavigationVisibility,
-    readRendererVisibleSourceIndexRange,
-} from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityPublish';
-import type { TranscriptNavigationRuntimeAnchor } from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationRuntimeAnchors';
+import { useTranscriptNavigationVisibilityHasSubscribers } from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityStore';
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 import type { WebPrependTelemetryFacts, WebPrependTelemetryFactsInput } from '@/components/sessions/transcript/viewport/prepend/webPrependOwner';
 
@@ -90,6 +82,13 @@ export type TranscriptViewportTelemetryEventsDeps = Readonly<{
     nativeMomentumScrollActiveRef: MutableRef<boolean>;
     nativePrependTelemetryStateRef: MutableRef<() => TranscriptViewportTelemetryTransactionState>;
     nativeVisibleWindowSnapshotRef: MutableRef<NativeVisibleWindowSnapshot | null>;
+    /**
+     * The session's ONE navigation-visibility publication owner (it resolves the
+     * jump-landing retention immediately before it writes). Native viewability is
+     * a trigger for it, never a second writer: publishing containment from here
+     * would revert the rail to the pre-jump turn after every landing.
+     */
+    observeTranscriptNavigationVisibilityRef: MutableRef<() => void>;
     pinThresholdPxRef: MutableRef<number>;
     platformOS: typeof Platform.OS;
     rendererKind: 'flashList' | 'legendList';
@@ -111,7 +110,6 @@ export type TranscriptViewportTelemetryEventsDeps = Readonly<{
         scrollable?: boolean;
         trigger: TranscriptViewportTelemetryWebTrigger;
     }>): Record<string, unknown>;
-    runtimeAnchorsRef: MutableRef<readonly TranscriptNavigationRuntimeAnchor[]>;
     sessionId: string;
     shouldUseNativeHotColdSplit: boolean;
     transcriptHotColdSegments: TranscriptHotColdSegments;
@@ -442,19 +440,12 @@ export function useTranscriptViewportTelemetryEvents(
     }>) => {
         if (deps.platformOS === 'web') return;
         // Viewability is a navigation-visibility TRIGGER: it fires on
-        // layout-only changes that never emit a scroll event. The range itself
-        // still comes from the renderer's visible index window so web and
-        // native share exactly one anchor derivation.
-        publishTranscriptNavigationVisibility({
-            anchors: deps.runtimeAnchorsRef.current,
-            itemCount: deps.listData.length,
-            readVisibleSourceRange: () => (
-                deps.listLayoutHeightRef.current > 0
-                    ? readRendererVisibleSourceIndexRange(deps.listRef.current)
-                    : null
-            ),
-            store: getTranscriptNavigationVisibilityStore(deps.sessionId),
-        });
+        // layout-only changes that never emit a scroll event. It hands the
+        // frame to the session's single publication owner, which re-derives
+        // from the renderer's visible index window AND resolves the
+        // jump-landing retention; writing a snapshot from here instead made
+        // viewability a competing owner that reverted every landing.
+        deps.observeTranscriptNavigationVisibilityRef.current();
         const result = resolveNativeViewabilityTelemetry({
             info,
             itemCount: deps.listData.length,
@@ -477,9 +468,8 @@ export function useTranscriptViewportTelemetryEvents(
         deps.listData,
         deps.listLayoutHeightRef,
         deps.nativeVisibleWindowSnapshotRef,
+        deps.observeTranscriptNavigationVisibilityRef,
         deps.platformOS,
-        deps.runtimeAnchorsRef,
-        deps.sessionId,
         observeNativeBlankRecovery,
         recordNativeVisibleWindowTelemetry,
     ]);

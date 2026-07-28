@@ -294,25 +294,16 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
       clientHeight: 0,
     };
 
-    const prevDocument = (globalThis as any).document;
-    const prevWindow = (globalThis as any).window;
-    try {
-      (globalThis as any).document = {
-        querySelector: () => scrollerEl,
-        getElementById: () => rootEl,
-      };
-      (globalThis as any).window = {
-        getComputedStyle: () => ({ overflowY: 'auto' }),
-      };
-
+    await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
       const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
       expect(scrollerEl.scrollTop).toBe(1500);
       await screen.unmount();
-    } finally {
-      (globalThis as any).document = prevDocument;
-      (globalThis as any).window = prevWindow;
-    }
+    }, {
+      document: {
+        getElementById: () => rootEl,
+      },
+    });
   });
 
   it('corrects same-height passive web drift after a cold-open bottom pin without releasing live-tail', async () => {
@@ -374,22 +365,13 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
     };
     loadOlderMessagesMock.mockResolvedValue({ loaded: 0, hasMore: false, status: 'no_more' });
 
-    const rootEl: any = {
+    const rootEl = createFlashListChatListWebScroller({
       scrollHeight: 500,
       clientHeight: 500,
       scrollTop: 0,
-    };
+    });
 
-    const prevDocument = (globalThis as any).document;
-    const prevWindow = (globalThis as any).window;
-    try {
-      (globalThis as any).document = {
-        getElementById: () => rootEl,
-      };
-      (globalThis as any).window = {
-        getComputedStyle: () => ({ overflowY: 'auto' }),
-      };
-
+    await withFlashListChatListWebScrollerDom(rootEl, async () => {
       const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
       requireCapturedFlashListProps();
@@ -401,10 +383,11 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
 
       expect(loadOlderMessagesMock).toHaveBeenCalledTimes(1);
       await screen.unmount();
-    } finally {
-      (globalThis as any).document = prevDocument;
-      (globalThis as any).window = prevWindow;
-    }
+    }, {
+      document: {
+        getElementById: () => rootEl,
+      },
+    });
   });
 
   it('auto-expands the newest tool calls group when the transcript cannot scroll and the group has hidden tools', async () => {

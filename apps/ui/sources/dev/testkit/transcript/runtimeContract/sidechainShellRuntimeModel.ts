@@ -44,6 +44,9 @@ import {
     type TranscriptListShellReadOnlyCapability,
     type TranscriptListShellFrame,
 } from '@/components/sessions/transcript/viewport/shell/transcriptListShellCapabilities';
+import type {
+    TranscriptListRendererKind,
+} from '@/components/sessions/transcript/viewport/shell/renderer/types';
 import {
     applySidechainOlderLoadObservation,
     resolveSidechainOlderLoadEdgeReachedObservation,
@@ -154,6 +157,7 @@ export class SidechainShellRuntimeModel {
     private olderState: OlderPaginationState = createInitialOlderPaginationState();
     private readonly observation = createWebDomScrollObservation();
     private readonly element: RuntimeElement;
+    private readonly rendererKind: TranscriptListRendererKind;
     private readonly shellFrame: TranscriptListShellFrame;
     private readonly nativeFactSource: TranscriptViewportFactSource;
 
@@ -163,8 +167,10 @@ export class SidechainShellRuntimeModel {
         this.footerHeightPx = options.footerHeightPx;
         this.layoutHeightPx = options.layoutHeightPx;
         this.platformOS = options.platformOS;
+        this.rendererKind = 'flashList';
         this.shellFrame = resolveSidechainTranscriptListShellFrame({
             platformOS: options.platformOS,
+            rendererKind: this.rendererKind,
         });
         this.element = {
             clientHeight: options.layoutHeightPx,
@@ -204,7 +210,7 @@ export class SidechainShellRuntimeModel {
         olderPagination: boolean;
         prependGrowthRestore: boolean;
         readOnlyForkContext: boolean;
-        renderer: TranscriptListShellFrame['renderer'];
+        renderer: TranscriptListRendererKind;
         scrollEventThrottle: number;
         streamingFollow: boolean;
         webOlderLoadObservation: boolean;
@@ -221,8 +227,8 @@ export class SidechainShellRuntimeModel {
             olderPagination: capability.olderPagination,
             prependGrowthRestore: capability.prependGrowthRestore,
             readOnlyForkContext: capability.readOnlyForkContext,
-            renderer: this.shellFrame.renderer,
-            scrollEventThrottle: this.shellFrame.rendererOptions.flashList.scrollEventThrottle,
+            renderer: this.rendererKind,
+            scrollEventThrottle: this.shellFrame.rendererOptions.interaction.scrollEventThrottle,
             streamingFollow: capability.streamingFollow != null,
             webOlderLoadObservation: capability.webOlderLoadObservation,
         };
@@ -619,6 +625,7 @@ export class SidechainShellRuntimeModel {
             },
             platformOS: this.platformOS,
             recordTelemetry: null,
+            rendererKind: this.rendererKind,
             sessionId: 'sidechain-runtime-contract',
             timestampMs: 0,
             viewportGuardThresholdPx: this.resolveViewportGuardThresholdPx(),
@@ -787,6 +794,7 @@ export class ReadOnlyShellRuntimeModel {
     private readonly hasThinkingMessage: boolean;
     private readonly messageCount: number;
     private readonly rowHeightPx: number;
+    private readonly rendererKind: TranscriptListRendererKind;
     private readonly shellFrame: TranscriptListShellFrame;
     private readonly viewportHeightPx: number;
     private readonly expandedThinkingMessageIds = new Set<string>();
@@ -796,10 +804,12 @@ export class ReadOnlyShellRuntimeModel {
         this.hasThinkingMessage = options.hasThinkingMessage;
         this.messageCount = options.messageCount;
         this.rowHeightPx = options.rowHeightPx ?? 100;
+        this.rendererKind = 'flashList';
         this.shellFrame = resolveReadOnlyTranscriptListShellFrame({
             accessKind: 'public',
             bottomNoticeVisible: options.bottomNotice,
             platformOS: options.platformOS,
+            rendererKind: this.rendererKind,
         });
         this.viewportHeightPx = options.viewportHeightPx ?? 600;
         if (this.shellFrame.capability.kind === 'readOnly') {
@@ -832,11 +842,11 @@ export class ReadOnlyShellRuntimeModel {
 
     observeFrame(): Readonly<{
         dataOrder: TranscriptListShellFrame['dataOrder'];
-        renderer: TranscriptListShellFrame['renderer'];
+        renderer: TranscriptListRendererKind;
     }> {
         return {
             dataOrder: this.shellFrame.dataOrder,
-            renderer: this.shellFrame.renderer,
+            renderer: this.rendererKind,
         };
     }
 

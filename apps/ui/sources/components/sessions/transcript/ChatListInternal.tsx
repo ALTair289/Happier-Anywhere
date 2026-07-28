@@ -7,7 +7,8 @@ import { Dimensions, Platform, View } from 'react-native';
 import { useCallback } from 'react';
 import type { Message } from '@/sync/domains/messages/messageTypes';
 import { sync, type SessionViewportAnchorSnapshot } from '@/sync/sync';
-import { useSessionCatchingUpNewer } from '@/sync/store/hooks';
+import { useSessionCatchingUpNewer, useSessionTailContiguousFloorSeq } from '@/sync/store/hooks';
+import { useSessionScreenIsFocused } from '@/components/sessions/shell/useSessionScreenIsFocused';
 import { fireAndForget } from '@/utils/system/fireAndForget';
 import { useTranscriptMotionConfig } from '@/components/sessions/transcript/motion/useTranscriptMotionConfig';
 import { TranscriptMotionProvider } from '@/components/sessions/transcript/motion/TranscriptMotionProvider';
@@ -39,7 +40,6 @@ import {
     type TranscriptLifecycleHost,
     type TranscriptLifecycleHostContentGrowthLiveTailCommandPlan,
     type TranscriptLifecycleHostExplicitJumpPlan,
-    type TranscriptLifecycleHostExplicitReturnPlan,
     type TranscriptLifecycleHostFollowBottomIntentPlan,
     type TranscriptLifecycleHostMeasuredNativePinPlan,
     type TranscriptLifecycleHostNativeMountSettlePendingPinFlushPlan,
@@ -65,6 +65,7 @@ import {
 } from '@/components/sessions/transcript/viewport/transcriptViewportOwnership';
 import type {
     TranscriptViewportAnchorIdentity,
+    TranscriptViewportCommand,
     TranscriptViewportMode,
 } from '@/components/sessions/transcript/viewport/transcriptViewportTypes';
 import { useNativeInvertedFactSource } from '@/components/sessions/transcript/viewport/driver/useNativeInvertedFactSource';
@@ -118,7 +119,6 @@ import type {
 import {
     useOptionalTranscriptSelectionState,
 } from '@/components/sessions/transcript/messageSelection/TranscriptMessageSelectionContext';
-import { resolveNativeInvertedColdScrollIndex } from '@/components/sessions/transcript/segments/resolveWebHotColdScrollDecision';
 import {
     isMessageRolledBack,
     type TranscriptRollbackAction,
@@ -145,6 +145,7 @@ import type {
     TranscriptJumpTargetRole,
 } from '@/components/sessions/transcript/viewport/jump/transcriptJumpTargetTypes';
 import {
+    type TranscriptRendererDataTarget,
     type TranscriptRenderWindowProjection,
 } from '@/components/sessions/transcript/viewport/window/resolveTranscriptRenderWindowProjection';
 import {
@@ -154,6 +155,10 @@ import {
     useTranscriptOlderPagination,
     type TranscriptOlderPaginationSnapshot,
 } from '@/components/sessions/transcript/pagination/useTranscriptOlderPagination';
+import {
+    resolveItemsToNewerEdge,
+    resolveItemsToOlderEdge,
+} from '@/components/sessions/transcript/pagination/olderPaginationMachine';
 import { waitForNextTranscriptVisualUpdate } from '@/components/sessions/transcript/pagination/waitForNextTranscriptVisualUpdate';
 import { TranscriptFirstPaintPlaceholder } from '@/components/sessions/transcript/TranscriptFirstPaintPlaceholder';
 import { JumpToBottomButton } from '@/components/sessions/transcript/scroll/JumpToBottomButton';
@@ -162,9 +167,11 @@ import { TranscriptNavigationRail } from '@/components/sessions/transcript/navig
 import {
     TranscriptListShell,
     type TranscriptListShellRef,
-    type TranscriptRendererAtEndState,
 } from '@/components/sessions/transcript/viewport/shell/TranscriptListShell';
-import { resolveTranscriptListRendererKind } from '@/components/sessions/transcript/viewport/shell/renderer/resolveTranscriptListRenderer';
+import {
+    resolveTranscriptListRendererSelection,
+} from '@/components/sessions/transcript/viewport/shell/renderer/resolveTranscriptListRenderer';
+import { resolveRowLayoutMutationViewportOwnershipAction } from '@/components/sessions/transcript/viewport/shell/rowLayoutMutationViewportOwnership';
 import type { TranscriptBlankRecoveryEffect } from '@/components/sessions/transcript/viewport/visibility/blankRecoveryOwner';
 import {
     deriveTranscriptNavigationRuntimeAnchors,
@@ -173,7 +180,10 @@ import {
 import { clearTranscriptNavigationVisibilityStore } from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityStore';
 import { useLayoutMaxWidth } from '@/components/ui/layout/layout';
 import { useTranscriptPrependHost } from '@/components/sessions/transcript/viewport/prepend/host/useTranscriptPrependHost';
-import { useTranscriptViewportAnchorCaptureHost } from '@/components/sessions/transcript/viewport/prepend/host/useTranscriptViewportAnchorCaptureHost';
+import {
+    useTranscriptViewportAnchorCaptureHost,
+    type ScheduledViewportAnchorCapture,
+} from '@/components/sessions/transcript/viewport/prepend/host/useTranscriptViewportAnchorCaptureHost';
 import { useTranscriptEntryHost } from '@/components/sessions/transcript/viewport/entryRestore/host/useTranscriptEntryHost';
 import {
     useTranscriptSessionEntryLifecycle,
@@ -181,6 +191,14 @@ import {
 } from '@/components/sessions/transcript/viewport/entryRestore/host/useTranscriptSessionEntryLifecycle';
 import { useTranscriptNativeEntryRestorePaintRelease } from '@/components/sessions/transcript/viewport/entryRestore/host/useTranscriptNativeEntryRestorePaintRelease';
 import { useTranscriptBottomFollowHost } from '@/components/sessions/transcript/viewport/bottomFollow/host/useTranscriptBottomFollowHost';
+import { useTranscriptLiveTailIntentHost } from '@/components/sessions/transcript/viewport/bottomFollow/host/useTranscriptLiveTailIntentHost';
+import { useTranscriptSessionExitHandoff } from '@/components/sessions/transcript/viewport/lifecycle/host/useTranscriptSessionExitHandoff';
+import { useCommittedTranscriptRef } from '@/components/sessions/transcript/viewport/lifecycle/host/useCommittedTranscriptRef';
+import { selectTranscriptExitSnapshot } from '@/components/sessions/transcript/viewport/lifecycle/selectTranscriptExitSnapshot';
+import {
+    useTranscriptSameSessionHandoff,
+    type TranscriptExitSnapshotSelection,
+} from '@/components/sessions/transcript/viewport/lifecycle/transcriptSameSessionHandoff';
 import { useTranscriptScrollObservationHost } from '@/components/sessions/transcript/viewport/lifecycle/host/useTranscriptScrollObservationHost';
 import { useTranscriptJumpHost } from '@/components/sessions/transcript/viewport/jump/host/useTranscriptJumpHost';
 import {
@@ -194,9 +212,12 @@ import type {
     WebPrependTelemetryFactsInput,
 } from '@/components/sessions/transcript/viewport/prepend/webPrependOwner';
 import type { TranscriptMeasurementReconciler } from '@/components/sessions/transcript/measurement/transcriptMeasurementReconciler';
+import type { TranscriptRowLayoutMutation } from '@/components/sessions/transcript/measurement/TranscriptRowLayoutMutationContext';
 import {
     createTranscriptMeasurementHost,
 } from '@/components/sessions/transcript/measurement/transcriptMeasurementHost';
+import { estimateTranscriptRowHeightFromCache, estimateTranscriptRowHeightFromContent } from '@/components/sessions/transcript/measurement/estimateTranscriptRowHeightFromCache';
+import { buildTranscriptItemHeightSignatureKey } from '@/components/sessions/transcript/measurement/transcriptItemHeightCache';
 import { useTranscriptMeasurementHostWiring } from '@/components/sessions/transcript/measurement/useTranscriptMeasurementHostWiring';
 import {
     resolveFontScaleKey,
@@ -236,7 +257,6 @@ import { useTranscriptExpansionState } from '@/components/sessions/transcript/ro
 export type { TranscriptViewportChangeState } from '@/components/sessions/transcript/chatListTypes';
 type ContentGrowthLiveTailCommandApplyEffect = NonNullable<TranscriptLifecycleHostContentGrowthLiveTailCommandPlan['contentGrowthLiveTailCommandEffect']>;
 type ExplicitJumpTakeoverApplyEffect = TranscriptLifecycleHostExplicitJumpPlan['explicitJumpTakeoverEffects'][number];
-type ExplicitReturnToLiveTailApplyEffect = TranscriptLifecycleHostExplicitReturnPlan['explicitReturnEffects'][number];
 type FollowBottomIntentTakeoverApplyEffect = TranscriptLifecycleHostFollowBottomIntentPlan['followBottomIntentTakeoverEffects'][number];
 type NativeMeasuredPinPlan = TranscriptLifecycleHostMeasuredNativePinPlan;
 type NativeMeasuredPinIssuePlan = Extract<NativeMeasuredPinPlan, { type: 'issue-command' }>;
@@ -299,29 +319,59 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         timeoutId: ReturnType<typeof setTimeout>;
     } | null>(null);
     const listRef = React.useRef<ScrollableChatListRef | null>(null);
+    const revalidateViewportAfterReveal = React.useCallback(() => {
+        listRef.current?.revalidateViewportAfterReveal?.();
+    }, []);
     const pendingJumpSeqViewportPromotionRef = React.useRef<PendingJumpSeqViewportPromotion | null>(null);
     const promotedJumpSeqViewportProtectionRef = React.useRef<PromotedJumpSeqViewportProtection | null>(null);
     const lastRouteJumpProtectionClearingWebMovementAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
-    const flushPendingJumpSeqViewportPromotionForExitRef = React.useRef<() => void>(() => {});
+    const flushPendingJumpSeqViewportPromotionForExitRef =
+        React.useRef<() => TranscriptExitSnapshotSelection | null>(() => null);
     const flushViewportAnchorCaptureRef = React.useRef<(options?: Readonly<{ deferEmit?: boolean }>) => void>(() => {});
-    const flushExitLiveTailIntentRef = React.useRef<(options?: Readonly<{ deferEmit?: boolean }>) => void>(() => {});
+    const captureViewportAtExitRef = React.useRef<(
+        options?: Readonly<{ deferEmit?: boolean }>,
+    ) => TranscriptExitSnapshotSelection | null>(() => null);
     const disposeEntryRestoreTransactionForExitRef = React.useRef<() => void>(() => {});
     const currentSessionIdRef = React.useRef(props.sessionId);
-    if (currentSessionIdRef.current !== props.sessionId) {
-        flushPendingJumpSeqViewportPromotionForExitRef.current();
-        pendingJumpSeqViewportPromotionRef.current = null;
-        promotedJumpSeqViewportProtectionRef.current = null;
-        lastRouteJumpProtectionClearingWebMovementAtMsRef.current = Number.NEGATIVE_INFINITY;
-        flushViewportAnchorCaptureRef.current({ deferEmit: true });
-        flushExitLiveTailIntentRef.current({ deferEmit: true });
-    }
-    currentSessionIdRef.current = props.sessionId;
     const viewportCommandControllerRef = React.useRef<TranscriptViewportCommandController | null>(null);
     if (viewportCommandControllerRef.current === null) {
         viewportCommandControllerRef.current = createTranscriptViewportCommandController();
     }
     const viewportCommandController = viewportCommandControllerRef.current;
-    viewportCommandController.setCurrentSessionId(props.sessionId);
+    const isEntryViewportCommandActive = React.useCallback(
+        () => viewportCommandController.activeOwner() === 'entry',
+        [viewportCommandController],
+    );
+    const selectCurrentExitSnapshot = React.useCallback((
+        options?: Readonly<{ deferEmit?: boolean }>,
+    ): TranscriptExitSnapshotSelection | null => selectTranscriptExitSnapshot({
+        capturePhysicalExit: () => captureViewportAtExitRef.current({
+            deferEmit: options?.deferEmit ?? true,
+        }),
+        flushJumpPromotion: () => flushPendingJumpSeqViewportPromotionForExitRef.current(),
+    }), []);
+    const sameSessionHandoff = useTranscriptSameSessionHandoff({
+        captureForHandoff: selectCurrentExitSnapshot,
+        explicitJump: props.jumpToSeq != null,
+        sessionId: props.sessionId,
+    });
+    const exitCurrentSession = React.useCallback((options?: Readonly<{ deferEmit?: boolean }>) => {
+        const selection = selectCurrentExitSnapshot(options);
+        pendingJumpSeqViewportPromotionRef.current = null;
+        promotedJumpSeqViewportProtectionRef.current = null;
+        lastRouteJumpProtectionClearingWebMovementAtMsRef.current = Number.NEGATIVE_INFINITY;
+        sameSessionHandoff.refreshForDeletion(selection);
+    }, [sameSessionHandoff.refreshForDeletion, selectCurrentExitSnapshot]);
+    const commitSessionId = React.useCallback((sessionId: string) => {
+        currentSessionIdRef.current = sessionId;
+        viewportCommandController.setCurrentSessionId(sessionId);
+    }, [viewportCommandController]);
+    useTranscriptSessionExitHandoff({
+        commitSessionId,
+        exitCurrentSession,
+        revalidateAfterLifecycleResume: revalidateViewportAfterReveal,
+        sessionId: props.sessionId,
+    });
     const commandHostRef = React.useRef<TranscriptViewportCommandHost | null>(null);
     const viewportLifecycleRef = React.useRef<TranscriptViewportLifecycle | null>(null);
     if (viewportLifecycleRef.current === null) {
@@ -349,16 +399,11 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     const sessionOpenLatch = sessionOpenLatchRef.current;
     const applySessionOpenLatchEffectsRef = React.useRef<(effects: readonly SessionOpenLatchEffect[]) => void>(() => {});
     const transcriptLegendListSpikeSurface = sync.getSyncTuning().transcriptLegendListSpikeSurface;
-    const mainTranscriptRendererKind = resolveTranscriptListRendererKind({
-        frameSurface: 'main',
+    const mainTranscriptRendererSelection = React.useMemo(() => resolveTranscriptListRendererSelection({
+        platformOS: Platform.OS,
         transcriptLegendListSpikeSurface,
-    });
-    const appOwnsContinuousFollow = mainTranscriptRendererKind === 'flashList';
-    const appOwnsInitialBottomPosition = mainTranscriptRendererKind === 'flashList';
-    const appOwnsPrependRestore = mainTranscriptRendererKind === 'flashList';
-    const appOwnsLocalHeightChangeRestore = mainTranscriptRendererKind === 'flashList';
-    const usesNativeFlashListBottomMaintenance =
-        Platform.OS !== 'web' && appOwnsContinuousFollow;
+    }), [transcriptLegendListSpikeSurface]);
+    const mainTranscriptRendererOwnerPolicy = mainTranscriptRendererSelection.ownerPolicy;
     React.useLayoutEffect(() => {
         viewportCommandController.setActive(true);
         return () => {
@@ -385,17 +430,12 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     const listDataRef = React.useRef<readonly ChatTranscriptListItem[]>(props.items);
     const canonicalWindowedItemsRef = React.useRef<readonly ChatTranscriptListItem[]>(props.items);
     const renderWindowIndexMapRef = React.useRef<TranscriptRenderWindowProjection<ChatTranscriptListItem>['indexMap'] | null>(null);
-    const nativeHotEdgeVisibleRowsRef = React.useRef<{
-        firstItemId: string | null;
-        firstSourceIndex: number | null;
-        lastItemId: string | null;
-        lastSourceIndex: number | null;
-    } | null>(null);
     // Pre-decomposition source (turn / tool-calls-group shapes) for visitors that must
     // not see per-unit rows (auto-expand policy scan).
     const preDecompositionItemsRef = React.useRef<ChatTranscriptListItem[]>(props.items);
-    const toolRouteCommonRef = React.useRef(props.toolRouteCommon);
-    toolRouteCommonRef.current = props.toolRouteCommon;
+    const commitListRef = React.useCallback((node: TranscriptListShellRef<ChatTranscriptListItem> | null) => {
+        listRef.current = node as unknown as ScrollableChatListRef | null;
+    }, []);
     const listLayoutHeightRef = React.useRef<number>(0);
     const listLayoutWidthPxRef = React.useRef<number>(listLayoutWidthPx);
     const listLayoutWidthBucketRef = React.useRef<string>(listLayoutWidthBucket);
@@ -424,6 +464,10 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     const chatListNativeId = React.useMemo(() => buildChatListNativeId(props.sessionId, chatListReactId), [props.sessionId, chatListReactId]);
     const webScrollContainerRef = React.useRef<HTMLElement | null>(null);
     const transcriptNavigationRuntimeAnchorsRef = React.useRef<readonly TranscriptNavigationRuntimeAnchor[]>([]);
+    // The jump host owns navigation-visibility publication (it resolves landing
+    // retention before every write). Triggers that fire outside it — native
+    // viewability — call through this ref instead of publishing themselves.
+    const observeTranscriptNavigationVisibilityRef = React.useRef<() => void>(() => {});
     const shouldSuppressGenericViewportStateForProtectedJumpSeqRef = React.useRef<() => boolean>(() => false);
     const commitJumpToBottomDistanceForVisibilityRef = React.useRef<(distanceFromBottom: number) => void>(() => {});
     const shouldSuppressGenericViewportStateForAnchorCapture = React.useCallback((): boolean => shouldSuppressGenericViewportStateForProtectedJumpSeqRef.current(), []);
@@ -457,12 +501,12 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         options?: Readonly<{ suppressAnchorCapture?: boolean }>,
     ) => void>(() => {});
     const resetOlderPaginationRef = React.useRef<() => void>(() => {});
+    const observeCommittedProjectionLayoutRef = React.useRef<() => void>(() => {});
     const wantsPinnedRef = React.useRef(true);
     const pinThresholdPxRef = React.useRef(72);
     const lastUserScrollIntentAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
     const lastExplicitWebScrollIntentAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
     const nativeTranscriptTouchStartYRef = React.useRef<number | null>(null);
-    const resolveRestoreAnchorIndexForCommandRef = React.useRef<(anchor: TranscriptViewportAnchorIdentity) => number | null>(() => null);
     const resolveJumpToSeqIndexForCommandRef = React.useRef<(
         seq: number,
         routeMessageId?: string | null,
@@ -557,18 +601,9 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         resolveInvertedBottomPinCarveTelemetryFieldsRef.current()
     ), []);
     const latestJumpToSeqRef = React.useRef<number | null>(props.jumpToSeq ?? null);
-    latestJumpToSeqRef.current = props.jumpToSeq ?? null;
+    useCommittedTranscriptRef(latestJumpToSeqRef, props.jumpToSeq ?? null);
     const initialWebPinStabilizingRef = React.useRef(false);
-    const scheduledViewportAnchorCaptureRef = React.useRef<{
-        captureAnchor: () => SessionViewportAnchorSnapshot | null;
-        dueAtMs: number;
-        emit: ((state: TranscriptViewportChangeState) => void) | undefined;
-        generation: number;
-        sessionId: string;
-        state: TranscriptViewportChangeState;
-        timeoutId: ReturnType<typeof setTimeout>;
-        wantsPinned: boolean;
-    } | null>(null);
+    const scheduledViewportAnchorCaptureRef = React.useRef<ScheduledViewportAnchorCapture | null>(null);
     const viewportAnchorCaptureGenerationRef = React.useRef(0);
     const attemptEntryRestoreRef = React.useRef<() => void>(() => {});
     const anchorLookupLoadCountRef = React.useRef(0);
@@ -631,16 +666,16 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         commitScrollPinState(next);
     }, [commitScrollPinState]);
     const commitScrollPinEventFromScrollObservation = React.useCallback((event: TranscriptScrollPinEvent) => {
-        if (!appOwnsContinuousFollow && event.type === 'scroll') return;
+        if (mainTranscriptRendererOwnerPolicy.continuousFollow !== 'app' && event.type === 'scroll') return;
         commitScrollPinEvent(event);
     }, [
-        appOwnsContinuousFollow,
         commitScrollPinEvent,
+        mainTranscriptRendererOwnerPolicy.continuousFollow,
     ]);
     const commitJumpToBottomDistanceFromScrollObservation = React.useCallback((distanceFromBottom: number) => {
-        if (!appOwnsContinuousFollow) return;
+        if (mainTranscriptRendererOwnerPolicy.continuousFollow !== 'app') return;
         commitJumpToBottomDistanceForVisibilityRef.current(distanceFromBottom);
-    }, [appOwnsContinuousFollow]);
+    }, [mainTranscriptRendererOwnerPolicy.continuousFollow]);
     const isPinnedRef = React.useRef(true);
     const resetOlderPaginationForSessionEntry = React.useCallback(() => {
         hasMoreOlderRef.current = null;
@@ -726,11 +761,24 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     const deferAutoPinAfterLocalTranscriptInteraction = React.useCallback(() => {
         deferAutoPinAfterLocalTranscriptInteractionRef.current();
     }, []);
-    const prepareWebToolGroupLocalHeightChange = React.useCallback((): 'anchor' | 'bottom' | 'none' => {
-        if (!appOwnsLocalHeightChangeRestore) {
+    const prepareLocalHeightChange = React.useCallback((
+        mutation: TranscriptRowLayoutMutation,
+    ): 'anchor' | 'bottom' | 'none' => {
+        const ownershipAction = resolveRowLayoutMutationViewportOwnershipAction({
+            localHeightChangeRestoreOwner: mainTranscriptRendererOwnerPolicy.localHeightChangeRestore,
+            reason: mutation.reason,
+        });
+        if (ownershipAction === 'arm-visible-anchor-hold') {
+            // Renderer-owned local height changes (default Legend): arm the renderer's ONE
+            // keyed visible-anchor hold before the expansion commit. Legend MVCP alone
+            // re-anchors its mounted window across the expansion item replacement (live S-C,
+            // web + native 2026-07-11); the armed hold keeps the visible row still and the
+            // tail-follow/pinned case stays owned by the held-'end' machinery inside the arm.
             pendingWebLocalHeightChangeAnchorRef.current = null;
+            listRef.current?.armVisibleAnchorHold?.();
             return 'none';
         }
+        if (mainTranscriptRendererOwnerPolicy.localHeightChangeRestore !== 'app') return 'none';
         if (Platform.OS !== 'web') return 'none';
         const metrics = resolveWebScrollMetrics();
         if (!metrics) return 'none';
@@ -753,7 +801,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
             anchor,
         };
         return 'anchor';
-    }, [appOwnsLocalHeightChangeRestore, props.sessionId, resolveWebScrollMetrics]);
+    }, [mainTranscriptRendererOwnerPolicy.localHeightChangeRestore, props.sessionId, resolveWebScrollMetrics]);
     const {
         applyToolCallsGroupExpanded,
         expandedToolCallsAnchorMessageIds,
@@ -763,12 +811,10 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         setToolCallsGroupExpanded,
     } = useTranscriptExpansionState({
         deferAutoPinAfterLocalTranscriptInteraction,
-        prepareWebToolGroupLocalHeightChange,
+        prepareLocalHeightChange,
     });
     const onViewportChangeRef = React.useRef(props.onViewportChange);
-    React.useEffect(() => {
-        onViewportChangeRef.current = props.onViewportChange;
-    }, [props.onViewportChange]);
+    useCommittedTranscriptRef(onViewportChangeRef, props.onViewportChange);
     const stampViewportAnchorForEmit = React.useCallback((
         anchor: SessionViewportAnchorSnapshot | null | undefined,
     ): SessionViewportAnchorSnapshot | null | undefined => {
@@ -785,89 +831,30 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         props.sessionId,
     ]);
     const emitViewportChange = React.useCallback((state: TranscriptViewportChangeState): boolean => {
-        const emit = onViewportChangeRef.current;
+        const emit = props.onViewportChange;
         if (!emit) return false;
         emit({
             ...state,
             anchor: stampViewportAnchorForEmit(state.anchor),
         });
         return true;
-    }, [stampViewportAnchorForEmit]);
-    const handleRendererAtEndChange = React.useCallback((state: TranscriptRendererAtEndState): void => {
-        if (appOwnsContinuousFollow) return;
-        const distanceFromLiveTailPx = state.isAtEnd ? 0 : Number.MAX_SAFE_INTEGER;
-        isPinnedRef.current = state.isAtEnd;
-        wantsPinnedRef.current = state.isAtEnd;
-        lastPinOffsetForIntentRef.current = distanceFromLiveTailPx;
-        commitBottomFollowModeState({
-            dragSession: null,
-            mode: state.isAtEnd ? 'following' : 'released',
-        });
-        commitJumpToBottomDistanceForVisibilityRef.current(distanceFromLiveTailPx);
-        commitScrollPinEvent({
-            type: 'rendererAtEnd',
-            enabled: transcriptScrollPinEnabled,
-            isAtEnd: state.isAtEnd,
-        });
-        if (state.isAtEnd) {
-            emitViewportChange({
-                isPinned: true,
-                offsetY: 0,
-                shouldRestoreViewport: false,
-            });
-        }
-    }, [
-        appOwnsContinuousFollow,
+    }, [props.onViewportChange, stampViewportAnchorForEmit]);
+    const { commitExplicitReturnToLiveTailState, handleRendererAtEndChange } = useTranscriptLiveTailIntentHost({
         commitBottomFollowModeState,
+        commitJumpToBottomDistanceForVisibilityRef,
         commitScrollPinEvent,
-        emitViewportChange,
-        transcriptScrollPinEnabled,
-    ]);
-    const applyExplicitReturnToLiveTailEffects = React.useCallback((
-        effects: readonly ExplicitReturnToLiveTailApplyEffect[],
-    ) => {
-        for (const effect of effects) {
-            if (effect.sessionId !== props.sessionId) continue;
-            switch (effect.type) {
-                case 'apply-explicit-return-clear-user-scroll-intent':
-                    lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
-                    break;
-                case 'apply-explicit-return-to-live-tail-viewport': {
-                    commitScrollPinState({ ...scrollPinRef.current, isPinned: effect.isPinned, newActivityCount: 0 });
-                    const emitted = emitViewportChange({
-                        isPinned: effect.isPinned,
-                        offsetY: effect.distanceFromLiveTailPx,
-                        shouldRestoreViewport: false,
-                    });
-                    if (!emitted) {
-                        sync.markSessionLiveTailIntent(props.sessionId);
-                    }
-                    break;
-                }
-            }
-        }
-    }, [
         commitScrollPinState,
+        continuousFollowOwner: mainTranscriptRendererOwnerPolicy.continuousFollow,
         emitViewportChange,
-        props.sessionId,
-    ]);
-    const commitExplicitReturnToLiveTailState = React.useCallback((
-        intent: Extract<TranscriptViewportLifecycleEvent, { type: 'return-to-live-tail-intent' }>['intent'],
-    ) => {
-        wantsPinnedRef.current = true;
-        isPinnedRef.current = true;
-        const plan = lifecycleHost.planExplicitReturnToLiveTail({
-            intent,
-            sessionId: props.sessionId,
-        });
-        commitBottomFollowModeState(plan.state.bottomFollowState);
-        applyExplicitReturnToLiveTailEffects(plan.explicitReturnEffects);
-    }, [
-        applyExplicitReturnToLiveTailEffects,
-        commitBottomFollowModeState,
+        isPinnedRef,
+        lastPinOffsetForIntentRef,
+        lastUserScrollIntentAtMsRef,
         lifecycleHost,
-        props.sessionId,
-    ]);
+        scrollPinRef,
+        sessionId: props.sessionId,
+        transcriptScrollPinEnabled,
+        wantsPinnedRef,
+    });
     const cancelScheduledViewportAnchorCapture = React.useCallback(() => {
         const scheduled = scheduledViewportAnchorCaptureRef.current;
         if (!scheduled) return;
@@ -882,27 +869,11 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         flushViewportAnchorCaptureRef.current();
         invalidateViewportAnchorCapture();
     }, [invalidateViewportAnchorCapture]);
-    const resetInitialFillForSessionEntry = React.useCallback(() => {
-        initialFillAbortRef.current?.abort();
-        initialFillAbortRef.current = null;
-    }, []);
     const resetNativeMountSettleFlagsForSessionEntry = React.useCallback(() => {
         setNativeMountSettleStable(false);
         nativeMountSettleDeadlineReachedRef.current = false;
         nativeMountSettleAutoPinSuppressedRef.current = false;
         setNativeMountSettleDeadlineReached(false);
-    }, []);
-    const clearNativePaintReleaseTimeoutsForSessionEntry = React.useCallback(() => {
-        const nativeFirstPaintFallbackReleaseTimeout = nativeFirstPaintFallbackReleaseTimeoutRef.current;
-        if (nativeFirstPaintFallbackReleaseTimeout) {
-            nativeFirstPaintFallbackReleaseTimeoutRef.current = null;
-            clearTimeout(nativeFirstPaintFallbackReleaseTimeout.timeoutId);
-        }
-        const nativeEntryRestorePaintReleaseTimeout = nativeEntryRestorePaintReleaseTimeoutRef.current;
-        if (nativeEntryRestorePaintReleaseTimeout) {
-            nativeEntryRestorePaintReleaseTimeoutRef.current = null;
-            clearTimeout(nativeEntryRestorePaintReleaseTimeout.timeoutId);
-        }
     }, []);
     const pendingNativeMountSettleBottomPinHostRef = React.useRef<{ current: boolean } | null>(null);
     const {
@@ -937,6 +908,8 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     const {
         applySessionOpenArmResetPlan,
         applySessionOpenDisposeResetPlan,
+        entryAnchorForRender,
+        entryShouldFollowBottomForRender,
     } = useTranscriptSessionEntryLifecycle({
         anchorLookupExhaustedRef,
         anchorLookupInFlightRef,
@@ -944,7 +917,6 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         applyEntryRestoreOwnerEffectsRef,
         applySessionOpenLatchEffectsRef,
         cancelScheduledPinToBottom,
-        clearNativePaintReleaseTimeoutsForSessionEntry,
         clearWebPrependRestoreWindow: (outcome) => clearWebPrependRestoreWindowRef.current(outcome),
         closeEntryViewportOwnership,
         commitBottomFollowModeState,
@@ -961,8 +933,16 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         flushViewportAnchorCaptureRef,
         getItemCount: () => itemsRef.current.length,
         hideOlderLoadSpinner,
-        initialBottomPositionOwner: appOwnsInitialBottomPosition ? 'app' : 'renderer',
+        initialBottomPositionOwner: mainTranscriptRendererOwnerPolicy.initialBottomPosition,
         initialFillAbortRef,
+        resetNativeFirstPaintRevealStateForSessionEntry: () => {
+            updateNativeViewportPaintObserved(false);
+            updateNativeEntryRestorePaintReleased(false);
+            // The placeholder policy's own record of a revealed paint belongs to the entry these
+            // facts describe, so it is dropped by the same entry reset. Without it the new entry
+            // could never cover, and its placement write would land in front of the reader.
+            resetFirstPaintRevealRecordForSessionEntry();
+        },
         invalidateNativePrependOwner: () => invalidateNativePrependOwnerRef.current(),
         invalidateViewportAnchorCapture,
         isLoaded: props.isLoaded,
@@ -992,12 +972,12 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         resetBottomFollowPinStateForSessionOpenArm: (latestActivityKey) => {
             resetBottomFollowPinStateForSessionOpenArmRef.current(latestActivityKey);
         },
-        resetInitialFillForSessionEntry,
         resetNativeMountSettleFlagsForSessionEntry,
         resetNativeSessionViewportLifecycle,
         resetOlderPaginationForSessionEntry,
-        resetTransientSessionEntryUiState: () => {},
         resetViewportAnchorCaptureForSessionEntry,
+        sameSessionHandoffClaimedViewportRef: sameSessionHandoff.claimedViewportRef,
+        sameSessionHandoffViewportForRender: sameSessionHandoff.renderViewport,
         scheduleFirstSessionOpenWebInitialPinRetryRef,
         sessionEntryViewportRef,
         sessionId: props.sessionId,
@@ -1031,11 +1011,9 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         preemptEntryRestoreTransaction,
         props.sessionId,
     ]);
-    const lastFollowBottomIntentKeyRef = React.useRef<string | number | null>(props.followBottomIntentKey ?? null);
     const applyUnmountCleanup = React.useCallback(() => {
         flushPendingJumpSeqViewportPromotionForExitRef.current();
         flushViewportAnchorCaptureRef.current();
-        flushExitLiveTailIntentRef.current();
         // An entry transaction still open at unmount closes with an attributable
         // outcome (mirror of the prepend invalidation below) — never a silent drop.
         disposeEntryRestoreTransactionForExitRef.current();
@@ -1084,17 +1062,17 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         typeof transcriptScrollPinOffsetThresholdPx === 'number' && Number.isFinite(transcriptScrollPinOffsetThresholdPx)
             ? Math.max(0, Math.trunc(transcriptScrollPinOffsetThresholdPx))
             : 72;
-    pinThresholdPxRef.current = pinThresholdPx;
     const autoFollowWhenPinned = transcriptScrollAutoFollowWhenPinned !== false;
     const pinEnabledRef = React.useRef(pinEnabled);
     const autoFollowWhenPinnedRef = React.useRef(autoFollowWhenPinned);
     const jumpToSeqActiveRef = React.useRef(props.jumpToSeq != null);
-    pinEnabledRef.current = pinEnabled;
-    autoFollowWhenPinnedRef.current = autoFollowWhenPinned;
-    jumpToSeqActiveRef.current = props.jumpToSeq != null;
+    useCommittedTranscriptRef(pinThresholdPxRef, pinThresholdPx);
+    useCommittedTranscriptRef(pinEnabledRef, pinEnabled);
+    useCommittedTranscriptRef(autoFollowWhenPinnedRef, autoFollowWhenPinned);
+    useCommittedTranscriptRef(jumpToSeqActiveRef, props.jumpToSeq != null);
     const targetWindowActiveRef = React.useRef(false);
     const activeTargetWindowTargetRef = React.useRef<TranscriptJumpTarget | null>(null);
-    const targetWindowEdgeLoadInFlightRef = React.useRef({ older: false, newer: false });
+    const targetWindowEdgeLoadInFlightRef = React.useRef<'older' | 'newer' | null>(null);
     const canAutoFollowForReason = React.useCallback((
         reason: TranscriptViewportTelemetryScrollReason,
         options?: Readonly<{ explicit?: boolean }>,
@@ -1130,6 +1108,9 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         return observeNativeStreamAppendOffsetEscapeHostRef.current(params);
     }, []);
     const isCatchingUpNewer = useSessionCatchingUpNewer(props.sessionId);
+    // Tail-reset discontinuity floor: bounds the tail display to content contiguous with
+    // the live tail while an older-page walk is filling a catch-up hole.
+    const tailContiguousFloorSeq = useSessionTailContiguousFloorSeq(props.sessionId);
     const transcriptListExtraData = React.useMemo(() => ({
         messagePins: props.messagePins,
         selectionVersion: transcriptMessageSelection.selectionVersion,
@@ -1202,9 +1183,9 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         listDataRef,
         listOrientation,
         messagesById: props.messagesById,
-        nativeHotEdgeVisibleRowsRef,
         platformOS: Platform.OS,
         preDecompositionItemsRef,
+        rendererKind: mainTranscriptRendererSelection.renderer.kind,
         renderWindowIndexMapRef,
         resolveThinkingExpanded,
         rowFontScaleKey: resolveFontScaleKey(),
@@ -1213,6 +1194,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         sessionId: props.sessionId,
         sessionThinking: props.sessionThinking,
         setEntrySliceWindow,
+        tailContiguousFloorSeq,
         targetWindowActiveRef,
         transcriptNativeHotTailItemCount: tuning.transcriptNativeHotTailItemCount,
         transcriptToolCallsCollapsedPreviewCountSetting,
@@ -1231,6 +1213,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         keyExtractor,
         listData,
         liveTailAnchor,
+        nativeHotEdgeVisibleRows,
         renderWindowProjection,
         resolveCreatedAtForMessageId,
         resolveEntryRestoreOwnerAnchor,
@@ -1238,7 +1221,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         resolveNearestSurvivingViewportAnchorIndex,
         resolveNearestSurvivingViewportAnchorIndexFromItems,
         resolveRestoreAnchorIdentityFromSourceIndex,
-        resolveRestoreAnchorSourceIndexFromLoadedItems,
+        resolveRestoreAnchorRendererTargetFromLoadedItems,
         resolveSeqForMessageId,
         resolveSeqForViewportAnchor,
         resolveTargetWindowItemSeq,
@@ -1249,6 +1232,24 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         targetWindowHostFacts,
         transcriptHotColdSegments,
     } = itemsPipeline;
+    const resolveRendererDataTarget = React.useCallback((
+        command: Extract<TranscriptViewportCommand, Readonly<{ kind: 'restore-anchor' | 'jump-to-seq' }>>,
+    ): TranscriptRendererDataTarget | null => {
+        if (command.kind === 'restore-anchor') {
+            return resolveRestoreAnchorRendererTargetFromLoadedItems(command.target.anchor);
+        }
+        const displayIndex = command.routeMessageId
+            ? resolveJumpToSeqIndexForCommandRef.current(
+                command.seq,
+                command.routeMessageId,
+                command.transcriptBlockIndex,
+                command.role,
+            )
+            : resolveJumpToSeqIndexForCommandRef.current(command.seq);
+        return displayIndex == null
+            ? null
+            : renderWindowIndexMapRef.current?.resolveRendererTargetForDisplayIndex(displayIndex) ?? null;
+    }, [resolveRestoreAnchorRendererTargetFromLoadedItems]);
     React.useEffect(() => {
         setFirstListPaintObserved(false);
         updateNativeViewportPaintObserved(false);
@@ -1267,17 +1268,20 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         };
     }, [props.sessionId]);
     const hasRearmedNativeBottomFollow = React.useCallback((): boolean => (
-        usesNativeFlashListBottomMaintenance &&
+        mainTranscriptRendererOwnerPolicy.usesNativeFlashListBottomMaintenance &&
         bottomFollowModeStateRef.current.mode === 'following' &&
         wantsPinnedRef.current &&
         isPinnedRef.current
-    ), [usesNativeFlashListBottomMaintenance]);
+    ), [mainTranscriptRendererOwnerPolicy.usesNativeFlashListBottomMaintenance]);
     const nativeEntryShouldUseBottomMaintenance =
         sessionEntryViewportRef.current?.shouldFollowBottom !== false;
     const configuredFlashListDrawDistance = sync.getSyncTuning().transcriptFlashListDrawDistance;
     const applyBlankRecoveryEffects = React.useCallback((effects: readonly TranscriptBlankRecoveryEffect[]): void => {
         for (const effect of effects) {
             if (effect.type === 'request-bottom-follow-write') {
+                // Continuous-follow ownership is enforced by the bottom-follow host, which drops the
+                // `blank-recovery` writer while the renderer owns the tail. Do not add a second gate
+                // here, and do not bypass the host with a direct viewport write.
                 authorizeImmediateBottomFollowWriteRef.current(effect.writer, effect.reason);
                 continue;
             }
@@ -1304,32 +1308,34 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         bottomFollowModeStateRef,
         entryRestoreOwner,
         getBottomFollowGestureActiveRef,
-        itemsRef,
+        hasTranscriptNavigationAnchors: props.transcriptNavigationEntries.length > 0,
+        items: displayItems,
         lastNativeVisibleRowsSnapshotRef,
         listContentHeightRef,
-        listDataRef,
+        listData,
         listLayoutHeightRef,
-        listOrientation,
         listRef,
         nativeFlashListMvcpPolicyRef,
         nativeFlashListPauseOffsetCorrectionRef,
-        nativeHotEdgeVisibleRowsRef,
+        nativeHotEdgeVisibleRows,
         nativeMomentumScrollActiveRef,
         nativePrependTelemetryStateRef,
         nativeVisibleWindowSnapshotRef,
+        observeTranscriptNavigationVisibilityRef,
         pinThresholdPxRef,
         platformOS: Platform.OS,
+        rendererKind: mainTranscriptRendererSelection.renderer.kind,
         readCurrentNativeDistanceFromBottom,
         readViewportVisibleSourceRange,
         resolveNativeObservedScrollOffset,
         resolveWebPrependTelemetryFactsRef,
         resolveWebScrollMetrics,
         resolveWebViewportTelemetryDiagnostics,
-        runtimeAnchorsRef: transcriptNavigationRuntimeAnchorsRef,
         sessionId: props.sessionId,
         shouldUseNativeHotColdSplit,
         transcriptHotColdSegments,
-        usesNativeFlashListBottomMaintenance,
+        usesNativeFlashListBottomMaintenance:
+            mainTranscriptRendererOwnerPolicy.usesNativeFlashListBottomMaintenance,
         wantsPinnedRef,
         webHotColdCountsRef,
     });
@@ -1355,12 +1361,30 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         resolveViewportTelemetryMode,
         sessionId: props.sessionId,
     });
+    // Renderer size estimates come from the app's own measured-height cache: a prior
+    // exact measurement beats the renderer's average-size learning for rows it has
+    // not mounted yet (legend-list#492; live reopen/switch-back oscillation captures
+    // 2026-07-22/23). Unknown rows return undefined and keep the renderer fallback.
+    const getEstimatedItemSize = React.useCallback((item: ChatTranscriptListItem): number | undefined => (
+        estimateTranscriptRowHeightFromCache({
+            reconciler: measurementReconciler,
+            signature: buildRowShellSignature(item),
+        }) ?? estimateTranscriptRowHeightFromContent({
+            getMessageById: getTurnMessageById,
+            item,
+        })
+    ), [buildRowShellSignature, getTurnMessageById, measurementReconciler]);
+    const getItemSizeVersion = React.useCallback((item: ChatTranscriptListItem): React.Key => (
+        buildTranscriptItemHeightSignatureKey(buildRowShellSignature(item))
+    ), [buildRowShellSignature]);
     const prependHostDeps = React.useMemo(() => ({
         commandHostRef,
         currentSessionId: props.sessionId,
         itemsRef,
         lastUserScrollIntentAtMsRef,
+        listContentHeight,
         listContentHeightRef,
+        listDataLength: listData.length,
         listDataRef,
         listLayoutHeightRef,
         listRef,
@@ -1371,9 +1395,11 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         resolveWebScrollMetrics,
         viewportCommandController,
         wantsPinnedRef,
-        webPrependRestoreOwner: appOwnsPrependRestore ? 'app' as const : 'renderer' as const,
+        webPrependRestoreOwner: mainTranscriptRendererOwnerPolicy.prependRestore,
     }), [
-        appOwnsPrependRestore,
+        listContentHeight,
+        listData.length,
+        mainTranscriptRendererOwnerPolicy.prependRestore,
         pinThresholdPx,
         preemptEntryRestoreTransaction,
         props.sessionId,
@@ -1383,25 +1409,47 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         viewportCommandController,
     ]);
     const prependHost = useTranscriptPrependHost(prependHostDeps);
-    observeNativePrependOwnerRef.current = prependHost.observeNative;
-    invalidateNativePrependOwnerRef.current = () => prependHost.invalidateNativeTransaction();
-    clearWebPrependRestoreWindowRef.current = prependHost.clearWebRestoreWindow;
-    hasOpenNativePrependTransactionForSessionRef.current = () => prependHost.hasOpenNativeTransaction();
-    resolveWebPrependTelemetryFactsRef.current = () => prependHost.telemetryFacts();
-    nativePrependTelemetryStateRef.current = () => prependHost.nativeTelemetryState();
-    closeNativePrependForTrustedScrollRef.current = () => {
+    const invalidateNativePrependOwner = React.useCallback(
+        () => prependHost.invalidateNativeTransaction(),
+        [prependHost],
+    );
+    const hasOpenNativePrependTransactionForSessionBridge = React.useCallback(
+        () => prependHost.hasOpenNativeTransaction(),
+        [prependHost],
+    );
+    const resolveWebPrependTelemetryFacts = React.useCallback(
+        () => prependHost.telemetryFacts(),
+        [prependHost],
+    );
+    const resolveNativePrependTelemetryState = React.useCallback(
+        () => prependHost.nativeTelemetryState(),
+        [prependHost],
+    );
+    const closeNativePrependForTrustedScroll = React.useCallback(() => {
         prependHost.applyNativeEffects(prependHost.trustedNativeScroll({
             activeOwner: viewportCommandController.activeOwner(),
             sessionId: props.sessionId,
         }));
-    };
+    }, [prependHost, props.sessionId, viewportCommandController]);
+    useCommittedTranscriptRef(observeNativePrependOwnerRef, prependHost.observeNative);
+    useCommittedTranscriptRef(invalidateNativePrependOwnerRef, invalidateNativePrependOwner);
+    useCommittedTranscriptRef(clearWebPrependRestoreWindowRef, prependHost.clearWebRestoreWindow);
+    useCommittedTranscriptRef(
+        hasOpenNativePrependTransactionForSessionRef,
+        hasOpenNativePrependTransactionForSessionBridge,
+    );
+    useCommittedTranscriptRef(resolveWebPrependTelemetryFactsRef, resolveWebPrependTelemetryFacts);
+    useCommittedTranscriptRef(nativePrependTelemetryStateRef, resolveNativePrependTelemetryState);
+    useCommittedTranscriptRef(
+        closeNativePrependForTrustedScrollRef,
+        closeNativePrependForTrustedScroll,
+    );
     const nativePrependTransactionRevision = prependHost.getNativeTransactionRevision();
     const viewportDriverDeps = React.useMemo<TranscriptViewportDriverDeps>(() => ({
             listRef,
             listContentHeightRef,
             listLayoutHeightRef,
             listDataRef,
-            itemsRef,
             composerInsetHeightRef,
             nativeHotTailHeightRef,
             lastPinOffsetForIntentRef,
@@ -1410,13 +1458,8 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
             lastNativeRestoreIndexCommandRef,
             nativeMountSettleStable,
             telemetryPlatform,
-            shouldUseNativeHotColdSplit,
-            webHotColdCountsRef,
             clearWebPrependRangeReserve: prependHost.clearWebRangeReserve,
-            resolveRestoreAnchorIndex: (anchor) => resolveRestoreAnchorIndexForCommandRef.current(anchor),
-            resolveJumpToSeqIndex: (seq, routeMessageId, transcriptBlockIndex, role) => (
-                resolveJumpToSeqIndexForCommandRef.current(seq, routeMessageId, transcriptBlockIndex, role)
-            ),
+            resolveRendererDataTarget,
             resolveWebScrollMetrics,
             recordViewportTelemetryEvent,
             recordRestoreDecisionTelemetry,
@@ -1428,9 +1471,9 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
             recordRestoreDecisionTelemetry,
             recordViewportTelemetryEvent,
             resolveInvertedBottomPinCarveTelemetryFields,
+            resolveRendererDataTarget,
             resolveWebViewportTelemetryDiagnostics,
             resolveWebScrollMetrics,
-            shouldUseNativeHotColdSplit,
             telemetryPlatform,
             webDomObservation,
         ]);
@@ -1456,7 +1499,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         hasWebPrependRestoreWindow: prependHost.hasWebRestoreWindow,
         listContentHeight,
         listDataLength: listData.length,
-        localHeightChangeRestoreOwner: appOwnsLocalHeightChangeRestore ? 'app' : 'renderer',
+        localHeightChangeRestoreOwner: mainTranscriptRendererOwnerPolicy.localHeightChangeRestore,
         pendingWebLocalHeightChangeAnchorRef,
         platformOS: Platform.OS,
         sessionId: props.sessionId,
@@ -1511,7 +1554,8 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         sessionOpenLatch,
         setNativeMountSettleDeadlineReached,
         setNativeMountSettleStable,
-        usesNativeFlashListBottomMaintenance,
+        usesNativeFlashListBottomMaintenance:
+            mainTranscriptRendererOwnerPolicy.usesNativeFlashListBottomMaintenance,
     });
     const paintTelemetry = useTranscriptPaintTelemetry({
         clearWebStablePaintRetry,
@@ -1548,7 +1592,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         recordStablePaintTelemetry,
         resolveEffectiveListPaintMetrics,
     } = paintTelemetry;
-    const mainTranscriptListShellFrame = useMainTranscriptRendererFrameHost({
+    const mainTranscriptRendererBinding = useMainTranscriptRendererFrameHost({
         autoFollowWhenPinned,
         bottomFollowModeRevision,
         bottomFollowModeStateRef,
@@ -1565,10 +1609,11 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         pinEnabled,
         pinThresholdPx,
         platformOS: Platform.OS,
+        rendererSelection: mainTranscriptRendererSelection,
+        sessionEntryShouldFollowBottom: entryShouldFollowBottomForRender,
         shouldUseNativeHotColdSplit,
         targetWindowActive,
     });
-    resolveRestoreAnchorIndexForCommandRef.current = resolveRestoreAnchorSourceIndexFromLoadedItems;
     const resolveForkedTurnMessageOrigin = React.useCallback((messageId: string) => {
         const metadata = props.forkMessageMetadataById?.[messageId] ?? null;
         if (!metadata) return null;
@@ -1585,6 +1630,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     const firstPaintState = useTranscriptFirstPaintState({
         applySessionOpenLatchEffectsRef,
         currentSessionIdRef,
+        entryAnchorForRender,
         entryRestoreOwner,
         firstListPaintObserved,
         isLoaded: props.isLoaded,
@@ -1601,18 +1647,55 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         nativeViewportPaintObservedRef,
         pinThresholdPx,
         platformOS: Platform.OS,
+        rendererKind: mainTranscriptRendererBinding.renderer.kind,
         routeHydrationPending: props.routeHydrationPending === true,
         sessionId: props.sessionId,
         sessionOpenLatch,
         transcriptInitialFillBudgetMs: sync.getSyncTuning().transcriptInitialFillBudgetMs,
         transcriptMountSettleQuiescentWindowMs: sync.getSyncTuning().transcriptMountSettleQuiescentWindowMs,
-        usesNativeFlashListBottomMaintenance,
+        usesNativeFlashListBottomMaintenance:
+            mainTranscriptRendererBinding.ownerPolicy.usesNativeFlashListBottomMaintenance,
     });
     const {
         nativeFirstPaintReleasedWithoutListLoad,
+        onEntryPlacementEvent,
+        recordEntryOwnerOutcome,
+        recordInitialPlacementSettled,
+        resetFirstPaintRevealRecordForSessionEntry,
         showFirstPaintPlaceholder,
         showRouteHydrationFirstPaintPlaceholder,
     } = firstPaintState;
+    // First-paint cover release for a web bottom-entry open. Legend's `onLoad` fires inside
+    // `finishInitialScroll`, one animation frame BEFORE the deferred at-end maintenance write it
+    // flushes in the same call, so `onLoad` is not the presentable frame. The renderer's own
+    // landing observation is; this subscribes the placeholder to it. Nothing else joins here —
+    // no producer readiness participates in the reveal.
+    const initialPlacementObservationActive =
+        Platform.OS === 'web'
+        && mainTranscriptRendererBinding.renderer.kind === 'legendList'
+        && entryAnchorForRender == null
+        && props.isLoaded
+        && listData.length > 0;
+    React.useEffect(() => {
+        if (!initialPlacementObservationActive) return;
+        const sessionId = props.sessionId;
+        const observe = listRef.current?.observeInitialPresentationSettlement;
+        if (!observe) {
+            // No renderer produces the fact here: the cover must not wait for it.
+            recordInitialPlacementSettled({ sessionId });
+            return;
+        }
+        return observe({
+            dataKey: sessionId,
+            revision: 0,
+            onSettled: () => recordInitialPlacementSettled({ sessionId }),
+        });
+    }, [
+        initialPlacementObservationActive,
+        listRef,
+        props.sessionId,
+        recordInitialPlacementSettled,
+    ]);
     useTranscriptPaintTelemetryEffects({
         firstListPaintObserved,
         isWarmKeepAliveInstance,
@@ -1629,6 +1712,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         pinThresholdPx,
         recordFirstListPaint,
         recordStablePaintTelemetry,
+        rendererKind: mainTranscriptRendererBinding.renderer.kind,
         resolveEffectiveListPaintMetrics,
         routeHydrationPending: props.routeHydrationPending === true,
         scheduleWebStablePaintRetry,
@@ -1638,16 +1722,50 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         showRouteHydrationFirstPaintPlaceholder,
         webStablePaintRetryTick,
     });
+    // S-E route-pop blank (live native capture 2026-07-11): a pushed route (tool details)
+    // covers the transcript screen; a scroll write settled while covered can fail to become
+    // native truth, and no scroll event arrives on reveal, so the renderer keeps computing
+    // its mounted window for a believed offset the native view is not displaying — a
+    // persistent blank region only the user's first swipe healed. On focus-return, ask the
+    // renderer to re-observe the natively displayed offset (Legend-only seam; FlashList and
+    // web never implement it).
+    const sessionScreenFocused = useSessionScreenIsFocused();
+    const sessionScreenWasBlurredRef = React.useRef(false);
+    React.useEffect(() => {
+        if (!sessionScreenFocused) {
+            sessionScreenWasBlurredRef.current = true;
+            return;
+        }
+        if (!sessionScreenWasBlurredRef.current) return;
+        sessionScreenWasBlurredRef.current = false;
+        revalidateViewportAfterReveal();
+    }, [revalidateViewportAfterReveal, sessionScreenFocused]);
+    // Row-local toggles (tool ROW inline expand/collapse, thinking) commit giant in-viewport
+    // height changes without passing the group-toggle choke point. Under renderer-owned
+    // local height restore (default Legend) this notification is the pre-commit seam that
+    // covers them all: arm the renderer's ONE keyed visible-anchor hold before delegating to
+    // the measurement host (live native S-C continuation 2026-07-11: a row expansion parked
+    // the viewport hours away with no hold armed).
+    const handleRowLayoutMutationWithViewportOwnership = React.useCallback<typeof handleRowLayoutMutation>((rowMutation) => {
+        const ownershipAction = resolveRowLayoutMutationViewportOwnershipAction({
+            localHeightChangeRestoreOwner: mainTranscriptRendererOwnerPolicy.localHeightChangeRestore,
+            reason: rowMutation.mutation.reason,
+        });
+        if (ownershipAction === 'arm-visible-anchor-hold') {
+            listRef.current?.armVisibleAnchorHold?.();
+        }
+        handleRowLayoutMutation(rowMutation);
+    }, [handleRowLayoutMutation, mainTranscriptRendererOwnerPolicy.localHeightChangeRestore]);
     const itemRenderer = useTranscriptItemRenderer({
         buildRowShellSignature,
         expandedToolCallsAnchorMessageIds,
         getMessageById: getTurnMessageById,
         getMessageOrigin: getTurnMessageOrigin,
         getMessageRevisionById: getTurnMessageRevisionById,
-        handleRowLayoutMutation,
+        handleRowLayoutMutation: handleRowLayoutMutationWithViewportOwnership,
         handleRowShellMeasured,
         itemsRef,
-        listDataRef,
+        listData,
         listOrientation,
         measurementReconciler,
         props,
@@ -1658,7 +1776,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         resolveToolCallMessagesForIds,
         setThinkingExpanded,
         setToolCallsGroupExpanded,
-        toolRouteCommonRef,
+        toolRouteCommon: props.toolRouteCommon,
         toolTimelineChromeMode,
     });
     const { renderItem, renderTranscriptItemAtIndex } = itemRenderer;
@@ -1672,15 +1790,18 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         transcriptInitialFillBudgetMs: sync.getSyncTuning().transcriptInitialFillBudgetMs,
         transcriptInitialFillMaxNoProgressLoads: sync.getSyncTuning().transcriptInitialFillMaxNoProgressLoads,
     });
-    revealEntrySliceWindowRef.current = revealEntrySliceWindow;
+    useCommittedTranscriptRef(revealEntrySliceWindowRef, revealEntrySliceWindow);
     const viewportAnchorCaptureHost = useTranscriptViewportAnchorCaptureHost({
         cancelScheduledViewportAnchorCapture,
         currentSessionIdRef,
         debounceMs: sync.getSyncTuning().transcriptViewportAnchorCaptureDebounceMs,
         emitViewportChange,
+        isEntryViewportCommandActive,
         listDataRef,
         listLayoutHeightRef,
         listRef,
+        pinThresholdPx,
+        readCurrentNativeDistanceFromBottom,
         recordViewportTelemetryEvent,
         resolveWebScrollMetrics,
         scheduledViewportAnchorCaptureRef,
@@ -1688,35 +1809,27 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         viewportAnchorCaptureGenerationRef,
         wantsPinnedRef,
     });
-    scheduleViewportAnchorCaptureRef.current = viewportAnchorCaptureHost.schedule;
+    useCommittedTranscriptRef(
+        scheduleViewportAnchorCaptureRef,
+        viewportAnchorCaptureHost.schedule,
+    );
     React.useLayoutEffect(() => {
         flushViewportAnchorCaptureRef.current = viewportAnchorCaptureHost.flush;
     }, [viewportAnchorCaptureHost.flush]);
-    const flushExitLiveTailIntent = React.useCallback((options?: Readonly<{ deferEmit?: boolean }>) => {
-        if (Platform.OS === 'web') return;
-        const distanceFromBottom = readCurrentNativeDistanceFromBottom() ?? lastPinOffsetForIntentRef.current;
-        if (distanceFromBottom == null || distanceFromBottom > pinThresholdPx) return;
-        const emit = onViewportChangeRef.current;
-        if (!emit) return;
-        const liveTailState = { isPinned: true, offsetY: 0, shouldRestoreViewport: false };
-        if (options?.deferEmit === true) {
-            queueMicrotask(() => {
-                emit(liveTailState);
-            });
-            return;
-        }
-        emit(liveTailState);
-    }, [pinThresholdPx, readCurrentNativeDistanceFromBottom]);
     React.useLayoutEffect(() => {
-        flushExitLiveTailIntentRef.current = flushExitLiveTailIntent;
-    }, [flushExitLiveTailIntent]);
+        captureViewportAtExitRef.current = viewportAnchorCaptureHost.captureAtExit;
+    }, [viewportAnchorCaptureHost.captureAtExit]);
     const observeNativePrependOwner = prependHost.observeNative;
     const observeWebPrependOwner = prependHost.observeWeb;
     const refreshInFlightWebPrependAnchor = prependHost.refreshInFlightWebAnchor;
     const retargetPendingWebPrependAnchorForUserScroll = prependHost.retargetPendingWebAnchorForUserScroll;
     const loadOlder = useCallback(async (options: TranscriptPrependOlderLoadOptions = {}): Promise<TranscriptPrependOlderLoadResult | null> => {
         const loadOlderOptions = options.preservePrependViewport === undefined
-            ? { ...options, preservePrependViewport: appOwnsPrependRestore }
+            ? {
+                ...options,
+                preservePrependViewport:
+                    mainTranscriptRendererOwnerPolicy.prependRestore === 'app',
+            }
             : options;
         return await runTranscriptPrependOlderLoad({
             clearOlderLoadSpinnerDelay,
@@ -1743,10 +1856,10 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
             showOlderLoadSpinner,
         });
     }, [
-        appOwnsPrependRestore,
         clearOlderLoadSpinnerDelay,
         hasMoreOlder,
         hideOlderLoadSpinner,
+        mainTranscriptRendererOwnerPolicy.prependRestore,
         pinThresholdPx,
         prependHost,
         props.committedMessagesCount,
@@ -1767,13 +1880,17 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         enabled: true,
         loadOlder: paginationLoadOlder,
         thresholdPx: resolveBackwardPrefetchThresholdPx(listLayoutHeight),
+        thresholdItems: sync.getSyncTuning().transcriptBackwardPrefetchThresholdItems,
         cooldownMs: sync.getSyncTuning().transcriptOlderLoadCooldownMs,
         spinnerDelayMs: sync.getSyncTuning().transcriptOlderLoadSpinnerDelayMs,
         isFillDone: () => sessionOpenLatch.initialFillStatus() === 'done',
         isTransactionOpen: () => viewportCommandController.activeOwner() !== 'follow',
     });
-    olderPaginationSnapshotRef.current = olderPagination.getSnapshot();
-    resetOlderPaginationRef.current = olderPagination.reset;
+    useCommittedTranscriptRef(
+        olderPaginationSnapshotRef,
+        olderPagination.getSnapshot(),
+    );
+    useCommittedTranscriptRef(resetOlderPaginationRef, olderPagination.reset);
         const tryPinToBottomDom = React.useCallback((reason: TranscriptViewportTelemetryScrollReason = 'initial-open'): boolean => {
             if (reason === 'jump-to-bottom') {
                 return executeViewportCommand(resolveViewportCommand({
@@ -1822,7 +1939,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         commitBottomFollowModeState,
         commitExplicitReturnToLiveTailState,
         commitScrollPinState,
-        continuousFollowOwner: appOwnsContinuousFollow ? 'app' : 'renderer',
+        continuousFollowOwner: mainTranscriptRendererOwnerPolicy.continuousFollow,
         currentBottomFollowModeStateRef: bottomFollowModeStateRef,
         executeViewportCommand,
         followBottomIntentKey: props.followBottomIntentKey,
@@ -1868,7 +1985,8 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         sessionId: props.sessionId,
         tryPinToBottomDom,
         updateNativeInitialViewportPendingObservation,
-        usesNativeFlashListBottomMaintenance,
+        usesNativeFlashListBottomMaintenance:
+            mainTranscriptRendererOwnerPolicy.usesNativeFlashListBottomMaintenance,
         wantsPinnedRef,
     });
     const {
@@ -1895,21 +2013,49 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         resetPinStateForSessionOpenArm,
         resolveInvertedBottomPinCarveTelemetryFields: resolveInvertedBottomPinCarveTelemetryFieldsFromHost,
     } = bottomFollowHost;
-    applyWebPassiveLiveTailCorrectionEffectRef.current = applyWebPassiveLiveTailCorrectionEffect;
-    cancelScheduledPinToBottomRef.current = cancelScheduledPinToBottomFromHost;
-    flushPendingNativeMountSettleBottomPinRef.current = flushPendingNativeMountSettleBottomPinFromHost;
-    resolveInvertedBottomPinCarveTelemetryFieldsRef.current = resolveInvertedBottomPinCarveTelemetryFieldsFromHost;
-	    applyNativeDragActiveMirrorEffectsRef.current = bottomFollowHost.applyNativeDragActiveMirrorEffects;
-	    getBottomFollowGestureActiveRef.current = bottomFollowHost.getGestureActive;
-	    resetBottomFollowPinRecordsForSessionEntryRef.current = resetPinRecordsForSessionEntry;
-	    resetBottomFollowPinStateForSessionOpenArmRef.current = resetPinStateForSessionOpenArm;
-	    pendingNativeMountSettleBottomPinHostRef.current = pendingNativeMountSettleBottomPinRef;
+    useCommittedTranscriptRef(
+        applyWebPassiveLiveTailCorrectionEffectRef,
+        applyWebPassiveLiveTailCorrectionEffect,
+    );
+    useCommittedTranscriptRef(
+        cancelScheduledPinToBottomRef,
+        cancelScheduledPinToBottomFromHost,
+    );
+    useCommittedTranscriptRef(
+        flushPendingNativeMountSettleBottomPinRef,
+        flushPendingNativeMountSettleBottomPinFromHost,
+    );
+    useCommittedTranscriptRef(
+        resolveInvertedBottomPinCarveTelemetryFieldsRef,
+        resolveInvertedBottomPinCarveTelemetryFieldsFromHost,
+    );
+    useCommittedTranscriptRef(
+        applyNativeDragActiveMirrorEffectsRef,
+        bottomFollowHost.applyNativeDragActiveMirrorEffects,
+    );
+    useCommittedTranscriptRef(
+        getBottomFollowGestureActiveRef,
+        bottomFollowHost.getGestureActive,
+    );
+    useCommittedTranscriptRef(
+        resetBottomFollowPinRecordsForSessionEntryRef,
+        resetPinRecordsForSessionEntry,
+    );
+    useCommittedTranscriptRef(
+        resetBottomFollowPinStateForSessionOpenArmRef,
+        resetPinStateForSessionOpenArm,
+    );
+    useCommittedTranscriptRef(
+        pendingNativeMountSettleBottomPinHostRef,
+        pendingNativeMountSettleBottomPinRef,
+    );
 
     // Stable identity wrapper: `isScrollable` is declared later in this component (TDZ), and an
     // inline arrow here would churn the entry host's session-open effect deps on every render.
     const isScrollableRef = React.useRef<() => boolean>(() => false);
     const isScrollableForEntryHost = React.useCallback((): boolean => isScrollableRef.current(), []);
     const entryHost = useTranscriptEntryHost({
+        activeTargetWindowTargetRef,
         anchorLookupExhaustedRef,
         anchorLookupInFlightRef,
         anchorLookupLoadCountRef,
@@ -1931,6 +2077,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         entrySliceWindowRef,
         executeViewportCommand,
         hasNativeContentMeasurementForCurrentSession,
+        initialBottomPositionOwner: mainTranscriptRendererOwnerPolicy.initialBottomPosition,
         initialFillAbortRef,
         initialWebPinStabilizingRef,
         invalidateViewportAnchorCapture,
@@ -1952,12 +2099,15 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         loadOlder,
         markNativeInitialViewportAppliedForCurrentSession,
         nativeMountSettleDeadlineReachedRef,
+        nativeMountSettleStable,
         observeMountSettleMetrics,
         pinThresholdPx,
         pinToBottom,
         pinToBottomRespectingNativeMountSettle,
+        recordEntryOwnerOutcome,
         recordRestoreDecisionTelemetry,
         recordViewportTelemetryEvent,
+        rendererKind: mainTranscriptRendererBinding.renderer.kind,
         renderWindowProjection,
         requestBottomFollowScheduledWriteRef,
         resolveEntryRestoreOwnerAnchor,
@@ -1990,6 +2140,10 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         verifyNativeSliceEntryRestoreTransaction,
         verifyWebEntryRestoreTransaction,
     } = entryHost;
+    const onSuccessfulRouteJumpSettled = React.useCallback((settledSessionId: string): void => {
+        if (!sessionOpenLatch.onJumpEntrySettled({ sessionId: settledSessionId })) return;
+        observeCommittedProjectionLayoutRef.current();
+    }, [sessionOpenLatch]);
     const jumpHost = useTranscriptJumpHost({
         activeTargetWindowTargetRef,
         applyExplicitJumpTakeoverApplyEffects,
@@ -2020,17 +2174,19 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         listContentHeightRef,
         listData,
         listLayoutHeight,
-        listLayoutWidthPx,
         listRef,
         messagesById: props.messagesById,
         onJumpLanded: props.onJumpLanded,
+        onSuccessfulRouteJumpSettled,
         onViewportChangeRef,
         pendingJumpSeqViewportPromotionRef,
+        pinThresholdPx,
         pinThresholdPxRef,
         pinToBottom,
         platformOS: Platform.OS,
         promotedJumpSeqViewportProtectionRef,
         readCurrentNativeDistanceFromBottom,
+        rendererKind: mainTranscriptRendererBinding.renderer.kind,
         resolveJumpToSeqIndexForCommandRef,
         resolveSeqForMessageId,
         resolveSyncLoadOlderOptions,
@@ -2043,10 +2199,10 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         stampViewportAnchorForEmit,
         targetWindowHasMoreNewer: targetWindowHostFacts.hasMoreNewer,
         targetWindowIsWindowMode: targetWindowHostFacts.targetWindowActive,
-        transcriptContentMaxWidth,
         transcriptNavigationEntries: props.transcriptNavigationEntries,
         transcriptNavigationRuntimeAnchorsRef,
-        usesNativeFlashListBottomMaintenance,
+        usesNativeFlashListBottomMaintenance:
+            mainTranscriptRendererBinding.ownerPolicy.usesNativeFlashListBottomMaintenance,
         waitForNextVisualUpdate,
         webDomObservation,
         wantsPinnedRef,
@@ -2064,9 +2220,19 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         onScrollToIndexFailed,
         promotePendingJumpSeqViewportSnapshot,
         shouldSuppressGenericViewportStateForProtectedJumpSeq,
-        transcriptNavigationRailVisibilitySnapshot,
     } = jumpHost;
-    shouldSuppressGenericViewportStateForProtectedJumpSeqRef.current = shouldSuppressGenericViewportStateForProtectedJumpSeq; commitJumpToBottomDistanceForVisibilityRef.current = commitJumpToBottomDistanceForVisibility;
+    useCommittedTranscriptRef(
+        shouldSuppressGenericViewportStateForProtectedJumpSeqRef,
+        shouldSuppressGenericViewportStateForProtectedJumpSeq,
+    );
+    useCommittedTranscriptRef(
+        commitJumpToBottomDistanceForVisibilityRef,
+        commitJumpToBottomDistanceForVisibility,
+    );
+    useCommittedTranscriptRef(
+        observeTranscriptNavigationVisibilityRef,
+        observeWebTranscriptNavigationVisibilityForSession,
+    );
     React.useLayoutEffect(() => {
         flushPendingJumpSeqViewportPromotionForExitRef.current = flushPendingJumpSeqViewportPromotionForExit;
     }, [flushPendingJumpSeqViewportPromotionForExit]);
@@ -2089,7 +2255,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         if (!Number.isFinite(content) || content <= 0) return false;
         return content > layout + 16;
     }, [listContentHeight, listLayoutHeight, resolveWebScrollMetrics]);
-    isScrollableRef.current = isScrollable;
+    useCommittedTranscriptRef(isScrollableRef, isScrollable);
     const skipRendererOwnedContentSizePin = React.useCallback(() => false, []);
     const flashListStartReachedThreshold = React.useMemo(() => {
         if (!Number.isFinite(listLayoutHeight) || listLayoutHeight <= 0) {
@@ -2107,7 +2273,10 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         jumpToSeq: props.jumpToSeq,
         markAutoExpandedToolCallsGroups: (sessionId) => sessionOpenLatch.markAutoExpandedToolCallsGroups(sessionId),
         maxTurnEntriesPerListItem: props.maxTurnEntriesPerListItem,
-        pinToBottom: appOwnsContinuousFollow ? pinToBottom : skipRendererOwnedContentSizePin,
+        pinToBottom:
+            mainTranscriptRendererOwnerPolicy.continuousFollow === 'app'
+                ? pinToBottom
+                : skipRendererOwnedContentSizePin,
         preDecompositionItemsRef,
         sessionEntryViewportRef,
         sessionId: props.sessionId,
@@ -2122,7 +2291,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         observeMountSettleMetrics();
         // Composer/keyboard inset resize is a write-authority event (S3): a held follow intent
         // must re-pin because the usable viewport height changed with no content change.
-        if (appOwnsContinuousFollow) {
+        if (mainTranscriptRendererOwnerPolicy.continuousFollow === 'app') {
             requestAutomaticLiveTailPin(null, 'viewport-resized');
         } else {
             // Legend remains the sole continuous-follow writer. The host only reports that its
@@ -2130,7 +2299,11 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
             // is still active, and stays inert for a genuinely detached viewport.
             listRef.current?.notifyViewportGeometryChanged?.();
         }
-    }, [appOwnsContinuousFollow, observeMountSettleMetrics, requestAutomaticLiveTailPin]);
+    }, [
+        mainTranscriptRendererOwnerPolicy.continuousFollow,
+        observeMountSettleMetrics,
+        requestAutomaticLiveTailPin,
+    ]);
     const transcriptItemsEdgeSlots = useTranscriptItemsEdgeSlots({
         bottomNotice: props.bottomNotice,
         composerInsetHeight,
@@ -2140,7 +2313,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         handleComposerInsetHeightChange,
         handleNativeHotTailHeightChange,
         isLoadingOlder,
-        mainTranscriptListShellFrame,
+        mainTranscriptListShellFrame: mainTranscriptRendererBinding.frame,
         olderPaginationIsLoadingOlder: olderPagination.isLoadingOlder,
         onRequestSwitchToRemote: props.onRequestSwitchToRemote,
         prependRangeReservePx: prependHost.slots.rangeReservePx,
@@ -2171,7 +2344,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         commitScrollPinEvent: commitScrollPinEventFromScrollObservation,
         commitScrollPinState,
         composerInsetHeightRef,
-        continuousFollowOwner: appOwnsContinuousFollow ? 'app' : 'renderer',
+        continuousFollowOwner: mainTranscriptRendererOwnerPolicy.continuousFollow,
         currentSessionIdRef,
         dispatchViewportLifecycleEvent,
         emitViewportChange,
@@ -2180,6 +2353,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         getBottomFollowGestureActiveRef,
         hasNativeContentMeasurementForCurrentSession,
         hasNativeInitialViewportAppliedForCurrentSession,
+        deferViewportAnchorCapture: viewportAnchorCaptureHost.defer,
         invalidateViewportAnchorCapture,
         isLoaded: props.isLoaded,
         isWarmKeepAliveInstance,
@@ -2234,6 +2408,16 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         recordScrollObservedTelemetry,
         recordStablePaintTelemetry,
         recordViewportTelemetryEvent,
+        readItemsToOlderEdge: () => resolveItemsToOlderEdge(
+            readViewportVisibleSourceRange(),
+            renderWindowIndexMapRef.current?.windowContentItemCount
+                ?? canonicalWindowedItemsRef.current.length,
+        ),
+        readItemsToNewerEdge: () => resolveItemsToNewerEdge(
+            readViewportVisibleSourceRange(),
+            renderWindowIndexMapRef.current?.windowContentItemCount
+                ?? canonicalWindowedItemsRef.current.length,
+        ),
         resolveEffectiveListPaintMetrics,
         resolveNativeObservedScrollOffset,
         resolveTranscriptMountSettleBottomDistanceNoiseFloorPx: () =>
@@ -2242,6 +2426,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         resolveViewportTelemetryMode,
         resolveWebScrollMetrics,
         resolveWebViewportTelemetryDiagnostics,
+        webDomObservation,
         routeJumpSeq: typeof props.jumpToSeq === 'number' && Number.isFinite(props.jumpToSeq)
             ? Math.trunc(props.jumpToSeq)
             : null,
@@ -2262,7 +2447,8 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         updateNativeViewportPaintObserved,
         updateNativeInitialViewportPendingObservation,
         userIntentRecentMs: TRANSCRIPT_SCROLL_USER_INTENT_RECENT_MS,
-        usesNativeFlashListBottomMaintenance,
+        usesNativeFlashListBottomMaintenance:
+            mainTranscriptRendererBinding.ownerPolicy.usesNativeFlashListBottomMaintenance,
         verifyWebEntryRestoreTransaction,
         viewportCommandController,
         wantsPinnedRef,
@@ -2270,35 +2456,53 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         setListLayoutHeight,
         verifyNativeSliceEntryRestoreTransaction,
     });
-    observeNativeStreamAppendOffsetEscapeHostRef.current =
-        scrollObservationHost.observeNativeStreamAppendOffsetEscape;
-    deferAutoPinAfterLocalTranscriptInteractionRef.current =
-        scrollObservationHost.deferAutoPinAfterLocalTranscriptInteraction;
-    adoptNativeFollowingForTrustedBottomArrivalRef.current =
-        scrollObservationHost.adoptNativeFollowingForTrustedBottomArrival;
+    useCommittedTranscriptRef(
+        observeCommittedProjectionLayoutRef,
+        scrollObservationHost.observeCommittedProjectionLayout,
+    );
+    useCommittedTranscriptRef(
+        observeNativeStreamAppendOffsetEscapeHostRef,
+        scrollObservationHost.observeNativeStreamAppendOffsetEscape,
+    );
+    useCommittedTranscriptRef(
+        deferAutoPinAfterLocalTranscriptInteractionRef,
+        scrollObservationHost.deferAutoPinAfterLocalTranscriptInteraction,
+    );
+    useCommittedTranscriptRef(
+        adoptNativeFollowingForTrustedBottomArrivalRef,
+        scrollObservationHost.adoptNativeFollowingForTrustedBottomArrival,
+    );
+    const observeTranscriptListCommittedLayout = React.useCallback(() => {
+        recordLayoutCommitObserved();
+        scrollObservationHost.observeCommittedProjectionLayout();
+    }, [
+        recordLayoutCommitObserved,
+        scrollObservationHost.observeCommittedProjectionLayout,
+    ]);
     const webViewInteractionProps = Platform.OS === 'web'
         ? scrollObservationHost.platformInteractionProps as Partial<React.ComponentProps<typeof View>>
         : undefined;
     return (
         <TranscriptMotionProvider sessionKey={props.sessionId} config={motionConfig}>
-            <View
-              style={{ flex: 1 }}
-              {...webViewInteractionProps}
-            >
+              <View
+                style={{ flex: 1 }}
+                {...webViewInteractionProps}
+              >
                 <TranscriptListShell<ChatTranscriptListItem>
-                    ref={(node: TranscriptListShellRef<ChatTranscriptListItem> | null) => {
-                        listRef.current = node as unknown as ScrollableChatListRef | null;
-                    }}
-                    frame={mainTranscriptListShellFrame}
-                    transcriptLegendListSpikeSurface={transcriptLegendListSpikeSurface}
-                    onCommitLayoutEffect={recordLayoutCommitObserved}
+                    ref={commitListRef}
+                    rendererBinding={mainTranscriptRendererBinding}
+                    webDomObservation={webDomObservation}
+                    onCommitLayoutEffect={observeTranscriptListCommittedLayout}
                     platformInteractionProps={scrollObservationHost.platformInteractionProps}
                     data={listData}
+                    dataKey={props.sessionId}
                     extraData={transcriptListExtraData}
                     key={props.sessionId}
                     keyExtractor={keyExtractor}
                     overrideProps={scrollObservationHost.nativeFlashListScrollOverrideProps}
                     getItemType={getItemType}
+                    getEstimatedItemSize={getEstimatedItemSize}
+                    getItemSizeVersion={getItemSizeVersion}
                     onLoad={handleFlashListLoad}
                     onViewableItemsChanged={shouldAttachNativeViewability ? handleNativeViewableItemsChanged : undefined}
                     viewabilityConfig={nativeViewabilityConfig}
@@ -2310,6 +2514,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
                     onMomentumScrollBegin={scrollObservationHost.onMomentumScrollBegin}
                     onMomentumScrollEnd={scrollObservationHost.onMomentumScrollEnd}
                     onRendererAtEndChange={handleRendererAtEndChange}
+                    onEntryPlacementEvent={onEntryPlacementEvent}
                     renderItem={renderItem}
                     onStartReachedThreshold={flashListStartReachedThreshold}
                     onStartReached={scrollObservationHost.onStartReached}
@@ -2322,14 +2527,14 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
                     catchUpOverlay={transcriptItemsEdgeSlots.catchUpOverlay}
                 />
                 <TranscriptNavigationRail
-                    currentAnchorId={transcriptNavigationRailVisibilitySnapshot.currentAnchorId}
                     entries={props.transcriptNavigationEntries}
                     onJumpToEntry={handleTranscriptNavigationRailJump}
                     paneHeightPx={listLayoutHeight}
                     paneWidthPx={listLayoutWidthPx}
+                    reducedMotion={reducedMotionPreferred}
+                    sessionId={props.sessionId}
                     transcriptContentWidthPx={Math.min(listLayoutWidthPx, transcriptContentMaxWidth)}
                     transcriptMaxWidthPx={transcriptContentMaxWidth}
-                    visibleAnchorIds={transcriptNavigationRailVisibilitySnapshot.visibleAnchorIds}
                 />
                 {showFirstPaintPlaceholder ? (
                     <TranscriptFirstPaintPlaceholder reducedMotion={reducedMotionPreferred} />
@@ -2348,7 +2553,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
                         />
                     </ComposerKeyboardFloatingInset>
                 ) : null}
-            </View>
+              </View>
         </TranscriptMotionProvider>
     );
 });

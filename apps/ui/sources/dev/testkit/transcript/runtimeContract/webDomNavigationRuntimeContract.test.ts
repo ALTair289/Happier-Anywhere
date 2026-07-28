@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX } from '@/components/sessions/transcript/webTranscriptPrependAnchor';
-import { deriveWebTranscriptNavigationAnchorRows } from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationRuntimeAnchors';
+import { TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX } from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
 
 import { createWebDomNavigationRuntimeModel } from './webDomNavigationRuntimeModel';
 
@@ -71,7 +70,10 @@ describe('web DOM navigation runtime contract — virtualized restore and jump',
         });
     });
 
-    it('renders production message-anchor test ids that navigation visibility can match', () => {
+    // Navigation visibility no longer matches DOM anchor rects — it derives the current
+    // anchor in renderer index space. The production test-id contract asserted here is still
+    // live (ChatListRows/TurnView render it for prepend-anchor restore), so it stays.
+    it('renders production message-anchor test ids', () => {
         const model = createWebDomNavigationRuntimeModel({
             clientHeightPx: 600,
             itemCount: 30,
@@ -85,23 +87,6 @@ describe('web DOM navigation runtime contract — virtualized restore and jump',
         expect(testIds).toEqual([
             `${TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX}msg-7`,
         ]);
-        expect(deriveWebTranscriptNavigationAnchorRows({
-            anchors: [{
-                id: 'session-1:user-turn:7',
-                kind: 'user-turn',
-                sourceIndex: 7,
-                messageIds: ['msg-7'],
-            }],
-            rows: [{
-                testId: testIds[0] ?? null,
-                topPx: 0,
-                bottomPx: 80,
-            }],
-        })).toEqual([{
-            anchorId: 'session-1:user-turn:7',
-            topPx: 0,
-            bottomPx: 80,
-        }]);
     });
 
     it('does not synthesize a fallback when neither DOM nor measured layout can locate the target', () => {

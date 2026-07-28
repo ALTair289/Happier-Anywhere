@@ -840,6 +840,83 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
         ).toEqual([]);
     });
 
+    it('reveals a bottom-entry open only at the tail, after the last open-path scroll write', async () => {
+        const Renderer = legendListRenderer.Component;
+        const listRef = React.createRef<TranscriptListShellRef<Row>>();
+        const timeline: Array<Readonly<{
+            distanceFromTail: number;
+            event: 'load' | 'settled';
+            writeCount: number;
+        }>> = [];
+        const render = (data: readonly Row[], dataKey: string) => (
+            <Renderer
+                key={dataKey}
+                data={data}
+                dataKey={dataKey}
+                frame={resolveMainTranscriptListShellFrame({
+                    legendInitialScrollAtEnd: true,
+                    maintainScrollAtEndThreshold: 0.1,
+                    nativeID: 'real-legend-host',
+                    platformOS: 'web',
+                })}
+                keyExtractor={(item: Row) => item.id}
+                onLoad={() => {
+                    timeline.push({
+                        distanceFromTail: distanceFromLiveTail(findScrollElement()),
+                        event: 'load',
+                        writeCount: physicalScrollWrites.length,
+                    });
+                }}
+                ref={listRef}
+                renderItem={renderRow}
+                webDomObservation={createWebDomScrollObservation()}
+            />
+        );
+
+        physicalScrollWrites.length = 0;
+        await act(async () => {
+            root.render(render(rows(80, 'open-flicker'), 'open-flicker-session'));
+        });
+        act(() => {
+            listRef.current?.observeInitialPresentationSettlement?.({
+                dataKey: 'open-flicker-session',
+                revision: 0,
+                onSettled: () => {
+                    timeline.push({
+                        distanceFromTail: distanceFromLiveTail(findScrollElement()),
+                        event: 'settled',
+                        writeCount: physicalScrollWrites.length,
+                    });
+                },
+            });
+        });
+        await flushLegendWork();
+
+        const load = timeline.find((entry) => entry.event === 'load');
+        const settled = timeline.find((entry) => entry.event === 'settled');
+        expect(load, 'Legend must report onLoad on a bottom-entry open').toBeDefined();
+        expect(settled, 'the renderer must confirm the landing without user interaction').toBeDefined();
+
+        // The presentable frame is the landing, not `onLoad`. `onLoad` fires inside
+        // `finishInitialScroll`, which flushes the deferred at-end maintenance afterwards, so it
+        // carries no guarantee about where the viewport is. The landing does.
+        expect(settled!.distanceFromTail).toBeLessThanOrEqual(1);
+
+        // Nothing may move the viewport after the reveal point.
+        expect(
+            physicalScrollWrites.slice(settled!.writeCount).map((write) => ({
+                family: classifyLegendPhysicalWrite(write),
+                top: write.top,
+            })),
+            'no scroll write may follow the first-paint reveal on a bottom-entry open',
+        ).toEqual([]);
+
+        // Initial placement stays library-owned: the adapter issues no imperative open write.
+        const owners = physicalScrollWrites.map(classifyLegendPhysicalWrite);
+        expect(owners.filter((owner) => owner === 'imperative-index')).toHaveLength(0);
+        expect(owners.filter((owner) => owner === 'imperative-offset')).toHaveLength(0);
+    });
+
     it('places an asynchronously hydrated pinned session at the physical tail after its keyed mount', async () => {
         const Renderer = legendListRenderer.Component;
         const render = (data: readonly Row[]) => (
@@ -874,11 +951,15 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
         expect(scrollElement.scrollTop).toBe(
             Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight),
         );
+        // The landing above is the contract, and the library alone produces it. The adapter's
+        // one-shot tail materialization is a post-placement fallback, not a participant in the
+        // open: while Legend's bootstrap is still resolving the tail offset the adapter has no
+        // target to write, and once the bootstrap lands the tail is already materialized.
         expect(
             physicalScrollWrites
                 .map(classifyLegendPhysicalWrite)
                 .filter((owner) => owner === 'imperative-index' || owner === 'imperative-offset'),
-        ).toHaveLength(1);
+        ).toHaveLength(0);
     });
 
     it('acknowledges initial rich content only after installed Legend physically maintains the tail', async () => {
@@ -1693,6 +1774,15 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
         });
 
         const scrollElement = findScrollElement() as HTMLElement & { __scrollTop?: number };
+        // Let the installed package measure the arrived window on its own. Legend publishes its
+        // content height from its first post-arrival frame; its bootstrap scroll dispatch lands
+        // on the following one, which is the ordering this fixture needs. The adapter issues no
+        // placement write in that window, so the height below is the library's own.
+        await act(async () => {
+            flushResizeObservers();
+            await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(physicalScrollWrites).toHaveLength(0);
         const liveTailOffset = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
         expect(liveTailOffset).toBeGreaterThan(600);
 
@@ -3140,5 +3230,75 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
             settled: true,
             timerLeak: 0,
         });
+    });
+
+    // Open-path write convergence gate. A bottom-entry open must be placed by the library
+    // alone: the app may not add a second placement writer to the window in which Legend's
+    // own bootstrap is still resolving the tail offset. Counting is the whole point — a
+    // "no writes after the reveal" assertion is satisfied by doing nothing and therefore
+    // cannot distinguish one owner from two.
+    it('places an asynchronously hydrated bottom-entry open with library writes only, never through the head', async () => {
+        const Renderer = legendListRenderer.Component;
+        const render = (data: readonly Row[]) => (
+            <Renderer
+                key="open-write-convergence"
+                data={data}
+                dataKey="open-write-convergence"
+                frame={resolveMainTranscriptListShellFrame({
+                    legendInitialScrollAtEnd: true,
+                    maintainScrollAtEndThreshold: 0.1,
+                    nativeID: 'real-legend-host',
+                    platformOS: 'web',
+                })}
+                keyExtractor={(item: Row) => item.id}
+                renderItem={renderRow}
+                webDomObservation={createWebDomScrollObservation()}
+            />
+        );
+
+        await act(async () => {
+            root.render(render([]));
+        });
+        await flushLegendWork();
+
+        physicalScrollWrites.length = 0;
+        directScrollTopWrites.length = 0;
+        await act(async () => {
+            root.render(render(rows(80, 'converge')));
+        });
+        await flushLegendWork();
+
+        const scrollElement = findScrollElement();
+        const tailOffset = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+        expect(tailOffset).toBeGreaterThan(0);
+        const census = physicalScrollWrites.map((write) => ({
+            family: classifyLegendPhysicalWrite(write),
+            top: write.top,
+        }));
+        const describeCensus = `open placement writes:\n${census
+            .map((entry) => `${entry.family} -> ${entry.top}`)
+            .join('\n')}`;
+
+        expect({
+            appPlacementWrites: census.filter((entry) => (
+                entry.family === 'imperative-index' || entry.family === 'imperative-offset'
+            )).length,
+            landedAtTail: tailOffset - scrollElement.scrollTop <= 1,
+            // Every write on a tail-entry open must move toward the tail. A placement write
+            // resolved to offset 0 is the measured `scrollTop = 0` hold that Legend's own
+            // bootstrap then teleports away from.
+            writesThroughHead: census.filter((entry) => entry.top === 0).length,
+        }, describeCensus).toEqual({
+            appPlacementWrites: 0,
+            landedAtTail: true,
+            writesThroughHead: 0,
+        });
+        // Convergence count. Initial placement is ONE library transaction: Legend's bootstrap
+        // dispatch, plus at most its own deferred at-end maintenance. Before this contract the
+        // same open produced three writes from two owners, and the extra library dispatch was
+        // Legend re-correcting the head offset the adapter had written.
+        expect(census.filter((entry) => entry.family === 'initial'), describeCensus).toHaveLength(1);
+        expect(census.length, describeCensus).toBeLessThanOrEqual(2);
+        expect(directScrollTopWrites).toHaveLength(0);
     });
 });

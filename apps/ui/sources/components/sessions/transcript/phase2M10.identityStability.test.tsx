@@ -12,6 +12,7 @@ import { useTranscriptNativeEntryRestorePaintRelease } from '@/components/sessio
 import { useTranscriptSessionEntryLifecycle } from '@/components/sessions/transcript/viewport/entryRestore/host/useTranscriptSessionEntryLifecycle';
 import { useTranscriptNativeMountSettleLifecycle } from '@/components/sessions/transcript/viewport/lifecycle/host/useTranscriptNativeMountSettleLifecycle';
 import { useTranscriptNativeViewportLifecycle } from '@/components/sessions/transcript/viewport/lifecycle/host/useTranscriptNativeViewportLifecycle';
+import { resolveTranscriptListRendererSelection } from '@/components/sessions/transcript/viewport/shell/renderer/resolveTranscriptListRenderer';
 import { useMainTranscriptRendererFrameHost } from '@/components/sessions/transcript/viewport/shell/useMainTranscriptRendererFrameHost';
 import { useTranscriptViewportTelemetryEvents } from '@/components/sessions/transcript/viewport/telemetryHost/useTranscriptViewportTelemetryEvents';
 import { useTranscriptWebViewportTelemetryDiagnostics } from '@/components/sessions/transcript/viewport/telemetryHost/useTranscriptWebViewportTelemetryDiagnostics';
@@ -55,7 +56,7 @@ describe('phase2 M10 hook identity stability', () => {
     it('keeps expansion callbacks stable when expansion state is unchanged', async () => {
         const members = {
             deferAutoPinAfterLocalTranscriptInteraction: vi.fn(),
-            prepareWebToolGroupLocalHeightChange: vi.fn(() => 'none' as const),
+            prepareLocalHeightChange: vi.fn(() => 'none' as const),
         };
         const buildParams = () => ({ ...members });
         const hook = await renderHook(
@@ -211,7 +212,6 @@ describe('phase2 M10 hook identity stability', () => {
             applyEntryRestoreOwnerEffectsRef: createRef(vi.fn()),
             applySessionOpenLatchEffectsRef: createRef(vi.fn()),
             cancelScheduledPinToBottom: vi.fn(),
-            clearNativePaintReleaseTimeoutsForSessionEntry: vi.fn(),
             clearWebPrependRestoreWindow: vi.fn(),
             closeEntryViewportOwnership: vi.fn(),
             commitBottomFollowModeState: vi.fn(),
@@ -252,12 +252,12 @@ describe('phase2 M10 hook identity stability', () => {
             pendingNativeMountSettleBottomPinHostRef: createRef(null),
             resetBottomFollowPinRecordsForSessionEntry: vi.fn(),
             resetBottomFollowPinStateForSessionOpenArm: vi.fn(),
-            resetInitialFillForSessionEntry: vi.fn(),
             resetNativeMountSettleFlagsForSessionEntry: vi.fn(),
             resetNativeSessionViewportLifecycle: vi.fn(),
             resetOlderPaginationForSessionEntry: vi.fn(),
-            resetTransientSessionEntryUiState: vi.fn(),
             resetViewportAnchorCaptureForSessionEntry: vi.fn(),
+            sameSessionHandoffClaimedViewportRef: createRef(null),
+            sameSessionHandoffViewportForRender: null,
             scheduleFirstSessionOpenWebInitialPinRetryRef: createRef(null),
             sessionEntryViewportRef: createRef(null),
             sessionId: 's1',
@@ -401,6 +401,11 @@ describe('phase2 M10 hook identity stability', () => {
             pinEnabled: true,
             pinThresholdPx: 72,
             platformOS: 'web',
+            rendererSelection: resolveTranscriptListRendererSelection({
+                platformOS: 'web',
+                transcriptLegendListSpikeSurface: 'off',
+            }),
+            sessionEntryShouldFollowBottom: true,
             shouldUseNativeHotColdSplit: false,
             targetWindowActive: false,
         } as unknown as Parameters<typeof useMainTranscriptRendererFrameHost>[0];
@@ -426,19 +431,20 @@ describe('phase2 M10 hook identity stability', () => {
             bottomFollowModeStateRef: createRef({ dragSession: null, mode: 'following' }),
             entryRestoreOwner: { telemetryState: vi.fn(() => 'none') },
             getBottomFollowGestureActiveRef: createRef(() => false),
-            itemsRef: createRef([]),
+            items: [],
             lastNativeVisibleRowsSnapshotRef: createRef(null),
             listContentHeightRef: createRef(0),
-            listDataRef: createRef([]),
+            listData: [],
             listLayoutHeightRef: createRef(0),
             listOrientation: 'normal',
             listRef: createRef(null),
             nativeFlashListMvcpPolicyRef: createRef('none'),
             nativeFlashListPauseOffsetCorrectionRef: createRef(false),
-            nativeHotEdgeVisibleRowsRef: createRef(null),
+            nativeHotEdgeVisibleRows: null,
             nativeMomentumScrollActiveRef: createRef(false),
             nativePrependTelemetryStateRef: createRef(() => 'none'),
             nativeVisibleWindowSnapshotRef: createRef(null),
+            observeTranscriptNavigationVisibilityRef: createRef(() => {}),
             pinThresholdPxRef: createRef(72),
             platformOS: 'web',
             readCurrentNativeDistanceFromBottom: vi.fn(() => null),
@@ -451,7 +457,6 @@ describe('phase2 M10 hook identity stability', () => {
             }))),
             resolveWebScrollMetrics: vi.fn(() => null),
             resolveWebViewportTelemetryDiagnostics: vi.fn(() => ({})),
-            runtimeAnchorsRef: createRef([]),
             sessionId: 's1',
             shouldUseNativeHotColdSplit: false,
             transcriptHotColdSegments: { coldCount: 0, hotCount: 0 },

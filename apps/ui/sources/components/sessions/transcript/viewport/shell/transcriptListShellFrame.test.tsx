@@ -19,7 +19,13 @@ type TestRow = Readonly<{ id: string }>;
 
 let capturedFlashListProps: Record<string, unknown> | null = null;
 let capturedLegendListProps: Record<string, unknown> | null = null;
-let assignedFlashListRef: unknown = null;
+type MockedListInstance = Readonly<{
+    scrollToEnd: ReturnType<typeof vi.fn>;
+    scrollToIndex: ReturnType<typeof vi.fn>;
+    scrollToOffset: ReturnType<typeof vi.fn>;
+}>;
+
+let assignedFlashListRef: MockedListInstance | null = null;
 let assignedLegendListRef: unknown = null;
 
 vi.mock('@shopify/flash-list', () => ({

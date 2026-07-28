@@ -135,6 +135,7 @@ vi.mock('@/hooks/ui/useReducedMotionPreference', () => ({
 vi.mock('@/components/markdown/enriched/preloadEnrichedMarkdownRuntime', () => ({
     isEnrichedMarkdownRuntimePreloaded: () => true,
     preloadEnrichedMarkdownRuntime: () => Promise.resolve(),
+    useEnrichedMarkdownRuntimeStatus: () => 'ready',
 }));
 
 vi.mock('@/sync/domains/state/agentStateCapabilities', () => ({

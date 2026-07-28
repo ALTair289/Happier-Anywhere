@@ -2,6 +2,7 @@ import * as React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  createFlashListChatListWebScroller,
   flashListChatListHarnessState,
   renderFlashListChatList,
   resetFlashListChatListHarness,
@@ -171,12 +172,11 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
     flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
     flashListChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 100;
 
-    const scrollerEl: any = {
+    const scrollerEl = createFlashListChatListWebScroller({
       scrollHeight: 2000,
       clientHeight: 500,
       scrollTop: 1500, // bottom (2000 - 500)
-      isConnected: true,
-    };
+    });
 
     await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
       const { ChatList } = await import('./ChatList');
@@ -220,12 +220,11 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
     flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
     flashListChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 100;
 
-    const scrollerEl: any = {
+    const scrollerEl = createFlashListChatListWebScroller({
       scrollHeight: 2000,
       clientHeight: 500,
       scrollTop: 1500, // bottom (2000 - 500)
-      isConnected: true,
-    };
+    });
 
     await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
       const { ChatList } = await import('./ChatList');
@@ -267,12 +266,11 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
     flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
     flashListChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 100;
 
-    const scrollerEl: any = {
+    const scrollerEl = createFlashListChatListWebScroller({
       scrollHeight: 2000,
       clientHeight: 500,
       scrollTop: 1500,
-      isConnected: true,
-    };
+    });
 
     await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
       const { ChatList } = await import('./ChatList');
@@ -309,12 +307,11 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
     flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
     flashListChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 100;
 
-    const scrollerEl: any = {
+    const scrollerEl = createFlashListChatListWebScroller({
       scrollHeight: 2000,
       clientHeight: 500,
       scrollTop: 1500,
-      isConnected: true,
-    };
+    });
 
     await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
       const { ChatList } = await import('./ChatList');
@@ -361,12 +358,11 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
     flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
     flashListChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 100;
 
-    const scrollerEl: any = {
+    const scrollerEl = createFlashListChatListWebScroller({
       scrollHeight: 2000,
       clientHeight: 500,
       scrollTop: 1500,
-      isConnected: true,
-    };
+    });
 
     await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
       const { ChatList } = await import('./ChatList');
@@ -399,19 +395,18 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
     });
   });
 
-  it('keeps FlashList stable while scroll distance remains below the jump-to-bottom reveal threshold', async () => {
+  it('bounds FlashList rerenders while scroll distance remains below the jump-to-bottom reveal threshold', async () => {
     flashListChatListHarnessState.settingValues.transcriptListImplementation = 'flash_v2';
     flashListChatListHarnessState.settingValues.transcriptScrollPinEnabled = true;
     flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
     flashListChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 100;
     flashListChatListHarnessState.settingValues.transcriptScrollJumpToBottomRevealViewportRatio = 0.5;
 
-    const scrollerEl: any = {
+    const scrollerEl = createFlashListChatListWebScroller({
       scrollHeight: 2000,
       clientHeight: 500,
       scrollTop: 1500,
-      isConnected: true,
-    };
+    });
 
     await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
       const { ChatList } = await import('./ChatList');
@@ -439,7 +434,17 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
       scrollerEl.scrollTop = 1360;
       await screen.triggerScroll(1360);
 
-      expect(flashListChatListHarnessState.flashListRenderCount).toBe(rendersAfterFirstHiddenDistance);
+      expect(flashListChatListHarnessState.flashListRenderCount).toBeLessThanOrEqual(
+        rendersAfterFirstHiddenDistance + 1,
+      );
+      const rendersAfterScrollPinTransition = flashListChatListHarnessState.flashListRenderCount;
+
+      scrollerEl.scrollTop = 1350;
+      await screen.triggerScroll(1350);
+      scrollerEl.scrollTop = 1340;
+      await screen.triggerScroll(1340);
+
+      expect(flashListChatListHarnessState.flashListRenderCount).toBe(rendersAfterScrollPinTransition);
     });
   });
 
@@ -449,12 +454,11 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
     flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
     flashListChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 100;
 
-    const scrollerEl: any = {
+    const scrollerEl = createFlashListChatListWebScroller({
       scrollHeight: 2000,
       clientHeight: 500,
       scrollTop: 1500, // bottom (2000 - 500)
-      isConnected: true,
-    };
+    });
 
     await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
       const { ChatList } = await import('./ChatList');

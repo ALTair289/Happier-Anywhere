@@ -1,3 +1,4 @@
+import * as React from 'react';
 import { act } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -139,14 +140,24 @@ describe('bounded first-paint presentation', () => {
 
         // The first cover clears on its own well inside the bound.
         await hook.rerender({ ...coveredDeps, firstListPaintObserved: true });
+        act(() => {
+            hook.getCurrent().recordInitialPlacementSettled({ sessionId: 'session-a' });
+        });
         expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
         await act(async () => {
             await vi.advanceTimersByTimeAsync(deadlineMs);
         });
 
-        // A later legitimate cover (warm re-entry restoring a detached position) must still be
-        // bounded rather than either lingering or being revealed instantly by a spent deadline.
-        await hook.rerender({ ...coveredDeps, firstListPaintObserved: false });
+        // A later legitimate cover must still be bounded rather than either lingering or being
+        // revealed instantly by a spent deadline. Such a cover always belongs to the NEXT entry:
+        // the first-paint fact only returns to unobserved when the session id changes, and an
+        // entry that already revealed its painted rows never covers them again.
+        await hook.rerender({
+            ...coveredDeps,
+            currentSessionIdRef: { current: 'session-b' },
+            firstListPaintObserved: false,
+            sessionId: 'session-b',
+        });
         expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
         await act(async () => {
             await vi.advanceTimersByTimeAsync(deadlineMs);
@@ -172,6 +183,11 @@ describe('bounded first-paint presentation', () => {
             },
         );
 
+        // The rows are painted AND the renderer has confirmed their placement: this is a refresh
+        // of presented content, which INV-5 forbids re-covering.
+        act(() => {
+            hook.getCurrent().recordInitialPlacementSettled({ sessionId: 'session-a' });
+        });
         expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
         expect(hook.getCurrent().showRouteHydrationFirstPaintPlaceholder).toBe(false);
 
@@ -199,7 +215,7 @@ describe('bounded first-paint presentation', () => {
 });
 
 describe('web Legend renderer-ready first-paint presentation', () => {
-    it('covers loaded bottom content until Legend reports its first onLoad readiness fact', async () => {
+    it('covers loaded bottom content until Legend reports onLoad and the landing is confirmed', async () => {
         const pendingDeps = createDeps({
             entryAnchorForRender: null,
             firstListPaintObserved: false,
@@ -216,6 +232,11 @@ describe('web Legend renderer-ready first-paint presentation', () => {
         await hook.rerender({
             ...pendingDeps,
             firstListPaintObserved: true,
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
+        act(() => {
+            hook.getCurrent().recordInitialPlacementSettled({ sessionId: 'session-a' });
         });
         expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
 
@@ -312,6 +333,144 @@ describe('web Legend renderer-ready first-paint presentation', () => {
                 sessionId: 'session-a',
             });
         });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        await hook.unmount();
+    });
+});
+
+describe('web Legend open placement cover', () => {
+    afterEach(() => {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+    });
+
+    function createWebBottomEntryDeps(
+        overrides: Partial<TranscriptFirstPaintStateDeps> = {},
+    ): TranscriptFirstPaintStateDeps {
+        return createDeps({
+            entryAnchorForRender: null,
+            firstListPaintObserved: true,
+            isLoaded: true,
+            itemCount: 10,
+            platformOS: 'web',
+            rendererKind: 'legendList',
+            ...overrides,
+        });
+    }
+
+    it('keeps a bottom-entry open covered after Legend onLoad until the renderer confirms the landing', async () => {
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: createWebBottomEntryDeps() },
+        );
+
+        // `onLoad` (firstListPaintObserved) fires inside Legend's `finishInitialScroll`, one
+        // frame BEFORE its deferred at-end maintenance write. Revealing here paints the list at
+        // the bootstrap-dispatched offset and then moves it under the reader.
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
+        act(() => {
+            hook.getCurrent().recordInitialPlacementSettled({ sessionId: 'session-a' });
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        await hook.unmount();
+    });
+
+    it('ignores a landing confirmation for another session', async () => {
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: createWebBottomEntryDeps() },
+        );
+
+        act(() => {
+            hook.getCurrent().recordInitialPlacementSettled({ sessionId: 'session-b' });
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
+        await hook.unmount();
+    });
+
+    it('reveals a stalled renderer landing once the single bounded deadline elapses', async () => {
+        vi.useFakeTimers();
+        const stalledDeps = createWebBottomEntryDeps();
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: stalledDeps },
+        );
+
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(
+                stalledDeps.transcriptInitialFillBudgetMs
+                + stalledDeps.transcriptMountSettleQuiescentWindowMs * 2
+                + 1,
+            );
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        await hook.unmount();
+    });
+
+    it('never holds the landing cover where no renderer produces the fact', async () => {
+        const flashHook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: createWebBottomEntryDeps({ rendererKind: 'flashList' }) },
+        );
+        expect(flashHook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+        await flashHook.unmount();
+
+        const nativeHook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: createWebBottomEntryDeps({ platformOS: 'ios' }) },
+        );
+        expect(nativeHook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+        await nativeHook.unmount();
+    });
+
+    it('stays terminal on a loaded empty transcript while the landing is still pending', async () => {
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: createWebBottomEntryDeps({ itemCount: 0 }) },
+        );
+
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        await hook.unmount();
+    });
+
+    it('leaves a keyed entry open to its existing entry join without a second landing hold', async () => {
+        const keyedDeps = createDeps({
+            firstListPaintObserved: true,
+            platformOS: 'web',
+            rendererKind: 'legendList',
+        });
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: keyedDeps },
+        );
+
+        act(() => {
+            hook.getCurrent().onEntryPlacementEvent({
+                dataKey: 'session-a',
+                itemId: 'row-42',
+                platform: 'web',
+                type: 'started',
+            });
+            hook.getCurrent().onEntryPlacementEvent({
+                dataKey: 'session-a',
+                itemId: 'row-42',
+                outcome: 'settled',
+                platform: 'web',
+                type: 'finished',
+            });
+            hook.getCurrent().recordEntryOwnerOutcome({
+                outcome: 'confirmed',
+                sessionId: 'session-a',
+            });
+        });
+
         expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
 
         await hook.unmount();
@@ -485,6 +644,282 @@ describe('native keyed entry first-paint presentation', () => {
             });
         });
         expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+        await hook.unmount();
+    });
+});
+
+describe('revealed transcript content is never re-covered', () => {
+    afterEach(() => {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+    });
+
+    function createWebSwrDeps(
+        overrides: Partial<TranscriptFirstPaintStateDeps> = {},
+    ): TranscriptFirstPaintStateDeps {
+        // A warm/SWR open: cached rows exist and paint while the session is still refreshing,
+        // so every cover gate that needs `isLoaded` can only arm AFTER the reader sees content.
+        return createDeps({
+            entryAnchorForRender: null,
+            firstListPaintObserved: false,
+            isLoaded: false,
+            itemCount: 10,
+            platformOS: 'web',
+            rendererKind: 'legendList',
+            ...overrides,
+        });
+    }
+
+    it('keeps cached rows visible when the open placement hold arms after they painted', async () => {
+        const swrDeps = createWebSwrDeps();
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: swrDeps },
+        );
+
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
+        await hook.rerender({ ...swrDeps, firstListPaintObserved: true });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        // The refresh lands: the loaded-data placement hold arms one render after the reader is
+        // already looking at the cached rows. Re-covering them is the open flicker.
+        await hook.rerender({ ...swrDeps, firstListPaintObserved: true, isLoaded: true });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        await hook.unmount();
+    });
+
+    it('keeps cached rows visible when route hydration arms after they painted', async () => {
+        const swrDeps = createWebSwrDeps();
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: swrDeps },
+        );
+
+        await hook.rerender({ ...swrDeps, firstListPaintObserved: true });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        await hook.rerender({
+            ...swrDeps,
+            firstListPaintObserved: true,
+            isLoaded: true,
+            routeHydrationPending: true,
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+        expect(hook.getCurrent().showRouteHydrationFirstPaintPlaceholder).toBe(false);
+
+        await hook.unmount();
+    });
+
+    it('still covers a native cold open through its placement, having revealed nothing yet', async () => {
+        let nativePlacementSettled = false;
+        const coldDeps = createDeps({
+            entryAnchorForRender: null,
+            firstListPaintObserved: false,
+            isLoaded: false,
+            itemCount: 0,
+            platformOS: 'ios',
+            rendererKind: 'legendList',
+            sessionOpenLatch: {
+                onNativeFirstPaintFallbackDeadline: () => ({ effects: [] }),
+                shouldShowNativeFirstPaintPlaceholder: (input: Readonly<{
+                    isLoaded: boolean;
+                    itemCount: number;
+                }>) => input.isLoaded && input.itemCount > 0 && !nativePlacementSettled,
+            } as unknown as SessionOpenLatch,
+        });
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: coldDeps },
+        );
+
+        // Nothing is loaded and nothing painted: there is no content to cover and none revealed.
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        await hook.rerender({ ...coldDeps, isLoaded: true, itemCount: 10 });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
+        // Rows paint at position A UNDER the cover. Native deliberately keeps them covered until
+        // the restore write lands, so the reader only ever sees the final position.
+        await hook.rerender({
+            ...coldDeps,
+            firstListPaintObserved: true,
+            isLoaded: true,
+            itemCount: 10,
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
+        nativePlacementSettled = true;
+        await hook.rerender({
+            ...coldDeps,
+            firstListPaintObserved: true,
+            isLoaded: true,
+            itemCount: 10,
+            nativeViewportPaintObserved: true,
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        await hook.unmount();
+    });
+
+    it('covers a session opened again after an entry that revealed nothing', async () => {
+        const swrDeps = createWebSwrDeps();
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: swrDeps },
+        );
+
+        await hook.rerender({ ...swrDeps, firstListPaintObserved: true });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        // The same mounted transcript switches to a session that never reveals anything...
+        await hook.rerender({
+            ...swrDeps,
+            currentSessionIdRef: { current: 'session-b' },
+            sessionId: 'session-b',
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
+        // ...and back. This is a fresh entry: the earlier reveal belongs to the entry that ended,
+        // so the open must cover again until this entry has something presentable.
+        await hook.rerender({ ...swrDeps, currentSessionIdRef: { current: 'session-a' } });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
+        await hook.unmount();
+    });
+
+    it('covers the next entry of the same session once the entry lifecycle drops the reveal record', async () => {
+        vi.useFakeTimers();
+        let nativePlacementPending = true;
+        const nativeDeps = createDeps({
+            entryAnchorForRender: null,
+            firstListPaintObserved: false,
+            isLoaded: true,
+            itemCount: 10,
+            platformOS: 'ios',
+            rendererKind: 'legendList',
+            sessionOpenLatch: {
+                onNativeFirstPaintFallbackDeadline: () => ({ effects: [] }),
+                shouldShowNativeFirstPaintPlaceholder: () => nativePlacementPending,
+            } as unknown as SessionOpenLatch,
+        });
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: nativeDeps },
+        );
+
+        // First entry of this session: rows paint at A under the cover, the placement lands, and
+        // the reader sees them at B.
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+        nativePlacementPending = false;
+        await hook.rerender({
+            ...nativeDeps,
+            firstListPaintObserved: true,
+            nativeViewportPaintObserved: true,
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        // The entry re-arms on an UNCHANGED session id (jump -> return, bottom <-> anchored). The
+        // lifecycle clears the native reveal facts for the new entry, so this policy's own record
+        // of the previous entry's reveal must clear with them: otherwise the new entry's placement
+        // can never cover, and its paint-at-A -> settle-at-B write happens in front of the reader.
+        nativePlacementPending = true;
+        act(() => {
+            hook.getCurrent().resetFirstPaintRevealRecordForSessionEntry();
+        });
+        await hook.rerender({
+            ...nativeDeps,
+            firstListPaintObserved: true,
+            nativeViewportPaintObserved: false,
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
+        await hook.unmount();
+    });
+
+    it('keeps the entry reset when it lands in the same commit that observed the previous reveal', async () => {
+        vi.useFakeTimers();
+        // The entry lifecycle re-arms from a layout effect, which React flushes BEFORE the passive
+        // effect that records this policy's reveal for the same commit. A reset that the stale
+        // passive write could undo would leave the fix green in a unit test and dead in the app.
+        const resetOnNextCommitRef: { current: boolean } = { current: false };
+        let nativePlacementPending = true;
+        const nativeDeps = createDeps({
+            entryAnchorForRender: null,
+            firstListPaintObserved: false,
+            isLoaded: true,
+            itemCount: 10,
+            platformOS: 'ios',
+            rendererKind: 'legendList',
+            sessionOpenLatch: {
+                onNativeFirstPaintFallbackDeadline: () => ({ effects: [] }),
+                shouldShowNativeFirstPaintPlaceholder: () => nativePlacementPending,
+            } as unknown as SessionOpenLatch,
+        });
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => {
+                const state = useTranscriptFirstPaintState(deps);
+                React.useLayoutEffect(() => {
+                    if (!resetOnNextCommitRef.current) return;
+                    resetOnNextCommitRef.current = false;
+                    state.resetFirstPaintRevealRecordForSessionEntry();
+                });
+                return state;
+            },
+            { initialProps: nativeDeps },
+        );
+
+        nativePlacementPending = false;
+        await hook.rerender({
+            ...nativeDeps,
+            firstListPaintObserved: true,
+            nativeViewportPaintObserved: true,
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
+
+        // The re-arm commit still renders the revealed transcript: the reset runs in its layout
+        // phase, and the reveal write queued by the very same render must not restore the record.
+        resetOnNextCommitRef.current = true;
+        await hook.rerender({
+            ...nativeDeps,
+            firstListPaintObserved: true,
+            nativeViewportPaintObserved: true,
+        });
+
+        nativePlacementPending = true;
+        await hook.rerender({
+            ...nativeDeps,
+            firstListPaintObserved: true,
+            nativeViewportPaintObserved: false,
+        });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
+        await hook.unmount();
+    });
+
+    it('still covers a keyed entry that paints before its placement joins', async () => {
+        const keyedDeps = createDeps({
+            firstListPaintObserved: false,
+            platformOS: 'web',
+            rendererKind: 'legendList',
+        });
+        const hook = await renderHook(
+            (deps: TranscriptFirstPaintStateDeps) => useTranscriptFirstPaintState(deps),
+            { initialProps: keyedDeps },
+        );
+
+        act(() => {
+            hook.getCurrent().onEntryPlacementEvent({
+                dataKey: 'session-a',
+                itemId: 'row-42',
+                platform: 'web',
+                type: 'started',
+            });
+        });
+        await hook.rerender({ ...keyedDeps, firstListPaintObserved: true });
+        expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(true);
+
         await hook.unmount();
     });
 });
