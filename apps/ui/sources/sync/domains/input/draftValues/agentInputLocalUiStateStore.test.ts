@@ -251,6 +251,32 @@ describe('agent input local UI-state store', () => {
         expect(uiState.readAgentInputLocalUiState(scopeA, sessionOwner, { textLength: 30, fontScale: 1.25 })).not.toHaveProperty('scrollY');
     });
 
+    it('withholds the selection entirely when the stored text basis does not apply', async () => {
+        // On session re-entry the composer mounts with empty text and the draft is adopted a
+        // commit later, so the store is read with textLength 0. Returning a truthy clamped
+        // {0,0} let the consumer restore "caret at start", which echoed straight back through
+        // onSelectionChangePersist and overwrote the stored basis with textLength 0 — destroying
+        // the real scroll/selection before the draft even loaded. Withhold it like scrollY.
+        const uiState = await importStore();
+        uiState.patchAgentInputLocalUiState(scopeA, sessionOwner, {
+            scrollY: 240,
+            selection: { start: 180, end: 180 },
+            textLength: 400,
+            fontScale: 1,
+        }, { now: 100 });
+
+        const atMount = uiState.readAgentInputLocalUiState(scopeA, sessionOwner, { textLength: 0, fontScale: 1 });
+        expect(atMount).not.toHaveProperty('scrollY');
+        expect(atMount?.selection).toBeUndefined();
+
+        // Once the draft has been adopted the basis applies again and both are delivered.
+        const afterDraftLoads = uiState.readAgentInputLocalUiState(scopeA, sessionOwner, { textLength: 400, fontScale: 1 });
+        expect(afterDraftLoads).toMatchObject({
+            scrollY: 240,
+            selection: { start: 180, end: 180 },
+        });
+    });
+
     it('clears session and new-session owners independently and prunes empty maps', async () => {
         const uiState = await importStore();
         uiState.patchAgentInputLocalUiState(scopeA, sessionOwner, { expanded: true }, { now: 100, flush: false });

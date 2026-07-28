@@ -225,10 +225,19 @@ export function readAgentInputLocalUiState(
     const state = cache.values[ownerKey];
     if (!state) return null;
 
+    // The transient payload (scroll + selection) only means anything against the text it
+    // was captured for. On session open the composer mounts empty and adopts the draft a
+    // commit later, so this is read with textLength 0 first. Returning a CLAMPED selection
+    // there produced a truthy {0,0} that consumers restored as "caret at start" — and that
+    // programmatic apply echoed back through onSelectionChangePersist, overwriting the
+    // stored basis with textLength 0 and destroying the real scroll/selection before the
+    // draft ever loaded. Withhold the selection on a non-applicable basis, exactly as
+    // scrollY already is, so the payload survives until the basis is adopted.
+    const basisApplies = isAgentInputLocalUiStateTextBasisApplicable(state, options?.textLength);
     const nextState: AgentInputLocalUiStateV1 = {
         ...state,
         ...(shouldDropScrollY(state, options) ? { scrollY: undefined } : {}),
-        selection: clampSelection(state.selection, options?.textLength),
+        selection: basisApplies ? clampSelection(state.selection, options?.textLength) : undefined,
     };
     if (typeof nextState.scrollY === 'undefined') {
         const { scrollY: _scrollY, ...withoutScroll } = nextState;
