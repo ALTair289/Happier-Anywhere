@@ -314,15 +314,15 @@ vi.mock('@/hooks/ui/useKeyboardHeight', () => ({
     useKeyboardHeight: () => 0,
 }));
 
-vi.mock('@/sync/acp/sessionModeControl', () => ({
+vi.mock('@/sync/domains/sessionControl/sessionModeControl', () => ({
     computeSessionModePickerControl: () => mockSessionModePickerControl,
 }));
 
-vi.mock('@/sync/acp/configOptionsControl', async (importOriginal) => {
-    const actual = await importOriginal<typeof import('@/sync/acp/configOptionsControl')>();
+vi.mock('@/sync/domains/sessionControl/configOptionsControl', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/sync/domains/sessionControl/configOptionsControl')>();
     return {
         ...actual,
-        computeAcpConfigOptionControls: () => null,
+        computeSessionConfigOptionControls: () => null,
     };
 });
 
@@ -1599,7 +1599,7 @@ describe('AgentInput (modelOptionsOverride)', () => {
 
     it('renders preflight ACP config options in the agent picker and applies local overrides', async () => {
         const { AgentInput } = await import('./AgentInput');
-        const onAcpConfigOptionChange = vi.fn();
+        const onSessionConfigOptionChange = vi.fn();
 
         const screen = await renderScreen(React.createElement(AgentInput, {
                     value: 'hello',
@@ -1632,7 +1632,7 @@ describe('AgentInput (modelOptionsOverride)', () => {
                             speed: { updatedAt: 123, value: 'fast' },
                         },
                     },
-                    onAcpConfigOptionChange,
+                    onSessionConfigOptionChange,
                 } as any));
         expect(screen.findByTestId('agent-input-action-menu-button')).toBeNull();
         await screen.pressByTestIdAsync('agent-input-agent-chip');
@@ -1643,12 +1643,12 @@ describe('AgentInput (modelOptionsOverride)', () => {
 
         await screen.pressByTestIdAsync('agent-input-config-option-option:speed:fast');
 
-        expect(onAcpConfigOptionChange).toHaveBeenCalledWith('speed', 'fast');
+        expect(onSessionConfigOptionChange).toHaveBeenCalledWith('speed', 'fast');
     });
 
     it('routes Cursor model_config options through the selected model controls instead of generic config controls', async () => {
         const { AgentInput } = await import('./AgentInput');
-        const onAcpConfigOptionChange = vi.fn();
+        const onSessionConfigOptionChange = vi.fn();
 
         const screen = await renderScreen(React.createElement(AgentInput, {
                     value: 'hello',
@@ -1733,7 +1733,7 @@ describe('AgentInput (modelOptionsOverride)', () => {
                             ],
                         },
                     ],
-                    onAcpConfigOptionChange,
+                    onSessionConfigOptionChange,
                 } as any));
         expect(screen.findByTestId('agent-input-action-menu-button')).toBeNull();
         await screen.pressByTestIdAsync('agent-input-agent-chip');
@@ -1765,7 +1765,7 @@ describe('AgentInput (modelOptionsOverride)', () => {
                         { value: 'gpt-5.4', label: 'GPT 5.4', description: 'Latest' },
                     ],
                     acpConfigOptionsOverrideProbe: { phase: 'loading', onRefresh: () => {} },
-                    onAcpConfigOptionChange: () => {},
+                    onSessionConfigOptionChange: () => {},
                 } as any));
         expect(screen.findByTestId('agent-input-action-menu-button')).toBeNull();
         await screen.pressByTestIdAsync('agent-input-agent-chip');
@@ -1796,7 +1796,7 @@ describe('AgentInput (modelOptionsOverride)', () => {
                         { value: 'gpt-5.4', label: 'GPT 5.4', description: 'Latest' },
                     ],
                     acpConfigOptionsOverrideProbe: { phase: 'idle', onRefresh },
-                    onAcpConfigOptionChange: () => {},
+                    onSessionConfigOptionChange: () => {},
                 } as any));
         expect(screen.findByTestId('agent-input-action-menu-button')).toBeNull();
         await screen.pressByTestIdAsync('agent-input-agent-chip');
@@ -1836,7 +1836,7 @@ describe('AgentInput (extended-context model toggle)', () => {
     it('synthesizes the context toggle and routes it through the model-override pipeline', async () => {
         const { AgentInput } = await import('./AgentInput');
         const onModelModeChange = vi.fn();
-        const onAcpConfigOptionChange = vi.fn();
+        const onSessionConfigOptionChange = vi.fn();
         lastModelPickerOverlayProps = null;
 
         const screen = await renderScreen(React.createElement(AgentInput, {
@@ -1851,7 +1851,7 @@ describe('AgentInput (extended-context model toggle)', () => {
             onPermissionModeChange: () => {},
             modelMode: 'claude-sonnet-4-6',
             onModelModeChange,
-            onAcpConfigOptionChange,
+            onSessionConfigOptionChange,
             modelOptionsOverride: sonnetOverrideOptions,
         } as any));
 
@@ -1870,13 +1870,13 @@ describe('AgentInput (extended-context model toggle)', () => {
         });
 
         expect(onModelModeChange).toHaveBeenCalledWith('claude-sonnet-4-6[1m]');
-        expect(onAcpConfigOptionChange).not.toHaveBeenCalled();
+        expect(onSessionConfigOptionChange).not.toHaveBeenCalled();
     });
 
     it('treats the [1m] variant as its base model and toggles back to the bare id', async () => {
         const { AgentInput } = await import('./AgentInput');
         const onModelModeChange = vi.fn();
-        const onAcpConfigOptionChange = vi.fn();
+        const onSessionConfigOptionChange = vi.fn();
         lastModelPickerOverlayProps = null;
 
         const screen = await renderScreen(React.createElement(AgentInput, {
@@ -1891,7 +1891,7 @@ describe('AgentInput (extended-context model toggle)', () => {
             onPermissionModeChange: () => {},
             modelMode: 'claude-sonnet-4-6[1m]',
             onModelModeChange,
-            onAcpConfigOptionChange,
+            onSessionConfigOptionChange,
             modelOptionsOverride: sonnetOverrideOptions,
         } as any));
 
@@ -1908,6 +1908,6 @@ describe('AgentInput (extended-context model toggle)', () => {
         });
 
         expect(onModelModeChange).toHaveBeenCalledWith('claude-sonnet-4-6');
-        expect(onAcpConfigOptionChange).not.toHaveBeenCalled();
+        expect(onSessionConfigOptionChange).not.toHaveBeenCalled();
     });
 });

@@ -224,7 +224,7 @@ vi.mock('@/sync/sync', () => ({
         fetchPendingMessages: async () => {},
         publishSessionPermissionModeToMetadata: async () => {},
         publishSessionAcpSessionModeOverrideToMetadata: async () => {},
-        publishSessionAcpConfigOptionOverrideToMetadata: async () => {},
+        publishSessionSessionConfigOptionOverrideToMetadata: async () => {},
         publishSessionModelOverrideToMetadata: async () => {},
         refreshSessions: async () => {},
         onSessionVisible: () => {},
@@ -529,7 +529,7 @@ vi.mock('@/sync/domains/session/control/localControlSwitch', () => ({
     shouldRequestRemoteControl: () => false,
     shouldRequestRemoteControlAfterPendingEnqueue: () => false,
 }));
-vi.mock('@/sync/acp/sessionModeControl', () => ({
+vi.mock('@/sync/domains/sessionControl/sessionModeControl', () => ({
     supportsSessionModeOverrides: () => false,
 }));
 vi.mock('@/sync/ops/sessionSwitch', () => ({

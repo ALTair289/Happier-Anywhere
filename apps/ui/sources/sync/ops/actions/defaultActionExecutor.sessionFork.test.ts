@@ -47,7 +47,7 @@ vi.mock('@/sync/runtime/orchestration/serverScopedRpc/serverScopedMachineRpc', (
   machineRpcWithServerScope: vi.fn(),
 }));
 
-vi.mock('@/sync/acp/sessionModeControl', () => ({
+vi.mock('@/sync/domains/sessionControl/sessionModeControl', () => ({
   computeSessionModePickerControl: vi.fn(() => null),
 }));
 

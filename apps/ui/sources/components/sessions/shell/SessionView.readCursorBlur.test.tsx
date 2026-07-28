@@ -191,7 +191,7 @@ vi.mock('@/sync/sync', () => ({
         fetchPendingMessages: vi.fn(async () => {}),
         publishSessionPermissionModeToMetadata: async () => {},
         publishSessionAcpSessionModeOverrideToMetadata: async () => {},
-        publishSessionAcpConfigOptionOverrideToMetadata: async () => {},
+        publishSessionSessionConfigOptionOverrideToMetadata: async () => {},
         publishSessionModelOverrideToMetadata: async () => {},
         refreshSessions: async () => {},
         onSessionVisible: () => {},
@@ -346,7 +346,7 @@ vi.mock('@/sync/domains/input/slashCommands/expandPromptTemplateInvocation', () 
 vi.mock('@/sync/domains/permissions/permissionModeApply', () => ({
     applyPermissionModeSelection: vi.fn(),
 }));
-vi.mock('@/sync/acp/sessionModeControl', () => ({
+vi.mock('@/sync/domains/sessionControl/sessionModeControl', () => ({
     supportsSessionModeOverrides: () => false,
 }));
 vi.mock('@/track', () => ({

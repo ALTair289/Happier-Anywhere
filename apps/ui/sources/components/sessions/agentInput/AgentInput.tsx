@@ -111,14 +111,14 @@ import { useRenderedAgentInputControlRows } from './controls/useRenderedAgentInp
 import { buildAgentInputSelectionOverlayViewModel } from './selection/buildAgentInputSelectionOverlayViewModel';
 import { useAgentInputSelectionAnchors } from './selection/useAgentInputSelectionAnchors';
 import { useAgentInputSelectionOverlayController } from './selection/useAgentInputSelectionOverlayController';
-import { computeSessionModePickerControl } from '@/sync/acp/sessionModeControl';
+import { computeSessionModePickerControl } from '@/sync/domains/sessionControl/sessionModeControl';
 import {
-    computeAcpConfigOptionControls,
-    computeAcpConfigOptionControlsForProvider,
-    computeAcpConfigOptionControlsFromOverride,
-    type AcpConfigOption,
-    type AcpConfigOptionValueId,
-} from '@/sync/acp/configOptionsControl';
+    computeSessionConfigOptionControls,
+    computeSessionConfigOptionControlsForProvider,
+    computeSessionConfigOptionControlsFromOverride,
+    type SessionConfigOption,
+    type SessionConfigOptionValueId,
+} from '@/sync/domains/sessionControl/configOptionsControl';
 import type { PendingPermissionRequest } from '@/utils/sessions/sessionUtils';
 import type { OpenApprovalArtifactForSession } from '@/sync/domains/artifacts/approvalArtifacts';
 import { Text } from '@/components/ui/text/Text';
@@ -135,7 +135,7 @@ import { WebDropTargetView } from '@/components/sessions/files/repositoryTree/We
 import { useWebFileDropZone } from '@/hooks/ui/useWebFileDropZone';
 import { useLocalSetting } from '@/sync/store/hooks';
 import { extractWebAttachmentFilesFromDataTransfer } from '@/utils/files/webAttachmentDataTransfer';
-import type { AcpConfigOptionOverridesV1 } from '@happier-dev/protocol';
+import type { SessionConfigOptionOverridesV1 } from '@happier-dev/protocol';
 import type { ConnectedServiceQuotaGaugeViewModel } from '@/sync/domains/connectedServices/connectedServiceQuotaGauge';
 import type {
     AgentInputAttachment,
@@ -301,10 +301,10 @@ interface AgentInputProps {
      * Optional: show a probe/loading state + refresh control in the ACP mode picker.
      */
     acpSessionModeOptionsOverrideProbe?: ModelPickerProbeState;
-    acpConfigOptionsOverride?: ReadonlyArray<AcpConfigOption>;
+    acpConfigOptionsOverride?: ReadonlyArray<SessionConfigOption>;
     acpConfigOptionsOverrideProbe?: ModelPickerProbeState;
-    acpConfigOptionOverridesOverride?: AcpConfigOptionOverridesV1 | null;
-    onAcpConfigOptionChange?: (configId: string, valueId: AcpConfigOptionValueId) => void;
+    acpConfigOptionOverridesOverride?: SessionConfigOptionOverridesV1 | null;
+    onSessionConfigOptionChange?: (configId: string, valueId: SessionConfigOptionValueId) => void;
     modelMode?: ModelMode;
     onModelModeChange?: (mode: ModelMode) => void;
     /**
@@ -2053,9 +2053,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     }, [sessionModeChipControl]);
 
     const acpConfigOptionControls = React.useMemo(() => {
-        if (!props.onAcpConfigOptionChange) return null;
+        if (!props.onSessionConfigOptionChange) return null;
         if (props.acpConfigOptionsOverride) {
-            return computeAcpConfigOptionControlsForProvider({
+            return computeSessionConfigOptionControlsForProvider({
                 providerId: agentId,
                 configOptions: props.acpConfigOptionsOverride,
                 overrides: props.acpConfigOptionOverridesOverride?.overrides ?? null,
@@ -2063,14 +2063,14 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 hideModelOption: modelOptions.length > 0,
             });
         }
-        return computeAcpConfigOptionControls({ agentId, metadata: props.metadata ?? null });
+        return computeSessionConfigOptionControls({ agentId, metadata: props.metadata ?? null });
     }, [
         agentId,
         modelOptions.length,
         props.acpConfigOptionsOverride,
         props.acpConfigOptionOverridesOverride,
         props.metadata,
-        props.onAcpConfigOptionChange,
+        props.onSessionConfigOptionChange,
         sessionModeChipControl,
     ]);
 
@@ -2079,11 +2079,11 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     }, [effectiveModelPolicy.effectiveModelId, modelOptions]);
 
     const selectedModelOptionControls = React.useMemo(() => {
-        if (!props.onAcpConfigOptionChange) return null;
+        if (!props.onSessionConfigOptionChange) return null;
         const selectedModel = selectedModelForControls;
         if (!selectedModel) return null;
         const baseControls = selectedModel.modelOptions?.length
-            ? computeAcpConfigOptionControlsFromOverride({
+            ? computeSessionConfigOptionControlsFromOverride({
                 agentId,
                 configOptions: selectedModel.modelOptions,
                 overrides: props.acpConfigOptionOverridesOverride?.overrides ?? null,
@@ -2112,11 +2112,11 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         effectiveModelPolicy.effectiveModelId,
         selectedModelForControls,
         props.acpConfigOptionOverridesOverride,
-        props.onAcpConfigOptionChange,
+        props.onSessionConfigOptionChange,
         props.onModelModeChange,
     ]);
 
-    const handleSelectModelOptionValue = React.useCallback((configId: string, valueId: AcpConfigOptionValueId) => {
+    const handleSelectModelOptionValue = React.useCallback((configId: string, valueId: SessionConfigOptionValueId) => {
         if (configId === EXTENDED_CONTEXT_MODEL_TOGGLE_OPTION_ID) {
             const selectedModel = selectedModelForControls;
             if (!selectedModel?.extendedContextModelId) return;
@@ -2125,8 +2125,8 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
             return;
         }
         hapticsLight();
-        props.onAcpConfigOptionChange?.(configId, valueId);
-    }, [props.onAcpConfigOptionChange, props.onModelModeChange, selectedModelForControls]);
+        props.onSessionConfigOptionChange?.(configId, valueId);
+    }, [props.onSessionConfigOptionChange, props.onModelModeChange, selectedModelForControls]);
     const hasSettingsAcpConfigSection = Boolean(acpConfigOptionControls);
 
     const shouldShowModelOptionDescriptions = React.useMemo(() => {
@@ -2179,13 +2179,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
             }}
             onSubmitCustomValue={canEnterCustomModel ? submitCustomModel : undefined}
             selectedModelOptionControls={selectedModelOptionControls}
-            onSelectModelOptionValue={props.onAcpConfigOptionChange ? handleSelectModelOptionValue : undefined}
+            onSelectModelOptionValue={props.onSessionConfigOptionChange ? handleSelectModelOptionValue : undefined}
             configControls={acpConfigOptionControls}
             onSelectConfigValue={
-                props.onAcpConfigOptionChange
+                props.onSessionConfigOptionChange
                     ? (configId, valueId) => {
                         hapticsLight();
-                        props.onAcpConfigOptionChange?.(configId, valueId);
+                        props.onSessionConfigOptionChange?.(configId, valueId);
                     }
                     : undefined
             }
@@ -2201,7 +2201,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         modelOptions,
         unifiedEnginePickerProbe,
         shouldShowModelOptionDescriptions,
-        props.onAcpConfigOptionChange,
+        props.onSessionConfigOptionChange,
         props.onModelModeChange,
         submitCustomModel,
         selectedModelOptionControls,

@@ -8,7 +8,7 @@ import {
 
 import { resolveProviderAgentIdForBackendTarget } from '@/agents/backendCatalog/getResolvedBackendCatalogEntries';
 import { machineCapabilitiesInvoke } from '@/sync/ops/capabilities';
-import { normalizeAcpConfigOptionsArray, type AcpConfigOption } from '@/sync/acp/configOptionsControl';
+import { normalizeSessionConfigOptionsArray, type SessionConfigOption } from '@/sync/domains/sessionControl/configOptionsControl';
 import { buildDynamicConfigOptionsProbeCacheKey } from '@/sync/acp/dynamicConfigOptionsProbeCacheKey';
 import {
     DYNAMIC_CONFIG_OPTIONS_PROBE_ERROR_BACKOFF_MS,
@@ -34,19 +34,19 @@ export function useNewSessionPreflightConfigOptionsState(params: Readonly<{
     probeContext?: NewSessionCapabilityProbeContext | null;
     connectedServices?: ConnectedServiceBindingsV1 | null;
 }>): Readonly<{
-    configOptions: readonly AcpConfigOption[] | null;
+    configOptions: readonly SessionConfigOption[] | null;
     probe: Readonly<{
         phase: 'idle' | 'loading' | 'refreshing';
         refreshedAt: number | null;
         onRefresh: () => void;
     }>;
 }> {
-    const [configOptions, setConfigOptions] = React.useState<readonly AcpConfigOption[] | null>(null);
+    const [configOptions, setConfigOptions] = React.useState<readonly SessionConfigOption[] | null>(null);
     const [probePhase, setProbePhase] = React.useState<'idle' | 'loading' | 'refreshing'>('idle');
     const [refreshedAt, setRefreshedAt] = React.useState<number | null>(null);
     const [refreshNonce, setRefreshNonce] = React.useState(0);
     const lastHandledRefreshNonceRef = React.useRef(0);
-    const configOptionsRef = React.useRef<readonly AcpConfigOption[] | null>(null);
+    const configOptionsRef = React.useRef<readonly SessionConfigOption[] | null>(null);
     const refreshedAtRef = React.useRef<number | null>(null);
     const lastScopeKeyRef = React.useRef<string | null>(null);
 
@@ -164,7 +164,7 @@ export function useNewSessionPreflightConfigOptionsState(params: Readonly<{
             setProbePhase(configOptionsRef.current ? 'refreshing' : 'loading');
             const cwd = typeof params.cwd === 'string' ? params.cwd.trim() : '';
             const attempt = await runDynamicConfigOptionsProbeDedupe<Readonly<{
-                value: readonly AcpConfigOption[];
+                value: readonly SessionConfigOption[];
                 cacheable: boolean;
             }> | null>(cacheKey, async () => {
                 const response = await machineCapabilitiesInvoke(
@@ -188,7 +188,7 @@ export function useNewSessionPreflightConfigOptionsState(params: Readonly<{
                 if (!response.supported) return null;
                 if (!response.response.ok) return null;
                 const result = response.response.result as any;
-                const normalized = normalizeAcpConfigOptionsArray(result?.configOptions);
+                const normalized = normalizeSessionConfigOptionsArray(result?.configOptions);
                 if (!normalized) return null;
                 const source = typeof result?.source === 'string' ? result.source : null;
                 const cacheable = source !== 'static';

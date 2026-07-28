@@ -4,25 +4,25 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Switch } from '@/components/ui/forms/Switch';
 import { Text } from '@/components/ui/text/Text';
-import type { AcpConfigOptionControl, AcpConfigOptionValueId } from '@/sync/acp/configOptionsControl';
+import type { SessionConfigOptionControl, SessionConfigOptionValueId } from '@/sync/domains/sessionControl/configOptionsControl';
 import {
     isBooleanConfigOptionType,
     resolveBooleanConfigOptionNextValue,
     resolveBooleanConfigOptionValue,
-} from '@/sync/acp/configOptionsControl';
+} from '@/sync/domains/sessionControl/configOptionsControl';
 import { t } from '@/text';
 
-type AgentInputAcpConfigOptionsSectionProps = Readonly<{
-    controls: ReadonlyArray<AcpConfigOptionControl>;
+type AgentInputSessionConfigOptionsSectionProps = Readonly<{
+    controls: ReadonlyArray<SessionConfigOptionControl>;
     headerAccessory?: React.ReactNode;
-    onSelectValue?: (configId: string, valueId: AcpConfigOptionValueId) => void;
+    onSelectValue?: (configId: string, valueId: SessionConfigOptionValueId) => void;
 }>;
 
-function formatValue(valueId: AcpConfigOptionValueId): string {
+function formatValue(valueId: SessionConfigOptionValueId): string {
     return valueId;
 }
 
-export function AgentInputAcpConfigOptionsSection(props: AgentInputAcpConfigOptionsSectionProps) {
+export function AgentInputSessionConfigOptionsSection(props: AgentInputSessionConfigOptionsSectionProps) {
     const { theme } = useUnistyles();
     const transientStyles = React.useMemo(() => ({
         choicePillSelected: {

@@ -15,7 +15,7 @@ import {
 } from '@/components/sessions/new/modules/newSessionCapabilityProbeContext';
 import type { Settings } from '@/sync/domains/settings/settings';
 import type { ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
-import { computeAcpConfigOptionControlsForProvider } from '@/sync/acp/configOptionsControl';
+import { computeSessionConfigOptionControlsForProvider } from '@/sync/domains/sessionControl/configOptionsControl';
 import type {
     SessionConfigOptionControl,
     SessionConfigOptionValueId,
@@ -307,7 +307,7 @@ function FavoriteBackendModelsCollector(props: Readonly<{
     const selectedOptionControls = React.useMemo(() => {
         const selectedModelOption = modelOptionByValue.get(selectedValue) ?? null;
         if (!selectedModelOption?.modelOptions?.length) return null;
-        return computeAcpConfigOptionControlsForProvider({
+        return computeSessionConfigOptionControlsForProvider({
             providerId:
                 props.entry.target.kind === 'configuredAcpBackend'
                     ? props.entry.target.backendId

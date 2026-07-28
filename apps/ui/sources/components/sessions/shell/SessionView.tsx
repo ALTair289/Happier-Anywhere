@@ -94,7 +94,7 @@ import { useSession } from '@/sync/domains/state/storage';
 import { writeSessionInitialPromptV1 } from '@/sync/domains/sessionInitialPrompt/sessionInitialPromptV1';
 import { Session, type Metadata } from '@/sync/domains/state/storageTypes';
 import { sync } from '@/sync/sync';
-import { computeNextAcpConfigOptionOverrideMetadata } from '@/sync/engine/overrides/acpConfigOptionOverridePublish';
+import { computeNextSessionConfigOptionOverrideMetadata } from '@/sync/engine/overrides/acpConfigOptionOverridePublish';
 import { readSessionConfigOptionOverridesState } from '@/sync/domains/sessionControl/readSessionControlMetadata';
 import { useApplyLocalSettings } from '@/sync/store/settingsWriters';
 import { updateUsageLimitRecoveryRememberedMode } from '@/sync/domains/settings/usageLimitRecoverySettings';
@@ -117,7 +117,7 @@ import type { AgentInputLocalUiStateV1 } from '@/sync/domains/input/draftValues/
 import { applyPermissionModeSelection } from '@/sync/domains/permissions/permissionModeApply';
 import {
     supportsSessionModeOverrides,
-} from '@/sync/acp/sessionModeControl';
+} from '@/sync/domains/sessionControl/sessionModeControl';
 import { buildSessionOrganizationListViewState } from '@/sync/domains/session/organization/viewState';
 import { shadowLevelStyle } from '@/shadowElevation';
 import { t, type TranslationKey } from '@/text';
@@ -302,7 +302,7 @@ import {
     type SessionUsageLimitRecoveryV1,
 } from '@happier-dev/protocol';
 import { selectSyncErrorForServer } from '@/sync/runtime/connectivity/syncErrorScope';
-import { resolveNextOptimisticAcpConfigOptionOverrides } from './resolveNextOptimisticAcpConfigOptionOverrides';
+import { resolveNextOptimisticSessionConfigOptionOverrides } from './resolveNextOptimisticSessionConfigOptionOverrides';
 import { useSessionViewShellSession, useSessionViewShellSessionSeq } from './sessionViewStableSession';
 import {
     isEmptyPendingMessageComposerSemanticDraftSnapshot,
@@ -3190,25 +3190,25 @@ function SessionViewLoaded({
     const isVoiceConversationSession = isVoiceConversationSystemSessionMetadata(session.metadata ?? null);
     const isHiddenSystemSessionSession = isHiddenSystemSession({ metadata: session.metadata ?? null });
     const modelMode = liveComposerState.modelMode;
-    const sessionAcpConfigOptionOverrides = React.useMemo<React.ComponentProps<typeof AgentInput>['acpConfigOptionOverridesOverride']>(() => {
+    const sessionSessionConfigOptionOverrides = React.useMemo<React.ComponentProps<typeof AgentInput>['acpConfigOptionOverridesOverride']>(() => {
         return readSessionConfigOptionOverridesState(session.metadata ?? null);
     }, [session.metadata]);
-    const [optimisticAcpConfigOptionOverrides, setOptimisticAcpConfigOptionOverrides] =
+    const [optimisticSessionConfigOptionOverrides, setOptimisticSessionConfigOptionOverrides] =
         React.useState<React.ComponentProps<typeof AgentInput>['acpConfigOptionOverridesOverride']>(
-            sessionAcpConfigOptionOverrides,
+            sessionSessionConfigOptionOverrides,
         );
-    const optimisticAcpConfigOptionOverridesSessionIdRef = React.useRef(sessionId);
+    const optimisticSessionConfigOptionOverridesSessionIdRef = React.useRef(sessionId);
     React.useEffect(() => {
-        setOptimisticAcpConfigOptionOverrides((current) => {
-            const sessionChanged = optimisticAcpConfigOptionOverridesSessionIdRef.current !== sessionId;
-            optimisticAcpConfigOptionOverridesSessionIdRef.current = sessionId;
-            return resolveNextOptimisticAcpConfigOptionOverrides({
+        setOptimisticSessionConfigOptionOverrides((current) => {
+            const sessionChanged = optimisticSessionConfigOptionOverridesSessionIdRef.current !== sessionId;
+            optimisticSessionConfigOptionOverridesSessionIdRef.current = sessionId;
+            return resolveNextOptimisticSessionConfigOptionOverrides({
                 current,
-                incoming: sessionAcpConfigOptionOverrides,
+                incoming: sessionSessionConfigOptionOverrides,
                 sessionChanged,
             }) as typeof current;
         });
-    }, [sessionAcpConfigOptionOverrides, sessionId]);
+    }, [sessionSessionConfigOptionOverrides, sessionId]);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
     const scmSessionAutoRefreshIntervalMsSetting = useSetting('scmSessionAutoRefreshIntervalMs' as any);
     const scmSessionAutoRefreshIntervalMs =
@@ -3742,9 +3742,9 @@ function SessionViewLoaded({
         }), { tag: 'SessionView.updateAcpSessionModeOverride' });
     }, [sessionId, sessionModeOptionIds]);
 
-    const updateAcpConfigOptionOverride = React.useCallback((configId: string, valueId: string) => {
+    const updateSessionConfigOptionOverride = React.useCallback((configId: string, valueId: string) => {
         const updatedAt = nowServerMs();
-        setOptimisticAcpConfigOptionOverrides((current) => {
+        setOptimisticSessionConfigOptionOverrides((current) => {
             const baseMetadata = (current
                 ? {
                     ...(session.metadata ?? {}),
@@ -3752,7 +3752,7 @@ function SessionViewLoaded({
                     sessionConfigOptionOverridesV1: current,
                 }
                 : (session.metadata ?? {})) as Metadata;
-            const nextMetadata = computeNextAcpConfigOptionOverrideMetadata({
+            const nextMetadata = computeNextSessionConfigOptionOverrideMetadata({
                 metadata: baseMetadata,
                 configId,
                 value: valueId,
@@ -3760,20 +3760,20 @@ function SessionViewLoaded({
             });
             return readSessionConfigOptionOverridesState(nextMetadata);
         });
-        fireAndForget(sync.publishSessionAcpConfigOptionOverrideToMetadata({
+        fireAndForget(sync.publishSessionSessionConfigOptionOverrideToMetadata({
             sessionId,
             configId,
             value: valueId,
             updatedAt,
-        }), { tag: 'SessionView.updateAcpConfigOptionOverride' });
+        }), { tag: 'SessionView.updateSessionConfigOptionOverride' });
     }, [session.metadata, sessionId]);
     const buildNextMessageMetaOverrides = React.useCallback((metaOverrides?: Record<string, unknown>) => {
         return buildSessionComposerNextMessageMetaOverridesFromUiState({
             agentId: liveComposerState.agentId,
-            configOptionOverrides: optimisticAcpConfigOptionOverrides,
+            configOptionOverrides: optimisticSessionConfigOptionOverrides,
             metaOverrides,
         });
-    }, [liveComposerState.agentId, optimisticAcpConfigOptionOverrides]);
+    }, [liveComposerState.agentId, optimisticSessionConfigOptionOverrides]);
 
     // Function to update model mode (only for agents that expose model selection in the UI)
     const updateModelMode = React.useCallback((mode: ModelMode) => {
@@ -4426,7 +4426,7 @@ function SessionViewLoaded({
             const providerNonSteerablePayloadReason = getSessionComposerNonSteerablePayloadReasonFromUiState({
                 agentId: liveComposerState.agentId,
                 session,
-                configOptionOverrides: optimisticAcpConfigOptionOverrides,
+                configOptionOverrides: optimisticSessionConfigOptionOverrides,
                 metaOverrides: sendIntent?.structuredInputMetaOverrides,
             });
 
@@ -5122,8 +5122,8 @@ function SessionViewLoaded({
                 permissionMode={permissionMode}
                 onPermissionModeChange={updatePermissionMode}
                 onAcpSessionModeChange={supportsSessionModeOverrides(liveComposerState.agentId) ? updateAcpSessionModeOverride : undefined}
-                onAcpConfigOptionChange={updateAcpConfigOptionOverride}
-                acpConfigOptionOverridesOverride={optimisticAcpConfigOptionOverrides}
+                onSessionConfigOptionChange={updateSessionConfigOptionOverride}
+                acpConfigOptionOverridesOverride={optimisticSessionConfigOptionOverrides}
                 modelMode={modelMode}
                 onModelModeChange={updateModelMode}
                 metadata={session.metadata}

@@ -17,7 +17,7 @@ import {
 import type { NewSessionCapabilityProbeContext } from '@/components/sessions/new/modules/newSessionCapabilityProbeContext';
 import { collectNewSessionModelScopedOptionIds } from '@/components/sessions/new/modules/collectNewSessionModelScopedOptionIds';
 import { sanitizeNewSessionConfigOverridesForModelSelection } from '@/components/sessions/new/modules/newSessionConfigOptionOverrideSanitization';
-import { computeAcpConfigOptionControlsForProvider, type AcpConfigOptionControl } from '@/sync/acp/configOptionsControl';
+import { computeSessionConfigOptionControlsForProvider, type SessionConfigOptionControl } from '@/sync/domains/sessionControl/configOptionsControl';
 import {
     buildFavoriteModelAvailabilityById,
     resolveAvailableFavoriteModelsForBackend,
@@ -107,11 +107,11 @@ function areSelectionsEqual(
 }
 
 function removeModelScopedConfigControls(params: Readonly<{
-    controls: ReadonlyArray<AcpConfigOptionControl> | null;
+    controls: ReadonlyArray<SessionConfigOptionControl> | null;
     modelOptions: ReadonlyArray<{
         modelOptions?: ReadonlyArray<{ id: string }>;
     }>;
-}>): ReadonlyArray<AcpConfigOptionControl> | null {
+}>): ReadonlyArray<SessionConfigOptionControl> | null {
     const modelScopedOptionIds = collectNewSessionModelScopedOptionIds(params.modelOptions);
     if (!params.controls || params.controls.length === 0 || modelScopedOptionIds.size === 0) {
         return params.controls;
@@ -243,7 +243,7 @@ export function NewSessionEngineOptionDetail(props: NewSessionEngineOptionDetail
 
     const configControls = React.useMemo(
         () => removeModelScopedConfigControls({
-            controls: computeAcpConfigOptionControlsForProvider({
+            controls: computeSessionConfigOptionControlsForProvider({
                 providerId,
                 configOptions,
                 overrides: Object.fromEntries(
@@ -260,7 +260,7 @@ export function NewSessionEngineOptionDetail(props: NewSessionEngineOptionDetail
     const selectedModelOptionControls = React.useMemo(() => {
         const selectedModel = modelOptions.find((option) => option.value === selectedModelId) ?? null;
         if (!selectedModel?.modelOptions?.length) return null;
-        return computeAcpConfigOptionControlsForProvider({
+        return computeSessionConfigOptionControlsForProvider({
             providerId,
             configOptions: selectedModel.modelOptions,
             overrides: Object.fromEntries(

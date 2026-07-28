@@ -228,12 +228,12 @@ vi.mock('@/hooks/ui/useKeyboardHeight', () => ({
     useKeyboardHeight: () => 0,
 }));
 
-vi.mock('@/sync/acp/sessionModeControl', () => ({
+vi.mock('@/sync/domains/sessionControl/sessionModeControl', () => ({
     computeSessionModePickerControl: () => null,
 }));
 
-vi.mock('@/sync/acp/configOptionsControl', () => ({
-    computeAcpConfigOptionControls: () => null,
+vi.mock('@/sync/domains/sessionControl/configOptionsControl', () => ({
+    computeSessionConfigOptionControls: () => null,
 }));
 
 describe('AgentInput (send button accessibility)', () => {
