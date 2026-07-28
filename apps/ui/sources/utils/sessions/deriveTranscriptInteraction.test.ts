@@ -15,6 +15,8 @@ describe('deriveTranscriptInteraction', () => {
             canSendMessages: true,
             canApprovePermissions: true,
             canFork: true,
+            canOpenFiles: true,
+            canPreviewMedia: true,
             permissionDisabledReason: undefined,
             disableToolNavigation: undefined,
         });
@@ -32,6 +34,8 @@ describe('deriveTranscriptInteraction', () => {
             canSendMessages: true,
             canApprovePermissions: false,
             canFork: true,
+            canOpenFiles: true,
+            canPreviewMedia: true,
             permissionDisabledReason: 'inactive',
             disableToolNavigation: undefined,
         });
@@ -42,6 +46,8 @@ describe('deriveTranscriptInteraction', () => {
             canSendMessages: false,
             canApprovePermissions: false,
             canFork: false,
+            canOpenFiles: true,
+            canPreviewMedia: true,
             permissionDisabledReason: 'readOnly',
             disableToolNavigation: undefined,
         });
@@ -59,6 +65,8 @@ describe('deriveTranscriptInteraction', () => {
             canSendMessages: false,
             canApprovePermissions: false,
             canFork: false,
+            canOpenFiles: true,
+            canPreviewMedia: true,
             permissionDisabledReason: 'inactive',
             disableToolNavigation: undefined,
         });
@@ -69,6 +77,8 @@ describe('deriveTranscriptInteraction', () => {
             canSendMessages: true,
             canApprovePermissions: false,
             canFork: true,
+            canOpenFiles: true,
+            canPreviewMedia: true,
             permissionDisabledReason: 'notGranted',
             disableToolNavigation: undefined,
         });
@@ -79,6 +89,8 @@ describe('deriveTranscriptInteraction', () => {
             canSendMessages: true,
             canApprovePermissions: true,
             canFork: true,
+            canOpenFiles: true,
+            canPreviewMedia: true,
             permissionDisabledReason: undefined,
             disableToolNavigation: undefined,
         });
@@ -96,6 +108,8 @@ describe('deriveTranscriptInteraction', () => {
             canSendMessages: true,
             canApprovePermissions: false,
             canFork: true,
+            canOpenFiles: true,
+            canPreviewMedia: true,
             permissionDisabledReason: 'inactive',
             disableToolNavigation: undefined,
         });
@@ -106,6 +120,8 @@ describe('deriveTranscriptInteraction', () => {
             canSendMessages: false,
             canApprovePermissions: false,
             canFork: false,
+            canOpenFiles: false,
+            canPreviewMedia: false,
             permissionDisabledReason: 'public',
             disableToolNavigation: true,
         });
@@ -125,6 +141,8 @@ describe('deriveTranscriptInteractionFromSession', () => {
             canSendMessages: true,
             canApprovePermissions: false,
             canFork: true,
+            canOpenFiles: true,
+            canPreviewMedia: true,
             permissionDisabledReason: 'inactive',
             disableToolNavigation: undefined,
         });
@@ -142,6 +160,8 @@ describe('deriveTranscriptInteractionFromSession', () => {
             canSendMessages: true,
             canApprovePermissions: false,
             canFork: true,
+            canOpenFiles: true,
+            canPreviewMedia: true,
             permissionDisabledReason: 'inactive',
             disableToolNavigation: undefined,
         });
