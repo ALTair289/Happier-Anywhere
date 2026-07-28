@@ -108,8 +108,9 @@ export const SessionSubagentGroup = React.memo((props: Readonly<{
                 teamId: deletableTeamId,
             },
         });
-        fireAndForget(sync.sendMessage(props.sessionId, structured.text, structured.displayText, structured.metaOverrides, {
-            bypassPendingQueueReason: 'subagent_control_command',
+        fireAndForget(sync.submitMessage(props.sessionId, structured.text, structured.displayText, structured.metaOverrides, {
+            callerSurface: 'subagent_control',
+            forceImmediate: true,
         }), {
             tag: 'SessionSubagentGroup.deleteTeam',
         });

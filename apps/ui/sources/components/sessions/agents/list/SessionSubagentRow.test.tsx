@@ -9,7 +9,7 @@ import { installSessionSubagentCommonModuleMocks } from '@/components/sessions/a
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const stopRunSpy = vi.fn(async () => ({ ok: true }));
-const sendMessageSpy = vi.fn(async () => undefined);
+const submitMessageSpy = vi.fn(async () => undefined);
 
 installSessionSubagentCommonModuleMocks({
     text: async () => {
@@ -32,7 +32,7 @@ vi.mock('@/sync/ops/sessionExecutionRuns', () => ({
 
 vi.mock('@/sync/sync', () => ({
     sync: {
-        sendMessage: sendMessageSpy,
+        submitMessage: submitMessageSpy,
     },
 }));
 
@@ -157,7 +157,7 @@ describe('SessionSubagentRow', () => {
 
         await screen.pressByTestIdAsync('session-subagent-delete:agent_team_member:qa-team:alpha');
 
-        expect(sendMessageSpy).toHaveBeenCalledWith(
+        expect(submitMessageSpy).toHaveBeenCalledWith(
             's1',
             'Shutdown teammate alpha · qa-team',
             'Shutdown teammate alpha · qa-team',
@@ -173,7 +173,8 @@ describe('SessionSubagentRow', () => {
                 },
             }),
             expect.objectContaining({
-                bypassPendingQueueReason: 'subagent_control_command',
+                callerSurface: 'subagent_control',
+                forceImmediate: true,
             }),
         );
     });
