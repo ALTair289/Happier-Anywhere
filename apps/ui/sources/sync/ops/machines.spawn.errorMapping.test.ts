@@ -758,7 +758,7 @@ describe('machineSpawnNewSession error mapping', () => {
     const {
       createMachineDetailSpawnAttempt,
       runMachineDetailSpawnAttempt,
-    } = await import('@/app/(app)/machine/[id]/machineDetailSpawnAttempt');
+    } = await import('@/components/machines/machineDetailSpawnAttempt');
     const options = {
       machineId: 'machine-1',
       directory: '/repo',

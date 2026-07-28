@@ -11,7 +11,6 @@ import { Ionicons, Octicons } from '@expo/vector-icons';
 import type { Machine, MachineMetadata, Session } from '@/sync/domains/state/storageTypes';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import {
-    machineSpawnNewSession,
     machineStopDaemon,
     machineStopSession,
     machineUpdateMetadata,
@@ -59,6 +58,11 @@ import {
     MachineReplacementPickerModal,
     type MachineReplacementPickerCandidate,
 } from '@/components/machines/MachineReplacementPickerModal';
+import {
+    createMachineDetailSpawnAttempt,
+    runMachineDetailSpawnAttempt,
+    type MachineDetailSpawnAttempt,
+} from '@/components/machines/machineDetailSpawnAttempt';
 
 
 const styles = StyleSheet.create((theme) => ({
@@ -169,6 +173,10 @@ export default function MachineDetailScreen() {
     const [isClearingReplacement, setIsClearingReplacement] = useState(false);
     const [customPath, setCustomPath] = useState('');
     const [isSpawning, setIsSpawning] = useState(false);
+    const machineDetailSpawnAttemptRef = useRef<Readonly<{
+        signature: string;
+        attempt: MachineDetailSpawnAttempt;
+    }> | null>(null);
     const inputRef = useRef<MultiTextInputHandle>(null);
     const [showAllPaths, setShowAllPaths] = useState(false);
     const isOnline = !!machine && isMachineOnline(machine);
@@ -745,16 +753,32 @@ export default function MachineDetailScreen() {
                 machineId,
             });
             const preferredAgentId = isAgentId(settings.lastUsedAgent) ? settings.lastUsedAgent : DEFAULT_AGENT_ID;
-            const result = await machineSpawnNewSession({
+            const spawnOptions = {
                 machineId: machineId!,
                 directory: absolutePath,
                 approvedNewDirectoryCreation,
                 backendTarget: { kind: 'builtInAgent', agentId: preferredAgentId },
                 terminal,
                 ...(effectiveWindowsRemoteSessionLaunchMode ? { windowsRemoteSessionLaunchMode: effectiveWindowsRemoteSessionLaunchMode } : {}),
+            } as const;
+            const signature = JSON.stringify({
+                machineId: spawnOptions.machineId,
+                directory: spawnOptions.directory,
+                backendTarget: spawnOptions.backendTarget,
+                terminal: spawnOptions.terminal,
+                windowsRemoteSessionLaunchMode: spawnOptions.windowsRemoteSessionLaunchMode ?? null,
+            });
+            const activeAttempt = machineDetailSpawnAttemptRef.current?.signature === signature
+                ? machineDetailSpawnAttemptRef.current.attempt
+                : createMachineDetailSpawnAttempt();
+            machineDetailSpawnAttemptRef.current = { signature, attempt: activeAttempt };
+            const result = await runMachineDetailSpawnAttempt({
+                options: spawnOptions,
+                attempt: activeAttempt,
             });
             switch (result.type) {
                 case 'success':
+                    machineDetailSpawnAttemptRef.current = null;
                     // Dismiss machine picker & machine detail screen
                     router.back();
                     router.back();
@@ -776,6 +800,12 @@ export default function MachineDetailScreen() {
                     break;
                 }
                 case 'error':
+                    if (
+                        result.spawnAttemptCustody?.status !== 'unresolved'
+                        && result.spawnAttemptCustody?.status !== 'completed'
+                    ) {
+                        machineDetailSpawnAttemptRef.current = null;
+                    }
                     Modal.alert(t('common.error'), result.errorMessage);
                     break;
             }
