@@ -32,8 +32,18 @@ async function main() {
   // Never share a single temp directory across invocations, or concurrent builds will race on rm/mkdir.
   const tempBaseDir = join(repoRoot, 'dist', 'release-assets', '.tmp-server-binaries');
   const tempDir = join(tempBaseDir, `build-${process.pid}-${randomUUID()}`);
+  const serverComponent = String(kv.get('--server-component') ?? 'happier-server-light').trim();
+  if (serverComponent !== 'happier-server' && serverComponent !== 'happier-server-light') {
+    throw new Error(`Unsupported --server-component: ${serverComponent}`);
+  }
   const entrypoint = String(kv.get('--entrypoint') ?? '').trim()
-    || join(repoRoot, 'apps', 'server', 'sources', 'main.light.ts');
+    || join(
+      repoRoot,
+      'apps',
+      'server',
+      'sources',
+      serverComponent === 'happier-server' ? 'main.ts' : 'main.light.ts',
+    );
   const externals = parseCsv(kv.get('--externals') ?? process.env.HAPPIER_SERVER_BUN_EXTERNALS ?? 'redis');
   const targets = resolveTargets({
     availableTargets: SERVER_TARGETS,
@@ -54,6 +64,7 @@ async function main() {
       repoRoot,
       payloadDir: stageDir,
       target,
+      serverComponent,
       entrypoint,
       externals,
       buildDbProviders,
@@ -88,6 +99,7 @@ async function main() {
     version,
     outDir,
     entrypoint,
+    serverComponent,
     artifacts: artifacts.map((artifact) => artifact.name),
     checksums: checksumsPath,
     signature: signaturePath,
