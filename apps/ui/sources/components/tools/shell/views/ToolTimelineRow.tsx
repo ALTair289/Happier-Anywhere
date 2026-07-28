@@ -29,6 +29,8 @@ import {
     type ToolViewExpandedDetailLevelSetting,
 } from '@/components/tools/normalization/policy/resolveToolViewDetailDefaultsForChromeMode';
 import { ToolTimelineRowHeader } from '@/components/tools/shell/views/timeline/ToolTimelineRowHeader';
+import { TranscriptJumpAttention } from '@/components/sessions/transcript/navigation/TranscriptJumpHighlightOverlay';
+import type { ToolRowPinAction } from '@/components/sessions/transcript/toolCalls/ToolCallPinAction';
 import { useEnsureSidechainsLoaded } from '@/hooks/session/useEnsureSidechainsLoaded';
 import { resolveToolTranscriptSidechainId } from './resolveToolTranscriptSidechainId';
 import {
@@ -43,6 +45,9 @@ import { resolveInactiveSessionToolCallFailure } from '../permissions/resolveIna
 import { navigateWithBlurOnWeb } from '@/utils/platform/navigateWithBlurOnWeb';
 import { buildApprovalToolCallLocation, doesApprovalMatchToolCall } from './toolApprovalPromptMatching';
 import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
+import { isAskUserQuestionToolName } from '@happier-dev/protocol';
+
+const TOOL_TIMELINE_ROW_HIGHLIGHT_RADIUS = 10;
 
 export const ToolTimelineRow = React.memo((props: {
     tool: ToolCall;
@@ -50,7 +55,9 @@ export const ToolTimelineRow = React.memo((props: {
     messages?: Message[];
     sessionId?: string;
     messageId?: string;
-    headerAction?: React.ReactNode | null;
+    /** Row seq, so a seq-targeted transcript jump can land its highlight here. */
+    jumpHighlightSeq?: number | null;
+    headerAction?: ToolRowPinAction | null;
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
     forcePermissionPromptsInTranscript?: boolean;
     interaction?: TranscriptInteraction;
@@ -182,6 +189,7 @@ export const ToolTimelineRow = React.memo((props: {
     const sidechainHydration = useEnsureSidechainsLoaded({
         enabled:
             effectiveIsExpanded &&
+            props.interaction?.disableToolNavigation !== true &&
             isSubAgentTranscriptToolName(normalizedToolName),
         sessionId: props.sessionId,
         sidechainIds: [transcriptSidechainId],
@@ -217,8 +225,7 @@ export const ToolTimelineRow = React.memo((props: {
                 ? <ActivitySpinner testID="tool-timeline-row-running" size="small" color={theme.colors.text.secondary} />
                 : null;
     const headerPrimaryActions = headerActions ?? null;
-    const parentHeaderAction = props.headerAction ?? null;
-    const headerRightElements = [headerStatusIndicator, parentHeaderAction, headerPrimaryActions].filter(Boolean);
+    const headerRightElements = [headerStatusIndicator, headerPrimaryActions].filter(Boolean);
     const headerRightElement =
         headerRightElements.length > 1 ? (
             <View style={styles.headerRightContent}>
@@ -259,8 +266,12 @@ export const ToolTimelineRow = React.memo((props: {
                 : ({ behavior: 'hover', state: 'collapsed' } as const)
             : null;
 
-    const actionRequiredStatusText = isPendingUserAction ? t('status.actionRequired') : null;
-    const headerStatusText = effectiveDetailLevel === 'title' ? null : (actionRequiredStatusText ?? statusText);
+    const pendingUserActionStatusText = !isPendingUserAction
+        ? null
+        : isAskUserQuestionToolName(toolForRendering.name)
+            ? t('status.waitingForYourResponse')
+            : t('status.actionRequired');
+    const headerStatusText = effectiveDetailLevel === 'title' ? null : (pendingUserActionStatusText ?? statusText);
     const resolvedPermissionPromptSurface = props.forcePermissionPromptsInTranscript
         ? 'transcript'
         : resolvePermissionPromptSurface(permissionPromptSurface);
@@ -301,7 +312,13 @@ export const ToolTimelineRow = React.memo((props: {
     );
 
     return (
-        <View style={styles.container}>
+        <TranscriptJumpAttention
+            sessionId={props.sessionId ?? ''}
+            routeMessageId={routeMessageId}
+            seq={props.jumpHighlightSeq ?? null}
+            radius={TOOL_TIMELINE_ROW_HIGHLIGHT_RADIUS}
+            style={styles.container}
+        >
             <ToolTimelineRowHeader
                 testID="tool-timeline-row"
                 openActionTestID="tool-timeline-row-open"
@@ -314,6 +331,8 @@ export const ToolTimelineRow = React.memo((props: {
                 canOpen={canOpen}
                 onOpen={handleOpen}
                 rightElement={headerRightElement}
+                revealAction={props.headerAction?.node ?? null}
+                revealActionSticky={props.headerAction?.pinned === true}
                 disclosure={disclosure}
             />
 
@@ -355,7 +374,7 @@ export const ToolTimelineRow = React.memo((props: {
                     disabledReason={props.interaction?.permissionDisabledReason}
                 />
             ))}
-        </View>
+        </TranscriptJumpAttention>
     );
 });
 

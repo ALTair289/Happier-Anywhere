@@ -232,7 +232,7 @@ describe('ToolTimelineRow (tap action)', () => {
         expect(screen.findAllByType('SpecificToolView' as React.ElementType)).toHaveLength(0);
     });
 
-    it('suppresses open-details routing when tool navigation is disabled, even if the tool has its own id', async () => {
+    it('expands without routing or hydrating the sidechain when tool navigation is disabled', async () => {
         settings.toolViewTapAction = 'open';
 
         const screen = await renderToolTimelineRow({
@@ -249,12 +249,14 @@ describe('ToolTimelineRow (tap action)', () => {
         await act(async () => {
             screen.pressByTestId('tool-timeline-row');
         });
+        await flushHookEffects();
 
         expect(pushSpy).not.toHaveBeenCalled();
         expect(screen.findAllByType('SpecificToolView' as React.ElementType)).toHaveLength(1);
+        expect(ensureSidechainMessagesLoadedMock).not.toHaveBeenCalled();
     });
 
-    it('auto-expands and shows action-required status for pending user-action tools', async () => {
+    it('auto-expands and shows waiting-for-response status for pending questions', async () => {
         const screen = await renderToolTimelineRow({
             tool: {
                 name: 'AskUserQuestion',
@@ -272,7 +274,28 @@ describe('ToolTimelineRow (tap action)', () => {
 
         expect(screen.findByTestId('tool-timeline-body')).not.toBeNull();
         expect(screen.findAllByType('SpecificToolView' as React.ElementType)).toHaveLength(1);
+        expect(screen.getTextContent()).toContain('status.waitingForYourResponse');
+        expect(screen.getTextContent()).not.toContain('status.actionRequired');
+    });
+
+    it('keeps action-required status for pending non-question user actions', async () => {
+        const screen = await renderToolTimelineRow({
+            tool: {
+                name: 'ExitPlanMode',
+                state: 'running',
+                completedAt: null,
+                permission: {
+                    id: 'perm-plan-1',
+                    status: 'pending',
+                    kind: 'user_action',
+                },
+            },
+            sessionId: 's1',
+            messageId: 'm-plan-1',
+        });
+
         expect(screen.getTextContent()).toContain('status.actionRequired');
+        expect(screen.getTextContent()).not.toContain('status.waitingForYourResponse');
     });
 
     it('shows a header error indicator only for failed tool rows', async () => {
@@ -303,7 +326,7 @@ describe('ToolTimelineRow (tap action)', () => {
         expect(completedScreen.findByTestId('tool-timeline-row-error')).toBeNull();
     });
 
-    it('renders a parent-supplied header action alongside status indicators', async () => {
+    it('reveals a parent-supplied pin alongside status indicators', async () => {
         const screen = await renderToolTimelineRow({
             tool: {
                 name: 'SearchContent',
@@ -312,7 +335,7 @@ describe('ToolTimelineRow (tap action)', () => {
                     content: 'ripgrep timed out',
                 },
             },
-            headerAction: React.createElement('Pressable', { testID: 'tool-parent-pin-action' }),
+            headerAction: { node: React.createElement('Pressable', { testID: 'tool-parent-pin-action' }), pinned: false },
         });
 
         expect(screen.findByTestId('tool-parent-pin-action')).toBeTruthy();

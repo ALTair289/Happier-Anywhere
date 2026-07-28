@@ -295,7 +295,7 @@ describe('ToolView (tap action: expand)', () => {
         expect(pushSpy).toHaveBeenCalledWith('/session/s1/message/server%3Aserver-msg-1');
     });
 
-    it('hides the secondary open action when tool navigation is disabled, even if the tool has its own id', async () => {
+    it('expands without hydrating the sidechain when tool navigation is disabled', async () => {
         pushSpy.mockReset();
         navigateWithBlurOnWebSpy.mockClear();
         renderedToolViewSpy.mockReset();
@@ -320,5 +320,13 @@ describe('ToolView (tap action: expand)', () => {
         );
 
         expect(screen.findByTestId('tool-view-header-secondary')).toBeNull();
+
+        await act(async () => {
+            screen.pressByTestId('tool-view-header-primary');
+        });
+        await flushHookEffects();
+
+        expect(screen.findAllByType('SpecificToolView' as React.ElementType)).toHaveLength(1);
+        expect(ensureSidechainMessagesLoadedMock).not.toHaveBeenCalled();
     });
 });

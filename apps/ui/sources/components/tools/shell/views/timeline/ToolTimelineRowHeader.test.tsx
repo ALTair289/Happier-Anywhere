@@ -63,6 +63,18 @@ describe('ToolTimelineRowHeader', () => {
         return (opacityEntries[opacityEntries.length - 1] as { opacity: number }).opacity;
     }
 
+    function readAnimatedOpacity(style: unknown): number | undefined {
+        const entries = Array.isArray(style) ? style.flat(Infinity) : [style];
+        for (let i = entries.length - 1; i >= 0; i -= 1) {
+            const entry = entries[i] as { opacity?: unknown } | null;
+            const opacity = entry && typeof entry === 'object' ? entry.opacity : undefined;
+            if (typeof opacity === 'number') return opacity;
+            const animated = opacity as { __getValue?: () => number } | undefined;
+            if (typeof animated?.__getValue === 'function') return animated.__getValue();
+        }
+        return undefined;
+    }
+
     function readStyleNumber(style: unknown, key: string): number | undefined {
         const entries = Array.isArray(style) ? style : [style];
         for (let i = entries.length - 1; i >= 0; i -= 1) {
@@ -189,7 +201,7 @@ describe('ToolTimelineRowHeader', () => {
     });
 
     it('keeps the open action visually hidden until hover on web', async () => {
-        const { ToolTimelineRowHeader } = await import('./ToolTimelineRowHeader');
+        const { ToolTimelineRowHeader, TOOL_TIMELINE_ROW_REVEAL_SLOT_TEST_ID } = await import('./ToolTimelineRowHeader');
 
         const screen = await renderScreen(
             <ToolTimelineRowHeader
@@ -203,21 +215,103 @@ describe('ToolTimelineRowHeader', () => {
             />,
         );
 
-        const getOpenSlotOpacity = () => {
-            const openButton = screen.findByTestId('tool-timeline-row-open');
-            expect(openButton).toBeTruthy();
-            return readOpacity(openButton!.parent?.parent?.props.style);
-        };
+        const getRevealOpacity = () =>
+            readAnimatedOpacity(screen.findByTestId(TOOL_TIMELINE_ROW_REVEAL_SLOT_TEST_ID)?.props.style);
 
-        const baseOpacity = getOpenSlotOpacity();
-        expect(baseOpacity).toBe(0);
+        expect(getRevealOpacity()).toBe(0);
 
         await act(async () => {
             screen.findByTestId('tool-timeline-row-open')?.props.onHoverIn?.();
         });
 
-        const hoverOpacity = getOpenSlotOpacity();
-        expect(hoverOpacity).toBe(1);
+        expect(getRevealOpacity()).toBe(1);
+    });
+
+    it('reveals the pin and the open action from one hover state without changing title truncation', async () => {
+        const { ToolTimelineRowHeader, TOOL_TIMELINE_ROW_PIN_SLOT_TEST_ID, TOOL_TIMELINE_ROW_REVEAL_SLOT_TEST_ID } =
+            await import('./ToolTimelineRowHeader');
+
+        const screen = await renderScreen(
+            <ToolTimelineRowHeader
+                testID="tool-timeline-row"
+                density="comfortable"
+                icon={React.createElement('Text', null, 'ICON')}
+                title="Turn Diff"
+                subtitle="Recap of the changes that occurred during this turn"
+                onPress={() => {}}
+                canOpen={true}
+                onOpen={() => {}}
+                openActionTestID="tool-timeline-row-open"
+                revealAction={React.createElement('Pressable', { testID: 'tool-timeline-row-pin' })}
+            />,
+        );
+
+        const readTitleShrink = () => {
+            const titleNode = screen.findAllByType('Text').find((node) => node.props.children === 'Turn Diff');
+            return readStyleNumber(titleNode!.props.style, 'flexShrink');
+        };
+        const pinSlot = () => screen.findByTestId(TOOL_TIMELINE_ROW_PIN_SLOT_TEST_ID);
+        const openSlot = () => screen.findByTestId(TOOL_TIMELINE_ROW_REVEAL_SLOT_TEST_ID);
+
+        expect(pinSlot()?.findByProps({ testID: 'tool-timeline-row-pin' })).toBeTruthy();
+        expect(openSlot()?.findByProps({ testID: 'tool-timeline-row-open' })).toBeTruthy();
+        expect(readAnimatedOpacity(pinSlot()?.props.style)).toBe(0);
+        expect(readAnimatedOpacity(openSlot()?.props.style)).toBe(0);
+        const unhoveredTitleShrink = readTitleShrink();
+
+        await act(async () => {
+            screen.findByTestId('tool-timeline-row')?.props.onHoverIn?.();
+        });
+
+        expect(readAnimatedOpacity(pinSlot()?.props.style)).toBe(1);
+        expect(readAnimatedOpacity(openSlot()?.props.style)).toBe(1);
+        expect(readTitleShrink()).toBe(unhoveredTitleShrink);
+    });
+
+    it('keeps a pinned row pin visible without dragging the open-details action into view', async () => {
+        const { ToolTimelineRowHeader, TOOL_TIMELINE_ROW_PIN_SLOT_TEST_ID, TOOL_TIMELINE_ROW_REVEAL_SLOT_TEST_ID } =
+            await import('./ToolTimelineRowHeader');
+
+        const screen = await renderScreen(
+            <ToolTimelineRowHeader
+                density="comfortable"
+                icon={React.createElement('Text', null, 'ICON')}
+                title="Title"
+                onPress={() => {}}
+                canOpen={true}
+                onOpen={() => {}}
+                openActionTestID="tool-timeline-row-open"
+                revealAction={React.createElement('Pressable', { testID: 'tool-timeline-row-pin' })}
+                revealActionSticky
+            />,
+        );
+
+        expect(readAnimatedOpacity(screen.findByTestId(TOOL_TIMELINE_ROW_PIN_SLOT_TEST_ID)?.props.style)).toBe(1);
+        expect(readAnimatedOpacity(screen.findByTestId(TOOL_TIMELINE_ROW_REVEAL_SLOT_TEST_ID)?.props.style)).toBe(0);
+    });
+
+    it('reveals a hidden pin when keyboard focus reaches it, so it can never be activated while invisible', async () => {
+        const { ToolTimelineRowHeader, TOOL_TIMELINE_ROW_PIN_SLOT_TEST_ID } = await import('./ToolTimelineRowHeader');
+
+        const screen = await renderScreen(
+            <ToolTimelineRowHeader
+                density="comfortable"
+                icon={React.createElement('Text', null, 'ICON')}
+                title="Title"
+                onPress={() => {}}
+                canOpen={false}
+                onOpen={null}
+                revealAction={React.createElement('Pressable', { testID: 'tool-timeline-row-pin' })}
+            />,
+        );
+
+        expect(readAnimatedOpacity(screen.findByTestId(TOOL_TIMELINE_ROW_PIN_SLOT_TEST_ID)?.props.style)).toBe(0);
+
+        await act(async () => {
+            screen.findByTestId(TOOL_TIMELINE_ROW_PIN_SLOT_TEST_ID)?.props.onFocus?.();
+        });
+
+        expect(readAnimatedOpacity(screen.findByTestId(TOOL_TIMELINE_ROW_PIN_SLOT_TEST_ID)?.props.style)).toBe(1);
     });
 
     it('crossfades the left icon to a chevron-down on hover when expandable (web)', async () => {

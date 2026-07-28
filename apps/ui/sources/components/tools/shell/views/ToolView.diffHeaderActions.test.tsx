@@ -181,7 +181,7 @@ describe('ToolView (diff header actions)', () => {
                 messages={[]}
                 sessionId="s1"
                 messageId="server:message-1"
-                headerAction={React.createElement('Pressable', { testID: 'tool-parent-pin-action' })}
+                headerAction={{ node: React.createElement('Pressable', { testID: 'tool-parent-pin-action' }), pinned: false }}
             />,
         );
 

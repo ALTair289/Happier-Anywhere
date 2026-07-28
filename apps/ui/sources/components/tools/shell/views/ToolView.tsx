@@ -42,7 +42,13 @@ import { resolveInactiveSessionToolCallFailure } from '../permissions/resolveIna
 import { navigateWithBlurOnWeb } from '@/utils/platform/navigateWithBlurOnWeb';
 import { buildApprovalToolCallLocation, doesApprovalMatchToolCall } from './toolApprovalPromptMatching';
 import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
+import { TranscriptJumpAttention } from '@/components/sessions/transcript/navigation/TranscriptJumpHighlightOverlay';
+import { RowActionRevealSlot } from '@/components/sessions/transcript/messageActions/RowActionRevealSlot';
+import { readCoarsePrimaryPointer, useRowActionHoverHost } from '@/components/sessions/transcript/messageActions/rowActionRevealHost';
+import { shouldShowTranscriptRowPinAction } from '@/components/sessions/transcript/messageCopyVisibility';
+import type { ToolRowPinAction } from '@/components/sessions/transcript/toolCalls/ToolCallPinAction';
 
+const TOOL_VIEW_HIGHLIGHT_RADIUS = 12;
 
 interface ToolViewProps {
     metadata: Metadata | null;
@@ -51,7 +57,9 @@ interface ToolViewProps {
     onPress?: () => void;
     sessionId?: string;
     messageId?: string;
-    headerAction?: React.ReactNode | null;
+    /** Row seq, so a seq-targeted transcript jump can land its highlight here. */
+    jumpHighlightSeq?: number | null;
+    headerAction?: ToolRowPinAction | null;
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
     forcePermissionPromptsInTranscript?: boolean;
     /**
@@ -67,6 +75,7 @@ interface ToolViewProps {
 
 export const ToolView = React.memo<ToolViewProps>((props) => {
     const { tool, onPress, sessionId, messageId } = props;
+    const headerActionHost = useRowActionHoverHost();
     const router = useRouter();
     const { theme } = useUnistyles();
     const [isExpanded, setIsExpanded] = React.useState(false);
@@ -190,6 +199,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     const sidechainHydration = useEnsureSidechainsLoaded({
         enabled:
             isExpanded &&
+            props.interaction?.disableToolNavigation !== true &&
             isSubAgentTranscriptToolName(normalizedToolName),
         sessionId,
         sidechainIds: [transcriptSidechainId],
@@ -329,8 +339,12 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
         statusKind === 'error' ? (resolveToolErrorSummary(toolForRendering) ?? t('common.error')) : null;
 
     return (
-        <View
-            testID="tool-view-container"
+        <TranscriptJumpAttention
+            sessionId={sessionId ?? ''}
+            routeMessageId={messageId ?? null}
+            seq={props.jumpHighlightSeq ?? null}
+            radius={TOOL_VIEW_HIGHLIGHT_RADIUS}
+            viewProps={{ testID: 'tool-view-container', ...headerActionHost.hoverProps }}
             style={[styles.container, props.embedded ? styles.containerEmbedded : null]}
         >
             <View style={[styles.header, timelineDensity === 'compact' ? styles.headerCompact : null]}>
@@ -376,9 +390,23 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                             </Text>
                         </View>
                     ) : null}
-                    {props.headerAction || headerActions ? (
+                    {props.headerAction ? (
+                        <RowActionRevealSlot
+                            revealed={shouldShowTranscriptRowPinAction({
+                                platformOS: Platform.OS,
+                                isRowHovered: headerActionHost.isHovered,
+                                isActionHovered: false,
+                                coarsePrimaryPointer: readCoarsePrimaryPointer(),
+                                pinned: props.headerAction.pinned,
+                            })}
+                            style={styles.headerActionsContainer}
+                            testID="tool-view-header-reveal-slot"
+                        >
+                            {props.headerAction.node}
+                        </RowActionRevealSlot>
+                    ) : null}
+                    {headerActions ? (
                         <View style={styles.headerActionsContainer}>
-                            {props.headerAction}
                             {headerActions}
                         </View>
                     ) : null}
@@ -456,7 +484,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                     disabledReason={props.interaction?.permissionDisabledReason}
                 />
             ))}
-        </View>
+        </TranscriptJumpAttention>
     );
 });
 
