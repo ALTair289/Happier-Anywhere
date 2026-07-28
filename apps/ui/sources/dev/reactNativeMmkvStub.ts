@@ -1,19 +1,33 @@
-export class MMKV {
-    private readonly values = new Map<string, string>();
+const values = new Map<string, unknown>();
 
+export function resetReactNativeMmkvStub(): void {
+    values.clear();
+}
+
+export class MMKV {
     getString(key: string): string | undefined {
-        return this.values.get(key);
+        const value = values.get(key);
+        return typeof value === 'string' ? value : undefined;
     }
 
-    set(key: string, value: string): void {
-        this.values.set(key, value);
+    getNumber(key: string): number | undefined {
+        const value = values.get(key);
+        return typeof value === 'number' ? value : undefined;
+    }
+
+    set(key: string, value: unknown): void {
+        values.set(key, value);
     }
 
     delete(key: string): void {
-        this.values.delete(key);
+        values.delete(key);
+    }
+
+    getAllKeys(): string[] {
+        return [...values.keys()];
     }
 
     clearAll(): void {
-        this.values.clear();
+        values.clear();
     }
 }

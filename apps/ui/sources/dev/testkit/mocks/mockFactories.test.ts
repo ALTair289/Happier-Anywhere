@@ -72,6 +72,23 @@ describe('UI testkit mock factories', () => {
         expect(typeof appState.addEventListener).toBe('function');
     });
 
+    it('creates a removable React Native AppState change emitter', async () => {
+        const { createReactNativeAppStateEmitter } = await import('./reactNative');
+        const boundary = createReactNativeAppStateEmitter();
+        const listener = vi.fn();
+        const subscription = boundary.appState.addEventListener('change', listener);
+
+        boundary.emit('inactive');
+        expect(boundary.appState.currentState).toBe('inactive');
+        expect(listener).toHaveBeenCalledExactlyOnceWith('inactive');
+        expect(boundary.getListenerCount()).toBe(1);
+
+        subscription.remove();
+        boundary.emit('background');
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(boundary.getListenerCount()).toBe(0);
+    });
+
     it('preserves nested stub exports when overriding React Native module objects like Animated', async () => {
         const { createReactNativeWebMock } = await import('./reactNative');
 

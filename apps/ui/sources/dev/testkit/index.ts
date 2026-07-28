@@ -21,6 +21,7 @@ export * from './hooks/flushHookEffects';
 export * from './hooks/renderHook';
 export * from './mocks/icons';
 export * from './mocks/flashList';
+export * from './mocks/legendList';
 export * from './mocks/gestureHandler';
 export * from './mocks/keyboardAvoidance';
 export * from './mocks/modal';
