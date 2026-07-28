@@ -77,7 +77,7 @@ describe('bootstrapActiveServerFromWebLocation', () => {
         expect(result?.serverUrl).toBe('http://127.0.0.1:57010');
     });
 
-    it('drops stale route serverId params when consuming a web server override', async () => {
+    it('keeps the relay intent visible until connection and auth commit', async () => {
         process.env.EXPO_PUBLIC_HAPPY_STORAGE_SCOPE = randomScope();
         process.env.EXPO_PUBLIC_HAPPY_SERVER_URL = 'http://localhost:57010';
 
@@ -88,7 +88,32 @@ describe('bootstrapActiveServerFromWebLocation', () => {
 
         expect(result?.serverUrl).toBe('http://127.0.0.1:57010');
         expect(result?.cleanedRelativeUrl).toBe('/session/session-1?tab=files');
-        expect(window.history.replaceState).toHaveBeenCalledWith(null, '', '/session/session-1?tab=files');
+        expect(window.history.replaceState).not.toHaveBeenCalled();
+    });
+
+    it('cleans the relay intent only after the active connection and auth refresh commit', async () => {
+        process.env.EXPO_PUBLIC_HAPPY_STORAGE_SCOPE = randomScope();
+        process.env.EXPO_PUBLIC_HAPPY_SERVER_URL = 'https://relay.example.test';
+        stubWebLocation('https://app.example.test/session/session-1?server=https%3A%2F%2Frelay.example.test&serverId=stale');
+
+        const { commitWebServerUrlOverride, readWebServerUrlOverrideFromLocation } = await importFreshBootstrap();
+        const override = readWebServerUrlOverrideFromLocation();
+        expect(override).not.toBeNull();
+        const refreshAuth = vi.fn()
+            .mockRejectedValueOnce(new Error('auth refresh failed'))
+            .mockResolvedValueOnce(undefined);
+
+        await expect(commitWebServerUrlOverride({
+            override: override!,
+            refreshAuth,
+        })).rejects.toThrow('auth refresh failed');
+        expect(window.history.replaceState).not.toHaveBeenCalled();
+
+        await expect(commitWebServerUrlOverride({
+            override: override!,
+            refreshAuth,
+        })).resolves.toBeUndefined();
+        expect(window.history.replaceState).toHaveBeenCalledWith(null, '', '/session/session-1');
     });
 
     it('promotes an equivalent tab override to the device active server from the web query string', async () => {

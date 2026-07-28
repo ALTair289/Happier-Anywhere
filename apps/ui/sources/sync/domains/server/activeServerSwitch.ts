@@ -56,25 +56,33 @@ export async function upsertActivateAndSwitchServer(params: Readonly<{
     scope?: 'device' | 'tab';
     name?: string;
     refreshAuth?: (() => Promise<void>) | null;
+    ensureConnection?: boolean;
 }>): Promise<boolean> {
     const targetServerUrl = normalizeServerUrl(params.serverUrl);
     if (!targetServerUrl) return false;
 
     const active = getActiveServerSnapshot();
     const scope = params.scope ?? 'device';
-    if (canSkipActiveServerUrlSwitch({ activeServerUrl: active.serverUrl, targetServerUrl, scope })) return false;
-
-    upsertAndActivateServer({
-        serverUrl: targetServerUrl,
-        name: params.name ?? defaultServerNameFromUrl(targetServerUrl),
-        source: params.source ?? 'url',
+    const canSkipActivation = canSkipActiveServerUrlSwitch({
+        activeServerUrl: active.serverUrl,
+        targetServerUrl,
         scope,
     });
+    if (canSkipActivation && !params.ensureConnection) return false;
+
+    if (!canSkipActivation) {
+        upsertAndActivateServer({
+            serverUrl: targetServerUrl,
+            name: params.name ?? defaultServerNameFromUrl(targetServerUrl),
+            source: params.source ?? 'url',
+            scope,
+        });
+    }
     await switchConnectionToActiveServer();
     if (params.refreshAuth) {
         await params.refreshAuth();
     }
-    return true;
+    return !canSkipActivation;
 }
 
 export async function setActiveServerAndSwitch(params: Readonly<{

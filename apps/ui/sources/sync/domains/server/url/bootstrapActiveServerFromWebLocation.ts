@@ -1,6 +1,7 @@
 import { canonicalizeServerUrl, createServerUrlComparableKey } from './serverUrlCanonical';
 import { getActiveServerUrl, getTabActiveServerId } from '../serverProfiles';
 import { upsertAndActivateServer } from '../serverRuntime';
+import { upsertActivateAndSwitchServer } from '../activeServerSwitch';
 
 export type WebServerUrlOverride = Readonly<{ serverUrl: string; cleanedRelativeUrl: string }>;
 
@@ -31,6 +32,24 @@ function replaceCurrentWebLocation(relativeUrl: string): void {
     } catch {
         // ignore
     }
+}
+
+export async function commitWebServerUrlOverride(params: Readonly<{
+    override: WebServerUrlOverride;
+    refreshAuth: () => Promise<void>;
+}>): Promise<void> {
+    const desired = normalizeServerUrl(params.override.serverUrl);
+    if (!desired) {
+        throw new Error('Invalid server URL override');
+    }
+    await upsertActivateAndSwitchServer({
+        serverUrl: desired,
+        source: 'url',
+        scope: 'device',
+        refreshAuth: params.refreshAuth,
+        ensureConnection: true,
+    });
+    replaceCurrentWebLocation(params.override.cleanedRelativeUrl);
 }
 
 export function readWebServerUrlOverrideFromLocation(): WebServerUrlOverride | null {
@@ -85,6 +104,5 @@ export function bootstrapActiveServerFromWebLocation(
         }
     }
 
-    replaceCurrentWebLocation(override.cleanedRelativeUrl);
     return { serverUrl: desired, cleanedRelativeUrl: override.cleanedRelativeUrl };
 }

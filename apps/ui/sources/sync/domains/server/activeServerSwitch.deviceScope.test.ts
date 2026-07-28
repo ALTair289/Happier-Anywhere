@@ -131,4 +131,31 @@ describe('activeServerSwitch device scope', () => {
         expect(profiles.getDeviceDefaultServerId()).toBe(profile.id);
         expect(profiles.getActiveServerId()).toBe('srv_identity_same_server');
     });
+
+    it('can re-establish connection and auth even when bootstrap already activated the target url', async () => {
+        process.env.EXPO_PUBLIC_HAPPY_STORAGE_SCOPE = randomScope();
+        stubWebRuntime('https://origin.example.test');
+
+        const { profiles, switches } = await importFreshServerModules();
+        const profile = profiles.upsertServerProfile({
+            serverUrl: 'https://relay.example.test',
+            name: 'Relay',
+        });
+        profiles.setActiveServerId(profile.id, { scope: 'device' });
+        const syncModule = await import('@/sync/sync');
+        const syncSwitchServer = vi.mocked(syncModule.syncSwitchServer);
+        syncSwitchServer.mockClear();
+        const refreshAuth = vi.fn(async () => undefined);
+
+        const switched = await switches.upsertActivateAndSwitchServer({
+            serverUrl: profile.serverUrl,
+            scope: 'device',
+            refreshAuth,
+            ensureConnection: true,
+        });
+
+        expect(switched).toBe(false);
+        expect(syncSwitchServer).toHaveBeenCalledTimes(1);
+        expect(refreshAuth).toHaveBeenCalledTimes(1);
+    });
 });
