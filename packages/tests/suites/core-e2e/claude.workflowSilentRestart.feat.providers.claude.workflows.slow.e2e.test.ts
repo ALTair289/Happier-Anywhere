@@ -33,12 +33,11 @@ const run = createRunDirs({ runLabel: 'core' });
 
 const ACTIVITY_NAMESPACE = 'activity';
 const WORKFLOW_RUN_KIND = 'workflow_run.v1';
-// The `progress` fixture preset (mid-run, no terminal) leaves this run active forever.
-const INTERRUPTED_RUN_ID = 'toolu_wf_progress';
-// The restarted CLI must first boot (dist already built) + connect to the server + wire the workflow
-// source, and only THEN does `WORKFLOW_ACTIVITY_STARTUP_RECONCILE_GRACE_MS` (30s, not env-overridable)
-// elapse before the synthetic terminal transition is written. Budget boot + grace + write generously.
-const RECONCILE_WAIT_MS = 180_000;
+// The `progress` fixture preset (mid-run, no terminal) leaves this run active indefinitely.
+const SILENT_ACTIVE_RUN_ID = 'toolu_wf_progress';
+// This exceeds the removed 30-second startup-grace heuristic. The run must remain active because
+// elapsed time and a runner restart are not workflow terminal evidence.
+const SILENCE_ASSERTION_MS = 45_000;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -102,7 +101,7 @@ async function fetchWorkflowRunSnapshots(ctx: ReadAccess): Promise<SessionWorkfl
     .filter((snapshot): snapshot is SessionWorkflowRunSnapshotV1 => snapshot !== null);
 }
 
-describe('core e2e: Claude workflow interruption startup reconciliation (W-1 / Lane D1)', () => {
+describe('core e2e: Claude workflow restart preserves silent active work', () => {
   let server: StartedServer | null = null;
   let proc: SpawnedProcess | null = null;
   let cliHomeForCleanup: string | null = null;
@@ -118,20 +117,12 @@ describe('core e2e: Claude workflow interruption startup reconciliation (W-1 / L
     server = null;
   });
 
-  // W-1 / plan #4: a CLI crash/SIGKILL leaves a workflow run pinned `active` forever in the durable
-  // record + `sessionWorkflowActivityHeadlineV1` (the graceful `finally`-flush never ran; the restarted
-  // process builds a fresh tracker; the server is a dumb store with no TTL). On restart,
-  // `wireClaudeWorkflowActivitySource` reads the persisted headline and, after the reconcile grace
-  // period, synthetically terminates any active run NOT re-observed live → `status:'stopped'`,
-  // `statusReason:'interrupted'` through the one-writer (record-first, headline-second) path.
-  //
-  // This e2e reproduces the crash genuinely: boot → drive the `progress` preset (a run that stays
-  // active) → SIGKILL the provider (no graceful flush) → restart the SAME server session under a FRESH
-  // fake-claude session id (empty transcript) WITHOUT re-writing the workflow signal, so the stale run
-  // is never re-observed and must be reconciled. Asserts the durable record AND the headline both flip
-  // to stopped/interrupted and agree.
-  it('reconciles a SIGKILL-interrupted workflow run to stopped/interrupted on restart (record + headline agree)', async () => {
-    const testName = 'claude-workflow-interrupt-reconcile';
+  // A runner crash does not prove that provider-owned workflow work finished. This e2e genuinely
+  // SIGKILLs the first runtime after persisting an active workflow, restarts the same Happier session
+  // with no new workflow evidence, waits beyond the former grace heuristic, and requires the durable
+  // record and headline to remain active and mutually consistent.
+  it('keeps a SIGKILL-surviving workflow active after restart and arbitrary silence', async () => {
+    const testName = 'claude-workflow-silent-restart-preserves-active';
     const testDir = run.testDir(testName);
     const startedAt = new Date().toISOString();
 
@@ -243,13 +234,13 @@ describe('core e2e: Claude workflow interruption startup reconciliation (W-1 / L
     // The durable record exists and is NON-terminal (active).
     await waitFor(async () => {
       const snapshots = await fetchWorkflowRunSnapshots(ctx);
-      const snapshot = snapshots.find((s) => s.runId === INTERRUPTED_RUN_ID);
+      const snapshot = snapshots.find((s) => s.runId === SILENT_ACTIVE_RUN_ID);
       return Boolean(snapshot && !isTerminalWorkflowRunStatus(snapshot.status));
     }, { timeoutMs: 60_000, context: 'progress preset produces a NON-terminal durable workflow run record' });
 
     // The headline pins the same run as active (a reconcile candidate on restart).
     await waitFor(async () => {
-      const run = findHeadlineRun(readWorkflowHeadline(await readMetadata(ctx)), INTERRUPTED_RUN_ID);
+      const run = findHeadlineRun(readWorkflowHeadline(await readMetadata(ctx)), SILENT_ACTIVE_RUN_ID);
       return Boolean(run && !isTerminalWorkflowRunStatus(run.status));
     }, { timeoutMs: 60_000, context: 'headline pins the active workflow run before the crash' });
 
@@ -258,39 +249,20 @@ describe('core e2e: Claude workflow interruption startup reconciliation (W-1 / L
     proc = null;
     await stopDaemonFromHomeDir(cliHome).catch(() => {});
 
-    // ── Phase 3: restart the SAME session under a FRESH transcript, NO workflow signal (run not re-observed)
-    // A `--happy-starting-mode local` restart of an EXISTING session forks via `--resume`; the startup
-    // reconciliation timer is armed at `wireClaudeWorkflowActivitySource` construction directly from the
-    // persisted (post-crash) headline — it does NOT depend on the forked runtime binding a new
-    // claudeSessionId. So we do NOT gate on a specific forked session id here (that binding is racy across
-    // the fork and is not the behavior under test). The reconcile itself (Phase 4) writes to the SERVER,
-    // which inherently proves the restarted CLI connected + wired before we accept it. The fresh
-    // fake-claude session id gives cli-2 an empty transcript so the stale run is never re-observed.
+    // ── Phase 3: restart the SAME session under a fresh transcript with no workflow signal ───────────
     const secondFakeSessionId = `fake-claude-session-${randomUUID()}`;
     proc = await bootSession({ fakeClaudeSessionId: secondFakeSessionId, label: 'cli-2' });
 
-    // ── Phase 4: after boot + the reconcile grace period, the durable record flips to stopped/interrupted ─
-    // (A server-side flip is only possible once cli-2 has connected and armed the reconcile timer.)
-    await waitFor(async () => {
-      const snapshots = await fetchWorkflowRunSnapshots(ctx);
-      return snapshots.some((s) =>
-        s.runId === INTERRUPTED_RUN_ID && s.status === 'stopped' && s.statusReason === 'interrupted');
-    }, { timeoutMs: RECONCILE_WAIT_MS, context: 'interrupted run is reconciled to stopped/interrupted in the durable record' });
-
-    // ── The headline agrees (record-first, headline-second) ──────────────────────────────────────────
-    await waitFor(async () => {
-      const run = findHeadlineRun(readWorkflowHeadline(await readMetadata(ctx)), INTERRUPTED_RUN_ID);
-      return run?.status === 'stopped' && run?.statusReason === 'interrupted';
-    }, { timeoutMs: 60_000, context: 'headline agrees: run reconciled to stopped/interrupted' });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, SILENCE_ASSERTION_MS));
+    expect(proc.child.exitCode).toBeNull();
 
     const snapshots = await fetchWorkflowRunSnapshots(ctx);
-    const record = snapshots.find((s) => s.runId === INTERRUPTED_RUN_ID);
-    const headlineRun = findHeadlineRun(readWorkflowHeadline(await readMetadata(ctx)), INTERRUPTED_RUN_ID);
-    expect(record?.status).toBe('stopped');
-    expect(record?.statusReason).toBe('interrupted');
-    expect(headlineRun?.status).toBe('stopped');
-    expect(headlineRun?.statusReason).toBe('interrupted');
-    // Record + headline agree on the run identity.
+    const record = snapshots.find((s) => s.runId === SILENT_ACTIVE_RUN_ID);
+    const headlineRun = findHeadlineRun(readWorkflowHeadline(await readMetadata(ctx)), SILENT_ACTIVE_RUN_ID);
+    expect(record && !isTerminalWorkflowRunStatus(record.status)).toBe(true);
+    expect(record?.statusReason).toBeUndefined();
+    expect(headlineRun && !isTerminalWorkflowRunStatus(headlineRun.status)).toBe(true);
+    expect(headlineRun?.statusReason).toBeUndefined();
     expect(headlineRun?.runId).toBe(record?.runId);
   }, 480_000);
 });

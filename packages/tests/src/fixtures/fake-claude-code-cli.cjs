@@ -62,6 +62,9 @@ const localActiveTurnStartSignalPath = String(
 const localActiveTurnCompleteSignalPath = String(
   process.env.HAPPIER_E2E_FAKE_CLAUDE_LOCAL_COMPLETE_SIGNAL || '',
 ).trim();
+const runtimeActivityTerminalSignalPath = String(
+  process.env.HAPPIER_E2E_FAKE_CLAUDE_RUNTIME_ACTIVITY_TERMINAL_SIGNAL || '',
+).trim();
 
 // `goal-status-attachment` scenario (T3): in local/unified-terminal mode, when a
 // signal file appears the fake CLI appends a Claude-native `goal_status`
@@ -90,6 +93,9 @@ const goalStatusDefaultObjective = String(
 // `stopped`, `no-phase`, `long-preview`, `concurrent`); the stream is emitted exactly once.
 const workflowSignalPath = String(process.env.HAPPIER_E2E_FAKE_CLAUDE_WORKFLOW_SIGNAL || '').trim();
 const workflowSignalsEnabled = workflowSignalPath.length > 0;
+const workflowTerminalSignalPath = String(
+  process.env.HAPPIER_E2E_FAKE_CLAUDE_WORKFLOW_TERMINAL_SIGNAL || '',
+).trim();
 
 function resolveClaudeConfigDir() {
   const explicit = String(process.env.CLAUDE_CONFIG_DIR || '').trim();
@@ -524,6 +530,10 @@ async function runSdkStreamUntilEof() {
   const rl = readline.createInterface({ input: process.stdin });
   let initialized = false;
   let turn = 0;
+  let stagedRuntimeActivityTaskId = null;
+  let stagedRuntimeActivityTerminalEmitted = false;
+  let stagedWorkflowProgressEmitted = false;
+  let stagedWorkflowTerminalEmitted = false;
 
   function emitSdk(obj) {
     process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -536,6 +546,92 @@ async function runSdkStreamUntilEof() {
       messageSubtype: obj?.subtype ?? null,
     });
   }
+
+  const runtimeActivityTerminalInterval =
+    scenario === 'runtime-activity-staged' && runtimeActivityTerminalSignalPath
+      ? setInterval(() => {
+          if (
+            !stagedRuntimeActivityTaskId
+            || stagedRuntimeActivityTerminalEmitted
+            || !fs.existsSync(runtimeActivityTerminalSignalPath)
+          ) return;
+          stagedRuntimeActivityTerminalEmitted = true;
+          emitSdk({
+            type: 'system',
+            subtype: 'task_notification',
+            task_id: stagedRuntimeActivityTaskId,
+            status: 'completed',
+            summary: 'staged runtime activity completed',
+            uuid: randomUUID(),
+            session_id: sessionId,
+          });
+          safeAppendJsonl(logPath, {
+            type: 'runtime_activity_terminal_emitted',
+            invocationId,
+            taskId: stagedRuntimeActivityTaskId,
+            ts: Date.now(),
+          });
+        }, 50)
+      : null;
+
+  const runtimeActivityWorkflowInterval =
+    scenario === 'runtime-activity-staged' && workflowSignalsEnabled
+      ? setInterval(() => {
+          if (!stagedWorkflowProgressEmitted) {
+            const preset = readReadySignalObjective(workflowSignalPath);
+            if (preset !== null) {
+              stagedWorkflowProgressEmitted = true;
+              const spec = buildWorkflowSpec(preset);
+              for (const run of spec.runs) {
+                for (const record of run.records) {
+                  emitSdk({
+                    ...record,
+                    session_id: sessionId,
+                    uuid: randomUUID(),
+                  });
+                }
+              }
+              safeAppendJsonl(logPath, {
+                type: 'runtime_activity_workflow_progress_emitted',
+                invocationId,
+                preset,
+                ts: Date.now(),
+              });
+            }
+          }
+          if (
+            stagedWorkflowProgressEmitted
+            && !stagedWorkflowTerminalEmitted
+            && workflowTerminalSignalPath
+            && fs.existsSync(workflowTerminalSignalPath)
+          ) {
+            stagedWorkflowTerminalEmitted = true;
+            emitSdk({
+              type: 'system',
+              subtype: 'task_updated',
+              task_id: 'w_progress',
+              patch: { status: 'completed', end_time: Date.now() },
+              session_id: sessionId,
+              uuid: randomUUID(),
+            });
+            emitSdk({
+              type: 'system',
+              subtype: 'task_notification',
+              task_id: 'w_progress',
+              tool_use_id: 'toolu_wf_progress',
+              status: 'completed',
+              summary: 'research-task completed',
+              session_id: sessionId,
+              uuid: randomUUID(),
+            });
+            safeAppendJsonl(logPath, {
+              type: 'runtime_activity_workflow_terminal_emitted',
+              invocationId,
+              ts: Date.now(),
+            });
+          }
+        }, 50)
+      : null;
 
   function createControlResponse(requestId, response) {
     return {
@@ -696,6 +792,22 @@ async function runSdkStreamUntilEof() {
 
     const now = Date.now();
     turn += 1;
+
+    if (scenario === 'runtime-activity-staged' && stagedRuntimeActivityTaskId === null) {
+      stagedRuntimeActivityTaskId = `runtime_activity_${turn}`;
+      emitSdk({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: stagedRuntimeActivityTaskId,
+        status: 'running',
+        description: 'staged runtime activity',
+        uuid: randomUUID(),
+        session_id: sessionId,
+      });
+      emitSdk(createAssistantMessage([{ type: 'text', text: `FAKE_CLAUDE_OK_${turn}` }]));
+      emitSdk(createResultSuccess());
+      continue;
+    }
 
     if (scenario === 'memory-hints-json') {
       const match = String(promptText).match(/OPENCLAW_MEMORY_SENTINEL_[A-Za-z0-9_-]+/);
@@ -1162,6 +1274,8 @@ async function runSdkStreamUntilEof() {
     emitSdk(createResultSuccess());
   }
 
+  if (runtimeActivityTerminalInterval) clearInterval(runtimeActivityTerminalInterval);
+  if (runtimeActivityWorkflowInterval) clearInterval(runtimeActivityWorkflowInterval);
   rl.close();
   safeAppendJsonl(logPath, { type: 'sdk_exited', invocationId, ts: Date.now(), turns: turn });
   process.exit(0);
