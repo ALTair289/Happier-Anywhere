@@ -446,4 +446,25 @@ describe('PetAppShellCompanionMount.native', () => {
             expect.objectContaining({ defaultSessionId: 'native-pet-session' }),
         );
     });
+
+    it('reads reduced motion from the shared process-wide preference, not a per-mount listener', async () => {
+        const { AccessibilityInfo } = await import('react-native');
+        // `addEventListener` is overloaded per event name, so the recorded calls are read
+        // through the widest shape both overloads satisfy: an event name plus a handler.
+        const readSubscriptionCalls = (): readonly (readonly [string, ...unknown[]])[] =>
+            vi.mocked(AccessibilityInfo.addEventListener).mock.calls;
+        const countReduceMotionSubscriptions = () => readSubscriptionCalls()
+            .filter(([event]) => event === 'reduceMotionChanged').length;
+        const before = countReduceMotionSubscriptions();
+        const { PetAppShellCompanionMount } = await import('./PetAppShellCompanionMount.native');
+
+        const first = await renderScreen(<PetAppShellCompanionMount />);
+        await first.unmount();
+        const second = await renderScreen(<PetAppShellCompanionMount />);
+        await second.unmount();
+
+        // The shared store attaches one platform listener for the whole process; a
+        // private per-mount hook would attach one per companion mount instead.
+        expect(countReduceMotionSubscriptions() - before).toBeLessThanOrEqual(1);
+    });
 });

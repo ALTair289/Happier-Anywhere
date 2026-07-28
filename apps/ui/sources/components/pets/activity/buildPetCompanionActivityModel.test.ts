@@ -217,4 +217,43 @@ describe('buildPetCompanionActivityModel', () => {
             trayItems: [],
         });
     });
+
+    it('ignores projected background activity', () => {
+        const session = createSession({
+            id: 'background-activity-session',
+            thinking: false,
+            runtimeActivityState: 'active',
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 1_000,
+            runtimeActivityRevision: 7,
+        });
+
+        const model = buildPetCompanionActivityModel({
+            sessions: [session],
+            nowMs: 10_000_000,
+        });
+
+        expect(model).toMatchObject({
+            state: 'idle',
+            reason: 'idle',
+            sessionId: session.id,
+            trayItems: [],
+        });
+    });
+
+    it('does not reinterpret projected unknown as running from elapsed time', () => {
+        const session = createSession({
+            id: 'unknown-activity-session',
+            thinking: false,
+            runtimeActivityState: 'unknown',
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 1_000,
+            runtimeActivityRevision: 8,
+        });
+
+        expect(buildPetCompanionActivityModel({ sessions: [session], nowMs: 5_000 })).toMatchObject({
+            state: 'idle',
+            reason: 'idle',
+        });
+    });
 });

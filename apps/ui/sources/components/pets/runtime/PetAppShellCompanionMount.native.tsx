@@ -1,6 +1,5 @@
 import * as React from 'react';
 import {
-    AccessibilityInfo,
     AppState,
     Pressable,
     View,
@@ -58,35 +57,12 @@ import { useLocalSetting } from '@/sync/domains/state/storage';
 import { createDefaultActionExecutor } from '@/sync/ops/actions/defaultActionExecutor';
 import { useApplyLocalSettings } from '@/sync/store/settingsWriters';
 import { useKeyboardHeight } from '@/hooks/ui/useKeyboardHeight';
+import { useReducedMotionPreference } from '@/hooks/ui/useReducedMotionPreference';
 
 const PET_TAP_REACTION_STATE = 'jumping' satisfies PetAnimationStateV1;
 const PET_TAP_REACTION_HAPTIC_STYLE: Record<typeof PET_TAP_REACTION_HAPTIC, Haptics.ImpactFeedbackStyle> = {
     light: Haptics.ImpactFeedbackStyle.Light,
 };
-
-function useReducedMotionPreference(): boolean {
-    const [reducedMotion, setReducedMotion] = React.useState(false);
-
-    React.useEffect(() => {
-        let mounted = true;
-        void AccessibilityInfo.isReduceMotionEnabled()
-            .then((enabled) => {
-                if (mounted) setReducedMotion(enabled);
-            })
-            .catch(() => {
-                if (mounted) setReducedMotion(false);
-            });
-        const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', (enabled) => {
-            setReducedMotion(enabled);
-        });
-        return () => {
-            mounted = false;
-            subscription.remove();
-        };
-    }, []);
-
-    return reducedMotion;
-}
 
 function useAppStateActive(): boolean {
     const [active, setActive] = React.useState(() => AppState.currentState === 'active');
