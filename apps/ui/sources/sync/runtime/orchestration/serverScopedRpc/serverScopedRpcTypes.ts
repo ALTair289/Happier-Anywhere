@@ -12,6 +12,8 @@ export type ServerScopedMachineRpcParams<A> = Readonly<{
     timeoutMs?: number;
     preferScoped?: boolean;
     authorization?: SocketRpcAuthorizationContext;
+    /** Called immediately before a fully prepared transport emission. */
+    onIssued?: () => void;
 }>;
 
 export type ActiveServerRpcContext = Readonly<{

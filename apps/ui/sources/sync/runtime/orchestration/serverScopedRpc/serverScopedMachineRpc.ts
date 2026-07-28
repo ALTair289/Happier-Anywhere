@@ -106,6 +106,13 @@ function shouldFallbackToScopedMachineRpc(error: unknown): boolean {
 }
 
 export async function machineRpcWithServerScope<R, A>(params: ServerScopedMachineRpcParams<A>): Promise<R> {
+    let exactIssuanceAttempted = false;
+    const onIssued = params.onIssued
+        ? () => {
+            exactIssuanceAttempted = true;
+            params.onIssued?.();
+        }
+        : undefined;
     const runOnce = async (options?: { forceScoped?: boolean }): Promise<R> => {
         const context = await resolveServerScopedContext({
             machineId: params.machineId,
@@ -115,15 +122,26 @@ export async function machineRpcWithServerScope<R, A>(params: ServerScopedMachin
         });
 
         if (context.scope === 'active' && params.preferScoped !== true) {
+            let abandonedBeforeEmission = false;
+            const activeOnIssued = onIssued
+                ? () => {
+                    if (abandonedBeforeEmission) {
+                        throw new Error('Exact active machine RPC was superseded before emission');
+                    }
+                    onIssued();
+                }
+                : undefined;
             try {
                 const result = await withMachineRpcTimeout(
                     apiSocket.machineRPC<R, A>(
                         context.machineId,
                         params.method,
                         params.payload,
-                        params.authorization
-                            ? { timeoutMs: context.timeoutMs, authorization: params.authorization }
-                            : { timeoutMs: context.timeoutMs },
+                        {
+                            timeoutMs: context.timeoutMs,
+                            ...(params.authorization ? { authorization: params.authorization } : {}),
+                            ...(activeOnIssued ? { onIssued: activeOnIssued } : {}),
+                        },
                     ),
                     {
                         scope: 'active',
@@ -138,9 +156,15 @@ export async function machineRpcWithServerScope<R, A>(params: ServerScopedMachin
                 });
                 return result;
             } catch (error) {
+                if (exactIssuanceAttempted) {
+                    throw error;
+                }
                 if (!shouldFallbackToScopedMachineRpc(error)) {
                     throw error;
                 }
+                // The timeout wrapper cannot cancel encryption already in progress. Fence that
+                // abandoned active promise at its immediate pre-emit callback before falling back.
+                abandonedBeforeEmission = true;
                 return await runOnce({ forceScoped: true });
             }
         }
@@ -170,18 +194,19 @@ export async function machineRpcWithServerScope<R, A>(params: ServerScopedMachin
             timeoutMs: context.timeoutMs,
         });
         try {
+            const encryptedPayload = await measureMachineEncryptRawAttribution(
+                resolveScopedMachineRpcEncryptRawAttributionEvent(params.method),
+                async () => await machineEncryption.encryptRaw(params.payload),
+            );
+            const socketEmission = socket.timeout(context.timeoutMs);
+            onIssued?.();
             const result = await withMachineRpcTimeout(
-                socket
-                    .timeout(context.timeoutMs)
-                    .emitWithAck(SOCKET_RPC_EVENTS.CALL, {
-                        method: `${context.machineId}:${params.method}`,
-                        params: await measureMachineEncryptRawAttribution(
-                            resolveScopedMachineRpcEncryptRawAttributionEvent(params.method),
-                            async () => await machineEncryption.encryptRaw(params.payload),
-                        ),
-                        ...(params.authorization ? { authorization: params.authorization } : {}),
-                        timeoutMs: context.timeoutMs,
-                    }) as Promise<SocketRpcResult>,
+                socketEmission.emitWithAck(SOCKET_RPC_EVENTS.CALL, {
+                    method: `${context.machineId}:${params.method}`,
+                    params: encryptedPayload,
+                    ...(params.authorization ? { authorization: params.authorization } : {}),
+                    timeoutMs: context.timeoutMs,
+                }) as Promise<SocketRpcResult>,
                 {
                     scope: 'scoped',
                     method: params.method,
@@ -215,6 +240,9 @@ export async function machineRpcWithServerScope<R, A>(params: ServerScopedMachin
             return await runOnce();
         } catch (error) {
             lastError = error;
+            if (exactIssuanceAttempted) {
+                throw error;
+            }
             const rpcErrorCode = readRpcErrorCode(error);
             if (rpcErrorCode === RPC_ERROR_CODES.METHOD_NOT_AVAILABLE && attempt === 0) {
                 await delay(250);

@@ -319,7 +319,12 @@ class ApiSocket {
     /**
      * RPC call for sessions - uses session-specific encryption
      */
-    async sessionRPC<R, A>(sessionId: string, method: string, params: A, options?: { timeoutMs?: number }): Promise<R> {
+    async sessionRPC<R, A>(
+        sessionId: string,
+        method: string,
+        params: A,
+        options?: { timeoutMs?: number; onIssued?: () => void },
+    ): Promise<R> {
         const sessionEncryptionMode = readSessionEncryptionModeFromLocalState(sessionId);
         const usePlaintextParams = sessionEncryptionMode === 'plain';
         const sessionEncryption = usePlaintextParams ? null : this.encryption?.getSessionEncryption(sessionId);
@@ -394,7 +399,11 @@ class ApiSocket {
         machineId: string,
         method: string,
         params: A,
-        options?: { timeoutMs?: number; authorization?: SocketRpcAuthorizationContext },
+        options?: {
+            timeoutMs?: number;
+            authorization?: SocketRpcAuthorizationContext;
+            onIssued?: () => void;
+        },
     ): Promise<R> {
         const machineEncryption = this.encryption!.getMachineEncryption(machineId);
         if (!machineEncryption) {
@@ -426,7 +435,11 @@ class ApiSocket {
         return true;
     }
 
-    async emitWithAck<T = any>(event: string, data: any, opts?: { timeoutMs?: number }): Promise<T> {
+    async emitWithAck<T = any>(
+        event: string,
+        data: any,
+        opts?: { timeoutMs?: number; onIssued?: () => void },
+    ): Promise<T> {
         if (this.currentConnectionState.phase === 'auth_failed') {
             throw createNotAuthenticatedError();
         }
@@ -435,10 +448,11 @@ class ApiSocket {
         }
         const timeoutMs = opts?.timeoutMs;
         try {
-            const ackPromise =
-                typeof timeoutMs === 'number' && timeoutMs > 0
-                    ? this.socket.timeout(timeoutMs).emitWithAck(event, data) as Promise<T>
-                    : this.socket.emitWithAck(event, data) as Promise<T>;
+            const socketEmission = typeof timeoutMs === 'number' && timeoutMs > 0
+                ? this.socket.timeout(timeoutMs)
+                : this.socket;
+            opts?.onIssued?.();
+            const ackPromise = socketEmission.emitWithAck(event, data) as Promise<T>;
             return await raceSocketIoAckTimeout(ackPromise, timeoutMs);
         } catch (error) {
             throw await this.coerceAckTimeoutAuthError(error);
