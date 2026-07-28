@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+
+import { renameForPublication } from './atomic_rename.mjs';
 
 export async function readJsonIfExists(path, { defaultValue = null } = {}) {
   try {
@@ -13,13 +15,12 @@ export async function readJsonIfExists(path, { defaultValue = null } = {}) {
   }
 }
 
-export async function writeJsonAtomic(path, value) {
+export async function writeJsonAtomic(path, value, options = {}) {
   const p = String(path ?? '').trim();
   if (!p) throw new Error('writeJsonAtomic: path is required');
   const dir = dirname(p);
   await mkdir(dir, { recursive: true }).catch(() => {});
   const tmp = join(dir, `.tmp.${Date.now()}.${Math.random().toString(16).slice(2)}.json`);
   await writeFile(tmp, JSON.stringify(value, null, 2) + '\n', 'utf-8');
-  await rename(tmp, p);
+  await renameForPublication(tmp, p, options);
 }
-

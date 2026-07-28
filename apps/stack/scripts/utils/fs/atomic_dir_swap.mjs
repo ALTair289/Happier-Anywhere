@@ -1,35 +1,10 @@
-import { mkdir, rename, rm } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { setTimeout as wait } from 'node:timers/promises';
 
-const WINDOWS_TRANSIENT_RENAME_CODES = new Set(['EACCES', 'EBUSY', 'EPERM']);
+import { renameForPublication } from './atomic_rename.mjs';
 
 function rand() {
   return Math.random().toString(16).slice(2);
-}
-
-async function renameForPublication(
-  from,
-  to,
-  { platform, renameImpl, waitImpl, maxRetries = 8 },
-) {
-  let retry = 0;
-  while (true) {
-    try {
-      await renameImpl(from, to);
-      return;
-    } catch (error) {
-      if (
-        platform !== 'win32'
-        || !WINDOWS_TRANSIENT_RENAME_CODES.has(error?.code)
-        || retry >= maxRetries
-      ) {
-        throw error;
-      }
-      await waitImpl(Math.min(25 * (2 ** retry), 400));
-      retry += 1;
-    }
-  }
 }
 
 export async function buildIntoTempThenReplace(
@@ -37,8 +12,8 @@ export async function buildIntoTempThenReplace(
   buildFn,
   {
     platform = process.platform,
-    renameImpl = rename,
-    waitImpl = wait,
+    renameImpl,
+    waitImpl,
   } = {},
 ) {
   const outDir = String(targetDir ?? '').trim();
