@@ -203,27 +203,62 @@ async function getComponentPm(dir, env = process.env) {
 
   // IMPORTANT: probe yarn with cwd=componentDir; yarn can be blocked depending on Corepack context.
   if (await commandExists('yarn', { cwd: dir, env })) {
-    return { name: 'yarn', cmd: 'yarn' };
+    return { name: 'yarn', cmd: 'yarn', prefixArgs: [] };
   }
 
   const binaryMode = String(env.HAPPIER_STACK_BINARY_MODE ?? '').trim() === '1'
     || String(env.HAPPIER_STACK_INSTALL_SOURCE ?? '').trim() === 'binary';
   if (binaryMode && (await commandExists('npm', { cwd: dir, env }))) {
-    return { name: 'npm', cmd: 'npm' };
+    return { name: 'npm', cmd: 'npm', prefixArgs: [] };
+  }
+
+  if (await commandExists('corepack', { cwd: dir, env })) {
+    return { name: 'yarn', cmd: 'corepack', prefixArgs: ['yarn'] };
   }
 
   throw new Error(`[local] yarn is required for component at ${dir}. Install it via Corepack: \`corepack enable\``);
+}
+
+function resolvePmArgs(pm, args) {
+  return [...(pm.prefixArgs ?? []), ...args];
+}
+
+function runPm(pm, args, options) {
+  return run(pm.cmd, resolvePmArgs(pm, args), options);
+}
+
+function spawnPm(label, pm, args, env, options) {
+  return spawnProc(label, pm.cmd, resolvePmArgs(pm, args), env, options);
+}
+
+function readEnvPath(env) {
+  const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === 'path');
+  return key ? String(env[key] ?? '') : '';
+}
+
+function writeEnvPath(env, value) {
+  for (const key of Object.keys(env)) {
+    if (key !== 'PATH' && key.toLowerCase() === 'path') {
+      delete env[key];
+    }
+  }
+  env.PATH = value;
+}
+
+function normalizeEnvPath(env) {
+  writeEnvPath(env, readEnvPath(env));
+  return env;
 }
 
 function prependPathEntry(env, entry) {
   const candidate = String(entry ?? '').trim();
   if (!candidate) return env;
   const delimiter = process.platform === 'win32' ? ';' : ':';
-  const current = String(env.PATH ?? '')
+  const current = readEnvPath(env)
     .split(delimiter)
     .map((value) => String(value ?? '').trim())
     .filter(Boolean);
-  env.PATH = [candidate, ...current.filter((value) => value !== candidate)].join(delimiter);
+  writeEnvPath(env, [candidate, ...current.filter((value) => value !== candidate)].join(delimiter));
   return env;
 }
 
@@ -267,6 +302,7 @@ async function resolvePreferredNodeBinDir(dir, env = process.env) {
 
 async function preparePmEnv(dir, envIn = process.env) {
   const env = await applyStackCacheEnv(envIn);
+  normalizeEnvPath(env);
   if (typeof env.REDISMS_DISABLE_POSTINSTALL === 'undefined') {
     // redis-memory-server only uses postinstall to prefetch binaries; skipping it avoids making
     // stack-managed dependency refreshes depend on local Redis build prerequisites.
@@ -323,8 +359,8 @@ async function ensureServerGeneratedProviderOutputs(componentDir, installDir, { 
   }
 
   if (pm.name === 'yarn') {
-    await ensureYarnReady({ dir: installDir, env, quiet });
-    await run(pm.cmd, ['-s', 'workspace', '@happier-dev/server', 'generate:providers'], {
+    await ensureYarnReady({ dir: installDir, env, quiet, pm });
+    await runPm(pm, ['-s', 'workspace', '@happier-dev/server', 'generate:providers'], {
       cwd: installDir,
       stdio,
       env,
@@ -332,7 +368,7 @@ async function ensureServerGeneratedProviderOutputs(componentDir, installDir, { 
     return;
   }
 
-  await run(pm.cmd, ['run', '-s', 'generate:providers'], {
+  await runPm(pm, ['run', '-s', 'generate:providers'], {
     cwd: componentDir,
     stdio,
     env,
@@ -343,7 +379,7 @@ async function ensureComponentPrerequisites(componentDir, _label, { quiet = fals
   await ensureServerGeneratedProviderOutputs(componentDir, resolveDependencyInstallRoot(componentDir), { quiet, env });
 }
 
-async function ensureYarnReady({ dir, env, quiet = false }) {
+async function ensureYarnReady({ dir, env, quiet = false, pm }) {
   const e = env && typeof env === 'object' ? env : process.env;
   // In stack mode we isolate HOME/cache; key by effective HOME+XDG cache so we only do this once.
   const key = `${resolve(dir)}|${String(e.HOME ?? '')}|${String(e.XDG_CACHE_HOME ?? '')}`;
@@ -355,7 +391,7 @@ async function ensureYarnReady({ dir, env, quiet = false }) {
   //
   // In TUI mode, the terminal is interactive but keyboard input is consumed by the TUI itself,
   // so Corepack's prompt can deadlock. Always provide a single "yes" to unblock the download.
-  await run('yarn', ['--version'], { cwd: dir, env: e, stdio, input: 'y\n' });
+  await runPm(pm, ['--version'], { cwd: dir, env: e, stdio, input: 'y\n' });
   _yarnReadyKeys.add(key);
 }
 
@@ -507,7 +543,7 @@ export async function ensureDepsInstalled(dir, label, { quiet = false, env: envI
   const env = await preparePmEnv(installDir, envIn);
   const pm = await getComponentPm(installDir, env);
   if (pm.name === 'yarn') {
-    await ensureYarnReady({ dir: installDir, env, quiet });
+    await ensureYarnReady({ dir: installDir, env, quiet, pm });
   }
   const installArgs = pm.name === 'yarn' ? ['install', '--production=false'] : ['install'];
 
@@ -540,7 +576,7 @@ export async function ensureDepsInstalled(dir, label, { quiet = false, env: envI
           // eslint-disable-next-line no-console
           console.log(`[local] refreshing ${label} dependencies (yarn.lock/package.json/workspace package.json/patches changed)...`);
         }
-        await run(pm.cmd, installArgs, {
+        await runPm(pm, installArgs, {
           cwd: installDir,
           stdio,
           env: heldCliLockValue
@@ -559,7 +595,7 @@ export async function ensureDepsInstalled(dir, label, { quiet = false, env: envI
       // eslint-disable-next-line no-console
       console.log(`[local] installing ${label} dependencies (first run)...`);
     }
-    await run(pm.cmd, installArgs, {
+    await runPm(pm, installArgs, {
       cwd: installDir,
       stdio,
       env: heldCliLockValue
@@ -583,11 +619,11 @@ const stackWorkspaceBuildBoundary = {
     const pm = await getComponentPm(pkgDir, env);
     const stdio = quiet ? 'ignore' : 'inherit';
     if (pm.name === 'yarn') {
-      await ensureYarnReady({ dir: pkgDir, env, quiet });
-      await run(pm.cmd, ['-s', 'build'], { cwd: pkgDir, stdio, env });
+      await ensureYarnReady({ dir: pkgDir, env, quiet, pm });
+      await runPm(pm, ['-s', 'build'], { cwd: pkgDir, stdio, env });
       return;
     }
-    await run(pm.cmd, ['run', '-s', 'build'], { cwd: pkgDir, stdio, env });
+    await runPm(pm, ['run', '-s', 'build'], { cwd: pkgDir, stdio, env });
   },
 };
 
@@ -693,7 +729,7 @@ export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: env
       // parent's live lock in the child process.
       HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: heldLockValue,
     };
-    await run(pm.cmd, ['build'], { cwd: cliDir, env: buildEnv, stdio: quiet ? 'ignore' : 'inherit' });
+    await runPm(pm, ['build'], { cwd: cliDir, env: buildEnv, stdio: quiet ? 'ignore' : 'inherit' });
 
     if (!(await pathExists(distEntrypoint))) {
       throw new Error(
@@ -817,9 +853,9 @@ export async function pmExecBin(dirOrOpts, binArg, argsArg, optsArg) {
 
   const pm = await getComponentPm(dir, env);
   if (pm.name === 'yarn') {
-    await ensureYarnReady({ dir, env, quiet });
+    await ensureYarnReady({ dir, env, quiet, pm });
   }
-  await run(pm.cmd, ['run', bin, ...args], { cwd: dir, env, stdio });
+  await runPm(pm, ['run', bin, ...args], { cwd: dir, env, stdio });
 }
 
 export async function pmSpawnBin(dir, label, bin, args, { env = process.env } = {}) {
@@ -835,10 +871,10 @@ export async function pmSpawnBin(dir, label, bin, args, { env = process.env } = 
   const effectiveEnv = await preparePmEnv(componentDir, componentEnv);
   const pm = await getComponentPm(componentDir, effectiveEnv);
   if (pm.name === 'yarn') {
-    await ensureYarnReady({ dir: componentDir, env: effectiveEnv, quiet });
+    await ensureYarnReady({ dir: componentDir, env: effectiveEnv, quiet, pm });
   }
   const envForChild = applyStackInfraProcessKind(effectiveEnv);
-  return spawnProc(componentLabel, pm.cmd, ['run', componentBin, ...componentArgs], envForChild, { cwd: componentDir, ...options });
+  return spawnPm(componentLabel, pm, ['run', componentBin, ...componentArgs], envForChild, { cwd: componentDir, ...options });
 }
 
 export async function pmSpawnScript(dir, label, script, args, { env = process.env } = {}) {
@@ -854,8 +890,8 @@ export async function pmSpawnScript(dir, label, script, args, { env = process.en
   const effectiveEnv = await preparePmEnv(componentDir, componentEnv);
   const pm = await getComponentPm(componentDir, effectiveEnv);
   if (pm.name === 'yarn') {
-    await ensureYarnReady({ dir: componentDir, env: effectiveEnv, quiet });
+    await ensureYarnReady({ dir: componentDir, env: effectiveEnv, quiet, pm });
   }
   const envForChild = applyStackInfraProcessKind(effectiveEnv);
-  return spawnProc(componentLabel, pm.cmd, ['run', componentScript, ...componentArgs], envForChild, { cwd: componentDir, ...options });
+  return spawnPm(componentLabel, pm, ['run', componentScript, ...componentArgs], envForChild, { cwd: componentDir, ...options });
 }

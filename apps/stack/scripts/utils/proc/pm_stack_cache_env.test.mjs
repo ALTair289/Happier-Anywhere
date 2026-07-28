@@ -136,6 +136,25 @@ async function writeNpmArgDumpStub({ binDir, outputPath }) {
   await writeFile(outputPath, '', 'utf-8');
 }
 
+async function writeCorepackYarnArgDumpStub({ binDir, outputPath }) {
+  await mkdir(binDir, { recursive: true });
+  const corepackPath = join(binDir, 'corepack');
+  await writeFile(
+    corepackPath,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'echo "$*" >> "${OUTPUT_PATH:?}"',
+      'if [[ "${1:-}" == "yarn" && "${2:-}" == "--version" ]]; then',
+      '  echo "1.22.22"',
+      'fi',
+    ].join('\n') + '\n',
+    'utf-8',
+  );
+  await chmod(corepackPath, 0o755);
+  await writeFile(outputPath, '', 'utf-8');
+}
+
 async function writeYarnBuildFailsBeforePromotionStub({ binDir, outputPath }) {
   await mkdir(binDir, { recursive: true });
   const yarnPath = join(binDir, 'yarn');
@@ -1272,6 +1291,63 @@ test('ensureDepsInstalled falls back to npm in binary mode when yarn is unavaila
   await ensureDepsInstalled(componentDir, 'binary-mode-component', { quiet: true });
   const out = await readFile(outputPath, 'utf-8');
   assert.match(out, /install/);
+});
+
+test('ensureDepsInstalled uses Corepack Yarn when a global Yarn shim is unavailable', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-pm-corepack-yarn-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const componentDir = join(root, 'component');
+  await mkdir(join(componentDir, 'node_modules'), { recursive: true });
+  await writeFile(join(componentDir, 'package.json'), '{}\n', 'utf-8');
+
+  const binDir = join(root, 'bin');
+  const outputPath = join(root, 'argv.txt');
+  await writeCorepackYarnArgDumpStub({ binDir, outputPath });
+
+  await ensureDepsInstalled(componentDir, 'corepack-component', {
+    quiet: true,
+    env: {
+      ...process.env,
+      PATH: `${binDir}:/usr/bin:/bin`,
+      OUTPUT_PATH: outputPath,
+      HAPPIER_STACK_BINARY_MODE: '0',
+      HAPPIER_STACK_ENV_FILE: '',
+      HAPPIER_STACK_SKIP_REFRESH_DEPS: '1',
+    },
+  });
+
+  assert.equal(await readFile(outputPath, 'utf-8'), 'yarn --version\n');
+});
+
+test('ensureDepsInstalled preserves a Windows-style Path key while preparing Corepack Yarn', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-pm-corepack-windows-path-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const componentDir = join(root, 'component');
+  await mkdir(join(componentDir, 'node_modules'), { recursive: true });
+  await writeFile(join(componentDir, 'package.json'), '{}\n', 'utf-8');
+
+  const binDir = join(root, 'bin');
+  const outputPath = join(root, 'argv.txt');
+  await writeCorepackYarnArgDumpStub({ binDir, outputPath });
+
+  const env = {
+    ...process.env,
+    Path: `${binDir}:/usr/bin:/bin`,
+    OUTPUT_PATH: outputPath,
+    HAPPIER_STACK_BINARY_MODE: '0',
+    HAPPIER_STACK_ENV_FILE: '',
+    HAPPIER_STACK_SKIP_REFRESH_DEPS: '1',
+  };
+  delete env.PATH;
+
+  await ensureDepsInstalled(componentDir, 'corepack-component', { quiet: true, env });
+  assert.equal(await readFile(outputPath, 'utf-8'), 'yarn --version\n');
 });
 
 test('pmExecBin sets stack-scoped cache env vars for yarn runs', async (t) => {
