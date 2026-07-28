@@ -62,6 +62,7 @@
 import { NormalizedMessage } from '../typesRaw';
 import { isDebugFlagEnabled } from './helpers/debugFlags';
 import { readStreamSegmentMetaV1 } from './helpers/streamSegmentMeta';
+import { readAcpToolCallSnapshotRevision } from './helpers/toolCallSnapshotRevision';
 
 type OrphanBucket = {
     updatedAt: number;
@@ -253,6 +254,10 @@ function getProcessedKey(message: NormalizedMessage): string {
         if (type === 'thinking') {
             const thinking = typeof first?.thinking === 'string' ? first.thinking : '';
             return `thinking:${hashStringFNV1a32(thinking)}:${thinking.length}`;
+        }
+        if (type === 'tool-call') {
+            const revision = readAcpToolCallSnapshotRevision(first?.input);
+            if (revision !== null) return `tool:${revision}`;
         }
         return 'v0';
     })();

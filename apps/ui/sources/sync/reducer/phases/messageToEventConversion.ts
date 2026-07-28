@@ -3,6 +3,10 @@ import type { ReducerState } from '../reducer';
 import { parseMessageAsEvent } from '../messageToEvent';
 import { setThinkingMergeCursor } from '../helpers/mergeCursors';
 import { normalizeTranscriptSeq } from '../../domains/messages/transcriptOrdering';
+import {
+  readAcpToolCallSnapshotRevision,
+  readMessageToolSnapshotRevision,
+} from '../helpers/toolCallSnapshotRevision';
 
 export function runMessageToEventConversion({
   state,
@@ -44,7 +48,13 @@ export function runMessageToEventConversion({
       continue;
     }
     if (state.messageIds.has(msg.id)) {
-      continue;
+      const existingMessageId = state.messageIds.get(msg.id) ?? null;
+      const existingMessage = existingMessageId ? state.messages.get(existingMessageId) ?? null : null;
+      const incomingRevision = readMessageToolSnapshotRevision(msg);
+      const existingRevision = readAcpToolCallSnapshotRevision(existingMessage?.tool?.input);
+      if (incomingRevision === null || existingRevision === null || incomingRevision <= existingRevision) {
+        continue;
+      }
     }
 
     // Filter out ready events completely - they should not create any message

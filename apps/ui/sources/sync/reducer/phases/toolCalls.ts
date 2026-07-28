@@ -5,6 +5,7 @@ import type { ReducerState } from '../reducer';
 import { drainAndApplyOrphanToolResultsToMessage } from '../helpers/drainAndApplyOrphanToolResultsToMessage';
 import { setThinkingMergeCursor } from '../helpers/mergeCursors';
 import { normalizeTranscriptSeq, transcriptBlockIndexFromContentIndex } from '../../domains/messages/transcriptOrdering';
+import { readAcpToolCallSnapshotRevision } from '../helpers/toolCallSnapshotRevision';
 
 export function runToolCallsPhase(params: Readonly<{
     state: ReducerState;
@@ -74,10 +75,17 @@ export function runToolCallsPhase(params: Readonly<{
                                 const incomingObj = incomingInput && typeof incomingInput === 'object' && !Array.isArray(incomingInput)
                                     ? (incomingInput as Record<string, unknown>)
                                     : null;
+                                const existingRevision = readAcpToolCallSnapshotRevision(existingInput);
+                                const incomingRevision = readAcpToolCallSnapshotRevision(incomingInput);
+                                const isNewerAcpSnapshot = incomingRevision !== null
+                                    && existingRevision !== null
+                                    && incomingRevision > existingRevision;
 
                                 const merged =
                                     existingObj && incomingObj
-                                        ? (() => {
+                                        ? isNewerAcpSnapshot && !message.tool.permission
+                                            ? { ...incomingObj }
+                                            : (() => {
                                             // Preserve existing fields (permission args are authoritative), but allow
                                             // ACP metadata (_acp) to update over time.
                                             const base = { ...incomingObj, ...existingObj };
