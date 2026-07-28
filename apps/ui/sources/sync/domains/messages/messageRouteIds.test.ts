@@ -50,6 +50,17 @@ describe('messageRouteIds', () => {
         expect(parseStableSessionMessageRouteId('plain-message-id')).toBeNull();
     });
 
+    it('preserves whitespace-distinct opaque local ids in stable routes', () => {
+        expect(parseStableSessionMessageRouteId('local: request-1')).toEqual({
+            kind: 'local',
+            value: ' request-1',
+        });
+        expect(parseStableSessionMessageRouteId('local:request-1 ')).toEqual({
+            kind: 'local',
+            value: 'request-1 ',
+        });
+    });
+
     it('builds a durable server route for an internal message id when reducer state knows the original id', () => {
         const reducerState = createReducer();
         reducerState.messageIds.set('server-msg-1', 'internal-1');
