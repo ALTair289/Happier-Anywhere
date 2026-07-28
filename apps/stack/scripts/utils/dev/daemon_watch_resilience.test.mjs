@@ -770,3 +770,55 @@ test('reload executor cold-start carries the admitted build fingerprint into dae
   assert.deepEqual(await executor.restart(), { restarted: true, mode: 'cold-start' });
   assert.equal(coldStartArgs?.admittedDistClosureFingerprint, 'abcdef1234567890');
 });
+
+test('successful CLI publication waits for a live startup daemon to publish its control state before activation', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-control-state-race-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const cliDir = join(root, 'apps', 'cli');
+  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(distIndexPath), { recursive: true });
+  await writeFile(distIndexPath, 'export const daemon = true;\n', 'utf-8');
+  await writeDistBuildManifest(distIndexPath, 'abcdef1234567890');
+
+  let pingCalls = 0;
+  let restartCalls = 0;
+  const delays = [];
+  const executor = createHappyCliReloadExecutor(
+    {
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      runtimeStatePath: join(root, 'stack.runtime.json'),
+      isShuttingDown: () => false,
+      stackName: 'dev',
+    },
+    {
+      ensureCliBuiltImpl: async () => ({ built: true, current: true, reason: 'test' }),
+      pingDaemonImpl: async () => {
+        pingCalls += 1;
+        return pingCalls === 1
+          ? { ok: false, reason: 'missing_state' }
+          : { ok: true, pid: 111 };
+      },
+      readStackRuntimeStateFileImpl: async () => ({ processes: { daemonPid: 111 } }),
+      isPidAliveImpl: (pid) => pid === 111,
+      sleepImpl: async (delayMs) => { delays.push(delayMs); },
+      restartDaemonViaControlServerImpl: async () => {
+        restartCalls += 1;
+        return { status: 'restarting', previousPid: 111, pid: 222 };
+      },
+      syncStackRuntimeDaemonPidFromDaemonStateImpl: async () => {},
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  await executor.build();
+  assert.deepEqual(await executor.restart(), { restarted: true, mode: 'overlap' });
+  assert.equal(pingCalls, 2);
+  assert.equal(restartCalls, 1);
+  assert.equal(delays.length, 1);
+});

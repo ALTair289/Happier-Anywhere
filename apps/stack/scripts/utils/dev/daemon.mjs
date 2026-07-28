@@ -24,6 +24,12 @@ import { resolveHappyCliRuntimeInputGroups } from '../proc/cli_runtime_inputs.mj
 import { readCliDistBuildManifest } from '../cli/cliDistIntegrity.mjs';
 import { WORKSPACE_BUNDLE_LOCK_TIMEOUT_ERROR_CODE } from '../proc/cliDistBuildLock.mjs';
 
+const DAEMON_CONTROL_PUBLICATION_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000];
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function createHappyCliReloadDescriptors({
   cliDir,
   existsSyncImpl = existsSync,
@@ -214,6 +220,7 @@ export function createHappyCliReloadExecutor({
   readStackRuntimeStateFileImpl = readStackRuntimeStateFile,
   isPidAliveImpl = isPidAlive,
   existsSyncImpl = existsSync,
+  sleepImpl = sleepMs,
   logger = console,
 } = {}) {
   let successorDistClosureFingerprint = null;
@@ -331,13 +338,34 @@ export function createHappyCliReloadExecutor({
           ...(successorPublicationSuperseded ? { degraded: true } : {}),
         };
       };
-      const ping = await pingDaemonImpl({
+      let ping = await pingDaemonImpl({
         cliHomeDir,
         serverUrl: internalServerUrl,
         internalServerUrl,
         env,
         stackName,
       });
+      if (
+        ping?.ok !== true
+        && successorDistClosureFingerprint
+        && await hasLiveRuntimeDaemonPid(
+          { runtimeStatePath },
+          { readStackRuntimeStateFileImpl, isPidAliveImpl },
+        )
+      ) {
+        for (const delayMs of DAEMON_CONTROL_PUBLICATION_RETRY_DELAYS_MS) {
+          if (isShuttingDown?.()) return { skipped: true, reason: 'daemon-disabled' };
+          await sleepImpl(delayMs);
+          ping = await pingDaemonImpl({
+            cliHomeDir,
+            serverUrl: internalServerUrl,
+            internalServerUrl,
+            env,
+            stackName,
+          });
+          if (ping?.ok === true) break;
+        }
+      }
       if (ping?.ok === true) {
         if (!successorActivationMayOutliveGeneration && !await generationIsCurrent()) {
           return { skipped: true, reason: 'stale-generation' };

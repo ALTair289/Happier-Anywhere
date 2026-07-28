@@ -197,6 +197,11 @@ const parseNonNegativeInt = (value, fallback) => {
 };
 
 export const DEFAULT_STACK_DAEMON_START_VERIFY_TIMEOUT_MS = 120_000;
+const PRIOR_DIST_PUBLICATION_RETRY_DELAYS_MS = [25, 50, 100, 200];
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export function resolveStackDaemonStartVerifyTimeoutMs(env = process.env) {
   return parseNonNegativeInt(
@@ -802,6 +807,7 @@ export async function ensureHappierCliDistExists(
   {
     ensureCliBuiltImpl = ensureCliBuilt,
     probeCliDistRuntimeImportImpl = probeCliDistRuntimeImport,
+    sleepImpl = sleepMs,
   } = {},
 ) {
   const explicitRuntimeLaunch = resolveExplicitRuntimeLaunchValidation({ cliEntrypoint, cliNodeEntrypoint, cliCommand });
@@ -847,7 +853,14 @@ export async function ensureHappierCliDistExists(
         reason: exactAdmission ? 'admitted-dist-closure' : `admitted_dist_mismatch:${integrity.reason ?? 'unknown'}`,
       };
     }
-    const priorIntegrity = readIntegrity();
+    let priorIntegrity = readIntegrity();
+    if (admitPriorDistImmediately && !priorIntegrity.ok) {
+      for (const delayMs of PRIOR_DIST_PUBLICATION_RETRY_DELAYS_MS) {
+        await sleepImpl(delayMs);
+        priorIntegrity = readIntegrity();
+        if (priorIntegrity.ok) break;
+      }
+    }
     if (admitPriorDistImmediately && priorIntegrity.ok) {
       try {
         await probeCliDistRuntimeImportImpl(distEntrypoint, {

@@ -74,6 +74,42 @@ test('watch startup admits a validated prior CLI publication without waiting for
   assert.equal(result.fallbackFingerprint, 'abcdef1234567890');
 });
 
+test('watch startup retries a transient atomic CLI publication gap before waiting on the shared build lock', async (t) => {
+  const repoDir = await mkdtemp(join(tmpdir(), 'hstack-last-green-cli-publication-gap-'));
+  t.after(async () => rm(repoDir, { recursive: true, force: true }));
+  const cliDir = join(repoDir, 'apps', 'cli');
+  const cliBin = join(cliDir, 'bin', 'happier.mjs');
+  const distEntrypoint = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(cliBin), { recursive: true });
+  await mkdir(dirname(distEntrypoint), { recursive: true });
+  await writeFile(distEntrypoint, 'export {};\n', 'utf-8');
+  let buildCalls = 0;
+  let sleepCalls = 0;
+
+  const result = await ensureHappierCliDistExists(
+    {
+      cliBin,
+      admitPriorDistImmediately: true,
+      env: { ...process.env, HAPPIER_STACK_REPO_DIR: repoDir },
+    },
+    {
+      ensureCliBuiltImpl: async () => {
+        buildCalls += 1;
+        throw new Error('startup must not wait on the shared build lock');
+      },
+      sleepImpl: async () => {
+        sleepCalls += 1;
+        await writeDistBuildManifestForTest(distEntrypoint, 'abcdef1234567890');
+      },
+      probeCliDistRuntimeImportImpl: async () => {},
+    },
+  );
+
+  assert.equal(result.reason, 'admitted-prior-dist-for-watch-startup');
+  assert.equal(buildCalls, 0);
+  assert.equal(sleepCalls, 1);
+});
+
 test('source admission forces one last-chance build when builds are disabled and dist is invalid', async (t) => {
   const repoDir = await mkdtemp(join(tmpdir(), 'hstack-disabled-cli-bootstrap-'));
   t.after(async () => rm(repoDir, { recursive: true, force: true }));
