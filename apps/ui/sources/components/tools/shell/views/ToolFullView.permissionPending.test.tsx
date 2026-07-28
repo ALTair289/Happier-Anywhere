@@ -113,7 +113,7 @@ describe('ToolFullView (permission pending)', () => {
         });
 
         const screen = await renderScreen(
-            React.createElement(ToolFullView, { tool, metadata: null, messages: [], sessionId: 's1' }),
+            React.createElement(ToolFullView, { tool, owningMessageId: 'tool-message-1', metadata: null, messages: [], sessionId: 's1' }),
         );
 
         expect(screen.findAllByType('PermissionFooter' as any)).toHaveLength(1);
@@ -133,7 +133,7 @@ describe('ToolFullView (permission pending)', () => {
         });
 
         const screen = await renderScreen(
-            React.createElement(ToolFullView, { tool, metadata: null, messages: [], sessionId: 's1' }),
+            React.createElement(ToolFullView, { tool, owningMessageId: 'tool-message-2', metadata: null, messages: [], sessionId: 's1' }),
         );
 
         expect(screen.findAllByType('PermissionFooter' as any)).toHaveLength(0);
@@ -155,6 +155,7 @@ describe('ToolFullView (permission pending)', () => {
         const screen = await renderScreen(
             React.createElement(ToolFullView, {
                 tool,
+                owningMessageId: 'tool-message-3',
                 metadata: null,
                 messages: [],
                 sessionId: 's1',
@@ -198,6 +199,7 @@ describe('ToolFullView (permission pending)', () => {
         const screen = await renderScreen(
             React.createElement(ToolFullView, {
                 tool,
+                owningMessageId: 'tool-message-4',
                 metadata: null,
                 messages: [childToolMessage],
                 sessionId: 's1',
@@ -228,6 +230,7 @@ describe('ToolFullView (permission pending)', () => {
         const screen = await renderScreen(
             React.createElement(ToolFullView, {
                 tool,
+                owningMessageId: 'tool-message-5',
                 metadata: null,
                 messages: [],
                 sessionId: 's1',

@@ -88,7 +88,8 @@ describe('ToolFullView (jumpChildId)', () => {
         ];
 
         const screen = await renderScreen(React.createElement(ToolFullView, {
-            tool: makeToolCall({ name: 'Task' }),
+            tool: makeToolCall({ id: 'sidechain-a', name: 'Task' }),
+            owningMessageId: 'task-message-1',
             sessionId: 's1',
             metadata: null,
             messages,
@@ -97,6 +98,7 @@ describe('ToolFullView (jumpChildId)', () => {
 
         expect(findTestInstanceByTypeWithProps(screen, 'ChainTranscriptList', {
             jumpToMessageId: 'child-2',
+            datasetKey: JSON.stringify(['s1', 'sidechain-a']),
         })).toBeTruthy();
     });
 });

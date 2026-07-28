@@ -85,7 +85,7 @@ describe('ToolFullView (error message formatting)', () => {
         });
 
         const screen = await renderScreen(
-            React.createElement(ToolFullView, { tool, sessionId: 's1', metadata: null, messages: [] }),
+            React.createElement(ToolFullView, { tool, owningMessageId: 'tool-message-1', sessionId: 's1', metadata: null, messages: [] }),
         );
 
         const flattened = collectHostText(screen.tree);
