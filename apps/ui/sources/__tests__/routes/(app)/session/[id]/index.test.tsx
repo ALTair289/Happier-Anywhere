@@ -21,6 +21,7 @@ let mobileWorkspaceExperience: 'classic' | 'cockpit' = 'classic';
 let lastMobileSurfaceBySessionId: Record<string, string> = {};
 let terminalTabAvailableForSessionId: string | null = null;
 let sessionsById: Record<string, unknown> = {};
+const storageListeners = new Set<() => void>();
 let endpointConnectivityStatus = 'idle';
 let syncError: { message: string; kind: 'auth' | 'config' | 'network' | 'server' | 'unknown'; serverId?: string | null } | null = null;
 const terminalAvailabilityCalls: Array<unknown> = [];
@@ -31,12 +32,19 @@ const activeServerRuntimeState = vi.hoisted(() => ({
     snapshot: { generation: 1 },
     listener: null as null | (() => void),
 }));
+const platformState = vi.hoisted(() => ({
+    os: 'ios' as 'ios' | 'web',
+}));
 
 installSessionRouteCommonModuleMocks({
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
         return createReactNativeWebMock({
-            Platform: { OS: 'ios' },
+            Platform: {
+                get OS() {
+                    return platformState.os;
+                },
+            },
             View: 'View',
             ActivityIndicator: 'ActivityIndicator',
         });
@@ -76,6 +84,16 @@ installSessionRouteCommonModuleMocks({
                         },
                     }),
                 })) as any,
+                storage: ((selector: (state: Record<string, unknown>) => unknown) => React.useSyncExternalStore(
+                    (listener) => {
+                        storageListeners.add(listener);
+                        return () => storageListeners.delete(listener);
+                    },
+                    () => selector({
+                        sessions: sessionsById,
+                        sessionListViewDataByServerId: {},
+                    }),
+                )) as any,
                 useEndpointConnectivity: (() => ({
                     status: endpointConnectivityStatus,
                     reason: null,
@@ -173,10 +191,12 @@ describe('session route index', () => {
         lastMobileSurfaceBySessionId = {};
         terminalTabAvailableForSessionId = null;
         sessionsById = {};
+        storageListeners.clear();
         endpointConnectivityStatus = 'idle';
         syncError = null;
         terminalAvailabilityCalls.length = 0;
         routeParams.value = { id: 'session-1' };
+        platformState.os = 'ios';
         activeServerRuntimeState.snapshot = { generation: 1 };
         activeServerRuntimeState.listener = null;
     });
@@ -195,6 +215,16 @@ describe('session route index', () => {
         expect(String(hydrateTag)).toContain('gen=1');
     });
 
+    it('lets web session views derive route anchoring from the current pathname instead of forcing stale mounted routes visible', async () => {
+        platformState.os = 'web';
+        const Route = await import('@/app/(app)/session/[id]');
+
+        const screen = await renderScreen(React.createElement(Route.default));
+
+        const sessionView = screen.findByType('SessionView' as never);
+        expect(sessionView.props.routeAnchorOverride).toBeUndefined();
+    });
+
     it('shows a loading spinner while hydration is pending and the session is not cached', async () => {
         hydrateSessionForRouteSpy.mockReturnValue({ kind: 'loading', sessionId: 'session-1', reason: 'cold' });
         const Route = await import('@/app/(app)/session/[id]');
@@ -204,6 +234,35 @@ describe('session route index', () => {
         expect(screen.findAllByType('ActivitySpinner')).toHaveLength(1);
         expect(screen.findAllByType('SessionView')).toHaveLength(0);
         expect(screen.findAllByType('SessionCockpitShell')).toHaveLength(0);
+    });
+
+    it('mounts the session view when an inactive session is hydrated into the store after the route starts loading', async () => {
+        routeParams.value = { id: 'session-1', serverId: 'server-target' };
+        hydrateSessionForRouteSpy.mockReturnValue({
+            kind: 'loading',
+            sessionId: 'session-1',
+            serverId: 'server-target',
+            reason: 'cold',
+        });
+        const Route = await import('@/app/(app)/session/[id]');
+
+        const screen = await renderScreen(React.createElement(Route.default));
+        expect(screen.findAllByType('ActivitySpinner')).toHaveLength(1);
+
+        await act(async () => {
+            sessionsById = {
+                'session-1': {
+                    id: 'session-1',
+                    serverId: 'server-target',
+                    active: false,
+                    metadata: { path: '/repo', machineId: 'machine-1' },
+                },
+            };
+            for (const listener of storageListeners) listener();
+        });
+
+        expect(screen.findAllByType('ActivitySpinner')).toHaveLength(0);
+        expect(screen.findAllByType('SessionView')).toHaveLength(1);
     });
 
     it('keeps loading when a cached same-id session belongs to a different route server', async () => {
