@@ -52,6 +52,9 @@ import { setActiveServerId, upsertServerProfile } from '@/sync/domains/server/se
 
 import { createSessionShare, getSessionShares } from './apiSharing';
 
+const ACTIVE_TOKEN = 'hdr.eyJzdWIiOiJhY3RpdmUtdXNlciJ9.sig';
+const OWNER_TOKEN = 'hdr.eyJzdWIiOiJvd25lci11c2VyIn0.sig';
+
 function expectHeaderValue(headers: HeadersInit | undefined, key: string, value: string) {
     expect(new Headers(headers).get(key)).toBe(value);
 }
@@ -71,14 +74,14 @@ describe('apiSharing server-scoped session routes', () => {
         const ownerServer = upsertServerProfile({ serverUrl: 'https://owner.example', name: 'Owner' });
         setActiveServerId(activeServer.id, { scope: 'device' });
         resolvePreferredServerIdForSessionIdMock.mockReturnValue(ownerServer.id);
-        getCredentialsForServerUrlMock.mockResolvedValue({ token: 'owner-token', secret: 'owner-secret' });
+        getCredentialsForServerUrlMock.mockResolvedValue({ token: OWNER_TOKEN, secret: 'owner-secret' });
         createEncryptionFromAuthCredentialsMock.mockResolvedValue({});
         runtimeFetchMock.mockResolvedValue(new Response(JSON.stringify({ shares: [] }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
         }));
 
-        const shares = await getSessionShares({ token: 'active-token', secret: 'active-secret' }, 'session-1');
+        const shares = await getSessionShares({ token: ACTIVE_TOKEN, secret: 'active-secret' }, 'session-1');
 
         expect(shares).toEqual([]);
         expect(serverFetchMock).not.toHaveBeenCalled();
@@ -88,7 +91,7 @@ describe('apiSharing server-scoped session routes', () => {
         );
         const sharesCall = runtimeFetchMock.mock.calls.find((call) => call[0] === 'https://owner.example/v1/sessions/session-1/shares');
         expect(sharesCall).toBeTruthy();
-        expectHeaderValue(sharesCall?.[1]?.headers, 'Authorization', 'Bearer owner-token');
+        expectHeaderValue(sharesCall?.[1]?.headers, 'Authorization', `Bearer ${OWNER_TOKEN}`);
     });
 
     it('creates session shares through the preferred owner server and preserves the request body', async () => {
@@ -96,7 +99,7 @@ describe('apiSharing server-scoped session routes', () => {
         const ownerServer = upsertServerProfile({ serverUrl: 'https://owner.example', name: 'Owner' });
         setActiveServerId(activeServer.id, { scope: 'device' });
         resolvePreferredServerIdForSessionIdMock.mockReturnValue(ownerServer.id);
-        getCredentialsForServerUrlMock.mockResolvedValue({ token: 'owner-token', secret: 'owner-secret' });
+        getCredentialsForServerUrlMock.mockResolvedValue({ token: OWNER_TOKEN, secret: 'owner-secret' });
         createEncryptionFromAuthCredentialsMock.mockResolvedValue({});
         runtimeFetchMock.mockResolvedValue(new Response(JSON.stringify({
             share: {
@@ -120,7 +123,7 @@ describe('apiSharing server-scoped session routes', () => {
         }));
 
         const share = await createSessionShare(
-            { token: 'active-token', secret: 'active-secret' },
+            { token: ACTIVE_TOKEN, secret: 'active-secret' },
             'session-1',
             { userId: 'user-2', accessLevel: 'edit' },
         );
@@ -136,7 +139,7 @@ describe('apiSharing server-scoped session routes', () => {
         );
         const createCall = runtimeFetchMock.mock.calls.find((call) => call[0] === 'https://owner.example/v1/sessions/session-1/shares');
         expect(createCall).toBeTruthy();
-        expectHeaderValue(createCall?.[1]?.headers, 'Authorization', 'Bearer owner-token');
+        expectHeaderValue(createCall?.[1]?.headers, 'Authorization', `Bearer ${OWNER_TOKEN}`);
         expectHeaderValue(createCall?.[1]?.headers, 'Content-Type', 'application/json');
     });
 });
