@@ -5825,6 +5825,7 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                     title: '遠端',
                     empty: '此儲存庫尚未設定遠端。',
                     addTitle: '新增遠端',
+          imageUnavailable: '圖片無法使用',
                     editTitle: ({ name }: { name: string }) => `編輯 ${name}`,
                     add: '新增遠端',
                     remove: '移除',

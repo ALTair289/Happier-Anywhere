@@ -20,6 +20,18 @@ installSessionAttachmentCommonModuleMocks({
 
 vi.mock('react-native-svg', () => ({
     SvgXml: (props: Record<string, unknown>) => React.createElement('SvgXml', props),
+    SvgAst: (props: Record<string, unknown>) => React.createElement('SvgAst', props),
+    parse: (_xml: string, middleware?: (root: {
+        tag: string;
+        props: Record<string, unknown>;
+        children: [];
+        parent: null;
+        Tag: () => null;
+    }) => unknown) => {
+        const root = { tag: 'svg', props: {}, children: [] as [], parent: null, Tag: () => null };
+        middleware?.(root);
+        return root;
+    },
 }));
 
 vi.mock('@expo/vector-icons', () => ({
@@ -40,7 +52,7 @@ vi.mock('@/components/sessions/files/content/imagePreview/useSessionImagePreview
 }));
 
 describe('AttachmentsInlineImages (svg previews)', () => {
-    it('renders an SvgXml preview for svg attachments on native', async () => {
+    it('renders a validated SvgAst preview for svg attachments on native', async () => {
         const { AttachmentsInlineImages } = await import('./AttachmentsInlineImages');
 
         const screen = await renderScreen(
@@ -56,9 +68,12 @@ describe('AttachmentsInlineImages (svg previews)', () => {
                     },
                 ]}
                 onOpenPath={() => {}}
+                fileOpenEnabled
+                mediaPreviewEnabled
             />,
         );
 
-        expect(screen.tree.findAllByType('SvgXml').length).toBe(1);
+        expect(screen.tree.findAllByType('SvgAst').length).toBe(1);
+        expect(screen.tree.findAllByType('SvgXml').length).toBe(0);
     });
 });

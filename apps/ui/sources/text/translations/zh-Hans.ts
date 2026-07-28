@@ -6808,6 +6808,7 @@ export const zhHans: TranslationStructure = {
         count === 1
           ? "已选择 1 个文件用于下一次提交。"
           : `已选择 ${count} 个文件用于下一次提交。`,
+          imageUnavailable: '图像不可用',
       clear: "清除",
       conflictsDetected:
         "检测到冲突。在冲突解决之前，提交、拉取和推送将被阻止。",

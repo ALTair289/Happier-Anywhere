@@ -552,6 +552,42 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
                 ]);
             }
         });
+
+        it('normalizeRawMessage() preserves unavailable-media-only assistant output', () => {
+            const normalized = normalizeRawMessage(
+                'server-message-id-media-unavailable',
+                null,
+                1710000000000,
+                {
+                    role: 'agent',
+                    content: {
+                        type: 'output',
+                        data: {
+                            type: 'assistant',
+                            message: { role: 'assistant', model: 'cursor', content: [] },
+                        },
+                    },
+                    meta: {
+                        happier: {
+                            kind: 'session_media.v1',
+                            payload: {
+                                media: [],
+                                unavailable: [{
+                                    id: 'd'.repeat(64),
+                                    role: 'output',
+                                    category: 'generated',
+                                    mediaKind: 'image',
+                                    code: 'provider_file_unavailable',
+                                    origin: { source: 'provider-generated' },
+                                }],
+                            },
+                        },
+                    },
+                } as any,
+            );
+
+            expect(normalized).not.toBeNull();
+        });
     });
 
     describe('Codex/Gemini messages use native hyphenated schema (no transformation)', () => {

@@ -111,4 +111,35 @@ describe('parseSessionMediaMessageMeta', () => {
 
         expect(parseSessionMediaMessageMeta(meta).inlineImages).toEqual([]);
     });
+
+    it('returns a path-free unavailable render state from the canonical envelope', () => {
+        const unavailable = {
+            id: 'b'.repeat(64),
+            role: 'output',
+            category: 'generated',
+            mediaKind: 'image',
+            code: 'provider_file_unavailable',
+            origin: {
+                source: 'provider-generated',
+                agentId: 'cursor',
+                toolCallIdHash: 'c'.repeat(64),
+            },
+        } as const;
+
+        const parsed = parseSessionMediaMessageMeta({
+            happier: {
+                kind: 'session_media.v1',
+                payload: { media: [], unavailable: [unavailable] },
+            },
+        });
+
+        expect(parsed.inlineImages).toEqual([]);
+        expect(parsed.unavailableMedia).toEqual([{
+            id: unavailable.id,
+            category: 'generated',
+            code: 'provider_file_unavailable',
+        }]);
+        expect(JSON.stringify(parsed.unavailableMedia)).not.toContain('cursor');
+        expect(JSON.stringify(parsed.unavailableMedia)).not.toContain('toolCallId');
+    });
 });

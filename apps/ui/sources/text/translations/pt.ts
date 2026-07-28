@@ -7170,6 +7170,7 @@ export const pt: TranslationStructure = {
       lockedBy: ({ actor }: { actor: string }) =>
         `As operações de controle de versão estão bloqueadas por ${actor}.`,
       globalLock:
+          imageUnavailable: 'A imagem não está disponível',
         "As operações estão temporariamente bloqueadas porque outra sessão está executando um comando de controle de versão.",
       selection: ({ count }: { count: number }) =>
         count === 1

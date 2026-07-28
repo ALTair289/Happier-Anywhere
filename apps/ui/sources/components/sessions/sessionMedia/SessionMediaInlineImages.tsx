@@ -8,7 +8,6 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { SvgXml } from 'react-native-svg';
 
 import { Modal } from '@/modal';
 import { t } from '@/text';
@@ -18,6 +17,7 @@ import {
     type AttachmentImagePreviewModalImage,
 } from '@/components/sessions/attachments/preview/AttachmentImagePreviewModal';
 import * as FlashListCompat from '@/components/ui/lists/flashListCompat/FlashListCompat';
+import { SafeNativeSvgXml } from '@/components/ui/media/SafeNativeSvgXml';
 import type { SessionMediaInlineImageSummary } from '@/sync/domains/sessionMedia/sessionMediaMessageMeta';
 
 import { resolveSessionMediaImageMimeType } from './sessionMediaPresentation';
@@ -97,12 +97,24 @@ function resolveThumbnailSize(dimensions: ImageDimensions | null): ImageDimensio
     };
 }
 
-function SessionMediaInlineImageTile(props: Readonly<{
+function resolveSessionMediaAccessibilityLabel(media: SessionMediaInlineImageSummary): string {
+    const accessibleName = (media.description ?? media.name).slice(0, 512);
+    if (media.category === 'attachment') {
+        return t('files.sessionMedia.attachmentImageA11y', { name: accessibleName });
+    }
+    if (media.category === 'tool-artifact') {
+        return t('files.sessionMedia.toolArtifactImageA11y', { name: accessibleName });
+    }
+    return t('files.sessionMedia.generatedImageA11y', { name: accessibleName });
+}
+
+function SessionMediaInlineImagePreviewTile(props: Readonly<{
     sessionId: string;
     media: SessionMediaInlineImageSummary;
     mimeType: string;
     imageIndex: number;
     onOpenPath: (path: string) => void;
+    fileOpenEnabled: boolean;
     onOpenPreview: (index: number) => void;
     imageTestIDPrefix: string;
     previewTestIDPrefix: string;
@@ -135,16 +147,7 @@ function SessionMediaInlineImageTile(props: Readonly<{
         mimeType: props.mimeType,
         sizeBytes: props.media.sizeBytes,
     });
-    const accessibilityLabel = (() => {
-        const accessibleName = (props.media.description ?? props.media.name).slice(0, 512);
-        if (props.media.category === 'attachment') {
-            return t('files.sessionMedia.attachmentImageA11y', { name: accessibleName });
-        }
-        if (props.media.category === 'tool-artifact') {
-            return t('files.sessionMedia.toolArtifactImageA11y', { name: accessibleName });
-        }
-        return t('files.sessionMedia.generatedImageA11y', { name: accessibleName });
-    })();
+    const accessibilityLabel = resolveSessionMediaAccessibilityLabel(props.media);
 
     return (
         <Pressable
@@ -153,7 +156,9 @@ function SessionMediaInlineImageTile(props: Readonly<{
             accessibilityLabel={accessibilityLabel}
             onPress={() => {
                 if (preview.status === 'error') {
-                    props.onOpenPath(props.media.path);
+                    if (props.fileOpenEnabled) {
+                        props.onOpenPath(props.media.path);
+                    }
                     return;
                 }
                 props.onOpenPreview(props.imageIndex);
@@ -164,7 +169,7 @@ function SessionMediaInlineImageTile(props: Readonly<{
                 Platform.OS !== 'web' && preview.svgXml ? (
                     // SVG stays supported, but only after the daemon preview path has read an authorized session file.
                     // Never render transcript-inline XML, provider URLs, or file:// sources here.
-                    <SvgXml xml={preview.svgXml} width="100%" height="100%" />
+                    <SafeNativeSvgXml xml={preview.svgXml} width="100%" height="100%" />
                 ) : (
                     <Image
                         testID={`${props.previewTestIDPrefix}:${props.media.path}`}
@@ -187,10 +192,38 @@ function SessionMediaInlineImageTile(props: Readonly<{
     );
 }
 
+function SessionMediaInlineImageInertTile(props: Readonly<{
+    media: SessionMediaInlineImageSummary;
+    imageTestIDPrefix: string;
+}>): React.ReactElement {
+    const { theme } = useUnistyles();
+    const styles = stylesheet;
+    const thumbnailSize = resolveThumbnailSize(resolveImageDimensions(props.media));
+
+    return (
+        <View
+            testID={`${props.imageTestIDPrefix}:${props.media.path}`}
+            accessibilityRole="image"
+            accessibilityLabel={resolveSessionMediaAccessibilityLabel(props.media)}
+            style={[styles.tile, thumbnailSize]}
+        >
+            <View style={styles.placeholder}>
+                <Ionicons
+                    name="image-outline"
+                    size={22}
+                    color={theme.colors.text.secondary}
+                />
+            </View>
+        </View>
+    );
+}
+
 export const SessionMediaInlineImages = React.memo(function SessionMediaInlineImages(props: Readonly<{
     sessionId: string;
     media: readonly SessionMediaInlineImageSummary[];
     onOpenPath: (path: string) => void;
+    fileOpenEnabled: boolean;
+    mediaPreviewEnabled: boolean;
     containerTestID?: string;
     imageTestIDPrefix?: string;
     previewTestIDPrefix?: string;
@@ -231,27 +264,41 @@ export const SessionMediaInlineImages = React.memo(function SessionMediaInlineIm
 
     return (
         <View testID={containerTestID} style={styles.container}>
-            {images.map((entry, index) => (
-                <SessionMediaInlineImageTile
-                    key={getMappingKey(`${entry.media.path}:${entry.media.name}`, index)}
-                    sessionId={props.sessionId}
-                    media={entry.media}
-                    mimeType={entry.mimeType}
-                    imageIndex={index}
-                    onOpenPath={props.onOpenPath}
-                    imageTestIDPrefix={imageTestIDPrefix}
-                    previewTestIDPrefix={previewTestIDPrefix}
-                    onOpenPreview={(imageIndex) => {
-                        Modal.show({
-                            component: AttachmentImagePreviewModal,
-                            props: {
-                                images: images.map((imageEntry) => imageEntry.modalImage),
-                                initialIndex: imageIndex,
-                            },
-                        });
-                    }}
-                />
-            ))}
+            {images.map((entry, index) => {
+                const key = getMappingKey(`${entry.media.path}:${entry.media.name}`, index);
+                if (!props.mediaPreviewEnabled) {
+                    return (
+                        <SessionMediaInlineImageInertTile
+                            key={key}
+                            media={entry.media}
+                            imageTestIDPrefix={imageTestIDPrefix}
+                        />
+                    );
+                }
+
+                return (
+                    <SessionMediaInlineImagePreviewTile
+                        key={key}
+                        sessionId={props.sessionId}
+                        media={entry.media}
+                        mimeType={entry.mimeType}
+                        imageIndex={index}
+                        onOpenPath={props.onOpenPath}
+                        fileOpenEnabled={props.fileOpenEnabled}
+                        imageTestIDPrefix={imageTestIDPrefix}
+                        previewTestIDPrefix={previewTestIDPrefix}
+                        onOpenPreview={(imageIndex) => {
+                            Modal.show({
+                                component: AttachmentImagePreviewModal,
+                                props: {
+                                    images: images.map((imageEntry) => imageEntry.modalImage),
+                                    initialIndex: imageIndex,
+                                },
+                            });
+                        }}
+                    />
+                );
+            })}
         </View>
     );
 });

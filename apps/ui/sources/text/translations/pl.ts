@@ -7049,6 +7049,7 @@ export const pl: TranslationStructure = {
       globalLock:
         "Operacje są tymczasowo zablokowane, ponieważ inna sesja uruchamia polecenie kontroli wersji.",
       selection: ({ count }: { count: number }) =>
+          imageUnavailable: 'Obraz jest niedostępny',
         count === 1
           ? "Wybrano 1 plik do następnego commita."
           : `Wybrano ${count} plików do następnego commita.`,

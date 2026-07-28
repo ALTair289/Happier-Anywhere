@@ -23,8 +23,15 @@ export type SessionMediaInlineImageSummary = Readonly<{
     role?: 'input' | 'output';
 }>;
 
+export type SessionMediaUnavailableSummary = Readonly<{
+    id: string;
+    category: 'attachment' | 'generated' | 'tool-artifact';
+    code: string;
+}>;
+
 export type ParsedSessionMediaMessageMeta = Readonly<{
     inlineImages: readonly SessionMediaInlineImageSummary[];
+    unavailableMedia: readonly SessionMediaUnavailableSummary[];
     legacyAttachments: AttachmentsMessageMetaV1 | null;
 }>;
 
@@ -59,13 +66,23 @@ function normalizeSessionMediaItem(value: unknown): SessionMediaInlineImageSumma
     };
 }
 
-function parseSessionMediaEnvelope(envelope: HappierMetaEnvelope | null): readonly SessionMediaInlineImageSummary[] {
+function parseSessionMediaEnvelope(envelope: HappierMetaEnvelope | null): Readonly<{
+    inlineImages: readonly SessionMediaInlineImageSummary[];
+    unavailableMedia: readonly SessionMediaUnavailableSummary[];
+}> {
     const parsed = SessionMediaMessageMetaEnvelopeV1Schema.safeParse(envelope);
-    if (!parsed.success) return [];
-    return parsed.data.payload.media.flatMap((item) => {
-        const normalized = normalizeSessionMediaItem(item);
-        return normalized ? [normalized] : [];
-    });
+    if (!parsed.success) return { inlineImages: [], unavailableMedia: [] };
+    return {
+        inlineImages: parsed.data.payload.media.flatMap((item) => {
+            const normalized = normalizeSessionMediaItem(item);
+            return normalized ? [normalized] : [];
+        }),
+        unavailableMedia: (parsed.data.payload.unavailable ?? []).map((item) => ({
+            id: item.id,
+            category: item.category,
+            code: item.code,
+        })),
+    };
 }
 
 export function normalizeAttachmentMetaToSessionMedia(
@@ -100,11 +117,13 @@ export function parseSessionMediaMessageMeta(meta: unknown): ParsedSessionMediaM
     const legacyMedia = legacyAttachments ? normalizeAttachmentMetaToSessionMedia(legacyAttachments.attachments) : [];
 
     return {
-        inlineImages: [...primaryMedia, ...secondaryMedia, ...legacyMedia],
+        inlineImages: [...primaryMedia.inlineImages, ...secondaryMedia.inlineImages, ...legacyMedia],
+        unavailableMedia: [...primaryMedia.unavailableMedia, ...secondaryMedia.unavailableMedia],
         legacyAttachments,
     };
 }
 
 export function hasSessionMediaRenderItems(meta: unknown): boolean {
-    return parseSessionMediaMessageMeta(meta).inlineImages.length > 0;
+    const parsed = parseSessionMediaMessageMeta(meta);
+    return parsed.inlineImages.length > 0 || parsed.unavailableMedia.length > 0;
 }

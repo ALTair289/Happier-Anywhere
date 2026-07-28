@@ -89,17 +89,28 @@ export const AttachmentsMessageRow = React.memo(function AttachmentsMessageRow(p
     return (
         <View testID="message-attachments-row" style={styles.container}>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.row}>
-                {props.attachments.map((a, index) => (
-                    <Pressable
-                        key={getMappingKey(`${a.path}:${a.name}`, index)}
-                        onPress={props.onOpenPath ? () => props.onOpenPath?.(a.path) : undefined}
-                        style={styles.attachmentChip}
-                    >
+                {props.attachments.map((a, index) => {
+                    const content = (
+                        <>
                         <Ionicons name={resolveAttachmentIconName(a.mimeType)} size={14} color={theme.colors.text.secondary} />
                         <Text numberOfLines={1} style={styles.attachmentText}>{a.name}</Text>
                         <Text style={styles.attachmentMeta}>{formatBytes(a.sizeBytes)}</Text>
-                    </Pressable>
-                ))}
+                        </>
+                    );
+                    return props.onOpenPath ? (
+                        <Pressable
+                            key={getMappingKey(`${a.path}:${a.name}`, index)}
+                            onPress={() => props.onOpenPath?.(a.path)}
+                            style={styles.attachmentChip}
+                        >
+                            {content}
+                        </Pressable>
+                    ) : (
+                        <View key={getMappingKey(`${a.path}:${a.name}`, index)} style={styles.attachmentChip}>
+                            {content}
+                        </View>
+                    );
+                })}
             </ScrollView>
         </View>
     );

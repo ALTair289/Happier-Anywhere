@@ -6558,6 +6558,7 @@ export const en = {
                     add: 'Add remote',
                     remove: 'Remove',
                     nameLabel: 'Remote name',
+                imageUnavailable: 'Image unavailable',
                     fetchUrlLabel: 'Fetch URL',
                     pushUrlLabel: 'Push URL',
                     namePlaceholder: 'origin',

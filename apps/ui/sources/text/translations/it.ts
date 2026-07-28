@@ -7374,6 +7374,7 @@ export const it: TranslationStructure = {
         `Le operazioni di controllo versione sono bloccate da ${actor}.`,
       globalLock:
         "Le operazioni sono temporaneamente bloccate perché un'altra sessione sta eseguendo un comando di controllo versione.",
+          imageUnavailable: 'Immagine non disponibile',
       selection: ({ count }: { count: number }) =>
         count === 1
           ? "1 file selezionato per il prossimo commit."

@@ -7294,6 +7294,7 @@ localTailscale: {
         `バージョン管理の操作は ${actor} によりロックされています。`,
       globalLock:
         "別のセッションがバージョン管理コマンドを実行中のため、操作は一時的にロックされています。",
+          imageUnavailable: '画像は利用できません',
       selection: ({ count }: { count: number }) =>
         count === 1
           ? "次のコミットに向けて 1 件のファイルが選択されています。"

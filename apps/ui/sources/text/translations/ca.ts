@@ -6578,6 +6578,7 @@ deps: {
                     fetchUrlLabel: 'URL de fetch',
                     pushUrlLabel: 'URL de push',
                     namePlaceholder: 'origin',
+                imageUnavailable: 'La imatge no està disponible',
                     fetchUrlPlaceholder: 'URL de fetch',
                     pushUrlPlaceholder: 'URL de push (opcional)',
                     noFetchUrl: 'Sense URL de fetch',
