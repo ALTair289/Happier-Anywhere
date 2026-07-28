@@ -709,6 +709,42 @@ describe('NewSessionEngineOptionDetail', () => {
         ]);
     });
 
+    it('does not collapse distinct opaque model-scoped option identifiers by trimming', async () => {
+        modelOptionsState.value = [{
+            value: 'composer-opaque',
+            label: 'Composer Opaque',
+            description: '',
+            modelOptions: [{
+                id: ' effort ',
+                name: 'Scoped effort',
+                type: 'select',
+                currentValue: ' scoped ',
+                options: [{ value: ' scoped ', name: 'Scoped' }],
+            }],
+        }];
+        configOptionsState.value = [{
+            id: 'effort',
+            name: 'Global effort',
+            type: 'select',
+            currentValue: 'global',
+            options: [{ value: 'global', name: 'Global' }],
+        }];
+
+        const { NewSessionEngineOptionDetail } = await import('./NewSessionEngineOptionDetail');
+        const screen = await renderScreen(<NewSessionEngineOptionDetail
+            backendTarget={backendTarget}
+            selectedMachineId="machine-1"
+            capabilityServerId="server-1"
+            cwd="/repo"
+            selectedModelId="composer-opaque"
+            selectedSessionModeId="default"
+            selectedConfigOverrides={{}}
+        />);
+
+        expect(screen.findByTestId('agent-input-config-option:effort')).toBeTruthy();
+        expect(lastModelPickerOverlayProps?.selectedOptionControls?.map((control: any) => control.option.id)).toEqual([' effort ']);
+    });
+
     it('does not render model or mode ACP config options as generic engine controls while model probing is pending', async () => {
         modelOptionsState.value = [];
         configOptionsState.value = [
