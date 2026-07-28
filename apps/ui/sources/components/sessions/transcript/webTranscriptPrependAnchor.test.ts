@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import * as webTranscriptPrependAnchorModule from '@/components/sessions/transcript/webTranscriptPrependAnchor';
+import * as webTranscriptPrependAnchorModule from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
 import {
     captureWebTranscriptPrependAnchor,
     refreshWebTranscriptPrependAnchor,
     restoreWebTranscriptPrependAnchor,
-} from '@/components/sessions/transcript/webTranscriptPrependAnchor';
+} from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 
 type CaptureWebTranscriptViewportAnchor = (params: Readonly<{
@@ -308,7 +308,7 @@ describe('webTranscriptPrependAnchor', () => {
         }
     });
 
-    it('falls back to scroll-height growth when virtualized DOM anchors are unavailable', () => {
+    it('does not replace a missing keyed anchor with a scroll-height growth position', () => {
         const restoreHTMLElement = installFakeHTMLElement();
 
         try {
@@ -323,6 +323,7 @@ describe('webTranscriptPrependAnchor', () => {
             });
             itemAnchor.parentElement = container;
 
+            const requestedTargets: number[] = [];
             const result = restoreWebTranscriptPrependAnchor({
                 metrics: {
                     element: container as unknown as HTMLElement,
@@ -337,10 +338,17 @@ describe('webTranscriptPrependAnchor', () => {
                 stabilizeForMs: 1000,
                 userIntentAtMs: 0,
                 expiresAtMs: Date.now() + 1000,
-            }, writeScrollTopFor(container));
+            }, {
+                writeScrollTop: (targetScrollTop) => {
+                    requestedTargets.push(targetScrollTop);
+                    container.scrollTop = targetScrollTop;
+                    return true;
+                },
+            });
 
-            expect(result).toEqual({ didAdjustScroll: true, strategy: 'growth' });
-            expect(container.scrollTop).toBe(700);
+            expect(result).toEqual({ didAdjustScroll: false, status: 'not_found' });
+            expect(requestedTargets).toEqual([]);
+            expect(container.scrollTop).toBe(100);
         } finally {
             restoreHTMLElement();
         }
@@ -384,7 +392,7 @@ describe('webTranscriptPrependAnchor', () => {
         }
     });
 
-    it('leaves scroll position unchanged when the prepend growth fallback writer refuses the write', () => {
+    it('leaves metric-only scroll position unchanged when the prepend growth fallback writer refuses the write', () => {
         const restoreHTMLElement = installFakeHTMLElement();
 
         try {
@@ -407,10 +415,10 @@ describe('webTranscriptPrependAnchor', () => {
                     scrollHeight: 1200,
                     clientHeight: 600,
                 },
-                anchorTestId: 'transcript-anchor-message-m1',
-                anchorTop: 160,
-                itemTestId: 'transcript-item-turn:1',
-                itemTop: 120,
+                anchorTestId: null,
+                anchorTop: null,
+                itemTestId: null,
+                itemTop: null,
                 stabilizeForMs: 1000,
                 userIntentAtMs: 0,
                 expiresAtMs: Date.now() + 1000,
@@ -724,7 +732,7 @@ describe('webTranscriptPrependAnchor', () => {
         (globalThis as any).HTMLElement = originalHTMLElement;
     });
 
-    it('keeps the original anchor across a growth fallback so a later remount can restore precisely', () => {
+    it('keeps the original keyed anchor write-free while missing so a later remount can restore precisely', () => {
         const originalHTMLElement = (globalThis as any).HTMLElement;
         (globalThis as any).HTMLElement = FakeElement;
 
@@ -753,10 +761,10 @@ describe('webTranscriptPrependAnchor', () => {
         container.setQuerySelectorAll('[data-testid]', []);
 
         expect(restoreWebTranscriptPrependAnchor(anchor, writeScrollTopFor(container))).toEqual({
-            didAdjustScroll: true,
-            strategy: 'growth',
+            didAdjustScroll: false,
+            status: 'not_found',
         });
-        expect(container.scrollTop).toBe(4100);
+        expect(container.scrollTop).toBe(100);
 
         const pendingAnchor = refreshWebTranscriptPrependAnchor(anchor, {
             element: container as unknown as HTMLElement,
@@ -774,7 +782,7 @@ describe('webTranscriptPrependAnchor', () => {
             didAdjustScroll: true,
             strategy: 'anchor',
         });
-        expect(container.scrollTop).toBe(4280);
+        expect(container.scrollTop).toBe(280);
 
         (globalThis as any).HTMLElement = originalHTMLElement;
     });

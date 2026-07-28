@@ -33,7 +33,7 @@ import { resolveTranscriptRowShellHeight } from '@/components/sessions/transcrip
 import {
     TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX,
     TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX,
-} from '@/components/sessions/transcript/webTranscriptPrependAnchor';
+} from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
 import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 import type { TranscriptEventEmphasisByMessageId } from '@/components/sessions/transcript/events/transcriptEventEmphasis';
 

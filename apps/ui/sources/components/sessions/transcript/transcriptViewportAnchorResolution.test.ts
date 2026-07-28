@@ -5,7 +5,7 @@ import {
     resolveTranscriptViewportAnchorDescriptor,
     resolveTranscriptViewportAnchorFocusOffsetPx,
     resolveTranscriptViewportAnchorIndex,
-} from '@/components/sessions/transcript/transcriptViewportAnchorResolution';
+} from '@/components/sessions/transcript/viewport/entryRestore/transcriptViewportAnchorResolution';
 
 describe('transcriptViewportAnchorResolution', () => {
     it('resolves anchors by message id before falling back to item id', () => {
@@ -71,6 +71,18 @@ describe('transcriptViewportAnchorResolution', () => {
             itemId: 'turn-1',
             messageId: 'tool-1',
         });
+    });
+
+    it('never promotes a synthetic window-gap row into restore identity', () => {
+        const gap = {
+            id: 'transcript-window-gap:window-50:older',
+            kind: 'transcript-window-gap',
+        } as const;
+        expect(resolveTranscriptViewportAnchorDescriptor(gap)).toBeNull();
+        expect(resolveTranscriptViewportAnchorIndex({
+            anchor: { messageId: null, itemId: gap.id },
+            items: [gap],
+        })).toBeNull();
     });
 
     describe('tool-group unit rows (N2c)', () => {

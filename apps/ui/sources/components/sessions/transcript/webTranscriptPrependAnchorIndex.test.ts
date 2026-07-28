@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolvePendingWebPrependAnchorIndex } from './webTranscriptPrependAnchorIndex';
+import { resolvePendingWebPrependAnchorIndex } from './viewport/prepend/webTranscriptPrependAnchorIndex';
 
 const ITEMS = [
     { kind: 'message', id: 'msg:m1', messageId: 'm1' },

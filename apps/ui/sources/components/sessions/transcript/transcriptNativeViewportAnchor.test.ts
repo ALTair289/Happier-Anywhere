@@ -6,7 +6,7 @@ import {
     planNativeTranscriptViewportAnchorRestore,
     resolveNativeTranscriptViewportAnchorRestoreObservation,
     type NativeTranscriptViewportFlashListRef,
-} from '@/components/sessions/transcript/transcriptNativeViewportAnchor';
+} from '@/components/sessions/transcript/viewport/driver/transcriptNativeViewportAnchor';
 
 type Item = Readonly<{
     kind: 'message';
