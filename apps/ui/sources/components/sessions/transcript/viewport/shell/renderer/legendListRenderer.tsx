@@ -25,6 +25,7 @@ import {
 import type { TranscriptExplicitJumpOperationId } from '@/components/sessions/transcript/viewport/jump/transcriptJumpTargetTypes';
 import { useCommittedTranscriptRef } from '@/components/sessions/transcript/viewport/lifecycle/host/useCommittedTranscriptRef';
 import type { WebScrollMovementFact } from '@/components/sessions/transcript/scroll/resolveWebGenuineScrollMovement';
+import { useReducedMotionPreference } from '@/hooks/ui/useReducedMotionPreference';
 
 import type {
     TranscriptInitialPresentationSettlementRequest,
@@ -512,6 +513,11 @@ function LegendListTranscriptRendererInner<TItem>(
         !props.frame.rendererOptions.initialPlacement.atEnd,
     );
     const isWebFrame = props.frame.platform === 'web';
+    // Read once per transcript (the hook shares one process-wide platform subscription) and
+    // published through a committed ref so the tail command owner keeps a stable identity —
+    // the imperative handle is identity-sensitive.
+    const reduceMotionRef = React.useRef(false);
+    useCommittedTranscriptRef(reduceMotionRef, useReducedMotionPreference());
     const finishEntryPlacement = React.useCallback((
         intent: LegendHeldScrollIntent | null,
         outcome: 'settled' | 'deadline' | 'preempted' | 'superseded' | 'unavailable',
@@ -2005,7 +2011,17 @@ function LegendListTranscriptRendererInner<TItem>(
         lastHeldIntentCorrectionRef.current = null;
         pendingWebTailMaterializationKeyRef.current = null;
         cancelScheduledHeldIntentSettle();
-        settleLegendScroll(legendListRef.current?.scrollToEnd(params));
+        // This is the ONLY tail write that can arrive animated. Steady end-maintenance is
+        // Legend-owned and pinned to `animated: false`, and every corrective pin-bottom
+        // reaches this owner unanimated (the drivers pass `command.animated ?? false`; only
+        // the discrete `jump-to-bottom` command resolves to `animated: true`). So honoring the
+        // OS reduced-motion preference here makes exactly the discrete, user-initiated
+        // transition instant and cannot turn a correction into motion.
+        settleLegendScroll(legendListRef.current?.scrollToEnd(
+            params?.animated === true && reduceMotionRef.current
+                ? { ...params, animated: false }
+                : params,
+        ));
     }, [cancelScheduledHeldIntentSettle, invalidateUserInertiaContinuation, setHeldScrollIntent]);
 
     const latchHeldEndIntent = React.useCallback(() => {
