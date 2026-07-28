@@ -220,6 +220,129 @@ config.watchFolders = existingWatchFolders.filter(
 
 const rootNodeModules = path.resolve(__dirname, "../../node_modules");
 const appNodeModules = path.resolve(__dirname, "node_modules");
+
+function safeReadJson(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function collectInternalWorkspacePackages(rootDir, maxDepth = 4) {
+  const packages = new Map();
+
+  function visit(dir, depth) {
+    if (depth > maxDepth) return;
+    const basename = path.basename(dir);
+    if (basename === "node_modules" || basename.startsWith(".")) return;
+
+    const packageJson = safeReadJson(path.resolve(dir, "package.json"));
+    if (packageJson && typeof packageJson.name === "string" && packageJson.name.startsWith("@happier-dev/")) {
+      packages.set(packageJson.name, dir);
+      return;
+    }
+
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        visit(path.resolve(dir, entry.name), depth + 1);
+      }
+    }
+  }
+
+  visit(rootDir, 0);
+  return packages;
+}
+
+const internalWorkspacePackages = collectInternalWorkspacePackages(path.resolve(__dirname, "../../packages"));
+const internalWorkspaceSourceRoots = [...internalWorkspacePackages.values()]
+  .map((packageRoot) => path.resolve(packageRoot, "src"));
+
+function resolvePackageExportTarget(entry, platform) {
+  if (typeof entry === "string" && entry.length > 0) return entry;
+  if (!entry || typeof entry !== "object") return null;
+
+  const platformEntry = platform === "web"
+    ? entry.browser
+    : platform
+      ? entry["react-native"]
+      : null;
+  const platformTarget = resolvePackageExportTarget(platformEntry, platform);
+  if (platformTarget) return platformTarget;
+
+  return resolvePackageExportTarget(entry.default ?? entry.import ?? entry.require ?? null, platform);
+}
+
+function resolveExistingSourceCandidate(basePath) {
+  for (const candidate of [
+    `${basePath}.ts`,
+    `${basePath}.tsx`,
+    `${basePath}.js`,
+    `${basePath}.jsx`,
+    `${basePath}.mts`,
+    `${basePath}.cts`,
+  ]) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function resolveInternalWorkspaceRelativeSourceImport(originModulePath, moduleName) {
+  if (typeof originModulePath !== "string" || typeof moduleName !== "string" || !moduleName.startsWith(".")) {
+    return null;
+  }
+
+  const candidate = path.resolve(path.dirname(originModulePath), moduleName);
+  const extension = path.extname(candidate);
+  if (extension !== ".js" && extension !== ".mjs" && extension !== ".cjs") return null;
+
+  const isWorkspaceSource = internalWorkspaceSourceRoots.some(
+    (sourceRoot) => candidate === sourceRoot || candidate.startsWith(`${sourceRoot}${path.sep}`),
+  );
+  if (!isWorkspaceSource) return null;
+
+  return resolveExistingSourceCandidate(candidate.slice(0, -extension.length));
+}
+
+function resolveInternalWorkspacePackageSource(moduleName, platform) {
+  if (typeof moduleName !== "string" || !moduleName.startsWith("@happier-dev/")) return null;
+
+  const parts = moduleName.split("/");
+  if (parts.length < 2) return null;
+  const packageName = `${parts[0]}/${parts[1]}`;
+  const packageRoot = internalWorkspacePackages.get(packageName);
+  if (!packageRoot) return null;
+
+  const packageJson = safeReadJson(path.resolve(packageRoot, "package.json"));
+  if (!packageJson) return null;
+
+  const subpath = parts.slice(2).join("/");
+  const exportKey = subpath ? `./${subpath}` : ".";
+  const exportTarget = resolvePackageExportTarget(
+    packageJson.exports?.[exportKey] ?? (!subpath ? packageJson.main : null),
+    platform,
+  );
+  if (typeof exportTarget !== "string") return null;
+
+  const normalizedTarget = exportTarget.replace(/\\/g, "/").replace(/^\.\//u, "");
+  if (!normalizedTarget.startsWith("dist/")) return null;
+
+  const sourceRelativeTarget = normalizedTarget.slice("dist/".length);
+  const extension = path.extname(sourceRelativeTarget);
+  const sourceBasePath = path.resolve(
+    packageRoot,
+    "src",
+    extension ? sourceRelativeTarget.slice(0, -extension.length) : sourceRelativeTarget,
+  );
+  return resolveExistingSourceCandidate(sourceBasePath);
+}
+
 const generatedWorkletsWatchFolders = resolveGeneratedWorkletsWatchFolders() || [];
 for (const generatedWorkletsWatchFolder of generatedWorkletsWatchFolders) {
   if (!config.watchFolders.includes(generatedWorkletsWatchFolder)) {
@@ -306,6 +429,19 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   }
   if (path.normalize(String(moduleName)) === path.resolve(rootNodeModules, "@noble/hashes/crypto.js")) {
     resolvedModuleName = "@noble/hashes/crypto";
+  }
+
+  const internalWorkspaceRelativeSourceImport = resolveInternalWorkspaceRelativeSourceImport(
+    context?.originModulePath,
+    resolvedModuleName,
+  );
+  if (internalWorkspaceRelativeSourceImport) {
+    return { type: "sourceFile", filePath: internalWorkspaceRelativeSourceImport };
+  }
+
+  const internalWorkspacePackageSource = resolveInternalWorkspacePackageSource(resolvedModuleName, platform);
+  if (internalWorkspacePackageSource) {
+    return { type: "sourceFile", filePath: internalWorkspacePackageSource };
   }
 
   // Per-tab web QA opt-out: allow disabling Fast Refresh/HMR on specific browser tabs (via sessionStorage),

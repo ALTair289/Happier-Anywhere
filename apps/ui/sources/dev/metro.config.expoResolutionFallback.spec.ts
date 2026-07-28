@@ -101,4 +101,25 @@ describe('apps/ui/metro.config.js (Expo resolution fallbacks)', () => {
         const config = requireFreshMetroConfig();
         expect(config?.resolver?.useWatchman).toBe(false);
     });
+
+    it('resolves editable internal workspace packages and their explicit .js imports from source', () => {
+        process.env.HAPPIER_STACK_STACK = 'qa-test';
+        delete process.env.CI;
+
+        const config = requireFreshMetroConfig();
+        const agentsEntry = path.resolve(__dirname, '../../../../packages/agents/src/index.ts');
+
+        expect(config.resolver.resolveRequest({}, '@happier-dev/agents', 'web')).toEqual({
+            type: 'sourceFile',
+            filePath: agentsEntry,
+        });
+        expect(config.resolver.resolveRequest(
+            { originModulePath: agentsEntry },
+            './models.js',
+            'web',
+        )).toEqual({
+            type: 'sourceFile',
+            filePath: path.resolve(__dirname, '../../../../packages/agents/src/models.ts'),
+        });
+    });
 });
