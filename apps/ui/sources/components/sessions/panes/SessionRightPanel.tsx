@@ -15,7 +15,6 @@ import { SessionTerminalSurface } from '@/components/sessions/panes/surfaces/Ses
 import { SessionTranscriptNavigationPane } from '@/components/sessions/panes/SessionTranscriptNavigationPane';
 import { useSessionFileDetailsOpener } from '@/components/sessions/panes/useSessionFileDetailsOpener';
 import { useSessionTerminalAvailability } from '@/components/sessions/terminal/useSessionTerminalAvailability';
-import { useTranscriptNavigationPaneSnapshot } from '@/components/sessions/transcript/navigation/transcriptNavigationPaneStore';
 import { t } from '@/text';
 import { resolveOptionalSessionScreenTestId, useSessionScreenTestIdsEnabled } from '../shell/sessionScreenTestIds';
 
@@ -78,7 +77,6 @@ export const SessionRightPanel = React.memo((props: SessionRightPanelProps) => {
     const { theme } = useUnistyles();
     const pane = useAppPaneScope(props.scopeId);
     const scopeState = pane.scopeState;
-    const transcriptNavigationPaneSnapshot = useTranscriptNavigationPaneSnapshot(props.sessionId);
     const { openFileInDetails, openFileInDetailsPinned } = useSessionFileDetailsOpener(props.scopeId);
 
     const terminalAvailability = useSessionTerminalAvailability({
@@ -175,9 +173,6 @@ export const SessionRightPanel = React.memo((props: SessionRightPanelProps) => {
                         testID={resolveOptionalSessionScreenTestId(sessionScreenTestIdsEnabled, 'session-rightpanel-surface-navigation')}
                     >
                         <SessionTranscriptNavigationPane
-                            activeEntryId={transcriptNavigationPaneSnapshot.activeEntryId}
-                            entries={transcriptNavigationPaneSnapshot.entries}
-                            onEntryPress={transcriptNavigationPaneSnapshot.onEntryPress ?? (() => {})}
                             onRequestClose={props.onRequestClose ?? pane.closeRight}
                             sessionId={props.sessionId}
                             testIDPrefix="session-transcript-navigation"
