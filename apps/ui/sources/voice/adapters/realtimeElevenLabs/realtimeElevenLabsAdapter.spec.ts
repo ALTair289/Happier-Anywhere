@@ -99,12 +99,15 @@ describe('realtime elevenlabs voice adapter', () => {
       controlSessionId: 'voice-global',
       conversationSessionId: 'carrier-s1',
       text: 'hello',
+      localId: 'voice-local-1',
+      handoffMode: 'interrupt_and_send',
     });
 
     expect(startRealtimeSession).not.toHaveBeenCalled();
     expect(appendVoiceConversationUserText).toHaveBeenCalledWith({
       conversationSessionId: 'carrier-s1',
       text: 'hello',
+      localId: 'voice-local-1',
     });
     expect(sendTextMessage).toHaveBeenCalledWith('hello');
   });
@@ -122,13 +125,40 @@ describe('realtime elevenlabs voice adapter', () => {
       controlSessionId: 'voice-global',
       conversationSessionId: 'carrier-s1',
       text: 'hello',
+      localId: 'voice-local-2',
+      handoffMode: 'interrupt_and_send',
     });
 
     expect(startRealtimeSession).toHaveBeenCalledWith('voice-global', undefined, false, { textOnly: true });
     expect(appendVoiceConversationUserText).toHaveBeenCalledWith({
       conversationSessionId: 'carrier-s1',
       text: 'hello',
+      localId: 'voice-local-2',
     });
     expect(sendTextMessage).toHaveBeenCalledWith('hello');
+  });
+
+  it('fails visibly when text-only startup does not register a realtime session', async () => {
+    sendTextMessage.mockReset();
+    startRealtimeSession.mockReset();
+    appendVoiceConversationUserText.mockReset();
+    isVoiceSessionStarted.mockReturnValueOnce(false);
+    getVoiceSession
+      .mockReturnValueOnce({ sendTextMessage, sendContextualUpdate })
+      .mockReturnValueOnce(null as any);
+
+    const { createRealtimeElevenLabsVoiceAdapter } = await import('./realtimeElevenLabsAdapter');
+    const adapter = createRealtimeElevenLabsVoiceAdapter();
+
+    await expect(adapter.sendTextTurn?.({
+      controlSessionId: 'voice-global',
+      conversationSessionId: 'carrier-s1',
+      text: 'hello',
+      localId: 'voice-local-3',
+      handoffMode: 'interrupt_and_send',
+    })).rejects.toThrow('voice_service_unavailable');
+
+    expect(startRealtimeSession).toHaveBeenCalledWith('voice-global', undefined, false, { textOnly: true });
+    expect(sendTextMessage).not.toHaveBeenCalled();
   });
 });

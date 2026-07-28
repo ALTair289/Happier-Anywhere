@@ -2,6 +2,7 @@ import { randomUUID } from '@/platform/randomUUID';
 import { storage } from '@/sync/domains/state/storage';
 import { nowServerMs } from '@/sync/runtime/time';
 import type { NormalizedMessage } from '@/sync/typesRaw';
+import { readPendingLocalId } from '@happier-dev/protocol';
 
 function appendNormalizedMessage(conversationSessionId: string, message: NormalizedMessage): void {
   const state: any = storage.getState();
@@ -12,12 +13,13 @@ function appendNormalizedMessage(conversationSessionId: string, message: Normali
 export function appendVoiceConversationUserText(params: Readonly<{
   conversationSessionId: string;
   text: string;
+  localId?: string;
 }>): void {
   const text = String(params.text ?? '').trim();
   if (!text) return;
   appendNormalizedMessage(params.conversationSessionId, {
     id: randomUUID(),
-    localId: null,
+    localId: readPendingLocalId(params.localId),
     createdAt: nowServerMs(),
     isSidechain: false,
     role: 'user',

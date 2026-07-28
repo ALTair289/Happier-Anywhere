@@ -152,6 +152,8 @@ describe('local conversation voice adapter', () => {
       controlSessionId: VOICE_AGENT_GLOBAL_SESSION_ID,
       conversationSessionId: 'voice-home',
       text: 'hello from composer',
+      localId: 'voice-local-1',
+      handoffMode: 'interrupt_and_send',
     });
 
     expect(sendVoiceTextTurn).toHaveBeenCalledWith(
@@ -173,6 +175,8 @@ describe('local conversation voice adapter', () => {
       controlSessionId: VOICE_AGENT_GLOBAL_SESSION_ID,
       conversationSessionId: 'voice-home',
       text: 'hello from daemon composer',
+      localId: 'voice-local-2',
+      handoffMode: 'interrupt_and_send',
     });
 
     expect(sendVoiceTextTurn).toHaveBeenCalledWith(

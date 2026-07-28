@@ -45,6 +45,42 @@ describe('voiceConversationTranscript', () => {
     );
   });
 
+  it('preserves valid opaque Pending local ids byte-for-byte and rejects blank identities', async () => {
+    const { appendVoiceConversationUserText } = await import('./voiceConversationTranscript');
+
+    appendVoiceConversationUserText({
+      conversationSessionId: 'carrier-s1',
+      text: 'first opaque identity',
+      localId: ' request-1 ',
+    });
+    appendVoiceConversationUserText({
+      conversationSessionId: 'carrier-s1',
+      text: 'whitespace-distinct identity',
+      localId: 'request-1',
+    });
+    appendVoiceConversationUserText({
+      conversationSessionId: 'carrier-s1',
+      text: 'invalid identity is not stored',
+      localId: ' \t\r\n ',
+    });
+
+    expect(applyMessages).toHaveBeenNthCalledWith(
+      1,
+      'carrier-s1',
+      [expect.objectContaining({ localId: ' request-1 ' })],
+    );
+    expect(applyMessages).toHaveBeenNthCalledWith(
+      2,
+      'carrier-s1',
+      [expect.objectContaining({ localId: 'request-1' })],
+    );
+    expect(applyMessages).toHaveBeenNthCalledWith(
+      3,
+      'carrier-s1',
+      [expect.objectContaining({ localId: null })],
+    );
+  });
+
   it('appends assistant text and plain note messages as agent transcript messages', async () => {
     const {
       appendVoiceConversationAssistantText,

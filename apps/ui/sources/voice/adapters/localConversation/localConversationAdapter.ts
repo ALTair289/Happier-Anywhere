@@ -98,7 +98,7 @@ export function createLocalConversationVoiceAdapter(): VoiceAdapterController {
     appendLocalVoiceAgentContextUpdate(resolveConversationSessionId(opts.sessionId), opts.update);
   };
 
-  const sendTextTurn = async (opts: Readonly<{ controlSessionId: string; conversationSessionId: string; text: string }>) => {
+  const sendTextTurn: NonNullable<VoiceAdapterController['sendTextTurn']> = async (opts) => {
     const settings: any = storage.getState().settings;
     const config = settings?.voice?.adapters?.local_conversation ?? {};
     if ((config?.conversationMode ?? 'direct_session') !== 'agent') {
@@ -111,6 +111,10 @@ export function createLocalConversationVoiceAdapter(): VoiceAdapterController {
       userText: opts.text,
       playbackController: createVoicePlaybackController(),
       voiceAgentSessions,
+      durableDispatch: {
+        localId: opts.localId,
+        handoffMode: opts.handoffMode,
+      },
     });
   };
 
