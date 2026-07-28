@@ -332,6 +332,17 @@ export function createDefaultActionExecutor(opts?: Readonly<{
           ...(typeof expectedStateAtMs === 'number' ? { expectedStateAtMs } : {}),
         },
       }),
+    sessionPendingInputInterruptAndRun: async ({ sessionId, localId, expectedStateAtMs, serverId }) =>
+      await sessionRpcWithServerScope({
+        sessionId,
+        serverId,
+        method: SESSION_RPC_METHODS.SESSION_PENDING_INPUT_INTERRUPT_AND_RUN,
+        payload: {
+          sessionId,
+          localId,
+          ...(typeof expectedStateAtMs === 'number' ? { expectedStateAtMs } : {}),
+        },
+      }),
     sessionModeSet: async ({ sessionId, modeId }) => {
       const session = (storage.getState() as any)?.sessions?.[sessionId] ?? null;
       const control = resolveSessionModeActionControl(session);

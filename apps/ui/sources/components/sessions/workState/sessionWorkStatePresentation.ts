@@ -88,6 +88,8 @@ function readItem(value: unknown): ReadItemResult {
     const title = readString(raw.title);
     const updatedAt = readNonNegativeNumber(raw.updatedAt);
     if (!id || !title || updatedAt === null) return { type: 'invalid' };
+    const statusReason = readStatusReason(raw.statusReason);
+    const goalCapabilities = readGoalCapabilities(raw.goalCapabilities);
 
     return {
         type: 'item',
@@ -98,8 +100,8 @@ function readItem(value: unknown): ReadItemResult {
             status: status as SessionWorkStateStatus,
             title,
             updatedAt,
-            ...(readStatusReason(raw.statusReason) ? { statusReason: readStatusReason(raw.statusReason) as SessionWorkStateStatusReason } : {}),
-            ...(readGoalCapabilities(raw.goalCapabilities) ? { goalCapabilities: readGoalCapabilities(raw.goalCapabilities) as SessionWorkStateGoalCapabilities } : {}),
+            ...(statusReason ? { statusReason } : {}),
+            ...(goalCapabilities ? { goalCapabilities } : {}),
             ...(typeof raw.summary === 'string' ? { summary: raw.summary } : {}),
             ...(typeof raw.backendId === 'string' ? { backendId: raw.backendId } : {}),
             ...(typeof raw.agentId === 'string' ? { agentId: raw.agentId } : {}),
@@ -165,6 +167,7 @@ function readLegacyGoalSnapshot(metadata: Record<string, unknown>): SessionWorkS
     const status: SessionWorkStateStatus = rawStatus && VALID_STATUSES.has(rawStatus) ? rawStatus as SessionWorkStateStatus : 'active';
     const updatedAt = readNumber(raw.updatedAt) ?? Date.now();
     const backendId = readString(metadata.flavor) ?? 'codex';
+    const statusReason = readStatusReason(raw.statusReason);
     return {
         v: 1,
         backendId,
@@ -177,7 +180,7 @@ function readLegacyGoalSnapshot(metadata: Record<string, unknown>): SessionWorkS
             status,
             title,
             updatedAt,
-            ...(readStatusReason(raw.statusReason) ? { statusReason: readStatusReason(raw.statusReason) as SessionWorkStateStatusReason } : {}),
+            ...(statusReason ? { statusReason } : {}),
             ...(typeof raw.tokenBudget === 'number' && Number.isFinite(raw.tokenBudget) ? { tokenBudget: raw.tokenBudget } : {}),
             ...(typeof raw.tokensUsed === 'number' && Number.isFinite(raw.tokensUsed) ? { tokensUsed: raw.tokensUsed } : {}),
             ...(typeof raw.timeUsedSeconds === 'number' && Number.isFinite(raw.timeUsedSeconds) ? { timeUsedSeconds: raw.timeUsedSeconds } : {}),

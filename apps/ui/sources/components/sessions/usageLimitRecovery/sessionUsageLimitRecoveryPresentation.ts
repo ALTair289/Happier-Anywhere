@@ -43,6 +43,8 @@ export type SessionUsageLimitRecoveryBannerPresentation = Readonly<{
 
 export type SessionUsageLimitRecoveryPresentation = Readonly<{
     issueFingerprint: string;
+    armedAtMs: number;
+    runtimeAuthRecoveryAttemptId?: string;
     banner: SessionUsageLimitRecoveryBannerPresentation;
 }>;
 
@@ -422,6 +424,10 @@ export function buildSessionUsageLimitRecoveryPresentation(
 
     return {
         issueFingerprint: params.recovery?.issueFingerprint ?? buildIssueFingerprint(params.issue),
+        armedAtMs: params.recovery?.armedAtMs ?? params.issue.occurredAt,
+        ...(params.recovery?.runtimeAuthRecoveryAttemptId
+            ? { runtimeAuthRecoveryAttemptId: params.recovery.runtimeAuthRecoveryAttemptId }
+            : {}),
         banner: {
             testID: 'session-usageLimit-recovery',
             title: ready

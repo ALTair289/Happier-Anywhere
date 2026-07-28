@@ -374,4 +374,17 @@ describe('createDefaultActionExecutor plan mode integration', () => {
       expect.objectContaining({ v: 1, modeId: 'default' }),
     );
   });
+
+  it('preserves exact nonblank opaque mode identifiers during action normalization', async () => {
+    const { normalizeRequestedSessionModeId } = await import('./sessionModeActionSupport');
+    const control = {
+      options: [
+        { id: 'plan', name: 'Plain' },
+        { id: ' plan ', name: 'Spaced' },
+      ],
+      selectedModeId: 'plan',
+    } as any;
+
+    expect(normalizeRequestedSessionModeId(control, ' plan ')).toBe(' plan ');
+  });
 });

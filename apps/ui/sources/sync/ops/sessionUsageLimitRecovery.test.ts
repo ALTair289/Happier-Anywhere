@@ -89,7 +89,11 @@ describe('sessionUsageLimitRecovery', () => {
             sessionUsageLimitWaitResumeCancel,
         } = await import('./sessionUsageLimitRecovery');
 
-        await expect(sessionUsageLimitWaitResumeCancel('session-1')).resolves.toEqual({
+        await expect(sessionUsageLimitWaitResumeCancel('session-1', {
+            issueFingerprint: 'issue-a',
+            armedAtMs: 1,
+            runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
+        })).resolves.toEqual({
             ok: true,
             status: 'cancelled',
         });
@@ -102,7 +106,12 @@ describe('sessionUsageLimitRecovery', () => {
             sessionId: 'session-1',
             serverId: 'server-owned',
             method: SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL,
-            payload: { sessionId: 'session-1' },
+            payload: {
+                sessionId: 'session-1',
+                issueFingerprint: 'issue-a',
+                armedAtMs: 1,
+                runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
+            },
         });
         expect(sessionRpcWithServerScopeMock).toHaveBeenNthCalledWith(2, {
             sessionId: 'session-1',
@@ -236,7 +245,7 @@ describe('sessionUsageLimitRecovery', () => {
 
         installStaleInactiveSession();
         machineRpcWithServerScopeMock.mockResolvedValueOnce({ ok: true, status: 'cancelled' });
-        await expect(sessionUsageLimitWaitResumeCancel('session-1', { refreshMachineTargets })).resolves.toEqual({
+        await expect(sessionUsageLimitWaitResumeCancel('session-1', { issueFingerprint: 'issue-a', armedAtMs: 1 }, { refreshMachineTargets })).resolves.toEqual({
             ok: true,
             status: 'cancelled',
         });
@@ -851,7 +860,7 @@ describe('sessionUsageLimitRecovery', () => {
         machineRpcWithServerScopeMock.mockResolvedValueOnce({ ok: true });
 
         const { sessionUsageLimitWaitResumeCancel } = await import('./sessionUsageLimitRecovery');
-        await expect(sessionUsageLimitWaitResumeCancel('session-1')).resolves.toEqual({
+        await expect(sessionUsageLimitWaitResumeCancel('session-1', { issueFingerprint: 'issue-a', armedAtMs: 1 })).resolves.toEqual({
             ok: false,
             status: 'malformed_response',
             error: 'malformed_session_usage_limit_recovery_operation_result',
@@ -862,7 +871,7 @@ describe('sessionUsageLimitRecovery', () => {
             machineId: 'machine-1',
             serverId: 'server-owned',
             method: RPC_METHODS.DAEMON_SESSION_USAGE_LIMIT_WAIT_RESUME_CANCEL,
-            payload: { sessionId: 'session-1' },
+            payload: { sessionId: 'session-1', issueFingerprint: 'issue-a', armedAtMs: 1 },
         });
     });
 });

@@ -56,6 +56,12 @@ type UsageLimitRecoveryOperationOptions = Readonly<{
     refreshMachineTargets?: () => Promise<void>;
 }>;
 
+type UsageLimitRecoveryAttemptIdentity = Readonly<{
+    issueFingerprint: string;
+    armedAtMs: number;
+    runtimeAuthRecoveryAttemptId?: string;
+}>;
+
 type UsageLimitRecoveryResumePromptMode = 'standard' | 'off' | 'custom';
 
 const STALE_ACTIVE_SESSION_RPC_FALLBACK_ERRORS = new Set<string>([
@@ -327,9 +333,10 @@ export function sessionUsageLimitWaitResumeEnable(
 
 export function sessionUsageLimitWaitResumeCancel(
     sessionId: string,
+    attempt: UsageLimitRecoveryAttemptIdentity,
     opts?: UsageLimitRecoveryOperationOptions,
 ): Promise<SessionUsageLimitRecoveryOperationResult> {
-    const payload = { sessionId };
+    const payload = { sessionId, ...attempt };
     if (isInactiveSession(sessionId)) {
         return runUsageLimitRecoveryMachineRpc(
             sessionId,

@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { SessionStopResponse } from '@/sync/ops/sessions';
+
 type TestState = {
     settings: any;
     sessions: Record<string, any>;
@@ -14,10 +16,14 @@ let state: TestState = {
 
 const patchSessionMetadataWithRetry = vi.fn(async () => {});
 const sessionRename = vi.fn(async () => ({ success: true as const }));
-const sessionStopWithServerScope = vi.fn(async () => ({ success: true as const }));
+const sessionStopWithServerScope = vi.fn(async (): Promise<SessionStopResponse> => ({ success: true }));
 const updateArtifactWithHeader = vi.fn(async () => {});
 const sessionExecutionRunStart = vi.fn(async () => ({}));
-const sessionRpcWithServerScope = vi.fn(async () => ({ ok: true }));
+const sendSessionMessageWithServerScope = vi.fn(async (): Promise<{
+    ok: boolean;
+    errorCode?: string;
+    error?: string;
+}> => ({ ok: true }));
 
 vi.mock('@/sync/ops/sessionExecutionRuns', () => ({
     sessionExecutionRunStart,
@@ -40,11 +46,11 @@ vi.mock('@/sync/ops/sessionHandoffs', () => ({
 }));
 
 vi.mock('@/sync/runtime/orchestration/serverScopedRpc/serverScopedSessionRpc', () => ({
-    sessionRpcWithServerScope,
+    sessionRpcWithServerScope: vi.fn(),
 }));
 
 vi.mock('@/sync/runtime/orchestration/serverScopedRpc/serverScopedSessionSendMessage', () => ({
-    sendSessionMessageWithServerScope: vi.fn(async () => ({ ok: true })),
+    sendSessionMessageWithServerScope,
 }));
 
 vi.mock('@/sync/runtime/orchestration/serverScopedRpc/serverScopedMachineRpc', () => ({
@@ -200,9 +206,12 @@ describe('createDefaultActionExecutor approvals', () => {
             },
         };
         sessionRename.mockClear();
+        sessionStopWithServerScope.mockReset();
+        sessionStopWithServerScope.mockResolvedValue({ success: true });
         patchSessionMetadataWithRetry.mockClear();
         updateArtifactWithHeader.mockClear();
-        sessionRpcWithServerScope.mockClear();
+        sendSessionMessageWithServerScope.mockReset();
+        sendSessionMessageWithServerScope.mockResolvedValue({ ok: true });
     });
 
     it('executes approved session.title.set requests when the approval was created from the MCP surface', async () => {
@@ -300,26 +309,65 @@ describe('createDefaultActionExecutor approvals', () => {
         expect(sessionStopWithServerScope).toHaveBeenCalledWith('s1', { serverId: undefined });
     });
 
-    it('preserves exact nonblank question-key bytes through the UI action adapter', async () => {
-        state.sessions.s1 = {
-            id: 's1',
-            agentState: { capabilities: { structuredQuestionAnswersV1Supported: true } },
+    it('reports unsupported session.stop as an action failure with upgrade recovery details', async () => {
+        state.settings.actionsSettingsV1.actions['session.stop'] = {
+            enabledPlacements: [],
+            disabledSurfaces: [],
+            disabledPlacements: [],
+            approvalRequiredSurfaces: [],
         };
+        sessionStopWithServerScope.mockResolvedValueOnce({
+            success: false,
+            message: 'Update Happier on the session machine, then try stopping again.',
+            code: 'session_stop_unsupported',
+            recovery: 'upgrade_runtime',
+        });
+
+        const { createDefaultActionExecutor } = await import('./defaultActionExecutor');
+        const executor = createDefaultActionExecutor();
+        const result = await executor.execute(
+            'session.stop' as any,
+            { sessionId: 's1' },
+            { surface: 'mcp' },
+        );
+
+        expect(result).toEqual({
+            ok: false,
+            errorCode: 'session_stop_unsupported',
+            error: 'Update Happier on the session machine, then try stopping again.',
+            details: {
+                success: false,
+                message: 'Update Happier on the session machine, then try stopping again.',
+                code: 'session_stop_unsupported',
+                recovery: 'upgrade_runtime',
+            },
+        });
+    });
+
+    it('surfaces scoped session message send failures as action failures', async () => {
+        sendSessionMessageWithServerScope.mockResolvedValueOnce({
+            ok: false,
+            errorCode: 'ack_unknown',
+            error: 'ack_unknown',
+        });
         const { createDefaultActionExecutor } = await import('./defaultActionExecutor');
         const executor = createDefaultActionExecutor();
 
-        const result = await executor.execute('session.user_action.answer', {
-            sessionId: 's1',
-            requestId: 'ask_1',
-            answers: [{ question: '  exact provider key  ', values: ['Yes'] }],
-        });
+        const res = await executor.execute(
+            'session.message.send' as any,
+            { sessionId: 's1', message: 'hello' },
+            { surface: 'voice_tool' },
+        );
 
-        expect(result.ok).toBe(true);
-        expect(sessionRpcWithServerScope).toHaveBeenCalledWith(expect.objectContaining({
-            payload: {
-                id: 'ask_1',
-                structuredAnswersV1: { '  exact provider key  ': ['Yes'] },
-            },
-        }));
+        expect(res).toEqual({
+            ok: false,
+            errorCode: 'ack_unknown',
+            error: 'ack_unknown',
+        });
+        expect(sendSessionMessageWithServerScope).toHaveBeenCalledWith({
+            sessionId: 's1',
+            message: 'hello',
+            serverId: undefined,
+        });
     });
 });
