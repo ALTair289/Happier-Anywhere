@@ -583,7 +583,7 @@ describe('app/_layout init resilience', () => {
         expect(routerPushMock).toHaveBeenCalledWith('/settings/report-issue');
     });
 
-    it('injects web font faces and does not invoke expo-font on web', async () => {
+    it('loads every injected web font family before completing startup', async () => {
         mockedPlatformOS = 'web';
         fromModuleMock.mockImplementation(() => ({ uri: 'https://example.com/font.ttf' }));
 
@@ -591,12 +591,14 @@ describe('app/_layout init resilience', () => {
         const appendChild = vi.fn((node: any) => {
             appended.push(node);
         });
+        const fontLoadMock = vi.fn(async () => [] as FontFace[]);
 
         Object.defineProperty(globalThis, 'document', {
             value: {
                 getElementById: vi.fn(() => null),
                 createElement: vi.fn(() => ({ textContent: '', id: '' })),
                 head: { appendChild },
+                fonts: { load: fontLoadMock },
             },
             configurable: true,
         });
@@ -604,12 +606,58 @@ describe('app/_layout init resilience', () => {
         const screen = await renderSettledRootLayout();
 
         expect(loadAsyncMock).toHaveBeenCalledTimes(0);
+        expect(fontLoadMock).toHaveBeenCalledTimes(10);
+        expect(fontLoadMock).toHaveBeenCalledWith('1em "Inter-Regular"');
+        expect(fontLoadMock).toHaveBeenCalledWith('1em "IBMPlexMono-Regular"');
+
         // We inject a <style> for @font-face rules and also add a <style> for UI font scaling overrides.
         expect(appendChild).toHaveBeenCalledTimes(2);
         const texts = appended.map((n) => String(n?.textContent ?? ''));
         expect(texts.some((t) => t.includes('@font-face'))).toBe(true);
         expect(texts.some((t) => t.includes('Inter-Regular'))).toBe(true);
         expect(texts.some((t) => t.includes('example.com/font.ttf'))).toBe(true);
+        expect(screen.findByTestId('app-crash-recovery-boundary')).not.toBeNull();
+    });
+
+    it('continues web startup after injected font family loads fail', async () => {
+        mockedPlatformOS = 'web';
+        fromModuleMock.mockImplementation(() => ({ uri: 'https://example.com/font.ttf' }));
+        const fontLoadMock = vi.fn(async () => {
+            throw new Error('font unavailable');
+        });
+
+        Object.defineProperty(globalThis, 'document', {
+            value: {
+                getElementById: vi.fn(() => null),
+                createElement: vi.fn(() => ({ textContent: '', id: '' })),
+                head: { appendChild: vi.fn() },
+                fonts: { load: fontLoadMock },
+            },
+            configurable: true,
+        });
+
+        const screen = await renderSettledRootLayout();
+
+        expect(fontLoadMock).toHaveBeenCalledTimes(10);
+        expect(screen.findByTestId('app-crash-recovery-boundary')).not.toBeNull();
+    });
+
+    it('continues web startup when FontFaceSet is unavailable', async () => {
+        mockedPlatformOS = 'web';
+        fromModuleMock.mockImplementation(() => ({ uri: 'https://example.com/font.ttf' }));
+
+        Object.defineProperty(globalThis, 'document', {
+            value: {
+                getElementById: vi.fn(() => null),
+                createElement: vi.fn(() => ({ textContent: '', id: '' })),
+                head: { appendChild: vi.fn() },
+            },
+            configurable: true,
+        });
+
+        const screen = await renderSettledRootLayout();
+
+        expect(loadAsyncMock).not.toHaveBeenCalled();
         expect(screen.findByTestId('app-crash-recovery-boundary')).not.toBeNull();
     });
 

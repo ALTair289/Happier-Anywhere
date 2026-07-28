@@ -3,7 +3,6 @@ import '../theme.css';
 import * as React from 'react';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Fonts from 'expo-font';
-import { Asset } from 'expo-asset';
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { usePathname, useRouter } from 'expo-router';
 import {
@@ -68,6 +67,7 @@ import { OnboardingShowcaseAutoShowMount } from '@/onboarding/showcase';
 import { DesktopMainContentDragSurface } from '@/components/navigation/desktopWindowChrome/DesktopMainContentDragSurface';
 import { useChromeSafeAreaInsets } from '@/components/ui/layout/useChromeSafeAreaInsets';
 import { loadExpoNotifications, type ExpoNotificationsModule } from '@/utils/platform/loadExpoNotifications';
+import { installWebFontFaces } from '@/platform/installWebFontFaces';
 
 initializeSentryOnce();
 installTauriMcpBridgeOnce();
@@ -444,62 +444,6 @@ let loaded = false;
 let suppressFontTimeoutErrorsUntilMs = 0;
 let webFontLoadAttemptedAtMs = 0;
 
-function escapeCssString(value: string): string {
-    // Enough for our controlled font family names; avoid pulling in a heavier CSS escaping dependency.
-    return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
-}
-
-function injectWebFontFaces(fontMap: Parameters<typeof Fonts.loadAsync>[0]): void {
-    if (typeof document === 'undefined') return;
-    if (typeof document.getElementById !== 'function') return;
-    if (typeof document.createElement !== 'function') return;
-    const head = document.head;
-    if (!head) return;
-
-    const styleId = 'happier-web-font-faces';
-    if (document.getElementById(styleId)) return;
-
-    const rules: string[] = [];
-    for (const [fontFamily, fontModule] of Object.entries(fontMap)) {
-        try {
-            if (!fontModule) continue;
-            let uri: string | null = null;
-            if (typeof fontModule === 'string' || typeof fontModule === 'number') {
-                uri = Asset.fromModule(fontModule).uri;
-            } else if (
-                typeof fontModule === 'object'
-                && fontModule !== null
-                && 'uri' in fontModule
-                && typeof (fontModule as { uri?: unknown }).uri === 'string'
-            ) {
-                uri = (fontModule as { uri: string }).uri;
-            }
-            if (!uri) continue;
-
-            const lower = uri.toLowerCase();
-            const format =
-                lower.endsWith('.woff2') ? 'woff2'
-                : lower.endsWith('.woff') ? 'woff'
-                : lower.endsWith('.otf') ? 'opentype'
-                : lower.endsWith('.ttf') ? 'truetype'
-                : null;
-
-            const src = format ? `url("${uri}") format("${format}")` : `url("${uri}")`;
-            rules.push(
-                `@font-face{font-family:"${escapeCssString(fontFamily)}";src:${src};font-display:swap;}`
-            );
-        } catch {
-            // Best-effort only; don't let font injection break app startup.
-        }
-    }
-
-    if (rules.length === 0) return;
-    const style = document.createElement('style');
-    style.id = styleId;
-    style.textContent = rules.join('\n');
-    head.appendChild(style);
-}
-
 async function loadFonts() {
     await lock.inLock(async () => {
         if (loaded) {
@@ -616,7 +560,7 @@ async function loadFonts() {
         if (isWeb) {
             try {
                 webFontLoadAttemptedAtMs = Date.now();
-                injectWebFontFaces(fontMap);
+                await installWebFontFaces(fontMap);
             } catch {
                 // Do not surface font init issues on web.
             }
