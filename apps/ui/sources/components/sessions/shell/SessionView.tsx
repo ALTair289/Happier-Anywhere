@@ -19,6 +19,8 @@ import type { AttachmentDraft } from '@/components/sessions/attachments/attachme
 import type { AttachmentFilePickerHandle, PickedAttachment } from '@/components/sessions/attachments/AttachmentFilePicker.types';
 import { openAttachmentFilePickerFiles, openAttachmentFilePickerImages } from '@/components/sessions/attachments/attachmentFilePickerActions';
 import { resolveReviewCommentDraftAnchorsForPrompt } from '@/components/sessions/reviews/comments/resolveReviewCommentDraftAnchorsForPrompt';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
+import { isRecoveredHistoryTranscriptObservation } from '@/sync/domains/messages/transcriptObservationProvenance';
 import { useSessionFileUploadAvailability } from '@/components/sessions/files/useSessionFileUploadAvailability';
 import { useSessionAgentInputExtraActionChips } from '@/components/sessions/agentInput/sessionActions/useSessionAgentInputExtraActionChips';
 import {
@@ -38,6 +40,7 @@ import { ChatHeaderView } from '@/components/sessions/transcript/ChatHeaderView'
 import { SessionHeaderActionMenu } from '@/components/sessions/actions/SessionHeaderActionMenu';
 import { SessionHeaderSubagentsButton } from '@/components/sessions/actions/SessionHeaderSubagentsButton';
 import { SessionHeaderTerminalButton } from '@/components/sessions/actions/SessionHeaderTerminalButton';
+import { useOpenAttachedSessionTerminal } from '@/components/sessions/terminal/openAttachedSessionTerminal';
 import { SessionHeaderTranscriptNavigationButton, useOpenTranscriptNavigationSurface } from '@/components/sessions/actions/SessionHeaderTranscriptNavigationButton';
 import { ChatList, type TranscriptViewportChangeState } from '@/components/sessions/transcript/ChatList';
 import { applyTranscriptJumpHighlightForJumpResult } from '@/components/sessions/transcript/navigation/transcriptJumpHighlightStore';
@@ -94,7 +97,7 @@ import { useSession } from '@/sync/domains/state/storage';
 import { writeSessionInitialPromptV1 } from '@/sync/domains/sessionInitialPrompt/sessionInitialPromptV1';
 import { Session, type Metadata } from '@/sync/domains/state/storageTypes';
 import { sync } from '@/sync/sync';
-import { computeNextSessionConfigOptionOverrideMetadata } from '@/sync/engine/overrides/acpConfigOptionOverridePublish';
+import { computeNextAcpConfigOptionOverrideMetadata } from '@/sync/engine/overrides/acpConfigOptionOverridePublish';
 import { readSessionConfigOptionOverridesState } from '@/sync/domains/sessionControl/readSessionControlMetadata';
 import { useApplyLocalSettings } from '@/sync/store/settingsWriters';
 import { updateUsageLimitRecoveryRememberedMode } from '@/sync/domains/settings/usageLimitRecoverySettings';
@@ -167,7 +170,6 @@ import { confirmNonSteerableSend } from '@/components/sessions/agentInput/confir
 import { canApplySteerConfigInFlight, decideSessionMessageDelivery, type MessageSendMode } from '@/sync/domains/session/control/submitMode';
 import { submitSessionUserMessage } from '@/sync/domains/session/input/submitSessionUserMessage';
 import { createSyncBackedSubmitPort } from '@/sync/domains/session/input/syncBackedSubmitPort';
-import type { SessionSubmitPort } from '@/sync/domains/session/input/types';
 import { isSessionLocallyAttached } from '@/sync/domains/session/control/sessionLocalControl';
 import { deriveSessionSubagentCounts } from '@/sync/domains/session/subagents/deriveSessionSubagentCounts';
 import { resolveSessionWorkspacePresentation } from '@/sync/domains/session/listing/sessionWorkspacePresentation';
@@ -181,9 +183,9 @@ import {
     type ConnectedServiceQuotaGaugeLabelFormatter,
     type ConnectedServiceQuotaGaugeWindowMode,
 } from '@/sync/domains/connectedServices/connectedServiceQuotaGauge';
+import { resolveConnectedServiceQuotaRecoveryCreditReceiptNoticeKey } from '@/sync/domains/connectedServices/connectedServiceQuotaRecoveryCreditReceiptPresentation';
 import { useConnectedServiceQuotaSnapshots } from '@/hooks/server/connectedServices/useConnectedServiceQuotaSnapshots';
 import { useProviderAccountUsageSnapshots } from '@/hooks/server/connectedServices/useProviderAccountUsageSnapshots';
-import { resolveConnectedServiceQuotaRecoveryCreditReceiptNoticeKey } from '@/sync/domains/connectedServices/connectedServiceQuotaRecoveryCreditReceiptPresentation';
 import {
     selectProviderUsageDisplaySnapshot,
     type ProviderUsageDisplaySnapshotSource,
@@ -262,6 +264,12 @@ import { resolveSessionResumeMachineTarget } from './sessionResumeMachineTarget'
 import { useDirectSessionTakeover } from '@/components/sessions/model/useDirectSessionTakeover';
 import { useDirectSessionRuntime } from '@/components/sessions/model/useDirectSessionRuntime';
 import { SessionWarningActionBanner } from './SessionWarningActionBanner';
+import { ComposerAuxiliaryFrame } from './view/ComposerAuxiliaryFrame';
+import {
+    ComposerBannerCollapseProvider,
+    useComposerBannerCollapse,
+} from '@/components/sessions/composerBanners/ComposerBannerCollapseProvider';
+import { buildComposerBannerBadgeAccessibility } from '@/components/sessions/composerBanners/composerBannerCollapse';
 import {
     buildStaleSessionRunnerNoticePresentation,
     type StaleSessionRunnerNoticeTranslate,
@@ -294,20 +302,39 @@ import { useEnabledAgentIds } from '@/agents/hooks/useEnabledAgentIds';
 import { readDirectSessionLink } from '@/sync/domains/session/directSessions/readDirectSessionLink';
 import type { SessionParticipantTarget } from '@/sync/domains/session/participants/participantTargets';
 import type { PendingMessage } from '@/sync/domains/state/storageTypes';
+
+function hasCanonicalOutboundHandoffForLocalId(sessionId: string, localId: string | null): boolean {
+    if (!localId) return false;
+
+    const state = storage.getState();
+    const pending = state.sessionPending[sessionId];
+    const hasCanonicalPending = [...(pending?.messages ?? []), ...(pending?.discarded ?? [])].some((message) => (
+        message.source === 'server_pending' && message.localId === localId
+    ));
+    if (hasCanonicalPending) return true;
+
+    const sessionMessages = state.sessionMessages[sessionId];
+    const messagesById = sessionMessages?.messagesById ?? sessionMessages?.messagesMap;
+    if (!messagesById) return false;
+
+    return Object.values(messagesById).some((message) => (
+        message.kind === 'user-text'
+        && message.localId === localId
+        && !isRecoveredHistoryTranscriptObservation(message)
+    ));
+}
 import {
     isHiddenSystemSession,
     ConnectedServiceIdSchema,
     SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
     SessionUsageLimitRecoveryV1Schema,
-    readSessionContinuationRecoveryFromMetadata,
     readProviderAccountUsageRecordIdsFromMetadata,
     type ConnectedServiceQuotaRecoveryCreditsV1,
-    type SessionRunnerRuntimeStateV1,
     type SessionRuntimeIssueV1,
     type SessionUsageLimitRecoveryV1,
 } from '@happier-dev/protocol';
 import { selectSyncErrorForServer } from '@/sync/runtime/connectivity/syncErrorScope';
-import { resolveNextOptimisticSessionConfigOptionOverrides } from './resolveNextOptimisticSessionConfigOptionOverrides';
+import { resolveNextOptimisticAcpConfigOptionOverrides } from './resolveNextOptimisticAcpConfigOptionOverrides';
 import { useSessionViewShellSession, useSessionViewShellSessionSeq } from './sessionViewStableSession';
 import {
     isEmptyPendingMessageComposerSemanticDraftSnapshot,
@@ -743,14 +770,14 @@ const SessionViewLoadedWithPendingMessages = React.memo(function SessionViewLoad
     });
 
     return (
-        <>
+        <ComposerBannerCollapseProvider>
             <MemoizedSessionViewLoaded
                 {...props}
                 directSessionRuntime={directSessionRuntime}
                 participantTargets={participantTargets}
                 pendingMessages={pendingMessages}
             />
-        </>
+        </ComposerBannerCollapseProvider>
     );
 });
 
@@ -774,6 +801,7 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
     const pane = useAppPaneScope(props.paneScopeId);
     const paneRef = React.useRef(pane);
     paneRef.current = pane;
+    const attachedSessionTerminal = useOpenAttachedSessionTerminal(props.sessionId);
     const openTranscriptNavigation = useOpenTranscriptNavigationSurface({
         scopeId: props.paneScopeId,
         sessionId: props.sessionId,
@@ -807,6 +835,10 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
     }, [props.currentSessionRouteServerId, props.sessionId]);
 
     const handleHeaderExtraItemSelect = React.useCallback((actionId: string) => {
+        if (actionId === 'header.openAttachedClaudeTerminal') {
+            attachedSessionTerminal.open();
+            return true;
+        }
         if (actionId === props.mobileWorkspaceExperienceToggleActionId) {
             if (actionId === 'header.openMobileWorkspaceCockpit') {
                 Keyboard.dismiss();
@@ -822,7 +854,7 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
         paneRef.current.openRight({ tabId: 'agents' });
         paneRef.current.setRightTab('agents');
         return true;
-    }, [openTranscriptNavigation, props.mobileWorkspaceExperienceToggleActionId, props.onToggleWorkspaceExperience]);
+    }, [attachedSessionTerminal, openTranscriptNavigation, props.mobileWorkspaceExperienceToggleActionId, props.onToggleWorkspaceExperience]);
 
     const headerExtraItems = React.useMemo(() => {
         const items: DropdownMenuItem[] = [];
@@ -831,6 +863,13 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
                 id: props.mobileWorkspaceExperienceToggleActionId,
                 title: t(props.mobileWorkspaceExperienceToggleLabelKey),
                 icon: <Ionicons name="phone-portrait-outline" size={18} color={theme.colors.text.secondary} />,
+            });
+        }
+        if (attachedSessionTerminal.available) {
+            items.push({
+                id: 'header.openAttachedClaudeTerminal',
+                title: t('tools.askUserQuestion.claudeDialogNotice.openTerminal'),
+                icon: <Ionicons name="terminal-outline" size={18} color={theme.colors.text.secondary} />,
             });
         }
         if (!props.shouldFoldHeaderIconActions) return items;
@@ -863,6 +902,7 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
         }
         return items;
     }, [
+        attachedSessionTerminal.available,
         props.mobileWorkspaceExperienceToggleActionId,
         props.mobileWorkspaceExperienceToggleLabelKey,
         props.shouldFoldHeaderIconActions,
@@ -876,17 +916,21 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
 
     const badgeLabel =
         props.sessionAutomationsEnabledCount > 99 ? '99+' : String(props.sessionAutomationsEnabledCount);
-    const sessionStatus = useSessionStatus(props.session, {
+    const headerRuntimeStatusSource = useSessionRuntimeStatusSource(props.session);
+    const sessionStatus = useSessionStatus(headerRuntimeStatusSource, {
         subscribeToSession: false,
         subscribeToTranscript: false,
     });
     const showResumingStatus = sessionStatus.state === 'resuming';
+    const showBackgroundActivityStatus = sessionStatus.state === 'background_active';
 
     return (
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            {showResumingStatus ? (
+            {showResumingStatus || showBackgroundActivityStatus ? (
                 <View
-                    testID="session-header-resuming-status"
+                    testID={showResumingStatus
+                        ? 'session-header-resuming-status'
+                        : 'session-header-background-activity-status'}
                     style={{
                         flexDirection: 'row',
                         alignItems: 'center',
@@ -901,7 +945,9 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
                         backgroundColor: theme.colors.surface.inset,
                     }}
                 >
-                    <ActivitySpinner size={12} color={sessionStatus.statusColor} />
+                    {showResumingStatus ? (
+                        <ActivitySpinner size={12} color={sessionStatus.statusColor} />
+                    ) : null}
                     <Text
                         numberOfLines={1}
                         style={{
@@ -912,7 +958,7 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
                             minWidth: 0,
                         }}
                     >
-                        {t('session.resuming')}
+                        {showResumingStatus ? t('session.resuming') : sessionStatus.statusText}
                     </Text>
                 </View>
             ) : null}
@@ -1243,15 +1289,11 @@ type SessionAgentInputRuntimeStatusBoundaryProps = Omit<
     'connectionStatus' | 'showAbortButton'
 > & {
     inactiveStatusText: string | null;
-    isPendingQueueWakeResuming: boolean;
-    isResuming: boolean;
     connectedServicesRestartState: SessionConnectedServicesAuthSwitchRestartState;
 };
 
 const SessionAgentInputRuntimeStatusBoundary = React.memo(function SessionAgentInputRuntimeStatusBoundary({
     inactiveStatusText,
-    isPendingQueueWakeResuming,
-    isResuming,
     connectedServicesRestartState,
     session,
     ...props
@@ -1267,21 +1309,17 @@ const SessionAgentInputRuntimeStatusBoundary = React.memo(function SessionAgentI
             ? t('connectedServices.authSwitch.status.restarting')
             : connectedServicesRestartState?.status === 'failed'
             ? t('connectedServices.authSwitch.switchFailed')
-            : (isResuming || isPendingQueueWakeResuming || sessionStatus.state === 'resuming')
+            : sessionStatus.state === 'resuming'
             ? t('session.resuming')
             : (inactiveStatusText || sessionStatus.statusText),
         color: sessionStatus.statusColor,
         dotColor: sessionStatus.statusDotColor,
         isPulsing: connectedServicesRestartState?.status === 'restarting'
             || connectedServicesRestartState?.status === 'pending_confirmation'
-            || isResuming
-            || isPendingQueueWakeResuming
             || sessionStatus.isPulsing,
     }), [
         connectedServicesRestartState?.status,
         inactiveStatusText,
-        isPendingQueueWakeResuming,
-        isResuming,
         sessionStatus.isPulsing,
         sessionStatus.state,
         sessionStatus.statusColor,
@@ -1293,6 +1331,7 @@ const SessionAgentInputRuntimeStatusBoundary = React.memo(function SessionAgentI
         <SessionAgentInputWithUsageAndRequests
             {...props}
             session={session}
+            sessionActive={sessionRuntimeStatusSource.active === true}
             connectionStatus={connectionStatus}
             showAbortButton={shouldShowAbortButtonForSessionState(sessionStatus.state)}
         />
@@ -1476,15 +1515,18 @@ export const SessionView = React.memo((props: SessionViewProps) => {
         ? props.routeAnchorOverride
         : isOwnedSessionRoutePathname(pathname, sessionId);
     const shouldRenderSessionSurface = surfaceFocused || isRouteAnchor;
+    const shouldRetainSessionSurface = Platform.OS === 'web' ? shouldRenderSessionSurface : true;
     const sessionRunnerRuntimeStatusRetention = useSessionRunnerRuntimeStatusRetention({
         enabled: Boolean(session && shouldRenderSessionSurface),
         serverId: currentSessionRouteServerId,
         session,
     });
-    const shouldRetainSessionSurface = Platform.OS === 'web' ? shouldRenderSessionSurface : true;
     useSessionSurfaceActivation({
         sessionId,
         serverId: currentSessionRouteServerId,
+        onSessionVisible: stableSessionForLoadedView && shouldRenderSessionSurface
+            ? sync.onSessionVisible
+            : undefined,
         surfaceFocused,
         surfaceRetained: shouldRetainSessionSurface,
         surfaceVisible: shouldRenderSessionSurface,
@@ -2202,7 +2244,9 @@ function SessionViewLoaded({
     const credentials = auth.credentials;
     const credentialScope = credentials ? resolveAuthCredentialsScopeKey(credentials) : '';
     const resolveAccountMode = useCredentialScopedAccountModeResolver({ credentials, credentialScope });
-    const sessionRuntimeStatusSource = session;
+    const sessionRuntimeStatusSource = useSessionRuntimeStatusSource(session, {
+        subscribeToRuntimeActivity: false,
+    });
     const applyLocalSettings = useApplyLocalSettings();
     const router = useRouter();
     const pathname = usePathname();
@@ -2394,14 +2438,14 @@ function SessionViewLoaded({
         metadata: session.metadata,
     });
     const [activeStatusBadgeKey, setActiveStatusBadgeKey] = React.useState<string | null>(null);
-    const [
-        collapsedUsageLimitRecoveryIssueFingerprint,
-        setCollapsedUsageLimitRecoveryIssueFingerprint,
-    ] = React.useState<string | null>(null);
-    const [
-        collapsedStaleSessionRunnerFingerprint,
-        setCollapsedStaleSessionRunnerFingerprint,
-    ] = React.useState<string | null>(null);
+    // Composer banner collapse is owned by ComposerBannerCollapseProvider (mounted above this
+    // component) so a banner and the badge that toggles it agree even across subtrees, and so the
+    // account-level "remember" preference decides between session-scoped and device-persisted state.
+    const [pendingQueueResumeFailed, setPendingQueueResumeFailed] = React.useState(false);
+    const usageLimitRecoveryBanner = useComposerBannerCollapse('usageLimitRecovery');
+    const staleSessionRunnerBanner = useComposerBannerCollapse('staleSessionRunner');
+    const authRecoveryBanner = useComposerBannerCollapse('authRecovery');
+    const pendingQueueResumeFailedBanner = useComposerBannerCollapse('pendingQueueResumeFailed');
     const [
         resolvedStaleSessionRunnerFingerprint,
         setResolvedStaleSessionRunnerFingerprint,
@@ -2641,18 +2685,6 @@ function SessionViewLoaded({
         if (baseUsageLimitRecoveryPresentation?.issueFingerprint === resolvedUsageLimitRecoveryIssueFingerprint) return;
         setResolvedUsageLimitRecoveryIssueFingerprint(null);
     }, [baseUsageLimitRecoveryPresentation?.issueFingerprint, resolvedUsageLimitRecoveryIssueFingerprint]);
-    const usageLimitRecoveryBannerCollapsed = Boolean(
-        collapsedUsageLimitRecoveryIssueFingerprint
-        && baseUsageLimitRecoveryPresentation?.issueFingerprint === collapsedUsageLimitRecoveryIssueFingerprint
-    );
-    React.useEffect(() => {
-        if (!collapsedUsageLimitRecoveryIssueFingerprint) return;
-        if (baseUsageLimitRecoveryPresentation?.issueFingerprint === collapsedUsageLimitRecoveryIssueFingerprint) return;
-        setCollapsedUsageLimitRecoveryIssueFingerprint(null);
-    }, [
-        baseUsageLimitRecoveryPresentation?.issueFingerprint,
-        collapsedUsageLimitRecoveryIssueFingerprint,
-    ]);
     const activeUsageLimitRecoveryOperation = usageLimitRecoveryOperationStatus
         && baseUsageLimitRecoveryPresentation?.issueFingerprint === usageLimitRecoveryOperationStatus.issueFingerprint
         ? usageLimitRecoveryOperationStatus
@@ -2694,7 +2726,7 @@ function SessionViewLoaded({
         usageLimitRuntimeState.runtimeActivelyWorking,
         usageLimitRecoveryNowMs,
     ]);
-    const visibleUsageLimitRecoveryPresentation = usageLimitRecoveryBannerCollapsed
+    const visibleUsageLimitRecoveryPresentation = usageLimitRecoveryBanner.collapsed
         ? null
         : usageLimitRecoveryPresentation;
     const usageLimitStatusBadgePresentation = React.useMemo(() => buildSessionUsageLimitStatusBadgePresentation({
@@ -2839,18 +2871,6 @@ function SessionViewLoaded({
         if (staleSessionRunnerStatus?.fingerprint === resolvedStaleSessionRunnerFingerprint) return;
         setResolvedStaleSessionRunnerFingerprint(null);
     }, [resolvedStaleSessionRunnerFingerprint, staleSessionRunnerStatus?.fingerprint]);
-    const staleSessionRunnerBannerCollapsed = Boolean(
-        collapsedStaleSessionRunnerFingerprint
-        && staleSessionRunnerStatus?.fingerprint === collapsedStaleSessionRunnerFingerprint
-    );
-    React.useEffect(() => {
-        if (!collapsedStaleSessionRunnerFingerprint) return;
-        if (staleSessionRunnerStatus?.fingerprint === collapsedStaleSessionRunnerFingerprint) return;
-        setCollapsedStaleSessionRunnerFingerprint(null);
-    }, [
-        collapsedStaleSessionRunnerFingerprint,
-        staleSessionRunnerStatus?.fingerprint,
-    ]);
     React.useEffect(() => {
         if (!staleSessionRunnerOperationStatus) return;
         if (staleSessionRunnerOperationStatus.fingerprint === staleSessionRunnerStatus?.fingerprint) return;
@@ -2873,7 +2893,7 @@ function SessionViewLoaded({
         staleSessionRunnerStatus,
         translateStaleSessionRunnerNotice,
     ]);
-    const visibleStaleSessionRunnerNoticePresentation = staleSessionRunnerBannerCollapsed
+    const visibleStaleSessionRunnerNoticePresentation = staleSessionRunnerBanner.collapsed
         ? null
         : staleSessionRunnerNoticePresentation;
     const handleStaleSessionRunnerRestart = React.useCallback(async () => {
@@ -2915,13 +2935,6 @@ function SessionViewLoaded({
         staleSessionRunnerOperationStatus?.status,
         staleSessionRunnerStatus,
     ]);
-    const toggleStaleSessionRunnerBannerCollapsed = React.useCallback(() => {
-        const fingerprint = staleSessionRunnerStatus?.fingerprint ?? null;
-        if (!fingerprint) return;
-        setCollapsedStaleSessionRunnerFingerprint((current) => (
-            current === fingerprint ? null : fingerprint
-        ));
-    }, [staleSessionRunnerStatus?.fingerprint]);
     const handleUsageLimitRecoveryAction = React.useCallback(async (kind: SessionUsageLimitRecoveryActionKind) => {
         if (usageLimitRecoveryPendingActionRef.current) return;
         const showUsageLimitRecoveryOperationFailure = (
@@ -3083,7 +3096,14 @@ function SessionViewLoaded({
                 return;
             }
             if (kind === 'forget') {
-                const result = await sessionUsageLimitWaitResumeCancel(sessionId, usageLimitRecoveryOperationOptions);
+                if (!usageLimitRecoveryPresentation) return;
+                const result = await sessionUsageLimitWaitResumeCancel(sessionId, {
+                    issueFingerprint: usageLimitRecoveryPresentation.issueFingerprint,
+                    armedAtMs: usageLimitRecoveryPresentation.armedAtMs,
+                    ...(usageLimitRecoveryPresentation.runtimeAuthRecoveryAttemptId
+                        ? { runtimeAuthRecoveryAttemptId: usageLimitRecoveryPresentation.runtimeAuthRecoveryAttemptId }
+                        : {}),
+                }, usageLimitRecoveryOperationOptions);
                 if (!result.ok) {
                     if (applyTypedUsageLimitRecoveryFailureStatus(result)) {
                         return;
@@ -3123,7 +3143,15 @@ function SessionViewLoaded({
                     rememberPreference: false,
                 }, usageLimitRecoveryOperationOptions)
                 : kind === 'cancel'
-                    ? await sessionUsageLimitWaitResumeCancel(sessionId, usageLimitRecoveryOperationOptions)
+                    ? usageLimitRecoveryPresentation
+                        ? await sessionUsageLimitWaitResumeCancel(sessionId, {
+                            issueFingerprint: usageLimitRecoveryPresentation.issueFingerprint,
+                            armedAtMs: usageLimitRecoveryPresentation.armedAtMs,
+                            ...(usageLimitRecoveryPresentation.runtimeAuthRecoveryAttemptId
+                                ? { runtimeAuthRecoveryAttemptId: usageLimitRecoveryPresentation.runtimeAuthRecoveryAttemptId }
+                                : {}),
+                        }, usageLimitRecoveryOperationOptions)
+                        : { ok: false as const, error: 'usage_limit_recovery_attempt_identity_required' }
                     : isUsageLimitRecoverySwitchAction(kind)
                         ? await sessionUsageLimitSwitchAccountNow(sessionId, {
                             provider: session.lastRuntimeIssue?.provider ?? null,
@@ -3183,48 +3211,86 @@ function SessionViewLoaded({
         usageLimitRecoveryPresentation?.issueFingerprint,
         usageLimitRecoveryResumePromptMode,
     ]);
-    const toggleUsageLimitRecoveryBannerCollapsed = React.useCallback(() => {
-        const issueFingerprint = usageLimitRecoveryPresentation?.issueFingerprint
-            ?? baseUsageLimitRecoveryPresentation?.issueFingerprint
-            ?? null;
-        if (!issueFingerprint) return;
-        setCollapsedUsageLimitRecoveryIssueFingerprint((current) => (
-            current === issueFingerprint ? null : issueFingerprint
-        ));
-    }, [
-        baseUsageLimitRecoveryPresentation?.issueFingerprint,
-        usageLimitRecoveryPresentation?.issueFingerprint,
-    ]);
     const sessionStatusBadges = React.useMemo<ReadonlyArray<AgentInputStatusBadge>>(() => {
         const usageBadge = usageLimitStatusBadgePresentation
             ? [{
                 ...usageLimitStatusBadgePresentation,
-                accessibilityLabel: usageLimitRecoveryBannerCollapsed
-                    ? t('session.usageLimitRecovery.showBannerAction')
-                    : t('session.usageLimitRecovery.hideBannerAction'),
+                ...buildComposerBannerBadgeAccessibility({
+                    statusLabel: usageLimitStatusBadgePresentation.label,
+                    collapsed: usageLimitRecoveryBanner.collapsed,
+                    expandHint: t('session.usageLimitRecovery.showBannerAction'),
+                    collapseHint: t('session.usageLimitRecovery.hideBannerAction'),
+                }),
                 icon: (tint: string) => <Ionicons name="timer-outline" size={12} color={tint} />,
-                onPress: toggleUsageLimitRecoveryBannerCollapsed,
+                onPress: usageLimitRecoveryBanner.toggle,
             } satisfies AgentInputStatusBadge]
             : [];
         const staleRunnerBadge = staleSessionRunnerNoticePresentation
             ? [{
                 ...staleSessionRunnerNoticePresentation.badge,
-                accessibilityLabel: staleSessionRunnerBannerCollapsed
-                    ? t('session.staleRunner.showBannerAction')
-                    : t('session.staleRunner.hideBannerAction'),
-                icon: (tint: string) => <Ionicons name="sync-circle-outline" size={13} color={tint} />,
-                onPress: toggleStaleSessionRunnerBannerCollapsed,
+                ...buildComposerBannerBadgeAccessibility({
+                    statusLabel: staleSessionRunnerNoticePresentation.badge.label,
+                    collapsed: staleSessionRunnerBanner.collapsed,
+                    expandHint: t('session.staleRunner.showBannerAction'),
+                    collapseHint: t('session.staleRunner.hideBannerAction'),
+                }),
+                icon: (tint: string) => <Ionicons name="sync-circle-outline" size={12} color={tint} />,
+                onPress: staleSessionRunnerBanner.toggle,
             } satisfies AgentInputStatusBadge]
             : [];
-        return [...usageBadge, ...staleRunnerBadge, ...sessionWorkStateBadges];
+        const authRecoveryBadge = authSurfaceState
+            ? [{
+                key: 'session-auth-recovery',
+                testID: 'session.authRecovery.badge',
+                label: t('connect.restoreAccount'),
+                tone: 'warning',
+                ...buildComposerBannerBadgeAccessibility({
+                    statusLabel: t('connect.restoreAccount'),
+                    collapsed: authRecoveryBanner.collapsed,
+                    expandHint: t('session.composerBanners.showBannerAction'),
+                    collapseHint: t('session.composerBanners.hideBannerAction'),
+                }),
+                icon: (tint: string) => <Ionicons name="key-outline" size={12} color={tint} />,
+                onPress: authRecoveryBanner.toggle,
+            } satisfies AgentInputStatusBadge]
+            : [];
+        const pendingQueueBadge = pendingQueueResumeFailed
+            ? [{
+                key: 'session-pendingQueue-resumeFailed',
+                testID: 'session.pendingQueueResumeFailed.badge',
+                label: t('session.pendingQueuedResumeFailedTitle'),
+                tone: 'warning',
+                ...buildComposerBannerBadgeAccessibility({
+                    statusLabel: t('session.pendingQueuedResumeFailedTitle'),
+                    collapsed: pendingQueueResumeFailedBanner.collapsed,
+                    expandHint: t('session.composerBanners.showBannerAction'),
+                    collapseHint: t('session.composerBanners.hideBannerAction'),
+                }),
+                icon: (tint: string) => <Ionicons name="alert-circle-outline" size={12} color={tint} />,
+                onPress: pendingQueueResumeFailedBanner.toggle,
+            } satisfies AgentInputStatusBadge]
+            : [];
+        return [
+            ...usageBadge,
+            ...staleRunnerBadge,
+            ...authRecoveryBadge,
+            ...pendingQueueBadge,
+            ...sessionWorkStateBadges,
+        ];
     }, [
+        authRecoveryBanner.collapsed,
+        authRecoveryBanner.toggle,
+        authSurfaceState,
+        pendingQueueResumeFailed,
+        pendingQueueResumeFailedBanner.collapsed,
+        pendingQueueResumeFailedBanner.toggle,
         sessionWorkStateBadges,
-        staleSessionRunnerBannerCollapsed,
+        staleSessionRunnerBanner.collapsed,
+        staleSessionRunnerBanner.toggle,
         staleSessionRunnerNoticePresentation,
         t,
-        toggleStaleSessionRunnerBannerCollapsed,
-        toggleUsageLimitRecoveryBannerCollapsed,
-        usageLimitRecoveryBannerCollapsed,
+        usageLimitRecoveryBanner.collapsed,
+        usageLimitRecoveryBanner.toggle,
         usageLimitStatusBadgePresentation,
     ]);
     React.useEffect(() => {
@@ -3239,25 +3305,25 @@ function SessionViewLoaded({
     const isVoiceConversationSession = isVoiceConversationSystemSessionMetadata(session.metadata ?? null);
     const isHiddenSystemSessionSession = isHiddenSystemSession({ metadata: session.metadata ?? null });
     const modelMode = liveComposerState.modelMode;
-    const sessionSessionConfigOptionOverrides = React.useMemo<React.ComponentProps<typeof AgentInput>['acpConfigOptionOverridesOverride']>(() => {
+    const sessionConfigOptionOverrides = React.useMemo<React.ComponentProps<typeof AgentInput>['acpConfigOptionOverridesOverride']>(() => {
         return readSessionConfigOptionOverridesState(session.metadata ?? null);
     }, [session.metadata]);
     const [optimisticSessionConfigOptionOverrides, setOptimisticSessionConfigOptionOverrides] =
         React.useState<React.ComponentProps<typeof AgentInput>['acpConfigOptionOverridesOverride']>(
-            sessionSessionConfigOptionOverrides,
+            sessionConfigOptionOverrides,
         );
     const optimisticSessionConfigOptionOverridesSessionIdRef = React.useRef(sessionId);
     React.useEffect(() => {
         setOptimisticSessionConfigOptionOverrides((current) => {
             const sessionChanged = optimisticSessionConfigOptionOverridesSessionIdRef.current !== sessionId;
             optimisticSessionConfigOptionOverridesSessionIdRef.current = sessionId;
-            return resolveNextOptimisticSessionConfigOptionOverrides({
+            return resolveNextOptimisticAcpConfigOptionOverrides({
                 current,
-                incoming: sessionSessionConfigOptionOverrides,
+                incoming: sessionConfigOptionOverrides,
                 sessionChanged,
             }) as typeof current;
         });
-    }, [sessionSessionConfigOptionOverrides, sessionId]);
+    }, [sessionConfigOptionOverrides, sessionId]);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
     const scmSessionAutoRefreshIntervalMsSetting = useSetting('scmSessionAutoRefreshIntervalMs' as any);
     const scmSessionAutoRefreshIntervalMs =
@@ -3538,9 +3604,9 @@ function SessionViewLoaded({
     );
 
     // Inactive session resume state
-    // Use `session.active` as the source of truth for whether the provider process is running.
-    // `presence` is derived from server snapshots and can drift if a partial update lands.
-    const isSessionActive = session.active === true;
+    // Runtime status is read from the live store subscription rather than the retained shell
+    // snapshot, so composer availability follows the latest server/session projection.
+    const isSessionActive = sessionRuntimeStatusSource.active === true;
     const supportsLocalControl = !isHiddenSystemSessionSession && supportsEffectiveLocalControlForSession({
         agentId,
         metadata: session.metadata,
@@ -3560,7 +3626,6 @@ function SessionViewLoaded({
     const isResumable = canResumeSessionWithOptions(session.metadata, resumeCapabilityOptions)
         || canContinueSessionWithFreshSpawn(session.metadata, resumeCapabilityOptions);
     const [isResuming, setIsResuming] = React.useState(false);
-    const [isPendingQueueWakeResuming, setIsPendingQueueWakeResuming] = React.useState(false);
     const persistedVoiceComposerRouting = React.useMemo(
         () => resolveVoiceSessionComposerRouting({
             conversationSessionId: sessionId,
@@ -3779,7 +3844,7 @@ function SessionViewLoaded({
     }, [sessionId, settings.sessionPermissionModeApplyTiming]);
 
     const updateAcpSessionModeOverride = React.useCallback((modeId: string) => {
-        const normalized = typeof modeId === 'string' ? modeId.trim() : '';
+        const normalized = readNonBlankSessionControlIdentifier(modeId) ?? '';
         const publishModeId =
             normalized === 'default' && !sessionModeOptionIds.includes('default')
                 ? ''
@@ -3801,7 +3866,7 @@ function SessionViewLoaded({
                     sessionConfigOptionOverridesV1: current,
                 }
                 : (session.metadata ?? {})) as Metadata;
-            const nextMetadata = computeNextSessionConfigOptionOverrideMetadata({
+            const nextMetadata = computeNextAcpConfigOptionOverrideMetadata({
                 metadata: baseMetadata,
                 configId,
                 value: valueId,
@@ -3809,7 +3874,7 @@ function SessionViewLoaded({
             });
             return readSessionConfigOptionOverridesState(nextMetadata);
         });
-        fireAndForget(sync.publishSessionSessionConfigOptionOverrideToMetadata({
+        fireAndForget(sync.publishSessionAcpConfigOptionOverrideToMetadata({
             sessionId,
             configId,
             value: valueId,
@@ -3964,7 +4029,7 @@ function SessionViewLoaded({
                 ...buildResumeSessionExtrasFromUiState({
                     agentId,
                     settings,
-                    session,
+                    session: sessionRuntimeStatusSource,
                 }),
             });
 
@@ -4026,13 +4091,6 @@ function SessionViewLoaded({
         [handleMicrophonePress, voiceProviderId, voiceSnap.status],
     );
 
-    // Trigger session visibility and initialize git status sync
-    React.useLayoutEffect(() => {
-
-        // Trigger session sync
-        sync.onSessionVisible(sessionId);
-    }, [sessionId]);
-
     const showInactiveNotResumableNotice = inactiveUi.noticeKind === 'not-resumable';
     const showMachineOfflineNotice = inactiveUi.noticeKind === 'machine-offline';
     const providerName = getAgentCore(agentId).uiConnectedService.label ?? t('status.unknown');
@@ -4065,7 +4123,6 @@ function SessionViewLoaded({
     }, [session.accessLevel, session.active, session.canApprovePermissions, session.presence]);
     const openApprovalRequests = useOpenApprovalArtifactsForSession(sessionId);
 
-    const [pendingQueueResumeFailed, setPendingQueueResumeFailed] = React.useState(false);
     React.useEffect(() => {
         if (!pendingQueueResumeFailed) return;
         if (!isSessionActive) return;
@@ -4161,11 +4218,11 @@ function SessionViewLoaded({
     }, [directSessionLink, directSessionRuntime.status, directSessionTakeover, isHiddenSystemSessionSession]);
 
     const [followBottomIntentSeq, setFollowBottomIntentSeq] = React.useState(0);
-    const markTranscriptLiveTailIntent = React.useCallback(() => {
-        if (sync.markSessionLiveTailIntentIfNotDetached(sessionId)) {
-            setFollowBottomIntentSeq((current) => current + 1);
-        }
-    }, [sessionId]);
+    const requestMountedTranscriptFollow = React.useCallback(() => {
+        // The sync send boundary already established durable own-send tail intent before
+        // its optimistic projection. This key is only the mounted physical takeover signal.
+        setFollowBottomIntentSeq((current) => current + 1);
+    }, []);
 
     const handleTranscriptViewportChange = React.useCallback((state: TranscriptViewportChangeState) => {
         sync.onSessionViewportChange(sessionId, state);
@@ -4368,7 +4425,7 @@ function SessionViewLoaded({
                     testID: 'session.pendingMessageEdit.badge',
                     tone: 'active',
                     emphasis: 'prominent',
-                    icon: (tint: string) => <Ionicons name="pencil-outline" size={13} color={tint} />,
+                    icon: (tint: string) => <Ionicons name="pencil-outline" size={12} color={tint} />,
                     onPress: cancelPendingMessageEdit,
                 } satisfies AgentInputStatusBadge]
                 : []),
@@ -4413,7 +4470,7 @@ function SessionViewLoaded({
     }, [buildCurrentSessionHref, multiPaneDeviceType, multiPaneEnabled, pane.openRight, pane.setRightTab, router, windowWidth]);
     const handleAgentInputFileViewerPress = useStableAgentInputFileViewerPress(openFileViewer);
     const handleAgentInputAbort = React.useCallback(() => {
-        void sessionAbort(sessionId);
+        return sessionAbort(sessionId);
     }, [sessionId]);
     const handleAutocompleteSuggestions = React.useCallback((query: string) => getSuggestions(sessionId, query), [sessionId]);
     const handleAutocompleteSuggestionSelect = React.useCallback<AgentInputAutocompleteSelectionHandler>(
@@ -4497,7 +4554,7 @@ function SessionViewLoaded({
                 const preflight = decideSessionMessageDelivery({
                     configuredMode,
                     busySteerSendPolicy,
-                    session,
+                    session: sessionRuntimeStatusSource,
                     text: trimmedText,
                     permissionModeApplyTiming,
                     nonSteerableSendPrompt,
@@ -4579,12 +4636,13 @@ function SessionViewLoaded({
                 restoreTransientInputState: inputComposerRestoreTransientStateRef.current,
             });
             let didClearAtOutboundHandoff = false;
+            let outboundHandoffLocalId: string | null = null;
             let didRecordOutboundAccepted = false;
             const recordOutboundAccepted = () => {
                 if (didRecordOutboundAccepted) return;
                 didRecordOutboundAccepted = true;
                 trackMessageSent();
-                markTranscriptLiveTailIntent();
+                requestMountedTranscriptFollow();
             };
             const clearAfterOutboundHandoff = () => {
                 const didClear = clearComposerAfterOutboundHandoff({
@@ -4607,6 +4665,10 @@ function SessionViewLoaded({
                 const didRestore = restoreComposerAfterFailedOutboundHandoff({
                     snapshot: sendSnapshot,
                     wasClearedAtHandoff: didClearAtOutboundHandoff,
+                    isCanonicalOutboundHandoffPresent: () => hasCanonicalOutboundHandoffForLocalId(
+                        sessionId,
+                        outboundHandoffLocalId,
+                    ),
                     isSemanticRestoreSafe: () =>
                         semanticDraftSnapshotAfterHandoffClear !== null
                         && isComposerSemanticDraftSnapshotCurrent(semanticDraftSnapshotAfterHandoffClear),
@@ -4719,20 +4781,9 @@ function SessionViewLoaded({
                                 removeSubmittedAttachmentDraftsFromCurrent();
                             }
                         };
-                        const submitPortWithUiWakeState: SessionSubmitPort = {
-                            ...sessionSubmitPort,
-                            resumeSession: async (options) => {
-                                setIsPendingQueueWakeResuming(true);
-                                try {
-                                    return await sessionSubmitPort.resumeSession(options);
-                                } finally {
-                                    setIsPendingQueueWakeResuming(false);
-                                }
-                            },
-                        };
-                        const result = await submitSessionUserMessage(submitPortWithUiWakeState, {
+                        const result = await submitSessionUserMessage(sessionSubmitPort, {
                             sessionId,
-                            session,
+                            session: sessionRuntimeStatusSource,
                             text: outbound.text,
                             displayText: outbound.displayText,
                             metaOverrides: steerWithoutConfigMetaOverrides
@@ -4765,6 +4816,7 @@ function SessionViewLoaded({
                                 ? 'session_attachment_review_comment_composer'
                                 : 'session_attachment_composer',
                             onOutboundHandoff: (handoff) => {
+                                outboundHandoffLocalId = handoff.localId ?? outboundHandoffLocalId;
                                 clearAttachmentsAfterProjectionHandoff();
                                 if (handoff.persistence === 'pending') {
                                     recordOutboundAccepted();
@@ -4926,20 +4978,9 @@ function SessionViewLoaded({
                         return;
                     }
 
-                    const submitPortWithUiWakeState: SessionSubmitPort = {
-                        ...sessionSubmitPort,
-                        resumeSession: async (options) => {
-                            setIsPendingQueueWakeResuming(true);
-                            try {
-                                return await sessionSubmitPort.resumeSession(options);
-                            } finally {
-                                setIsPendingQueueWakeResuming(false);
-                            }
-                        },
-                    };
-                    const result = await submitSessionUserMessage(submitPortWithUiWakeState, {
+                    const result = await submitSessionUserMessage(sessionSubmitPort, {
                         sessionId,
-                        session,
+                        session: sessionRuntimeStatusSource,
                         text: outbound.text,
                         displayText: outbound.displayText,
                         metaOverrides: steerWithoutConfigMetaOverrides
@@ -4972,6 +5013,7 @@ function SessionViewLoaded({
                             ? 'session_review_comment_composer'
                             : 'session_composer',
                         onOutboundHandoff: (handoff) => {
+                            outboundHandoffLocalId = handoff.localId ?? outboundHandoffLocalId;
                             clearAfterOutboundHandoff();
                             if (handoff.persistence === 'pending') {
                                 recordOutboundAccepted();
@@ -5080,21 +5122,16 @@ function SessionViewLoaded({
         if (resolved.kind !== 'send') return;
         void sendComposerText(resolved.text, composerMessage, sendOptions);
     });
-    const composerAuxiliaryBannerHorizontalPadding = COMPOSER_CONTENT_HORIZONTAL_INSET;
-    const composerAuxiliaryBannerStyle = { width: '100%' as const, maxWidth: layout.maxWidth };
     const input = shouldShowInput ? (
         <View>
             {voiceEnabled && voiceProviderId !== 'off' && !isHiddenSystemSessionSession ? <VoiceSurface variant="session" sessionId={sessionId} /> : null}
-            {authSurfaceState ? (
-                <View style={{ width: '100%', alignItems: 'center', paddingHorizontal: composerAuxiliaryBannerHorizontalPadding, paddingTop: 8 }}>
-                    <SessionAuthRecoveryBanner
-                        message={authSurfaceState.message}
-                        style={composerAuxiliaryBannerStyle}
-                    />
-                </View>
+            {authSurfaceState && !authRecoveryBanner.collapsed ? (
+                <ComposerAuxiliaryFrame>
+                    <SessionAuthRecoveryBanner message={authSurfaceState.message} />
+                </ComposerAuxiliaryFrame>
             ) : null}
-            {pendingQueueResumeFailed ? (
-                <View style={{ width: '100%', alignItems: 'center', paddingHorizontal: composerAuxiliaryBannerHorizontalPadding, paddingTop: 8 }}>
+            {pendingQueueResumeFailed && !pendingQueueResumeFailedBanner.collapsed ? (
+                <ComposerAuxiliaryFrame>
                     <SessionWarningActionBanner
                         testID="session-pendingQueue-resumeFailed"
                         actionTestID="session-pendingQueue-resumeFailed-retry"
@@ -5109,12 +5146,11 @@ function SessionViewLoaded({
                                 setPendingQueueResumeFailed(false);
                             }
                         }}
-                        style={composerAuxiliaryBannerStyle}
                     />
-                </View>
+                </ComposerAuxiliaryFrame>
             ) : null}
             {visibleUsageLimitRecoveryPresentation ? (
-                <View style={{ width: '100%', alignItems: 'center', paddingHorizontal: composerAuxiliaryBannerHorizontalPadding, paddingTop: 8 }}>
+                <ComposerAuxiliaryFrame>
                     <SessionWarningActionBanner
                         testID={visibleUsageLimitRecoveryPresentation.banner.testID}
                         actionTestID={visibleUsageLimitRecoveryPresentation.banner.primaryAction.testID}
@@ -5132,12 +5168,11 @@ function SessionViewLoaded({
                             disabled: usageLimitRecoveryActionsDisabled,
                             onPress: () => void handleUsageLimitRecoveryAction(action.kind),
                         }))}
-                        style={composerAuxiliaryBannerStyle}
                     />
-                </View>
+                </ComposerAuxiliaryFrame>
             ) : null}
             {visibleStaleSessionRunnerNoticePresentation ? (
-                <View style={{ width: '100%', alignItems: 'center', paddingHorizontal: composerAuxiliaryBannerHorizontalPadding, paddingTop: 8 }}>
+                <ComposerAuxiliaryFrame>
                     <SessionWarningActionBanner
                         testID={visibleStaleSessionRunnerNoticePresentation.banner.testID}
                         actionTestID={visibleStaleSessionRunnerNoticePresentation.banner.primaryAction.testID}
@@ -5147,9 +5182,8 @@ function SessionViewLoaded({
                         actionAccessibilityLabel={visibleStaleSessionRunnerNoticePresentation.banner.primaryAction.accessibilityLabel}
                         disabled={visibleStaleSessionRunnerNoticePresentation.banner.primaryAction.disabled || !hasWriteAccess}
                         onActionPress={() => void handleStaleSessionRunnerRestart()}
-                        style={composerAuxiliaryBannerStyle}
                     />
-                </View>
+                </ComposerAuxiliaryFrame>
             ) : null}
             <SessionAgentInputRuntimeStatusBoundary
                 session={session}
@@ -5201,8 +5235,6 @@ function SessionViewLoaded({
                 isMicActive={micButtonState.isMicActive}
                 onAbort={handleAgentInputAbort}
                 inactiveStatusText={inactiveStatusText}
-                isPendingQueueWakeResuming={isPendingQueueWakeResuming}
-                isResuming={isResuming}
                 onFileViewerPress={handleAgentInputFileViewerPress}
                 // Autocomplete configuration
                 autocompletePrefixes={SESSION_COMPOSER_AUTOCOMPLETE_PREFIXES}

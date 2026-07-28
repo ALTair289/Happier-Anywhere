@@ -121,9 +121,6 @@ const modalAlertSpy = vi.hoisted(() => vi.fn());
 const chatListPropsSpy = vi.hoisted(() => vi.fn());
 const chatHeaderPropsSpy = vi.hoisted(() => vi.fn());
 const voiceSurfacePropsSpy = vi.hoisted(() => vi.fn());
-const useSessionViewShellSessionSeqSpy = vi.hoisted(() => vi.fn());
-const useSessionRuntimeStatusSourceSpy = vi.hoisted(() => vi.fn());
-const useSessionRuntimeStatusSourceStacks = vi.hoisted(() => ({ current: [] as string[] }));
 const showDirectSessionTakeoverDialogSpy = vi.hoisted(() =>
   vi.fn<() => Promise<{ action: 'direct' | 'persisted' | null; forceStop: boolean }>>(async () => ({ action: null, forceStop: false })),
 );
@@ -131,7 +128,7 @@ const sendVoiceSessionComposerTextSpy = vi.hoisted(() =>
   vi.fn<
     (params: unknown) => Promise<
       { ok: true }
-      | { ok: false; reason: 'not_voice_session' | 'adapter_unavailable' | 'send_failed'; message?: string }
+      | { ok: false; reason: 'not_voice_session' | 'adapter_unavailable' | 'send_failed' | 'terminal_rejected'; message?: string }
     >
   >(async (_params: unknown) => ({ ok: false as const, reason: 'not_voice_session' as const })),
 );
@@ -198,6 +195,8 @@ const storageState = vi.hoisted(() => ({
   } as any,
   settings: {} as Record<string, unknown>,
   sessionListViewDataByServerId: {} as Record<string, unknown>,
+  sessionPending: {} as Record<string, any>,
+  sessionMessages: {} as Record<string, any>,
   // Stable container references so the storage snapshot built lazily on first
   // `vi.mock` factory invocation (see createStorageStoreMock) shares identity
   // with these objects; per-test mutations apply in place via Object.assign/
@@ -561,7 +560,6 @@ vi.mock('@/sync/sync', () => ({
     enqueuePendingMessage: async () => {},
     submitMessage: syncSubmitMessageSpy,
     encryption: { getMachineEncryption: () => null },
-    markSessionLiveTailIntentIfNotDetached: () => true,
     onSessionViewportChange: () => {},
   },
 }));
@@ -631,27 +629,6 @@ vi.mock('@/components/sessions/agentInput/routing/useSessionRecipientState', () 
 vi.mock('@/hooks/session/useSessionSubagents', () => ({
   useSessionSubagents: () => ({ subagents: [], participantTargets: participantTargetsState.current, sidechainIds: [] }),
 }));
-vi.mock('./sessionViewStableSession', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./sessionViewStableSession')>();
-  return {
-    ...actual,
-    useSessionViewShellSessionSeq: (sessionId: string) => {
-      useSessionViewShellSessionSeqSpy(sessionId);
-      return actual.useSessionViewShellSessionSeq(sessionId);
-    },
-  };
-});
-vi.mock('./useSessionRuntimeStatusSource', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./useSessionRuntimeStatusSource')>();
-  return {
-    ...actual,
-    useSessionRuntimeStatusSource: (session: any) => {
-      useSessionRuntimeStatusSourceSpy(session.id);
-      useSessionRuntimeStatusSourceStacks.current.push(new Error().stack ?? '');
-      return actual.useSessionRuntimeStatusSource(session);
-    },
-  };
-});
 vi.mock('@/sync/domains/session/control/localControlSwitch', async (importOriginal) => {
   const actual = await importOriginal<any>();
   return {
@@ -783,31 +760,11 @@ describe('SessionView (direct sessions)', () => {
       active: true,
       metadata: {
         ...storageState.sessions.s1.metadata,
-        [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: {
-          v: 1,
+        [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: buildSessionRunnerRuntimeStatus({
           sessionId: 's1',
           machineId: 'machine-1',
-          observedAtMs: 1,
-          runner: {
-            pid: 123,
-            runtimeId: 'version:cli-old',
-            processCommandHash: 'hash-old',
-            entrypointVersion: 'cli-old',
-            entrypointSource: 'process_command',
-            startedBy: 'daemon',
-            startingMode: 'remote',
-          },
-          daemon: {
-            currentEntrypointVersion: 'version:cli-new',
-            currentEntrypointSource: 'launch_spec',
-          },
           versionState: 'stale',
-          statusSource: 'daemon_tracking',
-          plannedRestart: {
-            supported: true,
-            eligible: true,
-          },
-        },
+        }),
       },
     };
   }
@@ -967,14 +924,11 @@ describe('SessionView (direct sessions)', () => {
   }
 
   beforeEach(() => {
+    __resetConnectedServiceQuotaSnapshotStore();
+    sessionRunnerRuntimeStatusRetention.clear();
     chatListPropsSpy.mockReset();
     chatHeaderPropsSpy.mockReset();
     voiceSurfacePropsSpy.mockReset();
-    useSessionViewShellSessionSeqSpy.mockReset();
-    __resetConnectedServiceQuotaSnapshotStore();
-    sessionRunnerRuntimeStatusRetention.clear();
-    useSessionRuntimeStatusSourceSpy.mockReset();
-    useSessionRuntimeStatusSourceStacks.current = [];
     featureEnabledState.voice = false;
     featureEnabledState['files.reviewComments'] = false;
     featureEnabledState['sessions.usageLimitRecovery'] = false;
@@ -1063,6 +1017,12 @@ describe('SessionView (direct sessions)', () => {
     };
     storageState.settings = settingsState.current;
     storageState.sessionListViewDataByServerId = {};
+    for (const key of Object.keys(storageState.sessionPending)) {
+      delete storageState.sessionPending[key];
+    }
+    for (const key of Object.keys(storageState.sessionMessages)) {
+      delete storageState.sessionMessages[key];
+    }
     // Clear the stable container references in place (see hoisted storageState
     // notes) so per-test mutations remain visible through the storage snapshot.
     for (const key of Object.keys(storageState.sessionListRenderables)) {
@@ -1158,24 +1118,6 @@ describe('SessionView (direct sessions)', () => {
     }));
   });
 
-  it('keeps seq-only streaming subscription isolated to the viewed lifecycle child', async () => {
-    await renderSessionViewAndSettle();
-
-    expect(useSessionViewShellSessionSeqSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps runtime status subscription isolated to the composer status boundary', async () => {
-    await renderSessionViewAndSettle();
-
-    expect(useSessionRuntimeStatusSourceSpy).toHaveBeenCalled();
-    expect(useSessionRuntimeStatusSourceStacks.current.some((stack) =>
-      stack.includes('SessionAgentInputRuntimeStatusBoundary'),
-    )).toBe(true);
-    expect(useSessionRuntimeStatusSourceStacks.current.some((stack) =>
-      stack.includes('SessionViewLoaded'),
-    )).toBe(false);
-  });
-
   it('renders stale-runner composer notice and badge from canonical daemon status', async () => {
     installStaleSessionRunnerStatus();
 
@@ -1189,7 +1131,7 @@ describe('SessionView (direct sessions)', () => {
     }));
   });
 
-  it('renders stale-runner composer notice from daemon status RPC when metadata is not seeded', async () => {
+  it('renders stale-runner composer notice from daemon status RPC for an inactive session when metadata is not seeded', async () => {
     storageState.machines['machine-1'] = {
       id: 'machine-1',
       active: true,
@@ -1197,7 +1139,7 @@ describe('SessionView (direct sessions)', () => {
     } as any;
     storageState.sessions.s1 = {
       ...storageState.sessions.s1,
-      active: true,
+      active: false,
       metadata: {
         ...storageState.sessions.s1.metadata,
         machineId: 'machine-1',
@@ -1396,7 +1338,11 @@ describe('SessionView (direct sessions)', () => {
     const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
 
     expect(screen.findByTestId('session-staleRunner-version')).toBeTruthy();
-    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+    // A disabled banner action carries no press handler at all, so a view-only participant has no
+    // reachable path to the restart operation.
+    const restartAction = screen.findByTestId('session-staleRunner-version-restart');
+    expect(restartAction?.props.disabled).toBe(true);
+    expect(restartAction?.props.onPress).toBeUndefined();
 
     expect(restartStaleSessionRunnerSpy).not.toHaveBeenCalled();
     expect(screen.findByTestId('session-staleRunner-version')).toBeTruthy();
@@ -1522,7 +1468,7 @@ describe('SessionView (direct sessions)', () => {
     expect(screen.findByTestId('session-usageLimit-recovery')).toBeTruthy();
   });
 
-  it('reopens the usage-limit recovery banner when a different issue replaces the collapsed one', async () => {
+  it('keeps the usage-limit recovery banner collapsed when a different issue replaces the collapsed one', async () => {
     featureEnabledState['sessions.usageLimitRecovery'] = true;
     settingByKeyState.current.usageLimitRecoverySettingsV1 = { v: 1, mode: 'ask', resumePromptMode: 'off' };
     storageState.sessions.s1 = {
@@ -1574,7 +1520,17 @@ describe('SessionView (direct sessions)', () => {
     };
     await updateSessionViewAndSettle(screen, { routeServerId: 'server-route-2' });
 
-    expect(findUsageLimitStatusBadge(screen)).toBeTruthy();
+    // Collapse is remembered per banner kind, not per issue: a replacement issue stays collapsed
+    // and keeps its signal on the status badge until the user reopens it.
+    const badgeForReplacementIssue = findUsageLimitStatusBadge(screen);
+    expect(badgeForReplacementIssue).toBeTruthy();
+    expect(screen.findByTestId('session-usageLimit-recovery')).toBeNull();
+
+    await act(async () => {
+      badgeForReplacementIssue.onPress();
+    });
+    await settleDirectSessionView();
+
     expect(screen.findByTestId('session-usageLimit-recovery')).toBeTruthy();
   });
 
@@ -2005,11 +1961,41 @@ describe('SessionView (direct sessions)', () => {
     expect(findAgentInput(screen).props.showAbortButton).toBe(true);
   });
 
+  it('shows background Activity in AgentInput status without exposing foreground Stop', async () => {
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      active: true,
+      presence: 'online',
+      thinking: false,
+      latestTurnStatus: 'completed',
+    };
+
+    const screen = await renderSessionViewAndSettle();
+    expect(findAgentInput(screen).props.connectionStatus?.text).toBe('status.online');
+
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      serverId: 'server-runtime-activity-refresh',
+      runtimeActivityState: 'active',
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: Date.now(),
+      runtimeActivityRevision: 1,
+    };
+    const { SessionView } = await import('./SessionView');
+    await screen.update(
+      <AppPaneProvider>
+        <SessionView id="s1" routeServerId="server-runtime-activity-refresh" />
+      </AppPaneProvider>,
+    );
+
+    expect(findAgentInput(screen).props.connectionStatus?.text).toBe('status.backgroundActive');
+    expect(findAgentInput(screen).props.showAbortButton).toBe(false);
+  });
+
   it('shows the main status as restarting while quota recovery is switching accounts', async () => {
     storageState.sessions.s1 = {
       ...storageState.sessions.s1,
       active: false,
-      activeAt: 1,
       presence: 'offline',
       lastRuntimeIssue: {
         v: 1,
@@ -2347,7 +2333,6 @@ describe('SessionView (direct sessions)', () => {
       serviceId: 'openai-codex',
       profileId: 'work',
     }));
-    expect(connectedServiceQuotaRecoveryCreditConsumeSpy).not.toHaveBeenCalled();
     expect(findAgentInput(screen).props.providerUsageGauge).toEqual(expect.objectContaining({
       ringValueLabel: '55',
       recoveryCreditSummary: null,
@@ -2399,7 +2384,6 @@ describe('SessionView (direct sessions)', () => {
       serviceId: 'openai-codex',
       profileId: 'work',
     }));
-    expect(connectedServiceQuotaRecoveryCreditConsumeSpy).not.toHaveBeenCalled();
     expect(sessionUsageLimitConsumeResetCreditSpy).not.toHaveBeenCalled();
   });
 
@@ -2547,6 +2531,7 @@ describe('SessionView (direct sessions)', () => {
       await findAgentInput(screen).props.onProviderUsageRecoveryCreditPress();
     });
     expect(screen.findByTestId('session-usageLimit-recovery-consumeResetCredit')).toBeNull();
+    expect(connectedServiceQuotaRecoveryCreditConsumeSpy).not.toHaveBeenCalled();
     expect(sessionUsageLimitConsumeResetCreditSpy).toHaveBeenCalledWith(
       's1',
       expect.objectContaining({
@@ -2620,6 +2605,7 @@ describe('SessionView (direct sessions)', () => {
     });
     await settleDirectSessionView();
 
+    expect(connectedServiceQuotaRecoveryCreditConsumeSpy).not.toHaveBeenCalled();
     expect(sessionUsageLimitConsumeResetCreditSpy).toHaveBeenCalledWith(
       's1',
       expect.objectContaining({
@@ -2881,11 +2867,11 @@ describe('SessionView (direct sessions)', () => {
     expect(agentInput.props.metadata).toEqual(session.metadata);
     expect(typeof agentInput.props.onModelModeChange).toBe('function');
     expect(typeof agentInput.props.onAcpSessionModeChange).toBe('function');
-    expect(typeof agentInput.props.onAcpConfigOptionChange).toBe('function');
+    expect(typeof agentInput.props.onSessionConfigOptionChange).toBe('function');
 
     await act(async () => {
       agentInput.props.onAcpSessionModeChange('plan');
-      agentInput.props.onAcpConfigOptionChange('thinking', 'high');
+      agentInput.props.onSessionConfigOptionChange('thinking', 'high');
     });
 
     expect(publishSessionAcpSessionModeOverrideToMetadataSpy).toHaveBeenCalledWith(expect.objectContaining({
@@ -2936,7 +2922,7 @@ describe('SessionView (direct sessions)', () => {
     expect(agentInput.props.acpConfigOptionOverridesOverride).toBeNull();
 
     await act(async () => {
-      agentInput.props.onAcpConfigOptionChange('thinking', 'high');
+      agentInput.props.onSessionConfigOptionChange('thinking', 'high');
     });
     await settleDirectSessionView();
 
@@ -2999,7 +2985,7 @@ describe('SessionView (direct sessions)', () => {
 
     const agentInput = findAgentInput(screen);
     await act(async () => {
-      agentInput.props.onAcpConfigOptionChange('reasoning_effort', 'low');
+      agentInput.props.onSessionConfigOptionChange('reasoning_effort', 'low');
     });
     await settleDirectSessionView();
 
@@ -3084,6 +3070,85 @@ describe('SessionView (direct sessions)', () => {
     agentInput = findAgentInput(screen);
     expect(agentInput.props.value).toBe('retry this direct send');
     expect(modalAlertSpy).toHaveBeenCalledWith('common.error', 'direct send rejected');
+  });
+
+  it('keeps composer custody clear when canonical Pending commits before an ambiguous direct-send error', async () => {
+    syncSubmitMessageSpy.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[4] as
+        | { onLocalPendingProjectionCreated?: (event: Readonly<{ localId: string }>) => void }
+        | undefined;
+      options?.onLocalPendingProjectionCreated?.({ localId: 'direct-local-id' });
+      storageState.sessionPending.s1 = {
+        messages: [{
+          id: 'pending-1',
+          localId: 'direct-local-id',
+          createdAt: 1,
+          updatedAt: 2,
+          source: 'server_pending',
+          deliveryStatus: 'accepted',
+          pendingDeliveryStatus: 'server_delivering',
+          text: 'ambiguous but committed',
+          rawRecord: {},
+        }],
+        discarded: [],
+        isLoaded: true,
+      };
+      throw new Error('direct send response lost');
+    });
+    showDirectSessionTakeoverDialogSpy.mockResolvedValueOnce({ action: 'direct', forceStop: false });
+
+    const screen = await renderSessionView();
+    let agentInput = findAgentInput(screen);
+    await act(async () => {
+      agentInput.props.onChangeText('ambiguous but committed');
+    });
+
+    await act(async () => {
+      await agentInput.props.onSend();
+    });
+    await settleDirectSessionView();
+
+    agentInput = findAgentInput(screen);
+    expect(agentInput.props.value).toBe('');
+    expect(modalAlertSpy).toHaveBeenCalledWith('common.error', 'direct send response lost');
+  });
+
+  it('restores composer custody when only recovered history shares the outbound local id', async () => {
+    syncSubmitMessageSpy.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[4] as
+        | { onLocalPendingProjectionCreated?: (event: Readonly<{ localId: string }>) => void }
+        | undefined;
+      options?.onLocalPendingProjectionCreated?.({ localId: 'direct-local-id' });
+      storageState.sessionMessages.s1 = {
+        messagesById: {
+          history: {
+            id: 'history',
+            kind: 'user-text',
+            localId: 'direct-local-id',
+            text: 'older recovered prompt',
+            createdAt: 1,
+            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+          },
+        },
+      };
+      throw new Error('direct send rejected before server custody');
+    });
+    showDirectSessionTakeoverDialogSpy.mockResolvedValueOnce({ action: 'direct', forceStop: false });
+
+    const screen = await renderSessionView();
+    let agentInput = findAgentInput(screen);
+    await act(async () => {
+      agentInput.props.onChangeText('new prompt with reused local id');
+    });
+
+    await act(async () => {
+      await agentInput.props.onSend();
+    });
+    await settleDirectSessionView();
+
+    agentInput = findAgentInput(screen);
+    expect(agentInput.props.value).toBe('new prompt with reused local id');
+    expect(modalAlertSpy).toHaveBeenCalledWith('common.error', 'direct send rejected before server custody');
   });
 
   it('does not restore an old semantic snapshot over newer semantic choices after direct-session handoff failure', async () => {
@@ -3600,11 +3665,10 @@ describe('SessionView (direct sessions)', () => {
 
   });
 
-  it('shows the adapter send error when a hidden voice conversation send fails', async () => {
+  it('keeps the composer text when durable voice dispatch is definitively rejected', async () => {
     sendVoiceSessionComposerTextSpy.mockResolvedValueOnce({
       ok: false,
       reason: 'send_failed',
-      message: 'voice_send_failed',
     });
     resolveVoiceSessionComposerRoutingSpy.mockReturnValue({
       kind: 'adapter_text',
@@ -3628,8 +3692,9 @@ describe('SessionView (direct sessions)', () => {
       await agentInput.props.onSend();
     });
 
-    expect(modalAlertSpy).toHaveBeenCalledWith('common.error', 'voice_send_failed');
+    expect(modalAlertSpy).toHaveBeenCalledWith('common.error', 'errors.voiceServiceUnavailable');
     expect(syncSubmitMessageSpy).not.toHaveBeenCalled();
+    expect(findAgentInput(screen).props.value).toBe('continue the voice conversation');
 
     await act(async () => {
       await screen.unmount();

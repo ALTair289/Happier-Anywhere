@@ -271,7 +271,7 @@ vi.mock('@/sync/sync', () => ({
             fetchPendingMessages: (sessionId: string) => fetchPendingMessagesSpy(sessionId),
             publishSessionPermissionModeToMetadata: async () => {},
             publishSessionAcpSessionModeOverrideToMetadata: async () => {},
-            publishSessionSessionConfigOptionOverrideToMetadata: async () => {},
+            publishSessionAcpConfigOptionOverrideToMetadata: async () => {},
         publishSessionModelOverrideToMetadata: async () => {},
         refreshSessions: async () => {},
         onSessionVisible: () => () => {},

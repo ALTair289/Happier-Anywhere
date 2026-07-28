@@ -507,6 +507,20 @@ export const LOCAL_SETTING_DEFINITIONS = defineSettingDefinitions({
             serializeCurrent: objectKeyCount,
         },
     },
+    sessionComposerCollapsedBannerKinds: {
+        schema: z.record(z.string(), z.boolean()).default({}),
+        default: {},
+        description: 'Composer banner kinds collapsed on this device, honored only while sessionComposerRememberBannerVisibility is enabled',
+        storageScope: 'local',
+        analytics: {
+            trackCurrentState: true,
+            trackChanges: true,
+            valueKind: 'count',
+            privacy: 'count_only',
+            identityScope: 'device_user',
+            serializeCurrent: objectKeyCount,
+        },
+    },
     acknowledgedCliVersions: {
         schema: z.record(z.string(), z.string()),
         default: {},

@@ -1131,10 +1131,14 @@ export const en = {
         error: 'error',
         online: 'online',
         working: 'working...',
+        workingRetained: 'working, awaiting updates…',
+        backgroundActive: 'working in background',
+        activityUnknown: 'activity status unavailable',
         readyForReview: 'ready for review',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `last seen ${time}`,
         actionRequired: 'action required',
+        waitingForYourResponse: 'Waiting for your response',
         permissionRequired: 'permission required',
         activeNow: 'Active now',
         unknown: 'unknown',
@@ -2280,6 +2284,12 @@ export const en = {
                 partialApplication: 'Authentication partly switched',
                 partialApplicationForService: ({ service }: { service: string }) => `${service} authentication not fully switched`,
             },
+            partialApply: {
+                title: 'Authentication partly switched',
+                body: 'The new account was saved but applying it to this running session did not fully succeed. Retry, or revert to keep this session on the previous account.',
+                retry: 'Retry applying to this session',
+                revert: 'Revert to previous account',
+            },
         },
         diagnostics: {
             title: {
@@ -2301,6 +2311,7 @@ export const en = {
                 quota_fetch_disabled: 'Quota checks are disabled',
                 quota_fetch_backoff: 'Quota checks are backed off',
                 auth_surface_weakly_verified: 'Authentication rewrite verified',
+                connected_service_restart_requested: 'Connected account restart requested',
                 connected_service_credential_reconnect_required: 'Connected account needs reconnect',
                 claude_subscription_missing_claude_code_scope: 'Claude Code access needs reconnect',
                 claude_subscription_native_auth_materialization_failed: 'Claude Code credentials could not be prepared',
@@ -2331,6 +2342,7 @@ export const en = {
                 quota_fetch_disabled: 'Quota checks disabled',
                 quota_fetch_backoff: 'Quota checks temporarily backed off',
                 auth_surface_weakly_verified: 'Authentication rewrite weakly verified',
+                connected_service_restart_requested: 'Connected account restart requested',
                 connected_service_credential_reconnect_required: 'Connected account needs reconnect',
                 claude_subscription_missing_claude_code_scope: 'Reconnect Claude subscription for Claude Code',
                 claude_subscription_native_auth_materialization_failed: 'Claude Code native auth could not be prepared',
@@ -2358,6 +2370,7 @@ export const en = {
                 quota_fetch_disabled: 'Quota checks are currently disabled for this provider. Happier will keep using reactive recovery.',
                 quota_fetch_backoff: 'Quota checks are temporarily backed off after a provider or network response. Happier will retry quota refresh later.',
                 auth_surface_weakly_verified: 'Happier verified the selected authentication files were rewritten, but this provider does not expose exact live account identity.',
+                connected_service_restart_requested: 'Happier requested a safe session restart so the selected connected account can take effect.',
                 connected_service_credential_reconnect_required: 'The selected connected account needs to be reconnected before this session can resume. Reconnect the profile, then retry.',
                 claude_subscription_missing_claude_code_scope: 'This Claude profile was connected before Claude Code scopes were granted. Reconnect it, then retry the session or pool switch.',
                 claude_subscription_native_auth_materialization_failed: 'Happier could not create the native Claude Code credential file for this profile. Reconnect the profile or choose another pool member.',
@@ -2372,6 +2385,7 @@ export const en = {
             identityMismatchTitle: 'Replace connected account?',
             identityMismatchBody: 'The new credentials belong to a different provider account. Confirm to keep the same profile id and replace the account linked to it.',
             identityMismatchConfirm: 'Replace account',
+            targetMismatch: 'This reconnect returned credentials for a different connected profile. Start reconnect again from the target profile.',
         },
         defaultAuth: {
             title: 'Default backend configuration',
@@ -2384,6 +2398,11 @@ export const en = {
                 connected_group_unavailable: 'Default connected pool is unavailable; using native auth.',
                 connected_group_disabled: 'Connected pools are disabled here; using native auth.',
                 connected_service_unsupported: 'This backend does not support that connected service; using native auth.',
+            },
+            poolSuggestion: {
+                body: ({ pool }: { pool: string }) => `Use the ${pool} pool so sessions rotate past rate limits.`,
+                accept: 'Use pool',
+                dismiss: 'Dismiss',
             },
         },
         list: {
@@ -2431,12 +2450,14 @@ export const en = {
             recoveryCreditExpires: ({ time }: { time: string }) => `Expires: ${time}`,
             recoveryCreditApplying: 'Applying reset…',
             recoveryCreditMachineUnavailable: 'No active machine is available to apply this reset.',
+            recoveryCreditNothingToReset: 'No exhausted usage window currently needs a reset.',
             recoveryCreditBadge: ({ count }: { count: number }) => count === 1 ? '1 reset' : `${count} resets`,
             remaining: ({ percent }: { percent: string }) => `${percent} left`,
             remainingWithReset: ({ percent, reset }: { percent: string; reset: string }) => `${percent} left · resets in ${reset}`,
             usageCount: ({ used, limit }: { used: number; limit: number }) => `${used}/${limit} used`,
             duration: {
                 now: 'now',
+                outdated: 'outdated',
                 daysHours: ({ days, hours }: { days: number; hours: number }) => `${days}d ${hours}h`,
                 hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) => `${hours}h ${minutes}m`,
                 hours: ({ hours }: { hours: number }) => `${hours}h`,
@@ -2450,7 +2471,6 @@ export const en = {
             usedDetail: ({ used, limit }: { used: string; limit: string }) => `${used}/${limit} used`,
             capacity: ({ percent }: { percent: number }) => `${percent}% capacity`,
             memberEnabledLabel: 'Enabled in pool',
-            recoveryCreditNothingToReset: 'No exhausted usage window currently needs a reset.',
             poolsLabel: 'Pools',
             planEmailSubtitle: ({ plan, email }: { plan: string; email: string }) => `${plan} · ${email}`,
             poolsCount: ({ count }: { count: number }) => count === 1 ? '1 pool' : `${count} pools`,
@@ -2767,9 +2787,18 @@ export const en = {
                 title: 'No pools yet',
                 subtitle: 'Create a pool to fall back across accounts automatically.',
             },
+            loadError: {
+                title: 'Could not load pools',
+                subtitle: 'The account pools failed to load. Check your connection and try again.',
+                staleTitle: 'Showing the last known pools',
+                staleSubtitle: 'The latest pool list could not be refreshed. Try again to update it.',
+                retry: 'Try again',
+            },
             detail: {
                 summaryTitle: 'Overview',
                 summary: ({ count, strategy }: { count: number; strategy: string }) => `${count} accounts · ${strategy}`,
+                serverActiveStatusTitle: 'Saved on the server',
+                serverActiveStatusSubtitle: 'This is the durable active account. Offline machines apply it when they reconnect; this screen does not claim every machine has converged.',
                 membersTitle: 'Members',
                 moveUp: 'Move up',
                 moveDown: 'Move down',
@@ -2779,6 +2808,15 @@ export const en = {
                 behaviorTitle: 'Behavior',
                 advancedTitle: 'Advanced',
                 advancedSubtitle: 'Fine-tune when and how this pool switches accounts.',
+                manualApplyDivergenceTitle: 'Switched on server, not on running sessions',
+                manualApplyDivergenceSubtitle: ({ detail }: { detail: string }) => `The active account changed on the server, but applying it to running sessions failed (${detail}). Retry, or revert to keep everything on the previous account.`,
+                manualApplyRetry: 'Retry applying to running sessions',
+                manualApplyRevert: 'Revert to previous account',
+                machineTarget: {
+                    title: 'Cannot apply to a running session',
+                    noBoundSession: 'No running session is using this pool right now, so the switch cannot be applied live. Start a session on this pool, then try again.',
+                    offline: 'The machine running this pool\'s session is offline, so the switch cannot reach it. Bring the machine back online, then try again.',
+                },
             },
             behavior: {
                 autoRestorePrimaryTitle: 'Restore primary on reset',
@@ -3623,6 +3661,24 @@ export const en = {
                             }
                         }
                     },
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                     claudeCodeExperimentalAgentTeamsEnabled: {
                         title: "Force-enable Agent Teams",
                         subtitle: "Enable Claude Code experimental Agent Teams (agent swarm) in all Claude sessions started by Happier."
@@ -3661,24 +3717,6 @@ export const en = {
                             },
                             '1p': {
                                 title: "1p",
-                    claudeUnifiedTerminalWorkspaceTrust: {
-                        title: "Workspace trust",
-                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
-                        options: {
-                            ask_every_time: {
-                                title: "Ask every time",
-                                subtitle: "Show the exact workspace trust question in the session."
-                            },
-                            always_trust_happier_workspaces: {
-                                title: "Always trust Happier workspaces",
-                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
-                            },
-                            always_reject_happier_workspaces: {
-                                title: "Always reject Happier workspaces",
-                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
-                            }
-                        }
-                    },
                                 subtitle: "First-party internal debug category."
                             }
                         }
@@ -4662,6 +4700,8 @@ export const en = {
             statusReady: 'Ready to resume',
             statusWaiting: 'Waiting for limit reset',
             statusWaitingUntil: ({ time }: { time: string }) => `Waiting until ${time}`,
+            statusWaitingResetUntil: ({ time }: { time: string }) => `Waiting for quota reset (resets at ${time})`,
+            statusAccountRotationPending: 'Account rotation pending',
             statusChecking: 'Checking limit',
             statusPaused: 'Waiting paused',
             statusExhausted: 'Group exhausted',
@@ -4677,6 +4717,7 @@ export const en = {
             noCurrentGoalMessage: 'Set a goal before pausing or resuming it.',
             dirtyCloseTitle: 'Discard goal edits?',
             dirtyCloseBody: 'Your unsaved goal changes will be lost.',
+            emptyPlaceholder: 'Nothing here yet',
             badge: {
                 goal: ({ title }: { title: string }) => `Goal: ${title}`,
                 goalPaused: 'Goal paused',
@@ -4697,6 +4738,7 @@ export const en = {
                 goalLabel: ({ title }: { title: string }) => `Goal: ${title}`,
                 bare: 'Workflow',
                 agentsFallback: ({ fraction }: { fraction: string }) => `Workflow ${fraction} agents`,
+                olderRunsHidden: ({ count }: { count: number }) => `${count} older runs not shown`,
                 phaseLabel: ({ title, fraction }: { title: string; fraction: string }) => `${title} ${fraction}`,
                 plural: ({ count }: { count: number }) => `${count} workflows`,
                 pluralWithAgents: ({ count, agents }: { count: number; agents: number }) => `${count} workflows · ${agents} agents`,
@@ -4709,7 +4751,7 @@ export const en = {
                 set: 'Set goal',
                 setTitle: 'Set a goal',
                 setSubtitle: 'Give this session a focus so the agent stays on track.',
-                addBudget: 'Add a budget limit (optional)',
+                addBudget: '+ Add a budget limit (optional)',
                 removeBudget: 'Remove budget',
                 noUsageYet: 'No usage yet',
                 tokensSuffix: ({ count }: { count: string }) => `${count} tokens`,
@@ -4722,12 +4764,14 @@ export const en = {
                 statusPaused: 'Paused',
                 statusComplete: 'Complete',
                 statusBudgetLimited: 'Limited by budget',
+                statusInterrupted: 'Interrupted',
                 tokenBudget: 'Token budget',
                 budgetProgress: ({ used, budget }: { used: string; budget: string }) => `${used} / ${budget}`,
+                budgetCaption: ({ budget }: { budget: string }) => `of ${budget} budget`,
                 budgetPlaceholder: 'Token limit',
                 invalidBudget: 'Enter a positive token budget.',
                 pending: 'Setting goal…',
-                pendingTimeout: 'Couldn’t confirm the goal update. It may still be applying.',
+                stillWaiting: 'Still waiting for confirmation…',
                 accessibilityCurrent: ({ objective }: { objective: string }) => `Current goal: ${objective}`,
                 errorUnsupportedResponse: 'Unsupported response from session RPC',
                 errorUnknown: 'Unknown error',
@@ -4762,6 +4806,10 @@ export const en = {
         pendingQueuedResumeFailedTitle: 'Message queued',
         pendingQueuedResumeFailedBody:
             'Your message was saved in the pending queue, but Happier couldn’t resume this session. Retry to start it.',
+        composerBanners: {
+            showBannerAction: 'Show banner',
+            hideBannerAction: 'Hide banner',
+        },
         staleRunner: {
             title: 'Session is still running on an older CLI',
             body: 'Restart this session runner to continue on the updated daemon CLI. The Happier session stays the same.',
@@ -4856,6 +4904,10 @@ export const en = {
                 launchTeammateA11y: 'Launch teammate',
                 launchTeammateAction: 'Launch teammate',
                 typeFact: ({ value }: { value: string }) => `Type: ${value}`,
+                nativeTypeFact: ({ value }: { value: string }) => `Native type: ${value}`,
+                modelFact: ({ value }: { value: string }) => `Model: ${value}`,
+                agentIdFact: ({ value }: { value: string }) => `Agent ID: ${value}`,
+                durationFact: ({ value }: { value: string }) => `Duration: ${value}`,
                 providerFact: ({ value }: { value: string }) => `Provider: ${value}`,
                 backendFact: ({ value }: { value: string }) => `Backend: ${value}`,
                 intentFact: ({ value }: { value: string }) => `Intent: ${value}`,
@@ -4963,11 +5015,26 @@ export const en = {
 	            badgeLabel: ({ count }: { count: number }) => (count > 0 ? `Pending (+${count})` : 'Pending'),
 	            deliveryStatus: {
 	                blocked: 'Blocked',
+	                deliveryUncertain: 'Delivery state uncertain',
 	                delivering: 'Delivering',
+	                queuedInClaude: 'Queued in Claude',
+	                queued: 'Queued',
+	                sending: 'Sending…',
+	                sendFailed: 'Not sent',
+	                waitingForTurn: 'Waiting',
 	            },
+	            sendFailedNotice: 'Message not sent. Check your connection, then retry.',
+	            waitingForTurnNotice: ({ minutes }: { minutes: number }) =>
+	                minutes > 0
+	                    ? `Waiting for the current task to finish · running ${minutes}m`
+	                    : 'Waiting for the current task to finish',
+	            waitingForPredecessorNotice: 'Waiting for an earlier pending message',
+	            waitingForRuntimeActivityNotice: 'Waiting for runtime activity to finish',
+	            runtimeActivityUnknownNotice: 'Waiting for runtime activity status',
+	            waitingForRuntimeNotice: 'Waiting for the runtime to reconnect',
 	            deliveryBlockedReasons: {
 	                terminalComposerDraft: 'Terminal draft is blocking delivery',
-	                providerAcceptanceTimeout: 'Provider did not confirm receipt',
+	                runtimeConfigBlocked: 'Runtime settings are blocking delivery',
 	                providerUnavailableBeforeAcceptance: 'Provider is temporarily unavailable',
 	                ambiguousTerminalDelivery: 'Delivery state is ambiguous',
 	                terminalHostUnreachable: 'Terminal host is unreachable',
@@ -4976,6 +5043,8 @@ export const en = {
 	                manualUserHandled: 'Marked handled',
 	                attemptExpiredBeforeWrite: 'Delivery attempt expired before writing',
 	                providerRejectedBeforeAcceptance: 'Provider rejected the message',
+	                steeringUnavailable: 'The active provider cannot accept steering',
+	                unsupportedAction: 'This message uses an unsupported delivery action',
 	                payloadTooLarge: 'Message is too large',
 	                unknown: 'Delivery status needs review',
 	            },
@@ -4998,7 +5067,12 @@ export const en = {
                 steerNow: 'Steer now',
                 sendNow: 'Send now',
                 sendNowInterrupt: 'Send now (interrupt)',
+                interruptAndRunNow: 'Interrupt and run now',
+                continueWaiting: 'Continue waiting',
+                dismiss: 'Dismiss',
+                sendAsNew: 'Send as new',
                 retryDelivery: 'Retry',
+                retrySend: 'Retry send',
                 markHandled: 'Mark handled',
                 requeue: 'Re-queue',
             },
@@ -5017,10 +5091,19 @@ export const en = {
                 title: 'Mark pending message handled?',
                 body: 'Use this only if the provider already handled the message or you no longer want Happier to deliver it.',
             },
+            dismissDeliveryConfirm: {
+                title: 'Dismiss uncertain delivery?',
+                body: 'This archives the original message without sending it again. If the provider later confirms delivery, Happier can still add the original message to the transcript.',
+            },
+            sendAsNewConfirm: {
+                title: 'Send this message as new?',
+                body: 'This archives the uncertain delivery and queues a new copy. The provider may still have received the original, so it could be handled twice.',
+            },
             sendConfirm: {
                 title: 'Send now?',
                 interruptTitle: 'Send now (interrupt)?',
                 body: 'This will stop the current turn and send this message immediately.',
+                resumeBody: 'This will resume the session and send this message immediately.',
             },
             discarded: {
                 title: 'Discarded messages',
@@ -5041,6 +5124,7 @@ export const en = {
                 deleteDiscardedFailed: 'Failed to delete discarded message',
                 sendDiscardedFailed: 'Failed to send discarded message',
                 reorderFailed: 'Failed to reorder pending messages',
+                retrySendFailed: 'Failed to retry sending the message',
                 retryDeliveryFailed: 'Failed to retry pending delivery',
                 markHandledFailed: 'Failed to mark pending delivery handled',
                 clearTerminalComposerFailed: 'Failed to clear the terminal composer',
@@ -5067,6 +5151,7 @@ export const en = {
             canManageDescription: 'Can manage sharing settings.',
             manageSharingDenied: 'You don’t have permission to manage sharing settings for this session.',
             stopSharing: 'Stop sharing',
+            stopSharingDescription: 'Revokes this person’s direct access.',
             recipientMissingKeys: 'This user hasn’t registered encryption keys yet.',
             permissionApprovals: 'Can approve permissions',
             allowPermissionApprovals: 'Allow permission approvals',
@@ -5081,7 +5166,7 @@ export const en = {
 
             publicLink: 'Public link',
             publicLinkActive: 'Public link is active',
-            publicLinkDescription: 'Create a link that lets anyone view this session.',
+            publicLinkDescription: 'Anyone with this link can view anonymously. Delete or regenerate it to revoke access for everyone.',
             createPublicLink: 'Create public link',
             regeneratePublicLink: 'Regenerate public link',
             deletePublicLink: 'Delete public link',
@@ -5501,6 +5586,7 @@ export const en = {
         },
         attentionSectionTitle: 'Needs attention',
         workingSectionTitle: 'Working',
+        backgroundWorkingSectionTitle: 'Working in background',
         hideInactiveSessions: 'Hide inactive sessions',
         showInactiveSessions: 'Show inactive sessions',
     },
@@ -5539,6 +5625,7 @@ export const en = {
         killSessionConfirm: 'Are you sure you want to terminate this session?',
         stopSession: 'Stop Session',
         stopSessionConfirm: 'Are you sure you want to stop this session?',
+        stopSessionUpgradeRequired: 'Update Happier on the session machine, then try stopping again.',
         archiveSession: 'Archive Session',
         archiveSessionConfirm: 'Are you sure you want to archive this session?',
         workspaceTitle: 'Workspace',
@@ -5577,6 +5664,8 @@ export const en = {
         kiroSessionId: 'Kiro Session ID',
         kiroSessionIdCopied: 'Kiro Session ID copied to clipboard',
         customAcpSessionId: 'Custom ACP Session ID',
+        grokSessionId: "Grok Session ID",
+        grokSessionIdCopied: "Grok Session ID copied to clipboard",
         customAcpSessionIdCopied: 'Custom ACP Session ID copied to clipboard',
         piSessionId: 'Pi Session ID',
         piSessionIdCopied: 'Pi Session ID copied to clipboard',
@@ -5584,8 +5673,6 @@ export const en = {
         copilotSessionIdCopied: 'Copilot Session ID copied to clipboard',
         cursorSessionId: 'Cursor Session ID',
         cursorSessionIdCopied: 'Cursor Session ID copied to clipboard',
-        grokSessionId: 'Grok Session ID',
-        grokSessionIdCopied: 'Grok Session ID copied to clipboard',
         metadataCopied: 'Metadata copied to clipboard',
         failedToCopyMetadata: 'Failed to copy metadata',
         failedToKillSession: 'Failed to kill session',
@@ -5747,6 +5834,7 @@ export const en = {
             usedCount: ({ used, limit }: { used: string; limit: string }) => `${used}/${limit} used`,
             duration: {
                 now: 'now',
+                outdated: 'outdated',
                 daysHours: ({ days, hours }: { days: number; hours: number }) => `${days}d ${hours}h`,
                 hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) => `${hours}h ${minutes}m`,
                 hours: ({ hours }: { hours: number }) => `${hours}h`,
@@ -5808,6 +5896,10 @@ export const en = {
               title: 'MODEL',
               useCliSettings: 'Use CLI settings',
               configureInCli: 'Configure models in CLI settings',
+              running: ({ model }: { model: string }) => `Running: ${model}`,
+              lastUsed: ({ model }: { model: string }) => `Last used: ${model}`,
+              lastReported: ({ model }: { model: string }) => `Last reported: ${model}`,
+              selectedForResume: 'The selected model will be used when this session resumes.',
               extendedContextToggleLabel: '1M context',
               extendedContextToggleDescription: 'Use the extended 1M-token context window for this model.',
               extendedContextLabel: ({ model }: { model: string }) => `${model} (1M)`,
@@ -5896,10 +5988,6 @@ export const en = {
             currentMode: ({ name }: { name: string }) => `Current: ${name}`,
             loadingModes: 'Loading modes…',
             refreshingModes: 'Refreshing modes…',
-              running: ({ model }: { model: string }) => `Running: ${model}`,
-              lastUsed: ({ model }: { model: string }) => `Last used: ${model}`,
-              lastReported: ({ model }: { model: string }) => `Last reported: ${model}`,
-              selectedForResume: 'The selected model will be used when this session resumes.',
             useDefaultModeHint: 'Use the default mode for this agent.',
             startIn: ({ name }: { name: string }) => `Start in: ${name}`,
             optionsSectionTitle: 'Options',
@@ -5931,6 +6019,9 @@ export const en = {
         expand: 'Expand/collapse',
         input: 'Input',
         output: 'Output',
+        payloadTruncated: 'Large payload truncated for performance.',
+        showFullPayload: 'Show full payload',
+        showLessPayload: 'Show less',
     },
 
     tools: {
@@ -5945,6 +6036,13 @@ export const en = {
         },
         webFetch: {
             httpStatus: ({ status }: { status: number }) => `HTTP ${status}`,
+        },
+        codeSearch: {
+            aggregateMatchUnavailable: '1 match; details were not provided.',
+            aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} matches; details were not provided.`,
+            aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} files; details were not provided.`,
+            detailsUnavailable: 'Search completed; details were not provided.',
+            truncated: 'Results may be truncated.',
         },
         fullView: {
             description: 'Description',
@@ -5981,6 +6079,7 @@ export const en = {
             statusComplete: 'Complete',
             statusFailed: 'Failed',
             statusStopped: 'Stopped',
+            statusInterrupted: 'Interrupted',
             statusBlocked: 'Blocked',
             statusCancelled: 'Cancelled',
             statusUnknown: 'Unknown',
@@ -5998,6 +6097,8 @@ export const en = {
             tokens: ({ tokens }: { tokens: string }) => `${tokens} tokens`,
             toolCalls: ({ count }: { count: number }) => `${count} tools`,
             showMore: ({ count }: { count: number }) => `Show ${count} more`,
+            detailShowMore: 'Show more',
+            detailShowLess: 'Show less',
         },
         changeTitleView: {
             titleLabel: 'Title',
@@ -6077,19 +6178,31 @@ export const en = {
             turnDiff: 'Turn Diff',
             question: 'Question',
             changeTitle: 'Change Title',
+            switchMode: 'Switch mode',
         },
         geminiExecute: {
             cwd: ({ cwd }: { cwd: string }) => `📁 ${cwd}`,
         },
         askUserQuestion: {
             submit: 'Submit Answer',
+            submissionFailures: {
+                update: 'Update Happier CLI, then try again.',
+                reconnect: 'Reconnect this session, then try again.',
+                retry: 'The answer could not be accepted. Review it and try again.',
+            },
+            claudeDialogNotice: {
+                header: 'Claude dialog',
+                question: 'Claude is showing a dialog. Open the terminal to review it and choose how to continue.',
+                openTerminal: 'Open Claude terminal',
+                description: 'Review and answer the dialog in Claude’s terminal.',
+            },
             multipleQuestions: ({ count }: { count: number }) => `${count} questions`,
             other: 'Other',
             otherDescription: 'Type your own answer',
             otherPlaceholder: 'Type your answer...',
-            selectionLimit: ({ count }: { count: number }) => `Select up to ${count} answers. Deselect one to choose another.`,
         },
         exitPlanMode: {
+        selectionLimit: ({ count }: { count: number }) => `Select up to ${count} answers. Deselect one to choose another.`,
             approve: 'Approve Plan',
             reject: 'Reject',
             requestChanges: 'Request changes',
@@ -6196,17 +6309,6 @@ export const en = {
 	            branchMenu: {
 	                openA11y: 'Open branch menu',
 	                failedToLoad: 'Failed to load branches.',
-            submissionFailures: {
-                update: 'Update Happier CLI, then try again.',
-                reconnect: 'Reconnect this session, then try again.',
-                retry: 'The answer could not be accepted. Review it and try again.',
-            },
-            claudeDialogNotice: {
-                header: 'Claude dialog',
-                question: 'Claude is showing a dialog. Open the terminal to review it and choose how to continue.',
-                openTerminal: 'Open Claude terminal',
-                description: 'Review and answer the dialog in Claude’s terminal.',
-            },
 	                unavailable: 'Branch list unavailable',
                 empty: 'No branches found',
                 searchPlaceholder: 'Search branches...',
@@ -6456,6 +6558,7 @@ export const en = {
                 generatedImageA11y: ({ name }: { name: string }) => `Open generated image ${name}`,
                 attachmentImageA11y: ({ name }: { name: string }) => `Open attached image ${name}`,
                 toolArtifactImageA11y: ({ name }: { name: string }) => `Open tool artifact image ${name}`,
+                imageUnavailable: 'Image unavailable',
             },
             cannotDisplayBinary: 'Cannot display binary file content',
             diff: 'Diff',
@@ -6562,7 +6665,6 @@ export const en = {
                     add: 'Add remote',
                     remove: 'Remove',
                     nameLabel: 'Remote name',
-                imageUnavailable: 'Image unavailable',
                     fetchUrlLabel: 'Fetch URL',
                     pushUrlLabel: 'Push URL',
                     namePlaceholder: 'origin',
@@ -6977,9 +7079,6 @@ settingsSession: {
 	              workingPlacementModeGlobalSubtitle: 'Show one working section below sessions needing attention',
 	              workingPlacementModeWithinGroupsTitle: 'Move to top of current group',
 	              workingPlacementModeWithinGroupsSubtitle: 'Keep working sessions in their folder or workspace',
-	              separateBackgroundWorkTitle: 'Separate background work',
-	              separateBackgroundWorkEnabledSubtitle: 'Show live background tasks in their own group',
-	              separateBackgroundWorkDisabledSubtitle: 'Merge live background tasks into Working',
 	              narrowWorkingIndicatorTitle: 'Narrow working indicator',
 	              narrowWorkingIndicatorSpinnerSelectedSubtitle: 'Show a small neutral spinner in narrow rows',
 	              narrowWorkingIndicatorPulseSelectedSubtitle: 'Show a pulsing dot in narrow rows',
@@ -7098,6 +7197,14 @@ settingsSession: {
           runtime: {
               title: 'Runtime and terminal',
               entrySubtitle: 'Tmux, Windows terminal windows, and Terminal Connect compatibility.',
+          },
+          banners: {
+              title: 'Banners',
+              footer: 'Banners above the composer can be collapsed into a status badge. Choose whether that stays remembered.',
+              rememberVisibilityTitle: 'Remember banner visibility',
+              rememberVisibilitySubtitle: 'Banners you close stay closed in every session on this device.',
+              resetHiddenTitle: 'Show all hidden banners',
+              resetHiddenSubtitle: 'Clear the banners hidden on this device.',
           },
           inputBehavior: {
               title: 'Input behavior',
@@ -9037,6 +9144,7 @@ settingsSession: {
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `Switched to ${mode} mode`,
         discarded: 'Discarded',
+        recoveredHistory: 'Recovered history',
         unknownEvent: 'Unknown event',
         contextCompactionStarted: 'Compacting context...',
         contextCompactionCompleted: 'Context compacted',
@@ -9582,10 +9690,10 @@ settingsSession: {
             kiloSubtitleExperimental: 'Kilo CLI (experimental)',
             kiroSubtitleExperimental: 'Kiro CLI (experimental)',
             customAcpSubtitleExperimental: 'Custom ACP CLI (experimental)',
+            grokSubtitleExperimental: "Grok Build CLI (experimental)",
             piSubtitleExperimental: 'Pi CLI (experimental)',
             copilotSubtitleExperimental: 'GitHub Copilot CLI (experimental)',
             cursorSubtitleExperimental: 'Cursor Agent CLI (experimental)',
-            grokSubtitleExperimental: 'Grok Build CLI (experimental)',
         },
         tmux: {
             title: 'Tmux',
@@ -9698,11 +9806,3 @@ export type TranslationsEn = typeof en;
 // Shape contract for all locales: enforce identical key structure without requiring English literal
 // string values. Functions are preserved so parameter lists remain typechecked.
 export type TranslationStructure = DeepTranslationShape<TranslationsEn>;
-        codeSearch: {
-            aggregateMatchUnavailable: '1 match; details were not provided.',
-            aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} matches; details were not provided.`,
-            aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} files; details were not provided.`,
-            detailsUnavailable: 'Search completed; details were not provided.',
-            truncated: 'Results may be truncated.',
-        },
-            switchMode: 'Switch mode',

@@ -1475,8 +1475,8 @@ export const it: TranslationStructure = {
       kimiSubtitleExperimental: "Kimi CLI (sperimentale)",
       kiloSubtitleExperimental: "Kilo CLI (sperimentale)",
       kiroSubtitleExperimental: "Kiro CLI (sperimentale)",
-      grokSubtitleExperimental: "Grok Build CLI (sperimentale)",
       customAcpSubtitleExperimental: "CLI ACP personalizzata (sperimentale)",
+      grokSubtitleExperimental: "Grok Build CLI (sperimentale)",
       piSubtitleExperimental: "Pi CLI (sperimentale)",
       copilotSubtitleExperimental: "GitHub Copilot CLI (sperimentale)",
       cursorSubtitleExperimental: "Cursor Agent CLI (sperimentale)",
@@ -1607,10 +1607,14 @@ export const it: TranslationStructure = {
     error: "errore",
     online: "in linea",
     working: "al lavoro...",
+    workingRetained: "al lavoro, in attesa di aggiornamenti…",
+    backgroundActive: "attività in background in esecuzione",
+    activityUnknown: "stato dell'attività non disponibile",
     readyForReview: "pronto per la revisione",
     offline: "non in linea",
     lastSeen: ({ time }: { time: string }) => `visto l'ultima volta ${time}`,
     actionRequired: "azione richiesta",
+    waitingForYourResponse: "In attesa della tua risposta",
     permissionRequired: "permesso richiesto",
     activeNow: "Attivo ora",
     unknown: "sconosciuto",
@@ -2825,6 +2829,12 @@ export const it: TranslationStructure = {
         partialApplication: "Autenticazione cambiata parzialmente",
         partialApplicationForService: ({ service }: { service: string }) => `Autenticazione di ${service} non cambiata completamente`,
       },
+      partialApply: {
+        title: 'Autenticazione cambiata parzialmente',
+        body: "Il nuovo account è stato salvato, ma l'applicazione a questa sessione attiva non è stata completata del tutto. Riprova o ripristina per mantenere questa sessione sull'account precedente.",
+        retry: 'Riprova ad applicare a questa sessione',
+        revert: "Ripristina l'account precedente",
+      },
     },
     diagnostics: {
       title: {
@@ -2846,6 +2856,7 @@ export const it: TranslationStructure = {
         quota_fetch_disabled: "I controlli quota sono disattivati",
         quota_fetch_backoff: "I controlli quota sono in backoff",
         auth_surface_weakly_verified: "Riscrittura dell’autenticazione verificata",
+        connected_service_restart_requested: "Riavvio della sessione richiesto",
         connected_service_credential_reconnect_required: "L'account collegato deve essere riconnesso",
         claude_subscription_missing_claude_code_scope: "L'accesso a Claude Code richiede una nuova connessione",
         claude_subscription_native_auth_materialization_failed: "Non è stato possibile preparare le credenziali di Claude Code",
@@ -2876,6 +2887,7 @@ export const it: TranslationStructure = {
         quota_fetch_disabled: "Controlli quota disattivati",
         quota_fetch_backoff: "Controlli quota temporaneamente in backoff",
         auth_surface_weakly_verified: "Riscrittura dell’autenticazione verificata debolmente",
+        connected_service_restart_requested: "Riavvio della sessione richiesto",
         connected_service_credential_reconnect_required: "L'account collegato deve essere riconnesso",
         claude_subscription_missing_claude_code_scope: "Riconnetti l'abbonamento Claude per Claude Code",
         claude_subscription_native_auth_materialization_failed: "Non è stato possibile preparare l'autenticazione nativa di Claude Code",
@@ -2903,6 +2915,7 @@ export const it: TranslationStructure = {
         quota_fetch_disabled: "I controlli quota sono attualmente disattivati per questo provider. Happier continuerà a usare il recupero reattivo.",
         quota_fetch_backoff: "I controlli quota sono temporaneamente in backoff dopo una risposta del provider o della rete. Happier riproverà ad aggiornare la quota più tardi.",
         auth_surface_weakly_verified: "Happier ha verificato che i file di autenticazione selezionati sono stati riscritti, ma questo provider non espone l’identità esatta dell’account attivo.",
+        connected_service_restart_requested: "Happier ha richiesto un riavvio sicuro della sessione per applicare l’account collegato selezionato.",
         connected_service_credential_reconnect_required: "L'account collegato selezionato deve essere riconnesso prima che questa sessione possa riprendere. Riconnetti il profilo, poi riprova.",
         claude_subscription_missing_claude_code_scope: "Questo profilo Claude è stato collegato prima che fossero concessi gli ambiti di Claude Code. Ricollegalo, poi riprova la sessione o il cambio di Pool.",
         claude_subscription_native_auth_materialization_failed: "Happier non ha potuto creare il file delle credenziali native di Claude Code per questo profilo. Ricollega il profilo o scegli un altro membro del Pool.",
@@ -2917,6 +2930,7 @@ export const it: TranslationStructure = {
       identityMismatchTitle: "Sostituire l'account connesso?",
       identityMismatchBody: "Le nuove credenziali appartengono a un account provider diverso. Conferma per mantenere lo stesso id profilo e sostituire l'account collegato.",
       identityMismatchConfirm: "Sostituisci account",
+      targetMismatch: "Questa riconnessione ha restituito credenziali per un altro profilo connesso. Avvia di nuovo la riconnessione dal profilo di destinazione.",
     },
     defaultAuth: {
       title: "Configurazione backend predefinita",
@@ -2935,6 +2949,11 @@ export const it: TranslationStructure = {
           "I Pool connessi sono disattivati qui; viene usata l'autenticazione nativa.",
         connected_service_unsupported:
           "Questo backend non supporta quel servizio connesso; viene usata l'autenticazione nativa.",
+      },
+      poolSuggestion: {
+        body: ({ pool }: { pool: string }) => `Usa il pool ${pool} così le sessioni ruotano oltre i limiti di frequenza.`,
+        accept: "Usa pool",
+        dismiss: "Ignora",
       },
     },
     list: {
@@ -2985,6 +3004,7 @@ export const it: TranslationStructure = {
       recoveryCreditExpires: ({ time }: { time: string }) => `Expires: ${time}`,
       recoveryCreditApplying: "Applicazione del reset…",
       recoveryCreditMachineUnavailable: "Nessuna macchina attiva è disponibile per applicare questo reset.",
+      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
       recoveryCreditBadge: ({ count }: { count: number }) => count === 1 ? "1 reset" : `${count} resets`,
       remaining: ({ percent }: { percent: string }) => `${percent} rimanente`,
       remainingWithReset: ({ percent, reset }: { percent: string; reset: string }) =>
@@ -2993,6 +3013,7 @@ export const it: TranslationStructure = {
         `${used}/${limit} usato`,
       duration: {
         now: "ora",
+        outdated: "non aggiornato",
         daysHours: ({ days, hours }: { days: number; hours: number }) =>
           `${days}g ${hours}h`,
         hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) =>
@@ -3004,7 +3025,6 @@ export const it: TranslationStructure = {
     account: {
       refreshA11y: "Aggiorna utilizzo e limiti",
       usageCaption: "Utilizzo",
-      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
       resetsCaption: "Ripristini quota",
       usedDetail: ({ used, limit }: { used: string; limit: string }) => `${used}/${limit} usati`,
       capacity: ({ percent }: { percent: number }) => `${percent}% di capacità`,
@@ -3330,8 +3350,17 @@ export const it: TranslationStructure = {
         title: "Nessun Pool ancora",
         subtitle: "Crea un Pool per il fallback automatico tra account.",
       },
+      loadError: {
+        title: "Impossibile caricare i Pool",
+        subtitle: "Impossibile caricare i Pool di account. Controlla la connessione e riprova.",
+        staleTitle: "Mostrati gli ultimi Pool noti",
+        staleSubtitle: "Impossibile aggiornare l'elenco dei Pool più recente. Riprova per aggiornarlo.",
+        retry: "Riprova",
+      },
       detail: {
         summaryTitle: "Panoramica",
+        serverActiveStatusTitle: "Salvato sul server",
+        serverActiveStatusSubtitle: "Questo è l’account attivo permanente. Le macchine offline lo applicheranno quando si riconnetteranno; questa schermata non indica che tutte le macchine abbiano completato la convergenza.",
         summary: ({ count, strategy }: { count: number; strategy: string }) => `${count} account · ${strategy}`,
         membersTitle: "Membri",
         moveUp: "Sposta su",
@@ -3342,6 +3371,15 @@ export const it: TranslationStructure = {
         behaviorTitle: "Comportamento",
         advancedTitle: "Avanzate",
         advancedSubtitle: "Regola quando e come questo Pool cambia account.",
+                manualApplyDivergenceTitle: "Cambiato sul server, non nelle sessioni attive",
+                manualApplyDivergenceSubtitle: ({ detail }: { detail: string }) => `L'account attivo è cambiato sul server, ma non è stato possibile applicarlo alle sessioni attive (${detail}). Riprova o ripristina per mantenere tutto sull'account precedente.`,
+                manualApplyRetry: "Riprova ad applicare alle sessioni attive",
+                manualApplyRevert: "Ripristina l'account precedente",
+                machineTarget: {
+                  title: "Impossibile applicare a una sessione attiva",
+                  noBoundSession: "Al momento nessuna sessione attiva usa questo Pool, quindi il cambio non può essere applicato in tempo reale. Avvia una sessione su questo Pool e riprova.",
+                  offline: "La macchina che esegue la sessione di questo Pool è offline, quindi il cambio non può raggiungerla. Riporta la macchina online e riprova.",
+                },
       },
       behavior: {
         autoRestorePrimaryTitle: "Ripristina il principale al reset",
@@ -4242,6 +4280,24 @@ export const it: TranslationStructure = {
                             }
                         }
                     },
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                     claudeCodeExperimentalAgentTeamsEnabled: {
                         title: "Forza l’attivazione di Agent Teams",
                         subtitle: "Abilita Agent Teams sperimentale di Claude Code (sciame di agenti) in tutte le sessioni Claude avviate da Happier."
@@ -4280,24 +4336,6 @@ export const it: TranslationStructure = {
                             },
                             '1p': {
                                 title: "1p",
-                    claudeUnifiedTerminalWorkspaceTrust: {
-                        title: "Workspace trust",
-                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
-                        options: {
-                            ask_every_time: {
-                                title: "Ask every time",
-                                subtitle: "Show the exact workspace trust question in the session."
-                            },
-                            always_trust_happier_workspaces: {
-                                title: "Always trust Happier workspaces",
-                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
-                            },
-                            always_reject_happier_workspaces: {
-                                title: "Always reject Happier workspaces",
-                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
-                            }
-                        }
-                    },
                                 subtitle: "Categoria interna first-party."
                             }
                         }
@@ -5347,6 +5385,8 @@ export const it: TranslationStructure = {
       statusReady: "Pronto per riprendere",
       statusWaiting: "In attesa del ripristino del limite",
       statusWaitingUntil: ({ time }: { time: string }) => `In attesa fino a ${time}`,
+      statusWaitingResetUntil: ({ time }: { time: string }) => `In attesa del ripristino della quota (si ripristina alle ${time})`,
+      statusAccountRotationPending: "Rotazione account in sospeso",
       statusChecking: "Controllo del limite",
       statusPaused: "Attesa in pausa",
       statusExhausted: "Gruppo esaurito",
@@ -5365,6 +5405,7 @@ export const it: TranslationStructure = {
         "Imposta un obiettivo prima di metterlo in pausa o riprenderlo.",
       dirtyCloseTitle: "Scartare le modifiche all’obiettivo?",
       dirtyCloseBody: "Le modifiche non salvate all’obiettivo andranno perse.",
+      emptyPlaceholder: "Ancora niente qui",
       badge: {
         goal: ({ title }: { title: string }) => `Obiettivo: ${title}`,
         goalPaused: "Obiettivo in pausa",
@@ -5385,6 +5426,7 @@ export const it: TranslationStructure = {
         goalLabel: ({ title }: { title: string }) => `Obiettivo: ${title}`,
         bare: "Flusso di lavoro",
         agentsFallback: ({ fraction }: { fraction: string }) => `Flusso di lavoro ${fraction} agenti`,
+        olderRunsHidden: ({ count }: { count: number }) => `${count} esecuzioni precedenti nascoste`,
         phaseLabel: ({ title, fraction }: { title: string; fraction: string }) => `${title} ${fraction}`,
         plural: ({ count }: { count: number }) => `${count} flussi di lavoro`,
         pluralWithAgents: ({ count, agents }: { count: number; agents: number }) => `${count} flussi di lavoro · ${agents} agenti`,
@@ -5397,7 +5439,7 @@ export const it: TranslationStructure = {
         set: "Imposta obiettivo",
         setTitle: "Imposta un obiettivo",
         setSubtitle: "Dai un focus a questa sessione così l’agente resta in carreggiata.",
-        addBudget: "Aggiungi un limite di budget (opzionale)",
+        addBudget: "+ Aggiungi un limite di budget (opzionale)",
         removeBudget: "Rimuovi budget",
         noUsageYet: "Ancora nessun utilizzo",
         tokensSuffix: ({ count }: { count: string }) => `${count} token`,
@@ -5410,12 +5452,14 @@ export const it: TranslationStructure = {
         statusPaused: "In pausa",
         statusComplete: "Completato",
         statusBudgetLimited: "Limitato dal budget",
+        statusInterrupted: "Interrotto",
         tokenBudget: "Budget token",
         budgetProgress: ({ used, budget }: { used: string; budget: string }) => `${used} / ${budget}`,
+        budgetCaption: ({ budget }: { budget: string }) => `su ${budget} di budget`,
         budgetPlaceholder: "Limite token",
         invalidBudget: "Inserisci un budget token positivo.",
         pending: "Impostazione obiettivo…",
-        pendingTimeout: "Impossibile confermare l’aggiornamento dell’obiettivo. Potrebbe essere ancora in corso.",
+        stillWaiting: "In attesa di conferma…",
         accessibilityCurrent: ({ objective }: { objective: string }) => `Obiettivo attuale: ${objective}`,
         errorUnsupportedResponse: "Risposta RPC della sessione non supportata",
         errorUnknown: "Errore sconosciuto",
@@ -5450,6 +5494,10 @@ export const it: TranslationStructure = {
 	    pendingQueuedResumeFailedTitle: "Messaggio in coda",
 	    pendingQueuedResumeFailedBody:
 	      "Il tuo messaggio è stato salvato nella coda dei messaggi in sospeso, ma Happier non è riuscito a riprendere questa sessione. Riprova per avviarla.",
+	    composerBanners: {
+            showBannerAction: 'Mostra banner',
+            hideBannerAction: 'Nascondi banner',
+	    },
 	    staleRunner: {
 	      title: "La sessione è ancora in esecuzione su una CLI precedente",
 	      body: "Riavvia il runner di questa sessione per continuare con la CLI del daemon aggiornata. La sessione Happier resta la stessa.",
@@ -5546,7 +5594,11 @@ export const it: TranslationStructure = {
               teammateInstructionsPlaceholder: "Cosa deve fare questo compagno?",
               launchTeammateA11y: "Avvia compagno",
               launchTeammateAction: "Avvia compagno",
-              typeFact: ({ value }: { value: string }) => `Tipo: ${value}`,
+            typeFact: ({ value }: { value: string }) => `Tipo: ${value}`,
+            nativeTypeFact: ({ value }: { value: string }) => `Tipo nativo: ${value}`,
+            modelFact: ({ value }: { value: string }) => `Modello: ${value}`,
+            agentIdFact: ({ value }: { value: string }) => `ID agente: ${value}`,
+            durationFact: ({ value }: { value: string }) => `Durata: ${value}`,
               providerFact: ({ value }: { value: string }) => `Fornitore: ${value}`,
               backendFact: ({ value }: { value: string }) => `Backend: ${value}`,
               intentFact: ({ value }: { value: string }) => `Intenzione: ${value}`,
@@ -5656,11 +5708,18 @@ export const it: TranslationStructure = {
             count > 0 ? `In sospeso (+${count})` : "In sospeso",
           deliveryStatus: {
             blocked: "Bloccato",
+            deliveryUncertain: 'Stato della consegna incerto',
             delivering: "In consegna",
+            queuedInClaude: "In coda in Claude",
+            queued: 'In coda',
+            sending: 'Invio in corso…',
+            sendFailed: 'Non inviato',
+            waitingForTurn: 'In attesa',
           },
           deliveryBlockedReasons: {
             terminalComposerDraft: "Una bozza nel terminale blocca la consegna",
-            providerAcceptanceTimeout: "Il provider non ha confermato la ricezione",
+            runtimeConfigBlocked: "La configurazione di runtime blocca la consegna",
+            unsupportedAction: "Questo messaggio usa un'azione di consegna non supportata",
             providerUnavailableBeforeAcceptance: "Il provider è temporaneamente non disponibile",
             ambiguousTerminalDelivery: "Lo stato della consegna è ambiguo",
             terminalHostUnreachable: "L'host del terminale non è raggiungibile",
@@ -5669,11 +5728,21 @@ export const it: TranslationStructure = {
             manualUserHandled: "Segnato come gestito",
             attemptExpiredBeforeWrite: "Il tentativo di consegna è scaduto prima della scrittura",
             providerRejectedBeforeAcceptance: "Il provider ha rifiutato il messaggio",
+            steeringUnavailable: "Non è possibile dirigere il turno attivo",
             payloadTooLarge: "Il messaggio è troppo grande",
             unknown: "Lo stato della consegna richiede verifica",
           },
 	          empty: "Nessun messaggio in sospeso.",
 	          decryptFailed: "Impossibile decifrare questo messaggio in sospeso.",
+	          sendFailedNotice: 'Messaggio non inviato. Controlla la connessione e riprova.',
+	          waitingForTurnNotice: ({ minutes }: { minutes: number }) =>
+	              minutes > 0
+	                  ? `In attesa del completamento dell’attività corrente · in esecuzione da ${minutes} min`
+	                  : 'In attesa del completamento dell’attività corrente',
+	          waitingForPredecessorNotice: 'In attesa di un messaggio precedente',
+	          waitingForRuntimeActivityNotice: 'In attesa che termini l’attività del runtime',
+	          runtimeActivityUnknownNotice: 'In attesa dello stato di attività del runtime',
+	          waitingForRuntimeNotice: 'In attesa che il runtime si riconnetta',
 	          nonSteerableNotice: "Il turno corrente non può accettare inserimenti dopo questo cambio di modalità. Verrà eseguito dopo, oppure usa Invia ora per interrompere.",
 	          steerBlockedTerminalDraftNotice: 'In attesa: una bozza nel compositore del terminale blocca la consegna. Cancellala nel terminale o interrompi il turno.',
 	          clearTerminalComposer: {
@@ -5691,7 +5760,12 @@ export const it: TranslationStructure = {
           steerNow: "Inserisci ora",
           sendNow: "Invia ora",
           sendNowInterrupt: "Invia ora (interrompi)",
+          interruptAndRunNow: "Interrompi ed esegui ora",
+          continueWaiting: "Continua ad aspettare",
+          dismiss: "Archivia",
+          sendAsNew: "Invia come nuovo",
           retryDelivery: "Riprova",
+          retrySend: 'Riprova invio',
           markHandled: "Segna come gestito",
           requeue: "Rimetti in coda",
         },
@@ -5710,10 +5784,19 @@ export const it: TranslationStructure = {
           title: "Segnare il messaggio in sospeso come gestito?",
           body: "Usalo solo se il provider ha già gestito il messaggio o non vuoi più che Happier lo consegni.",
         },
+        dismissDeliveryConfirm: {
+          title: "Archiviare la consegna incerta?",
+          body: "Questo archivia il messaggio originale senza inviarlo di nuovo. Se il provider conferma la consegna in seguito, Happier può ancora aggiungere il messaggio originale alla trascrizione.",
+        },
+        sendAsNewConfirm: {
+          title: "Inviare questo messaggio come nuovo?",
+          body: "Questo archivia la consegna incerta e mette in coda una nuova copia. Il provider potrebbe aver già ricevuto l’originale, quindi il messaggio potrebbe essere gestito due volte.",
+        },
         sendConfirm: {
           title: "Inviare ora?",
           interruptTitle: "Inviare ora (interrompere)?",
           body: "Questo fermerà il turno corrente e invierà questo messaggio immediatamente.",
+          resumeBody: "Questo riprenderà la sessione e invierà immediatamente il messaggio.",
         },
         discarded: {
           title: "Messaggi scartati",
@@ -5735,6 +5818,7 @@ export const it: TranslationStructure = {
           sendDiscardedFailed: "Impossibile inviare il messaggio scartato",
           reorderFailed: "Impossibile riordinare i messaggi in sospeso",
           retryDeliveryFailed: "Impossibile riprovare la consegna in sospeso",
+          retrySendFailed: 'Impossibile inviare di nuovo il messaggio',
           markHandledFailed: "Impossibile segnare la consegna in sospeso come gestita",
           clearTerminalComposerFailed: "Impossibile cancellare il compositore del terminale",
           clearTerminalComposerUnsupported: "Questa sessione non supporta la cancellazione del compositore del terminale da Happier.",
@@ -5761,6 +5845,7 @@ export const it: TranslationStructure = {
       manageSharingDenied:
         "Non hai il permesso di gestire le impostazioni di condivisione per questa sessione.",
       stopSharing: "Interrompi condivisione",
+      stopSharingDescription: "Revoca l’accesso diretto di questa persona.",
       recipientMissingKeys:
         "Questo utente non ha ancora registrato le chiavi di crittografia.",
       permissionApprovals: "Può approvare i permessi",
@@ -5784,7 +5869,7 @@ export const it: TranslationStructure = {
       publicLink: "Link pubblico",
       publicLinkActive: "Link pubblico attivo",
       publicLinkDescription:
-        "Crea un link per permettere a chiunque di visualizzare questa sessione.",
+        "Chiunque abbia questo link può visualizzare la sessione in modo anonimo. Eliminalo o rigeneralo per revocare l’accesso a tutti.",
       createPublicLink: "Crea link pubblico",
       regeneratePublicLink: "Rigenera link pubblico",
       deletePublicLink: "Elimina link pubblico",
@@ -6216,6 +6301,7 @@ export const it: TranslationStructure = {
         },
     attentionSectionTitle: 'Richiede attenzione',
     workingSectionTitle: 'In lavorazione',
+    backgroundWorkingSectionTitle: 'In lavorazione in background',
     hideInactiveSessions: 'Nascondi sessioni inattive',
     showInactiveSessions: 'Mostra sessioni inattive',
   },
@@ -6269,6 +6355,7 @@ export const it: TranslationStructure = {
     killSessionConfirm: "Sei sicuro di voler terminare questa sessione?",
     stopSession: "Ferma sessione",
     stopSessionConfirm: "Sei sicuro di voler fermare questa sessione?",
+    stopSessionUpgradeRequired: "Aggiorna Happier sul computer della sessione, quindi riprova.",
     archiveSession: "Archivia sessione",
     archiveSessionConfirm: "Sei sicuro di voler archiviare questa sessione?",
     workspaceTitle: "Area di lavoro",
@@ -6307,9 +6394,9 @@ export const it: TranslationStructure = {
     kiloSessionIdCopied: "ID sessione Kilo copiato negli appunti",
     kiroSessionId: "ID sessione Kiro",
     kiroSessionIdCopied: "ID sessione Kiro copiato negli appunti",
+    customAcpSessionId: "ID sessione ACP personalizzata",
     grokSessionId: "ID sessione Grok",
     grokSessionIdCopied: "ID sessione Grok copiato negli appunti",
-    customAcpSessionId: "ID sessione ACP personalizzata",
     customAcpSessionIdCopied: "ID sessione ACP personalizzata copiato negli appunti",
     piSessionId: "ID sessione Pi",
     piSessionIdCopied: "ID sessione Pi copiato negli appunti",
@@ -6475,6 +6562,7 @@ export const it: TranslationStructure = {
         `${used}/${limit} usato`,
       duration: {
         now: "ora",
+        outdated: "non aggiornato",
         daysHours: ({ days, hours }: { days: number; hours: number }) =>
           `${days}g ${hours}h`,
         hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) =>
@@ -6532,11 +6620,11 @@ export const it: TranslationStructure = {
       kimi: "Kimi",
       kilo: "Kilo",
       kiro: "Kiro",
-      grok: "Grok",
       customAcp: "ACP personalizzato",
       pi: "Pi",
       copilot: "Copilot",
       cursor: "Cursor",
+      grok: "Grok",
     },
     auggieIndexingChip: {
       on: "Indicizzazione attiva",
@@ -6546,6 +6634,10 @@ export const it: TranslationStructure = {
         title: "MODELLO",
         useCliSettings: "Usa le impostazioni CLI",
         configureInCli: "Configura i modelli nelle impostazioni CLI",
+        running: ({ model }: { model: string }) => `In esecuzione: ${model}`,
+        lastUsed: ({ model }: { model: string }) => `Ultimo utilizzo: ${model}`,
+        lastReported: ({ model }: { model: string }) => `Ultimo segnalato: ${model}`,
+        selectedForResume: "Il modello selezionato verrà usato alla ripresa di questa sessione.",
         extendedContextToggleLabel: 'Contesto da 1M',
         extendedContextToggleDescription: 'Usa la finestra di contesto estesa da 1M di token per questo modello.',
         extendedContextLabel: ({ model }: { model: string }) => `${model} (1M)`,
@@ -6634,10 +6726,6 @@ export const it: TranslationStructure = {
       buildDescription: "Comportamento predefinito",
       plan: "Pianifica",
       planDescription: "Pensa prima",
-        running: ({ model }: { model: string }) => `In esecuzione: ${model}`,
-        lastUsed: ({ model }: { model: string }) => `Ultimo utilizzo: ${model}`,
-        lastReported: ({ model }: { model: string }) => `Ultimo segnalato: ${model}`,
-        selectedForResume: "Il modello selezionato verrà usato alla ripresa di questa sessione.",
     },
     acp: {
       modeSectionTitle: "Modalità",
@@ -6685,6 +6773,9 @@ export const it: TranslationStructure = {
     expand: "Espandi/Comprimi",
     input: "Ingresso",
     output: "Uscita",
+    payloadTruncated: "Payload grande troncato per prestazioni.",
+    showFullPayload: "Mostra payload completo",
+    showLessPayload: "Mostra meno",
   },
 
     tools: {
@@ -6700,6 +6791,13 @@ export const it: TranslationStructure = {
       },
       webFetch: {
         httpStatus: ({ status }: { status: number }) => `HTTP ${status}`,
+      },
+      codeSearch: {
+        aggregateMatchUnavailable: '1 corrispondenza; i dettagli non sono stati forniti.',
+        aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} corrispondenze; i dettagli non sono stati forniti.`,
+        aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} file; i dettagli non sono stati forniti.`,
+        detailsUnavailable: "Ricerca completata; i dettagli non sono stati forniti.",
+        truncated: "I risultati potrebbero essere troncati.",
       },
     fullView: {
       description: "Descrizione",
@@ -6736,6 +6834,7 @@ export const it: TranslationStructure = {
       statusComplete: "Completato",
       statusFailed: "Non riuscito",
       statusStopped: "Interrotto",
+      statusInterrupted: "Interrotto",
       statusBlocked: "Bloccato",
       statusCancelled: "Annullato",
       statusUnknown: "Sconosciuto",
@@ -6752,6 +6851,8 @@ export const it: TranslationStructure = {
       tokens: ({ tokens }: { tokens: string }) => `${tokens} token`,
       toolCalls: ({ count }: { count: number }) => `${count} strumenti`,
       showMore: ({ count }: { count: number }) => `Mostra ${count}`,
+      detailShowMore: 'Mostra altro',
+      detailShowLess: 'Mostra meno',
   },
     changeTitleView: {
       titleLabel: "Titolo",
@@ -6824,9 +6925,9 @@ export const it: TranslationStructure = {
       other: "Altro",
       otherDescription: "Scrivi la tua risposta",
       otherPlaceholder: "Scrivi la tua risposta...",
-      selectionLimit: ({ count }: { count: number }) => `Seleziona fino a ${count} risposte. Deselezionane una per sceglierne un'altra.`,
     },
     exitPlanMode: {
+    selectionLimit: ({ count }: { count: number }) => `Seleziona fino a ${count} risposte. Deselezionane una per sceglierne un'altra.`,
       approve: "Approva piano",
       reject: "Rifiuta",
       requestChanges: "Richiedi modifiche",
@@ -6873,6 +6974,7 @@ export const it: TranslationStructure = {
       turnDiff: "Differenze turno",
       question: "Domanda",
       changeTitle: "Cambia titolo",
+      switchMode: "Cambia modalità",
     },
     geminiExecute: {
       cwd: ({ cwd }: { cwd: string }) => `📁 ${cwd}`,
@@ -7272,6 +7374,7 @@ export const it: TranslationStructure = {
           generatedImageA11y: ({ name }: { name: string }) => `Apri immagine generata ${name}`,
           attachmentImageA11y: ({ name }: { name: string }) => `Apri immagine allegata ${name}`,
           toolArtifactImageA11y: ({ name }: { name: string }) => `Apri immagine artefatto dello strumento ${name}`,
+          imageUnavailable: 'Immagine non disponibile',
         },
         cannotDisplayBinary: "Impossibile mostrare il contenuto del file binario",
         diff: "Differenze",
@@ -7378,7 +7481,6 @@ export const it: TranslationStructure = {
         `Le operazioni di controllo versione sono bloccate da ${actor}.`,
       globalLock:
         "Le operazioni sono temporaneamente bloccate perché un'altra sessione sta eseguendo un comando di controllo versione.",
-          imageUnavailable: 'Immagine non disponibile',
       selection: ({ count }: { count: number }) =>
         count === 1
           ? "1 file selezionato per il prossimo commit."
@@ -7763,9 +7865,6 @@ settingsSession: {
 	          workingPlacementModeGlobalSubtitle: 'Mostra una sezione di lavoro sotto le sessioni che richiedono attenzione',
 	          workingPlacementModeWithinGroupsTitle: 'Sposta in cima al gruppo attuale',
 	          workingPlacementModeWithinGroupsSubtitle: 'Mantieni le sessioni in lavorazione nella loro cartella o area di lavoro',
-	          separateBackgroundWorkTitle: 'Separa lavoro in background',
-	          separateBackgroundWorkEnabledSubtitle: 'Mostra le attività in background attive nel proprio gruppo',
-	          separateBackgroundWorkDisabledSubtitle: 'Unisci le attività in background attive a In lavorazione',
 	          narrowWorkingIndicatorTitle: 'Indicatore di lavoro stretto',
 	          narrowWorkingIndicatorSpinnerSelectedSubtitle: 'Mostra uno spinner piccolo e neutro nelle righe strette',
 	          narrowWorkingIndicatorPulseSelectedSubtitle: 'Mostra un punto pulsante nelle righe strette',
@@ -7867,6 +7966,14 @@ settingsSession: {
               title: 'Runtime e terminale',
               entrySubtitle: 'Tmux, finestre Windows Terminal e compatibilità Terminal Connect.',
           },
+      banners: {
+          title: 'Banner',
+          footer: 'I banner sopra il campo di scrittura possono essere ridotti a un badge di stato. Scegli se ricordarlo.',
+          rememberVisibilityTitle: 'Ricorda la visibilità dei banner',
+          rememberVisibilitySubtitle: 'I banner che chiudi restano nascosti in tutte le sessioni su questo dispositivo.',
+          resetHiddenTitle: 'Mostra tutti i banner nascosti',
+          resetHiddenSubtitle: 'Cancella i banner nascosti su questo dispositivo.',
+      },
       inputBehavior: {
           title: 'Comportamento dell\'immissione',
           footer: 'Configura Invio con Enter e il comportamento della cronologia dei messaggi.',
@@ -10038,6 +10145,7 @@ settingsSession: {
     switchedToMode: ({ mode }: { mode: string }) =>
       `Passato alla modalità ${mode}`,
     discarded: "Scartato",
+    recoveredHistory: "Cronologia recuperata",
     unknownEvent: "Evento sconosciuto",
     contextCompactionStarted: "Compattazione del contesto...",
     contextCompactionCompleted: "Contesto compattato",
@@ -10397,11 +10505,3 @@ settingsSession: {
 } as const;
 
 export type TranslationsIt = typeof it;
-      codeSearch: {
-        aggregateMatchUnavailable: '1 corrispondenza; i dettagli non sono stati forniti.',
-        aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} corrispondenze; i dettagli non sono stati forniti.`,
-        aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} file; i dettagli non sono stati forniti.`,
-        detailsUnavailable: "Ricerca completata; i dettagli non sono stati forniti.",
-        truncated: "I risultati potrebbero essere troncati.",
-      },
-      switchMode: "Cambia modalità",

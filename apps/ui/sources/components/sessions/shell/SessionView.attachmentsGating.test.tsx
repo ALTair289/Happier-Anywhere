@@ -30,6 +30,7 @@ const attachmentsFeatureScopeState = vi.hoisted(() => ({ enabledForServerId: nul
 const executeSessionComposerResolutionMock = vi.hoisted(() => vi.fn());
 const modalAlertSpy = vi.hoisted(() => vi.fn());
 const resolveSessionComposerSendMock = vi.hoisted(() => vi.fn(() => ({ kind: 'noop' })));
+const sessionAbortMock = vi.hoisted(() => vi.fn());
 
 installSessionShellCommonModuleMocks({
   reactNative: async () =>
@@ -266,7 +267,7 @@ vi.mock('@/sync/ops', async (importOriginal) => {
     importOriginal,
     overrides: {
       continueSessionWithReplay: vi.fn(),
-      sessionAbort: vi.fn(),
+      sessionAbort: (...args: unknown[]) => sessionAbortMock(...args),
       resumeSession: vi.fn(),
       sessionAttachmentsUploadFile: vi.fn(),
     },
@@ -381,6 +382,36 @@ describe('SessionView attachments gating', () => {
     modalAlertSpy.mockReset();
     resolveSessionComposerSendMock.mockReset();
     resolveSessionComposerSendMock.mockImplementation(() => ({ kind: 'noop' }));
+    sessionAbortMock.mockReset();
+  });
+
+  it('returns the session abort operation promise from the composer callback', async () => {
+    let resolveAbort!: () => void;
+    const abortPromise = new Promise<void>((resolve) => {
+      resolveAbort = resolve;
+    });
+    sessionAbortMock.mockReturnValueOnce(abortPromise);
+
+    const tree = (await renderScreen(<AppPaneProvider>
+          <SessionView id="s1" />
+        </AppPaneProvider>)).tree;
+
+    const agentInput = tree.findByType('AgentInput' as any);
+    const returnedAbort = agentInput.props.onAbort();
+
+    expect(sessionAbortMock).toHaveBeenCalledWith('s1');
+    expect(returnedAbort).toBe(abortPromise);
+
+    let settled = false;
+    void returnedAbort.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolveAbort();
+    await expect(returnedAbort).resolves.toBeUndefined();
+    expect(settled).toBe(true);
   });
 
   it('does not wire drag/drop/paste attachments when attachments.uploads is disabled', async () => {

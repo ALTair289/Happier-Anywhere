@@ -2453,6 +2453,12 @@ export const ru: TranslationStructure = {
         partialApplication: "Аутентификация частично переключена",
         partialApplicationForService: ({ service }: { service: string }) => `Аутентификация ${service} переключена не полностью`,
       },
+      partialApply: {
+        title: 'Аутентификация переключена частично',
+        body: 'Новый аккаунт сохранён, но применить его к этой активной сессии удалось не полностью. Повторите попытку или откатите, чтобы оставить эту сессию на прежнем аккаунте.',
+        retry: 'Повторить применение к этой сессии',
+        revert: 'Вернуться к прежнему аккаунту',
+      },
     },
     defaultAuth: {
       title: "Конфигурация бэкенда по умолчанию",
@@ -2471,6 +2477,11 @@ export const ru: TranslationStructure = {
           "Подключенные пулы здесь отключены; используется нативная аутентификация.",
         connected_service_unsupported:
           "Этот бэкенд не поддерживает этот подключенный сервис; используется нативная аутентификация.",
+      },
+      poolSuggestion: {
+        body: ({ pool }: { pool: string }) => `Используйте пул ${pool}, чтобы сессии переключались в обход лимитов.`,
+        accept: "Использовать пул",
+        dismiss: "Скрыть",
       },
     },
     list: {
@@ -2520,6 +2531,7 @@ export const ru: TranslationStructure = {
       recoveryCreditExpires: ({ time }: { time: string }) => `Expires: ${time}`,
       recoveryCreditApplying: "Применение сброса…",
       recoveryCreditMachineUnavailable: "Нет активной машины, на которой можно применить этот сброс.",
+      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
       recoveryCreditBadge: ({ count }: { count: number }) => count === 1 ? "1 reset" : `${count} resets`,
       remaining: ({ percent }: { percent: string }) => `${percent} осталось`,
       remainingWithReset: ({ percent, reset }: { percent: string; reset: string }) =>
@@ -2528,10 +2540,10 @@ export const ru: TranslationStructure = {
         `${used}/${limit} использовано`,
       duration: {
         now: "сейчас",
+        outdated: "устарело",
         daysHours: ({ days, hours }: { days: number; hours: number }) =>
           `${days}д ${hours}ч`,
         hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) =>
-      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
           `${hours}ч ${minutes}м`,
         hours: ({ hours }: { hours: number }) => `${hours}ч`,
         minutes: ({ minutes }: { minutes: number }) => `${minutes}м`,
@@ -2651,6 +2663,7 @@ export const ru: TranslationStructure = {
         quota_fetch_disabled: "Проверки квоты отключены",
         quota_fetch_backoff: "Проверки квоты отложены",
         auth_surface_weakly_verified: "Перезапись аутентификации проверена",
+        connected_service_restart_requested: "Запрошен перезапуск сеанса",
         connected_service_credential_reconnect_required: "Подключенную учетную запись нужно переподключить",
         claude_subscription_missing_claude_code_scope: "Для доступа к Claude Code нужно переподключение",
         claude_subscription_native_auth_materialization_failed: "Не удалось подготовить учетные данные Claude Code",
@@ -2681,6 +2694,7 @@ export const ru: TranslationStructure = {
         quota_fetch_disabled: "Проверки квоты отключены",
         quota_fetch_backoff: "Проверки квоты временно отложены",
         auth_surface_weakly_verified: "Перезапись аутентификации слабо проверена",
+        connected_service_restart_requested: "Запрошен перезапуск сеанса",
         connected_service_credential_reconnect_required: "Подключенную учетную запись нужно переподключить",
         claude_subscription_missing_claude_code_scope: "Переподключите подписку Claude для Claude Code",
         claude_subscription_native_auth_materialization_failed: "Не удалось подготовить нативную авторизацию Claude Code",
@@ -2708,6 +2722,7 @@ export const ru: TranslationStructure = {
         quota_fetch_disabled: "Проверки квоты сейчас отключены для этого провайдера. Happier продолжит использовать реактивное восстановление.",
         quota_fetch_backoff: "Проверки квоты временно отложены после ответа провайдера или сети. Happier повторит обновление квоты позже.",
         auth_surface_weakly_verified: "Happier проверил, что выбранные файлы аутентификации были перезаписаны, но этот провайдер не раскрывает точную идентичность активного аккаунта.",
+        connected_service_restart_requested: "Happier запросил безопасный перезапуск сеанса, чтобы применить выбранный подключённый аккаунт.",
         connected_service_credential_reconnect_required: "Выбранную подключенную учетную запись нужно переподключить, прежде чем эту сессию можно будет возобновить. Переподключите профиль и повторите попытку.",
         claude_subscription_missing_claude_code_scope: "Этот профиль Claude был подключен до выдачи областей Claude Code. Переподключите его, затем повторите сессию или переключение пула.",
         claude_subscription_native_auth_materialization_failed: "Happier не смог создать файл нативных учетных данных Claude Code для этого профиля. Переподключите профиль или выберите другого участника пула.",
@@ -2723,6 +2738,7 @@ export const ru: TranslationStructure = {
       identityMismatchBody:
         "Новые учётные данные принадлежат другому аккаунту провайдера. Подтвердите, чтобы сохранить тот же ID профиля и заменить связанный аккаунт.",
       identityMismatchConfirm: "Заменить аккаунт",
+      targetMismatch: "Это повторное подключение вернуло учётные данные для другого подключённого профиля. Запустите повторное подключение заново из целевого профиля.",
     },
     detail: {
       unknownService: "Неизвестный подключённый сервис.",
@@ -2958,8 +2974,17 @@ export const ru: TranslationStructure = {
         title: "Пулов пока нет",
         subtitle: "Создайте пул, чтобы автоматически переключаться между аккаунтами.",
       },
+      loadError: {
+        title: "Не удалось загрузить пулы",
+        subtitle: "Не удалось загрузить пулы аккаунтов. Проверьте подключение и повторите попытку.",
+        staleTitle: "Показаны последние известные пулы",
+        staleSubtitle: "Не удалось обновить последний список пулов. Повторите попытку, чтобы обновить его.",
+        retry: "Повторить попытку",
+      },
       detail: {
         summaryTitle: "Обзор",
+        serverActiveStatusTitle: "Сохранено на сервере",
+        serverActiveStatusSubtitle: "Это сохранённая активная учётная запись. Офлайн-машины применят её после подключения; этот экран не утверждает, что все машины уже синхронизированы.",
         summary: ({ count, strategy }: { count: number; strategy: string }) => `${count} аккаунтов · ${strategy}`,
         membersTitle: "Участники",
         moveUp: "Вверх",
@@ -2970,6 +2995,15 @@ export const ru: TranslationStructure = {
         behaviorTitle: "Поведение",
         advancedTitle: "Дополнительно",
         advancedSubtitle: "Настройте, когда и как этот пул переключает аккаунты.",
+                manualApplyDivergenceTitle: "Переключено на сервере, но не в активных сессиях",
+                manualApplyDivergenceSubtitle: ({ detail }: { detail: string }) => `Активный аккаунт изменён на сервере, но применить его к активным сессиям не удалось (${detail}). Повторите попытку или вернитесь, чтобы всё осталось на предыдущем аккаунте.`,
+                manualApplyRetry: "Повторить применение к активным сессиям",
+                manualApplyRevert: "Вернуться к предыдущему аккаунту",
+                machineTarget: {
+                  title: "Невозможно применить к активной сессии",
+                  noBoundSession: "Сейчас ни одна активная сессия не использует этот пул, поэтому переключение нельзя применить вживую. Запустите сессию в этом пуле и повторите попытку.",
+                  offline: "Машина, на которой выполняется сессия этого пула, офлайн, поэтому переключение не может её достичь. Верните машину в онлайн и повторите попытку.",
+                },
       },
       behavior: {
         autoRestorePrimaryTitle: "Восстанавливать основной при сбросе",
@@ -3869,6 +3903,24 @@ export const ru: TranslationStructure = {
                             }
                         }
                     },
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                     claudeCodeExperimentalAgentTeamsEnabled: {
                         title: "Принудительно включить Agent Teams",
                         subtitle: "Включает экспериментальный Agent Teams в Claude Code (рой агентов) во всех сессиях Claude, запущенных из Happier."
@@ -3903,24 +3955,6 @@ export const ru: TranslationStructure = {
                             },
                             file: {
                                 title: "Файлы",
-                    claudeUnifiedTerminalWorkspaceTrust: {
-                        title: "Workspace trust",
-                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
-                        options: {
-                            ask_every_time: {
-                                title: "Ask every time",
-                                subtitle: "Show the exact workspace trust question in the session."
-                            },
-                            always_trust_happier_workspaces: {
-                                title: "Always trust Happier workspaces",
-                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
-                            },
-                            always_reject_happier_workspaces: {
-                                title: "Always reject Happier workspaces",
-                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
-                            }
-                        }
-                    },
                                 subtitle: "Операции файловой системы и вспомогательные функции."
                             },
                             '1p': {
@@ -5126,6 +5160,7 @@ export const ru: TranslationStructure = {
         },
     attentionSectionTitle: 'Требует внимания',
     workingSectionTitle: 'В работе',
+    backgroundWorkingSectionTitle: 'Работает в фоне',
     hideInactiveSessions: 'Скрыть неактивные сессии',
     showInactiveSessions: 'Показать неактивные сессии',
   },
@@ -5179,6 +5214,7 @@ export const ru: TranslationStructure = {
     killSessionConfirm: "Вы уверены, что хотите завершить эту сессию?",
     stopSession: "Остановить сессию",
     stopSessionConfirm: "Вы уверены, что хотите остановить эту сессию?",
+    stopSessionUpgradeRequired: "Обновите Happier на компьютере сессии и попробуйте остановить её снова.",
     archiveSession: "Архивировать сессию",
     archiveSessionConfirm: "Вы уверены, что хотите архивировать эту сессию?",
     workspaceTitle: "Рабочее пространство",
@@ -5218,9 +5254,9 @@ export const ru: TranslationStructure = {
     kiloSessionIdCopied: "ID сессии Kilo скопирован в буфер обмена",
     kiroSessionId: "ID сессии Kiro",
     kiroSessionIdCopied: "ID сессии Kiro скопирован в буфер обмена",
+    customAcpSessionId: "ID пользовательской ACP-сессии",
     grokSessionId: "ID сессии Grok",
     grokSessionIdCopied: "ID сессии Grok скопирован в буфер обмена",
-    customAcpSessionId: "ID пользовательской ACP-сессии",
     customAcpSessionIdCopied: "ID пользовательской ACP-сессии скопирован в буфер обмена",
     piSessionId: "ID сессии Pi",
     piSessionIdCopied: "ID сессии Pi скопирован в буфер обмена",
@@ -5378,10 +5414,14 @@ export const ru: TranslationStructure = {
     error: "ошибка",
     online: "в сети",
     working: "работаю...",
+    workingRetained: "работает, ожидание обновлений…",
+    backgroundActive: "фоновые задачи выполняются",
+    activityUnknown: "статус активности недоступен",
     readyForReview: "готово к проверке",
     offline: "не в сети",
     lastSeen: ({ time }: { time: string }) => `в сети ${time}`,
     actionRequired: "требуется действие",
+    waitingForYourResponse: "Ожидание вашего ответа",
     permissionRequired: "требуется разрешение",
     activeNow: "Активен сейчас",
     unknown: "неизвестно",
@@ -5480,6 +5520,8 @@ export const ru: TranslationStructure = {
       statusReady: "Готово к возобновлению",
       statusWaiting: "Ожидание сброса лимита",
       statusWaitingUntil: ({ time }: { time: string }) => `Ожидание до ${time}`,
+      statusWaitingResetUntil: ({ time }: { time: string }) => `Ожидание сброса квоты (сброс в ${time})`,
+      statusAccountRotationPending: "Ожидается ротация аккаунта",
       statusChecking: "Проверка лимита",
       statusPaused: "Ожидание приостановлено",
       statusExhausted: "Группа исчерпана",
@@ -5498,6 +5540,7 @@ export const ru: TranslationStructure = {
         "Задайте цель, прежде чем приостанавливать или возобновлять ее.",
       dirtyCloseTitle: "Отменить изменения цели?",
       dirtyCloseBody: "Несохраненные изменения цели будут потеряны.",
+      emptyPlaceholder: "Здесь пока ничего нет",
       badge: {
         goal: ({ title }: { title: string }) => `Цель: ${title}`,
         goalPaused: "Цель приостановлена",
@@ -5518,6 +5561,7 @@ export const ru: TranslationStructure = {
         goalLabel: ({ title }: { title: string }) => `Цель: ${title}`,
         bare: "Рабочий процесс",
         agentsFallback: ({ fraction }: { fraction: string }) => `Рабочий процесс ${fraction} агентов`,
+        olderRunsHidden: ({ count }: { count: number }) => `${count} предыдущих запусков скрыто`,
         phaseLabel: ({ title, fraction }: { title: string; fraction: string }) => `${title} ${fraction}`,
         plural: ({ count }: { count: number }) => `${count} рабочих процессов`,
         pluralWithAgents: ({ count, agents }: { count: number; agents: number }) => `${count} рабочих процессов · ${agents} агентов`,
@@ -5530,7 +5574,7 @@ export const ru: TranslationStructure = {
         set: "Задать цель",
         setTitle: "Задайте цель",
         setSubtitle: "Задайте фокус сессии, чтобы агент не отклонялся от цели.",
-        addBudget: "Добавить лимит бюджета (необязательно)",
+        addBudget: "+ Добавить лимит бюджета (необязательно)",
         removeBudget: "Убрать бюджет",
         noUsageYet: "Пока нет расхода",
         tokensSuffix: ({ count }: { count: string }) => `${count} токенов`,
@@ -5543,12 +5587,14 @@ export const ru: TranslationStructure = {
         statusPaused: "Приостановлена",
         statusComplete: "Выполнена",
         statusBudgetLimited: "Ограничена бюджетом",
+        statusInterrupted: "Прервано",
         tokenBudget: "Бюджет токенов",
         budgetProgress: ({ used, budget }: { used: string; budget: string }) => `${used} / ${budget}`,
+        budgetCaption: ({ budget }: { budget: string }) => `из бюджета ${budget}`,
         budgetPlaceholder: "Лимит токенов",
         invalidBudget: "Введите положительный бюджет токенов.",
         pending: "Установка цели…",
-        pendingTimeout: "Не удалось подтвердить обновление цели. Возможно, оно ещё применяется.",
+        stillWaiting: "Ожидание подтверждения…",
         accessibilityCurrent: ({ objective }: { objective: string }) => `Текущая цель: ${objective}`,
         errorUnsupportedResponse: "Неподдерживаемый ответ от RPC сеанса",
         errorUnknown: "Неизвестная ошибка",
@@ -5583,6 +5629,10 @@ export const ru: TranslationStructure = {
 	    pendingQueuedResumeFailedTitle: "Сообщение поставлено в очередь",
 	    pendingQueuedResumeFailedBody:
 	      "Ваше сообщение сохранено в очереди ожидания, но Happier не смог возобновить эту сессию. Нажмите «Повторить», чтобы запустить её.",
+	    composerBanners: {
+            showBannerAction: 'Показать баннер',
+            hideBannerAction: 'Скрыть баннер',
+	    },
 	    staleRunner: {
 	      title: "Сессия всё ещё работает на старой CLI",
 	      body: "Перезапустите runner этой сессии, чтобы продолжить на обновлённой CLI демона. Сессия Happier останется той же.",
@@ -5680,6 +5730,10 @@ export const ru: TranslationStructure = {
             launchTeammateA11y: "Запустить участника",
             launchTeammateAction: "Запустить участника",
             typeFact: ({ value }: { value: string }) => `Тип: ${value}`,
+            nativeTypeFact: ({ value }: { value: string }) => `Нативный тип: ${value}`,
+            modelFact: ({ value }: { value: string }) => `Модель: ${value}`,
+            agentIdFact: ({ value }: { value: string }) => `ID агента: ${value}`,
+            durationFact: ({ value }: { value: string }) => `Длительность: ${value}`,
             providerFact: ({ value }: { value: string }) => `Провайдер: ${value}`,
             backendFact: ({ value }: { value: string }) => `Бэкенд: ${value}`,
             intentFact: ({ value }: { value: string }) => `Намерение: ${value}`,
@@ -5789,11 +5843,18 @@ export const ru: TranslationStructure = {
             count > 0 ? `Ожидает (+${count})` : "Ожидает",
           deliveryStatus: {
             blocked: "Заблокировано",
+            deliveryUncertain: 'Состояние доставки неизвестно',
             delivering: "Доставляется",
+            queuedInClaude: "В очереди в Claude",
+            queued: 'В очереди',
+            sending: 'Отправка…',
+            sendFailed: 'Не отправлено',
+            waitingForTurn: 'Ожидание',
           },
           deliveryBlockedReasons: {
             terminalComposerDraft: "Черновик в терминале блокирует доставку",
-            providerAcceptanceTimeout: "Провайдер не подтвердил получение",
+            runtimeConfigBlocked: "Настройки среды выполнения блокируют доставку",
+            unsupportedAction: "Это сообщение использует неподдерживаемое действие доставки",
             providerUnavailableBeforeAcceptance: "Провайдер временно недоступен",
             ambiguousTerminalDelivery: "Состояние доставки неоднозначно",
             terminalHostUnreachable: "Хост терминала недоступен",
@@ -5802,11 +5863,21 @@ export const ru: TranslationStructure = {
             manualUserHandled: "Отмечено как обработанное",
             attemptExpiredBeforeWrite: "Попытка доставки истекла до записи",
             providerRejectedBeforeAcceptance: "Провайдер отклонил сообщение",
+            steeringUnavailable: "Невозможно направить активный ход",
             payloadTooLarge: "Сообщение слишком большое",
             unknown: "Состояние доставки требует проверки",
           },
 	          empty: "Нет отложенных сообщений.",
 	          decryptFailed: "Не удалось расшифровать это отложенное сообщение.",
+	          sendFailedNotice: 'Сообщение не отправлено. Проверьте подключение и повторите попытку.',
+	          waitingForTurnNotice: ({ minutes }: { minutes: number }) =>
+	              minutes > 0
+	                  ? `Ожидание завершения текущей задачи · выполняется ${minutes} мин`
+	                  : 'Ожидание завершения текущей задачи',
+	          waitingForPredecessorNotice: 'Ожидание предыдущего отложенного сообщения',
+	          waitingForRuntimeActivityNotice: 'Ожидание завершения активности среды выполнения',
+	          runtimeActivityUnknownNotice: 'Ожидание состояния активности среды выполнения',
+	          waitingForRuntimeNotice: 'Ожидание повторного подключения среды выполнения',
 	          nonSteerableNotice: "Текущий ход не может принять уточнение после этого изменения режима. Сообщение выполнится следующим, либо используйте Отправить сейчас, чтобы прервать.",
 	          steerBlockedTerminalDraftNotice: 'Ожидание: черновик в поле ввода терминала блокирует доставку. Очистите его в терминале или прервите ход.',
 	          clearTerminalComposer: {
@@ -5824,7 +5895,12 @@ export const ru: TranslationStructure = {
           steerNow: "Направить сейчас",
           sendNow: "Отправить сейчас",
           sendNowInterrupt: "Отправить сейчас (прервать)",
+          interruptAndRunNow: "Прервать и запустить сейчас",
+          continueWaiting: "Продолжить ожидание",
+          dismiss: "Отклонить",
+          sendAsNew: "Отправить как новое",
           retryDelivery: "Повторить",
+          retrySend: 'Повторить отправку',
           markHandled: "Отметить как обработанное",
           requeue: "Вернуть в очередь",
         },
@@ -5843,10 +5919,19 @@ export const ru: TranslationStructure = {
           title: "Отметить отложенное сообщение как обработанное?",
           body: "Используйте это только если провайдер уже обработал сообщение или вы больше не хотите, чтобы Happier доставлял его.",
         },
+        dismissDeliveryConfirm: {
+          title: "Отклонить доставку с неопределённым результатом?",
+          body: "Исходное сообщение будет заархивировано без повторной отправки. Если провайдер позже подтвердит доставку, Happier всё ещё сможет добавить исходное сообщение в расшифровку.",
+        },
+        sendAsNewConfirm: {
+          title: "Отправить это сообщение как новое?",
+          body: "Доставка с неопределённым результатом будет заархивирована, а новая копия поставлена в очередь. Провайдер мог уже получить исходное сообщение, поэтому оно может быть обработано дважды.",
+        },
         sendConfirm: {
           title: "Отправить сейчас?",
           interruptTitle: "Отправить сейчас (прервать)?",
           body: "Это остановит текущий ход и отправит сообщение немедленно.",
+          resumeBody: "Это возобновит сеанс и немедленно отправит сообщение.",
         },
         discarded: {
           title: "Отброшенные сообщения",
@@ -5868,6 +5953,7 @@ export const ru: TranslationStructure = {
           sendDiscardedFailed: "Не удалось отправить отброшенное сообщение",
           reorderFailed: "Не удалось изменить порядок отложенных сообщений",
           retryDeliveryFailed: "Не удалось повторить отложенную доставку",
+          retrySendFailed: 'Не удалось повторно отправить сообщение',
           markHandledFailed: "Не удалось отметить отложенную доставку как обработанную",
           clearTerminalComposerFailed: "Не удалось очистить поле ввода терминала",
           clearTerminalComposerUnsupported: "Эта сессия не поддерживает очистку поля терминала из Happier.",
@@ -5894,6 +5980,7 @@ export const ru: TranslationStructure = {
       manageSharingDenied:
         "У вас нет прав на управление настройками общего доступа для этой сессии.",
       stopSharing: "Прекратить доступ",
+      stopSharingDescription: "Отзывает прямой доступ этого пользователя.",
       recipientMissingKeys:
         "Этот пользователь ещё не зарегистрировал ключи шифрования.",
       permissionApprovals: "Может подтверждать разрешения",
@@ -5916,7 +6003,7 @@ export const ru: TranslationStructure = {
       publicLink: "Публичная ссылка",
       publicLinkActive: "Публичная ссылка активна",
       publicLinkDescription:
-        "Создайте ссылку, по которой любой сможет просмотреть эту сессию.",
+        "Любой, у кого есть эта ссылка, может анонимно просмотреть сессию. Удалите или обновите ссылку, чтобы отозвать доступ у всех.",
       createPublicLink: "Создать публичную ссылку",
       regeneratePublicLink: "Пересоздать публичную ссылку",
       deletePublicLink: "Удалить публичную ссылку",
@@ -6140,6 +6227,7 @@ export const ru: TranslationStructure = {
           `${used}/${limit} использовано`,
         duration: {
           now: "сейчас",
+          outdated: "устарело",
           daysHours: ({ days, hours }: { days: number; hours: number }) =>
             `${days}д ${hours}ч`,
           hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) =>
@@ -6198,11 +6286,11 @@ export const ru: TranslationStructure = {
       kimi: "Kimi",
       kilo: "Kilo",
       kiro: "Kiro",
-      grok: "Grok",
       customAcp: "Пользовательский АКП",
       pi: "Pi",
       copilot: "Copilot",
       cursor: "Cursor",
+      grok: "Grok",
     },
     auggieIndexingChip: {
       on: "Индексация включена",
@@ -6212,6 +6300,10 @@ export const ru: TranslationStructure = {
         title: "МОДЕЛЬ",
         useCliSettings: "Использовать настройки CLI",
         configureInCli: "Настройте модели в настройках CLI",
+        running: ({ model }: { model: string }) => `Сейчас используется: ${model}`,
+        lastUsed: ({ model }: { model: string }) => `Последняя использованная: ${model}`,
+        lastReported: ({ model }: { model: string }) => `Последняя сообщённая: ${model}`,
+        selectedForResume: "Выбранная модель будет использоваться после возобновления этой сессии.",
         extendedContextToggleLabel: 'Контекст 1M',
         extendedContextToggleDescription: 'Использовать расширенное контекстное окно в 1 млн токенов для этой модели.',
         extendedContextLabel: ({ model }: { model: string }) => `${model} (1M)`,
@@ -6300,10 +6392,6 @@ export const ru: TranslationStructure = {
       buildDescription: "Поведение по умолчанию",
       plan: "План",
       planDescription: "Сначала подумать",
-        running: ({ model }: { model: string }) => `Сейчас используется: ${model}`,
-        lastUsed: ({ model }: { model: string }) => `Последняя использованная: ${model}`,
-        lastReported: ({ model }: { model: string }) => `Последняя сообщённая: ${model}`,
-        selectedForResume: "Выбранная модель будет использоваться после возобновления этой сессии.",
     },
     acp: {
       modeSectionTitle: "Режим",
@@ -6351,6 +6439,9 @@ export const ru: TranslationStructure = {
     expand: "Развернуть/свернуть",
     input: "Входные данные",
     output: "Результат",
+    payloadTruncated: "Большая нагрузка обрезана для производительности.",
+    showFullPayload: "Показать полную нагрузку",
+    showLessPayload: "Показать меньше",
   },
 
   tools: {
@@ -6366,6 +6457,13 @@ export const ru: TranslationStructure = {
     },
     webFetch: {
       httpStatus: ({ status }: { status: number }) => `HTTP ${status}`,
+    },
+    codeSearch: {
+      aggregateMatchUnavailable: '1 совпадение; подробности не предоставлены.',
+      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} совпадений; подробности не предоставлены.`,
+      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} файлов; подробности не предоставлены.`,
+      detailsUnavailable: "Поиск завершён; подробности не предоставлены.",
+      truncated: "Результаты могут быть сокращены.",
     },
     fullView: {
       description: "Описание",
@@ -6402,6 +6500,7 @@ export const ru: TranslationStructure = {
       statusComplete: "Завершено",
       statusFailed: "Ошибка",
       statusStopped: "Остановлено",
+      statusInterrupted: "Прервано",
       statusBlocked: "Заблокировано",
       statusCancelled: "Отменено",
       statusUnknown: "Неизвестно",
@@ -6418,6 +6517,8 @@ export const ru: TranslationStructure = {
       tokens: ({ tokens }: { tokens: string }) => `${tokens} токенов`,
       toolCalls: ({ count }: { count: number }) => `${count} инструментов`,
       showMore: ({ count }: { count: number }) => `Показать ${count}`,
+      detailShowMore: 'Показать больше',
+      detailShowLess: 'Показать меньше',
   },
     changeTitleView: {
       titleLabel: "Заголовок",
@@ -6502,6 +6603,7 @@ export const ru: TranslationStructure = {
       turnDiff: "Изменения за ход",
       question: "Вопрос",
       changeTitle: "Изменить заголовок",
+      switchMode: "Сменить режим",
     },
     geminiExecute: {
       cwd: ({ cwd }: { cwd: string }) => `📁 ${cwd}`,
@@ -6557,9 +6659,9 @@ export const ru: TranslationStructure = {
       other: "Другое",
       otherDescription: "Введите свой ответ",
       otherPlaceholder: "Введите ваш ответ...",
-      selectionLimit: ({ count }: { count: number }) => `Можно выбрать до ${count} ответов. Снимите один выбор, чтобы выбрать другой.`,
     },
     exitPlanMode: {
+    selectionLimit: ({ count }: { count: number }) => `Можно выбрать до ${count} ответов. Снимите один выбор, чтобы выбрать другой.`,
       approve: "Одобрить план",
       reject: "Отклонить",
       requestChanges: "Попросить изменения",
@@ -6933,6 +7035,7 @@ export const ru: TranslationStructure = {
           generatedImageA11y: ({ name }: { name: string }) => `Открыть сгенерированное изображение ${name}`,
           attachmentImageA11y: ({ name }: { name: string }) => `Открыть прикрепленное изображение ${name}`,
           toolArtifactImageA11y: ({ name }: { name: string }) => `Открыть изображение артефакта инструмента ${name}`,
+          imageUnavailable: 'Изображение недоступно',
         },
         cannotDisplayBinary: "Невозможно отобразить содержимое бинарного файла",
         diff: "Различия",
@@ -7039,7 +7142,6 @@ export const ru: TranslationStructure = {
         `Операции контроля версий заблокированы ${actor}.`,
       globalLock:
         "Операции временно заблокированы, потому что другая сессия выполняет команду контроля версий.",
-          imageUnavailable: 'Изображение недоступно',
       selection: ({ count }: { count: number }) =>
         count === 1
           ? "Выбран 1 файл для следующего коммита."
@@ -7424,9 +7526,6 @@ settingsSession: {
 	        workingPlacementModeGlobalSubtitle: 'Показывать секцию работы под сессиями, требующими внимания',
 	        workingPlacementModeWithinGroupsTitle: 'Переместить вверх текущей группы',
 	        workingPlacementModeWithinGroupsSubtitle: 'Оставлять сессии в работе в их папке или рабочей области',
-	        separateBackgroundWorkTitle: 'Отделять фоновую работу',
-	        separateBackgroundWorkEnabledSubtitle: 'Показывать активные фоновые задачи в отдельной группе',
-	        separateBackgroundWorkDisabledSubtitle: 'Объединять активные фоновые задачи с В работе',
 	        narrowWorkingIndicatorTitle: 'Индикатор работы в узком списке',
 	        narrowWorkingIndicatorSpinnerSelectedSubtitle: 'Показывать небольшой нейтральный спиннер в узких строках',
 	        narrowWorkingIndicatorPulseSelectedSubtitle: 'Показывать пульсирующую точку в узких строках',
@@ -7528,6 +7627,14 @@ settingsSession: {
             title: 'Среда выполнения и терминал',
             entrySubtitle: 'Tmux, окна Windows Terminal и совместимость Terminal Connect.',
         },
+    banners: {
+        title: 'Баннеры',
+        footer: 'Баннеры над полем ввода можно свернуть в значок состояния. Выберите, запоминать ли это.',
+        rememberVisibilityTitle: 'Запоминать видимость баннеров',
+        rememberVisibilitySubtitle: 'Закрытые баннеры остаются скрытыми во всех сессиях на этом устройстве.',
+        resetHiddenTitle: 'Показать все скрытые баннеры',
+        resetHiddenSubtitle: 'Очистить список баннеров, скрытых на этом устройстве.',
+    },
     inputBehavior: {
         title: 'Поведение ввода',
         footer: 'Настройте отправку по Enter и поведение истории сообщений.',
@@ -9614,6 +9721,7 @@ settingsSession: {
     switchedToMode: ({ mode }: { mode: string }) =>
       `Переключено в режим ${mode}`,
     discarded: "Отброшено",
+    recoveredHistory: "Восстановленная история",
     unknownEvent: "Неизвестное событие",
     contextCompactionStarted: "Сжатие контекста...",
     contextCompactionCompleted: "Контекст сжат",
@@ -10203,8 +10311,8 @@ settingsSession: {
       kimiSubtitleExperimental: "Kimi CLI (экспериментально)",
       kiloSubtitleExperimental: "Kilo CLI (экспериментально)",
       kiroSubtitleExperimental: "Kiro CLI (экспериментально)",
-      grokSubtitleExperimental: "Grok Build CLI (экспериментально)",
       customAcpSubtitleExperimental: "Пользовательский ACP CLI (экспериментально)",
+      grokSubtitleExperimental: "Grok Build CLI (экспериментально)",
       piSubtitleExperimental: "Pi CLI (экспериментально)",
       copilotSubtitleExperimental: "GitHub Copilot CLI (экспериментально)",
       cursorSubtitleExperimental: "Cursor Agent CLI (экспериментально)",
@@ -10330,11 +10438,3 @@ settingsSession: {
 } as const;
 
 export type TranslationsRu = typeof ru;
-    codeSearch: {
-      aggregateMatchUnavailable: '1 совпадение; подробности не предоставлены.',
-      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} совпадений; подробности не предоставлены.`,
-      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} файлов; подробности не предоставлены.`,
-      detailsUnavailable: "Поиск завершён; подробности не предоставлены.",
-      truncated: "Результаты могут быть сокращены.",
-    },
-      switchMode: "Сменить режим",

@@ -15,6 +15,7 @@ import {
 } from './liveInputState';
 import { isGlassComposerSurface } from './composerSurfaceStyle';
 import { resolveComposerSelectionRestore } from './composerSelectionRestore';
+import { COMPOSER_SURFACE_RADIUS } from './composerContentInset';
 import { Typography } from '@/constants/Typography';
 import type { PermissionMode, ModelMode } from '@/sync/domains/permissions/permissionTypes';
 import { findModelOptionForEffectiveModelId, getModelOptionsForSession, supportsFreeformModelSelectionForSession, type ModelOption } from '@/sync/domains/models/modelOptions';
@@ -136,7 +137,7 @@ import { WebDropTargetView } from '@/components/sessions/files/repositoryTree/We
 import { useWebFileDropZone } from '@/hooks/ui/useWebFileDropZone';
 import { useLocalSetting } from '@/sync/store/hooks';
 import { extractWebAttachmentFilesFromDataTransfer } from '@/utils/files/webAttachmentDataTransfer';
-import type { SessionConfigOptionOverridesV1 } from '@happier-dev/protocol';
+import type { AcpConfigOptionOverridesV1 } from '@happier-dev/protocol';
 import type { ConnectedServiceQuotaGaugeViewModel } from '@/sync/domains/connectedServices/connectedServiceQuotaGauge';
 import type {
     AgentInputAttachment,
@@ -191,9 +192,9 @@ const AGENT_INPUT_CONTAINER_VERTICAL_PADDING = 4;
 const AGENT_INPUT_CONTAINER_VERTICAL_CHROME_HEIGHT = AGENT_INPUT_CONTAINER_VERTICAL_PADDING * 2;
 const AGENT_INPUT_PANEL_PADDING_TOP = 2;
 const AGENT_INPUT_PANEL_PADDING_BOTTOM = 8;
-// Composer panel corner radius. Shared by the panel surface and its cast-shadow
-// wrapper so the drop shadow follows the same rounded shape.
-const AGENT_INPUT_PANEL_RADIUS = Platform.select({ default: 16, android: 20 });
+// Composer panel corner radius. Shared by the panel surface, its cast-shadow wrapper so the drop
+// shadow follows the same rounded shape, and the auxiliary banners stacked above the panel.
+const AGENT_INPUT_PANEL_RADIUS = COMPOSER_SURFACE_RADIUS;
 const AGENT_INPUT_PANEL_VERTICAL_CHROME_HEIGHT = AGENT_INPUT_PANEL_PADDING_TOP + AGENT_INPUT_PANEL_PADDING_BOTTOM;
 const AGENT_INPUT_VARIABLE_SECTION_CONTENT_PADDING_BOTTOM = 4;
 const EMPTY_PERMISSION_LOCATIONS_BY_ID = new Map<string, PermissionToolCallMessageLocation | null>();
@@ -304,7 +305,7 @@ interface AgentInputProps {
     acpSessionModeOptionsOverrideProbe?: ModelPickerProbeState;
     acpConfigOptionsOverride?: ReadonlyArray<SessionConfigOption>;
     acpConfigOptionsOverrideProbe?: ModelPickerProbeState;
-    acpConfigOptionOverridesOverride?: SessionConfigOptionOverridesV1 | null;
+    acpConfigOptionOverridesOverride?: AcpConfigOptionOverridesV1 | null;
     onSessionConfigOptionChange?: (configId: string, valueId: SessionConfigOptionValueId) => void;
     modelMode?: ModelMode;
     onModelModeChange?: (mode: ModelMode) => void;
@@ -320,9 +321,9 @@ interface AgentInputProps {
      */
     modelOptionsOverrideProbe?: ModelPickerProbeState;
     metadata?: Metadata | null;
-    onAbort?: () => void | Promise<void>;
     /** Whether the existing session runtime is active. Omit for pre-session composers. */
     sessionActive?: boolean;
+    onAbort?: () => void | Promise<void>;
     showAbortButton?: boolean;
     connectionStatus?: {
         text: string;
@@ -1903,7 +1904,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const caretRect = useTextInputCaretRect({
         inputRef,
         selection: inputSelection,
-        enabled: isInputFocused && !props.disabled && activeWord !== null,
+        // D38: focus-scoped, NOT menu-scoped. Adding `&& activeWord !== null` here
+        // (collateral drift in 795326144) released the keyboard-controller subscription
+        // until the trigger character was typed, so the selection event for that very
+        // keystroke landed in an empty handler map and the menu's first paint fell back
+        // to the composer-view anchor — the "menu appears at the top of the composer,
+        // then jumps on the next keystroke" report.
+        enabled: isInputFocused && !props.disabled,
     });
     const commandMenuAnchor: CommandMenuAnchor = React.useMemo(
         () => resolveAgentInputCommandMenuAnchor(caretRect, composerAnchorRef),
@@ -2211,13 +2218,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
             modelOptions={modelOptions.map((option) => ({
                 value: option.value,
                 label: option.label,
-                description:
-                    option.value === 'default'
-                    && shouldShowModelOptionDescriptions
-                    && (typeof option.description !== 'string' || option.description.trim().length === 0)
-                        ? t('agentInput.model.configureInCli')
-                        : option.description,
-                ...(option.modelOptions ? { modelOptions: option.modelOptions } : {}),
                 ...(appliedModelPresentation?.optionValue === option.value
                     ? {
                         trailingStatusIcon: (
@@ -2231,6 +2231,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                         accessibilityLabel: appliedModelPresentation.summary,
                     }
                     : {}),
+                description:
+                    option.value === 'default'
+                    && shouldShowModelOptionDescriptions
+                    && (typeof option.description !== 'string' || option.description.trim().length === 0)
+                        ? t('agentInput.model.configureInCli')
+                        : option.description,
+                ...(option.modelOptions ? { modelOptions: option.modelOptions } : {}),
             }))}
             selectedModelId={effectiveModelPolicy.selectedModelId}
             modelSummary={appliedModelPresentation?.summary}
@@ -2265,6 +2272,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         effectiveModelPolicy.selectedModelId,
         modelNotes,
         modelOptions,
+        appliedModelPresentation,
         unifiedEnginePickerProbe,
         shouldShowModelOptionDescriptions,
         props.onSessionConfigOptionChange,
@@ -2272,7 +2280,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         submitCustomModel,
         selectedModelOptionControls,
         handleSelectModelOptionValue,
-        appliedModelPresentation,
+        theme.colors.text.secondary,
     ]);
 
     const hasInternalAgentPickerOptions = Boolean(
@@ -2280,7 +2288,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         && (props.onModelModeChange || hasSettingsAcpConfigSection),
     );
 
-        theme.colors.text.secondary,
     const internalAgentPickerOptions = React.useMemo<ReadonlyArray<AgentInputChipPickerOption>>(() => {
         if (!hasInternalAgentPickerOptions || !props.agentType) return [];
         return [{

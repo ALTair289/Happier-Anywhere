@@ -72,6 +72,7 @@ function shouldRebuildSessionListViewData(previous: Settings, next: Settings): b
         next.sessionListSectionModeV1 !== previous.sessionListSectionModeV1 ||
         next.sessionListAttentionPromotionModeV1 !== previous.sessionListAttentionPromotionModeV1 ||
         next.sessionListWorkingPlacementModeV1 !== previous.sessionListWorkingPlacementModeV1 ||
+        next.sessionListSeparateBackgroundWork !== previous.sessionListSeparateBackgroundWork ||
         next.workspacePathDisplayModeV1 !== previous.workspacePathDisplayModeV1;
 }
 

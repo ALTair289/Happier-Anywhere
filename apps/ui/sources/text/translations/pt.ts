@@ -1326,10 +1326,14 @@ export const pt: TranslationStructure = {
     error: "erro",
     online: "em linha",
     working: "trabalhando...",
+    workingRetained: "trabalhando, aguardando atualizações…",
+    backgroundActive: "tarefas em segundo plano em execução",
+    activityUnknown: "estado da atividade indisponível",
     readyForReview: "pronto para revisão",
     offline: "fora de linha",
     lastSeen: ({ time }: { time: string }) => `visto por último ${time}`,
     actionRequired: "ação necessária",
+    waitingForYourResponse: "Aguardando sua resposta",
     permissionRequired: "permissão necessária",
     activeNow: "Ativo agora",
     unknown: "desconhecido",
@@ -2611,6 +2615,12 @@ export const pt: TranslationStructure = {
         partialApplication: "Autenticação parcialmente trocada",
         partialApplicationForService: ({ service }: { service: string }) => `Autenticação de ${service} não foi totalmente trocada`,
       },
+      partialApply: {
+        title: 'Autenticação trocada parcialmente',
+        body: 'A nova conta foi salva, mas aplicá-la a esta sessão em execução não foi totalmente concluído. Tente novamente ou reverta para manter esta sessão na conta anterior.',
+        retry: 'Tentar aplicar novamente a esta sessão',
+        revert: 'Reverter para a conta anterior',
+      },
     },
     defaultAuth: {
       title: "Configuração padrão do backend",
@@ -2629,6 +2639,11 @@ export const pt: TranslationStructure = {
           "Os Pools conectados estão desativados aqui; usando autenticação nativa.",
         connected_service_unsupported:
           "Este backend não oferece suporte a esse serviço conectado; usando autenticação nativa.",
+      },
+      poolSuggestion: {
+        body: ({ pool }: { pool: string }) => `Use o grupo ${pool} para que as sessões alternem e evitem os limites de uso.`,
+        accept: "Usar grupo",
+        dismiss: "Dispensar",
       },
     },
     list: {
@@ -2678,6 +2693,7 @@ export const pt: TranslationStructure = {
       recoveryCreditExpires: ({ time }: { time: string }) => `Expires: ${time}`,
       recoveryCreditApplying: "Aplicando reset…",
       recoveryCreditMachineUnavailable: "Nenhuma máquina ativa está disponível para aplicar este reset.",
+      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
       recoveryCreditBadge: ({ count }: { count: number }) => count === 1 ? "1 reset" : `${count} resets`,
       remaining: ({ percent }: { percent: string }) => `${percent} restante`,
       remainingWithReset: ({ percent, reset }: { percent: string; reset: string }) =>
@@ -2686,6 +2702,7 @@ export const pt: TranslationStructure = {
         `${used}/${limit} usado`,
       duration: {
         now: "agora",
+        outdated: "desatualizado",
         daysHours: ({ days, hours }: { days: number; hours: number }) =>
           `${days}d ${hours}h`,
         hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) =>
@@ -2693,7 +2710,6 @@ export const pt: TranslationStructure = {
         hours: ({ hours }: { hours: number }) => `${hours}h`,
         minutes: ({ minutes }: { minutes: number }) => `${minutes}m`,
       },
-      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
     },
     account: {
       refreshA11y: "Atualizar uso e limites",
@@ -2809,6 +2825,7 @@ export const pt: TranslationStructure = {
         quota_fetch_disabled: "As verificações de cota estão desativadas",
         quota_fetch_backoff: "As verificações de cota estão em espera",
         auth_surface_weakly_verified: "Regravação da autenticação verificada",
+        connected_service_restart_requested: "Reinicialização da sessão solicitada",
         connected_service_credential_reconnect_required: "A conta conectada precisa ser reconectada",
         claude_subscription_missing_claude_code_scope: "O acesso ao Claude Code precisa ser reconectado",
         claude_subscription_native_auth_materialization_failed: "Não foi possível preparar as credenciais do Claude Code",
@@ -2839,6 +2856,7 @@ export const pt: TranslationStructure = {
         quota_fetch_disabled: "Verificações de cota desativadas",
         quota_fetch_backoff: "Verificações de cota temporariamente em espera",
         auth_surface_weakly_verified: "Regravação da autenticação verificada parcialmente",
+        connected_service_restart_requested: "Reinicialização da sessão solicitada",
         connected_service_credential_reconnect_required: "A conta conectada precisa ser reconectada",
         claude_subscription_missing_claude_code_scope: "Reconecte a assinatura do Claude para o Claude Code",
         claude_subscription_native_auth_materialization_failed: "Não foi possível preparar a autenticação nativa do Claude Code",
@@ -2866,6 +2884,7 @@ export const pt: TranslationStructure = {
         quota_fetch_disabled: "As verificações de cota estão desativadas no momento para este provedor. O Happier continuará usando recuperação reativa.",
         quota_fetch_backoff: "As verificações de cota estão temporariamente em espera após uma resposta do provedor ou da rede. O Happier tentará atualizar a cota mais tarde.",
         auth_surface_weakly_verified: "O Happier verificou que os arquivos de autenticação selecionados foram regravados, mas este provedor não expõe a identidade exata da conta ativa.",
+        connected_service_restart_requested: "O Happier solicitou uma reinicialização segura da sessão para aplicar a conta conectada selecionada.",
         connected_service_credential_reconnect_required: "A conta conectada selecionada precisa ser reconectada antes que esta sessão possa ser retomada. Reconecte o perfil e tente novamente.",
         claude_subscription_missing_claude_code_scope: "Este perfil do Claude foi conectado antes de os escopos do Claude Code serem concedidos. Reconecte-o e tente novamente a sessão ou a troca de Pool.",
         claude_subscription_native_auth_materialization_failed: "O Happier não conseguiu criar o arquivo de credenciais nativas do Claude Code para este perfil. Reconecte o perfil ou escolha outro membro do Pool.",
@@ -2881,6 +2900,7 @@ export const pt: TranslationStructure = {
       identityMismatchBody:
         "As novas credenciais pertencem a outra conta do provedor. Confirme para manter o mesmo ID de perfil e substituir a conta vinculada a ele.",
       identityMismatchConfirm: "Substituir conta",
+      targetMismatch: "Esta reconexão retornou credenciais para outro perfil conectado. Inicie a reconexão novamente pelo perfil de destino.",
     },
     detail: {
       unknownService: "Serviço conectado desconhecido.",
@@ -3116,8 +3136,17 @@ export const pt: TranslationStructure = {
         title: "Ainda não há pools",
         subtitle: "Crie um Pool para alternar entre contas automaticamente.",
       },
+      loadError: {
+        title: "Não foi possível carregar os pools",
+        subtitle: "Não foi possível carregar os pools de contas. Verifique sua conexão e tente novamente.",
+        staleTitle: "Mostrando os últimos pools conhecidos",
+        staleSubtitle: "Não foi possível atualizar a lista de pools mais recente. Tente novamente para atualizá-la.",
+        retry: "Tentar novamente",
+      },
       detail: {
         summaryTitle: "Visão geral",
+        serverActiveStatusTitle: "Salvo no servidor",
+        serverActiveStatusSubtitle: "Esta é a conta ativa persistente. As máquinas offline a aplicarão quando se reconectarem; esta tela não afirma que todas as máquinas concluíram a convergência.",
         summary: ({ count, strategy }: { count: number; strategy: string }) => `${count} contas · ${strategy}`,
         membersTitle: "Membros",
         moveUp: "Mover para cima",
@@ -3128,6 +3157,15 @@ export const pt: TranslationStructure = {
         behaviorTitle: "Comportamento",
         advancedTitle: "Avançado",
         advancedSubtitle: "Ajuste quando e como este Pool troca de conta.",
+                manualApplyDivergenceTitle: "Alterado no servidor, mas não nas sessões ativas",
+                manualApplyDivergenceSubtitle: ({ detail }: { detail: string }) => `A conta ativa foi alterada no servidor, mas não foi possível aplicá-la às sessões ativas (${detail}). Tente novamente ou reverta para manter tudo na conta anterior.`,
+                manualApplyRetry: "Tentar aplicar novamente às sessões ativas",
+                manualApplyRevert: "Reverter para a conta anterior",
+                machineTarget: {
+                  title: "Não é possível aplicar a uma sessão em execução",
+                  noBoundSession: "Nenhuma sessão em execução está usando este pool no momento, então a troca não pode ser aplicada ao vivo. Inicie uma sessão neste pool e tente novamente.",
+                  offline: "A máquina que executa a sessão deste pool está offline, então a troca não pode alcançá-la. Coloque a máquina online novamente e tente de novo.",
+                },
       },
       behavior: {
         autoRestorePrimaryTitle: "Restaurar a principal ao redefinir",
@@ -4027,6 +4065,24 @@ export const pt: TranslationStructure = {
                             }
                         }
                     },
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                     claudeCodeExperimentalAgentTeamsEnabled: {
                         title: "Forcar ativacao do Agent Teams",
                         subtitle: "Ativa o Agent Teams experimental do Claude Code (enxame de agentes) em todas as sessoes do Claude iniciadas pelo Happier."
@@ -4065,24 +4121,6 @@ export const pt: TranslationStructure = {
                             },
                             '1p': {
                                 title: "1p",
-                    claudeUnifiedTerminalWorkspaceTrust: {
-                        title: "Workspace trust",
-                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
-                        options: {
-                            ask_every_time: {
-                                title: "Ask every time",
-                                subtitle: "Show the exact workspace trust question in the session."
-                            },
-                            always_trust_happier_workspaces: {
-                                title: "Always trust Happier workspaces",
-                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
-                            },
-                            always_reject_happier_workspaces: {
-                                title: "Always reject Happier workspaces",
-                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
-                            }
-                        }
-                    },
                                 subtitle: "Categoria interna first-party."
                             }
                         }
@@ -5127,6 +5165,8 @@ export const pt: TranslationStructure = {
       statusReady: "Pronto para retomar",
       statusWaiting: "Aguardando redefinição do limite",
       statusWaitingUntil: ({ time }: { time: string }) => `Aguardando até ${time}`,
+      statusWaitingResetUntil: ({ time }: { time: string }) => `Aguardando redefinição da cota (redefine às ${time})`,
+      statusAccountRotationPending: "Rotação de conta pendente",
       statusChecking: "Verificando limite",
       statusPaused: "Espera pausada",
       statusExhausted: "Grupo esgotado",
@@ -5145,6 +5185,7 @@ export const pt: TranslationStructure = {
         "Defina um objetivo antes de pausá-lo ou retomá-lo.",
       dirtyCloseTitle: "Descartar edições do objetivo?",
       dirtyCloseBody: "As alterações não salvas do objetivo serão perdidas.",
+      emptyPlaceholder: "Ainda não há nada aqui",
       badge: {
         goal: ({ title }: { title: string }) => `Objetivo: ${title}`,
         goalPaused: "Objetivo pausado",
@@ -5165,6 +5206,7 @@ export const pt: TranslationStructure = {
         goalLabel: ({ title }: { title: string }) => `Objetivo: ${title}`,
         bare: "Fluxo de trabalho",
         agentsFallback: ({ fraction }: { fraction: string }) => `Fluxo de trabalho ${fraction} agentes`,
+        olderRunsHidden: ({ count }: { count: number }) => `${count} execuções anteriores ocultas`,
         phaseLabel: ({ title, fraction }: { title: string; fraction: string }) => `${title} ${fraction}`,
         plural: ({ count }: { count: number }) => `${count} fluxos de trabalho`,
         pluralWithAgents: ({ count, agents }: { count: number; agents: number }) => `${count} fluxos de trabalho · ${agents} agentes`,
@@ -5177,7 +5219,7 @@ export const pt: TranslationStructure = {
         set: "Definir objetivo",
         setTitle: "Defina um objetivo",
         setSubtitle: "Dê um foco a esta sessão para o agente se manter no rumo.",
-        addBudget: "Adicionar um limite de orçamento (opcional)",
+        addBudget: "+ Adicionar um limite de orçamento (opcional)",
         removeBudget: "Remover orçamento",
         noUsageYet: "Ainda sem uso",
         tokensSuffix: ({ count }: { count: string }) => `${count} tokens`,
@@ -5190,12 +5232,14 @@ export const pt: TranslationStructure = {
         statusPaused: "Pausado",
         statusComplete: "Concluído",
         statusBudgetLimited: "Limitado pelo orçamento",
+        statusInterrupted: "Interrompido",
         tokenBudget: "Orçamento de tokens",
         budgetProgress: ({ used, budget }: { used: string; budget: string }) => `${used} / ${budget}`,
+        budgetCaption: ({ budget }: { budget: string }) => `de ${budget} de orçamento`,
         budgetPlaceholder: "Limite de tokens",
         invalidBudget: "Informe um orçamento de tokens positivo.",
         pending: "Definindo objetivo…",
-        pendingTimeout: "Não foi possível confirmar a atualização do objetivo. Talvez ainda esteja sendo aplicada.",
+        stillWaiting: "Ainda aguardando confirmação…",
         accessibilityCurrent: ({ objective }: { objective: string }) => `Objetivo atual: ${objective}`,
         errorUnsupportedResponse: "Resposta incompatível do RPC da sessão",
         errorUnknown: "Erro desconhecido",
@@ -5230,6 +5274,10 @@ export const pt: TranslationStructure = {
 	    pendingQueuedResumeFailedTitle: "Mensagem na fila",
 	    pendingQueuedResumeFailedBody:
 	      "Sua mensagem foi salva na fila de pendentes, mas o Happier não conseguiu retomar esta sessão. Tente novamente para iniciá-la.",
+	    composerBanners: {
+            showBannerAction: 'Mostrar aviso',
+            hideBannerAction: 'Ocultar aviso',
+	    },
 	    staleRunner: {
 	      title: "A sessão ainda está em uma CLI antiga",
 	      body: "Reinicie o runner desta sessão para continuar na CLI atualizada do daemon. A sessão do Happier permanece a mesma.",
@@ -5327,6 +5375,10 @@ export const pt: TranslationStructure = {
             launchTeammateA11y: "Iniciar colega",
             launchTeammateAction: "Iniciar colega",
             typeFact: ({ value }: { value: string }) => `Tipo: ${value}`,
+            nativeTypeFact: ({ value }: { value: string }) => `Tipo nativo: ${value}`,
+            modelFact: ({ value }: { value: string }) => `Modelo: ${value}`,
+            agentIdFact: ({ value }: { value: string }) => `ID do agente: ${value}`,
+            durationFact: ({ value }: { value: string }) => `Duração: ${value}`,
             providerFact: ({ value }: { value: string }) => `Provedor: ${value}`,
             backendFact: ({ value }: { value: string }) => `Backend: ${value}`,
             intentFact: ({ value }: { value: string }) => `Intenção: ${value}`,
@@ -5436,11 +5488,18 @@ export const pt: TranslationStructure = {
           count > 0 ? `Pendentes (+${count})` : "Pendentes",
         deliveryStatus: {
           blocked: "Bloqueada",
+          deliveryUncertain: 'Estado de entrega incerto',
           delivering: "Entregando",
+          queuedInClaude: "Na fila no Claude",
+          queued: 'Na fila',
+          sending: 'Enviando…',
+          sendFailed: 'Não enviado',
+          waitingForTurn: 'Aguardando',
         },
         deliveryBlockedReasons: {
           terminalComposerDraft: "Um rascunho no terminal está bloqueando a entrega",
-          providerAcceptanceTimeout: "O provedor não confirmou o recebimento",
+          runtimeConfigBlocked: "As configuracoes de runtime estao bloqueando a entrega",
+          unsupportedAction: "Esta mensagem usa uma ação de entrega não compatível",
           providerUnavailableBeforeAcceptance: "O provedor está temporariamente indisponível",
           ambiguousTerminalDelivery: "O estado da entrega é ambíguo",
           terminalHostUnreachable: "O host do terminal está inacessível",
@@ -5449,11 +5508,21 @@ export const pt: TranslationStructure = {
           manualUserHandled: "Marcada como tratada",
           attemptExpiredBeforeWrite: "A tentativa de entrega expirou antes da escrita",
           providerRejectedBeforeAcceptance: "O provedor rejeitou a mensagem",
+          steeringUnavailable: "Não é possível direcionar o turno ativo",
           payloadTooLarge: "A mensagem é grande demais",
           unknown: "O estado da entrega precisa de revisão",
         },
 	        empty: "Nenhuma mensagem pendente.",
 	        decryptFailed: "Não foi possível descriptografar esta mensagem pendente.",
+	        sendFailedNotice: 'Mensagem não enviada. Verifique sua conexão e tente novamente.',
+	        waitingForTurnNotice: ({ minutes }: { minutes: number }) =>
+	            minutes > 0
+	                ? `Aguardando a tarefa atual terminar · em execução há ${minutes} min`
+	                : 'Aguardando a tarefa atual terminar',
+	        waitingForPredecessorNotice: 'Aguardando uma mensagem pendente anterior',
+	        waitingForRuntimeActivityNotice: 'Aguardando o fim da atividade do runtime',
+	        runtimeActivityUnknownNotice: 'Aguardando o estado de atividade do runtime',
+	        waitingForRuntimeNotice: 'Aguardando o runtime se reconectar',
 	        nonSteerableNotice: "O turno atual não pode aceitar inserção após esta mudança de modo. Ele será executado depois, ou use Enviar agora para interromper.",
 	        steerBlockedTerminalDraftNotice: 'Em espera: um rascunho no compositor do terminal está a bloquear a entrega. Apague-o no terminal ou interrompa o turno.',
 	        clearTerminalComposer: {
@@ -5471,7 +5540,12 @@ export const pt: TranslationStructure = {
           steerNow: "Inserir agora",
           sendNow: "Enviar agora",
           sendNowInterrupt: "Enviar agora (interromper)",
+          interruptAndRunNow: "Interromper e executar agora",
+          continueWaiting: "Continuar aguardando",
+          dismiss: "Descartar",
+          sendAsNew: "Enviar como nova",
           retryDelivery: "Tentar novamente",
+          retrySend: 'Reenviar',
           markHandled: "Marcar como tratada",
           requeue: "Reenfileirar",
         },
@@ -5490,10 +5564,19 @@ export const pt: TranslationStructure = {
           title: "Marcar a mensagem pendente como tratada?",
           body: "Use isso apenas se o provedor já tratou a mensagem ou se você não quer mais que o Happier a entregue.",
         },
+        dismissDeliveryConfirm: {
+          title: "Descartar a entrega incerta?",
+          body: "Isso arquiva a mensagem original sem enviá-la novamente. Se o provedor confirmar a entrega depois, o Happier ainda poderá adicionar a mensagem original à transcrição.",
+        },
+        sendAsNewConfirm: {
+          title: "Enviar esta mensagem como nova?",
+          body: "Isso arquiva a entrega incerta e coloca uma nova cópia na fila. O provedor pode já ter recebido a mensagem original, então ela poderá ser tratada duas vezes.",
+        },
         sendConfirm: {
           title: "Enviar agora?",
           interruptTitle: "Enviar agora (interromper)?",
           body: "Isso interromperá o turno atual e enviará esta mensagem imediatamente.",
+          resumeBody: "Isso retomará a sessão e enviará esta mensagem imediatamente.",
         },
         discarded: {
           title: "Mensagens descartadas",
@@ -5515,6 +5598,7 @@ export const pt: TranslationStructure = {
           sendDiscardedFailed: "Falha ao enviar a mensagem descartada",
           reorderFailed: "Falha ao reordenar mensagens pendentes",
           retryDeliveryFailed: "Falha ao tentar novamente a entrega pendente",
+          retrySendFailed: 'Falha ao reenviar a mensagem',
           markHandledFailed: "Falha ao marcar a entrega pendente como tratada",
           clearTerminalComposerFailed: "Falha ao limpar o compositor do terminal",
           clearTerminalComposerUnsupported: "Esta sessão não permite limpar o compositor do terminal a partir do Happier.",
@@ -5541,6 +5625,7 @@ export const pt: TranslationStructure = {
       manageSharingDenied:
         "Você não tem permissão para gerenciar as configurações de compartilhamento desta sessão.",
       stopSharing: "Parar de compartilhar",
+      stopSharingDescription: "Revoga o acesso direto desta pessoa.",
       recipientMissingKeys:
         "Este usuário ainda não registrou chaves de criptografia.",
       permissionApprovals: "Pode aprovar permissões",
@@ -5564,7 +5649,7 @@ export const pt: TranslationStructure = {
       publicLink: "Link público",
       publicLinkActive: "Link público ativo",
       publicLinkDescription:
-        "Crie um link para que qualquer pessoa possa ver esta sessão.",
+        "Qualquer pessoa com este link pode ver a sessão anonimamente. Exclua ou gere o link novamente para revogar o acesso de todos.",
       createPublicLink: "Criar link público",
       regeneratePublicLink: "Regenerar link público",
       deletePublicLink: "Excluir link público",
@@ -5997,6 +6082,7 @@ export const pt: TranslationStructure = {
         },
     attentionSectionTitle: 'Precisa de atenção',
     workingSectionTitle: 'Trabalhando',
+    backgroundWorkingSectionTitle: 'Trabalhando em segundo plano',
     hideInactiveSessions: 'Ocultar sessões inativas',
     showInactiveSessions: 'Mostrar sessões inativas',
   },
@@ -6050,6 +6136,7 @@ export const pt: TranslationStructure = {
     killSessionConfirm: "Tem certeza de que deseja encerrar esta sessão?",
     stopSession: "Parar sessão",
     stopSessionConfirm: "Tem certeza de que deseja parar esta sessão?",
+    stopSessionUpgradeRequired: "Atualize o Happier na máquina da sessão e tente parar novamente.",
     archiveSession: "Arquivar sessão",
     archiveSessionConfirm: "Tem certeza de que deseja arquivar esta sessão?",
     workspaceTitle: "Espaço de trabalho",
@@ -6097,10 +6184,9 @@ export const pt: TranslationStructure = {
     kiroSessionId: "ID da sessão Kiro",
     kiroSessionIdCopied:
       "ID da sessão Kiro copiado para a área de transferência",
-    grokSessionId: "ID da sessão Grok",
-    grokSessionIdCopied:
-      "ID da sessão Grok copiado para a área de transferência",
     customAcpSessionId: "ID da sessão ACP personalizada",
+    grokSessionId: "ID da sessão Grok",
+    grokSessionIdCopied: "ID da sessão Grok copiado para a área de transferência",
     customAcpSessionIdCopied:
       "ID da sessão ACP personalizada copiado para a área de transferência",
     piSessionId: "ID da sessão Pi",
@@ -6271,6 +6357,7 @@ export const pt: TranslationStructure = {
         `${used}/${limit} usado`,
       duration: {
         now: "agora",
+        outdated: "desatualizado",
         daysHours: ({ days, hours }: { days: number; hours: number }) =>
           `${days}d ${hours}h`,
         hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) =>
@@ -6328,11 +6415,11 @@ export const pt: TranslationStructure = {
       kimi: "Kimi",
       kilo: "Kilo",
       kiro: "Kiro",
-      grok: "Grok",
       customAcp: "Custom ACP",
       pi: "Pi",
       copilot: "Copilot",
       cursor: "Cursor",
+      grok: "Grok",
     },
     auggieIndexingChip: {
       on: "Indexação ativada",
@@ -6342,6 +6429,10 @@ export const pt: TranslationStructure = {
         title: "MODELO",
         useCliSettings: "Usar configurações do CLI",
         configureInCli: "Configurar modelos nas configurações do CLI",
+        running: ({ model }: { model: string }) => `Em execução: ${model}`,
+        lastUsed: ({ model }: { model: string }) => `Usado por último: ${model}`,
+        lastReported: ({ model }: { model: string }) => `Último informado: ${model}`,
+        selectedForResume: "O modelo selecionado será usado quando esta sessão for retomada.",
         extendedContextToggleLabel: 'Contexto de 1M',
         extendedContextToggleDescription: 'Use a janela de contexto estendida de 1M de tokens para este modelo.',
         extendedContextLabel: ({ model }: { model: string }) => `${model} (1M)`,
@@ -6429,10 +6520,6 @@ export const pt: TranslationStructure = {
       build: "Construir",
       buildDescription: "Comportamento padrão",
       plan: "Plano",
-        running: ({ model }: { model: string }) => `Em execução: ${model}`,
-        lastUsed: ({ model }: { model: string }) => `Usado por último: ${model}`,
-        lastReported: ({ model }: { model: string }) => `Último informado: ${model}`,
-        selectedForResume: "O modelo selecionado será usado quando esta sessão for retomada.",
       planDescription: "Pensar primeiro",
     },
     acp: {
@@ -6481,6 +6568,9 @@ export const pt: TranslationStructure = {
     expand: "Expandir/recolher",
     input: "Entrada",
     output: "Saída",
+    payloadTruncated: "Payload grande truncado para preservar o desempenho.",
+    showFullPayload: "Mostrar payload completo",
+    showLessPayload: "Mostrar menos",
   },
 
   tools: {
@@ -6496,6 +6586,13 @@ export const pt: TranslationStructure = {
     },
     webFetch: {
       httpStatus: ({ status }: { status: number }) => `HTTP ${status}`,
+    },
+    codeSearch: {
+      aggregateMatchUnavailable: '1 correspondência; os detalhes não foram fornecidos.',
+      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} correspondências; os detalhes não foram fornecidos.`,
+      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} ficheiros; os detalhes não foram fornecidos.`,
+      detailsUnavailable: "A pesquisa terminou; os detalhes não foram fornecidos.",
+      truncated: "Os resultados podem estar truncados.",
     },
     fullView: {
       description: "Descrição",
@@ -6532,6 +6629,7 @@ export const pt: TranslationStructure = {
       statusComplete: "Concluído",
       statusFailed: "Falhou",
       statusStopped: "Parado",
+      statusInterrupted: "Interrompido",
       statusBlocked: "Bloqueado",
       statusCancelled: "Cancelado",
       statusUnknown: "Desconhecido",
@@ -6548,6 +6646,8 @@ export const pt: TranslationStructure = {
       tokens: ({ tokens }: { tokens: string }) => `${tokens} tokens`,
       toolCalls: ({ count }: { count: number }) => `${count} ferramentas`,
       showMore: ({ count }: { count: number }) => `Mostrar ${count}`,
+      detailShowMore: 'Mostrar mais',
+      detailShowLess: 'Mostrar menos',
   },
     changeTitleView: {
       titleLabel: "Título",
@@ -6632,6 +6732,7 @@ export const pt: TranslationStructure = {
       turnDiff: "Diferenças do turno",
       question: "Pergunta",
       changeTitle: "Alterar título",
+      switchMode: "Alterar modo",
     },
     geminiExecute: {
       cwd: ({ cwd }: { cwd: string }) => `📁 ${cwd}`,
@@ -6686,9 +6787,9 @@ export const pt: TranslationStructure = {
       other: "Outro",
       otherDescription: "Digite sua própria resposta",
       otherPlaceholder: "Digite sua resposta...",
-      selectionLimit: ({ count }: { count: number }) => `Selecione até ${count} respostas. Desmarque uma para escolher outra.`,
     },
     exitPlanMode: {
+    selectionLimit: ({ count }: { count: number }) => `Selecione até ${count} respostas. Desmarque uma para escolher outra.`,
       approve: "Aprovar plano",
       reject: "Rejeitar",
       requestChanges: "Solicitar alterações",
@@ -7069,6 +7170,7 @@ export const pt: TranslationStructure = {
           generatedImageA11y: ({ name }: { name: string }) => `Abrir imagem gerada ${name}`,
           attachmentImageA11y: ({ name }: { name: string }) => `Abrir imagem anexada ${name}`,
           toolArtifactImageA11y: ({ name }: { name: string }) => `Abrir imagem de artefato da ferramenta ${name}`,
+          imageUnavailable: 'A imagem não está disponível',
         },
         cannotDisplayBinary: "Não é possível exibir o conteúdo do arquivo binário",
         diff: "Diferenças",
@@ -7174,7 +7276,6 @@ export const pt: TranslationStructure = {
       lockedBy: ({ actor }: { actor: string }) =>
         `As operações de controle de versão estão bloqueadas por ${actor}.`,
       globalLock:
-          imageUnavailable: 'A imagem não está disponível',
         "As operações estão temporariamente bloqueadas porque outra sessão está executando um comando de controle de versão.",
       selection: ({ count }: { count: number }) =>
         count === 1
@@ -7560,9 +7661,6 @@ settingsSession: {
 	          workingPlacementModeGlobalSubtitle: 'Mostra uma seção de trabalho abaixo das sessões que precisam de atenção',
 	          workingPlacementModeWithinGroupsTitle: 'Mover para o topo do grupo atual',
 	          workingPlacementModeWithinGroupsSubtitle: 'Mantenha as sessões trabalhando na pasta ou workspace delas',
-	          separateBackgroundWorkTitle: 'Separar trabalho em segundo plano',
-	          separateBackgroundWorkEnabledSubtitle: 'Mostre tarefas em segundo plano ativas em seu próprio grupo',
-	          separateBackgroundWorkDisabledSubtitle: 'Mescle tarefas em segundo plano ativas em Trabalhando',
 	          narrowWorkingIndicatorTitle: 'Indicador de trabalho estreito',
 	          narrowWorkingIndicatorSpinnerSelectedSubtitle: 'Mostre um indicador giratório pequeno e neutro nas linhas estreitas',
 	          narrowWorkingIndicatorPulseSelectedSubtitle: 'Mostre um ponto pulsante nas linhas estreitas',
@@ -7664,6 +7762,14 @@ settingsSession: {
               title: 'Runtime e terminal',
               entrySubtitle: 'Tmux, janelas do Windows Terminal e compatibilidade do Terminal Connect.',
           },
+      banners: {
+          title: 'Avisos',
+          footer: 'Os avisos acima do campo de mensagem podem ser recolhidos num emblema de estado. Escolha se isso fica memorizado.',
+          rememberVisibilityTitle: 'Memorizar a visibilidade dos avisos',
+          rememberVisibilitySubtitle: 'Os avisos que fechar continuam ocultos em todas as sessões neste dispositivo.',
+          resetHiddenTitle: 'Mostrar todos os avisos ocultos',
+          resetHiddenSubtitle: 'Limpe os avisos ocultos neste dispositivo.',
+      },
       inputBehavior: {
           title: 'Comportamento da entrada',
           footer: 'Configure enviar com Enter e o comportamento do histórico de mensagens.',
@@ -9835,6 +9941,7 @@ settingsSession: {
   message: {
     switchedToMode: ({ mode }: { mode: string }) => `Mudou para o modo ${mode}`,
     discarded: "Descartado",
+    recoveredHistory: "Histórico recuperado",
     unknownEvent: "Evento desconhecido",
     contextCompactionStarted: "Compactando contexto...",
     contextCompactionCompleted: "Contexto compactado",
@@ -10338,8 +10445,8 @@ settingsSession: {
       kimiSubtitleExperimental: "CLI do Kimi (experimental)",
       kiloSubtitleExperimental: "CLI do Kilo (experimental)",
       kiroSubtitleExperimental: "CLI do Kiro (experimental)",
-      grokSubtitleExperimental: "CLI do Grok Build (experimental)",
       customAcpSubtitleExperimental: "CLI de ACP personalizada (experimental)",
+      grokSubtitleExperimental: "CLI do Grok Build (experimental)",
       piSubtitleExperimental: "CLI do Pi (experimental)",
       copilotSubtitleExperimental: "GitHub Copilot CLI (em testes)",
       cursorSubtitleExperimental: "Cursor Agent CLI (em testes)",
@@ -10524,11 +10631,3 @@ settingsSession: {
 } as const;
 
 export type TranslationsPt = typeof pt;
-    codeSearch: {
-      aggregateMatchUnavailable: '1 correspondência; os detalhes não foram fornecidos.',
-      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} correspondências; os detalhes não foram fornecidos.`,
-      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} ficheiros; os detalhes não foram fornecidos.`,
-      detailsUnavailable: "A pesquisa terminou; os detalhes não foram fornecidos.",
-      truncated: "Os resultados podem estar truncados.",
-    },
-      switchMode: "Alterar modo",

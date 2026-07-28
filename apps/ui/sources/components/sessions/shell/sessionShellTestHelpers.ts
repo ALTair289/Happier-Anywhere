@@ -65,8 +65,11 @@ function resolveSessionItemTestListAttentionState(status: SessionStatus): Sessio
         case 'background_active':
         case 'permission_required':
         case 'action_required':
-            return status.state === 'waiting' || status.state === 'background_active' ? 'quiet' : status.state;
+            return status.state === 'waiting' || status.state === 'background_active'
+                ? 'quiet'
+                : status.state;
         case 'disconnected':
+        case 'recoverable_unservable':
         case 'resuming':
             return 'quiet';
     }

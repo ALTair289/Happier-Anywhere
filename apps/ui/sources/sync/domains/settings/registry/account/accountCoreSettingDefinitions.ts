@@ -137,6 +137,13 @@ export const ACCOUNT_CORE_SETTING_DEFINITIONS = defineSettingDefinitions({
         storageScope: 'account',
         analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'boolean', privacy: 'safe', identityScope: 'person' },
     },
+    sessionComposerRememberBannerVisibility: {
+        schema: z.boolean(),
+        default: false,
+        description: 'Remember collapsed composer banners globally across sessions instead of per session view',
+        storageScope: 'account',
+        analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'boolean', privacy: 'safe', identityScope: 'person' },
+    },
     agentInputHistoryScope: {
         schema: z.enum(['perSession', 'global']),
         default: 'perSession',

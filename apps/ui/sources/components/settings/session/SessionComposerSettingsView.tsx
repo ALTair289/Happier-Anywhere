@@ -9,7 +9,8 @@ import { Item } from '@/components/ui/lists/Item';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { ItemList } from '@/components/ui/lists/ItemList';
 import { t } from '@/text';
-import { useSettingMutable } from '@/sync/domains/state/storage';
+import { useLocalSettingMutable, useSettingMutable } from '@/sync/domains/state/storage';
+import { normalizeComposerBannerCollapseRecord } from '@/components/sessions/composerBanners/composerBannerCollapse';
 import type { BusySteerSendPolicy, MessageSendMode, NonSteerableSendPromptSetting } from '@/sync/domains/session/control/submitMode';
 
 type PendingQueueDrainMode = 'one_at_a_time' | 'drain_all';
@@ -30,7 +31,11 @@ export const SessionComposerSettingsView = React.memo(function SessionComposerSe
     const [agentInputChipDensity, setAgentInputChipDensity] = useSettingMutable('agentInputChipDensity');
     const [alwaysShowContextSize, setAlwaysShowContextSize] = useSettingMutable('alwaysShowContextSize');
     const [composerSurfaceStyle, setComposerSurfaceStyle] = useSettingMutable('composerSurfaceStyle');
+    const [rememberBannerVisibility, setRememberBannerVisibility] = useSettingMutable('sessionComposerRememberBannerVisibility');
+    const [collapsedBannerKinds, setCollapsedBannerKinds] = useLocalSettingMutable('sessionComposerCollapsedBannerKinds');
     const [openHistoryScopeMenu, setOpenHistoryScopeMenu] = React.useState(false);
+
+    const hiddenBannerCount = Object.keys(normalizeComposerBannerCollapseRecord(collapsedBannerKinds)).length;
 
     const enterToSendEnabled = Platform.OS === 'web' ? agentInputEnterToSend : agentInputEnterToSendNative;
     const setEnterToSendEnabled = Platform.OS === 'web' ? setAgentInputEnterToSend : setAgentInputEnterToSendNative;
@@ -299,6 +304,33 @@ export const SessionComposerSettingsView = React.memo(function SessionComposerSe
                     }
                     showChevron={false}
                 />
+            </ItemGroup>
+
+            <ItemGroup title={t('settingsSession.banners.title')} footer={t('settingsSession.banners.footer')}>
+                <Item
+                    title={t('settingsSession.banners.rememberVisibilityTitle')}
+                    subtitle={t('settingsSession.banners.rememberVisibilitySubtitle')}
+                    icon={<Ionicons name="eye-off-outline" size={29} color={theme.colors.accent.indigo} />}
+                    rightElement={
+                        <Switch
+                            testID="settings-composer-rememberBannerVisibility-switch"
+                            value={rememberBannerVisibility}
+                            onValueChange={setRememberBannerVisibility}
+                        />
+                    }
+                    showChevron={false}
+                />
+                {hiddenBannerCount > 0 ? (
+                    <Item
+                        testID="settings-composer-resetHiddenBanners"
+                        title={t('settingsSession.banners.resetHiddenTitle')}
+                        subtitle={t('settingsSession.banners.resetHiddenSubtitle')}
+                        icon={<Ionicons name="eye-outline" size={29} color={theme.colors.accent.indigo} />}
+                        detail={String(hiddenBannerCount)}
+                        onPress={() => setCollapsedBannerKinds({})}
+                        showChevron={false}
+                    />
+                ) : null}
             </ItemGroup>
         </ItemList>
     );

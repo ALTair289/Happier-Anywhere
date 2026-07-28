@@ -87,7 +87,7 @@ function setCommittedMessagesForTest(messages: readonly any[], ids: readonly str
 
 function getStorageStateForTest() {
     return {
-        sessions: sessionState ? { s1: sessionState } : {},
+        sessions: sessionState ? { [sessionState.id]: sessionState } : {},
         settings: {
             sessionMessageSendMode: 'agent_queue',
             sessionBusySteerSendPolicy: 'steerImmediately',
@@ -437,7 +437,7 @@ vi.mock('@/sync/sync', () => ({
         fetchPendingMessages: fetchPendingMessagesSpy,
         publishSessionPermissionModeToMetadata: async () => {},
         publishSessionAcpSessionModeOverrideToMetadata: async () => {},
-        publishSessionSessionConfigOptionOverrideToMetadata: async () => {},
+        publishSessionAcpConfigOptionOverrideToMetadata: async () => {},
         publishSessionModelOverrideToMetadata: async () => {},
         refreshSessions: async () => {},
         refreshSessionForSubmit: async (sessionId: string) => sessionState?.id === sessionId ? sessionState : null,
@@ -659,6 +659,34 @@ describe('SessionView (transcript rendering for seq-only sessions)', () => {
         await screen.update(<SessionView id="s1" />);
 
         expect(onSessionVisibleSpy).toHaveBeenCalledTimes(1);
+
+        await screen.unmount();
+    });
+
+    it('synchronously re-runs transcript activation after a server-scope reset while warm route switches remain the control', async () => {
+        const screen = await renderSessionView();
+        const { SessionView } = await import('./SessionView');
+
+        expect(onSessionVisibleSpy).toHaveBeenLastCalledWith('s1');
+        expect(onSessionVisibleSpy).toHaveBeenCalledTimes(1);
+
+        sessionState = { ...sessionState, id: 's2' };
+        await screen.update(<SessionView id="s2" />);
+        expect(onSessionVisibleSpy).toHaveBeenLastCalledWith('s2');
+
+        sessionState = { ...sessionState, id: 's1' };
+        await screen.update(<SessionView id="s1" />);
+        expect(onSessionVisibleSpy).toHaveBeenLastCalledWith('s1');
+        expect(onSessionVisibleSpy).toHaveBeenCalledTimes(3);
+
+        await act(async () => {
+            clearActiveViewingSessionsForServerScopeReset();
+        });
+
+        // No timer or later socket/update turn: activation must be reacquired in the
+        // reset commit so onSessionVisible can restore viewport intent before paint.
+        expect(onSessionVisibleSpy).toHaveBeenLastCalledWith('s1');
+        expect(onSessionVisibleSpy).toHaveBeenCalledTimes(4);
 
         await screen.unmount();
     });
@@ -1181,7 +1209,7 @@ describe('SessionView (transcript rendering for seq-only sessions)', () => {
         await screen.unmount();
     });
 
-    it('re-arms transcript bottom follow when the user sends a message', async () => {
+    it('requests mounted transcript follow without duplicating the sync live-tail owner after send', async () => {
         const screen = await renderSessionView();
 
         const initialFollowBottomIntentKey = chatListRenderSpy.mock.calls.at(-1)?.[0]?.followBottomIntentKey;
@@ -1205,7 +1233,7 @@ describe('SessionView (transcript rendering for seq-only sessions)', () => {
 
         const nextFollowBottomIntentKey = chatListRenderSpy.mock.calls.at(-1)?.[0]?.followBottomIntentKey;
         expect(nextFollowBottomIntentKey).not.toBe(initialFollowBottomIntentKey);
-        expect(markSessionLiveTailIntentSpy).toHaveBeenCalledWith('s1');
+        expect(markSessionLiveTailIntentSpy).not.toHaveBeenCalled();
 
         await screen.unmount();
     });

@@ -11,6 +11,7 @@ import { installSessionShellCommonModuleMocks } from './sessionShellTestHelpers'
 type SessionMachineTargetTestValue = { machineId: string; basePath: string } | null;
 
 const headerActionMenuSpy = vi.hoisted(() => vi.fn());
+const attachedTerminalState = vi.hoisted(() => ({ available: false, open: vi.fn() }));
 const sessionConnectedServicesAuthSwitchSpy = vi.hoisted(() => vi.fn());
 const openRightSpy = vi.hoisted(() => vi.fn());
 const setRightTabSpy = vi.hoisted(() => vi.fn());
@@ -140,6 +141,9 @@ vi.mock('@/components/sessions/actions/SessionHeaderActionMenu', () => ({
     headerActionMenuSpy(props);
     return React.createElement('SessionHeaderActionMenu');
   },
+}));
+vi.mock('@/components/sessions/terminal/openAttachedSessionTerminal', () => ({
+  useOpenAttachedSessionTerminal: () => attachedTerminalState,
 }));
 vi.mock('@/components/sessions/agentInput/hooks/useSessionConnectedServicesAuthSwitch', () => ({
   useSessionConnectedServicesAuthSwitch: (props: unknown) => {
@@ -463,6 +467,8 @@ describe('SessionView header action menu visibility', () => {
     openRightSpy.mockReset();
     setRightTabSpy.mockReset();
     headerActionMenuSpy.mockClear();
+    attachedTerminalState.available = false;
+    attachedTerminalState.open.mockReset();
     sessionConnectedServicesAuthSwitchSpy.mockClear();
     readMachineTargetForSessionSpy.mockReset();
     readMachineTargetForSessionSpy.mockReturnValue(null);
@@ -591,7 +597,7 @@ describe('SessionView header action menu visibility', () => {
     }));
   });
 
-  it('does not block connected-services auth switching for display-only provider runtime activity', async () => {
+  it('does not block connected-services auth switching for detached runtime activity', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(1_000_000));
     sessionState.session = {
@@ -603,10 +609,10 @@ describe('SessionView header action menu visibility', () => {
       thinkingAt: 0,
       latestTurnStatus: 'completed',
       latestTurnStatusObservedAt: 995_000,
+      runtimeActivityState: 'active',
+      runtimeActivityRevision: 1,
       runtimeActivityActiveCount: 1,
       runtimeActivityObservedAt: 999_000,
-      runtimeActivityExpiresAt: 1_060_000,
-      runtimeActivitySourceClass: 'provider_detached_task',
       pendingPermissionRequestCount: 0,
       pendingUserActionRequestCount: 0,
       pendingRequestObservedAt: null,
@@ -671,6 +677,25 @@ describe('SessionView header action menu visibility', () => {
     const openRunsButton = findPressableByAccessibilityLabel(screen, 'session.openRuns');
 
     expect(openRunsButton).toBeDefined();
+  });
+
+  it('shows neutral background copy in the header without making the composer busy or hiding execution runs', async () => {
+    sessionExecutionRunsSupportedState.supported = true;
+    sessionState.session = {
+      ...sessionState.session,
+      active: true,
+      presence: 'online',
+      thinking: false,
+      latestTurnStatus: 'completed',
+      latestTurnStatusObservedAt: 999_000,
+      runtimeActivityState: 'active',
+      runtimeActivityActiveCount: 1,
+    };
+
+    const screen = await renderSessionView();
+
+    expect(screen.findByTestId('session-header-background-activity-status')).toBeDefined();
+    expect(findPressableByAccessibilityLabel(screen, 'session.openRuns')).toBeDefined();
   });
 
   it('routes to session automations through blur-safe navigation', async () => {
@@ -945,6 +970,16 @@ describe('SessionView header action menu visibility', () => {
     await renderSessionView();
 
     expect(headerActionMenuSpy).toHaveBeenCalled();
+  });
+
+  it('offers and handles the attached Claude terminal action when supported', async () => {
+    attachedTerminalState.available = true;
+    await renderSessionView();
+
+    const props = getLastHeaderActionMenuProps();
+    expect(getHeaderExtraItemIds(props)).toContain('header.openAttachedClaudeTerminal');
+    expect(props.onSelectExtraItem('header.openAttachedClaudeTerminal')).toBe(true);
+    expect(attachedTerminalState.open).toHaveBeenCalledTimes(1);
   });
 
   it('renders a raised landscape back button on Android phones when the top header is hidden', async () => {

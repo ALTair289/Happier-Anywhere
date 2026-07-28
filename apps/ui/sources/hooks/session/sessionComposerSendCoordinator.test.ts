@@ -111,6 +111,7 @@ describe('sessionComposerSendCoordinator', () => {
         const didRestore = restoreComposerAfterFailedOutboundHandoff({
             snapshot: { sessionId: 'session-a', text: 'submitted prompt' },
             wasClearedAtHandoff: true,
+            isCanonicalOutboundHandoffPresent: () => false,
             restoreDraftForSessionIfCurrentValueMatches,
             restoreTransientInputState,
             restoreSemanticDraftValues,
@@ -125,6 +126,26 @@ describe('sessionComposerSendCoordinator', () => {
         expect(restoreTransientInputState).toHaveBeenCalledTimes(1);
     });
 
+    it('does not restore after the submitted local id reaches a canonical message owner', () => {
+        const restoreDraftForSessionIfCurrentValueMatches = vi.fn(() => true);
+        const restoreTransientInputState = vi.fn();
+        const restoreSemanticDraftValues = vi.fn();
+
+        const didRestore = restoreComposerAfterFailedOutboundHandoff({
+            snapshot: { sessionId: 'session-a', text: 'submitted prompt' },
+            wasClearedAtHandoff: true,
+            isCanonicalOutboundHandoffPresent: () => true,
+            restoreDraftForSessionIfCurrentValueMatches,
+            restoreTransientInputState,
+            restoreSemanticDraftValues,
+        });
+
+        expect(didRestore).toBe(false);
+        expect(restoreDraftForSessionIfCurrentValueMatches).not.toHaveBeenCalled();
+        expect(restoreSemanticDraftValues).not.toHaveBeenCalled();
+        expect(restoreTransientInputState).not.toHaveBeenCalled();
+    });
+
     it('does not restore a failed handoff over a newer draft', () => {
         const restoreDraftForSessionIfCurrentValueMatches = vi.fn(() => false);
         const restoreTransientInputState = vi.fn();
@@ -133,6 +154,7 @@ describe('sessionComposerSendCoordinator', () => {
         const didRestore = restoreComposerAfterFailedOutboundHandoff({
             snapshot: { sessionId: 'session-a', text: 'submitted prompt' },
             wasClearedAtHandoff: true,
+            isCanonicalOutboundHandoffPresent: () => false,
             restoreDraftForSessionIfCurrentValueMatches,
             restoreTransientInputState,
             restoreSemanticDraftValues,
@@ -152,6 +174,7 @@ describe('sessionComposerSendCoordinator', () => {
         const didRestore = restoreComposerAfterFailedOutboundHandoff({
             snapshot: { sessionId: 'session-a', text: 'submitted prompt' },
             wasClearedAtHandoff: true,
+            isCanonicalOutboundHandoffPresent: () => false,
             restoreDraftForSessionIfCurrentValueMatches,
             isSemanticRestoreSafe,
             restoreTransientInputState,

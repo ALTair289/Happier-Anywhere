@@ -1259,10 +1259,14 @@ export const zhHans: TranslationStructure = {
     error: "错误",
     online: "在线",
     working: "正在工作...",
+    workingRetained: "工作中，等待更新…",
+    backgroundActive: "后台任务正在运行",
+    activityUnknown: "活动状态不可用",
     readyForReview: "已可审核",
     offline: "离线",
     lastSeen: ({ time }: { time: string }) => `最后活跃时间 ${time}`,
     actionRequired: "需要操作",
+    waitingForYourResponse: "等待你的回复",
     permissionRequired: "需要权限",
     activeNow: "当前活跃",
     unknown: "未知",
@@ -2418,6 +2422,12 @@ export const zhHans: TranslationStructure = {
         partialApplication: "身份验证已部分切换",
         partialApplicationForService: ({ service }: { service: string }) => `${service} 认证未完全切换`,
       },
+      partialApply: {
+        title: '认证部分切换',
+        body: '新账户已保存，但应用到此运行中的会话未完全成功。请重试，或还原以使此会话保持在之前的账户。',
+        retry: '重试应用到此会话',
+        revert: '还原到之前的账户',
+      },
     },
     defaultAuth: {
       title: "默认后端配置",
@@ -2430,6 +2440,11 @@ export const zhHans: TranslationStructure = {
         connected_group_unavailable: "默认已连接池不可用；将使用原生认证。",
         connected_group_disabled: "此处已停用已连接池；将使用原生认证。",
         connected_service_unsupported: "此后端不支持该连接服务；将使用原生认证。",
+      },
+      poolSuggestion: {
+        body: ({ pool }: { pool: string }) => `使用 ${pool} 池，让会话在触及速率限制时自动轮换。`,
+        accept: "使用池",
+        dismiss: "忽略",
       },
     },
     list: {
@@ -2478,6 +2493,7 @@ export const zhHans: TranslationStructure = {
       recoveryCreditExpires: ({ time }: { time: string }) => `Expires: ${time}`,
       recoveryCreditApplying: "正在应用重置…",
       recoveryCreditMachineUnavailable: "没有可用于应用此重置的活动机器。",
+      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
       recoveryCreditBadge: ({ count }: { count: number }) => count === 1 ? "1 reset" : `${count} resets`,
       remaining: ({ percent }: { percent: string }) => `剩余 ${percent}`,
       remainingWithReset: ({ percent, reset }: { percent: string; reset: string }) =>
@@ -2486,6 +2502,7 @@ export const zhHans: TranslationStructure = {
         `${used}/${limit} 已用`,
       duration: {
         now: "现在",
+        outdated: "已过期",
         daysHours: ({ days, hours }: { days: number; hours: number }) =>
           `${days}天 ${hours}小时`,
         hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) =>
@@ -2493,7 +2510,6 @@ export const zhHans: TranslationStructure = {
         hours: ({ hours }: { hours: number }) => `${hours}小时`,
         minutes: ({ minutes }: { minutes: number }) => `${minutes}分钟`,
       },
-      recoveryCreditNothingToReset: "No exhausted usage window currently needs a reset.",
     },
     account: {
       refreshA11y: "刷新用量和限额",
@@ -2609,6 +2625,7 @@ export const zhHans: TranslationStructure = {
         quota_fetch_disabled: "配额检查已禁用",
         quota_fetch_backoff: "配额检查已退避",
         auth_surface_weakly_verified: "身份验证重写已验证",
+        connected_service_restart_requested: "已请求重启会话",
         connected_service_credential_reconnect_required: "已连接的账户需要重新连接",
         claude_subscription_missing_claude_code_scope: "Claude Code 访问需要重新连接",
         claude_subscription_native_auth_materialization_failed: "无法准备 Claude Code 凭据",
@@ -2639,6 +2656,7 @@ export const zhHans: TranslationStructure = {
         quota_fetch_disabled: "配额检查已禁用",
         quota_fetch_backoff: "配额检查暂时退避",
         auth_surface_weakly_verified: "身份验证重写仅弱验证",
+        connected_service_restart_requested: "已请求重启会话",
         connected_service_credential_reconnect_required: "已连接的账户需要重新连接",
         claude_subscription_missing_claude_code_scope: "为 Claude Code 重新连接 Claude 订阅",
         claude_subscription_native_auth_materialization_failed: "无法准备 Claude Code 原生认证",
@@ -2666,6 +2684,7 @@ export const zhHans: TranslationStructure = {
         quota_fetch_disabled: "该提供商当前已禁用配额检查。Happier 会继续使用被动恢复。",
         quota_fetch_backoff: "收到提供商或网络响应后，配额检查暂时退避。Happier 稍后会重试刷新配额。",
         auth_surface_weakly_verified: "Happier 已验证所选身份验证文件已被重写，但该提供商不公开确切的当前账号身份。",
+        connected_service_restart_requested: "Happier 已请求安全重启会话，以应用所选的已连接账户。",
         connected_service_credential_reconnect_required: "恢复此会话前，需要重新连接所选的已连接账户。请重新连接该配置，然后重试。",
         claude_subscription_missing_claude_code_scope: "此 Claude 配置是在授予 Claude Code 范围之前连接的。请重新连接它，然后重试会话或账号池切换。",
         claude_subscription_native_auth_materialization_failed: "Happier 无法为此配置创建 Claude Code 原生凭据文件。请重新连接该配置，或选择账号池中的其他成员。",
@@ -2681,6 +2700,7 @@ export const zhHans: TranslationStructure = {
       identityMismatchBody:
         "新的凭据属于另一个提供商账号。确认后将保留相同的配置 ID，并替换与其关联的账号。",
       identityMismatchConfirm: "替换账号",
+      targetMismatch: "此次重新连接返回了另一个已连接配置的凭据。请从目标配置重新开始连接。",
     },
     detail: {
       unknownService: "未知的已连接服务。",
@@ -2913,8 +2933,17 @@ export const zhHans: TranslationStructure = {
         title: "暂无池",
         subtitle: "创建池以在账号间自动回退。",
       },
+      loadError: {
+        title: "无法加载池",
+        subtitle: "账号池加载失败。请检查网络连接后重试。",
+        staleTitle: "显示最近一次已知的池",
+        staleSubtitle: "无法刷新最新的池列表。请重试以更新。",
+        retry: "重试",
+      },
       detail: {
         summaryTitle: "概览",
+        serverActiveStatusTitle: "已保存到服务器",
+        serverActiveStatusSubtitle: "这是服务器上持久保存的活动账号。离线设备将在重新连接时应用；此页面并不表示所有设备都已完成同步。",
         summary: ({ count, strategy }: { count: number; strategy: string }) => `${count} 个账号 · ${strategy}`,
         membersTitle: "成员",
         moveUp: "上移",
@@ -2925,6 +2954,15 @@ export const zhHans: TranslationStructure = {
         behaviorTitle: "行为",
         advancedTitle: "高级",
         advancedSubtitle: "微调此池切换账号的时机和方式。",
+                manualApplyDivergenceTitle: "已在服务器上切换，但未在运行中的会话中生效",
+                manualApplyDivergenceSubtitle: ({ detail }: { detail: string }) => `活动账号已在服务器上更改，但未能应用到运行中的会话（${detail}）。请重试，或还原以让所有内容保持在上一个账号。`,
+                manualApplyRetry: "重试应用到运行中的会话",
+                manualApplyRevert: "还原到上一个账号",
+                machineTarget: {
+                  title: "无法应用到运行中的会话",
+                  noBoundSession: "当前没有运行中的会话在使用此池，因此无法实时应用切换。请在此池上启动一个会话后重试。",
+                  offline: "运行此池会话的机器已离线，切换无法送达。请让该机器重新上线后重试。",
+                },
       },
       behavior: {
         autoRestorePrimaryTitle: "重置时恢复主账号",
@@ -3793,6 +3831,24 @@ export const zhHans: TranslationStructure = {
                             }
                         }
                     },
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                     claudeCodeExperimentalAgentTeamsEnabled: {
                         title: "强制启用 Agent Teams",
                         subtitle: "在所有由 Happier 启动的 Claude 会话中启用 Claude Code 的实验性 Agent Teams（代理群）功能。"
@@ -3831,24 +3887,6 @@ export const zhHans: TranslationStructure = {
                             },
                             '1p': {
                                 title: "1p",
-                    claudeUnifiedTerminalWorkspaceTrust: {
-                        title: "Workspace trust",
-                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
-                        options: {
-                            ask_every_time: {
-                                title: "Ask every time",
-                                subtitle: "Show the exact workspace trust question in the session."
-                            },
-                            always_trust_happier_workspaces: {
-                                title: "Always trust Happier workspaces",
-                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
-                            },
-                            always_reject_happier_workspaces: {
-                                title: "Always reject Happier workspaces",
-                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
-                            }
-                        }
-                    },
                                 subtitle: "第一方内部类别。"
                             }
                         }
@@ -4829,6 +4867,8 @@ export const zhHans: TranslationStructure = {
       statusReady: "可恢复",
       statusWaiting: "等待限制重置",
       statusWaitingUntil: ({ time }: { time: string }) => `等待到 ${time}`,
+      statusWaitingResetUntil: ({ time }: { time: string }) => `等待配额重置（重置时间 ${time}）`,
+      statusAccountRotationPending: "账号轮换待处理",
       statusChecking: "正在检查限制",
       statusPaused: "等待已暂停",
       statusExhausted: "组已耗尽",
@@ -4844,6 +4884,7 @@ export const zhHans: TranslationStructure = {
       noCurrentGoalMessage: "请先设置目标，再暂停或继续。",
       dirtyCloseTitle: "放弃目标编辑？",
       dirtyCloseBody: "未保存的目标更改将会丢失。",
+      emptyPlaceholder: "这里还没有内容",
       badge: {
         goal: ({ title }: { title: string }) => `目标：${title}`,
         goalPaused: "目标已暂停",
@@ -4864,6 +4905,7 @@ export const zhHans: TranslationStructure = {
         goalLabel: ({ title }: { title: string }) => `目标: ${title}`,
         bare: "工作流",
         agentsFallback: ({ fraction }: { fraction: string }) => `工作流 ${fraction} 个智能体`,
+        olderRunsHidden: ({ count }: { count: number }) => `${count} 个较早的运行未显示`,
         phaseLabel: ({ title, fraction }: { title: string; fraction: string }) => `${title} ${fraction}`,
         plural: ({ count }: { count: number }) => `${count} 个工作流`,
         pluralWithAgents: ({ count, agents }: { count: number; agents: number }) => `${count} 个工作流 · ${agents} 个智能体`,
@@ -4876,7 +4918,7 @@ export const zhHans: TranslationStructure = {
         set: "设置目标",
         setTitle: "设定目标",
         setSubtitle: "为该会话设定一个重点，让智能体保持专注。",
-        addBudget: "添加预算上限（可选）",
+        addBudget: "+ 添加预算上限（可选）",
         removeBudget: "移除预算",
         noUsageYet: "暂无使用",
         tokensSuffix: ({ count }: { count: string }) => `${count} 令牌`,
@@ -4889,12 +4931,14 @@ export const zhHans: TranslationStructure = {
         statusPaused: "已暂停",
         statusComplete: "已完成",
         statusBudgetLimited: "受预算限制",
+        statusInterrupted: "已中断",
         tokenBudget: "Token 预算",
         budgetProgress: ({ used, budget }: { used: string; budget: string }) => `${used} / ${budget}`,
+        budgetCaption: ({ budget }: { budget: string }) => `预算共 ${budget}`,
         budgetPlaceholder: "Token 限制",
         invalidBudget: "请输入正数 token 预算。",
         pending: "正在设置目标…",
-        pendingTimeout: "无法确认目标更新，可能仍在应用中。",
+        stillWaiting: "仍在等待确认…",
         accessibilityCurrent: ({ objective }: { objective: string }) => `当前目标：${objective}`,
         errorUnsupportedResponse: "会话 RPC 返回了不受支持的响应",
         errorUnknown: "未知错误",
@@ -4929,6 +4973,10 @@ export const zhHans: TranslationStructure = {
 	    pendingQueuedResumeFailedTitle: "消息已排队",
 	    pendingQueuedResumeFailedBody:
 	      "你的消息已保存到待处理队列，但 Happier 无法恢复此会话。请重试以启动它。",
+	    composerBanners: {
+            showBannerAction: '显示横幅',
+            hideBannerAction: '隐藏横幅',
+	    },
 	    staleRunner: {
 	      title: "会话仍在旧版 CLI 上运行",
 	      body: "重启此会话运行器，以继续使用已更新的守护进程 CLI。Happier 会话本身保持不变。",
@@ -5024,6 +5072,10 @@ export const zhHans: TranslationStructure = {
           launchTeammateA11y: "启动队友",
           launchTeammateAction: "启动队友",
           typeFact: ({ value }: { value: string }) => `类型：${value}`,
+          nativeTypeFact: ({ value }: { value: string }) => `原生类型：${value}`,
+          modelFact: ({ value }: { value: string }) => `模型：${value}`,
+          agentIdFact: ({ value }: { value: string }) => `代理 ID：${value}`,
+          durationFact: ({ value }: { value: string }) => `时长：${value}`,
           providerFact: ({ value }: { value: string }) => `提供商：${value}`,
           backendFact: ({ value }: { value: string }) => `后端：${value}`,
           intentFact: ({ value }: { value: string }) => `意图：${value}`,
@@ -5132,11 +5184,18 @@ export const zhHans: TranslationStructure = {
           count > 0 ? `待发送 (+${count})` : "待发送",
         deliveryStatus: {
           blocked: "已阻止",
+          deliveryUncertain: '投递状态不确定',
           delivering: "投递中",
+          queuedInClaude: "已在 Claude 中排队",
+          queued: '已排队',
+          sending: '正在发送…',
+          sendFailed: '未发送',
+          waitingForTurn: '等待中',
         },
         deliveryBlockedReasons: {
           terminalComposerDraft: "终端输入框中的草稿阻止了投递",
-          providerAcceptanceTimeout: "提供商未确认接收",
+          runtimeConfigBlocked: "运行时设置阻止了投递",
+          unsupportedAction: "此消息使用了不受支持的投递操作",
           providerUnavailableBeforeAcceptance: "提供商暂时不可用",
           ambiguousTerminalDelivery: "投递状态不明确",
           terminalHostUnreachable: "无法连接到终端主机",
@@ -5145,11 +5204,21 @@ export const zhHans: TranslationStructure = {
           manualUserHandled: "已标记为已处理",
           attemptExpiredBeforeWrite: "投递尝试在写入前已过期",
           providerRejectedBeforeAcceptance: "提供商拒绝了该消息",
+          steeringUnavailable: "无法引导当前轮次",
           payloadTooLarge: "消息过大",
           unknown: "需要检查投递状态",
         },
 	        empty: "没有待发送消息。",
 	        decryptFailed: "无法解密这条待发送消息。",
+	        sendFailedNotice: '消息未发送。请检查网络连接后重试。',
+	        waitingForTurnNotice: ({ minutes }: { minutes: number }) =>
+	            minutes > 0
+	                ? `等待当前任务完成 · 已运行 ${minutes} 分钟`
+	                : '等待当前任务完成',
+	        waitingForPredecessorNotice: '正在等待前一条待发送消息',
+	        waitingForRuntimeActivityNotice: '正在等待运行时活动结束',
+	        runtimeActivityUnknownNotice: '正在等待运行时活动状态',
+	        waitingForRuntimeNotice: '正在等待运行时重新连接',
 	        nonSteerableNotice: "当前轮次在此次模式切换后不能再接受插入。它会在下一轮运行，或使用立即发送来中断。",
 	        steerBlockedTerminalDraftNotice: '等待中：终端输入框中的草稿阻止了消息送达。请在终端中清除草稿或中断本轮。',
 	        clearTerminalComposer: {
@@ -5167,7 +5236,12 @@ export const zhHans: TranslationStructure = {
           steerNow: "立即插入",
           sendNow: "立即发送",
           sendNowInterrupt: "立即发送（中断）",
+          interruptAndRunNow: "中断并立即运行",
+          continueWaiting: "继续等待",
+          dismiss: "忽略",
+          sendAsNew: "作为新消息发送",
           retryDelivery: "重试",
+          retrySend: '重试发送',
           markHandled: "标记为已处理",
           requeue: "重新入队",
         },
@@ -5186,10 +5260,19 @@ export const zhHans: TranslationStructure = {
           title: "将待发送消息标记为已处理？",
           body: "仅当提供商已处理该消息，或你不再希望 Happier 投递它时使用。",
         },
+        dismissDeliveryConfirm: {
+          title: "忽略结果不确定的投递？",
+          body: "这会归档原消息，不会再次发送。如果提供商之后确认已投递，Happier 仍可将原消息加入对话记录。",
+        },
+        sendAsNewConfirm: {
+          title: "将此消息作为新消息发送？",
+          body: "这会归档结果不确定的投递，并将新副本加入队列。提供商可能已经收到原消息，因此消息可能会被处理两次。",
+        },
         sendConfirm: {
           title: "立即发送？",
           interruptTitle: "立即发送（中断）？",
           body: "这会停止当前轮次并立即发送此消息。",
+          resumeBody: "这将恢复会话并立即发送此消息。",
         },
         discarded: {
           title: "已丢弃消息",
@@ -5210,6 +5293,7 @@ export const zhHans: TranslationStructure = {
           sendDiscardedFailed: "发送已丢弃消息失败",
           reorderFailed: "重新排序待发送消息失败",
           retryDeliveryFailed: "重试待投递消息失败",
+          retrySendFailed: '重试发送消息失败',
           markHandledFailed: "将待投递消息标记为已处理失败",
           clearTerminalComposerFailed: "清空终端输入框失败",
           clearTerminalComposerUnsupported: "此会话不支持从 Happier 清空终端输入框。",
@@ -5234,6 +5318,7 @@ export const zhHans: TranslationStructure = {
       canManageDescription: "可管理共享设置。",
       manageSharingDenied: "您没有权限管理此会话的共享设置。",
       stopSharing: "停止分享",
+      stopSharingDescription: "撤销此人的直接访问权限。",
       recipientMissingKeys: "此用户尚未注册加密密钥。",
       permissionApprovals: "权限审批",
       allowPermissionApprovals: "允许审批权限",
@@ -5251,7 +5336,7 @@ export const zhHans: TranslationStructure = {
 
       publicLink: "公开链接",
       publicLinkActive: "公开链接已启用",
-      publicLinkDescription: "创建一个任何人都可以查看此会话的链接。",
+      publicLinkDescription: "任何拥有此链接的人都可以匿名查看会话。删除或重新生成链接可撤销所有人的访问权限。",
       createPublicLink: "创建公开链接",
       regeneratePublicLink: "重新生成公开链接",
       deletePublicLink: "删除公开链接",
@@ -5676,6 +5761,7 @@ export const zhHans: TranslationStructure = {
         },
     attentionSectionTitle: '需要注意',
     workingSectionTitle: '正在工作',
+    backgroundWorkingSectionTitle: '正在后台工作',
     hideInactiveSessions: '隐藏非活动会话',
     showInactiveSessions: '显示非活动会话',
   },
@@ -5729,6 +5815,7 @@ export const zhHans: TranslationStructure = {
     killSessionConfirm: "您确定要终止此会话吗？",
     stopSession: "停止会话",
     stopSessionConfirm: "您确定要停止此会话吗？",
+    stopSessionUpgradeRequired: "请更新会话所在机器上的 Happier，然后重试停止操作。",
     archiveSession: "归档会话",
     archiveSessionConfirm: "您确定要归档此会话吗？",
     workspaceTitle: "工作区",
@@ -5766,9 +5853,9 @@ export const zhHans: TranslationStructure = {
     kiloSessionIdCopied: "Kilo 会话 ID 已复制到剪贴板",
     kiroSessionId: "Kiro 会话 ID",
     kiroSessionIdCopied: "Kiro 会话 ID 已复制到剪贴板",
+    customAcpSessionId: "自定义 ACP 会话 ID",
     grokSessionId: "Grok 会话 ID",
     grokSessionIdCopied: "Grok 会话 ID 已复制到剪贴板",
-    customAcpSessionId: "自定义 ACP 会话 ID",
     customAcpSessionIdCopied: "自定义 ACP 会话 ID 已复制到剪贴板",
     piSessionId: "Pi 会话 ID",
     piSessionIdCopied: "Pi 会话 ID 已复制到剪贴板",
@@ -5931,6 +6018,7 @@ export const zhHans: TranslationStructure = {
         `已用 ${used}/${limit}`,
       duration: {
         now: "现在",
+        outdated: "已过期",
         daysHours: ({ days, hours }: { days: number; hours: number }) =>
           `${days}天 ${hours}小时`,
         hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) =>
@@ -5988,11 +6076,11 @@ export const zhHans: TranslationStructure = {
       kimi: "Kimi",
       kilo: "Kilo",
       kiro: "Kiro",
-      grok: "Grok",
       customAcp: "Custom ACP",
       pi: "Pi",
       copilot: "Copilot",
       cursor: "Cursor",
+      grok: "Grok",
     },
     auggieIndexingChip: {
       on: "已开启索引",
@@ -6002,6 +6090,10 @@ export const zhHans: TranslationStructure = {
       title: "模型",
       useCliSettings: "使用 CLI 设置",
       configureInCli: "在 CLI 设置中配置模型",
+      running: ({ model }: { model: string }) => `正在运行：${model}`,
+      lastUsed: ({ model }: { model: string }) => `上次使用：${model}`,
+      lastReported: ({ model }: { model: string }) => `上次报告：${model}`,
+      selectedForResume: "恢复此会话时将使用所选模型。",
       extendedContextToggleLabel: '1M 上下文',
       extendedContextToggleDescription: '为此模型使用扩展的 100 万 token 上下文窗口。',
       extendedContextLabel: ({ model }: { model: string }) => `${model} (1M)`,
@@ -6090,10 +6182,6 @@ export const zhHans: TranslationStructure = {
       buildDescription: "默认行为",
       plan: "计划",
       planDescription: "先思考",
-      running: ({ model }: { model: string }) => `正在运行：${model}`,
-      lastUsed: ({ model }: { model: string }) => `上次使用：${model}`,
-      lastReported: ({ model }: { model: string }) => `上次报告：${model}`,
-      selectedForResume: "恢复此会话时将使用所选模型。",
     },
     acp: {
       modeSectionTitle: "模式",
@@ -6140,6 +6228,9 @@ export const zhHans: TranslationStructure = {
     expand: "展开/折叠",
     input: "输入",
     output: "输出",
+    payloadTruncated: "为保证性能，已截断大型负载。",
+    showFullPayload: "显示完整负载",
+    showLessPayload: "显示较少",
   },
 
   tools: {
@@ -6155,6 +6246,13 @@ export const zhHans: TranslationStructure = {
     },
     webFetch: {
       httpStatus: ({ status }: { status: number }) => `HTTP ${status}`,
+    },
+    codeSearch: {
+      aggregateMatchUnavailable: '1 个匹配项；未提供详情。',
+      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} 个匹配项；未提供详情。`,
+      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} 个文件；未提供详情。`,
+      detailsUnavailable: "搜索已完成；未提供详情。",
+      truncated: "结果可能已截断。",
     },
     fullView: {
       description: "描述",
@@ -6191,6 +6289,7 @@ export const zhHans: TranslationStructure = {
       statusComplete: "已完成",
       statusFailed: "失败",
       statusStopped: "已停止",
+      statusInterrupted: "已中断",
       statusBlocked: "已阻塞",
       statusCancelled: "已取消",
       statusUnknown: "未知",
@@ -6207,6 +6306,8 @@ export const zhHans: TranslationStructure = {
       tokens: ({ tokens }: { tokens: string }) => `${tokens} 个令牌`,
       toolCalls: ({ count }: { count: number }) => `${count} 个工具`,
       showMore: ({ count }: { count: number }) => `显示 ${count}`,
+      detailShowMore: '展开更多',
+      detailShowLess: '收起',
   },
     changeTitleView: {
       titleLabel: "标题",
@@ -6290,6 +6391,7 @@ export const zhHans: TranslationStructure = {
       turnDiff: "回合差异",
       question: "问题",
       changeTitle: "更改标题",
+      switchMode: "切换模式",
     },
     geminiExecute: {
       cwd: ({ cwd }: { cwd: string }) => `📁 ${cwd}`,
@@ -6343,9 +6445,9 @@ export const zhHans: TranslationStructure = {
       other: "其他",
       otherDescription: "输入您自己的答案",
       otherPlaceholder: "输入您的答案...",
-      selectionLimit: ({ count }: { count: number }) => `最多可选择 ${count} 个答案。取消选择一个答案后可选择其他答案。`,
     },
     exitPlanMode: {
+    selectionLimit: ({ count }: { count: number }) => `最多可选择 ${count} 个答案。取消选择一个答案后可选择其他答案。`,
       approve: "批准计划",
       reject: "拒绝",
       requestChanges: "请求修改",
@@ -6706,6 +6808,7 @@ export const zhHans: TranslationStructure = {
           generatedImageA11y: ({ name }: { name: string }) => `打开生成的图片 ${name}`,
           attachmentImageA11y: ({ name }: { name: string }) => `打开附件图片 ${name}`,
           toolArtifactImageA11y: ({ name }: { name: string }) => `打开工具产物图片 ${name}`,
+          imageUnavailable: '图像不可用',
         },
         cannotDisplayBinary: "无法显示二进制文件内容",
         diff: "差异",
@@ -6812,7 +6915,6 @@ export const zhHans: TranslationStructure = {
         count === 1
           ? "已选择 1 个文件用于下一次提交。"
           : `已选择 ${count} 个文件用于下一次提交。`,
-          imageUnavailable: '图像不可用',
       clear: "清除",
       conflictsDetected:
         "检测到冲突。在冲突解决之前，提交、拉取和推送将被阻止。",
@@ -7190,9 +7292,6 @@ settingsSession: {
 	        workingPlacementModeGlobalSubtitle: '在需要注意的会话下方显示一个工作中分组',
 	        workingPlacementModeWithinGroupsTitle: '移到当前分组顶部',
 	        workingPlacementModeWithinGroupsSubtitle: '将正在工作的会话保留在其文件夹或工作区内',
-	        separateBackgroundWorkTitle: '分开后台工作',
-	        separateBackgroundWorkEnabledSubtitle: '将实时后台任务显示在自己的分组中',
-	        separateBackgroundWorkDisabledSubtitle: '将实时后台任务合并到正在工作',
 	        narrowWorkingIndicatorTitle: '窄列表工作指示器',
 	        narrowWorkingIndicatorSpinnerSelectedSubtitle: '在窄行中显示小型中性加载指示器',
 	        narrowWorkingIndicatorPulseSelectedSubtitle: '在窄行中显示脉冲圆点',
@@ -7312,6 +7411,14 @@ settingsSession: {
             title: '运行时和终端',
             entrySubtitle: 'Tmux、Windows Terminal 窗口和 Terminal Connect 兼容性。',
         },
+    banners: {
+        title: '横幅',
+        footer: '输入框上方的横幅可以折叠为状态徽标。选择是否记住该状态。',
+        rememberVisibilityTitle: '记住横幅显示状态',
+        rememberVisibilitySubtitle: '你关闭的横幅将在本设备的所有会话中保持隐藏。',
+        resetHiddenTitle: '显示所有隐藏的横幅',
+        resetHiddenSubtitle: '清除本设备上已隐藏的横幅。',
+    },
     inputBehavior: {
         title: '输入行为',
         footer: '设置按 Enter 发送以及消息历史行为。',
@@ -9340,6 +9447,7 @@ settingsSession: {
   message: {
     switchedToMode: ({ mode }: { mode: string }) => `已切换到 ${mode} 模式`,
     discarded: "已丢弃",
+    recoveredHistory: "已恢复的历史记录",
     unknownEvent: "未知事件",
     contextCompactionStarted: "正在压缩上下文...",
     contextCompactionCompleted: "上下文已压缩",
@@ -9823,8 +9931,8 @@ settingsSession: {
       kimiSubtitleExperimental: "Kimi 命令行（实验）",
       kiloSubtitleExperimental: "Kilo 命令行（实验）",
       kiroSubtitleExperimental: "Kiro 命令行（实验）",
-      grokSubtitleExperimental: "Grok Build 命令行（实验）",
       customAcpSubtitleExperimental: "自定义 ACP 命令行（实验）",
+      grokSubtitleExperimental: "Grok Build 命令行（实验）",
       piSubtitleExperimental: "Pi 命令行（实验）",
       copilotSubtitleExperimental: "GitHub Copilot CLI（实验）",
       cursorSubtitleExperimental: "Cursor Agent CLI（实验）",
@@ -9993,11 +10101,3 @@ settingsSession: {
     friendAcceptedGeneric: "好友请求已接受",
   },
 } as const;
-    codeSearch: {
-      aggregateMatchUnavailable: '1 个匹配项；未提供详情。',
-      aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} 个匹配项；未提供详情。`,
-      aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} 个文件；未提供详情。`,
-      detailsUnavailable: "搜索已完成；未提供详情。",
-      truncated: "结果可能已截断。",
-    },
-      switchMode: "切换模式",

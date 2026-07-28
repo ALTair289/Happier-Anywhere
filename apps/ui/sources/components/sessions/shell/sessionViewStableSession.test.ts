@@ -85,6 +85,25 @@ describe('buildSessionViewShellSessionSignature', () => {
         expect(buildSessionViewShellSessionSignature(heartbeat)).toBe(buildSessionViewShellSessionSignature(base));
     });
 
+    it('stays stable for an exact duplicate explicit runtime-activity projection', () => {
+        const base = createSession({
+            runtimeActivityState: 'active',
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 200,
+            runtimeActivityRevision: 7,
+        });
+        const duplicate = createSession({
+            runtimeActivityState: 'active',
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 200,
+            runtimeActivityRevision: 7,
+        });
+
+        expect(buildSessionViewShellSessionSignature(duplicate)).toBe(
+            buildSessionViewShellSessionSignature(base),
+        );
+    });
+
     it('stays stable for transcript seq-only streaming updates after transcript history exists', () => {
         const base = createSession({ seq: 25 });
         const nextToken = createSession({ seq: 26 });
@@ -438,6 +457,10 @@ describe('useSessionViewShellSession', () => {
                         activeAt: 100,
                         thinkingAt: 100,
                         latestTurnStatusObservedAt: 100,
+                        runtimeActivityState: 'active',
+                        runtimeActivityActiveCount: 1,
+                        runtimeActivityObservedAt: 90,
+                        runtimeActivityRevision: 7,
                     }),
                 },
             }));
@@ -461,6 +484,10 @@ describe('useSessionViewShellSession', () => {
                             activeAt: 200,
                             thinkingAt: 200,
                             latestTurnStatusObservedAt: 200,
+                            runtimeActivityState: 'active',
+                            runtimeActivityActiveCount: 1,
+                            runtimeActivityObservedAt: 90,
+                            runtimeActivityRevision: 7,
                         }),
                     },
                 }));

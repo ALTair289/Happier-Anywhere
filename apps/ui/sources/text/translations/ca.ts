@@ -1223,10 +1223,14 @@ export const ca: TranslationStructure = {
         error: 'errada',
         online: 'en línia',
         working: 'treballant...',
+        workingRetained: 'treballant, esperant actualitzacions…',
+        backgroundActive: 'tasques en segon pla en execució',
+        activityUnknown: "l'estat de l'activitat no està disponible",
         readyForReview: 'a punt per revisar',
         offline: 'fora de línia',
         lastSeen: ({ time }: { time: string }) => `vist per última vegada ${time}`,
         actionRequired: 'acció requerida',
+        waitingForYourResponse: 'Esperant la teva resposta',
         permissionRequired: 'permís requerit',
         activeNow: 'Actiu ara',
         unknown: 'desconegut',
@@ -2359,6 +2363,12 @@ export const ca: TranslationStructure = {
                 partialApplication: 'Autenticació canviada parcialment',
                 partialApplicationForService: ({ service }: { service: string }) => `Autenticació de ${service} no canviada completament`,
             },
+            partialApply: {
+                title: 'Autenticació canviada parcialment',
+                body: "El compte nou s'ha desat, però aplicar-lo a aquesta sessió en execució no s'ha completat del tot. Torna-ho a provar o reverteix per mantenir aquesta sessió al compte anterior.",
+                retry: 'Torna a aplicar-ho a aquesta sessió',
+                revert: 'Reverteix al compte anterior',
+            },
         },
         diagnostics: {
             title: {
@@ -2380,6 +2390,7 @@ export const ca: TranslationStructure = {
                 quota_fetch_disabled: 'Les comprovacions de quota estan desactivades',
                 quota_fetch_backoff: 'Les comprovacions de quota estan en espera',
                 auth_surface_weakly_verified: 'Reescriptura d’autenticació verificada',
+                connected_service_restart_requested: 'S’ha sol·licitat reiniciar la sessió',
                 connected_service_credential_reconnect_required: 'Cal reconnectar el compte connectat',
                 claude_subscription_missing_claude_code_scope: 'L’accés a Claude Code necessita reconnexió',
                 claude_subscription_native_auth_materialization_failed: 'No s’han pogut preparar les credencials de Claude Code',
@@ -2410,6 +2421,7 @@ export const ca: TranslationStructure = {
                 quota_fetch_disabled: 'Comprovacions de quota desactivades',
                 quota_fetch_backoff: 'Comprovacions de quota temporalment en espera',
                 auth_surface_weakly_verified: 'Reescriptura d’autenticació verificada dèbilment',
+                connected_service_restart_requested: 'S’ha sol·licitat reiniciar la sessió',
                 connected_service_credential_reconnect_required: 'Cal reconnectar el compte connectat',
                 claude_subscription_missing_claude_code_scope: 'Torna a connectar la subscripció de Claude per a Claude Code',
                 claude_subscription_native_auth_materialization_failed: 'No s’ha pogut preparar l’autenticació nativa de Claude Code',
@@ -2437,6 +2449,7 @@ export const ca: TranslationStructure = {
                 quota_fetch_disabled: 'Les comprovacions de quota estan desactivades actualment per a aquest proveïdor. Happier continuarà utilitzant recuperació reactiva.',
                 quota_fetch_backoff: 'Les comprovacions de quota estan temporalment en espera després d’una resposta del proveïdor o de la xarxa. Happier tornarà a actualitzar la quota més tard.',
                 auth_surface_weakly_verified: 'Happier ha verificat que els fitxers d’autenticació seleccionats s’han reescrit, però aquest proveïdor no exposa la identitat exacta del compte actiu.',
+                connected_service_restart_requested: 'Happier ha sol·licitat un reinici segur de la sessió perquè el compte connectat seleccionat tingui efecte.',
                 connected_service_credential_reconnect_required: 'Cal reconnectar el compte connectat seleccionat abans que aquesta sessió es pugui reprendre. Reconnecta el perfil i torna-ho a provar.',
                 claude_subscription_missing_claude_code_scope: 'Aquest perfil de Claude es va connectar abans que es concedissin els permisos de Claude Code. Torna’l a connectar i després reintenta la sessió o el canvi de Pool.',
                 claude_subscription_native_auth_materialization_failed: 'Happier no ha pogut crear el fitxer de credencials natives de Claude Code per a aquest perfil. Torna a connectar el perfil o tria un altre membre del Pool.',
@@ -2451,6 +2464,7 @@ export const ca: TranslationStructure = {
             identityMismatchTitle: 'Substituir el compte connectat?',
             identityMismatchBody: 'Les credencials noves pertanyen a un compte del proveïdor diferent. Confirma-ho per mantenir el mateix id de perfil i substituir el compte enllaçat.',
             identityMismatchConfirm: 'Substitueix el compte',
+            targetMismatch: 'Aquesta reconnexió ha retornat credencials per a un altre perfil connectat. Torna a iniciar la reconnexió des del perfil de destinació.',
         },
         defaultAuth: {
             title: 'Configuració predeterminada del backend',
@@ -2463,6 +2477,11 @@ export const ca: TranslationStructure = {
                 connected_group_unavailable: 'El Pool connectat predeterminat no està disponible; s’utilitza l’autenticació nativa.',
                 connected_group_disabled: 'Els Pools connectats estan desactivats aquí; s’utilitza l’autenticació nativa.',
                 connected_service_unsupported: 'Aquest backend no admet aquest servei connectat; s’utilitza l’autenticació nativa.',
+            },
+            poolSuggestion: {
+                body: ({ pool }: { pool: string }) => `Utilitza el grup ${pool} perquè les sessions rotin i evitin els límits de freqüència.`,
+                accept: 'Utilitza el grup',
+                dismiss: 'Ignora',
             },
         },
         list: {
@@ -2510,12 +2529,14 @@ export const ca: TranslationStructure = {
             recoveryCreditExpires: ({ time }: { time: string }) => `Expires: ${time}`,
             recoveryCreditApplying: 'Aplicant el restabliment…',
             recoveryCreditMachineUnavailable: 'No hi ha cap màquina activa disponible per aplicar aquest restabliment.',
+            recoveryCreditNothingToReset: 'No exhausted usage window currently needs a reset.',
             recoveryCreditBadge: ({ count }: { count: number }) => count === 1 ? '1 reset' : `${count} resets`,
             remaining: ({ percent }: { percent: string }) => `${percent} restant`,
             remainingWithReset: ({ percent, reset }: { percent: string; reset: string }) => `${percent} restant · es reinicia d'aquí a ${reset}`,
             usageCount: ({ used, limit }: { used: number; limit: number }) => `${used}/${limit} utilitzat`,
             duration: {
                 now: 'ara',
+                outdated: 'obsolet',
                 daysHours: ({ days, hours }: { days: number; hours: number }) => `${days}d ${hours}h`,
                 hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) => `${hours}h ${minutes}m`,
                 hours: ({ hours }: { hours: number }) => `${hours}h`,
@@ -2529,7 +2550,6 @@ export const ca: TranslationStructure = {
             usedDetail: ({ used, limit }: { used: string; limit: string }) => `${used}/${limit} usat`,
             capacity: ({ percent }: { percent: number }) => `${percent}% de capacitat`,
             memberEnabledLabel: 'Activat al Pool',
-            recoveryCreditNothingToReset: 'No exhausted usage window currently needs a reset.',
             poolsLabel: 'Pools',
             planEmailSubtitle: ({ plan, email }: { plan: string; email: string }) => `${plan} · ${email}`,
             poolsCount: ({ count }: { count: number }) => count === 1 ? '1 pool' : `${count} pools`,
@@ -2846,8 +2866,17 @@ export const ca: TranslationStructure = {
                 title: 'Encara no hi ha pools',
                 subtitle: 'Crea un Pool per alternar entre comptes automàticament.',
             },
+            loadError: {
+                title: 'No s\'han pogut carregar els pools',
+                subtitle: 'No s\'han pogut carregar els pools de comptes. Comprova la connexió i torna-ho a provar.',
+                staleTitle: 'Es mostren els últims pools coneguts',
+                staleSubtitle: 'No s\'ha pogut actualitzar la darrera llista de pools. Torna-ho a provar per actualitzar-la.',
+                retry: 'Torna-ho a provar',
+            },
             detail: {
                 summaryTitle: 'Resum',
+                serverActiveStatusTitle: 'Desat al servidor',
+                serverActiveStatusSubtitle: 'Aquest és el compte actiu durador. Les màquines fora de línia l’aplicaran quan es tornin a connectar; aquesta pantalla no afirma que totes les màquines hagin convergit.',
                 summary: ({ count, strategy }: { count: number; strategy: string }) => `${count} comptes · ${strategy}`,
                 membersTitle: 'Membres',
                 moveUp: 'Mou amunt',
@@ -2858,6 +2887,15 @@ export const ca: TranslationStructure = {
                 behaviorTitle: 'Comportament',
                 advancedTitle: 'Avançat',
                 advancedSubtitle: 'Ajusta quan i com aquest Pool canvia de compte.',
+                manualApplyDivergenceTitle: 'Canviat al servidor, però no a les sessions actives',
+                manualApplyDivergenceSubtitle: ({ detail }: { detail: string }) => `El compte actiu ha canviat al servidor, però no s'ha pogut aplicar a les sessions actives (${detail}). Torna-ho a provar o reverteix per mantenir-ho tot al compte anterior.`,
+                manualApplyRetry: 'Torna a aplicar a les sessions actives',
+                manualApplyRevert: 'Torna al compte anterior',
+                machineTarget: {
+                    title: 'No es pot aplicar a una sessió en execució',
+                    noBoundSession: 'Ara mateix cap sessió en execució utilitza aquest pool, així que el canvi no es pot aplicar en directe. Inicia una sessió en aquest pool i torna-ho a provar.',
+                    offline: 'La màquina que executa la sessió d\'aquest pool està fora de línia, així que el canvi no hi pot arribar. Torna a posar la màquina en línia i torna-ho a provar.',
+                },
             },
             behavior: {
                 autoRestorePrimaryTitle: 'Restaura el principal en restablir-se',
@@ -3602,8 +3640,8 @@ export const ca: TranslationStructure = {
               logInSubtitle: 'Obre un terminal i executa el flux d’inici de sessió del proveïdor en aquesta màquina.',
               reauthenticateTitle: 'Torna a autenticar',
               reauthenticateSubtitle: 'Obre un terminal i renova l’inici de sessió del proveïdor en aquesta màquina.',
-              deviceCodeTitle: 'Utilitza un codi de dispositiu',
-              deviceCodeSubtitle: 'Autentica’t en una màquina remota o sense interfície amb un codi de dispositiu.',
+              deviceCodeTitle: "Utilitza un codi de dispositiu",
+              deviceCodeSubtitle: "Autentica’t en una màquina remota o sense interfície amb un codi de dispositiu.",
               checkNowTitle: 'Comprova-ho ara',
               checkNowSubtitle: 'Actualitza l’estat d’autenticació local detectat.',
               statusTitle: 'Estat',
@@ -3705,6 +3743,24 @@ export const ca: TranslationStructure = {
                             }
                         }
                     },
+                    claudeUnifiedTerminalWorkspaceTrust: {
+                        title: "Workspace trust",
+                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
+                        options: {
+                            ask_every_time: {
+                                title: "Ask every time",
+                                subtitle: "Show the exact workspace trust question in the session."
+                            },
+                            always_trust_happier_workspaces: {
+                                title: "Always trust Happier workspaces",
+                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
+                            },
+                            always_reject_happier_workspaces: {
+                                title: "Always reject Happier workspaces",
+                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
+                            }
+                        }
+                    },
                     claudeCodeExperimentalAgentTeamsEnabled: {
                         title: "Força l’activació d’Agent Teams",
                         subtitle: "Activa Agent Teams experimental de Claude Code (eixam d’agents) a totes les sessions de Claude iniciades per Happier."
@@ -3743,24 +3799,6 @@ export const ca: TranslationStructure = {
                             },
                             '1p': {
                                 title: "1p",
-                    claudeUnifiedTerminalWorkspaceTrust: {
-                        title: "Workspace trust",
-                        subtitle: "Choose how Happier responds when Claude asks whether to trust a workspace.",
-                        options: {
-                            ask_every_time: {
-                                title: "Ask every time",
-                                subtitle: "Show the exact workspace trust question in the session."
-                            },
-                            always_trust_happier_workspaces: {
-                                title: "Always trust Happier workspaces",
-                                subtitle: "Trust the current recaptured Claude prompt for workspaces opened by Happier."
-                            },
-                            always_reject_happier_workspaces: {
-                                title: "Always reject Happier workspaces",
-                                subtitle: "Reject the current recaptured Claude prompt for workspaces opened by Happier."
-                            }
-                        }
-                    },
                                 subtitle: "Categoria interna de depuració (first-party)."
                             }
                         }
@@ -4680,6 +4718,8 @@ deps: {
             statusReady: 'A punt per reprendre',
             statusWaiting: 'Esperant el restabliment del límit',
             statusWaitingUntil: ({ time }: { time: string }) => `Esperant fins a ${time}`,
+            statusWaitingResetUntil: ({ time }: { time: string }) => `Esperant el restabliment de la quota (es restableix a ${time})`,
+            statusAccountRotationPending: 'Rotació del compte pendent',
             statusChecking: 'Comprovant el límit',
             statusPaused: 'Espera en pausa',
             statusExhausted: 'Grup esgotat',
@@ -4695,6 +4735,7 @@ deps: {
             noCurrentGoalMessage: 'Defineix un objectiu abans de posar-lo en pausa o reprendre’l.',
             dirtyCloseTitle: 'Descartar els canvis de l’objectiu?',
             dirtyCloseBody: 'Es perdran els canvis de l’objectiu que no s’han desat.',
+            emptyPlaceholder: 'Encara no hi ha res aquí',
             badge: {
                 goal: ({ title }: { title: string }) => `Objectiu: ${title}`,
                 goalPaused: 'Objectiu en pausa',
@@ -4715,6 +4756,7 @@ deps: {
                 goalLabel: ({ title }: { title: string }) => `Objectiu: ${title}`,
                 bare: 'Flux de treball',
                 agentsFallback: ({ fraction }: { fraction: string }) => `Flux de treball ${fraction} agents`,
+                olderRunsHidden: ({ count }: { count: number }) => `${count} execucions anteriors ocultes`,
                 phaseLabel: ({ title, fraction }: { title: string; fraction: string }) => `${title} ${fraction}`,
                 plural: ({ count }: { count: number }) => `${count} fluxos de treball`,
                 pluralWithAgents: ({ count, agents }: { count: number; agents: number }) => `${count} fluxos de treball · ${agents} agents`,
@@ -4727,7 +4769,7 @@ deps: {
                 set: 'Defineix objectiu',
                 setTitle: 'Defineix un objectiu',
                 setSubtitle: 'Dona un focus a aquesta sessió perquè l’agent no es desviï.',
-                addBudget: 'Afegeix un límit de pressupost (opcional)',
+                addBudget: '+ Afegeix un límit de pressupost (opcional)',
                 removeBudget: 'Treu el pressupost',
                 noUsageYet: 'Encara sense ús',
                 tokensSuffix: ({ count }: { count: string }) => `${count} tokens`,
@@ -4740,12 +4782,14 @@ deps: {
                 statusPaused: 'En pausa',
                 statusComplete: 'Completat',
                 statusBudgetLimited: 'Limitat pel pressupost',
+                statusInterrupted: 'Interromput',
                 tokenBudget: 'Pressupost de tokens',
                 budgetProgress: ({ used, budget }: { used: string; budget: string }) => `${used} / ${budget}`,
+                budgetCaption: ({ budget }: { budget: string }) => `de ${budget} de pressupost`,
                 budgetPlaceholder: 'Límit de tokens',
                 invalidBudget: 'Introdueix un pressupost de tokens positiu.',
                 pending: 'S’està definint l’objectiu…',
-                pendingTimeout: 'No s’ha pogut confirmar l’actualització de l’objectiu. Pot ser que encara s’estigui aplicant.',
+                stillWaiting: 'Encara esperant la confirmació…',
                 accessibilityCurrent: ({ objective }: { objective: string }) => `Objectiu actual: ${objective}`,
                 errorUnsupportedResponse: 'Resposta no compatible de l’RPC de sessió',
                 errorUnknown: 'Error desconegut',
@@ -4780,6 +4824,10 @@ deps: {
 	        pendingQueuedResumeFailedTitle: 'Missatge en cua',
 	        pendingQueuedResumeFailedBody:
 	            'El teu missatge s’ha desat a la cua pendent, però Happier no ha pogut reprendre aquesta sessió. Torna-ho a provar per iniciar-la.',
+	        composerBanners: {
+            showBannerAction: 'Mostra el bàner',
+            hideBannerAction: 'Amaga el bàner',
+	        },
 	        staleRunner: {
 	            title: 'La sessió encara s’executa amb una CLI antiga',
 	            body: 'Reinicia el runner d’aquesta sessió per continuar amb la CLI del daemon actualitzada. La sessió de Happier es manté.',
@@ -4873,7 +4921,11 @@ deps: {
                       teammateInstructionsPlaceholder: "Què ha de fer aquest company?",
                       launchTeammateA11y: "Inicia company",
                       launchTeammateAction: "Inicia company",
-                      typeFact: ({ value }: { value: string }) => `Tipus: ${value}`,
+                typeFact: ({ value }: { value: string }) => `Tipus: ${value}`,
+                nativeTypeFact: ({ value }: { value: string }) => `Tipus natiu: ${value}`,
+                modelFact: ({ value }: { value: string }) => `Model: ${value}`,
+                agentIdFact: ({ value }: { value: string }) => `ID de l’agent: ${value}`,
+                durationFact: ({ value }: { value: string }) => `Durada: ${value}`,
                       providerFact: ({ value }: { value: string }) => `Proveidor: ${value}`,
                       backendFact: ({ value }: { value: string }) => `Backend: ${value}`,
                       intentFact: ({ value }: { value: string }) => `Intenció: ${value}`,
@@ -4981,11 +5033,18 @@ deps: {
                     badgeLabel: ({ count }: { count: number }) => (count > 0 ? `Pendent (+${count})` : 'Pendent'),
                     deliveryStatus: {
                         blocked: 'Bloquejat',
+                        deliveryUncertain: 'Estat de lliurament incert',
                         delivering: 'Lliurant',
+                        queuedInClaude: 'A la cua de Claude',
+                        queued: 'En cua',
+                        sending: 'Enviant…',
+                        sendFailed: 'No enviat',
+                        waitingForTurn: 'Esperant',
                     },
                     deliveryBlockedReasons: {
                         terminalComposerDraft: 'Un esborrany del terminal bloqueja el lliurament',
-                        providerAcceptanceTimeout: 'El proveïdor no ha confirmat la recepció',
+                        runtimeConfigBlocked: 'La configuracio del temps d’execucio bloqueja el lliurament',
+                        unsupportedAction: 'Aquest missatge utilitza una acció de lliurament no compatible',
                         providerUnavailableBeforeAcceptance: 'El proveïdor no està disponible temporalment',
                         ambiguousTerminalDelivery: 'L’estat del lliurament és ambigu',
                         terminalHostUnreachable: 'No es pot accedir a l’amfitrió del terminal',
@@ -4994,11 +5053,21 @@ deps: {
                         manualUserHandled: 'Marcat com a gestionat',
                         attemptExpiredBeforeWrite: 'L’intent de lliurament ha caducat abans d’escriure',
                         providerRejectedBeforeAcceptance: 'El proveïdor ha rebutjat el missatge',
+                        steeringUnavailable: 'La direcció del torn actiu no està disponible',
                         payloadTooLarge: 'El missatge és massa gran',
                         unknown: 'Cal revisar l’estat del lliurament',
                     },
 	                empty: 'No hi ha missatges pendents.',
 	                decryptFailed: "No s'ha pogut desxifrar aquest missatge pendent.",
+	                sendFailedNotice: 'Missatge no enviat. Comprova la connexió i torna-ho a provar.',
+	                waitingForTurnNotice: ({ minutes }: { minutes: number }) =>
+	                    minutes > 0
+	                        ? `Esperant que acabi la tasca actual · en execució des de fa ${minutes} min`
+	                        : 'Esperant que acabi la tasca actual',
+	                waitingForPredecessorNotice: 'Esperant un missatge pendent anterior',
+	                waitingForRuntimeActivityNotice: 'Esperant que acabi l’activitat del runtime',
+	                runtimeActivityUnknownNotice: 'Esperant l’estat d’activitat del runtime',
+	                waitingForRuntimeNotice: 'Esperant que el runtime es torni a connectar',
 	                nonSteerableNotice: 'El torn actual no pot acceptar direcció després d’aquest canvi de mode. S’executarà després, o fes servir Envia ara per interrompre.',
 	                steerBlockedTerminalDraftNotice: 'En espera: un esborrany al compositor del terminal bloqueja l\'entrega. Esborra\'l al terminal o interromp el torn.',
 	                clearTerminalComposer: {
@@ -5016,7 +5085,12 @@ deps: {
                   steerNow: 'Insereix ara',
                   sendNow: 'Envia ara',
                   sendNowInterrupt: 'Envia ara (interromp)',
+                  interruptAndRunNow: 'Interromp i executa ara',
+                  continueWaiting: 'Continua esperant',
+                  dismiss: 'Descarta',
+                  sendAsNew: 'Envia com a nou',
                   retryDelivery: 'Reintenta',
+                  retrySend: 'Torna a enviar',
                   markHandled: 'Marca com a gestionat',
                   requeue: 'Torna a la cua',
               },
@@ -5035,10 +5109,19 @@ deps: {
                   title: 'Vols marcar el missatge pendent com a gestionat?',
                   body: 'Fes-ho servir només si el proveïdor ja ha gestionat el missatge o ja no vols que Happier el lliuri.',
               },
+              dismissDeliveryConfirm: {
+                  title: 'Vols descartar el lliurament incert?',
+                  body: 'Això arxiva el missatge original sense tornar-lo a enviar. Si el proveïdor confirma el lliurament més endavant, Happier encara pot afegir el missatge original a la transcripció.',
+              },
+              sendAsNewConfirm: {
+                  title: 'Vols enviar aquest missatge com a nou?',
+                  body: 'Això arxiva el lliurament incert i posa una còpia nova a la cua. És possible que el proveïdor ja hagi rebut l’original, de manera que es podria gestionar dues vegades.',
+              },
               sendConfirm: {
                   title: 'Envia ara?',
                   interruptTitle: 'Envia ara (interrompre)?',
                   body: 'Això aturarà el torn actual i enviarà aquest missatge immediatament.',
+                  resumeBody: 'Això reprendrà la sessió i enviarà aquest missatge immediatament.',
               },
               discarded: {
                   title: 'Missatges descartats',
@@ -5059,6 +5142,7 @@ deps: {
                   sendDiscardedFailed: 'No s’ha pogut enviar el missatge descartat',
                   reorderFailed: 'No s’ha pogut reordenar els missatges pendents',
                   retryDeliveryFailed: 'No s’ha pogut reintentar el lliurament pendent',
+                  retrySendFailed: 'No s’ha pogut tornar a enviar el missatge',
                   markHandledFailed: 'No s’ha pogut marcar el lliurament pendent com a gestionat',
                   clearTerminalComposerFailed: 'No s’ha pogut esborrar el compositor del terminal',
                   clearTerminalComposerUnsupported: 'Aquesta sessió no permet esborrar el compositor del terminal des de Happier.',
@@ -5084,6 +5168,7 @@ deps: {
             canManageDescription: 'Pot gestionar la compartició.',
             manageSharingDenied: 'No tens permís per gestionar la compartició d’aquesta sessió.',
             stopSharing: 'Deixa de compartir',
+            stopSharingDescription: 'Revoca l’accés directe d’aquesta persona.',
             recipientMissingKeys: "Aquest usuari encara no ha registrat claus d'encriptació.",
             permissionApprovals: 'Pot aprovar permisos',
             allowPermissionApprovals: 'Permetre l’aprovació de permisos',
@@ -5098,7 +5183,7 @@ deps: {
 
             publicLink: 'Enllaç públic',
             publicLinkActive: "L'enllaç públic està actiu",
-            publicLinkDescription: 'Crea un enllaç perquè qualsevol pugui veure aquesta sessió.',
+            publicLinkDescription: 'Qualsevol persona amb aquest enllaç pot veure la sessió anònimament. Elimina’l o regenera’l per revocar l’accés de tothom.',
             createPublicLink: 'Crea un enllaç públic',
             regeneratePublicLink: "Regenera l'enllaç públic",
             deletePublicLink: "Suprimeix l'enllaç públic",
@@ -5520,6 +5605,7 @@ deps: {
         },
         attentionSectionTitle: 'Requereix atenció',
         workingSectionTitle: 'Treballant',
+        backgroundWorkingSectionTitle: 'Treballant en segon pla',
         hideInactiveSessions: 'Amaga sessions inactives',
         showInactiveSessions: 'Mostra sessions inactives',
     },
@@ -5573,6 +5659,7 @@ deps: {
         killSessionConfirm: 'Segur que vols finalitzar aquesta sessió?',
         stopSession: 'Atura la sessió',
         stopSessionConfirm: 'Segur que vols aturar aquesta sessió?',
+        stopSessionUpgradeRequired: 'Actualitza Happier a la màquina de la sessió i torna-ho a provar.',
         archiveSession: 'Arxiva la sessió',
         archiveSessionConfirm: 'Segur que vols arxivar aquesta sessió?',
         workspaceTitle: 'Espai de treball',
@@ -5610,9 +5697,9 @@ deps: {
         kiloSessionIdCopied: 'ID de la sessió de Kilo copiat al porta-retalls',
         kiroSessionId: 'ID de la sessió de Kiro',
         kiroSessionIdCopied: 'ID de la sessió de Kiro copiat al porta-retalls',
-        grokSessionId: 'ID de la sessió de Grok',
-        grokSessionIdCopied: 'ID de la sessió de Grok copiat al porta-retalls',
         customAcpSessionId: 'ID de la sessió d’ACP personalitzat',
+        grokSessionId: "ID de la sessió de Grok",
+        grokSessionIdCopied: "ID de la sessió de Grok copiat al porta-retalls",
         customAcpSessionIdCopied: 'ID de la sessió d’ACP personalitzat copiat al porta-retalls',
         piSessionId: 'ID de la sessio de Pi',
         piSessionIdCopied: 'ID de la sessio de Pi copiat al porta-retalls',
@@ -5766,6 +5853,7 @@ deps: {
             usedCount: ({ used, limit }: { used: string; limit: string }) => `${used}/${limit} usat`,
             duration: {
                 now: 'ara',
+                outdated: 'obsolet',
                 daysHours: ({ days, hours }: { days: number; hours: number }) => `${days}d ${hours}h`,
                 hoursMinutes: ({ hours, minutes }: { hours: number; minutes: number }) => `${hours}h ${minutes}m`,
                 hours: ({ hours }: { hours: number }) => `${hours}h`,
@@ -5813,11 +5901,11 @@ deps: {
             kimi: 'Kimi',
             kilo: 'Kilo',
             kiro: 'Kiro',
-            grok: 'Grok',
         customAcp: 'ACP personalitzat',
             pi: 'Pi',
             copilot: 'Copilot',
             cursor: 'Cursor',
+            grok: 'Grok',
         },
         auggieIndexingChip: {
             on: 'Indexació activada',
@@ -5827,6 +5915,10 @@ deps: {
               title: 'MODEL',
               useCliSettings: 'Fes servir la configuració del CLI',
               configureInCli: 'Configura els models a la configuració del CLI',
+              running: ({ model }: { model: string }) => `En execució: ${model}`,
+              lastUsed: ({ model }: { model: string }) => `Últim ús: ${model}`,
+              lastReported: ({ model }: { model: string }) => `Últim model informat: ${model}`,
+              selectedForResume: 'El model seleccionat s’utilitzarà quan es reprengui aquesta sessió.',
               extendedContextToggleLabel: 'Context d\'1M',
               extendedContextToggleDescription: 'Utilitza la finestra de context ampliada d\'1M de tokens per a aquest model.',
               extendedContextLabel: ({ model }: { model: string }) => `${model} (1M)`,
@@ -5915,10 +6007,6 @@ deps: {
             currentMode: ({ name }: { name: string }) => `Actual: ${name}`,
             loadingModes: 'Carregant modes…',
             refreshingModes: 'Actualitzant modes…',
-              running: ({ model }: { model: string }) => `En execució: ${model}`,
-              lastUsed: ({ model }: { model: string }) => `Últim ús: ${model}`,
-              lastReported: ({ model }: { model: string }) => `Últim model informat: ${model}`,
-              selectedForResume: 'El model seleccionat s’utilitzarà quan es reprengui aquesta sessió.',
             useDefaultModeHint: 'Fes servir el mode per defecte per a aquest agent.',
             startIn: ({ name }: { name: string }) => `Inicia a: ${name}`,
             optionsSectionTitle: 'Opcions',
@@ -5950,6 +6038,9 @@ deps: {
         expand: 'Expandir/contraure',
         input: 'Entrada',
         output: 'Sortida',
+        payloadTruncated: 'Càrrega gran truncada per rendiment.',
+        showFullPayload: 'Mostra la càrrega completa',
+        showLessPayload: 'Mostra menys',
     },
 
       tools: {
@@ -5964,6 +6055,13 @@ deps: {
           },
           webFetch: {
               httpStatus: ({ status }: { status: number }) => `HTTP ${status}`,
+          },
+          codeSearch: {
+              aggregateMatchUnavailable: '1 coincidència; no s\'han proporcionat detalls.',
+              aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} coincidències; no s'han proporcionat detalls.`,
+              aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} fitxers; no s'han proporcionat detalls.`,
+              detailsUnavailable: 'La cerca ha finalitzat; no s\'han proporcionat detalls.',
+              truncated: 'Els resultats poden estar truncats.',
           },
         fullView: {
             description: 'Descripció',
@@ -6000,6 +6098,7 @@ deps: {
             statusComplete: 'Completat',
             statusFailed: 'Ha fallat',
             statusStopped: 'Aturat',
+            statusInterrupted: 'Interromput',
             statusBlocked: 'Bloquejat',
             statusCancelled: 'Cancel·lat',
             statusUnknown: 'Desconegut',
@@ -6016,6 +6115,8 @@ deps: {
             tokens: ({ tokens }: { tokens: string }) => `${tokens} tokens`,
             toolCalls: ({ count }: { count: number }) => `${count} eines`,
             showMore: ({ count }: { count: number }) => `Mostra ${count}`,
+            detailShowMore: `Mostra'n més`,
+            detailShowLess: `Mostra'n menys`,
         },
         changeTitleView: {
             titleLabel: 'Títol',
@@ -6095,6 +6196,7 @@ deps: {
             turnDiff: 'Diferències del torn',
             question: 'Pregunta',
             changeTitle: 'Canvia el títol',
+            switchMode: 'Canvia el mode',
         },
         geminiExecute: {
             cwd: ({ cwd }: { cwd: string }) => `📁 ${cwd}`,
@@ -6119,13 +6221,24 @@ deps: {
         },
         askUserQuestion: {
             submit: 'Envia resposta',
+            submissionFailures: {
+                update: 'Actualitza el CLI de Happier i torna-ho a provar.',
+                reconnect: 'Torna a connectar aquesta sessió i torna-ho a provar.',
+                retry: 'No s’ha pogut acceptar la resposta. Revisa-la i torna-ho a provar.',
+            },
+            claudeDialogNotice: {
+                header: 'Diàleg de Claude',
+                question: 'Claude mostra un diàleg. Obre el terminal per revisar-lo i triar com continuar.',
+                openTerminal: 'Obre el terminal',
+                description: 'Revisa i respon el diàleg al terminal de Claude.',
+            },
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, singular: 'pregunta', plural: 'preguntes' })}`,
             other: 'Altres',
             otherDescription: 'Escriu la teva pròpia resposta',
             otherPlaceholder: 'Escriu la teva resposta...',
-            selectionLimit: ({ count }: { count: number }) => `Selecciona fins a ${count} respostes. Desmarca'n una per triar-ne una altra.`,
         },
         exitPlanMode: {
+        selectionLimit: ({ count }: { count: number }) => `Selecciona fins a ${count} respostes. Desmarca'n una per triar-ne una altra.`,
             approve: 'Aprovar el pla',
             reject: 'Rebutjar',
             requestChanges: 'Demanar canvis',
@@ -6232,17 +6345,6 @@ deps: {
                   short: 'Publica',
                   failed: 'No s\'ha pogut publicar la branca.',
               },
-            submissionFailures: {
-                update: 'Actualitza el CLI de Happier i torna-ho a provar.',
-                reconnect: 'Torna a connectar aquesta sessió i torna-ho a provar.',
-                retry: 'No s’ha pogut acceptar la resposta. Revisa-la i torna-ho a provar.',
-            },
-            claudeDialogNotice: {
-                header: 'Diàleg de Claude',
-                question: 'Claude mostra un diàleg. Obre el terminal per revisar-lo i triar com continuar.',
-                openTerminal: 'Obre el terminal',
-                description: 'Revisa i respon el diàleg al terminal de Claude.',
-            },
               create: {
                   title: 'Crea una branca',
                   subtitle: ({ name }: { name: string }) => `Crea "${name}"`,
@@ -6476,6 +6578,7 @@ deps: {
                 generatedImageA11y: ({ name }: { name: string }) => `Obre la imatge generada ${name}`,
                 attachmentImageA11y: ({ name }: { name: string }) => `Obre la imatge adjunta ${name}`,
                 toolArtifactImageA11y: ({ name }: { name: string }) => `Obre la imatge d'artefacte d'eina ${name}`,
+                imageUnavailable: 'La imatge no està disponible',
             },
             cannotDisplayBinary: 'No es pot mostrar el contingut del fitxer binari',
             diff: 'Diferències',
@@ -6582,7 +6685,6 @@ deps: {
                     fetchUrlLabel: 'URL de fetch',
                     pushUrlLabel: 'URL de push',
                     namePlaceholder: 'origin',
-                imageUnavailable: 'La imatge no està disponible',
                     fetchUrlPlaceholder: 'URL de fetch',
                     pushUrlPlaceholder: 'URL de push (opcional)',
                     noFetchUrl: 'Sense URL de fetch',
@@ -6994,9 +7096,6 @@ settingsSession: {
 	                workingPlacementModeGlobalSubtitle: 'Mostra una secció de treball sota les sessions que requereixen atenció',
 	                workingPlacementModeWithinGroupsTitle: 'Mou al capdamunt del grup actual',
 	                workingPlacementModeWithinGroupsSubtitle: 'Mantén les sessions treballant dins la seva carpeta o espai de treball',
-	                separateBackgroundWorkTitle: 'Separa el treball en segon pla',
-	                separateBackgroundWorkEnabledSubtitle: 'Mostra les tasques en segon pla actives en el seu propi grup',
-	                separateBackgroundWorkDisabledSubtitle: 'Fusiona les tasques en segon pla actives a Treballant',
 	                narrowWorkingIndicatorTitle: 'Indicador de treball estret',
 	                narrowWorkingIndicatorSpinnerSelectedSubtitle: 'Mostra un indicador giratori petit i neutre a les files estretes',
 	                narrowWorkingIndicatorPulseSelectedSubtitle: 'Mostra un punt pulsant a les files estretes',
@@ -7115,6 +7214,14 @@ settingsSession: {
             runtime: {
                 title: 'Runtime i terminal',
                 entrySubtitle: 'Tmux, finestres de Windows Terminal i compatibilitat de Terminal Connect.',
+            },
+            banners: {
+                title: 'Bàners',
+                footer: 'Els bàners sobre el camp de missatge es poden plegar en una insígnia d’estat. Tria si es recorda.',
+                rememberVisibilityTitle: 'Recorda la visibilitat dels bàners',
+                rememberVisibilitySubtitle: 'Els bàners que tanquis continuen amagats a totes les sessions d’aquest dispositiu.',
+                resetHiddenTitle: 'Mostra tots els bàners amagats',
+                resetHiddenSubtitle: 'Esborra els bàners amagats en aquest dispositiu.',
             },
             inputBehavior: {
                 title: 'Comportament de l’entrada',
@@ -8993,6 +9100,7 @@ settingsSession: {
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `S'ha canviat al mode ${mode}`,
         discarded: 'Descartat',
+        recoveredHistory: 'Historial recuperat',
         unknownEvent: 'Esdeveniment desconegut',
         contextCompactionStarted: 'Compactant el context...',
         contextCompactionCompleted: 'Context compactat',
@@ -9453,8 +9561,8 @@ settingsSession: {
             kimiSubtitleExperimental: 'CLI de Kimi (experimental)',
             kiloSubtitleExperimental: 'CLI de Kilo (experimental)',
             kiroSubtitleExperimental: 'CLI de Kiro (experimental)',
-            grokSubtitleExperimental: 'CLI de Grok Build (experimental)',
             customAcpSubtitleExperimental: 'CLI d’ACP personalitzat (experimental)',
+            grokSubtitleExperimental: "CLI de Grok Build (experimental)",
             piSubtitleExperimental: 'CLI de Pi (experimental)',
             copilotSubtitleExperimental: 'GitHub Copilot CLI (en proves)',
             cursorSubtitleExperimental: 'Cursor Agent CLI (en proves)',
@@ -9604,11 +9712,3 @@ settingsSession: {
 } as const;
 
 export type TranslationsCa = typeof ca;
-          codeSearch: {
-              aggregateMatchUnavailable: '1 coincidència; no s\'han proporcionat detalls.',
-              aggregateMatchesUnavailable: ({ count }: { count: number }) => `${count} coincidències; no s'han proporcionat detalls.`,
-              aggregateFilesUnavailable: ({ count }: { count: number }) => `${count} fitxers; no s'han proporcionat detalls.`,
-              detailsUnavailable: 'La cerca ha finalitzat; no s\'han proporcionat detalls.',
-              truncated: 'Els resultats poden estar truncats.',
-          },
-            switchMode: 'Canvia el mode',
