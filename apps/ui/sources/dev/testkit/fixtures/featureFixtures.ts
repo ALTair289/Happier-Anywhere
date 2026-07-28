@@ -97,8 +97,6 @@ const BASE_ROOT_LAYOUT_FEATURES: RootLayoutFeatures = {
             contentKeys: { enabled: true },
             pendingQueueV2: { enabled: false },
             pendingDeliveryState: { enabled: false },
-            pendingDeliveryAttempts: { enabled: false },
-            pendingDeliveryAttemptClaims: { enabled: false },
         },
         sessions: {
             enabled: false,
@@ -150,6 +148,7 @@ const BASE_ROOT_LAYOUT_FEATURES: RootLayoutFeatures = {
         },
     },
     capabilities: {
+        connectedServices: { credentialDelete: { revisionGuard: false } },
         bugReports: {
             providerUrl: 'https://reports.happier.dev',
             defaultIncludeDiagnostics: true,

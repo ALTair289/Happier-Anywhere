@@ -1,6 +1,12 @@
 import { vi } from 'vitest';
 
-import { DEFAULT_PETS_CAPABILITIES, DEFAULT_SESSION_CAPABILITIES, type FeaturesResponse } from '@happier-dev/protocol';
+import {
+    CURRENT_PENDING_INPUT_PROTOCOL_VERSION,
+    CURRENT_SESSION_SYNC_PROTOCOL_VERSION,
+    DEFAULT_PETS_CAPABILITIES,
+    DEFAULT_SESSION_CAPABILITIES,
+    type FeaturesResponse,
+} from '@happier-dev/protocol';
 
 type FixtureOverrides = {
     friendsEnabled?: boolean;
@@ -105,8 +111,6 @@ export function buildServerFeaturesResponse(overrides: FixtureOverrides = {}): F
                 contentKeys: { enabled: true },
                 pendingQueueV2: { enabled: false },
                 pendingDeliveryState: { enabled: false },
-                pendingDeliveryAttempts: { enabled: false },
-                pendingDeliveryAttemptClaims: { enabled: false },
             },
             sessions: {
                 enabled: false,
@@ -161,6 +165,20 @@ export function buildServerFeaturesResponse(overrides: FixtureOverrides = {}): F
             },
         },
         capabilities: {
+            connectedServices: { credentialDelete: { revisionGuard: false } },
+            compatibility: {
+                v: 1,
+                sessionSync: {
+                    v: 1,
+                    enforcement: 'observe',
+                    minimumSessionSyncProtocolVersion: CURRENT_SESSION_SYNC_PROTOCOL_VERSION,
+                    currentSessionSyncProtocolVersion: CURRENT_SESSION_SYNC_PROTOCOL_VERSION,
+                    declarationTransport: 'headers-v1',
+                },
+                pendingInput: {
+                    currentPendingInputProtocolVersion: CURRENT_PENDING_INPUT_PROTOCOL_VERSION,
+                },
+            },
             bugReports: {
                 providerUrl: 'https://reports.happier.dev',
                 defaultIncludeDiagnostics: true,
