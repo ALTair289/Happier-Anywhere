@@ -70,6 +70,7 @@ function createMockHandle(
         measureInWindow: vi.fn((cb) => cb(100, 200, 300, 100)),
         getReactNodeTag: () => null,
         getInputElement: () => textarea,
+        getScrollOffset: () => ({ x: textarea?.scrollLeft ?? 0, y: textarea?.scrollTop ?? 0 }),
     };
 }
 

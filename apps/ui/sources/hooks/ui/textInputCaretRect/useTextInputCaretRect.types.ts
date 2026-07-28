@@ -18,6 +18,12 @@ export type TextInputCaretRectHandle = Readonly<{
     measureInWindow: (callback: (x: number, y: number, width: number, height: number) => void) => void;
     getReactNodeTag: () => number | null;
     getInputElement: () => HTMLTextAreaElement | null;
+    /**
+     * The input's own content scroll offset. Required on both platforms because the
+     * native caret payload is content-relative: without it the caret anchor drifts
+     * down by the scroll amount once the composer clamps at max height.
+     */
+    getScrollOffset: () => Readonly<{ x: number; y: number }>;
 }>;
 
 /**

@@ -607,6 +607,10 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
         },
         getReactNodeTag: () => null,
         getInputElement: () => textareaRef.current,
+        getScrollOffset: () => {
+            const node = textareaRef.current;
+            return node ? { x: node.scrollLeft, y: node.scrollTop } : { x: 0, y: 0 };
+        },
     }), [applyTextareaHeight, emitChangeText, flushPendingTextChange, onStateChange, onSelectionChange, value]);
 
     const commonTextareaProps = {

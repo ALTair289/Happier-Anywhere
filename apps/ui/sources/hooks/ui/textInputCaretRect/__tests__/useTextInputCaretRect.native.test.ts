@@ -36,6 +36,7 @@ function createMockHandle(overrides?: Partial<TextInputCaretRectHandle>): TextIn
         measureInWindow: overrides?.measureInWindow ?? vi.fn((cb) => cb(100, 200, 300, 100)),
         getReactNodeTag: overrides?.getReactNodeTag ?? (() => 42),
         getInputElement: overrides?.getInputElement ?? (() => null),
+        getScrollOffset: overrides?.getScrollOffset ?? (() => ({ x: 0, y: 0 })),
     };
 }
 
@@ -83,6 +84,37 @@ describe('useTextInputCaretRect (native)', () => {
             left: 150,
             top: 210,
             height: 16,
+        });
+    });
+
+    it('subtracts the input\'s scroll offset so the rect tracks the VISIBLE caret', async () => {
+        // The native caret payload is content-relative. Once the composer clamps at
+        // max height and scrolls, an uncompensated rect sits too far down by exactly
+        // the scroll amount, which is what dropped the autocomplete menu onto the
+        // line holding the trigger character.
+        const inputRef = createInputRef(createMockHandle({
+            getScrollOffset: () => ({ x: 0, y: 240 }),
+        }));
+        const { useTextInputCaretRect } = await import('../useTextInputCaretRect.native');
+
+        const hook = await renderHook(() =>
+            useTextInputCaretRect({ inputRef, enabled: true }),
+        );
+
+        await act(async () => {
+            capturedHandler.onSelectionChange?.({
+                target: 42,
+                selection: {
+                    start: { x: 50, y: 300, position: 5 },
+                    end: { x: 50, y: 322, position: 5 },
+                },
+            });
+        });
+
+        expect(hook.getCurrent()).toEqual({
+            left: 150,
+            top: 260,
+            height: 22,
         });
     });
 

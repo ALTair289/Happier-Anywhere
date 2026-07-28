@@ -56,6 +56,7 @@ describe('MultiTextInputHandle (native)', () => {
         const mockFocus = vi.fn();
         const mockBlur = vi.fn();
         const mockSetNativeProps = vi.fn();
+        const mockSetSelection = vi.fn();
 
         let tree: renderer.ReactTestRenderer;
         await act(async () => {
@@ -71,13 +72,50 @@ describe('MultiTextInputHandle (native)', () => {
                         focus: mockFocus,
                         blur: mockBlur,
                         setNativeProps: mockSetNativeProps,
+                        setSelection: mockSetSelection,
                     }),
                 },
             );
         });
 
-        return { ref, tree: tree!, mockMeasureInWindow, mockFocus, mockBlur, findNodeHandleMock };
+        return {
+            ref,
+            tree: tree!,
+            mockMeasureInWindow,
+            mockFocus,
+            mockBlur,
+            mockSetNativeProps,
+            mockSetSelection,
+            findNodeHandleMock,
+        };
     }
+
+    it('setSelection issues the setTextAndSelection command, not a selection prop write', async () => {
+        // Under the New Architecture, RCTTextInputComponentView.updateProps has no branch for
+        // `selection` (only selectionColor) — the prop is stored and never applied, so
+        // setNativeProps({ selection }) is a silent no-op. The supported path is RN's
+        // setSelection(start, end), which dispatches setTextAndSelection and, on iOS, ends with
+        // scrollRangeToVisible — restoring the caret AND scrolling to it, without focusing.
+        const { ref, mockSetSelection, mockSetNativeProps } = await renderNativeWithHandle();
+
+        await act(async () => {
+            ref.current!.setSelection({ start: 2, end: 4 });
+        });
+
+        expect(mockSetSelection).toHaveBeenCalledWith(2, 4);
+        expect(mockSetNativeProps).not.toHaveBeenCalled();
+    });
+
+    it('clamps a restored selection to the live text before issuing the command', async () => {
+        const { ref, mockSetSelection } = await renderNativeWithHandle();
+
+        await act(async () => {
+            ref.current!.setSelection({ start: 99, end: 120 });
+        });
+
+        // 'hello'.length === 5
+        expect(mockSetSelection).toHaveBeenCalledWith(5, 5);
+    });
 
     it('measureInWindow calls the underlying TextInput measureInWindow with 4 numeric arguments', async () => {
         const { ref, mockMeasureInWindow } = await renderNativeWithHandle();

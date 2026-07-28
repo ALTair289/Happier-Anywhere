@@ -15,6 +15,13 @@ const MIN_CARET_HEIGHT = 16;
 /**
  * Pure, unit-testable math: transforms input-local selection coordinates
  * into a window-relative CaretRect using the input's window offset.
+ *
+ * `inputScroll` is required, not defaulted: iOS reports the caret through
+ * `UITextView.caretRect(for:)`, which is CONTENT-relative, so the input's own
+ * scroll offset must come back out. Omitting it left the caret anchor too far
+ * down by exactly the scroll amount once the composer clamped at max height —
+ * the autocomplete menu then covered the line holding the trigger character.
+ * The web sibling subtracts `scrollLeft`/`scrollTop` for the same reason.
  */
 export function computeNativeCaretRect(
     inputOffset: Readonly<{ x: number; y: number }>,
@@ -22,11 +29,12 @@ export function computeNativeCaretRect(
         start: Readonly<{ x: number; y: number }>;
         end: Readonly<{ x: number; y: number }>;
     }>,
+    inputScroll: Readonly<{ x: number; y: number }>,
 ): CaretRect {
     const rawHeight = selection.end.y - selection.start.y;
     return {
-        left: inputOffset.x + selection.start.x,
-        top: inputOffset.y + selection.start.y,
+        left: inputOffset.x + selection.start.x - inputScroll.x,
+        top: inputOffset.y + selection.start.y - inputScroll.y,
         height: Math.max(MIN_CARET_HEIGHT, rawHeight),
     };
 }
@@ -74,6 +82,7 @@ export function useTextInputCaretRect(input: UseTextInputCaretRectInput): CaretR
                 setRect(computeNativeCaretRect(
                     { x: ax, y: ay },
                     selection,
+                    handle.getScrollOffset(),
                 ));
             });
         },
