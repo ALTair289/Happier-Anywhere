@@ -39,6 +39,10 @@ import {
 } from '@/sync/domains/models/favoriteModelSelections';
 import { resolveNewSessionConnectedServicesBindingsForAgent } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
 import { stableJsonStringify } from '@/utils/json/stableJsonStringify';
+import {
+    readNonBlankSessionControlIdentifier,
+    readSessionControlValueId,
+} from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 type EngineSelection = Readonly<{
     modelId: string;
@@ -71,6 +75,22 @@ function normalizeConfigOverrides(overrides: Readonly<Record<string, string>> | 
     return overrides ?? {};
 }
 
+function buildSessionConfigOptionOverrides(
+    configOverrides: Readonly<Record<string, string>>,
+    updatedAt: number,
+) {
+    if (Object.keys(configOverrides).length === 0) return null;
+    return buildAcpConfigOptionOverridesV1({
+        updatedAt,
+        overrides: Object.fromEntries(
+            Object.entries(configOverrides).map(([configId, value]) => [
+                configId,
+                { updatedAt, value },
+            ]),
+        ),
+    });
+}
+
 function backendEntrySupportsSessionModeSelection(entry: ResolvedBackendCatalogEntry | null): boolean {
     if (!entry) return true;
     if (!isAgentId(entry.providerAgentId)) return true;
@@ -82,8 +102,7 @@ function normalizeSessionModeIdForEntry(
     sessionModeId: string | null | undefined,
 ): string | null {
     if (!backendEntrySupportsSessionModeSelection(entry)) return null;
-    const trimmed = typeof sessionModeId === 'string' ? sessionModeId.trim() : '';
-    return trimmed.length > 0 ? trimmed : 'default';
+    return readNonBlankSessionControlIdentifier(sessionModeId) ?? 'default';
 }
 
 function areEngineSelectionsEqual(left: EngineSelectionLike, right: EngineSelectionLike): boolean {
@@ -193,6 +212,12 @@ function buildFavoriteBackendTargetKeysSignature(favoriteTargetKeys: ReadonlyArr
     } catch {
         return 'unserializable';
     }
+}
+
+function buildCurrentConfigOverridesSignature(params: Readonly<{
+    configOverrides: Readonly<Record<string, string>>;
+}>): string {
+    return stableJsonStringify(params);
 }
 
 function buildFavoriteModelSelectionsSignature(favorites: readonly FavoriteModelSelectionV1[]): string {
@@ -347,8 +372,11 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
                 sessionModeId: normalizeSessionModeIdForEntry(entry, params.acpSessionModeId),
                 configOverrides: Object.fromEntries(
                     Object.entries(params.sessionConfigOptionOverrides?.overrides ?? {})
-                        .map(([configId, override]) => [configId, typeof override?.value === 'string' ? override.value.trim() : ''])
-                        .filter(([, value]) => value.length > 0),
+                        .map(([configId, override]) => [
+                            readNonBlankSessionControlIdentifier(configId) ?? '',
+                            readSessionControlValueId(override?.value) ?? '',
+                        ])
+                        .filter(([configId, value]) => configId.length > 0 && value.length > 0),
                 ),
             };
         }
@@ -367,8 +395,11 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
             sessionModeId: normalizeSessionModeIdForEntry(entry, remembered?.acpSessionModeId),
             configOverrides: Object.fromEntries(
                 Object.entries(remembered?.sessionConfigOptionOverrides?.overrides ?? {})
-                    .map(([configId, override]) => [configId, typeof override?.value === 'string' ? override.value.trim() : ''])
-                    .filter(([, value]) => value.length > 0),
+                    .map(([configId, override]) => [
+                        readNonBlankSessionControlIdentifier(configId) ?? '',
+                        readSessionControlValueId(override?.value) ?? '',
+                    ])
+                    .filter(([configId, value]) => configId.length > 0 && value.length > 0),
             ),
         };
     }, [
@@ -422,17 +453,7 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
         params.setModelMode(selection.modelId as ModelMode);
         params.setAcpSessionModeId(nextSessionModeId);
         const updatedAt = Date.now();
-        const sessionConfigOptionOverrides = Object.keys(nextConfigOverrides).length === 0
-            ? null
-            : buildAcpConfigOptionOverridesV1({
-                updatedAt,
-                overrides: Object.fromEntries(
-                    Object.entries(nextConfigOverrides).map(([configId, value]) => [
-                        configId,
-                        { updatedAt, value },
-                    ]),
-                ),
-        });
+        const sessionConfigOptionOverrides = buildSessionConfigOptionOverrides(nextConfigOverrides, updatedAt);
         params.onRememberEngineSelection?.(entry.target, {
             modelId: selection.modelId,
             acpSessionModeId: nextSessionModeId,
@@ -735,9 +756,21 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
         () => buildFavoriteBackendTargetKeysSignature(params.favoriteBackendTargetKeys ?? []),
         [params.favoriteBackendTargetKeys],
     );
+    const currentConfigOverridesSignature = React.useMemo(() => buildCurrentConfigOverridesSignature({
+        configOverrides: Object.fromEntries(
+            Object.entries(params.sessionConfigOptionOverrides?.overrides ?? {})
+                .map(([configId, override]) => [
+                    readNonBlankSessionControlIdentifier(configId) ?? '',
+                    readSessionControlValueId(override?.value) ?? '',
+                ])
+                .filter(([configId, value]) => configId.length > 0 && value.length > 0),
+        ),
+    }), [
+        params.sessionConfigOptionOverrides?.overrides,
+    ]);
     const agentPickerOptionsSignature = React.useMemo(
-        () => `${buildAgentPickerOptionsSignature(agentPickerOptions)}|favorite-models:${favoriteModelSelectionsSignature}|favorite-backends:${favoriteBackendTargetKeysSignature}`,
-        [agentPickerOptions, favoriteBackendTargetKeysSignature, favoriteModelSelectionsSignature],
+        () => `${buildAgentPickerOptionsSignature(agentPickerOptions)}|favorite-models:${favoriteModelSelectionsSignature}|favorite-backends:${favoriteBackendTargetKeysSignature}|config-overrides:${currentConfigOverridesSignature}`,
+        [agentPickerOptions, currentConfigOverridesSignature, favoriteBackendTargetKeysSignature, favoriteModelSelectionsSignature],
     );
     const stableAgentPickerOptions = useStableValueBySignature(
         agentPickerOptions,

@@ -124,7 +124,7 @@ export interface NewSessionWizardAgentProps {
     acpConfigOptions?: React.ComponentProps<typeof AgentInput>['acpConfigOptionsOverride'];
     acpConfigOptionsProbe?: React.ComponentProps<typeof AgentInput>['acpConfigOptionsOverrideProbe'];
     acpConfigOptionOverrides?: AcpConfigOptionOverridesV1 | null;
-    setAcpConfigOptionOverride?: (configId: string, value: string) => void;
+    setSessionConfigOptionOverride?: (configId: string, value: string) => void;
     modelMode: ModelMode | undefined;
     setModelMode: (mode: ModelMode) => void;
     selectedIndicatorColor: string;
@@ -597,7 +597,7 @@ export const NewSessionWizard = React.memo(function NewSessionWizard(props: NewS
                                         acpConfigOptionsOverride={props.agent.acpConfigOptions}
                                         acpConfigOptionsOverrideProbe={props.agent.acpConfigOptionsProbe}
                                         acpConfigOptionOverridesOverride={props.agent.acpConfigOptionOverrides ?? null}
-                                        onAcpConfigOptionChange={props.agent.setAcpConfigOptionOverride}
+                                        onSessionConfigOptionChange={props.agent.setSessionConfigOptionOverride}
                                         connectionStatus={connectionStatus}
                                         machineName={selectedMachine?.metadata?.displayName || selectedMachine?.metadata?.host}
                                         machinePopover={props.footer.machinePopover}

@@ -59,7 +59,7 @@ export type NewSessionSimplePanelProps = Readonly<{
     acpConfigOptions?: React.ComponentProps<typeof AgentInput>['acpConfigOptionsOverride'];
     acpConfigOptionsProbe?: React.ComponentProps<typeof AgentInput>['acpConfigOptionsOverrideProbe'];
     acpConfigOptionOverrides?: AcpConfigOptionOverridesV1 | null;
-    setAcpConfigOptionOverride?: (configId: string, value: string) => void;
+    setSessionConfigOptionOverride?: (configId: string, value: string) => void;
     connectionStatus: React.ComponentProps<typeof AgentInput>['connectionStatus'];
     machineName: string | undefined;
     machinePopover?: React.ComponentProps<typeof AgentInput>['machinePopover'];
@@ -238,7 +238,7 @@ function NewSessionSimplePanelComposer({
                         acpConfigOptionsOverride={props.acpConfigOptions}
                         acpConfigOptionsOverrideProbe={props.acpConfigOptionsProbe}
                         acpConfigOptionOverridesOverride={props.acpConfigOptionOverrides ?? null}
-                        onAcpConfigOptionChange={props.setAcpConfigOptionOverride}
+                        onSessionConfigOptionChange={props.setSessionConfigOptionOverride}
                         connectionStatus={props.connectionStatus}
                         machineName={props.machineName}
                         machinePopover={props.machinePopover}

@@ -30,6 +30,7 @@ import { parseCheckoutCreationDraft } from '@/sync/domains/state/newSessionCheck
 import type { NewSessionDraft } from '@/sync/domains/state/persistence';
 import type { Session } from '@/sync/domains/state/storageTypes';
 import type { SpawnSessionOptions } from '@/sync/domains/session/spawn/spawnSessionPayload';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 import type { SessionAuthoringDraft } from './sessionAuthoringDraft';
 
@@ -689,7 +690,7 @@ export function buildAutomationTemplateFromSessionAuthoringDraft(draft: SessionA
         ...(normalizeOptionalString(draft.resumeSessionId) ? { resume: draft.resumeSessionId!.trim() } : {}),
         ...(normalizeOptionalString(draft.permissionMode) ? { permissionMode: draft.permissionMode!.trim() } : {}),
         ...(typeof draft.permissionModeUpdatedAt === 'number' ? { permissionModeUpdatedAt: draft.permissionModeUpdatedAt } : {}),
-        ...(normalizeOptionalString(draft.modelId) ? { modelId: draft.modelId!.trim() } : {}),
+        ...(readNonBlankSessionControlIdentifier(draft.modelId) ? { modelId: draft.modelId! } : {}),
         ...(typeof draft.modelUpdatedAt === 'number' ? { modelUpdatedAt: draft.modelUpdatedAt } : {}),
         ...(draft.mcpSelection ? { mcpSelection: draft.mcpSelection } : {}),
         ...(draft.connectedServices !== undefined && draft.connectedServices !== null ? { connectedServices: draft.connectedServices } : {}),
@@ -698,7 +699,7 @@ export function buildAutomationTemplateFromSessionAuthoringDraft(draft: SessionA
         ...(draft.windowsRemoteSessionConsole ? { windowsRemoteSessionConsole: draft.windowsRemoteSessionConsole } : {}),
         ...(normalizeOptionalString(draft.windowsTerminalWindowName) ? { windowsTerminalWindowName: draft.windowsTerminalWindowName!.trim() } : {}),
         ...(codexBackendMode ? { codexBackendMode } : {}),
-        ...(normalizeOptionalString(draft.acpSessionModeId) ? { agentModeId: draft.acpSessionModeId!.trim() } : {}),
+        ...(readNonBlankSessionControlIdentifier(draft.acpSessionModeId) ? { agentModeId: draft.acpSessionModeId! } : {}),
         ...(draft.targetType === 'existing_session' && normalizeOptionalString(draft.existingSessionId)
             ? { existingSessionId: draft.existingSessionId!.trim() }
             : {}),
@@ -750,15 +751,15 @@ export function buildSpawnSessionOptionsFromAuthoringDraft(params: Readonly<{
         ...(typeof params.draft.permissionModeUpdatedAt === 'number'
             ? { permissionModeUpdatedAt: params.draft.permissionModeUpdatedAt }
             : {}),
-        ...(normalizeOptionalString(params.draft.acpSessionModeId)
+        ...(readNonBlankSessionControlIdentifier(params.draft.acpSessionModeId)
             ? {
-                agentModeId: params.draft.acpSessionModeId!.trim(),
+                agentModeId: params.draft.acpSessionModeId!,
                 ...(typeof params.agentModeUpdatedAt === 'number' && Number.isFinite(params.agentModeUpdatedAt)
                     ? { agentModeUpdatedAt: params.agentModeUpdatedAt }
                     : {}),
             }
             : {}),
-        ...(normalizeOptionalString(params.draft.modelId) ? { modelId: params.draft.modelId!.trim() } : {}),
+        ...(readNonBlankSessionControlIdentifier(params.draft.modelId) ? { modelId: params.draft.modelId! } : {}),
         ...(typeof params.draft.modelUpdatedAt === 'number' ? { modelUpdatedAt: params.draft.modelUpdatedAt } : {}),
         ...(params.draft.sessionConfigOptionOverrides ? { sessionConfigOptionOverrides: params.draft.sessionConfigOptionOverrides } : {}),
         ...(codexBackendMode ? { codexBackendMode, experimentalCodexAcp: codexBackendMode === 'acp' } : {}),

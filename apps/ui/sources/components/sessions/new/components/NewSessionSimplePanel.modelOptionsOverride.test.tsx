@@ -690,7 +690,7 @@ describe('NewSessionSimplePanel (modelOptionsOverride)', () => {
                                 speed: { updatedAt: 123, value: 'fast' },
                             },
                         },
-                        setAcpConfigOptionOverride: onConfigChange,
+                        setSessionConfigOptionOverride: onConfigChange,
                         connectionStatus: undefined,
                         machineName: undefined,
                         selectedPath: '',
@@ -723,9 +723,9 @@ describe('NewSessionSimplePanel (modelOptionsOverride)', () => {
                 },
             });
             expect(props.acpConfigOptionsOverrideProbe).toEqual({ phase: 'idle', onRefresh: expect.any(Function) });
-            expect(typeof props.onAcpConfigOptionChange).toBe('function');
+            expect(typeof props.onSessionConfigOptionChange).toBe('function');
 
-            props.onAcpConfigOptionChange('speed', 'standard');
+            props.onSessionConfigOptionChange('speed', 'standard');
             expect(onConfigChange).toHaveBeenCalledWith('speed', 'standard');
         } finally {
             act(() => {

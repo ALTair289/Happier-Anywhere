@@ -376,7 +376,7 @@ describe('NewSessionWizard agent input chips', () => {
                 ],
             },
         ];
-        props.agent.setAcpConfigOptionOverride = vi.fn();
+        props.agent.setSessionConfigOptionOverride = vi.fn();
 
         AgentInputMock.mockClear();
 

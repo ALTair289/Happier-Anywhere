@@ -21,7 +21,7 @@ type PersistedDraft = Readonly<{
     }> | null;
 }>;
 
-let latestSetAcpConfigOptionOverride: ((configId: string, value: string) => void) | null = null;
+let latestSetSessionConfigOptionOverride: ((configId: string, value: string) => void) | null = null;
 
 function HookProbe(props: Readonly<{
     agentType?: 'claude' | 'codex';
@@ -37,7 +37,7 @@ function HookProbe(props: Readonly<{
         backendTarget: props.backendTarget ?? { kind: 'builtInAgent', agentId: props.agentType ?? 'claude' },
     };
     const state = useNewSessionAgentAuthoringOptionsState(params);
-    latestSetAcpConfigOptionOverride = state.setAcpConfigOptionOverride;
+    latestSetSessionConfigOptionOverride = state.setSessionConfigOptionOverride;
 
     return (
         <>
@@ -55,6 +55,24 @@ function HookProbe(props: Readonly<{
 }
 
 describe('useNewSessionAgentAuthoringOptionsState', () => {
+    it('preserves exact nonblank opaque mode identifiers from draft and remembered state', async () => {
+        const draft = await renderScreen(<HookProbe
+            persistedDraft={{ modelId: 'default', acpSessionModeId: ' plan\t' }}
+        />);
+        expect(draft.findByTestId('session-mode-id')?.props.children).toBe(' plan\t');
+
+        const remembered = await renderScreen(<HookProbe
+            persistedDraft={null}
+            rememberedSelection={{
+                modelId: null,
+                acpSessionModeId: ' ask\t',
+                sessionConfigOptionOverrides: null,
+                updatedAt: 1,
+            }}
+        />);
+        expect(remembered.findByTestId('session-mode-id')?.props.children).toBe(' ask\t');
+    });
+
     it('seeds model mode, session mode, and config options from remembered engine selection when no draft value exists', async () => {
         const screen = await renderScreen(<HookProbe
             persistedDraft={null}
@@ -226,7 +244,7 @@ describe('useNewSessionAgentAuthoringOptionsState', () => {
             const firstJson = screen.findByTestId('overrides-json')?.props.children;
 
             await act(async () => {
-                latestSetAcpConfigOptionOverride?.('service_tier', 'fast');
+                latestSetSessionConfigOptionOverride?.('service_tier', 'fast');
             });
 
             const secondJson = screen.findByTestId('overrides-json')?.props.children;
@@ -235,5 +253,19 @@ describe('useNewSessionAgentAuthoringOptionsState', () => {
         } finally {
             nowSpy.mockRestore();
         }
+    });
+
+    it('persists exact nonblank config identifiers and values without trimming', async () => {
+        const screen = await renderScreen(<HookProbe persistedDraft={null} />);
+
+        await act(async () => {
+            latestSetSessionConfigOptionOverride?.(' effort ', ' high ');
+        });
+
+        expect(JSON.parse(String(screen.findByTestId('overrides-json')?.props.children))).toMatchObject({
+            overrides: {
+                ' effort ': { value: ' high ' },
+            },
+        });
     });
 });

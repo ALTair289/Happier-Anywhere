@@ -68,6 +68,10 @@ import {
     buildNewSessionAuthoringDraftFromPersistedDraft,
     buildNewSessionAuthoringDraftFromTempData,
 } from '@/components/sessions/authoring/draft/sessionAuthoringDraftAdapters';
+import {
+    readNonBlankSessionControlIdentifier,
+    readSessionControlValueId,
+} from '@/sync/domains/sessionControl/opaqueIdentifiers';
 import { useNewSessionServerTargetState } from '@/components/sessions/new/hooks/serverTarget/useNewSessionServerTargetState';
 import { useNewSessionActiveServerSource } from '@/components/sessions/new/hooks/serverTarget/useNewSessionActiveServerSource';
 import { useNewSessionBackendTargetState } from '@/components/sessions/new/hooks/screenModel/useNewSessionBackendTargetState';
@@ -621,7 +625,7 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         setAcpSessionModeId,
         sessionConfigOptionOverrides,
         setSessionConfigOptionOverrides,
-        setAcpConfigOptionOverride,
+        setSessionConfigOptionOverride,
         mcpSelection,
         setMcpSelection,
     } = useNewSessionAgentAuthoringOptionsState({
@@ -674,13 +678,13 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         setSessionConfigOptionOverrides(nextOverrides);
         rememberCurrentEngineSelection({ sessionConfigOptionOverrides: nextOverrides });
     }, [rememberCurrentEngineSelection, sessionConfigOptionOverrides, setSessionConfigOptionOverrides]);
-    const setRememberedAcpConfigOptionOverride = React.useCallback((configId: string, value: string) => {
-        const normalizedConfigId = typeof configId === 'string' ? configId.trim() : '';
-        const normalizedValue = typeof value === 'string' ? value.trim() : '';
+    const setRememberedSessionConfigOptionOverride = React.useCallback((configId: string, value: string) => {
+        const normalizedConfigId = readNonBlankSessionControlIdentifier(configId) ?? '';
+        const normalizedValue = readSessionControlValueId(value) ?? '';
         if (!normalizedConfigId || !normalizedValue) return;
 
         const currentRawValue = sessionConfigOptionOverrides?.overrides?.[normalizedConfigId]?.value;
-        const currentValue = typeof currentRawValue === 'string' ? currentRawValue.trim() : '';
+        const currentValue = readSessionControlValueId(currentRawValue) ?? '';
         if (currentValue === normalizedValue) return;
 
         const updatedAt = Date.now();
@@ -1881,7 +1885,7 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         acpConfigOptions: acpConfigOptions ?? undefined,
         acpConfigOptionsProbe,
         acpConfigOptionOverrides: sessionConfigOptionOverrides,
-        setAcpConfigOptionOverride: setRememberedAcpConfigOptionOverride,
+        setSessionConfigOptionOverride: setRememberedSessionConfigOptionOverride,
         modelMode,
         setModelMode: setRememberedModelMode,
         selectedIndicatorColor,
@@ -1984,7 +1988,7 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         acpConfigOptions: acpConfigOptions ?? undefined,
         acpConfigOptionsProbe,
         acpConfigOptionOverrides: sessionConfigOptionOverrides,
-        setAcpConfigOptionOverride: setRememberedAcpConfigOptionOverride,
+        setSessionConfigOptionOverride: setRememberedSessionConfigOptionOverride,
         connectionStatus,
         machineName: selectedMachine?.metadata?.displayName || selectedMachine?.metadata?.host,
         machinePopover,

@@ -12,6 +12,10 @@ import {
     type BackendTargetRefV1,
 } from '@happier-dev/protocol';
 import type { RememberedEngineSelectionV1 } from '@/sync/domains/sessionAuthoring/rememberedEngineSelections';
+import {
+    readNonBlankSessionControlIdentifier,
+    readSessionControlValueId,
+} from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 type PersistedAuthoringDraftLike = Readonly<{
     agentId?: string | null;
@@ -91,7 +95,7 @@ function resolveDraftBackendTargetOwnership(
 }
 
 function isKnownStaticModelForDifferentAgent(modelId: string, agentType: AgentId): boolean {
-    const normalizedModelId = modelId.trim();
+    const normalizedModelId = readNonBlankSessionControlIdentifier(modelId) ?? '';
     if (!normalizedModelId || normalizedModelId === 'default') return false;
     for (const candidateAgentId of AGENT_IDS) {
         const candidateCore = getAgentCore(candidateAgentId);
@@ -111,7 +115,7 @@ function readScopedDraftModelId(
     agentType: AgentId,
     backendTarget: BackendTargetRefV1,
 ): string | null {
-    const modelId = typeof draft?.modelId === 'string' ? draft.modelId.trim() : '';
+    const modelId = readNonBlankSessionControlIdentifier(draft?.modelId) ?? '';
     if (!modelId) return null;
     const ownership = resolveDraftBackendTargetOwnership(draft, backendTarget);
     if (ownership === 'mismatch') return null;
@@ -129,8 +133,7 @@ function readScopedAcpSessionModeId(
     const raw = draft.acpSessionModeId;
     if (raw === null) return null;
     if (typeof raw !== 'string') return undefined;
-    const trimmed = raw.trim();
-    return trimmed.length > 0 ? trimmed : null;
+    return readNonBlankSessionControlIdentifier(raw);
 }
 
 export function useNewSessionAgentAuthoringOptionsState(params: Readonly<{
@@ -146,7 +149,7 @@ export function useNewSessionAgentAuthoringOptionsState(params: Readonly<{
     setAcpSessionModeId: React.Dispatch<React.SetStateAction<string | null>>;
     sessionConfigOptionOverrides: AcpConfigOptionOverridesV1 | null;
     setSessionConfigOptionOverrides: React.Dispatch<React.SetStateAction<AcpConfigOptionOverridesV1 | null>>;
-    setAcpConfigOptionOverride: (configId: string, value: string) => void;
+    setSessionConfigOptionOverride: (configId: string, value: string) => void;
     mcpSelection: SessionMcpSelectionV1;
     setMcpSelection: React.Dispatch<React.SetStateAction<SessionMcpSelectionV1>>;
 }> {
@@ -182,8 +185,7 @@ export function useNewSessionAgentAuthoringOptionsState(params: Readonly<{
         if (persisted !== undefined) return persisted;
         const remembered = params.rememberedEngineSelection?.acpSessionModeId;
         if (typeof remembered === 'string') {
-            const trimmed = remembered.trim();
-            return trimmed.length > 0 ? trimmed : null;
+            return readNonBlankSessionControlIdentifier(remembered);
         }
         return null;
     }, [
@@ -230,13 +232,13 @@ export function useNewSessionAgentAuthoringOptionsState(params: Readonly<{
 
     const [mcpSelection, setMcpSelection] = React.useState<SessionMcpSelectionV1>(() => initialMcpSelection);
 
-    const setAcpConfigOptionOverride = React.useCallback((configId: string, value: string) => {
-        const normalizedConfigId = typeof configId === 'string' ? configId.trim() : '';
-        const normalizedValue = typeof value === 'string' ? value.trim() : '';
+    const setSessionConfigOptionOverride = React.useCallback((configId: string, value: string) => {
+        const normalizedConfigId = readNonBlankSessionControlIdentifier(configId) ?? '';
+        const normalizedValue = readSessionControlValueId(value) ?? '';
         if (!normalizedConfigId || !normalizedValue) return;
         setSessionConfigOptionOverrides((current) => {
             const currentRawValue = current?.overrides?.[normalizedConfigId]?.value;
-            const currentValue = typeof currentRawValue === 'string' ? currentRawValue.trim() : '';
+            const currentValue = readSessionControlValueId(currentRawValue) ?? '';
             if (currentValue === normalizedValue) {
                 return current;
             }
@@ -263,7 +265,7 @@ export function useNewSessionAgentAuthoringOptionsState(params: Readonly<{
         setAcpSessionModeId,
         sessionConfigOptionOverrides,
         setSessionConfigOptionOverrides,
-        setAcpConfigOptionOverride,
+        setSessionConfigOptionOverride,
         mcpSelection,
         setMcpSelection,
     };

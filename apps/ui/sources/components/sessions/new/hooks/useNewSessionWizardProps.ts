@@ -103,7 +103,7 @@ export function useNewSessionWizardProps(params: Readonly<{
     acpConfigOptions?: NewSessionWizardAgentProps['acpConfigOptions'];
     acpConfigOptionsProbe?: NewSessionWizardAgentProps['acpConfigOptionsProbe'];
     acpConfigOptionOverrides?: NewSessionWizardAgentProps['acpConfigOptionOverrides'];
-    setAcpConfigOptionOverride?: NewSessionWizardAgentProps['setAcpConfigOptionOverride'];
+    setSessionConfigOptionOverride?: NewSessionWizardAgentProps['setSessionConfigOptionOverride'];
     modelMode: ModelMode | undefined;
     setModelMode: (mode: ModelMode) => void;
     selectedIndicatorColor: string;
@@ -355,7 +355,7 @@ export function useNewSessionWizardProps(params: Readonly<{
             acpConfigOptions: params.acpConfigOptions,
             acpConfigOptionsProbe: params.acpConfigOptionsProbe,
             acpConfigOptionOverrides: params.acpConfigOptionOverrides,
-            setAcpConfigOptionOverride: params.setAcpConfigOptionOverride,
+            setSessionConfigOptionOverride: params.setSessionConfigOptionOverride,
             modelMode: params.modelMode,
             setModelMode: params.setModelMode,
             selectedIndicatorColor: params.selectedIndicatorColor,
@@ -391,7 +391,7 @@ export function useNewSessionWizardProps(params: Readonly<{
         params.selectedBackendEntry,
         params.setFavoriteModelSelections,
         params.setAgentType,
-        params.setAcpConfigOptionOverride,
+        params.setSessionConfigOptionOverride,
         params.setAcpSessionModeId,
         params.setModelMode,
         params.handlePermissionModeChange,
