@@ -97,12 +97,6 @@ describe('SessionWarningActionBanner', () => {
                     label: 'Check limit now',
                     accessibilityLabel: 'Check limit now',
                     onPress: vi.fn(),
-                }, {
-                    key: 'remember',
-                    testID: 'warning-remember',
-                    label: 'Always wait and resume',
-                    accessibilityLabel: 'Always wait and resume',
-                    onPress: vi.fn(),
                 }]}
             />,
         );
@@ -118,11 +112,104 @@ describe('SessionWarningActionBanner', () => {
         expect(flattenStyle(screen.findByTestId('warning-actions-row')?.props.style)).toMatchObject({
             flexDirection: 'row',
             flexWrap: 'wrap',
-            flexShrink: 0,
+            flexShrink: 1,
             justifyContent: 'flex-end',
         });
         expect(flattenStyle(screen.findByTestId('warning-primary')?.props.style({ pressed: false })).maxWidth).toBe('100%');
-        expect(flattenStyle(screen.findByTestId('warning-remember')?.props.style({ pressed: false })).maxWidth).toBe('100%');
+        expect(flattenStyle(screen.findByTestId('warning-check')?.props.style({ pressed: false })).maxWidth).toBe('100%');
+    });
+
+    it('wraps a long action run into a right-aligned block beside the copy on desktop', async () => {
+        const { SessionWarningActionBanner } = await import('./SessionWarningActionBanner');
+
+        const screen = await renderScreen(
+            <SessionWarningActionBanner
+                testID="warning"
+                actionTestID="warning-primary"
+                title="Usage limit reached"
+                body="This provider is asking the session to wait until 18.5.2026, 11:40:00 before continuing."
+                actionLabel="Stop waiting"
+                actionAccessibilityLabel="Stop waiting"
+                onActionPress={vi.fn()}
+                secondaryActions={[{
+                    key: 'apply',
+                    testID: 'warning-apply',
+                    label: 'Apply reset',
+                    accessibilityLabel: 'Apply reset',
+                    onPress: vi.fn(),
+                }, {
+                    key: 'check',
+                    testID: 'warning-check',
+                    label: 'Check limit now',
+                    accessibilityLabel: 'Check limit now',
+                    onPress: vi.fn(),
+                }, {
+                    key: 'remember',
+                    testID: 'warning-remember',
+                    label: 'Ask each time',
+                    accessibilityLabel: 'Ask each time',
+                    onPress: vi.fn(),
+                }]}
+            />,
+        );
+
+        // Four actions stay beside the copy on a wide banner, but the block is capped and
+        // shrinkable so it wraps into a right-aligned grid instead of starving the message or
+        // dropping below it and leaving the row half empty.
+        expect(flattenStyle(screen.findByTestId('warning')?.props.style)).toMatchObject({
+            flexDirection: 'row',
+            alignItems: 'center',
+        });
+        expect(flattenStyle(screen.findByTestId('warning-copy-row')?.props.style)).toMatchObject({
+            flex: 1,
+        });
+        expect(flattenStyle(screen.findByTestId('warning-actions-row')?.props.style)).toMatchObject({
+            flexDirection: 'row',
+            flexWrap: 'wrap',
+            flexShrink: 1,
+            maxWidth: '50%',
+            justifyContent: 'flex-end',
+        });
+        expect(flattenStyle(screen.findByTestId('warning-actions-row')?.props.style).width).toBeUndefined();
+    });
+
+    it('stacks the action run below the copy at full width on narrow screens', async () => {
+        windowDimensionsState.width = 390;
+        const { SessionWarningActionBanner } = await import('./SessionWarningActionBanner');
+
+        const screen = await renderScreen(
+            <SessionWarningActionBanner
+                testID="warning"
+                actionTestID="warning-primary"
+                title="Usage limit reached"
+                body="This provider is asking the session to wait before continuing."
+                actionLabel="Stop waiting"
+                actionAccessibilityLabel="Stop waiting"
+                onActionPress={vi.fn()}
+                secondaryActions={[{
+                    key: 'check',
+                    testID: 'warning-check',
+                    label: 'Check limit now',
+                    accessibilityLabel: 'Check limit now',
+                    onPress: vi.fn(),
+                }, {
+                    key: 'remember',
+                    testID: 'warning-remember',
+                    label: 'Ask each time',
+                    accessibilityLabel: 'Ask each time',
+                    onPress: vi.fn(),
+                }]}
+            />,
+        );
+
+        expect(flattenStyle(screen.findByTestId('warning')?.props.style)).toMatchObject({
+            flexDirection: 'column',
+        });
+        expect(flattenStyle(screen.findByTestId('warning-actions-row')?.props.style)).toMatchObject({
+            width: '100%',
+            maxWidth: '100%',
+            justifyContent: 'flex-end',
+        });
     });
 
     it('wraps action buttons to a separate row on mobile', async () => {
