@@ -6300,6 +6300,10 @@ export const es: TranslationStructure = {
       buildDescription: "Comportamiento predeterminado",
       plan: "Planificación",
       planDescription: "Pensar primero",
+        running: ({ model }: { model: string }) => `En ejecución: ${model}`,
+        lastUsed: ({ model }: { model: string }) => `Último usado: ${model}`,
+        lastReported: ({ model }: { model: string }) => `Último informado: ${model}`,
+        selectedForResume: "El modelo seleccionado se usará cuando se reanude esta sesión.",
     },
     acp: {
       modeSectionTitle: "Modo",

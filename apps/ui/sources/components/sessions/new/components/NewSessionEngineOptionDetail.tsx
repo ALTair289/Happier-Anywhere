@@ -62,19 +62,6 @@ function normalizeSelectedOptionId(value: string | null | undefined): string {
     return readNonBlankSessionControlIdentifier(value) ?? 'default';
 }
 
-function resolveEffectiveModelLabel(
-    modelOptions: ReadonlyArray<{ value: string; label: string }>,
-    selectedModelId: string,
-): string {
-    const matched = modelOptions.find((option) => option.value === selectedModelId);
-    if (matched) {
-        return matched.label;
-    }
-    return selectedModelId === 'default'
-        ? t('agentInput.model.useCliSettings')
-        : selectedModelId;
-}
-
 function areSelectedConfigOverridesEqual(
     current: Readonly<Record<string, string>>,
     next: Readonly<Record<string, string>>,
@@ -236,11 +223,6 @@ export function NewSessionEngineOptionDetail(props: NewSessionEngineOptionDetail
         : props.backendTarget.agentId;
     const providerSupportsFreeform = providerCore.model.supportsFreeform === true;
     const canEnterCustomModel = preflightModels?.supportsFreeform === true || providerSupportsFreeform;
-    const effectiveModelLabel = React.useMemo(
-        () => resolveEffectiveModelLabel(modelOptions, selectedModelId),
-        [modelOptions, selectedModelId],
-    );
-
     const configControls = React.useMemo(
         () => removeModelScopedConfigControls({
             controls: computeSessionConfigOptionControlsForProvider({
@@ -322,7 +304,6 @@ export function NewSessionEngineOptionDetail(props: NewSessionEngineOptionDetail
         <AgentInputEngineDetail
             modelOptions={modelOptions}
             selectedModelId={selectedModelId}
-            effectiveModelLabel={effectiveModelLabel}
             modelNotes={[]}
             modelEmptyText={t('agentInput.model.configureInCli')}
             canEnterCustomModel={canEnterCustomModel}

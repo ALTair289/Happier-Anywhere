@@ -5215,6 +5215,10 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
     machineLauncher: {
         showLess: '顯示更少',
         showAll: ({ count }: { count: number }) => `顯示全部 (${count} 個路徑)`,
+              running: ({ model }: { model: string }) => `執行中：${model}`,
+              lastUsed: ({ model }: { model: string }) => `上次使用：${model}`,
+              lastReported: ({ model }: { model: string }) => `上次回報：${model}`,
+              selectedForResume: '恢復此工作階段時將使用所選模型。',
         enterCustomPath: '輸入自訂路徑',
         offlineUnableToSpawn: '無法生成新工作階段，已離線',
     },

@@ -6634,6 +6634,10 @@ export const it: TranslationStructure = {
       buildDescription: "Comportamento predefinito",
       plan: "Pianifica",
       planDescription: "Pensa prima",
+        running: ({ model }: { model: string }) => `In esecuzione: ${model}`,
+        lastUsed: ({ model }: { model: string }) => `Ultimo utilizzo: ${model}`,
+        lastReported: ({ model }: { model: string }) => `Ultimo segnalato: ${model}`,
+        selectedForResume: "Il modello selezionato verrà usato alla ripresa di questa sessione.",
     },
     acp: {
       modeSectionTitle: "Modalità",

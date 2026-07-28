@@ -1331,6 +1331,7 @@ function resolveRouteHydrationRetryStatusKey(
 
 type SessionViewProps = Readonly<{
     id: string;
+            sessionActive={sessionRuntimeStatusSource.active === true}
     routeServerId?: string | null;
     routeHydrationState?: SessionRouteHydrationState | null;
     jumpToSeq?: number | null;

@@ -20,6 +20,9 @@ import { AgentInputSessionConfigOptionsSection } from "./AgentInputSessionConfig
 type AgentInputEngineModelOption = Readonly<{
   value: string;
   label: string;
+  icon?: React.ReactNode;
+  trailingStatusIcon?: React.ReactNode;
+  accessibilityLabel?: string;
   description: string;
   modelOptions?: ReadonlyArray<SessionConfigOption>;
 }>;
@@ -27,7 +30,7 @@ type AgentInputEngineModelOption = Readonly<{
 type AgentInputEngineDetailProps = Readonly<{
   modelOptions?: ReadonlyArray<AgentInputEngineModelOption>;
   selectedModelId?: string;
-  effectiveModelLabel?: string;
+  modelSummary?: React.ReactNode;
   modelNotes?: ReadonlyArray<string>;
   modelEmptyText?: string;
   canEnterCustomModel?: boolean;
@@ -150,11 +153,7 @@ export function AgentInputEngineDetail(props: AgentInputEngineDetailProps) {
             "model",
             <OptionPickerOverlay
               title={t("agentInput.model.title")}
-              effectiveLabel={
-                props.effectiveModelLabel ??
-                props.selectedModelId ??
-                t("agentInput.model.useCliSettings")
-              }
+              summary={props.modelSummary}
               notes={props.modelNotes ?? []}
               options={resolvedModelOptions}
               selectedValue={props.selectedModelId ?? "default"}

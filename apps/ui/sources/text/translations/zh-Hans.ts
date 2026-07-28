@@ -6090,6 +6090,10 @@ export const zhHans: TranslationStructure = {
       buildDescription: "默认行为",
       plan: "计划",
       planDescription: "先思考",
+      running: ({ model }: { model: string }) => `正在运行：${model}`,
+      lastUsed: ({ model }: { model: string }) => `上次使用：${model}`,
+      lastReported: ({ model }: { model: string }) => `上次报告：${model}`,
+      selectedForResume: "恢复此会话时将使用所选模型。",
     },
     acp: {
       modeSectionTitle: "模式",

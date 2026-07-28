@@ -321,6 +321,8 @@ interface AgentInputProps {
     modelOptionsOverrideProbe?: ModelPickerProbeState;
     metadata?: Metadata | null;
     onAbort?: () => void | Promise<void>;
+    /** Whether the existing session runtime is active. Omit for pre-session composers. */
+    sessionActive?: boolean;
     showAbortButton?: boolean;
     connectionStatus?: {
         text: string;
@@ -1944,17 +1946,49 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         });
     }, [agentId, props.metadata, props.modelMode]);
 
-    const effectiveModelLabel = React.useMemo(() => {
-        const found = findModelOptionForEffectiveModelId(modelOptions, effectiveModelPolicy.effectiveModelId);
+    const selectedModelLabel = React.useMemo(() => {
+        const found = findModelOptionForEffectiveModelId(modelOptions, effectiveModelPolicy.selectedModelId);
         if (found) {
-            return found.value === effectiveModelPolicy.effectiveModelId
+            return found.value === effectiveModelPolicy.selectedModelId
                 ? found.label
                 : t('agentInput.model.extendedContextLabel', { model: found.label });
         }
-        return effectiveModelPolicy.effectiveModelId === 'default'
+        return effectiveModelPolicy.selectedModelId === 'default'
             ? t('agentInput.model.useCliSettings')
-            : effectiveModelPolicy.effectiveModelId;
-    }, [effectiveModelPolicy.effectiveModelId, modelOptions]);
+            : effectiveModelPolicy.selectedModelId;
+    }, [effectiveModelPolicy.selectedModelId, modelOptions]);
+
+    const appliedModelPresentation = React.useMemo(() => {
+        const appliedModelId = effectiveModelPolicy.appliedModelId;
+        if (!appliedModelId) return null;
+        const found = findModelOptionForEffectiveModelId(modelOptions, appliedModelId);
+        const label = found
+            ? (found.value === appliedModelId
+                ? found.label
+                : t('agentInput.model.extendedContextLabel', { model: found.label }))
+            : appliedModelId;
+        const status = props.sessionActive === true
+            ? 'running'
+            : props.sessionActive === false
+                ? 'lastUsed'
+                : 'lastReported';
+        return {
+            optionValue: found?.value ?? appliedModelId,
+            iconName: props.sessionActive === true
+                ? 'play-circle-outline' as const
+                : props.sessionActive === false
+                    ? 'time-outline' as const
+                    : 'information-circle-outline' as const,
+            summary: t(`agentInput.model.${status}`, { model: label }),
+        };
+    }, [effectiveModelPolicy.appliedModelId, modelOptions, props.sessionActive]);
+
+    const modelNotes = React.useMemo(() => {
+        if (props.sessionActive === false) {
+            return [t('agentInput.model.selectedForResume')];
+        }
+        return effectiveModelPolicy.notes;
+    }, [effectiveModelPolicy.notes, props.sessionActive]);
 
     const canEnterCustomModel = React.useMemo(() => {
         return supportsFreeformModelSelectionForSession(agentId, props.metadata ?? null);
@@ -2095,8 +2129,8 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     ]);
 
     const selectedModelForControls = React.useMemo(() => {
-        return findModelOptionForEffectiveModelId(modelOptions, effectiveModelPolicy.effectiveModelId);
-    }, [effectiveModelPolicy.effectiveModelId, modelOptions]);
+        return findModelOptionForEffectiveModelId(modelOptions, effectiveModelPolicy.selectedModelId);
+    }, [effectiveModelPolicy.selectedModelId, modelOptions]);
 
     const selectedModelOptionControls = React.useMemo(() => {
         if (!props.onSessionConfigOptionChange) return null;
@@ -2112,7 +2146,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         // Extended-context (e.g. Claude `[1m]`) is a MODEL-ID VARIANT, not a config option:
         // the toggle is synthesized here and routed through the model-override pipeline.
         if (selectedModel.extendedContextModelId && props.onModelModeChange) {
-            const extendedSelected = effectiveModelPolicy.effectiveModelId === selectedModel.extendedContextModelId;
+            const extendedSelected = effectiveModelPolicy.selectedModelId === selectedModel.extendedContextModelId;
             const value = extendedSelected ? 'true' : 'false';
             baseControls.push({
                 option: {
@@ -2129,7 +2163,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         return baseControls.length > 0 ? baseControls : null;
     }, [
         agentId,
-        effectiveModelPolicy.effectiveModelId,
+        effectiveModelPolicy.selectedModelId,
         selectedModelForControls,
         props.acpConfigOptionOverridesOverride,
         props.onSessionConfigOptionChange,
@@ -2184,10 +2218,23 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                         ? t('agentInput.model.configureInCli')
                         : option.description,
                 ...(option.modelOptions ? { modelOptions: option.modelOptions } : {}),
+                ...(appliedModelPresentation?.optionValue === option.value
+                    ? {
+                        trailingStatusIcon: (
+                            <Ionicons
+                                name={appliedModelPresentation.iconName}
+                                size={16}
+                                color={theme.colors.text.secondary}
+                                accessibilityElementsHidden
+                            />
+                        ),
+                        accessibilityLabel: appliedModelPresentation.summary,
+                    }
+                    : {}),
             }))}
-            selectedModelId={effectiveModelPolicy.effectiveModelId}
-            effectiveModelLabel={effectiveModelLabel}
-            modelNotes={effectiveModelPolicy.notes}
+            selectedModelId={effectiveModelPolicy.selectedModelId}
+            modelSummary={appliedModelPresentation?.summary}
+            modelNotes={modelNotes}
             modelEmptyText={t('agentInput.model.configureInCli')}
             canEnterCustomModel={canEnterCustomModel}
             // Keep a single refresh affordance in the model section, but wire it to refresh all
@@ -2215,9 +2262,8 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     ), [
         acpConfigOptionControls,
         canEnterCustomModel,
-        effectiveModelLabel,
-        effectiveModelPolicy.effectiveModelId,
-        effectiveModelPolicy.notes,
+        effectiveModelPolicy.selectedModelId,
+        modelNotes,
         modelOptions,
         unifiedEnginePickerProbe,
         shouldShowModelOptionDescriptions,
@@ -2226,6 +2272,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         submitCustomModel,
         selectedModelOptionControls,
         handleSelectModelOptionValue,
+        appliedModelPresentation,
     ]);
 
     const hasInternalAgentPickerOptions = Boolean(
@@ -2233,6 +2280,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         && (props.onModelModeChange || hasSettingsAcpConfigSection),
     );
 
+        theme.colors.text.secondary,
     const internalAgentPickerOptions = React.useMemo<ReadonlyArray<AgentInputChipPickerOption>>(() => {
         if (!hasInternalAgentPickerOptions || !props.agentType) return [];
         return [{
@@ -2401,8 +2449,8 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         toggleSelectionOverlay,
     });
     const engineChipLabel = React.useMemo(() => {
-        return hasAgentPickerOptions ? effectiveModelLabel : resolvedAgentLabel;
-    }, [effectiveModelLabel, hasAgentPickerOptions, resolvedAgentLabel]);
+        return hasAgentPickerOptions ? selectedModelLabel : resolvedAgentLabel;
+    }, [hasAgentPickerOptions, resolvedAgentLabel, selectedModelLabel]);
     const hasRecipient = React.useMemo(() => {
         return (props.extraActionChips ?? []).some((chip) => chip.controlId === 'recipient');
     }, [props.extraActionChips]);

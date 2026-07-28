@@ -6314,6 +6314,10 @@ export const pl: TranslationStructure = {
       buildDescription: "Domyślne zachowanie",
       plan: "Planowanie",
       planDescription: "Najpierw pomyśl",
+        running: ({ model }: { model: string }) => `Uruchomiony: ${model}`,
+        lastUsed: ({ model }: { model: string }) => `Ostatnio używany: ${model}`,
+        lastReported: ({ model }: { model: string }) => `Ostatnio zgłoszony: ${model}`,
+        selectedForResume: "Wybrany model zostanie użyty po wznowieniu tej sesji.",
     },
     acp: {
       modeSectionTitle: "Tryb",

@@ -6429,6 +6429,10 @@ export const pt: TranslationStructure = {
       build: "Construir",
       buildDescription: "Comportamento padrão",
       plan: "Plano",
+        running: ({ model }: { model: string }) => `Em execução: ${model}`,
+        lastUsed: ({ model }: { model: string }) => `Usado por último: ${model}`,
+        lastReported: ({ model }: { model: string }) => `Último informado: ${model}`,
+        selectedForResume: "O modelo selecionado será usado quando esta sessão for retomada.",
       planDescription: "Pensar primeiro",
     },
     acp: {

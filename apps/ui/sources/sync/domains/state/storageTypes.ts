@@ -158,6 +158,12 @@ const MetadataObjectSchema = z.object({
     }).optional(),
     /**
      * ACP session configuration options (if supported by the provider's ACP agent).
+    sessionAppliedModelV1: z.object({
+        v: z.literal(1),
+        provider: z.string(),
+        updatedAt: z.number(),
+        modelId: z.string(),
+    }).optional(),
      */
     acpConfigOptionsV1: z.object({
         v: z.literal(1),

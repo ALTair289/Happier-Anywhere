@@ -6300,6 +6300,10 @@ export const ru: TranslationStructure = {
       buildDescription: "Поведение по умолчанию",
       plan: "План",
       planDescription: "Сначала подумать",
+        running: ({ model }: { model: string }) => `Сейчас используется: ${model}`,
+        lastUsed: ({ model }: { model: string }) => `Последняя использованная: ${model}`,
+        lastReported: ({ model }: { model: string }) => `Последняя сообщённая: ${model}`,
+        selectedForResume: "Выбранная модель будет использоваться после возобновления этой сессии.",
     },
     acp: {
       modeSectionTitle: "Режим",

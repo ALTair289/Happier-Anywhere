@@ -6563,6 +6563,10 @@ localTailscale: {
       buildDescription: "デフォルトの動作",
       plan: "プラン",
       planDescription: "最初に考える",
+      running: ({ model }: { model: string }) => `実行中: ${model}`,
+      lastUsed: ({ model }: { model: string }) => `前回使用: ${model}`,
+      lastReported: ({ model }: { model: string }) => `最終報告: ${model}`,
+      selectedForResume: "このセッションを再開すると、選択したモデルが使用されます。",
     },
     acp: {
       modeSectionTitle: "モード",

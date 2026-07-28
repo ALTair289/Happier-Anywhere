@@ -180,7 +180,7 @@ function mockCommonDeps() {
     }));
 
     vi.doMock('@/sync/domains/models/describeEffectiveModelMode', () => ({
-        describeEffectiveModelMode: () => ({ effectiveModelId: 'default' }),
+        describeEffectiveModelMode: () => ({ selectedModelId: 'default', appliedModelId: null, effectiveModelId: 'default' }),
     }));
 
     vi.doMock('@/sync/domains/permissions/permissionModeOptions', () => ({

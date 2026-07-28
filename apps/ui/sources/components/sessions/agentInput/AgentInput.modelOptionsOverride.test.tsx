@@ -135,6 +135,7 @@ vi.mock('@/agents/catalog/catalog', () => ({
         displayNameKey: 'agents.codex',
         toolRendering: { hideUnknownToolsByDefault: false },
         uiConnectedService: { serviceId: 'openai-codex', label: 'Codex', connectRoute: null },
+        ui: { agentPickerIconName: 'code-slash' },
         flavorAliases: [],
         availability: { experimental: false },
         model: {
@@ -182,11 +183,24 @@ vi.mock('@/sync/domains/models/modelOptions', () => ({
 }));
 
 vi.mock('@/sync/domains/models/describeEffectiveModelMode', () => ({
-    describeEffectiveModelMode: (params: { selectedModelId?: string | null }) => ({
-        effectiveModelId: params.selectedModelId?.trim() || 'default',
-        applyScope: 'spawn_only',
-        notes: [],
-    }),
+    describeEffectiveModelMode: (params: {
+        selectedModelId?: string | null;
+        agentType?: string | null;
+        metadata?: any;
+    }) => {
+        const selectedModelId = params.selectedModelId?.trim() || 'default';
+        const state = params.metadata?.sessionAppliedModelV1 ?? null;
+        const appliedModelId = state?.provider === params.agentType && typeof state?.modelId === 'string'
+            ? state.modelId
+            : null;
+        return {
+            selectedModelId,
+            appliedModelId,
+            effectiveModelId: selectedModelId,
+            applyScope: 'spawn_only',
+            notes: [],
+        };
+    },
 }));
 
 vi.mock('@/sync/domains/permissions/permissionModeOptions', () => ({
@@ -1265,6 +1279,101 @@ describe('AgentInput (modelOptionsOverride)', () => {
         });
 
         expect(onModelModeChange).toHaveBeenCalledWith('session-model');
+    });
+
+    it('marks the last-used applied model without moving selection away from the requested model', async () => {
+        const { AgentInput } = await import('./AgentInput');
+
+        lastModelPickerOverlayProps = null;
+
+        const screen = await renderScreen(React.createElement(AgentInput, {
+            value: 'hello',
+            placeholder: 'placeholder',
+            onChangeText: () => {},
+            onSend: () => {},
+            autocompletePrefixes: [],
+            autocompleteSuggestions: async () => [],
+            agentType: 'codex',
+            metadata: {
+                sessionModelsV1: {
+                    v: 1,
+                    provider: 'codex',
+                    updatedAt: 10,
+                    currentModelId: 'session-model',
+                    availableModels: [{ id: 'session-model', name: 'Session Model' }],
+                },
+                sessionAppliedModelV1: {
+                    v: 1,
+                    provider: 'codex',
+                    updatedAt: 9,
+                    modelId: 'session-model',
+                },
+            },
+            sessionActive: false,
+            permissionMode: 'default',
+            onPermissionModeChange: () => {},
+            modelMode: 'default',
+            onModelModeChange: () => {},
+        } as any));
+
+        act(() => {
+            screen.pressByTestId('agent-input-agent-chip');
+        });
+
+        expect(lastModelPickerOverlayProps?.selectedValue).toBe('default');
+        const currentOption = lastModelPickerOverlayProps?.options?.find((option: any) => option.value === 'session-model');
+        expect(currentOption?.trailingStatusIcon?.props?.name).toBe('time-outline');
+        expect(currentOption?.icon).toBeUndefined();
+        expect(currentOption?.accessibilityLabel).toContain('agentInput.model.lastUsed');
+        expect(lastModelPickerOverlayProps?.summary).toContain('agentInput.model.lastUsed');
+        expect(lastModelPickerOverlayProps?.notes).toEqual(['agentInput.model.selectedForResume']);
+    });
+
+    it('keeps the check/background on the selected model while the running icon stays on the applied model', async () => {
+        const { AgentInput } = await import('./AgentInput');
+        lastModelPickerOverlayProps = null;
+
+        const screen = await renderScreen(React.createElement(AgentInput, {
+            value: 'hello',
+            placeholder: 'placeholder',
+            onChangeText: () => {},
+            onSend: () => {},
+            autocompletePrefixes: [],
+            autocompleteSuggestions: async () => [],
+            agentType: 'codex',
+            metadata: {
+                sessionModelsV1: {
+                    v: 1,
+                    provider: 'codex',
+                    updatedAt: 11,
+                    currentModelId: 'default',
+                    availableModels: [{ id: 'session-model', name: 'Applied Model' }],
+                },
+                sessionAppliedModelV1: {
+                    v: 1,
+                    provider: 'codex',
+                    updatedAt: 10,
+                    modelId: 'session-model',
+                },
+            },
+            sessionActive: true,
+            permissionMode: 'default',
+            onPermissionModeChange: () => {},
+            modelMode: 'default',
+            onModelModeChange: () => {},
+        } as any));
+
+        act(() => {
+            screen.pressByTestId('agent-input-agent-chip');
+        });
+
+        expect(lastModelPickerOverlayProps?.selectedValue).toBe('default');
+        expect(lastModelPickerOverlayProps?.options?.map((option: any) => option.value)).toContain('session-model');
+        const appliedOption = lastModelPickerOverlayProps?.options?.find(
+            (option: any) => option.value === 'session-model',
+        );
+        expect(appliedOption?.trailingStatusIcon?.props?.name).toBe('play-circle-outline');
+        expect(appliedOption?.accessibilityLabel).toContain('agentInput.model.running');
     });
 
     it('renders the selected model label and provider logo in the engine chip', async () => {
