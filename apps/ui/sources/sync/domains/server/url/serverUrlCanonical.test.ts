@@ -67,4 +67,10 @@ describe('serverUrlDisplay', () => {
             toServerUrlDisplay('https://admin:secret@example.com:8443/path?token=abc#frag'),
         ).toBe('https://example.com:8443/path');
     });
+
+    it('redacts public-share capability tokens from displayed server paths', () => {
+        expect(
+            toServerUrlDisplay('https://example.com/v1/public-share/secret-capability/messages'),
+        ).toBe('https://example.com/v1/public-share/:token/messages');
+    });
 });
