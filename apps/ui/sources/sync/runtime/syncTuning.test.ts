@@ -75,7 +75,7 @@ describe('loadSyncTuning', () => {
                     transcriptFlashListEstimatedItemSize: 222,
                     transcriptWebHotTailItemCount: 9,
                     transcriptNativeHotTailItemCount: 3,
-                    transcriptLegendListSpikeSurface: 'readOnly',
+                    transcriptLegendListSpikeSurface: 'flashList',
                     transcriptMaxTurnEntriesPerListItem: 6,
                     transcriptWebInitialPinStabilizeMs: 3000,
                     transcriptWebInitialPinRetryMilestonesMs: [25, 75, 125],
@@ -150,7 +150,7 @@ describe('loadSyncTuning', () => {
         expect(tuning.transcriptFlashListEstimatedItemSize).toBe(222);
         expect(tuning.transcriptWebHotTailItemCount).toBe(9);
         expect(tuning.transcriptNativeHotTailItemCount).toBe(3);
-        expect(tuning.transcriptLegendListSpikeSurface).toBe('readOnly');
+        expect(tuning.transcriptLegendListSpikeSurface).toBe('flashList');
         expect(tuning.transcriptMaxTurnEntriesPerListItem).toBe(6);
         expect(tuning.transcriptWebInitialPinStabilizeMs).toBe(3000);
         expect(tuning.transcriptWebInitialPinRetryMilestonesMs).toEqual([25, 75, 125]);
@@ -407,8 +407,8 @@ describe('loadSyncTuning', () => {
         expect(tuning.transcriptFlashListDrawDistance).toBe(0);
     });
 
-    it('accepts only known transcript Legend spike surfaces', () => {
-        for (const surface of ['off', 'readOnly', 'sidechain', 'main'] as const) {
+    it('keeps the FlashList escape hatch and normalizes retired renderer aliases', () => {
+        for (const surface of ['off', 'flashList'] as const) {
             expect(loadSyncTuning({
                 env: {
                     EXPO_PUBLIC_HAPPIER_SYNC_TUNING_JSON: JSON.stringify({
@@ -416,6 +416,16 @@ describe('loadSyncTuning', () => {
                     }),
                 },
             }).transcriptLegendListSpikeSurface).toBe(surface);
+        }
+
+        for (const legacyValue of ['readOnly', 'sidechain', 'main'] as const) {
+            expect(loadSyncTuning({
+                env: {
+                    EXPO_PUBLIC_HAPPIER_SYNC_TUNING_JSON: JSON.stringify({
+                        transcriptLegendListSpikeSurface: legacyValue,
+                    }),
+                },
+            }).transcriptLegendListSpikeSurface).toBe('off');
         }
 
         for (const value of [true, 'legend', 'mainChat', '', 'read-only', null, 1]) {

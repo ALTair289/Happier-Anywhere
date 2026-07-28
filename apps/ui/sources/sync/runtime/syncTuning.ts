@@ -1,6 +1,8 @@
 import Constants from 'expo-constants';
 
-export type TranscriptLegendListSpikeSurface = 'off' | 'readOnly' | 'sidechain' | 'main';
+// The external key is retained for persisted compatibility. `off` is the Legend default;
+// `flashList` is the explicit compatibility escape hatch.
+export type TranscriptLegendListSpikeSurface = 'off' | 'flashList';
 
 export type SyncTuning = Readonly<{
     messageLargeGapSeq: number;
@@ -10,6 +12,13 @@ export type SyncTuning = Readonly<{
     transcriptNativeOlderMessagesPageSize: number;
     transcriptForwardPrefetchThresholdPx: number;
     transcriptBackwardPrefetchThresholdPx: number;
+    /**
+     * Item-space arm threshold for older-page prefetch on native lists (count of loaded
+     * rows between the viewport and the older edge). Estimate-immune companion to the px
+     * threshold: native canonical px offsets are derived from estimated content height,
+     * whose error routinely swallows the px margin.
+     */
+    transcriptBackwardPrefetchThresholdItems: number;
     transcriptFlashListEstimatedItemSize: number;
     transcriptWebHotTailItemCount: number;
     transcriptNativeHotTailItemCount: number;
@@ -208,9 +217,9 @@ function readSessionRealtimeProjectionMode(obj: Record<string, unknown>): SyncTu
 
 function readTranscriptLegendListSpikeSurface(obj: Record<string, unknown>): TranscriptLegendListSpikeSurface | null {
     const value = obj.transcriptLegendListSpikeSurface;
-    return value === 'off' || value === 'readOnly' || value === 'sidechain' || value === 'main'
-        ? value
-        : null;
+    if (value === 'flashList') return 'flashList';
+    if (value === 'off' || value === 'readOnly' || value === 'sidechain' || value === 'main') return 'off';
+    return null;
 }
 
 function readRatio(obj: Record<string, unknown>, key: keyof SyncTuning): number | null {
@@ -233,19 +242,29 @@ export function loadSyncTuning(opts?: {
         transcriptNativeOlderMessagesPageSize: 64,
         transcriptForwardPrefetchThresholdPx: 800,
         transcriptBackwardPrefetchThresholdPx: 800,
+        transcriptBackwardPrefetchThresholdItems: 12,
         transcriptFlashListEstimatedItemSize: 120,
         transcriptWebHotTailItemCount: 24,
         // Native hot/cold streaming carve-out (live-tail rows rendered in the inverted edge slot,
         // outside the recycler). The number is a hard ceiling on hot-tail items (see
         // buildTranscriptHotColdSegments#maxHotTailItems). 0 = OFF (all-in-FlashList); >0 = ON.
         //
-        // DEFAULT-ON (4): the carve is the streaming transcript path on native. It eliminates
-        // streaming-overlap (the growing row renders in real layout), fixes the composer-inset gap,
-        // bounds the hot tail (no blank), and — critically — AUTO-FOLLOW: the inverted bottom pin
+        // INERT ON THE SHIPPED DEFAULT PATH — this 4 currently changes nothing. The carve is
+        // FlashList-only: resolveTranscriptRenderWindowProjection gates it on
+        // `rendererKind === 'flashList'`, and resolveTranscriptListRendererSelection returns the
+        // Legend renderer unless `transcriptLegendListSpikeSurface === 'flashList'` (default 'off',
+        // see below). Under Legend there is one chronological recycler projection and no edge slot,
+        // so buildTranscriptHotColdSegments yields zero hot items and TranscriptHotTail renders
+        // nothing. The value only takes effect when the FlashList transcript surface is selected
+        // explicitly. Do not read it as a live streaming-path setting.
+        //
+        // WHAT IT DID ON THE FLASHLIST SURFACE (historical, pre-Legend): it eliminated
+        // streaming-overlap (the growing row renders in real layout), fixed the composer-inset gap,
+        // bounded the hot tail (no blank), and — critically — AUTO-FOLLOW: the inverted bottom pin
         // fires authoritatively on a pre-change following decision (mirrors web's
         // capture-before/write-after), beating FlashList MVCP's index-0 re-anchor.
         //
-        // VALIDATION STATUS:
+        // VALIDATION STATUS (FlashList surface only; never re-measured under Legend):
         // - iOS: DEVICE-VALIDATED (2026-06-15) — measured proof for overlap (dist≈0, was 2055px),
         //   multi-row hot-tail ordering on a complex turn, the deterministic synced pin, idle/finalize
         //   (no orphan), and scrolled-up readers not yanked; jump-to-bottom + entry-restore land flush.
@@ -371,6 +390,7 @@ export function loadSyncTuning(opts?: {
         transcriptNativeOlderMessagesPageSize: readNumber(merged, 'transcriptNativeOlderMessagesPageSize', { min: 1, max: 1000 }) ?? defaults.transcriptNativeOlderMessagesPageSize,
         transcriptForwardPrefetchThresholdPx: readNumber(merged, 'transcriptForwardPrefetchThresholdPx', { min: 0, max: 50_000 }) ?? defaults.transcriptForwardPrefetchThresholdPx,
         transcriptBackwardPrefetchThresholdPx: readNumber(merged, 'transcriptBackwardPrefetchThresholdPx', { min: 0, max: 50_000 }) ?? defaults.transcriptBackwardPrefetchThresholdPx,
+        transcriptBackwardPrefetchThresholdItems: readNumber(merged, 'transcriptBackwardPrefetchThresholdItems', { min: 1, max: 500 }) ?? defaults.transcriptBackwardPrefetchThresholdItems,
         transcriptFlashListEstimatedItemSize: readNumber(merged, 'transcriptFlashListEstimatedItemSize', { min: 20, max: 2000 }) ?? defaults.transcriptFlashListEstimatedItemSize,
         transcriptWebHotTailItemCount: readNumber(merged, 'transcriptWebHotTailItemCount', { min: 1, max: 200 }) ?? defaults.transcriptWebHotTailItemCount,
         transcriptNativeHotTailItemCount: readNumber(merged, 'transcriptNativeHotTailItemCount', { min: 0, max: 200 }) ?? defaults.transcriptNativeHotTailItemCount,
