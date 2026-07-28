@@ -392,18 +392,21 @@ describe('buildCliDist', () => {
     }
   });
 
-  it('removes builder-owned current and abandoned staging generations without touching live dist', async () => {
+  it('removes builder-owned current and abandoned build generations without touching live dist', async () => {
     const packageRoot = createTempDirSync('happier-cli-build-failed-stage-cleanup-');
     try {
       writeRuntimeManifest(packageRoot);
       const distDir = join(packageRoot, 'dist');
       const stagingDir = join(packageRoot, `dist.staging.${process.pid}`);
+      const abandonedSourceDir = join(packageRoot, '.tmp.hstack-cli-build-source.abandoned');
       const abandonedStagingDirs = [
         join(packageRoot, 'dist.staging.1001'),
         join(packageRoot, 'dist.staging.1002'),
       ];
       mkdirSync(distDir, { recursive: true });
       writeFileSync(join(distDir, 'index.mjs'), 'export const stable = true;\n', 'utf8');
+      mkdirSync(abandonedSourceDir, { recursive: true });
+      writeFileSync(join(abandonedSourceDir, 'partial.ts'), 'abandoned\n', 'utf8');
       for (const abandonedStagingDir of abandonedStagingDirs) {
         mkdirSync(abandonedStagingDir, { recursive: true });
         writeFileSync(join(abandonedStagingDir, 'partial.mjs'), 'abandoned\n', 'utf8');
@@ -424,6 +427,7 @@ describe('buildCliDist', () => {
       })).rejects.toThrow(/pkgroll failed/);
 
       expect(existsSync(stagingDir)).toBe(false);
+      expect(existsSync(abandonedSourceDir)).toBe(false);
       for (const abandonedStagingDir of abandonedStagingDirs) {
         expect(existsSync(abandonedStagingDir)).toBe(false);
       }

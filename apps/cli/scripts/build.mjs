@@ -16,11 +16,14 @@ function resolveBuildOutput(env = process.env) {
   return { outputDir: `dist.staging.${process.pid}`, builderOwned: true };
 }
 
-async function reclaimAbandonedCliDistStagingDirs(packageRoot, activeOutputDir) {
+async function reclaimAbandonedCliBuildDirs(packageRoot, activeOutputDir) {
   const activeOutputPath = resolve(packageRoot, activeOutputDir);
   const entries = await readdir(packageRoot, { withFileTypes: true });
   await Promise.all(entries
-    .filter((entry) => entry.name.startsWith('dist.staging.') && (entry.isDirectory() || entry.isSymbolicLink()))
+    .filter((entry) => (
+      entry.name.startsWith('dist.staging.')
+      || entry.name.startsWith('.tmp.hstack-cli-build-source.')
+    ) && (entry.isDirectory() || entry.isSymbolicLink()))
     .map((entry) => resolve(packageRoot, entry.name))
     .filter((entryPath) => entryPath !== activeOutputPath)
     .map((entryPath) => rm(entryPath, { recursive: true, force: true })));
@@ -142,6 +145,7 @@ async function buildCliDistUnlocked(options = {}) {
   const probeDistRuntimeImportImpl = options.probeDistRuntimeImportImpl ?? probeDistRuntimeImport;
   const resolveDistRuntimeEntrypointsImpl = options.resolveDistRuntimeEntrypointsImpl ?? resolveDistRuntimeEntrypoints;
   const finalizeDistImpl = options.finalizeDistImpl ?? finalizeDist;
+  await reclaimAbandonedCliBuildDirs(packageRoot, outputDir);
   const immutableSource = builderOwnsOutput
     ? await (options.createImmutableBuildSourceImpl ?? createImmutableBuildSource)({
         packageRoot,
@@ -153,7 +157,6 @@ async function buildCliDistUnlocked(options = {}) {
       };
   const resolvedOutputDir = resolve(immutableSource.packageRoot, outputDir);
   try {
-    await reclaimAbandonedCliDistStagingDirs(packageRoot, outputDir);
     await rmDistImpl(['node', 'rmDist.mjs', outputDir], {
       env,
       repoRoot: options.repoRoot,
