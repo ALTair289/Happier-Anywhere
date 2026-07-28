@@ -32,7 +32,7 @@ test('remote bootstrap reuses canonical dependency freshness instead of reinstal
   assert.match(posixCommand, /^bash -lc /);
   assert.match(
     posixCommand,
-    /node .*apps\/stack\/scripts\/utils\/dev_targets\/remote_dependency_bootstrap\.mjs/,
+    /corepack yarn node .*apps\/stack\/scripts\/utils\/dev_targets\/remote_dependency_bootstrap\.mjs/,
   );
   assert.match(posixCommand, /HAPPIER_STACK_PM_CACHE_BASE_DIR=.*HOME.*\/\.cache/);
   assert.doesNotMatch(posixCommand, /corepack yarn install --frozen-lockfile/);
@@ -44,7 +44,7 @@ test('remote bootstrap reuses canonical dependency freshness instead of reinstal
   const decodedPowerShell = Buffer.from(windowsCommand.split(' ').at(-1), 'base64').toString('utf16le');
   assert.match(
     decodedPowerShell,
-    /node .*apps\/stack\/scripts\/utils\/dev_targets\/remote_dependency_bootstrap\.mjs/,
+    /corepack yarn node .*apps\/stack\/scripts\/utils\/dev_targets\/remote_dependency_bootstrap\.mjs/,
   );
   assert.match(
     decodedPowerShell,
@@ -66,7 +66,7 @@ test('remote doctor checks prerequisites without changing the target', () => {
   assert.doesNotMatch(decodedPowerShell, /yarn install/);
 });
 
-test('remote daemon command reuses the Stack dev owner without the repo-local env scrubber', () => {
+test('remote daemon command reuses the Stack dev owner and adopts a last-green daemon on reconnect', () => {
   const command = buildRemoteDaemonCommand(posix, {
     serverUrl: 'http://127.0.0.1:43005',
     activeServerId: 'stack_repo__id_default',
@@ -76,7 +76,7 @@ test('remote daemon command reuses the Stack dev owner without the repo-local en
     command,
     /corepack yarn workspace @happier-dev\/stack stack dev .*repo-local-dev.* --no-server --no-ui --no-browser --no-dev-targets --watch/,
   );
-  assert.match(command, /--restart/);
+  assert.doesNotMatch(command, /--restart/);
   assert.match(command, /stack-state\/repo-local-dev\/env/);
   assert.match(command, /HAPPIER_HOME_DIR/);
   assert.match(command, /HAPPIER_STACK_CLI_HOME_DIR/);
@@ -105,7 +105,7 @@ test('remote daemon command reuses the Stack dev owner without the repo-local en
     decodedPowerShell,
     /corepack yarn workspace @happier-dev\/stack stack dev 'repo-local-dev' --no-server --no-ui --no-browser --no-dev-targets --watch/,
   );
-  assert.match(decodedPowerShell, /--restart/);
+  assert.doesNotMatch(decodedPowerShell, /--restart/);
   assert.match(decodedPowerShell, /stack-state\/repo-local-dev/);
 });
 

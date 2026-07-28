@@ -44,7 +44,7 @@ export function buildRemoteBootstrapCommand(target) {
         'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "Node.js is required on the remote target" }',
         'if (-not (Get-Command corepack -ErrorAction SilentlyContinue)) { throw "Corepack is required on the remote target" }',
         `$env:HAPPIER_STACK_PM_CACHE_BASE_DIR = Join-Path $env:USERPROFILE '.cache'`,
-        'node ./apps/stack/scripts/utils/dev_targets/remote_dependency_bootstrap.mjs',
+        'corepack yarn node ./apps/stack/scripts/utils/dev_targets/remote_dependency_bootstrap.mjs',
         'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
       ].join('; '),
     );
@@ -57,7 +57,7 @@ export function buildRemoteBootstrapCommand(target) {
       'command -v node >/dev/null || { echo "Node.js is required on the remote target" >&2; exit 127; }',
       'command -v corepack >/dev/null || { echo "Corepack is required on the remote target" >&2; exit 127; }',
       'export HAPPIER_STACK_PM_CACHE_BASE_DIR="$HOME/.cache"',
-      'node ./apps/stack/scripts/utils/dev_targets/remote_dependency_bootstrap.mjs',
+      'corepack yarn node ./apps/stack/scripts/utils/dev_targets/remote_dependency_bootstrap.mjs',
     ].join('; '),
   );
 }
@@ -138,7 +138,7 @@ export function buildRemoteDaemonCommand(target, { serverUrl, activeServerId, st
         `$stackEnvPath = ${powershellQuote(stackEnvPath)}`,
         `@(${stackEnvLines.map(powershellQuote).join(', ')}) | Set-Content -LiteralPath $stackEnvPath -Encoding Ascii`,
         `Set-Location -LiteralPath ${powershellQuote(target.repoDir)}`,
-        `corepack yarn workspace @happier-dev/stack stack dev ${powershellQuote(stackName)} --no-server --no-ui --no-browser --no-dev-targets --watch --restart --server-url=${powershellQuote(serverUrl)}`,
+        `corepack yarn workspace @happier-dev/stack stack dev ${powershellQuote(stackName)} --no-server --no-ui --no-browser --no-dev-targets --watch --server-url=${powershellQuote(serverUrl)}`,
         'exit $LASTEXITCODE',
       ].join('; '),
     );
@@ -157,7 +157,7 @@ export function buildRemoteDaemonCommand(target, { serverUrl, activeServerId, st
       `install -d -m 700 -- ${posixQuote(stackBaseDir)}`,
       `printf '%s\\n' ${stackEnvLines.map(posixQuote).join(' ')} > ${posixQuote(stackEnvPath)}`,
       `cd -- ${posixQuote(target.repoDir)}`,
-      `exec corepack yarn workspace @happier-dev/stack stack dev ${posixQuote(stackName)} --no-server --no-ui --no-browser --no-dev-targets --watch --restart --server-url=${posixQuote(serverUrl)}`,
+      `exec corepack yarn workspace @happier-dev/stack stack dev ${posixQuote(stackName)} --no-server --no-ui --no-browser --no-dev-targets --watch --server-url=${posixQuote(serverUrl)}`,
     ].join('; '),
   );
 }
