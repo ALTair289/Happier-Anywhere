@@ -282,6 +282,80 @@ describe('spawnHappyCLI fallback invocation', () => {
     });
   });
 
+  it('retries a transient Windows directory publication conflict when pinning an admitted daemon closure', async () => {
+    await withTempDir('happier-admitted-daemon-runner-rename-retry-', async (root) => {
+      const entrypoint = writeTinyDist(root);
+      writeTinyRuntimeAssets(root);
+      const fingerprint = 'abc123def4567890';
+      writeDistBuildManifest(entrypoint, fingerprint);
+      const runtimeStatePath = join(root, 'stack.runtime.json');
+      writeStackRuntimeFingerprint(runtimeStatePath, null);
+      patchFreshDistEnv(entrypoint, runtimeStatePath, fingerprint);
+
+      let renameSyncMock: ReturnType<typeof vi.fn> | null = null;
+      vi.doMock('node:fs', async () => {
+        const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+        const conflict = new Error('EPERM') as NodeJS.ErrnoException;
+        conflict.code = 'EPERM';
+        renameSyncMock = vi.fn(actual.renameSync)
+          .mockImplementationOnce(() => {
+            throw conflict;
+          });
+        return {
+          ...actual,
+          renameSync: renameSyncMock,
+        };
+      });
+
+      const mod = (await import('@/utils/spawnHappyCLI')) as typeof import('@/utils/spawnHappyCLI');
+      const invocation = mod.buildHappyCliSubprocessInvocation(
+        ['daemon', 'start-sync'],
+        { allowAdmittedDaemonStartupClosure: true },
+      );
+
+      expect(invocation.runtime).toBe('node');
+      expect(invocation.argv).toEqual(expect.arrayContaining([
+        expect.stringMatching(/[\\/]\.runner-snapshots[\\/]abc123def4567890[\\/]index\.mjs$/),
+        'daemon',
+        'start-sync',
+      ]));
+      expect(renameSyncMock).not.toBeNull();
+      expect(renameSyncMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('uses the admitted pinned closure after mutable dist advances to a newer publication', async () => {
+    await withTempDir('happier-admitted-daemon-startup-after-dist-advance-', async (root) => {
+      const entrypoint = writeTinyDist(root);
+      writeTinyRuntimeAssets(root);
+      const admittedFingerprint = 'abc123def4567890';
+      writeDistBuildManifest(entrypoint, admittedFingerprint);
+      const runtimeStatePath = join(root, 'stack.runtime.json');
+      writeStackRuntimeFingerprint(runtimeStatePath, null);
+      patchFreshDistEnv(entrypoint, runtimeStatePath, admittedFingerprint);
+
+      const mod = (await import('@/utils/spawnHappyCLI')) as typeof import('@/utils/spawnHappyCLI');
+      const admitted = mod.buildHappyCliSubprocessInvocation(
+        ['daemon', 'start-sync'],
+        { allowAdmittedDaemonStartupClosure: true },
+      );
+      const admittedEntrypoint = admitted.argv.find((arg) => arg.endsWith('index.mjs'));
+      expect(admittedEntrypoint).toContain(admittedFingerprint);
+
+      writeFileSync(join(dirname(entrypoint), 'chunk.mjs'), 'export const marker = "new";\n', 'utf8');
+      writeDistBuildManifest(entrypoint, 'fed456abc1230987');
+
+      const startup = mod.buildHappyCliSubprocessInvocation(
+        ['daemon', 'start-sync'],
+        { allowAdmittedDaemonStartupClosure: true },
+      );
+
+      expect(startup.runtime).toBe('node');
+      expect(startup.argv).toContain(admittedEntrypoint);
+      expect(startup.argv).not.toContain(entrypoint);
+    });
+  });
+
   it('accepts the immutable runtime artifact sidecars without the development-only command wrapper', async () => {
     await withTempDir('happier-runtime-artifact-runner-', async (root) => {
       const entrypoint = writeTinyDist(root);

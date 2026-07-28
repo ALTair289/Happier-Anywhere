@@ -56,7 +56,6 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -76,6 +75,7 @@ import {
   decidePinnedRunnerSnapshotPrune,
   type LiveRunnerSnapshotFingerprints,
 } from './pinnedRunnerSnapshotPrune';
+import { renameForPublicationSync } from './fs/renameForPublicationSync';
 
 const STACK_RUNTIME_STATE_PATH_ENV = 'HAPPIER_CLI_SUBPROCESS_STACK_RUNTIME_STATE_PATH';
 const STACK_DIST_ENTRYPOINT_ENV = 'HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT';
@@ -504,6 +504,27 @@ function ensurePinnedSnapshotRuntimeAssets(runtimeRoot: string, snapshotRoot: st
   return hasPinnedSnapshotRuntimeAssets(snapshotRoot);
 }
 
+function resolvePinnedSnapshotLocation(entrypoint: string, fingerprint: string): {
+  runtimeRoot: string;
+  snapshotsDir: string;
+  snapshotRoot: string;
+  snapshotEntrypoint: string;
+} | null {
+  const distRoot = dirname(entrypoint);
+  const entrypointRelativePath = relative(distRoot, entrypoint);
+  if (!isRelativePathInsideRoot(entrypointRelativePath)) return null;
+
+  const runtimeRoot = dirname(distRoot);
+  const snapshotsDir = join(runtimeRoot, PINNED_RUNNER_DIST_DIR);
+  const snapshotRoot = join(snapshotsDir, fingerprint);
+  return {
+    runtimeRoot,
+    snapshotsDir,
+    snapshotRoot,
+    snapshotEntrypoint: join(snapshotRoot, entrypointRelativePath),
+  };
+}
+
 let warnedOnceAboutUnreliableSnapshotLiveness = false;
 
 /**
@@ -565,13 +586,14 @@ function copyCliDistToPinnedSnapshot(
   live: LiveRunnerSnapshotFingerprints | null | undefined,
 ): string | null {
   const distRoot = dirname(entrypoint);
-  const entrypointRelativePath = relative(distRoot, entrypoint);
-  if (!isRelativePathInsideRoot(entrypointRelativePath)) return null;
-
-  const runtimeRoot = dirname(distRoot);
-  const snapshotsDir = join(runtimeRoot, PINNED_RUNNER_DIST_DIR);
-  const snapshotRoot = join(snapshotsDir, fingerprint);
-  const snapshotEntrypoint = join(snapshotRoot, entrypointRelativePath);
+  const location = resolvePinnedSnapshotLocation(entrypoint, fingerprint);
+  if (!location) return null;
+  const {
+    runtimeRoot,
+    snapshotsDir,
+    snapshotRoot,
+    snapshotEntrypoint,
+  } = location;
   if (readPinnedSnapshotReadyMarker(snapshotRoot, fingerprint) && existsSync(snapshotEntrypoint)) {
     prunePinnedRunnerSnapshots(snapshotsDir, fingerprint, live);
     return ensurePinnedSnapshotRuntimeAssets(runtimeRoot, snapshotRoot) ? snapshotEntrypoint : null;
@@ -588,7 +610,7 @@ function copyCliDistToPinnedSnapshot(
     copyCliRuntimeAssetsToPinnedSnapshot(runtimeRoot, tmpRoot);
     writeFileSync(join(tmpRoot, '.fingerprint'), `${fingerprint}\n`, 'utf8');
     try {
-      renameSync(tmpRoot, snapshotRoot);
+      renameForPublicationSync(tmpRoot, snapshotRoot);
     } catch {
       if (
         !readPinnedSnapshotReadyMarker(snapshotRoot, fingerprint)
@@ -641,6 +663,33 @@ function buildCurrentStackDistSubprocessInvocation(
   }
 
   const distEntrypoint = resolveStackDistEntrypoint(defaultEntrypoint, env);
+  const admittedSnapshot = resolvePinnedSnapshotLocation(distEntrypoint, daemonFingerprint);
+  if (
+    admittedSnapshot
+    && readPinnedSnapshotReadyMarker(admittedSnapshot.snapshotRoot, daemonFingerprint)
+    && existsSync(admittedSnapshot.snapshotEntrypoint)
+    && ensurePinnedSnapshotRuntimeAssets(
+      admittedSnapshot.runtimeRoot,
+      admittedSnapshot.snapshotRoot,
+    )
+  ) {
+    prunePinnedRunnerSnapshots(
+      admittedSnapshot.snapshotsDir,
+      daemonFingerprint,
+      options?.liveRunnerSnapshotFingerprints,
+    );
+    return {
+      runtime: 'node',
+      argv: [
+        ...readInheritedNodeLaunchFlags(),
+        '--no-warnings',
+        '--no-deprecation',
+        admittedSnapshot.snapshotEntrypoint,
+        ...args,
+      ],
+    };
+  }
+
   const distManifest = readCliDistBuildManifest(distEntrypoint);
   if (!distManifest.ok || !distManifest.fingerprint || distManifest.fingerprint !== daemonFingerprint) {
     return null;
