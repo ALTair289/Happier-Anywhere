@@ -9,18 +9,20 @@ import {
   ProviderAccountUsageSnapshotV1Schema,
   SESSION_RUNNER_RUNTIME_STATE_FIELD_ID,
   type ProviderAccountUsageSnapshotV1,
+  type SessionRunnerRuntimeStateV1,
 } from '@happier-dev/protocol';
 import type { connectedServiceQuotaRecoveryCreditConsume } from '@/sync/ops/connectedServiceQuotaRecoveryCredits';
 import type { RestartStaleSessionRunnerResult } from '@/sync/ops/sessionRunnerRestart';
 
 import { AppPaneProvider } from '@/components/appShell/panes/AppPaneProvider';
-import { pressTestInstanceAsync, renderScreen, standardCleanup } from '@/dev/testkit';
+import { createDeferred, pressTestInstanceAsync, renderScreen, standardCleanup } from '@/dev/testkit';
 import { localSettingsDefaults, type LocalSettings } from '@/sync/domains/settings/localSettings';
 import { settingsDefaults, type Settings } from '@/sync/domains/settings/settings';
 import { listOpenApprovalArtifactsForSession } from '@/sync/domains/artifacts/approvalArtifacts';
 import { connectedServiceProfileKey } from '@/sync/domains/connectedServices/connectedServiceProfilePreferences';
-import { installSessionShellCommonModuleMocks } from './sessionShellTestHelpers';
 import { __resetConnectedServiceQuotaSnapshotStore } from '@/hooks/server/connectedServices/connectedServiceQuotaSnapshotStore';
+import { sessionRunnerRuntimeStatusRetention } from '@/sync/domains/sessionRunnerRuntime/sessionRunnerRuntimeStatusRetention';
+import { installSessionShellCommonModuleMocks } from './sessionShellTestHelpers';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 (globalThis as any).__DEV__ = false;
@@ -330,7 +332,9 @@ installSessionShellCommonModuleMocks({
       importOriginal,
       overrides: {
         storage: createStorageStoreMock(storageState as any),
-        useSession: () => storageState.sessions.s1,
+        useSession: (sessionId: string) => (
+          (storageState.sessions as Record<string, any>)[sessionId] ?? null
+        ),
         useIsDataReady: () => true,
         useRealtimeStatus: () => 'connected',
         useSessionMessages: () => ({ messages: sessionMessagesState.current, isLoaded: true }),
@@ -656,36 +660,40 @@ vi.mock('@/sync/domains/session/control/localControlSwitch', async (importOrigin
 });
 
 describe('SessionView (direct sessions)', () => {
-  async function renderSessionView(props: { routeServerId?: string } = {}) {
+  async function renderSessionView(props: { sessionId?: string; routeServerId?: string } = {}) {
+    const sessionId = props.sessionId ?? 's1';
     const routeServerId = props.routeServerId?.trim();
-    if (routeServerId && storageState.sessions.s1) {
-      storageState.sessions.s1 = {
-        ...storageState.sessions.s1,
+    const sessions = storageState.sessions as Record<string, any>;
+    if (routeServerId && sessions[sessionId]) {
+      sessions[sessionId] = {
+        ...sessions[sessionId],
         serverId: routeServerId,
       };
     }
     const { SessionView } = await import('./SessionView');
     return renderScreen(
       <AppPaneProvider>
-        <SessionView id="s1" routeServerId={props.routeServerId} />
+        <SessionView id={sessionId} routeServerId={props.routeServerId} />
       </AppPaneProvider>,
     );
   }
 
-  async function renderSessionViewAndSettle(props: { routeServerId?: string } = {}) {
+  async function renderSessionViewAndSettle(props: { sessionId?: string; routeServerId?: string } = {}) {
     const screen = await renderSessionView(props);
     await settleDirectSessionView();
     return screen;
   }
 
-  async function updateSessionViewAndSettle(
+  async function updateSessionView(
     screen: Awaited<ReturnType<typeof renderSessionView>>,
-    props: { routeServerId?: string } = {},
+    props: { sessionId?: string; routeServerId?: string } = {},
   ) {
+    const sessionId = props.sessionId ?? 's1';
     const routeServerId = props.routeServerId?.trim();
-    if (routeServerId && storageState.sessions.s1) {
-      storageState.sessions.s1 = {
-        ...storageState.sessions.s1,
+    const sessions = storageState.sessions as Record<string, any>;
+    if (routeServerId && sessions[sessionId]) {
+      sessions[sessionId] = {
+        ...sessions[sessionId],
         serverId: routeServerId,
       };
     }
@@ -693,10 +701,17 @@ describe('SessionView (direct sessions)', () => {
     await act(async () => {
       screen.tree.update(
         <AppPaneProvider>
-          <SessionView id="s1" routeServerId={props.routeServerId} />
+          <SessionView id={sessionId} routeServerId={props.routeServerId} />
         </AppPaneProvider>,
       );
     });
+  }
+
+  async function updateSessionViewAndSettle(
+    screen: Awaited<ReturnType<typeof renderSessionView>>,
+    props: { sessionId?: string; routeServerId?: string } = {},
+  ) {
+    await updateSessionView(screen, props);
     await settleDirectSessionView();
   }
 
@@ -722,6 +737,39 @@ describe('SessionView (direct sessions)', () => {
   function findStaleRunnerStatusBadge(screen: Awaited<ReturnType<typeof renderSessionView>>) {
     return findAgentInput(screen).props.statusBadges.find((badge: { key?: string }) =>
       badge.key === 'session-stale-runner');
+  }
+
+  function buildSessionRunnerRuntimeStatus(input: Readonly<{
+    sessionId: string;
+    machineId: string;
+    versionState: 'current' | 'stale';
+  }>): SessionRunnerRuntimeStateV1 {
+    const current = input.versionState === 'current';
+    return {
+      v: 1,
+      sessionId: input.sessionId,
+      machineId: input.machineId,
+      observedAtMs: current ? 2 : 1,
+      runner: {
+        pid: 123,
+        runtimeId: current ? 'version:cli-new' : 'version:cli-old',
+        processCommandHash: current ? 'hash-new' : 'hash-old',
+        entrypointVersion: current ? 'cli-new' : 'cli-old',
+        entrypointSource: 'process_command',
+        startedBy: 'daemon',
+        startingMode: 'remote',
+      },
+      daemon: {
+        currentEntrypointVersion: 'version:cli-new',
+        currentEntrypointSource: 'launch_spec',
+      },
+      versionState: input.versionState,
+      statusSource: 'daemon_tracking',
+      plannedRestart: {
+        supported: true,
+        eligible: !current,
+      },
+    };
   }
 
   function installStaleSessionRunnerStatus() {
@@ -924,6 +972,7 @@ describe('SessionView (direct sessions)', () => {
     voiceSurfacePropsSpy.mockReset();
     useSessionViewShellSessionSeqSpy.mockReset();
     __resetConnectedServiceQuotaSnapshotStore();
+    sessionRunnerRuntimeStatusRetention.clear();
     useSessionRuntimeStatusSourceSpy.mockReset();
     useSessionRuntimeStatusSourceStacks.current = [];
     featureEnabledState.voice = false;
@@ -1007,6 +1056,7 @@ describe('SessionView (direct sessions)', () => {
       agentState: {},
       lastRuntimeIssue: null,
     };
+    delete (storageState.sessions as Record<string, any>).s2;
     storageState.artifacts = {};
     storageState.profile = {
       connectedServicesV2: [],
@@ -1199,6 +1249,94 @@ describe('SessionView (direct sessions)', () => {
     });
   });
 
+  it('retains validated stale-runner status across a full remount when refresh is unavailable without leaking identities', async () => {
+    storageState.machines['machine-1'] = {
+      id: 'machine-1',
+      active: true,
+      metadata: { host: 'happy-host-a', homeDir: '/tmp/a' },
+    } as any;
+    storageState.machines['machine-2'] = {
+      id: 'machine-2',
+      active: true,
+      metadata: { host: 'happy-host-b', homeDir: '/tmp/b' },
+    } as any;
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      active: false,
+      serverId: 'server-a',
+      metadata: {
+        ...storageState.sessions.s1.metadata,
+        machineId: 'machine-1',
+        host: 'happy-host-a',
+        homeDir: '/tmp/a',
+        path: '/tmp/a/project',
+      },
+    };
+    (storageState.sessions as Record<string, any>).s2 = {
+      ...storageState.sessions.s1,
+      id: 's2',
+      serverId: 'server-b',
+      metadata: {
+        ...storageState.sessions.s1.metadata,
+        machineId: 'machine-2',
+        host: 'happy-host-b',
+        homeDir: '/tmp/b',
+        path: '/tmp/b/project',
+        directSessionV1: {
+          ...storageState.sessions.s1.metadata.directSessionV1,
+          machineId: 'machine-2',
+          remoteSessionId: 'vendor-session-2',
+        },
+      },
+    };
+
+    const sessionBRefresh = createDeferred<unknown>();
+    const returnedSessionARefresh = createDeferred<unknown>();
+    let sessionARefreshCount = 0;
+    getSessionRunnerRuntimeStatusSpy.mockImplementation(async (request: any) => {
+      if (request.sessionId === 's2') {
+        return sessionBRefresh.promise;
+      }
+      sessionARefreshCount += 1;
+      if (sessionARefreshCount === 1) {
+        return buildSessionRunnerRuntimeStatus({
+          sessionId: 's1',
+          machineId: 'machine-1',
+          versionState: 'stale',
+        });
+      }
+      return returnedSessionARefresh.promise;
+    });
+
+    const firstSessionAScreen = await renderSessionViewAndSettle({
+      sessionId: 's1',
+      routeServerId: 'server-a',
+    });
+    expect(firstSessionAScreen.findByTestId('session-staleRunner-version')).toBeTruthy();
+    await firstSessionAScreen.unmount();
+
+    const sessionBScreen = await renderSessionView({
+      sessionId: 's2',
+      routeServerId: 'server-b',
+    });
+    expect(sessionBScreen.findByTestId('session-staleRunner-version')).toBeNull();
+
+    sessionBRefresh.resolve(null);
+    await settleDirectSessionView();
+    expect(sessionBScreen.findByTestId('session-staleRunner-version')).toBeNull();
+    await sessionBScreen.unmount();
+
+    const returnedSessionAScreen = await renderSessionView({
+      sessionId: 's1',
+      routeServerId: 'server-a',
+    });
+    expect(returnedSessionAScreen.findByTestId('session-staleRunner-version')).toBeTruthy();
+
+    returnedSessionARefresh.resolve(null);
+    await settleDirectSessionView();
+    expect(returnedSessionAScreen.findByTestId('session-staleRunner-version')).toBeTruthy();
+  });
+
   it('does not render stale-runner composer notice when canonical identity is unknown', async () => {
     installUnknownIdentityStaleSessionRunnerStatus();
 
@@ -1232,7 +1370,9 @@ describe('SessionView (direct sessions)', () => {
     restartStaleSessionRunnerSpy.mockResolvedValueOnce({ ok: true, status: 'restarted', sessionId: 's1' });
 
     const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    expect(getSessionRunnerRuntimeStatusSpy).toHaveBeenCalledTimes(1);
     await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+    await settleDirectSessionView();
 
     expect(restartStaleSessionRunnerSpy).toHaveBeenCalledWith({
       sessionId: 's1',
@@ -1242,6 +1382,7 @@ describe('SessionView (direct sessions)', () => {
       expectedProcessCommandHash: 'hash-old',
       expectedRunnerEntrypointIdentity: 'version:cli-old',
     });
+    expect(getSessionRunnerRuntimeStatusSpy).toHaveBeenCalledTimes(2);
     expect(screen.findByTestId('session-staleRunner-version')).toBeNull();
   });
 

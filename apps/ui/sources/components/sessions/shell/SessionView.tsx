@@ -272,6 +272,11 @@ import {
     SESSION_RUNNER_RUNTIME_STATE_FIELD_ID,
 } from '@/sync/domains/sessionRunnerRuntime/sessionRunnerRuntimeStatus';
 import {
+    sessionRunnerRuntimeStatusRetention as sessionRunnerRuntimeStatusRetentionStore,
+    type SessionRunnerRuntimeStatusIdentity,
+    type SessionRunnerRuntimeStatusSnapshot,
+} from '@/sync/domains/sessionRunnerRuntime/sessionRunnerRuntimeStatusRetention';
+import {
     getSessionRunnerRuntimeStatus,
     restartStaleSessionRunnerWithObserve,
     type RestartStaleSessionRunnerResult,
@@ -294,6 +299,7 @@ import {
     ConnectedServiceIdSchema,
     SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
     SessionUsageLimitRecoveryV1Schema,
+    readSessionContinuationRecoveryFromMetadata,
     readProviderAccountUsageRecordIdsFromMetadata,
     type ConnectedServiceQuotaRecoveryCreditsV1,
     type SessionRunnerRuntimeStateV1,
@@ -708,6 +714,9 @@ type SessionViewLoadedProps = Readonly<{
     paneUrlSyncRouteActive: boolean;
     surfaceFocused: boolean;
     routeHydrationPending: boolean;
+    sessionRunnerRuntimeStatus: SessionRunnerRuntimeStatusSnapshot | null;
+    sessionRunnerRuntimeStatusMachineId: string | null;
+    onSessionRunnerRuntimeStatusInvalidated: () => void;
 }>;
 
 type SessionViewLoadedWithPendingMessagesProps = Omit<
@@ -1284,7 +1293,6 @@ const SessionAgentInputRuntimeStatusBoundary = React.memo(function SessionAgentI
         <SessionAgentInputWithUsageAndRequests
             {...props}
             session={session}
-            sessionActive={sessionRuntimeStatusSource.active === true}
             connectionStatus={connectionStatus}
             showAbortButton={shouldShowAbortButtonForSessionState(sessionStatus.state)}
         />
@@ -1319,6 +1327,77 @@ function resolveRouteHydrationRetryStatusKey(
         return 'common.loading';
     }
     return null;
+}
+
+function useSessionRunnerRuntimeStatusRetention(input: Readonly<{
+    enabled: boolean;
+    serverId: string;
+    session: Session | null;
+}>): Readonly<{
+    machineId: string | null;
+    status: SessionRunnerRuntimeStatusSnapshot | null;
+    invalidateAndRefresh: () => void;
+}> {
+    const sessionId = input.session?.id ?? '';
+    const controlMachineTarget = sessionId ? readMachineControlTargetForSession(sessionId) : null;
+    const reachableMachineTarget = sessionId ? readMachineTargetForSession(sessionId) : null;
+    const rawMachineId = controlMachineTarget?.machineId
+        ?? reachableMachineTarget?.machineId
+        ?? input.session?.metadata?.machineId;
+    const machineId = typeof rawMachineId === 'string' && rawMachineId.trim()
+        ? rawMachineId.trim()
+        : null;
+    const identity = React.useMemo<SessionRunnerRuntimeStatusIdentity | null>(() => (
+        input.enabled && sessionId && machineId
+            ? {
+                serverId: input.serverId,
+                machineId,
+                sessionId,
+            }
+            : null
+    ), [input.enabled, input.serverId, machineId, sessionId]);
+    const requestRevisionRef = React.useRef(0);
+    const [refreshRevision, setRefreshRevision] = React.useState(0);
+    const [, setStatusRevision] = React.useState(0);
+
+    const status = identity ? sessionRunnerRuntimeStatusRetentionStore.read(identity) : null;
+    const invalidateAndRefresh = React.useCallback(() => {
+        if (!identity) return;
+        requestRevisionRef.current += 1;
+        setRefreshRevision((revision) => revision + 1);
+    }, [identity]);
+
+    React.useEffect(() => {
+        if (!identity || !machineId || !sessionId) return;
+
+        let cancelled = false;
+        const requestRevision = requestRevisionRef.current;
+        const refresh = sessionRunnerRuntimeStatusRetentionStore.beginRefresh(identity);
+        void getSessionRunnerRuntimeStatus({
+            sessionId,
+            machineId,
+            serverId: input.serverId,
+        }).then((state) => {
+            if (cancelled || requestRevision !== requestRevisionRef.current) return;
+            sessionRunnerRuntimeStatusRetentionStore.completeRefresh(refresh, state);
+            setStatusRevision((revision) => revision + 1);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [
+        identity,
+        input.serverId,
+        machineId,
+        refreshRevision,
+        sessionId,
+    ]);
+
+    return {
+        machineId,
+        status,
+        invalidateAndRefresh,
+    };
 }
 
 type SessionViewProps = Readonly<{
@@ -1397,6 +1476,11 @@ export const SessionView = React.memo((props: SessionViewProps) => {
         ? props.routeAnchorOverride
         : isOwnedSessionRoutePathname(pathname, sessionId);
     const shouldRenderSessionSurface = surfaceFocused || isRouteAnchor;
+    const sessionRunnerRuntimeStatusRetention = useSessionRunnerRuntimeStatusRetention({
+        enabled: Boolean(session && shouldRenderSessionSurface),
+        serverId: currentSessionRouteServerId,
+        session,
+    });
     const shouldRetainSessionSurface = Platform.OS === 'web' ? shouldRenderSessionSurface : true;
     useSessionSurfaceActivation({
         sessionId,
@@ -1637,6 +1721,9 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                 paneUrlSyncRouteActive={paneUrlSyncRouteActive}
                 surfaceFocused={shouldRenderSessionSurface}
                 routeHydrationPending={routeHydrationPending}
+                sessionRunnerRuntimeStatus={sessionRunnerRuntimeStatusRetention.status}
+                sessionRunnerRuntimeStatusMachineId={sessionRunnerRuntimeStatusRetention.machineId}
+                onSessionRunnerRuntimeStatusInvalidated={sessionRunnerRuntimeStatusRetention.invalidateAndRefresh}
             />
         ))
         : null;
@@ -2106,6 +2193,9 @@ function SessionViewLoaded({
     paneUrlSyncRouteActive,
     surfaceFocused,
     routeHydrationPending,
+    sessionRunnerRuntimeStatus,
+    sessionRunnerRuntimeStatusMachineId,
+    onSessionRunnerRuntimeStatusInvalidated,
 }: SessionViewLoadedProps) {
     const { theme } = useUnistyles();
     const auth = useAuth();
@@ -2708,51 +2798,16 @@ function SessionViewLoaded({
         sessionRouteServerId,
         t,
     ]);
-    const staleSessionRunnerMachineId = controlMachineTarget?.machineId ?? machineId ?? null;
-    const [fetchedSessionRunnerRuntimeState, setFetchedSessionRunnerRuntimeState] = React.useState<Readonly<{
-        sessionId: string;
-        machineId: string;
-        state: SessionRunnerRuntimeStateV1 | null;
-    }> | null>(null);
-    React.useEffect(() => {
-        const targetMachineId = typeof staleSessionRunnerMachineId === 'string'
-            ? staleSessionRunnerMachineId.trim()
-            : '';
-        if (session.active !== true || !sessionId || !targetMachineId) {
-            setFetchedSessionRunnerRuntimeState(null);
-            return;
-        }
-
-        let cancelled = false;
-        void getSessionRunnerRuntimeStatus({
-            sessionId,
-            machineId: targetMachineId,
-            serverId: sessionRouteServerId,
-        }).then((state) => {
-            if (cancelled) return;
-            setFetchedSessionRunnerRuntimeState({
-                sessionId,
-                machineId: targetMachineId,
-                state,
-            });
-        });
-        return () => {
-            cancelled = true;
-        };
-    }, [
-        session.active,
-        sessionRouteServerId,
-        sessionId,
-        staleSessionRunnerMachineId,
-    ]);
+    const staleSessionRunnerMachineId = sessionRunnerRuntimeStatusMachineId;
     const staleSessionRunnerMetadata = React.useMemo(() => {
         const targetMachineId = typeof staleSessionRunnerMachineId === 'string'
             ? staleSessionRunnerMachineId.trim()
             : '';
-        const fetchedState = fetchedSessionRunnerRuntimeState
-            && fetchedSessionRunnerRuntimeState.sessionId === sessionId
-            && fetchedSessionRunnerRuntimeState.machineId === targetMachineId
-            ? fetchedSessionRunnerRuntimeState.state
+        const fetchedState = sessionRunnerRuntimeStatus
+            && sessionRunnerRuntimeStatus.serverId === sessionRouteServerId
+            && sessionRunnerRuntimeStatus.sessionId === sessionId
+            && sessionRunnerRuntimeStatus.machineId === targetMachineId
+            ? sessionRunnerRuntimeStatus.state
             : null;
         if (!fetchedState) return session.metadata;
         return {
@@ -2760,9 +2815,10 @@ function SessionViewLoaded({
             [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: fetchedState,
         };
     }, [
-        fetchedSessionRunnerRuntimeState,
         session.metadata,
         sessionId,
+        sessionRouteServerId,
+        sessionRunnerRuntimeStatus,
         staleSessionRunnerMachineId,
     ]);
     const staleSessionRunnerStatus = React.useMemo(() => readActionableStaleSessionRunnerStatus({
@@ -2843,6 +2899,7 @@ function SessionViewLoaded({
 
         if (viewStatus === 'restarted' || viewStatus === 'already_current') {
             setResolvedStaleSessionRunnerFingerprint(fingerprint);
+            onSessionRunnerRuntimeStatusInvalidated();
             void sync.refreshSessions();
             return;
         }
@@ -2853,6 +2910,7 @@ function SessionViewLoaded({
         );
     }, [
         hasWriteAccess,
+        onSessionRunnerRuntimeStatusInvalidated,
         sessionRouteServerId,
         staleSessionRunnerOperationStatus?.status,
         staleSessionRunnerStatus,
