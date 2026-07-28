@@ -5,6 +5,11 @@ import { runVoiceAgentTurnWithTools } from '@/voice/local/runVoiceAgentTurnWithT
 import type { VoiceSessionBinding } from '@/voice/sessionBinding/voiceSessionBindingTypes';
 import { buildVoiceInitialContext } from '@/voice/context/buildVoiceInitialContext';
 import { captureAssistantTextMessageBaseline } from '@/voice/runtime/waitForNextAssistantTextMessage';
+import {
+  submitDurableVoiceTextTurn,
+  type VoiceTextTurnPendingPort,
+} from '@/voice/sessionBinding/sendVoiceSessionComposerText';
+import type { VoiceAgentSendTurnOptions } from '@/voice/agent/types';
 
 import { formatVoiceQaErrorMessage } from './formatVoiceQaErrorMessage';
 import { createDefaultVoiceQaControllerDeps } from './voiceQaRuntimeDeps';
@@ -44,7 +49,13 @@ export type VoiceQaControllerDeps = Readonly<{
   ensureLocalRunningAndMaybeWelcome: (sessionId: string) => Promise<string | null>;
   ensureSessionVisibleForMessageRoute?: (sessionId: string, options?: Readonly<{ forceRefresh?: boolean }>) => Promise<unknown> | void;
   refreshSessionMessages?: (sessionId: string) => Promise<void> | void;
-  sendLocalTurn: (sessionId: string, prompt: string) => Promise<Readonly<{ assistantText: string; actions?: ReadonlyArray<unknown> }>>;
+  pendingPort: VoiceTextTurnPendingPort;
+  commitLocalUserTranscript?: (sessionId: string, prompt: string, localId: string) => Promise<void>;
+  sendLocalTurn: (
+    sessionId: string,
+    prompt: string,
+    options?: VoiceAgentSendTurnOptions,
+  ) => Promise<Readonly<{ assistantText: string; actions?: ReadonlyArray<unknown> }>>;
   stopLocal: (sessionId: string) => Promise<void>;
   appendLocalContextUpdate: (sessionId: string, update: string) => void;
   startRealtime: (sessionId: string, initialContext?: string, options?: Readonly<{ textOnly?: boolean }>) => Promise<void>;
@@ -207,73 +218,100 @@ export function createVoiceQaController(
           targetSessionId,
           runtimeSessionId: resolveVoiceQaRuntimeSessionId(binding, runtimeSessionId),
         });
-        const baseline =
-          conversationSessionId
-            ? captureAssistantTextMessageBaseline(conversationSessionId)
-            : null;
-        let appendedAssistantTurn = false;
-        let shouldWatchAsyncTargetFollowUp = false;
-        const appendFollowUpAssistantTurn = async (timeoutMs: number): Promise<string | null> => {
-          if (!conversationSessionId) return null;
-          const followUpAssistantText = await deps.waitForInterruptedLocalAssistantTurn({
-            conversationSessionId,
-            timeoutMs,
-            baseline,
-          });
-          const normalizedFollowUpAssistantText = normalizeVoiceQaText(followUpAssistantText);
-          if (!normalizedFollowUpAssistantText) return null;
-          deps.qaStore.getState().appendAssistant(normalizedFollowUpAssistantText);
-          return normalizedFollowUpAssistantText;
-        };
-        try {
-          const result = await runVoiceAgentTurnWithTools({
-            sessionId: runtimeSessionId,
-            userText: prompt,
-            currentToolSessionId: targetSessionId === VOICE_AGENT_GLOBAL_SESSION_ID ? null : targetSessionId,
-            voiceAgentSessions: {
-              sendTurn: deps.sendLocalTurn,
-            },
-            onAssistantTurn: async ({ assistantText }) => {
-              deps.qaStore.getState().appendAssistant(assistantText);
-              if (normalizeVoiceQaText(assistantText)) appendedAssistantTurn = true;
-            },
-            onToolResults: async ({ toolResults }) => {
-              if (toolResults.length > 0) {
-                deps.qaStore.getState().appendSystem(formatVoiceQaToolResultsSummary(toolResults));
-                if (shouldVoiceQaWatchForAsyncTargetFollowUp(toolResults)) {
-                  shouldWatchAsyncTargetFollowUp = true;
+        if (!conversationSessionId) {
+          throw new Error('voice_session_binding_required');
+        }
+
+        let providerResult: Readonly<{ assistantText: string; actions: ReadonlyArray<unknown> }> | null = null;
+        const durableResult = await submitDurableVoiceTextTurn({
+          conversationSessionId,
+          text: prompt,
+          pendingPort: deps.pendingPort,
+          dispatch: async ({ localId }) => {
+            const baseline = captureAssistantTextMessageBaseline(conversationSessionId);
+            let appendedAssistantTurn = false;
+            let shouldWatchAsyncTargetFollowUp = false;
+            const appendFollowUpAssistantTurn = async (timeoutMs: number): Promise<string | null> => {
+              const followUpAssistantText = await deps.waitForInterruptedLocalAssistantTurn({
+                conversationSessionId,
+                timeoutMs,
+                baseline,
+              });
+              const normalizedFollowUpAssistantText = normalizeVoiceQaText(followUpAssistantText);
+              if (!normalizedFollowUpAssistantText) return null;
+              deps.qaStore.getState().appendAssistant(normalizedFollowUpAssistantText);
+              return normalizedFollowUpAssistantText;
+            };
+            try {
+              const result = await runVoiceAgentTurnWithTools({
+                sessionId: runtimeSessionId,
+                userText: prompt,
+                durableLocalId: localId,
+                currentToolSessionId: targetSessionId === VOICE_AGENT_GLOBAL_SESSION_ID ? null : targetSessionId,
+                voiceAgentSessions: {
+                  ...(deps.commitLocalUserTranscript
+                    ? { commitUserTranscript: deps.commitLocalUserTranscript }
+                    : {}),
+                  sendTurn: deps.sendLocalTurn,
+                },
+                onAssistantTurn: async ({ assistantText }) => {
+                  deps.qaStore.getState().appendAssistant(assistantText);
+                  if (normalizeVoiceQaText(assistantText)) appendedAssistantTurn = true;
+                },
+                onToolResults: async ({ toolResults }) => {
+                  if (toolResults.length > 0) {
+                    deps.qaStore.getState().appendSystem(formatVoiceQaToolResultsSummary(toolResults));
+                    if (shouldVoiceQaWatchForAsyncTargetFollowUp(toolResults)) {
+                      shouldWatchAsyncTargetFollowUp = true;
+                    }
+                  }
+                },
+              });
+              if (appendedAssistantTurn && shouldWatchAsyncTargetFollowUp) {
+                void appendFollowUpAssistantTurn(15_000);
+              }
+              if (!appendedAssistantTurn) {
+                const normalizedFollowUpAssistantText = await appendFollowUpAssistantTurn(5_000);
+                if (normalizedFollowUpAssistantText) {
+                  providerResult = { assistantText: normalizedFollowUpAssistantText, actions: [] };
+                  return;
                 }
               }
-            },
-          });
-          if (appendedAssistantTurn && shouldWatchAsyncTargetFollowUp) {
-            void appendFollowUpAssistantTurn(15_000);
-          }
-          if (!appendedAssistantTurn && conversationSessionId) {
-            const normalizedFollowUpAssistantText = await appendFollowUpAssistantTurn(5_000);
-            if (normalizedFollowUpAssistantText) {
-              return { assistantText: normalizedFollowUpAssistantText, actions: [] };
+              providerResult = {
+                assistantText: result.assistantTurns.at(-1) ?? '',
+                actions: [],
+              };
+            } catch (error) {
+              if (!isVoiceQaTurnAbortedError(error)) throw error;
+              const normalizedFollowUpAssistantText = await appendFollowUpAssistantTurn(20_000);
+              if (normalizedFollowUpAssistantText) {
+                providerResult = { assistantText: normalizedFollowUpAssistantText, actions: [] };
+                return;
+              }
+              deps.qaStore.getState().appendSystem('Local voice turn was interrupted by a higher-priority update.');
+              providerResult = { assistantText: '', actions: [] };
+            } finally {
+              syncLatestLocalVoiceQaResolvedSessions(deps, sessionId, binding);
             }
-          }
-          return result;
-        } catch (error) {
-          if (!isVoiceQaTurnAbortedError(error)) throw error;
-          if (!conversationSessionId) {
-            deps.qaStore.getState().appendSystem('Local voice turn was interrupted by a higher-priority update.');
-            return { assistantText: '', actions: [] };
-          }
-          const normalizedFollowUpAssistantText = await appendFollowUpAssistantTurn(20_000);
-          if (normalizedFollowUpAssistantText) {
-            return { assistantText: normalizedFollowUpAssistantText, actions: [] };
-          }
-          deps.qaStore.getState().appendSystem('Local voice turn was interrupted by a higher-priority update.');
-          return { assistantText: '', actions: [] };
-        } finally {
-          syncLatestLocalVoiceQaResolvedSessions(deps, sessionId, binding);
+          },
+        });
+        if (!durableResult.ok) {
+          deps.qaStore.getState().setStatus('error');
+          throw new Error(durableResult.message ?? durableResult.reason);
         }
+        if (durableResult.disposition === 'settled') {
+          return { assistantText: '', actions: [] };
+        }
+        if (durableResult.disposition !== 'handoff_acknowledged' || providerResult === null) {
+          throw new Error(
+            durableResult.disposition === 'ambiguous'
+              ? 'voice_turn_dispatch_ambiguous'
+              : 'voice_turn_pending',
+          );
+        }
+        return providerResult;
       }
 
-      const session = deps.getRealtimeSession();
       const binding = deps.getRealtimeBinding(sessionId);
       if (binding?.adapterId === 'realtime_elevenlabs') {
         deps.qaStore.getState().setResolvedSessions({
@@ -288,14 +326,10 @@ export function createVoiceQaController(
         return { assistantText: '', actions: [] };
       }
 
-      if (!session) {
-        const error = new Error('realtime_voice_session_not_registered');
-        deps.qaStore.getState().setStatus('error');
-        deps.qaStore.getState().appendError(error.message);
-        throw error;
-      }
-      session.sendTextMessage(prompt);
-      return { assistantText: '', actions: [] };
+      const error = new Error('realtime_voice_session_binding_required');
+      deps.qaStore.getState().setStatus('error');
+      deps.qaStore.getState().appendError(error.message);
+      throw error;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'voice_qa_send_failed';
       deps.qaStore.getState().appendError(message);

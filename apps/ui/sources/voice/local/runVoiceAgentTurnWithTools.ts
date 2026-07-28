@@ -1,10 +1,12 @@
 import { createVoiceToolHandlers } from '@/voice/tools/handlers';
 import { resolveToolSessionId } from '@/voice/tools/resolveToolSessionId';
 import { resolveVoiceToolResultHumanSummary } from '@/voice/context/resolveVoiceToolResultHumanSummary';
+import type { ExecutionRunUserTranscriptDirective } from '@happier-dev/protocol';
 
 type VoiceToolAction = Readonly<{ t?: unknown; args?: unknown }>;
 
 type VoiceAgentSessionsLike = Readonly<{
+  commitUserTranscript?: (sessionId: string, userText: string, localId: string) => Promise<void>;
   sendTurn: (
     sessionId: string,
     userText: string,
@@ -12,6 +14,7 @@ type VoiceAgentSessionsLike = Readonly<{
       | {
           onTextDelta?: (delta: string) => void;
           signal?: AbortSignal;
+          userTranscript?: ExecutionRunUserTranscriptDirective;
         }
       | undefined,
   ) => Promise<{ assistantText: string; actions?: ReadonlyArray<unknown> }>;
@@ -298,6 +301,7 @@ function normalizeAssistantTextForActions(
 export async function runVoiceAgentTurnWithTools(params: Readonly<{
   sessionId: string;
   userText: string;
+  durableLocalId: string;
   currentToolSessionId?: string | null;
   voiceAgentSessions: VoiceAgentSessionsLike;
   signal?: AbortSignal;
@@ -334,7 +338,17 @@ export async function runVoiceAgentTurnWithTools(params: Readonly<{
   });
 
   const directPermissionDecision = resolveDirectPermissionDecision(params.userText);
+  let outerTranscriptCommitted = false;
   if (directPermissionDecision) {
+    if (!params.voiceAgentSessions.commitUserTranscript) {
+      throw new Error('voice_user_transcript_commit_required');
+    }
+    await params.voiceAgentSessions.commitUserTranscript(
+      params.sessionId,
+      params.userText,
+      params.durableLocalId,
+    );
+    outerTranscriptCommitted = true;
     const permissionShortcutResult = parseToolResult(
       await (tools as any).processPermissionRequest({ decision: directPermissionDecision, currentSessionOnly: true }),
     );
@@ -477,13 +491,22 @@ export async function runVoiceAgentTurnWithTools(params: Readonly<{
       params.sessionId,
       nextPrompt,
       turnIndex === 0
-        ? (params.onTextDelta || params.signal
-            ? {
-                ...(params.onTextDelta ? { onTextDelta: params.onTextDelta } : {}),
-                ...(params.signal ? { signal: params.signal } : {}),
-              }
-            : undefined)
-        : (params.signal ? { signal: params.signal } : undefined),
+        ? {
+            ...(params.onTextDelta ? { onTextDelta: params.onTextDelta } : {}),
+            ...(params.signal ? { signal: params.signal } : {}),
+            userTranscript: {
+              ...(outerTranscriptCommitted
+                ? { mode: 'suppress' as const }
+                : {
+                    mode: 'persist' as const,
+                    localId: params.durableLocalId,
+                  }),
+            },
+          }
+        : {
+            ...(params.signal ? { signal: params.signal } : {}),
+            userTranscript: { mode: 'suppress' as const },
+          },
     );
 
     throwIfAborted(params.signal);

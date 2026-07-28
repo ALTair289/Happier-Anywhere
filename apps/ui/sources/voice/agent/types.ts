@@ -1,9 +1,19 @@
-import type { ExecutionRunReplaySeedRequest, ExecutionRunResumeHandle, VoiceAssistantAction } from '@happier-dev/protocol';
+import type {
+  ExecutionRunReplaySeedRequest,
+  ExecutionRunResumeHandle,
+  ExecutionRunUserTranscriptDirective,
+  VoiceAssistantAction,
+} from '@happier-dev/protocol';
 
 export type VoiceAgentPermissionPolicy = 'no_tools' | 'read_only';
 export type VoiceAgentAgentSource = 'session' | 'agent';
 export type VoiceAgentVerbosity = 'short' | 'balanced';
 export type VoiceAgentTranscriptPersistenceMode = 'ephemeral' | 'persistent';
+export type VoiceAgentSendTurnOptions = Readonly<{
+  onTextDelta?: (textDelta: string) => void | Promise<void>;
+  signal?: AbortSignal;
+  userTranscript?: ExecutionRunUserTranscriptDirective;
+}>;
 
 export type VoiceAgentStartParams = Readonly<{
   sessionId: string;
@@ -86,13 +96,35 @@ export type VoiceAgentHandle = Readonly<{
 export interface VoiceAgentClient {
   start(params: VoiceAgentStartParams): Promise<VoiceAgentStartResult>;
   sendTurn(
-    params: Readonly<{ sessionId: string; voiceAgentId: string; userText: string; displayUserText?: string }>,
+    params: Readonly<{
+      sessionId: string;
+      voiceAgentId: string;
+      userText: string;
+      displayUserText?: string;
+      userTranscript?: ExecutionRunUserTranscriptDirective;
+    }>,
   ): Promise<{ assistantText: string; actions?: VoiceAssistantAction[] }>;
+  commitUserTranscript(
+    params: Readonly<{
+      sessionId: string;
+      voiceAgentId: string;
+      userText: string;
+      displayUserText?: string;
+      localId: string;
+    }>,
+  ): Promise<{ ok: true }>;
   welcome(
     params: Readonly<{ sessionId: string; voiceAgentId: string; welcomeText?: string }>,
   ): Promise<{ assistantText: string }>;
   startTurnStream(
-    params: Readonly<{ sessionId: string; voiceAgentId: string; userText: string; displayUserText?: string; resume?: boolean }>,
+    params: Readonly<{
+      sessionId: string;
+      voiceAgentId: string;
+      userText: string;
+      displayUserText?: string;
+      resume?: boolean;
+      userTranscript?: ExecutionRunUserTranscriptDirective;
+    }>,
   ): Promise<{ streamId: string }>;
   readTurnStream(
     params: Readonly<{ sessionId: string; voiceAgentId: string; streamId: string; cursor: number; maxEvents?: number }>,

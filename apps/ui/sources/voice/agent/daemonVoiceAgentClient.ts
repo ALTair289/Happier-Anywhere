@@ -7,11 +7,12 @@ import {
   ExecutionRunActionResponseSchema,
   ExecutionRunEnsureOrStartResponseSchema,
   ExecutionRunStopResponseSchema,
+  ExecutionRunUserTranscriptCommitResponseSchema,
   ExecutionRunTurnStreamCancelResponseSchema,
   ExecutionRunTurnStreamReadResponseSchema,
   ExecutionRunTurnStreamStartResponseSchema,
 } from '@happier-dev/protocol';
-import type { VoiceAssistantAction } from '@happier-dev/protocol';
+import type { ExecutionRunUserTranscriptDirective, VoiceAssistantAction } from '@happier-dev/protocol';
 
 import type { VoiceAgentClient, VoiceAgentStartParams, VoiceAgentStartResult, VoiceAgentTurnStreamEvent } from './types';
 import { resolveVoiceAgentBootstrapTimeoutMs } from './resolveVoiceAgentBootstrapTimeoutMs';
@@ -126,7 +127,13 @@ export class DaemonVoiceAgentClient implements VoiceAgentClient {
   }
 
   async sendTurn(
-    params: Readonly<{ sessionId: string; voiceAgentId: string; userText: string; displayUserText?: string }>,
+    params: Readonly<{
+      sessionId: string;
+      voiceAgentId: string;
+      userText: string;
+      displayUserText?: string;
+      userTranscript?: ExecutionRunUserTranscriptDirective;
+    }>,
   ): Promise<{ assistantText: string; actions?: VoiceAssistantAction[] }> {
     const readCfg = this.resolveTurnStreamReadConfig();
     const started = await this.startTurnStream({
@@ -134,6 +141,7 @@ export class DaemonVoiceAgentClient implements VoiceAgentClient {
       voiceAgentId: params.voiceAgentId,
       userText: params.userText,
       ...(typeof params.displayUserText === 'string' ? { displayUserText: params.displayUserText } : {}),
+      ...(params.userTranscript ? { userTranscript: params.userTranscript } : {}),
     });
     let cursor = 0;
     const startedAt = Date.now();
@@ -168,6 +176,27 @@ export class DaemonVoiceAgentClient implements VoiceAgentClient {
     }
   }
 
+  async commitUserTranscript(params: Readonly<{
+    sessionId: string;
+    voiceAgentId: string;
+    userText: string;
+    displayUserText?: string;
+    localId: string;
+  }>): Promise<{ ok: true }> {
+    const res: any = await sessionRpcWithServerScope({
+      sessionId: params.sessionId,
+      method: SESSION_RPC_METHODS.EXECUTION_RUN_USER_TRANSCRIPT_COMMIT_V1,
+      payload: {
+        runId: params.voiceAgentId,
+        message: params.userText,
+        ...(typeof params.displayUserText === 'string' ? { displayMessage: params.displayUserText } : {}),
+        localId: params.localId,
+      },
+    });
+    throwIfRpcError(res);
+    return ensureOk(res, ExecutionRunUserTranscriptCommitResponseSchema);
+  }
+
   async welcome(params: Readonly<{ sessionId: string; voiceAgentId: string; welcomeText?: string }>): Promise<{ assistantText: string }> {
     const res: any = await sessionRpcWithServerScope({
       sessionId: params.sessionId,
@@ -189,10 +218,19 @@ export class DaemonVoiceAgentClient implements VoiceAgentClient {
     return { assistantText };
   }
 
-  async startTurnStream(params: Readonly<{ sessionId: string; voiceAgentId: string; userText: string; displayUserText?: string; resume?: boolean }>): Promise<{ streamId: string }> {
+  async startTurnStream(params: Readonly<{
+    sessionId: string;
+    voiceAgentId: string;
+    userText: string;
+    displayUserText?: string;
+    resume?: boolean;
+    userTranscript?: ExecutionRunUserTranscriptDirective;
+  }>): Promise<{ streamId: string }> {
     const res: any = await sessionRpcWithServerScope({
       sessionId: params.sessionId,
-      method: SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START,
+      method: params.userTranscript
+        ? SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START_V2
+        : SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START,
       payload: {
         runId: params.voiceAgentId,
         message: params.userText,
@@ -200,6 +238,7 @@ export class DaemonVoiceAgentClient implements VoiceAgentClient {
           ? { displayMessage: params.displayUserText }
           : {}),
         ...(params.resume === true ? { resume: true } : {}),
+        ...(params.userTranscript ? { userTranscript: params.userTranscript } : {}),
       },
     });
     throwIfRpcError(res);

@@ -2,16 +2,14 @@ import { storage } from '@/sync/domains/state/storage';
 
 import { createAbortRacer } from './voiceAgentAbort';
 import { resolveVoiceTurnStreamReadConfig } from './resolveVoiceTurnStreamReadConfig';
-import type { VoiceAgentHandle, VoiceAgentStartParams } from './types';
-
-type SendTurnOptions = Readonly<{ onTextDelta?: (textDelta: string) => void | Promise<void>; signal?: AbortSignal }>;
+import type { VoiceAgentHandle, VoiceAgentSendTurnOptions } from './types';
 
 export async function streamVoiceAgentTurn(params: Readonly<{
     sessionId: string;
     handle: VoiceAgentHandle;
     userText: string;
     displayUserText: string;
-    options?: SendTurnOptions;
+    options?: VoiceAgentSendTurnOptions;
 }>): Promise<Readonly<{ assistantText: string; actions: NonNullable<Awaited<ReturnType<VoiceAgentHandle['client']['sendTurn']>>['actions']> }>> {
     const abort = createAbortRacer(params.options?.signal);
     const resolveStreamReadConfig = () => {
@@ -37,6 +35,7 @@ export async function streamVoiceAgentTurn(params: Readonly<{
             userText: params.userText,
             displayUserText: params.displayUserText,
             ...(shouldResumeStreamStart ? { resume: true } : {}),
+            ...(params.options?.userTranscript ? { userTranscript: params.options.userTranscript } : {}),
         });
         abort.throwIfAborted();
 

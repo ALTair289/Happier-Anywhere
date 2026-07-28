@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { RPC_ERROR_CODES } from '@happier-dev/protocol';
+import { RpcError } from '@happier-dev/protocol/rpcErrors';
 
 import { sync } from '@/sync/sync';
 import { storage } from '@/sync/domains/state/storage';
@@ -6,11 +8,23 @@ import { storage } from '@/sync/domains/state/storage';
 import { resetVoiceQaStoreForTests, useVoiceQaStore } from './voiceQaStore';
 import { createVoiceQaController } from './voiceQaController';
 
+function createAcceptedPendingPort() {
+  return {
+    enqueuePendingMessage: vi.fn(async ({ localId }: Readonly<{ localId: string }>) => ({
+      localId,
+      accepted: true,
+      externalHandoffClaimed: true,
+    } as const)),
+    blockPendingDelivery: vi.fn(async () => undefined),
+  };
+}
+
 describe('voiceQaController', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     resetVoiceQaStoreForTests();
     storage.setState({
+      sessionMessages: {},
       settings: {
         ...(storage.getState() as any).settings,
         backendEnabledById: {
@@ -46,6 +60,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome,
       ensureSessionVisibleForMessageRoute,
       refreshSessionMessages,
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -137,6 +152,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
       ensureSessionVisibleForMessageRoute: vi.fn(async () => {}),
       refreshSessionMessages: vi.fn(async () => {}),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -222,6 +238,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome,
       ensureSessionVisibleForMessageRoute: vi.fn(async () => {}),
       refreshSessionMessages: vi.fn(async () => {}),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate,
@@ -308,6 +325,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
       ensureSessionVisibleForMessageRoute,
       refreshSessionMessages: vi.fn(async () => {}),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -439,6 +457,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
       ensureSessionVisibleForMessageRoute,
       refreshSessionMessages,
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -524,6 +543,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
       ensureSessionVisibleForMessageRoute,
       refreshSessionMessages: vi.fn(async () => {}),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate,
@@ -580,6 +600,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
       ensureSessionVisibleForMessageRoute: vi.fn(async () => {}),
       refreshSessionMessages: vi.fn(async () => {}),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn,
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -606,7 +627,16 @@ describe('voiceQaController', () => {
       controlSessionId: '__voice_agent__',
       requestedTargetSessionId: 's1',
     });
-    expect(sendLocalTurn).toHaveBeenCalledWith('voice-hidden-s1', expect.any(String), undefined);
+    expect(sendLocalTurn).toHaveBeenCalledWith(
+      'voice-hidden-s1',
+      expect.any(String),
+      {
+        userTranscript: {
+          mode: 'persist',
+          localId: expect.any(String),
+        },
+      },
+    );
     expect(useVoiceQaStore.getState().targetSessionId).toBe('s1');
     expect(useVoiceQaStore.getState().runtimeSessionId).toBe('voice-hidden-s1');
   });
@@ -641,6 +671,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
       ensureSessionVisibleForMessageRoute: vi.fn(async () => {}),
       refreshSessionMessages: vi.fn(async () => {}),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn,
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -702,6 +733,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
       ensureSessionVisibleForMessageRoute: vi.fn(async () => {}),
       refreshSessionMessages: vi.fn(async () => {}),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'Ready.', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -764,6 +796,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
       ensureSessionVisibleForMessageRoute: vi.fn(async () => {}),
       refreshSessionMessages: vi.fn(async () => {}),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -790,7 +823,8 @@ describe('voiceQaController', () => {
   });
 
   it('sends text prompts through the bound hidden voice conversation for native-session local voice agent bindings, executes tool rounds, and appends the follow-up answer', async () => {
-    const sendLocalTurn = vi.fn(async (_sessionId: string, prompt: string) => {
+    const pendingPort = createAcceptedPendingPort();
+    const sendLocalTurn = vi.fn(async (_sessionId: string, prompt: string, _options?: unknown) => {
       if (prompt.startsWith('VOICE_TOOL_RESULTS_JSON:')) {
         return {
           assistantText: 'Available backends: claude, codex, opencode.',
@@ -823,6 +857,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
       ensureSessionVisibleForMessageRoute: vi.fn(async () => {}),
       refreshSessionMessages: vi.fn(async () => {}),
+      pendingPort,
       sendLocalTurn,
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -842,12 +877,34 @@ describe('voiceQaController', () => {
       controlSessionId: '__voice_agent__',
       requestedTargetSessionId: 's1',
     });
-    expect(sendLocalTurn).toHaveBeenNthCalledWith(1, 'voice-hidden-s1', 'List the available backends.', undefined);
+    expect(pendingPort.enqueuePendingMessage).toHaveBeenCalledTimes(1);
+    expect(pendingPort.enqueuePendingMessage).toHaveBeenCalledWith({
+      conversationSessionId: 'voice-hidden-s1',
+      text: 'List the available backends.',
+      localId: expect.any(String),
+    });
+    const durableLocalId = pendingPort.enqueuePendingMessage.mock.calls[0]?.[0]?.localId;
+    expect(durableLocalId).toEqual(expect.any(String));
+    expect(sendLocalTurn).toHaveBeenNthCalledWith(
+      1,
+      'voice-hidden-s1',
+      'List the available backends.',
+      {
+        userTranscript: {
+          mode: 'persist',
+          localId: durableLocalId,
+        },
+      },
+    );
     expect(sendLocalTurn).toHaveBeenNthCalledWith(
       2,
       'voice-hidden-s1',
       expect.stringContaining('VOICE_TOOL_RESULTS_JSON:'),
-      undefined,
+      {
+        userTranscript: {
+          mode: 'suppress',
+        },
+      },
     );
     expect(useVoiceQaStore.getState().entries.some((entry) => entry.kind === 'user' && entry.text.includes('List the available backends.'))).toBe(true);
     expect(useVoiceQaStore.getState().entries.some((entry) => entry.kind === 'assistant' && entry.text === 'I checked the tools.')).toBe(true);
@@ -899,6 +956,7 @@ describe('voiceQaController', () => {
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
       ensureSessionVisibleForMessageRoute: vi.fn(async () => {}),
       refreshSessionMessages: vi.fn(async () => {}),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn,
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -916,7 +974,16 @@ describe('voiceQaController', () => {
 
     expect(useVoiceQaStore.getState().targetSessionId).toBe('s1');
     expect(useVoiceQaStore.getState().runtimeSessionId).toBe('voice-hidden-s1');
-    expect(sendLocalTurn).toHaveBeenCalledWith('voice-home-hidden', 'Teleport into the active coding session.', undefined);
+    expect(sendLocalTurn).toHaveBeenCalledWith(
+      'voice-home-hidden',
+      'Teleport into the active coding session.',
+      {
+        userTranscript: {
+          mode: 'persist',
+          localId: expect.any(String),
+        },
+      },
+    );
   });
 
   it('surfaces failed local voice tool results in the QA transcript', async () => {
@@ -963,6 +1030,7 @@ describe('voiceQaController', () => {
       getVoiceTargetState: () => ({ primaryActionSessionId: 's1', lastFocusedSessionId: null }),
       ensureLocalBinding,
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn,
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -984,7 +1052,11 @@ describe('voiceQaController', () => {
       2,
       'voice-hidden-s1',
       expect.stringContaining('VOICE_TOOL_RESULTS_JSON:'),
-      undefined,
+      {
+        userTranscript: {
+          mode: 'suppress',
+        },
+      },
     );
     expect(
       useVoiceQaStore.getState().entries.some(
@@ -996,7 +1068,7 @@ describe('voiceQaController', () => {
     ).toBe(true);
   });
 
-  it('appends local send errors to the QA transcript before rethrowing', async () => {
+  it('sets QA error after a typed pre-provider prompt rejection', async () => {
     const ensureLocalBinding = vi.fn(async () => ({
       adapterId: 'local_conversation',
       controlSessionId: '__voice_agent__',
@@ -1005,6 +1077,7 @@ describe('voiceQaController', () => {
       targetSessionId: 's1',
       updatedAt: 1,
     }));
+    const pendingPort = createAcceptedPendingPort();
     const controller = createVoiceQaController({
       getSettings: () => ({
         voice: {
@@ -1015,8 +1088,9 @@ describe('voiceQaController', () => {
       getVoiceTargetState: () => ({ primaryActionSessionId: 's1', lastFocusedSessionId: null }),
       ensureLocalBinding,
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort,
       sendLocalTurn: vi.fn(async () => {
-        throw new Error('execution_run_busy');
+        throw new RpcError('RPC method not available', RPC_ERROR_CODES.METHOD_NOT_AVAILABLE);
       }),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1030,15 +1104,21 @@ describe('voiceQaController', () => {
       qaStore: useVoiceQaStore,
     });
 
-    await expect(controller.sendPrompt({ sessionId: 's1', prompt: 'Answer the pending question.' })).rejects.toThrow(
-      'execution_run_busy',
-    );
+    await expect(
+      controller.sendPrompt({ sessionId: 's1', prompt: 'Answer the pending question.' }),
+    ).rejects.toThrow('RPC method not available');
 
     expect(
       useVoiceQaStore.getState().entries.some(
-        (entry) => entry.kind === 'error' && entry.text.includes('execution_run_busy'),
+        (entry) => entry.kind === 'error' && entry.text.includes('RPC method not available'),
       ),
     ).toBe(true);
+    expect(pendingPort.blockPendingDelivery).toHaveBeenCalledWith({
+      conversationSessionId: 'voice-hidden-s1',
+      localId: expect.any(String),
+      reason: 'provider_unavailable_before_acceptance',
+    });
+    expect(useVoiceQaStore.getState().status).toBe('error');
   });
 
   it('surfaces the follow-up assistant reply when a local QA turn is interrupted by a higher-priority update', async () => {
@@ -1064,6 +1144,7 @@ describe('voiceQaController', () => {
       getVoiceTargetState: () => ({ primaryActionSessionId: 's1', lastFocusedSessionId: null }),
       ensureLocalBinding,
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn,
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1120,6 +1201,7 @@ describe('voiceQaController', () => {
       getVoiceTargetState: () => ({ primaryActionSessionId: 's1', lastFocusedSessionId: null }),
       ensureLocalBinding,
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn,
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1204,6 +1286,7 @@ describe('voiceQaController', () => {
       getVoiceTargetState: () => ({ primaryActionSessionId: 's1', lastFocusedSessionId: null }),
       ensureLocalBinding,
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn,
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1261,6 +1344,7 @@ describe('voiceQaController', () => {
       getVoiceTargetState: () => ({ primaryActionSessionId: 's9', lastFocusedSessionId: null }),
       ensureLocalBinding: vi.fn(async () => null),
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1305,6 +1389,7 @@ describe('voiceQaController', () => {
       getVoiceTargetState: () => ({ primaryActionSessionId: 's9', lastFocusedSessionId: null }),
       ensureLocalBinding: vi.fn(async () => null),
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1333,6 +1418,7 @@ describe('voiceQaController', () => {
       getVoiceTargetState: () => ({ primaryActionSessionId: 's9', lastFocusedSessionId: null }),
       ensureLocalBinding: vi.fn(async () => null),
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1361,6 +1447,7 @@ describe('voiceQaController', () => {
       getVoiceTargetState: () => ({ primaryActionSessionId: 's1', lastFocusedSessionId: null }),
       ensureLocalBinding: vi.fn(async () => null),
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1400,6 +1487,7 @@ describe('voiceQaController', () => {
         });
       }),
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1437,6 +1525,7 @@ describe('voiceQaController', () => {
         throw new Error('voice_conversation_session_target_missing');
       }),
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1499,6 +1588,7 @@ describe('voiceQaController', () => {
         throw new Error('voice_conversation_session_target_missing');
       }),
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal: vi.fn(async () => {}),
       appendLocalContextUpdate: vi.fn(),
@@ -1537,6 +1627,7 @@ describe('voiceQaController', () => {
       getVoiceTargetState: () => ({ primaryActionSessionId: 's1', lastFocusedSessionId: null }),
       ensureLocalBinding: vi.fn(async () => null),
       ensureLocalRunningAndMaybeWelcome: vi.fn(async () => null),
+      pendingPort: createAcceptedPendingPort(),
       sendLocalTurn: vi.fn(async () => ({ assistantText: 'ok', actions: [] })),
       stopLocal,
       appendLocalContextUpdate: vi.fn(),

@@ -16,6 +16,10 @@ import {
   resolveVoiceSessionBindingByConversationSessionId,
 } from '@/voice/sessionBinding/resolveVoiceSessionBinding';
 import { VOICE_AGENT_GLOBAL_SESSION_ID } from '@/voice/agent/voiceAgentGlobalSessionId';
+import {
+  submitDurableVoiceTextTurn,
+  type VoiceTextTurnPendingPort,
+} from '@/voice/sessionBinding/sendVoiceSessionComposerText';
 
 import { patchLocalVoiceState, setIdleStateUnlessRecording } from './localVoiceState';
 import { resolveLocalVoiceAdapterSettings } from './localVoiceSettings';
@@ -29,6 +33,7 @@ type VoicePlaybackControllerLike = Readonly<{
 }>;
 
 type VoiceAgentSessionsLike = Readonly<{
+  commitUserTranscript?: (sessionId: string, userText: string, localId: string) => Promise<void>;
   sendTurn: (
     sessionId: string,
     userText: string,
@@ -36,6 +41,7 @@ type VoiceAgentSessionsLike = Readonly<{
       | {
           onTextDelta?: (delta: string) => void;
           signal?: AbortSignal;
+          userTranscript?: import('@happier-dev/protocol').ExecutionRunUserTranscriptDirective;
         }
       | undefined,
   ) => Promise<{ assistantText: string; actions?: ReadonlyArray<unknown> }>;
@@ -48,6 +54,11 @@ export async function sendVoiceTextTurn(params: {
   playbackController: VoicePlaybackControllerLike;
   voiceAgentSessions: VoiceAgentSessionsLike;
   signal?: AbortSignal;
+  pendingPort?: VoiceTextTurnPendingPort;
+  durableDispatch?: Readonly<{
+    localId: string;
+    handoffMode: 'interrupt_and_send';
+  }>;
 }): Promise<void> {
   const { sessionId, settings, userText } = params;
   const { adapterId, config } = resolveLocalVoiceAdapterSettings(settings);
@@ -67,11 +78,40 @@ export async function sendVoiceTextTurn(params: {
     sessionBinding?.targetSessionId
     ?? (sessionId === VOICE_AGENT_GLOBAL_SESSION_ID ? null : sessionId);
 
+  if (conversationMode === 'agent' && !params.durableDispatch) {
+    if (!syntheticConversationSessionId) {
+      throw new Error('voice_session_binding_required');
+    }
+    const result = await submitDurableVoiceTextTurn({
+      conversationSessionId: syntheticConversationSessionId,
+      text: userText,
+      pendingPort: params.pendingPort,
+      dispatch: async (durableDispatch) => {
+        await sendVoiceTextTurn({ ...params, durableDispatch });
+      },
+    });
+    if (!result.ok) throw new Error(result.message ?? result.reason);
+    if (result.disposition === 'settled') return;
+    if (result.disposition !== 'handoff_acknowledged') {
+      throw new Error(
+        result.disposition === 'ambiguous'
+          ? 'voice_turn_dispatch_ambiguous'
+          : 'voice_turn_pending',
+      );
+    }
+    return;
+  }
+
   voiceActivityController.appendUserText(sessionId, adapterId, userText);
-  if (syntheticConversationSessionId) {
+  const voiceAgentBackend = String(config?.agent?.backend ?? 'daemon').trim() || 'daemon';
+  if (
+    syntheticConversationSessionId
+    && !(conversationMode === 'agent' && voiceAgentBackend === 'daemon')
+  ) {
     appendVoiceConversationUserText({
       conversationSessionId: syntheticConversationSessionId,
       text: userText,
+      localId: params.durableDispatch?.localId,
     });
   }
 
@@ -103,6 +143,10 @@ export async function sendVoiceTextTurn(params: {
   };
 
   if (conversationMode === 'agent') {
+    const durableLocalId = params.durableDispatch?.localId;
+    if (!durableLocalId) {
+      throw new Error('voice_durable_local_id_required');
+    }
     const autoSpeak = config?.tts?.autoSpeakReplies !== false;
     const tts = config?.tts ?? null;
     const legacyUseDeviceTts = tts?.useDeviceTts === true;
@@ -195,6 +239,7 @@ export async function sendVoiceTextTurn(params: {
       await runVoiceAgentTurnWithTools({
         sessionId,
         userText,
+        durableLocalId,
         currentToolSessionId,
         voiceAgentSessions: params.voiceAgentSessions,
         signal: params.signal,
@@ -244,8 +289,9 @@ export async function sendVoiceTextTurn(params: {
 
   patchLocalVoiceState({ status: 'sending' });
   try {
-    await sync.sendMessage(sessionId, userText, undefined, undefined, {
-      bypassPendingQueueReason: 'voice_turn_immediate',
+    await sync.submitMessage(sessionId, userText, undefined, undefined, {
+      callerSurface: 'voice_turn',
+      forceImmediate: true,
     });
     voiceActivityController.appendActionExecuted(sessionId, adapterId, 'unknown', `Sent to session: ${userText.slice(0, 200)}`);
   } catch (error) {

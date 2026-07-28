@@ -330,6 +330,103 @@ describe('DaemonVoiceAgentClient', () => {
     );
   });
 
+  it('uses the versioned stream-start method for exact outer-turn transcript custody', async () => {
+    const { SESSION_RPC_METHODS } = await import('@happier-dev/protocol/rpc');
+    const { sessionRpcWithServerScope } = await import('@/sync/runtime/orchestration/serverScopedRpc/serverScopedSessionRpc');
+    vi.mocked(sessionRpcWithServerScope).mockResolvedValueOnce({ streamId: 'stream-1' } as any);
+
+    const { DaemonVoiceAgentClient } = await import('./daemonVoiceAgentClient');
+    const client = new DaemonVoiceAgentClient();
+
+    await expect(
+      client.startTurnStream({
+        sessionId: 'session-1',
+        voiceAgentId: 'run-1',
+        userText: 'Create the file.',
+        userTranscript: {
+          mode: 'persist',
+          localId: ' durable-outer-id ',
+        },
+      }),
+    ).resolves.toEqual({ streamId: 'stream-1' });
+
+    expect(vi.mocked(sessionRpcWithServerScope)).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      method: SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START_V2,
+      payload: {
+        runId: 'run-1',
+        message: 'Create the file.',
+        userTranscript: {
+          mode: 'persist',
+          localId: ' durable-outer-id ',
+        },
+      },
+    });
+  });
+
+  it('fails closed before a legacy stream-start write when v2 transcript custody is unavailable', async () => {
+    const { SESSION_RPC_METHODS } = await import('@happier-dev/protocol/rpc');
+    const { sessionRpcWithServerScope } = await import('@/sync/runtime/orchestration/serverScopedRpc/serverScopedSessionRpc');
+    vi.mocked(sessionRpcWithServerScope).mockRejectedValueOnce(
+      Object.assign(new Error('RPC method not available'), {
+        rpcErrorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
+      }),
+    );
+
+    const { DaemonVoiceAgentClient } = await import('./daemonVoiceAgentClient');
+    const client = new DaemonVoiceAgentClient();
+
+    await expect(
+      client.startTurnStream({
+        sessionId: 'session-1',
+        voiceAgentId: 'run-1',
+        userText: 'Create the file.',
+        userTranscript: {
+          mode: 'persist',
+          localId: 'durable-outer-id',
+        },
+      }),
+    ).rejects.toMatchObject({
+      message: 'RPC method not available',
+      rpcErrorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
+    });
+
+    expect(vi.mocked(sessionRpcWithServerScope)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sessionRpcWithServerScope)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: SESSION_RPC_METHODS.EXECUTION_RUN_STREAM_START_V2,
+      }),
+    );
+  });
+
+  it('commits shortcut transcript custody through the versioned daemon writer method', async () => {
+    const { SESSION_RPC_METHODS } = await import('@happier-dev/protocol/rpc');
+    const { sessionRpcWithServerScope } = await import('@/sync/runtime/orchestration/serverScopedRpc/serverScopedSessionRpc');
+    vi.mocked(sessionRpcWithServerScope).mockResolvedValueOnce({ ok: true } as any);
+
+    const { DaemonVoiceAgentClient } = await import('./daemonVoiceAgentClient');
+    const client = new DaemonVoiceAgentClient();
+
+    await expect(
+      client.commitUserTranscript({
+        sessionId: 'session-1',
+        voiceAgentId: 'run-1',
+        userText: 'Approve the pending permission request.',
+        localId: ' shortcut-durable-id ',
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(vi.mocked(sessionRpcWithServerScope)).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      method: SESSION_RPC_METHODS.EXECUTION_RUN_USER_TRANSCRIPT_COMMIT_V1,
+      payload: {
+        runId: 'run-1',
+        message: 'Approve the pending permission request.',
+        localId: ' shortcut-durable-id ',
+      },
+    });
+  });
+
   it('surfaces RPC method unavailable from ensureOrStart without falling back', async () => {
     const { sessionRpcWithServerScope } = await import('@/sync/runtime/orchestration/serverScopedRpc/serverScopedSessionRpc');
     vi.mocked(sessionRpcWithServerScope).mockRejectedValueOnce(

@@ -2,7 +2,7 @@ import { storage } from '@/sync/domains/state/storage';
 import { DaemonVoiceAgentClient } from '@/voice/agent/daemonVoiceAgentClient';
 import { OpenAiCompatVoiceAgentClient } from '@/voice/agent/openaiCompatVoiceAgentClient';
 import { initializeVoiceAgentHandle } from '@/voice/agent/initializeVoiceAgentHandle';
-import type { VoiceAgentHandle } from '@/voice/agent/types';
+import type { VoiceAgentHandle, VoiceAgentSendTurnOptions } from '@/voice/agent/types';
 import type { VoiceAssistantAction } from '@happier-dev/protocol';
 import { VOICE_AGENT_GLOBAL_SESSION_ID } from '@/voice/agent/voiceAgentGlobalSessionId';
 import { resolveVoiceTurnStreamReadConfig } from '@/voice/agent/resolveVoiceTurnStreamReadConfig';
@@ -29,8 +29,6 @@ import {
 } from '@/voice/agent/voiceAgentRunState';
 import { streamVoiceAgentTurn } from '@/voice/agent/streamVoiceAgentTurn';
 import { buildVoiceAgentTurnPayload } from '@/voice/agent/buildVoiceAgentTurnPayload';
-
-type SendTurnOptions = Readonly<{ onTextDelta?: (textDelta: string) => void | Promise<void>; signal?: AbortSignal }>;
 
 function resolveExecutionRunBackendId(run: Readonly<Record<string, unknown>> | null | undefined): string | null {
   const backendIdRaw = typeof run?.backendId === 'string' ? run.backendId.trim() : '';
@@ -91,10 +89,11 @@ export type VoiceAgentSessionController = Readonly<{
   ensureRunning: (sessionId: string) => Promise<void>;
   ensureRunningAndMaybeWelcome: (sessionId: string) => Promise<string | null>;
   isActive: (sessionId: string) => boolean;
+  commitUserTranscript: (sessionId: string, userText: string, localId: string) => Promise<void>;
   sendInterruptingTextUpdate: (
     sessionId: string,
     update: string,
-    options?: SendTurnOptions,
+    options?: VoiceAgentSendTurnOptions,
   ) => Promise<Readonly<{ assistantText: string; actions: VoiceAssistantAction[] }>>;
   sendTextUpdate: (
     sessionId: string,
@@ -103,7 +102,7 @@ export type VoiceAgentSessionController = Readonly<{
   sendTurn: (
     sessionId: string,
     userText: string,
-    options?: SendTurnOptions,
+    options?: VoiceAgentSendTurnOptions,
   ) => Promise<Readonly<{ assistantText: string; actions: VoiceAssistantAction[] }>>;
   stop: (sessionId: string) => Promise<void>;
 }>;
@@ -185,7 +184,7 @@ export function createVoiceAgentSessionController(): VoiceAgentSessionController
   const sendTurnImpl = async (
     sessionId: string,
     userText: string,
-    options?: SendTurnOptions,
+    options?: VoiceAgentSendTurnOptions,
   ): Promise<Readonly<{ assistantText: string; actions: VoiceAssistantAction[] }>> => {
     let lastHandle: VoiceAgentHandle | null = null;
     let preparedPayloadText: string | null = null;
@@ -224,6 +223,7 @@ export function createVoiceAgentSessionController(): VoiceAgentSessionController
             voiceAgentId: handle.voiceAgentId,
             userText: nextUserText,
             displayUserText,
+            ...(options?.userTranscript ? { userTranscript: options.userTranscript } : {}),
           });
       const normalizedResponse = {
         assistantText: response.assistantText,
@@ -270,7 +270,7 @@ export function createVoiceAgentSessionController(): VoiceAgentSessionController
   const sendTurn = async (
     sessionId: string,
     userText: string,
-    options?: SendTurnOptions,
+    options?: VoiceAgentSendTurnOptions,
   ): Promise<Readonly<{ assistantText: string; actions: VoiceAssistantAction[] }>> =>
     await runSerializedTurn(sessionId, async () => {
       const internalAbortController = new AbortController();
@@ -286,10 +286,22 @@ export function createVoiceAgentSessionController(): VoiceAgentSessionController
       }
     });
 
+  const commitUserTranscript = async (sessionId: string, userText: string, localId: string): Promise<void> => {
+    const handle = await getVoiceAgentHandle(sessionId);
+    if (handle.backend !== 'daemon') return;
+    await handle.client.commitUserTranscript({
+      sessionId: handle.rpcSessionId,
+      voiceAgentId: handle.voiceAgentId,
+      userText,
+      displayUserText: userText,
+      localId,
+    });
+  };
+
   const sendInterruptingTextUpdate = async (
     sessionId: string,
     update: string,
-    options?: SendTurnOptions,
+    options?: VoiceAgentSendTurnOptions,
   ): Promise<Readonly<{ assistantText: string; actions: VoiceAssistantAction[] }>> => {
     const text = update.trim();
     if (!text) {
@@ -438,6 +450,7 @@ export function createVoiceAgentSessionController(): VoiceAgentSessionController
   return {
     appendContextUpdate,
     commit,
+    commitUserTranscript,
     ensureRunning: async (sessionId: string) => {
       await getVoiceAgentHandle(sessionId);
     },

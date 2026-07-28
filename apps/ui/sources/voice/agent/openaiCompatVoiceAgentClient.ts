@@ -2,7 +2,11 @@ import { storage } from '@/sync/domains/state/storage';
 import { sync } from '@/sync/sync';
 import { buildOpenAiChatCompletionRequest, parseOpenAiChatCompletionAssistantText, type OpenAiCompatChatMessage } from '@/voice/local/openaiCompatChat';
 import { fetchWithTimeout, resolveVoiceNetworkTimeoutMs } from '@/voice/runtime/fetchWithTimeout';
-import { extractVoiceActionsFromAssistantText, type VoiceAssistantAction } from '@happier-dev/protocol';
+import {
+  extractVoiceActionsFromAssistantText,
+  type ExecutionRunUserTranscriptDirective,
+  type VoiceAssistantAction,
+} from '@happier-dev/protocol';
 import { buildLocalVoiceAgentSystemPrompt } from '@happier-dev/agents';
 import { resolveDisabledVoiceActionIdsFromState } from '@/voice/tools/resolveDisabledVoiceActionIds';
 import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
@@ -93,7 +97,13 @@ export class OpenAiCompatVoiceAgentClient implements VoiceAgentClient {
   }
 
   async sendTurn(
-    params: Readonly<{ sessionId: string; voiceAgentId: string; userText: string; displayUserText?: string }>,
+    params: Readonly<{
+      sessionId: string;
+      voiceAgentId: string;
+      userText: string;
+      displayUserText?: string;
+      userTranscript?: ExecutionRunUserTranscriptDirective;
+    }>,
   ): Promise<{ assistantText: string; actions?: VoiceAssistantAction[] }> {
     const state = this.voiceAgents.get(params.voiceAgentId);
     if (!state || state.sessionId !== params.sessionId) throw new Error('VOICE_AGENT_NOT_FOUND');
@@ -123,6 +133,16 @@ export class OpenAiCompatVoiceAgentClient implements VoiceAgentClient {
     return extracted.actions.length > 0 ? { assistantText, actions: extracted.actions } : { assistantText };
   }
 
+  async commitUserTranscript(_params: Readonly<{
+    sessionId: string;
+    voiceAgentId: string;
+    userText: string;
+    displayUserText?: string;
+    localId: string;
+  }>): Promise<{ ok: true }> {
+    return { ok: true };
+  }
+
   async welcome(_params: Readonly<{ sessionId: string; voiceAgentId: string; welcomeText?: string }>): Promise<{ assistantText: string }> {
     const state = this.voiceAgents.get(_params.voiceAgentId);
     if (!state || state.sessionId !== _params.sessionId) throw new Error('VOICE_AGENT_NOT_FOUND');
@@ -133,7 +153,14 @@ export class OpenAiCompatVoiceAgentClient implements VoiceAgentClient {
     return { assistantText };
   }
 
-  async startTurnStream(params: Readonly<{ sessionId: string; voiceAgentId: string; userText: string; displayUserText?: string; resume?: boolean }>): Promise<{ streamId: string }> {
+  async startTurnStream(params: Readonly<{
+    sessionId: string;
+    voiceAgentId: string;
+    userText: string;
+    displayUserText?: string;
+    resume?: boolean;
+    userTranscript?: ExecutionRunUserTranscriptDirective;
+  }>): Promise<{ streamId: string }> {
     const streamId =
       typeof (globalThis as any)?.crypto?.randomUUID === 'function'
         ? (globalThis as any).crypto.randomUUID()

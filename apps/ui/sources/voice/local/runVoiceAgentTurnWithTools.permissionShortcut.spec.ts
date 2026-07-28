@@ -83,6 +83,7 @@ describe('runVoiceAgentTurnWithTools permission shortcuts', () => {
     const result = await runVoiceAgentTurnWithTools({
       sessionId: 'voice-hidden-s1',
       userText: 'Describe the pending permission request and ask me to approve or deny it.',
+      durableLocalId: 'permission-shortcut-test-1',
       currentToolSessionId: 's1',
       voiceAgentSessions: { sendTurn },
     });
@@ -160,23 +161,33 @@ describe('runVoiceAgentTurnWithTools permission shortcuts', () => {
       assistantText: 'model fallback should not run',
       actions: [],
     }));
+    const commitUserTranscript = vi.fn(async () => {});
 
     const { runVoiceAgentTurnWithTools } = await import('./runVoiceAgentTurnWithTools');
 
     const result = await runVoiceAgentTurnWithTools({
       sessionId: 'voice-hidden-s1',
       userText: 'Approve the pending write permission request.',
+      durableLocalId: 'permission-shortcut-test-2',
       currentToolSessionId: 's1',
-      voiceAgentSessions: { sendTurn },
+      voiceAgentSessions: { sendTurn, commitUserTranscript },
     });
 
     expect(sendTurn).not.toHaveBeenCalled();
+    expect(commitUserTranscript).toHaveBeenCalledWith(
+      'voice-hidden-s1',
+      'Approve the pending write permission request.',
+      'permission-shortcut-test-2',
+    );
     expect(sessionRpcWithServerScope).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: 's1',
         method: 'permission',
         payload: { id: 'perm_voice_1', approved: true },
       }),
+    );
+    expect(commitUserTranscript.mock.invocationCallOrder[0]).toBeLessThan(
+      sessionRpcWithServerScope.mock.invocationCallOrder[0]!,
     );
     expect(result.totalActions).toBe(1);
     expect(result.assistantTurns).toEqual(['Approved the pending permission request.']);
@@ -254,8 +265,9 @@ describe('runVoiceAgentTurnWithTools permission shortcuts', () => {
     const result = await runVoiceAgentTurnWithTools({
       sessionId: 'voice-hidden-s1',
       userText: 'Deny the pending permission request.',
+      durableLocalId: 'permission-shortcut-test-3',
       currentToolSessionId: 's1',
-      voiceAgentSessions: { sendTurn },
+      voiceAgentSessions: { sendTurn, commitUserTranscript: vi.fn(async () => {}) },
     });
 
     expect(sendTurn).not.toHaveBeenCalled();
@@ -400,8 +412,9 @@ describe('runVoiceAgentTurnWithTools permission shortcuts', () => {
     const result = await runVoiceAgentTurnWithTools({
       sessionId: 'voice-hidden-s1',
       userText: 'Approve the pending write permission request.',
+      durableLocalId: 'permission-shortcut-test-4',
       currentToolSessionId: 's1',
-      voiceAgentSessions: { sendTurn },
+      voiceAgentSessions: { sendTurn, commitUserTranscript: vi.fn(async () => {}) },
     });
 
     expect(sendTurn).not.toHaveBeenCalled();
@@ -492,14 +505,85 @@ describe('runVoiceAgentTurnWithTools permission shortcuts', () => {
     const result = await runVoiceAgentTurnWithTools({
       sessionId: 'voice-hidden-s1',
       userText: 'Approve the pending write permission request.',
+      durableLocalId: 'permission-shortcut-test-5',
       currentToolSessionId: 'sys_voice',
-      voiceAgentSessions: { sendTurn },
+      voiceAgentSessions: { sendTurn, commitUserTranscript: vi.fn(async () => {}) },
     });
 
     expect(sendTurn).not.toHaveBeenCalled();
     expect(sessionRpcWithServerScope).not.toHaveBeenCalled();
     expect(result.totalActions).toBe(0);
     expect(result.assistantTurns[0]).toContain('current session');
+  });
+
+  it('suppresses the provider fallback transcript after a direct shortcut already committed the outer turn', async () => {
+    const storage = await getStorage();
+    storage.__setState({
+      settings: {
+        ...storage.getState().settings,
+      },
+      sessions: {
+        ...storage.getState().sessions,
+        s1: {
+          id: 's1',
+          presence: 'online',
+          active: true,
+          updatedAt: 1,
+          agentState: null,
+          metadata: { path: '/tmp/project-a', host: 'test-machine' },
+        },
+      },
+      sessionMessages: {
+        ...storage.getState().sessionMessages,
+        s1: { messages: [] },
+      },
+      sessionListViewDataByServerId: {
+        'server-a': [
+          {
+            type: 'session',
+            serverId: 'server-a',
+            session: {
+              id: 's1',
+              presence: 'online',
+              active: true,
+            },
+          },
+        ],
+      },
+    });
+
+    const sendTurn = vi.fn(async () => ({
+      assistantText: 'There is no pending request in this session.',
+      actions: [],
+    }));
+    const commitUserTranscript = vi.fn(async () => {});
+
+    const { runVoiceAgentTurnWithTools } = await import('./runVoiceAgentTurnWithTools');
+
+    const result = await runVoiceAgentTurnWithTools({
+      sessionId: 'voice-hidden-s1',
+      userText: 'Approve the pending permission request.',
+      durableLocalId: 'permission-shortcut-fallback-id',
+      currentToolSessionId: 's1',
+      voiceAgentSessions: { sendTurn, commitUserTranscript },
+    });
+
+    expect(commitUserTranscript).toHaveBeenCalledWith(
+      'voice-hidden-s1',
+      'Approve the pending permission request.',
+      'permission-shortcut-fallback-id',
+    );
+    expect(sendTurn).toHaveBeenCalledWith(
+      'voice-hidden-s1',
+      'Approve the pending permission request.',
+      {
+        userTranscript: {
+          mode: 'suppress',
+        },
+      },
+    );
+    expect(sessionRpcWithServerScope).not.toHaveBeenCalled();
+    expect(result.assistantTurns).toEqual(['There is no pending request in this session.']);
   });
 
   it('does not treat compound approval requests as direct shortcuts', async () => {
@@ -574,6 +658,7 @@ describe('runVoiceAgentTurnWithTools permission shortcuts', () => {
     const result = await runVoiceAgentTurnWithTools({
       sessionId: 'voice-hidden-s1',
       userText: 'Approve the pending write permission request and then summarize it.',
+      durableLocalId: 'permission-shortcut-test-6',
       currentToolSessionId: 's1',
       voiceAgentSessions: { sendTurn },
     });
