@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { createPendingDomain } from './pending';
 
 function createHarness(initial: any = {}) {
+    let setCalls = 0;
     let state: any = {
         sessions: {},
         sessionPending: {},
@@ -12,16 +13,51 @@ function createHarness(initial: any = {}) {
 
     const get = () => state;
     const set = (updater: any) => {
+        setCalls += 1;
         const next = typeof updater === 'function' ? updater(state) : updater;
         if (next === state) return;
         state = { ...state, ...next };
     };
 
     const domain = createPendingDomain({ get, set } as any);
-    return { get, domain };
+    return { get, getSetCalls: () => setCalls, domain };
 }
 
 describe('pending domain: ordering', () => {
+    it('applies pending and discarded refresh projections in one state transition', () => {
+        const { get, getSetCalls, domain } = createHarness();
+        const pendingMessage = {
+            id: 'p1',
+            localId: 'p1',
+            createdAt: 2_000,
+            updatedAt: 2_000,
+            text: 'pending',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'pending' } } as any,
+        };
+        const discardedMessage = {
+            id: 'd1',
+            localId: 'd1',
+            createdAt: 3_000,
+            updatedAt: 3_000,
+            text: 'discarded',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'discarded' } } as any,
+            discardedAt: 3_100,
+            discardedReason: 'manual' as const,
+        };
+
+        domain.applyPendingSnapshot('s1', {
+            messages: [pendingMessage],
+            discarded: [discardedMessage],
+        });
+
+        expect(getSetCalls()).toBe(1);
+        expect(get().sessionPending.s1).toEqual({
+            messages: [pendingMessage],
+            discarded: [discardedMessage],
+            isLoaded: true,
+        });
+    });
+
     it('preserves state references for equivalent loaded pending refreshes', () => {
         const { get, domain } = createHarness();
         const pendingMessage = {
@@ -170,5 +206,38 @@ describe('pending domain: ordering', () => {
 
         expect(get().sessionPending.s1.messages.map((message: any) => message.id)).toEqual(['p1', 'p2']);
         expect(get().sessionPending.s1.messages[0].text).toBe('late stale upsert');
+    });
+
+    it('does not treat recovered history as commit proof when pending arrives later', () => {
+        const { get, domain } = createHarness({
+            sessionMessages: {
+                s1: {
+                    messagesById: {
+                        history: {
+                            id: 'history',
+                            kind: 'user-text',
+                            localId: 'shared-local',
+                            createdAt: 1_000,
+                            text: 'recovered history',
+                            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+                        },
+                    },
+                    messagesMap: {},
+                },
+            },
+        });
+        const localPending = {
+            id: 'pending-live',
+            localId: 'shared-local',
+            source: 'local_outbound' as const,
+            createdAt: 2_000,
+            updatedAt: 2_000,
+            text: 'live pending',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'live pending' } } as any,
+        };
+
+        domain.applyPendingMessages('s1', [localPending]);
+
+        expect(get().sessionPending.s1.messages).toEqual([localPending]);
     });
 });

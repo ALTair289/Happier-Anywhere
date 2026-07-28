@@ -42,6 +42,7 @@ import {
     type ServerAccountScope,
 } from '../scope/serverAccountScope';
 import type { LocalPetSourceMetadata } from '../pets/localPetSourceMetadata';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 var persistedStorage: MMKV | null = null;
 
 const pendingSettingsSchemaByKey: Readonly<Record<string, z.ZodTypeAny>> = Object.freeze({
@@ -786,13 +787,13 @@ export function loadNewSessionDraft(scope?: ServerAccountScope | null): NewSessi
             ? parsed.permissionMode
             : 'default';
         const modelMode: ModelMode = isModelMode(parsed.modelMode)
-            ? String(parsed.modelMode).trim()
+            ? String(parsed.modelMode)
             : 'default';
         const rawAcpSessionModeId = (parsed as any).acpSessionModeId;
         const acpSessionModeId = rawAcpSessionModeId === null
             ? null
             : typeof rawAcpSessionModeId === 'string'
-                ? (rawAcpSessionModeId.trim() || null)
+                ? readNonBlankSessionControlIdentifier(rawAcpSessionModeId)
                 : null;
         const parsedMcpSelection = SessionMcpSelectionV1Schema.safeParse((parsed as any).mcpSelection);
         const mcpSelection = parsedMcpSelection.success ? parsedMcpSelection.data : undefined;

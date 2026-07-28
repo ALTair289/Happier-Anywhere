@@ -28,6 +28,14 @@ const createEncryptionSpy = vi.hoisted(() => vi.fn());
 const listServerProfilesSpy = vi.hoisted(() => vi.fn());
 const getActiveServerSnapshotSpy = vi.hoisted(() => vi.fn());
 
+function tokenForSub(sub: string): string {
+  const payload = globalThis.btoa(JSON.stringify({ sub }))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replaceAll('=', '');
+  return `e30.${payload}.signature`;
+}
+
 vi.mock('@/sync/runtime/orchestration/serverScopedRpc/createEphemeralServerSocketClient', () => ({
   createEphemeralServerSocketClient: (...args: unknown[]) => createEphemeralSocketSpy(...args),
 }));
@@ -97,6 +105,63 @@ describe('sessionRpcWithServerScope', () => {
     expect(createEphemeralSocketSpy).not.toHaveBeenCalled();
   });
 
+  it('keeps exact issuance replayable when the active session RPC fails before socket emission', async () => {
+    getActiveServerSnapshotSpy.mockReturnValue({
+      serverId: 'server-a',
+      serverUrl: 'https://server-a.example.test',
+      kind: 'custom',
+      generation: 1,
+    });
+    let receivedOptions: { onIssued?: () => void } | undefined;
+    sessionRpcSpy.mockImplementationOnce(async (...args: unknown[]) => {
+      receivedOptions = args[3] as { onIssued?: () => void } | undefined;
+      throw new Error('active encryption failed before emit');
+    });
+    const onIssued = vi.fn();
+
+    const { sessionRpcWithServerScope } = await import('./serverScopedSessionRpc');
+    await expect(sessionRpcWithServerScope({
+      sessionId: 'session-1',
+      method: 'method-test',
+      payload: { value: 1 },
+      timeoutMs: 5000,
+      onIssued,
+    })).rejects.toThrow('active encryption failed before emit');
+
+    expect(receivedOptions?.onIssued).toEqual(expect.any(Function));
+    expect(onIssued).not.toHaveBeenCalled();
+    expect(createEphemeralSocketSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to scoped transport after an exact active session RPC was emitted', async () => {
+    getActiveServerSnapshotSpy.mockReturnValue({
+      serverId: 'server-a',
+      serverUrl: 'https://server-a.example.test',
+      kind: 'custom',
+      generation: 1,
+    });
+    const methodUnavailableError = new Error('RPC method not available');
+    Object.assign(methodUnavailableError, { rpcErrorCode: 'RPC_METHOD_NOT_AVAILABLE' });
+    sessionRpcSpy.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[3] as { onIssued?: () => void } | undefined;
+      options?.onIssued?.();
+      throw methodUnavailableError;
+    });
+    const onIssued = vi.fn();
+
+    const { sessionRpcWithServerScope } = await import('./serverScopedSessionRpc');
+    await expect(sessionRpcWithServerScope({
+      sessionId: 'session-1',
+      method: 'method-test',
+      payload: { value: 2 },
+      timeoutMs: 5000,
+      onIssued,
+    })).rejects.toThrow('RPC method not available');
+
+    expect(onIssued).toHaveBeenCalledTimes(1);
+    expect(createEphemeralSocketSpy).not.toHaveBeenCalled();
+  });
+
   it('falls back to a scoped plaintext RPC when active session RPC lacks local encryption context', async () => {
     getActiveServerSnapshotSpy.mockReturnValue({
       serverId: 'server-a',
@@ -105,7 +170,8 @@ describe('sessionRpcWithServerScope', () => {
       generation: 1,
     });
     sessionRpcSpy.mockRejectedValueOnce(new Error('Session encryption not found for session-1'));
-    getCredentialsSpy.mockResolvedValue({ token: 'token-a', secret: 'secret-a' });
+    const scopedToken = tokenForSub('account-a');
+    getCredentialsSpy.mockResolvedValue({ token: scopedToken, secret: 'secret-a' });
 
     const initializeSessions = vi.fn(async () => {});
     const getSessionEncryption = vi.fn(() => null);
@@ -149,7 +215,7 @@ describe('sessionRpcWithServerScope', () => {
     expect(sessionRpcSpy).toHaveBeenCalledWith('session-1', 'method-test', { value: 4 }, { timeoutMs: 5000 });
     expect(createEphemeralSocketSpy).toHaveBeenCalledWith(expect.objectContaining({
       serverUrl: 'https://server-a.example.test',
-      token: 'token-a',
+      token: scopedToken,
       timeoutMs: 5000,
     }));
     expect(initializeSessions).not.toHaveBeenCalled();
@@ -172,7 +238,8 @@ describe('sessionRpcWithServerScope', () => {
     const methodUnavailableError = new Error('RPC method not available');
     Object.assign(methodUnavailableError, { rpcErrorCode: 'RPC_METHOD_NOT_AVAILABLE' });
     sessionRpcSpy.mockRejectedValueOnce(methodUnavailableError);
-    getCredentialsSpy.mockResolvedValue({ token: 'token-a', secret: 'secret-a' });
+    const scopedToken = tokenForSub('account-a');
+    getCredentialsSpy.mockResolvedValue({ token: scopedToken, secret: 'secret-a' });
 
     const initializeSessions = vi.fn(async () => {});
     const getSessionEncryption = vi.fn(() => null);
@@ -216,7 +283,7 @@ describe('sessionRpcWithServerScope', () => {
     expect(sessionRpcSpy).toHaveBeenCalledWith('session-1', 'method-test', { value: 5 }, { timeoutMs: 5000 });
     expect(createEphemeralSocketSpy).toHaveBeenCalledWith(expect.objectContaining({
       serverUrl: 'https://server-a.example.test',
-      token: 'token-a',
+      token: scopedToken,
       timeoutMs: 5000,
     }));
     expect(initializeSessions).not.toHaveBeenCalled();
@@ -237,7 +304,8 @@ describe('sessionRpcWithServerScope', () => {
       generation: 1,
     });
     listServerProfilesSpy.mockReturnValue([{ id: 'server-b', serverUrl: 'https://server-b.example.test', name: 'Server B' }]);
-    getCredentialsSpy.mockResolvedValue({ token: 'token-b', secret: 'secret-b' });
+    const scopedToken = tokenForSub('account-b');
+    getCredentialsSpy.mockResolvedValue({ token: scopedToken, secret: 'secret-b' });
 
     const sessionEncryption = {
       encryptRaw: vi.fn(async () => 'encrypted-payload'),
@@ -279,7 +347,7 @@ describe('sessionRpcWithServerScope', () => {
     expect(sessionRpcSpy).not.toHaveBeenCalled();
     expect(createEphemeralSocketSpy).toHaveBeenCalledWith(expect.objectContaining({
       serverUrl: 'https://server-b.example.test',
-      token: 'token-b',
+      token: scopedToken,
       timeoutMs: 5000,
     }));
     expect(initializeSessions).toHaveBeenCalledWith(new Map([['session-1', expect.any(Uint8Array)]]));
@@ -304,7 +372,8 @@ describe('sessionRpcWithServerScope', () => {
     listServerProfilesSpy.mockReturnValue([
       { id: 'server-b', serverUrl: 'https://server-a.example.test', name: 'Server A (alt id)' },
     ]);
-    getCredentialsSpy.mockResolvedValue({ token: 'token-b', secret: 'secret-b' });
+    const scopedToken = tokenForSub('account-b');
+    getCredentialsSpy.mockResolvedValue({ token: scopedToken, secret: 'secret-b' });
 
     const initializeSessions = vi.fn(async () => {});
     const sessionEncryption = {
@@ -348,7 +417,7 @@ describe('sessionRpcWithServerScope', () => {
     expect(getCredentialsSpy).toHaveBeenCalledWith('https://server-a.example.test', { serverId: 'server-b' });
     expect(createEphemeralSocketSpy).toHaveBeenCalledWith(expect.objectContaining({
       serverUrl: 'https://server-a.example.test',
-      token: 'token-b',
+      token: scopedToken,
       timeoutMs: 5000,
     }));
     expect(fakeSocket.disconnect).toHaveBeenCalledTimes(1);
@@ -362,7 +431,8 @@ describe('sessionRpcWithServerScope', () => {
       generation: 1,
     });
     listServerProfilesSpy.mockReturnValue([{ id: 'server-b', serverUrl: 'https://server-b.example.test', name: 'Server B' }]);
-    getCredentialsSpy.mockResolvedValue({ token: 'token-b', secret: 'secret-b' });
+    const scopedToken = tokenForSub('account-b');
+    getCredentialsSpy.mockResolvedValue({ token: scopedToken, secret: 'secret-b' });
 
     const initializeSessions = vi.fn(async () => {});
     const getSessionEncryption = vi.fn(() => null);
@@ -393,6 +463,11 @@ describe('sessionRpcWithServerScope', () => {
       disconnect: vi.fn(),
     };
     createEphemeralSocketSpy.mockResolvedValueOnce(fakeSocket);
+    const onIssued = vi.fn(() => {
+      expect(createEphemeralSocketSpy).toHaveBeenCalledTimes(1);
+      expect(fakeSocket.timeout).toHaveBeenCalledWith(5000);
+      expect(emitWithAck).not.toHaveBeenCalled();
+    });
 
     const { sessionRpcWithServerScope } = await import('./serverScopedSessionRpc');
     const result = await sessionRpcWithServerScope({
@@ -401,15 +476,17 @@ describe('sessionRpcWithServerScope', () => {
       payload: { value: 3 },
       serverId: 'server-b',
       timeoutMs: 5000,
+      onIssued,
     });
 
     expect(result).toEqual({ decodedPlain: true });
     expect(sessionRpcSpy).not.toHaveBeenCalled();
     expect(createEphemeralSocketSpy).toHaveBeenCalledWith(expect.objectContaining({
       serverUrl: 'https://server-b.example.test',
-      token: 'token-b',
+      token: scopedToken,
       timeoutMs: 5000,
     }));
+    expect(onIssued).toHaveBeenCalledTimes(1);
     expect(initializeSessions).not.toHaveBeenCalled();
     expect(getSessionEncryption).not.toHaveBeenCalled();
     expect(fakeSocket.timeout).toHaveBeenCalledWith(5000);
@@ -418,6 +495,59 @@ describe('sessionRpcWithServerScope', () => {
       params: { value: 3 },
       timeoutMs: 5000,
     });
+    expect(fakeSocket.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps exact issuance replayable when scoped session encryption fails before socket emission', async () => {
+    getActiveServerSnapshotSpy.mockReturnValue({
+      serverId: 'server-a',
+      serverUrl: 'https://server-a.example.test',
+      kind: 'custom',
+      generation: 1,
+    });
+    listServerProfilesSpy.mockReturnValue([{ id: 'server-b', serverUrl: 'https://server-b.example.test', name: 'Server B' }]);
+    getCredentialsSpy.mockResolvedValue({ token: tokenForSub('account-b'), secret: 'secret-b' });
+
+    const sessionEncryption = {
+      encryptRaw: vi.fn(async () => {
+        throw new Error('scoped encryption failed before emit');
+      }),
+      decryptRaw: vi.fn(),
+    };
+    createEncryptionSpy.mockResolvedValue({
+      decryptEncryptionKey: vi.fn(async () => new Uint8Array([1])),
+      initializeSessions: vi.fn(async () => {}),
+      getSessionEncryption: vi.fn(() => sessionEncryption),
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ session: sessionListByIdFixture }),
+      })),
+    );
+
+    const emitWithAck = vi.fn();
+    const fakeSocket = {
+      timeout: vi.fn(() => ({ emitWithAck })),
+      emit: vi.fn(),
+      disconnect: vi.fn(),
+    };
+    createEphemeralSocketSpy.mockResolvedValueOnce(fakeSocket);
+    const onIssued = vi.fn();
+
+    const { sessionRpcWithServerScope } = await import('./serverScopedSessionRpc');
+    await expect(sessionRpcWithServerScope({
+      sessionId: 'session-1',
+      method: 'method-test',
+      payload: { value: 8 },
+      serverId: 'server-b',
+      timeoutMs: 5000,
+      onIssued,
+    })).rejects.toThrow('scoped encryption failed before emit');
+
+    expect(onIssued).not.toHaveBeenCalled();
+    expect(emitWithAck).not.toHaveBeenCalled();
     expect(fakeSocket.disconnect).toHaveBeenCalledTimes(1);
   });
 
@@ -431,7 +561,7 @@ describe('sessionRpcWithServerScope', () => {
       generation: 1,
     });
     listServerProfilesSpy.mockReturnValue([{ id: 'server-b', serverUrl: 'https://server-b.example.test', name: 'Server B' }]);
-    getCredentialsSpy.mockResolvedValue({ token: 'token-b', secret: 'secret-b' });
+    getCredentialsSpy.mockResolvedValue({ token: tokenForSub('account-b'), secret: 'secret-b' });
 
     createEncryptionSpy.mockResolvedValue({
       decryptEncryptionKey: vi.fn(async () => null),

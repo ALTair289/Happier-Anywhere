@@ -5,6 +5,52 @@ import type { RawRecord } from '@/sync/typesRaw';
 
 const initialStorageState = storage.getState();
 
+type PendingQueueTestRequest = (path: string, init?: RequestInit) => Promise<Response>;
+
+export function withExactPendingEnqueueAckIdentityForTest(
+    request: PendingQueueTestRequest,
+): PendingQueueTestRequest {
+    return async (path, init) => {
+        const response = await request(path, init);
+        if (init?.method !== 'POST' || !response.ok) return response;
+        if (Object.prototype.hasOwnProperty.call(response, 'json')) return response;
+
+        let requestBody: unknown;
+        let responsePayload: unknown;
+        try {
+            requestBody = JSON.parse(String(init.body ?? '{}')) as unknown;
+            responsePayload = await response.clone().json() as unknown;
+        } catch {
+            return response;
+        }
+        if (
+            !requestBody
+            || typeof requestBody !== 'object'
+            || Array.isArray(requestBody)
+            || !responsePayload
+            || typeof responsePayload !== 'object'
+            || Array.isArray(responsePayload)
+        ) return response;
+
+        const requestRecord = requestBody as Record<string, unknown>;
+        const responseRecord = responsePayload as Record<string, unknown>;
+        if (responseRecord.terminal === true || !responseRecord.requestedAction) return response;
+        const pending = responseRecord.pending && typeof responseRecord.pending === 'object' && !Array.isArray(responseRecord.pending)
+            ? responseRecord.pending as Record<string, unknown>
+            : {};
+        if ('localId' in pending) return response;
+
+        return new Response(JSON.stringify({
+            ...responseRecord,
+            pending: { ...pending, localId: requestRecord.localId },
+        }), {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+        });
+    };
+}
+
 export function resetPendingQueueState(): void {
     storage.setState(initialStorageState, true);
 }

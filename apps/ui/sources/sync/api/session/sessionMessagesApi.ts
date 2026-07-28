@@ -1,3 +1,5 @@
+import type { SessionMessageRole } from '@happier-dev/protocol';
+
 import type { ApiSessionMessagesResponse } from '@/sync/api/types/apiTypes';
 import { ApiSessionMessagesResponseSchema } from '@/sync/api/types/apiTypes';
 
@@ -10,6 +12,14 @@ export type BuildSessionMessagesPathParams = Readonly<{
     limit?: number;
     beforeSeq?: number;
     afterSeq?: number;
+    /**
+     * Single-role filter understood by every released server. Callers that also pass `roles`
+     * send both so a server without multi-role support degrades to this narrower filter
+     * instead of rejecting the request.
+     */
+    role?: SessionMessageRole;
+    /** Multi-role filter; ignored by servers that predate it. */
+    roles?: readonly SessionMessageRole[];
 }>;
 
 function appendFiniteInteger(params: URLSearchParams, key: string, value: number | undefined): void {
@@ -19,6 +29,12 @@ function appendFiniteInteger(params: URLSearchParams, key: string, value: number
 
 export function buildSessionMessagesPath(params: BuildSessionMessagesPathParams): string {
     const query = new URLSearchParams({ scope: params.scope });
+    if (params.role) {
+        query.set('role', params.role);
+    }
+    if (params.roles && params.roles.length > 0) {
+        query.set('roles', params.roles.join(','));
+    }
     appendFiniteInteger(query, 'limit', params.limit);
     appendFiniteInteger(query, 'beforeSeq', params.beforeSeq);
     appendFiniteInteger(query, 'afterSeq', params.afterSeq);

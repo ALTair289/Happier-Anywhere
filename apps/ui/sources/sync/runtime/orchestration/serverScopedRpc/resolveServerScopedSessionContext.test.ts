@@ -5,6 +5,14 @@ const createEncryptionSpy = vi.hoisted(() => vi.fn());
 const listServerProfilesSpy = vi.hoisted(() => vi.fn());
 const getActiveServerSnapshotSpy = vi.hoisted(() => vi.fn());
 
+function tokenForSub(sub: string): string {
+  const payload = globalThis.btoa(JSON.stringify({ sub }))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replaceAll('=', '');
+  return `e30.${payload}.signature`;
+}
+
 vi.mock('@/auth/storage/tokenStorage', () => ({
   TokenStorage: {
     getCredentialsForServerUrl: (...args: unknown[]) => getCredentialsSpy(...args),
@@ -67,7 +75,7 @@ describe('resolveServerScopedSessionContext', () => {
         name: 'Server A',
       },
     ]);
-    getCredentialsSpy.mockResolvedValue({ token: 'token-a', secret: 'secret-a' });
+    getCredentialsSpy.mockResolvedValue({ token: tokenForSub('account-a'), secret: 'secret-a' });
 
     const { resolveServerScopedSessionContext } = await import('./resolveServerScopedSessionContext');
     const context = await resolveServerScopedSessionContext({ serverId: 'localhost-52753' });
@@ -88,7 +96,8 @@ describe('resolveServerScopedSessionContext', () => {
     listServerProfilesSpy.mockReturnValue([
       { id: 'server-b', serverUrl: 'https://server-b.example.test', name: 'Server B' },
     ]);
-    getCredentialsSpy.mockResolvedValue({ token: 'token-b', secret: 'secret-b' });
+    const token = tokenForSub('account-sub-b');
+    getCredentialsSpy.mockResolvedValue({ token, secret: 'secret-b' });
 
     const fakeEncryption = {
       decryptEncryptionKey: vi.fn(async () => null),
@@ -105,7 +114,8 @@ describe('resolveServerScopedSessionContext', () => {
       timeoutMs: 5000,
       targetServerId: 'server-b',
       targetServerUrl: 'https://server-b.example.test',
-      token: 'token-b',
+      targetAccountId: 'account-sub-b',
+      token,
       encryption: fakeEncryption,
     });
   });
@@ -119,7 +129,8 @@ describe('resolveServerScopedSessionContext', () => {
     listServerProfilesSpy.mockReturnValue([
       { id: 'server-b', serverUrl: 'https://server-a.example.test', name: 'Server A (alt id)' },
     ]);
-    getCredentialsSpy.mockResolvedValue({ token: 'token-b', secret: 'secret-b' });
+    const token = tokenForSub('account-sub-b');
+    getCredentialsSpy.mockResolvedValue({ token, secret: 'secret-b' });
 
     const fakeEncryption = {
       decryptEncryptionKey: vi.fn(async () => null),
@@ -134,7 +145,8 @@ describe('resolveServerScopedSessionContext', () => {
       timeoutMs: 5000,
       targetServerId: 'server-b',
       targetServerUrl: 'https://server-a.example.test',
-      token: 'token-b',
+      targetAccountId: 'account-sub-b',
+      token,
       encryption: fakeEncryption,
     });
     expect(getCredentialsSpy).toHaveBeenCalledWith('https://server-a.example.test', { serverId: 'server-b' });
@@ -163,7 +175,8 @@ describe('resolveServerScopedSessionContext', () => {
       serverUrl: 'https://server-a.example.test/',
       generation: 1,
     });
-    getCredentialsSpy.mockResolvedValue({ token: 'token-a', secret: 'secret-a' });
+    const token = tokenForSub('account-sub-a');
+    getCredentialsSpy.mockResolvedValue({ token, secret: 'secret-a' });
 
     const fakeEncryption = {
       decryptEncryptionKey: vi.fn(async () => null),
@@ -180,7 +193,8 @@ describe('resolveServerScopedSessionContext', () => {
       timeoutMs: 7000,
       targetServerId: 'server-a',
       targetServerUrl: 'https://server-a.example.test/',
-      token: 'token-a',
+      targetAccountId: 'account-sub-a',
+      token,
       encryption: fakeEncryption,
     });
   });

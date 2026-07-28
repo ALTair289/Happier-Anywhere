@@ -1,4 +1,5 @@
 import type { Message } from '../../domains/messages/messageTypes';
+import { isRecoveredHistoryTranscriptObservation } from '../../domains/messages/transcriptObservationProvenance';
 import type { DiscardedPendingMessage, PendingMessage } from '../../domains/state/storageTypes';
 import { shouldPreservePendingProjectionAfterCommittedUserLocalId } from '../../domains/pending/pendingTranscriptProjection';
 
@@ -13,6 +14,10 @@ export type SessionPending = {
 export type PendingDomain = {
     sessionPending: Record<string, SessionPending>;
     applyPendingLoaded: (sessionId: string) => void;
+    applyPendingSnapshot: (sessionId: string, snapshot: Readonly<{
+        messages: PendingMessage[];
+        discarded: DiscardedPendingMessage[];
+    }>) => void;
     applyPendingMessages: (sessionId: string, messages: PendingMessage[]) => void;
     applyDiscardedPendingMessages: (sessionId: string, messages: DiscardedPendingMessage[]) => void;
     pruneServerPendingMessages: (sessionId: string) => void;
@@ -40,7 +45,10 @@ function collectCommittedUserLocalIds<S extends PendingDomainDependencies>(
 
     const committed = new Set<string>();
     for (const message of Object.values(messagesById)) {
-        if (message?.kind !== 'user-text') continue;
+        if (
+            message?.kind !== 'user-text'
+            || isRecoveredHistoryTranscriptObservation(message)
+        ) continue;
         const localId = typeof message.localId === 'string' ? message.localId : '';
         if (localId && candidateLocalIds.has(localId)) {
             committed.add(localId);
@@ -120,6 +128,44 @@ function arePendingMessageListsEqual<T extends PendingMessage>(
     return true;
 }
 
+function replacePendingBucket<S extends PendingDomain & PendingDomainDependencies>(
+    state: S,
+    sessionId: string,
+    snapshot: Readonly<{
+        messages: PendingMessage[];
+        discarded: DiscardedPendingMessage[];
+        isLoaded: boolean;
+    }>,
+): S {
+    const filteredMessages = filterUncommittedPendingMessages(state, sessionId, snapshot.messages);
+    const existing = state.sessionPending[sessionId];
+    const nextMessages = existing && arePendingMessageListsEqual(existing.messages, filteredMessages)
+        ? existing.messages
+        : filteredMessages;
+    const nextDiscarded = existing && arePendingMessageListsEqual(existing.discarded, snapshot.discarded)
+        ? existing.discarded
+        : snapshot.discarded;
+    if (
+        existing
+        && existing.messages === nextMessages
+        && existing.discarded === nextDiscarded
+        && existing.isLoaded === snapshot.isLoaded
+    ) {
+        return state;
+    }
+    return {
+        ...state,
+        sessionPending: {
+            ...state.sessionPending,
+            [sessionId]: {
+                messages: nextMessages,
+                discarded: nextDiscarded,
+                isLoaded: snapshot.isLoaded,
+            },
+        },
+    };
+}
+
 export function createPendingDomain<S extends PendingDomain & PendingDomainDependencies>({
     set,
     get: _get,
@@ -144,64 +190,37 @@ export function createPendingDomain<S extends PendingDomain & PendingDomainDepen
                 }
             };
         }),
-        applyPendingMessages: (sessionId: string, messages: PendingMessage[]) => set((state) => {
-            const filteredMessages = filterUncommittedPendingMessages(state, sessionId, messages);
-            const existing = state.sessionPending[sessionId];
-            const nextMessages = existing && arePendingMessageListsEqual(existing.messages, filteredMessages)
-                ? existing.messages
-                : filteredMessages;
-            const nextDiscarded = existing?.discarded ?? [];
-            if (
-                existing
-                && existing.messages === nextMessages
-                && existing.discarded === nextDiscarded
-                && existing.isLoaded === true
-            ) {
-                return state;
-            }
-            return {
-                ...state,
-                sessionPending: {
-                    ...state.sessionPending,
-                    [sessionId]: {
-                        messages: nextMessages,
-                        discarded: nextDiscarded,
-                        isLoaded: true
-                    }
-                }
-            };
-        }),
-        applyDiscardedPendingMessages: (sessionId: string, messages: DiscardedPendingMessage[]) => set((state) => {
-            const existing = state.sessionPending[sessionId];
-            const nextDiscarded = existing && arePendingMessageListsEqual(existing.discarded, messages)
-                ? existing.discarded
-                : messages;
-            const nextMessages = existing?.messages ?? [];
-            const nextIsLoaded = existing?.isLoaded ?? false;
-            if (
-                existing
-                && existing.messages === nextMessages
-                && existing.discarded === nextDiscarded
-                && existing.isLoaded === nextIsLoaded
-            ) {
-                return state;
-            }
-            return {
-                ...state,
-                sessionPending: {
-                    ...state.sessionPending,
-                    [sessionId]: {
-                        messages: nextMessages,
-                        discarded: nextDiscarded,
-                        isLoaded: nextIsLoaded,
-                    },
-                },
-            };
-        }),
+        applyPendingSnapshot: (sessionId, snapshot) => set((state) => replacePendingBucket(state, sessionId, {
+            ...snapshot,
+            isLoaded: true,
+        })),
+        applyPendingMessages: (sessionId, messages) => set((state) => replacePendingBucket(state, sessionId, {
+            messages,
+            discarded: state.sessionPending[sessionId]?.discarded ?? [],
+            isLoaded: true,
+        })),
+        applyDiscardedPendingMessages: (sessionId, discarded) => set((state) => replacePendingBucket(state, sessionId, {
+            messages: state.sessionPending[sessionId]?.messages ?? [],
+            discarded,
+            isLoaded: state.sessionPending[sessionId]?.isLoaded ?? false,
+        })),
         pruneServerPendingMessages: (sessionId: string) => set((state) => {
             const existing = state.sessionPending[sessionId];
             if (!existing || existing.messages.length === 0) return state;
-            const nextMessages = existing.messages.filter((message) => message.source !== 'server_pending');
+            const nextMessages = existing.messages.filter((message) => {
+                if (message.source === 'server_pending') return false;
+                const acceptedOrdinaryServerProjection =
+                    message.source === 'local_outbound'
+                    && message.deliveryStatus === 'accepted'
+                    && message.pendingOutboxOperation === undefined
+                    && message.pendingOutboxQuarantineReason === undefined
+                    && (
+                        message.pendingDeliveryStatus === undefined
+                        || message.pendingDeliveryStatus === 'server_queued'
+                        || message.pendingDeliveryStatus === 'server_delivering'
+                    );
+                return !acceptedOrdinaryServerProjection;
+            });
             if (nextMessages.length === existing.messages.length) return state;
             return {
                 ...state,

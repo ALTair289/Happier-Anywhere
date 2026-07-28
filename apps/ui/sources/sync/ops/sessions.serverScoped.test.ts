@@ -140,6 +140,24 @@ describe('sessions ops server-scoped routing', () => {
         expect(machineRpcWithServerScopeMock).not.toHaveBeenCalled();
     });
 
+    it('does not issue machine RPC when target validation fails', async () => {
+        const { resumeSession } = await sessionsModulePromise;
+
+        const result = await resumeSession({
+            sessionId: 'session-1',
+            machineId: '',
+            directory: '',
+            backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+            serverId: 'server-b',
+        });
+
+        expect(result).toMatchObject({
+            type: 'error',
+            errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
+        });
+        expect(machineRpcWithServerScopeMock).not.toHaveBeenCalled();
+    });
+
     it('passes connectedServices and freshness through resumeSession when requested', async () => {
         machineRpcWithServerScopeMock.mockResolvedValueOnce({ type: 'success', sessionId: 'sess-1' });
         const { resumeSession } = await sessionsModulePromise;

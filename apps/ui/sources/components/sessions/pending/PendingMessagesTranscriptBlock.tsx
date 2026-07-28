@@ -22,9 +22,25 @@ import { TranscriptSeparatorRow } from '@/components/sessions/transcript/separat
 import { transcriptMarkdownTextStyle } from '@/components/sessions/transcript/transcriptMarkdownTypography';
 import { PendingMessagesDragReorderList } from './PendingMessagesDragReorderList';
 import { deriveSessionInputReadinessState, type SessionInputReadinessState } from '@/sync/domains/session/control/deriveSessionInputReadinessState';
-import { reprioritizePendingQueueIdsToFront } from '@/sync/domains/pending/reprioritizePendingQueueOrder';
-import { getPendingMessageVisualState, type PendingMessageVisualState } from './pendingMessageVisualState';
+import { deriveSessionRuntimePresentationState } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
+import {
+    getPendingMessageVisualState,
+    isPendingMessageProviderDeliveryInFlight,
+    type PendingMessageVisualState,
+} from './pendingMessageVisualState';
 import { useTerminalComposerClearAction } from '@/components/sessions/terminalComposer/useTerminalComposerClearAction';
+import { usePendingInputInterruptAndRunAction } from './usePendingInputInterruptAndRunAction';
+import {
+    resolvePendingDeliveryLabelKeyForSession,
+    resolvePendingDeliveryTransientActionForSession,
+} from '@/agents/registry/registryUiBehavior';
+import { useServerFeaturesSnapshotForServerId } from '@/sync/domains/features/featureDecisionRuntime';
+import { resolvePendingInputServerWireMode } from '@/sync/engine/pending/pendingInputServerWireContract';
+import { resolvePreferredServerIdForSessionId } from '@/sync/runtime/orchestration/serverScopedRpc/resolvePreferredServerIdForSessionId';
+import {
+    isPendingDeliveryProviderEffectPossibleV1,
+    parsePendingDeliveryStatusV1,
+} from '@happier-dev/protocol';
 
 function getPendingText(message: PendingMessage | DiscardedPendingMessage): string {
     const raw = (message.displayText ?? message.text) ?? '';
@@ -39,13 +55,28 @@ function isAcceptedLocalPendingProjection(message: PendingMessage): boolean {
     return message.deliveryStatus === 'accepted' && message.source !== 'server_pending';
 }
 
+function isActivePendingFifoRow(message: PendingMessage): boolean {
+    return message.source === 'server_pending' || message.deliveryStatus === 'accepted';
+}
+
 function hasPendingDeliveryResolutionState(visualState: PendingMessageVisualState): boolean {
     return visualState.kind === 'blocked'
-        || visualState.kind === 'delivering';
+        || visualState.kind === 'delivering'
+        || visualState.kind === 'delivery_uncertain';
 }
 
 function canUseDirectPendingDeliveryActions(message: PendingMessage, hasDecryptFailure: boolean): boolean {
     return !isAcceptedLocalPendingProjection(message) && !hasDecryptFailure;
+}
+
+function isPendingMessageProviderEffectPossible(message: PendingMessage): boolean {
+    const status = parsePendingDeliveryStatusV1({
+        status: message.pendingDeliveryStatus === 'server_delivering'
+            ? 'delivering'
+            : message.pendingDeliveryStatus,
+        reason: message.pendingDeliveryBlockedReason,
+    });
+    return status !== null && isPendingDeliveryProviderEffectPossibleV1(status);
 }
 
 function supportsInFlightSteerForPendingActions(session: ReturnType<typeof useSession>): boolean {
@@ -77,14 +108,55 @@ export type PendingMessageEditRequest = Readonly<{
     message: PendingMessage;
 }>;
 
-function getPendingDeliveryStateLabel(visualState: PendingMessageVisualState): string {
+function getPendingDeliveryStateLabel(
+    visualState: PendingMessageVisualState,
+    providerDeliveryLabel: string | null,
+): string {
     if (visualState.kind === 'delivering') {
-        return t('session.pendingMessages.deliveryStatus.delivering');
+        return providerDeliveryLabel ?? t('session.pendingMessages.deliveryStatus.delivering');
     }
     if (visualState.kind === 'blocked') {
         return t('session.pendingMessages.deliveryStatus.blocked');
     }
+    if (visualState.kind === 'delivery_uncertain') {
+        return t('session.pendingMessages.deliveryStatus.deliveryUncertain');
+    }
+    if (visualState.kind === 'send_unconfirmed') {
+        return t('session.pendingMessages.deliveryStatus.sending');
+    }
+    if (visualState.kind === 'send_failed') {
+        return t('session.pendingMessages.deliveryStatus.sendFailed');
+    }
+    if (visualState.kind === 'cancelling') {
+        return t('common.remove');
+    }
+    if (visualState.kind === 'cancel_failed') {
+        return t('common.error');
+    }
+    if (visualState.kind === 'queued_behind_turn') {
+        return t('session.pendingMessages.deliveryStatus.waitingForTurn');
+    }
+    if (visualState.kind === 'queued') {
+        return t('session.pendingMessages.deliveryStatus.queued');
+    }
     return t('session.pendingMessages.badgeLabel', { count: 0 });
+}
+
+function getPendingQueuedReasonNotice(visualState: PendingMessageVisualState, minutes: number): string {
+    const reason = visualState.queuedBehindTurn?.reason;
+    if (reason === 'waiting_for_predecessor') {
+        return t('session.pendingMessages.waitingForPredecessorNotice');
+    }
+    if (reason === 'waiting_for_runtime_activity') {
+        return t('session.pendingMessages.waitingForRuntimeActivityNotice');
+    }
+    if (reason === 'runtime_activity_unknown') {
+        return t('session.pendingMessages.runtimeActivityUnknownNotice');
+    }
+    if (reason === 'waiting_for_runtime') {
+        return t('session.pendingMessages.waitingForRuntimeNotice');
+    }
+    return t('session.pendingMessages.waitingForTurnNotice', { minutes });
 }
 
 export function PendingMessagesTranscriptBlock(props: Readonly<{
@@ -95,6 +167,13 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
 }>) {
     const { theme } = useUnistyles();
     const session = useSession(props.sessionId);
+    const pendingInputServerId = session?.serverId ?? resolvePreferredServerIdForSessionId(props.sessionId);
+    const serverFeaturesSnapshot = useServerFeaturesSnapshotForServerId(pendingInputServerId ?? null, {
+        enabled: Boolean(pendingInputServerId),
+    });
+    const pendingInputServerWireMode = serverFeaturesSnapshot.status === 'loading'
+        ? 'indeterminate'
+        : resolvePendingInputServerWireMode(serverFeaturesSnapshot);
 
     const inputReadiness = deriveSessionInputReadinessState({
         active: session?.active,
@@ -112,12 +191,67 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
             ?? session?.agentState?.capabilities?.inFlightSteer,
     }, Date.now());
     const canSteerNow = canSteerNowForPendingActions(session, inputReadiness);
+    const sendNowConfirmationBody = inputReadiness.disposition === 'offline'
+        ? t('session.pendingMessages.sendConfirm.resumeBody')
+        : t('session.pendingMessages.sendConfirm.body');
+    const pendingQueueDeliveryTiming = useSetting('sessionPendingQueueDeliveryTiming');
+
+    // Join the canonical runtime working state into the pending presentation so a message queued
+    // behind an active turn renders "Waiting for the current task to finish" — derived, never a new
+    // wire status. Absent/idle => unchanged plain queued.
+    const sessionRuntimePresentation = deriveSessionRuntimePresentationState({
+        active: session?.active,
+        activeAt: session?.activeAt,
+        presence: session?.presence,
+        thinking: session?.thinking,
+        thinkingAt: session?.thinkingAt,
+        latestTurnStatus: session?.latestTurnStatus,
+        latestTurnStatusObservedAt: session?.latestTurnStatusObservedAt,
+    }, Date.now());
+    const sessionRuntimeInput = React.useMemo(() => ({
+        isWorking: sessionRuntimePresentation.working,
+        runtimeReachable: session?.active === true && session?.presence === 'online',
+        runtimeActivityState: session?.runtimeActivityState === 'idle' || session?.runtimeActivityState === 'active'
+            ? session.runtimeActivityState
+            : 'unknown' as const,
+        foregroundState: inputReadiness.isInputBusy
+            ? (inputReadiness.disposition === 'steer_available' ? 'active_steerable' as const : 'active_unsteerable' as const)
+            : 'ready' as const,
+        deliveryTiming: pendingQueueDeliveryTiming === 'after_runtime_idle'
+            ? 'after_runtime_idle' as const
+            : 'after_foreground_ready' as const,
+        turnStartedAtMs: typeof session?.thinkingAt === 'number' && Number.isFinite(session.thinkingAt)
+            ? session.thinkingAt
+            : (typeof session?.activeAt === 'number' && Number.isFinite(session.activeAt) ? session.activeAt : undefined),
+    }), [
+        inputReadiness.disposition,
+        inputReadiness.isInputBusy,
+        pendingQueueDeliveryTiming,
+        sessionRuntimePresentation.working,
+        session?.active,
+        session?.presence,
+        session?.runtimeActivityState,
+        session?.thinkingAt,
+        session?.activeAt,
+    ]);
+
     const pendingCount = props.pendingMessages.length;
     const discardedCount = props.discardedMessages.length;
-    const pendingDeliveryVisualStates = React.useMemo(
-        () => props.pendingMessages.map((message) => getPendingMessageVisualState(message)),
-        [props.pendingMessages],
-    );
+    const hasProviderDeliveryInFlight = props.pendingMessages.some(isPendingMessageProviderDeliveryInFlight);
+    const pendingDeliveryVisualStates = React.useMemo(() => {
+        let hasEarlierPendingPredecessor = false;
+        return props.pendingMessages.map((message) => {
+            const visualState = getPendingMessageVisualState(message, {
+                hasEarlierPendingPredecessor,
+                hasProviderDeliveryInFlight,
+                sessionRuntime: sessionRuntimeInput,
+            });
+            if (isActivePendingFifoRow(message)) {
+                hasEarlierPendingPredecessor = true;
+            }
+            return visualState;
+        });
+    }, [hasProviderDeliveryInFlight, props.pendingMessages, sessionRuntimeInput]);
     const terminalDraftBlocksPendingDelivery = pendingDeliveryVisualStates.some((visualState) =>
         visualState.kind === 'blocked'
         && visualState.deliveryBlockedReason === 'terminal_composer_draft'
@@ -169,8 +303,12 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     const [scrollOffsetY, setScrollOffsetY] = React.useState<number | null>(null);
     const [materializingLocalIdMap, setMaterializingLocalIdMap] = React.useState<Record<string, true>>({});
     const deliveryActionInFlightRef = React.useRef<Record<string, true>>({});
+    const removeActionInFlightRef = React.useRef<Record<string, true>>({});
     const terminalComposerClear = useTerminalComposerClearAction(props.sessionId);
+    const pendingInputInterruptAndRun = usePendingInputInterruptAndRunAction(props.sessionId);
     const scrollRef = React.useRef<ScrollView | null>(null);
+    const canReorderPendingMessages = props.pendingMessages.length > 1
+        && !props.pendingMessages.some(isPendingMessageProviderEffectPossible);
     const materializingLocalIds = React.useMemo(
         () => new Set(Object.keys(materializingLocalIdMap)),
         [materializingLocalIdMap],
@@ -216,7 +354,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     }, [props.onEditPendingMessage]);
 
     const handleReorderIds = React.useCallback(async (ids: string[]) => {
-        if (ids.length <= 1) return;
+        if (!canReorderPendingMessages || ids.length <= 1) return;
         const current = props.pendingMessages.map((m) => m.id);
         if (ids.length === current.length && ids.every((id, idx) => id === current[idx])) {
             return;
@@ -226,19 +364,27 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         } catch (e) {
             Modal.alert(t('common.error'), e instanceof Error ? e.message : t('session.pendingMessages.errors.reorderFailed'));
         }
-    }, [props.pendingMessages, props.sessionId]);
+    }, [canReorderPendingMessages, props.pendingMessages, props.sessionId]);
 
     const handleRemove = React.useCallback(async (pendingId: string) => {
-        const confirmed = await Modal.confirm(
-            t('session.pendingMessages.removeConfirm.title'),
-            t('session.pendingMessages.removeConfirm.body'),
-            { confirmText: t('common.remove'), destructive: true },
-        );
-        if (!confirmed) return;
+        if (removeActionInFlightRef.current[pendingId]) return;
+        removeActionInFlightRef.current = { ...removeActionInFlightRef.current, [pendingId]: true };
         try {
-            await sync.deletePendingMessage(props.sessionId, pendingId);
-        } catch (e) {
-            Modal.alert(t('common.error'), e instanceof Error ? e.message : t('session.pendingMessages.errors.deleteFailed'));
+            const confirmed = await Modal.confirm(
+                t('session.pendingMessages.removeConfirm.title'),
+                t('session.pendingMessages.removeConfirm.body'),
+                { confirmText: t('common.remove'), destructive: true },
+            );
+            if (!confirmed) return;
+            try {
+                await sync.deletePendingMessage(props.sessionId, pendingId);
+            } catch (e) {
+                Modal.alert(t('common.error'), e instanceof Error ? e.message : t('session.pendingMessages.errors.deleteFailed'));
+            }
+        } finally {
+            const next = { ...removeActionInFlightRef.current };
+            delete next[pendingId];
+            removeActionInFlightRef.current = next;
         }
     }, [props.sessionId]);
 
@@ -290,12 +436,12 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         });
     }, [props.sessionId, runPendingDeliveryAction]);
 
-    const handleRetryDelivery = React.useCallback(async (message: PendingMessage) => {
+    const handleRetrySend = React.useCallback(async (message: PendingMessage) => {
         await runPendingDeliveryAction(message, async () => {
             try {
-                await sync.retryPendingDelivery(props.sessionId, message.id);
+                await sync.retryPendingMessageSend(props.sessionId, message.localId ?? message.id);
             } catch (e) {
-                Modal.alert(t('common.error'), e instanceof Error ? e.message : t('session.pendingMessages.errors.retryDeliveryFailed'));
+                Modal.alert(t('common.error'), e instanceof Error ? e.message : t('session.pendingMessages.errors.retrySendFailed'));
             }
         });
     }, [props.sessionId, runPendingDeliveryAction]);
@@ -316,6 +462,50 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         });
     }, [props.sessionId, runPendingDeliveryAction]);
 
+    const handleDismissDelivery = React.useCallback(async (message: PendingMessage) => {
+        await runPendingDeliveryAction(message, async () => {
+            const confirmed = await Modal.confirm(
+                t('session.pendingMessages.dismissDeliveryConfirm.title'),
+                t('session.pendingMessages.dismissDeliveryConfirm.body'),
+                { confirmText: t('session.pendingMessages.actions.dismiss'), destructive: true },
+            );
+            if (!confirmed) return;
+            try {
+                await sync.dismissPendingDelivery(props.sessionId, message.id);
+            } catch (e) {
+                Modal.alert(t('common.error'), e instanceof Error ? e.message : t('session.pendingMessages.errors.deleteFailed'));
+            }
+        });
+    }, [props.sessionId, runPendingDeliveryAction]);
+
+    const handleSendDeliveryAsNew = React.useCallback(async (message: PendingMessage) => {
+        await runPendingDeliveryAction(message, async () => {
+            const confirmed = await Modal.confirm(
+                t('session.pendingMessages.sendAsNewConfirm.title'),
+                t('session.pendingMessages.sendAsNewConfirm.body'),
+                { confirmText: t('session.pendingMessages.actions.sendAsNew') },
+            );
+            if (!confirmed) return;
+            try {
+                await sync.sendPendingDeliveryAsNew(props.sessionId, message.id);
+            } catch (e) {
+                Modal.alert(t('common.error'), e instanceof Error ? e.message : t('session.pendingMessages.errors.sendFailed'));
+            }
+        });
+    }, [props.sessionId, runPendingDeliveryAction]);
+
+    const handleInterruptAndRun = React.useCallback(async (
+        message: PendingMessage,
+        action: Readonly<{ localId: string; stateAtMs?: number }>,
+    ) => {
+        await runPendingDeliveryAction(message, async () => {
+            await pendingInputInterruptAndRun.interruptAndRun({
+                localId: action.localId,
+                ...(typeof action.stateAtMs === 'number' ? { expectedStateAtMs: action.stateAtMs } : {}),
+            });
+        });
+    }, [pendingInputInterruptAndRun, runPendingDeliveryAction]);
+
     const deleteAfterSend = React.useCallback(async (pendingId: string) => {
         await sync.deletePendingMessage(props.sessionId, pendingId);
     }, [props.sessionId]);
@@ -326,33 +516,15 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         && result.providerAcceptancePending !== true
     ), []);
 
-    // A per-message "send now"/"steer now" must deliver THIS message, not the head of the
-    // pending queue. The durable queue is position-ordered and every drain (server + runner)
-    // takes the head; re-enqueue for an existing localId is idempotent, so without this the
-    // selected later row is starved and the head is delivered instead. Reprioritize the target
-    // to the front of the durable queue (canonical position owner) before delivery so the
-    // existing head-drain materializes the message the user actually picked. Best-effort: a
-    // failed reorder must not block the send.
-    const reprioritizePendingMessageToFront = React.useCallback(async (targetLocalId: string) => {
-        const orderedIds = props.pendingMessages.map((m) => m.id);
-        const reordered = reprioritizePendingQueueIdsToFront(orderedIds, targetLocalId);
-        if (!reordered) return;
-        try {
-            await sync.reorderPendingMessages(props.sessionId, reordered);
-        } catch {
-            // Non-fatal: fall through to the send so the action still delivers.
-        }
-    }, [props.pendingMessages, props.sessionId]);
-
     // Lane Q (Q5): tapping "Steer now" is already an explicit user action on a specific message —
     // it executes directly. The not-steerable decision modal (composer affordance) is a separate
     // mechanism and is unaffected.
     const handleSteerNow = React.useCallback(async (message: PendingMessage) => {
+        const localId = getPendingMaterializingKey(message);
         try {
             setPendingMaterializing(message, true);
-            await reprioritizePendingMessageToFront(message.id);
             const result = await sync.sendPendingMessageNow(props.sessionId, {
-                localId: message.id,
+                localId,
                 createdAt: message.createdAt,
                 rawRecord: message.rawRecord,
                 text: message.text,
@@ -367,21 +539,21 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         } finally {
             setPendingMaterializing(message, false);
         }
-    }, [deleteAfterSend, props.sessionId, reprioritizePendingMessageToFront, setPendingMaterializing, shouldRemoveDurableRowAfterSend]);
+    }, [deleteAfterSend, props.sessionId, setPendingMaterializing, shouldRemoveDurableRowAfterSend]);
 
     const handleSendNow = React.useCallback(async (message: PendingMessage) => {
+        const localId = getPendingMaterializingKey(message);
         const confirmed = await Modal.confirm(
             canSteerNow ? t('session.pendingMessages.sendConfirm.interruptTitle') : t('session.pendingMessages.sendConfirm.title'),
-            t('session.pendingMessages.sendConfirm.body'),
+            sendNowConfirmationBody,
             { confirmText: canSteerNow ? t('session.pendingMessages.actions.sendNowInterrupt') : t('session.pendingMessages.actions.sendNow') },
         );
         if (!confirmed) return;
 
         try {
             setPendingMaterializing(message, true);
-            await reprioritizePendingMessageToFront(message.id);
             const result = await sync.sendPendingMessageNow(props.sessionId, {
-                localId: message.id,
+                localId,
                 createdAt: message.createdAt,
                 rawRecord: message.rawRecord,
                 text: message.text,
@@ -396,7 +568,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         } finally {
             setPendingMaterializing(message, false);
         }
-    }, [canSteerNow, deleteAfterSend, props.sessionId, reprioritizePendingMessageToFront, setPendingMaterializing, shouldRemoveDurableRowAfterSend]);
+    }, [canSteerNow, deleteAfterSend, props.sessionId, sendNowConfirmationBody, setPendingMaterializing, shouldRemoveDurableRowAfterSend]);
 
     const handleRequeueDiscarded = React.useCallback(async (pendingId: string) => {
         try {
@@ -424,7 +596,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     const handleSteerDiscardedNow = React.useCallback(async (message: DiscardedPendingMessage) => {
         try {
             const result = await sync.sendPendingMessageNow(props.sessionId, {
-                localId: message.id,
+                localId: getPendingMaterializingKey(message),
                 createdAt: message.createdAt,
                 rawRecord: message.rawRecord,
                 text: message.text,
@@ -442,14 +614,14 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     const handleSendDiscardedNow = React.useCallback(async (message: DiscardedPendingMessage) => {
         const confirmed = await Modal.confirm(
             canSteerNow ? t('session.pendingMessages.sendConfirm.interruptTitle') : t('session.pendingMessages.sendConfirm.title'),
-            t('session.pendingMessages.sendConfirm.body'),
+            sendNowConfirmationBody,
             { confirmText: canSteerNow ? t('session.pendingMessages.actions.sendNowInterrupt') : t('session.pendingMessages.actions.sendNow') },
         );
         if (!confirmed) return;
 
         try {
             const result = await sync.sendPendingMessageNow(props.sessionId, {
-                localId: message.id,
+                localId: getPendingMaterializingKey(message),
                 createdAt: message.createdAt,
                 rawRecord: message.rawRecord,
                 text: message.text,
@@ -462,7 +634,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         } catch (e) {
             Modal.alert(t('common.error'), e instanceof Error ? e.message : t('session.pendingMessages.errors.sendDiscardedFailed'));
         }
-    }, [canSteerNow, props.sessionId, shouldRemoveDurableRowAfterSend]);
+    }, [canSteerNow, props.sessionId, sendNowConfirmationBody, shouldRemoveDurableRowAfterSend]);
 
     const renderMessage = React.useCallback((args: {
         message: PendingMessage;
@@ -483,25 +655,108 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                 : null;
         const hideChipBecauseNextHovered =
             isWeb && hoveredIndex !== null && hoveredIndex + 1 === index && hoveredMessageId !== message.id;
-        const deliveryVisualState = getPendingMessageVisualState(message);
-        const visualState = getPendingMessageVisualState(message, { materializingLocalIds });
+        const hasEarlierPendingPredecessor = props.pendingMessages
+            .slice(0, index)
+            .some(isActivePendingFifoRow);
+        const deliveryVisualState = getPendingMessageVisualState(message, {
+            hasEarlierPendingPredecessor,
+            hasProviderDeliveryInFlight,
+            sessionRuntime: sessionRuntimeInput,
+        });
+        const visualState = getPendingMessageVisualState(message, {
+            hasEarlierPendingPredecessor,
+            hasProviderDeliveryInFlight,
+            materializingLocalIds,
+            sessionRuntime: sessionRuntimeInput,
+        });
         const deliveryActionBusy = materializingLocalIds.has(getPendingMaterializingKey(message));
         const usesDeliveryResolutionActions = hasPendingDeliveryResolutionState(deliveryVisualState);
-        const canUsePendingQueueActions = !isAcceptedLocalPendingProjection(message);
+        const providerEffectPossible = isPendingMessageProviderEffectPossible(message);
+        const isUncertainDelivery = deliveryVisualState.kind === 'delivery_uncertain';
+        const canRemoveDelivery = usesDeliveryResolutionActions && !providerEffectPossible;
+        const isSendFailed = deliveryVisualState.kind === 'send_failed';
+        const isCancellationState = deliveryVisualState.kind === 'cancelling' || deliveryVisualState.kind === 'cancel_failed';
+        const hasDurableOutboxOperation = message.pendingOutboxOperation === 'enqueue' || message.pendingOutboxOperation === 'cancel';
+        const queuedBehindTurnMinutes =
+            deliveryVisualState.kind === 'queued_behind_turn'
+            && typeof deliveryVisualState.queuedBehindTurn?.turnStartedAtMs === 'number'
+                ? Math.max(0, Math.floor((Date.now() - deliveryVisualState.queuedBehindTurn.turnStartedAtMs) / 60_000))
+                : 0;
+        const canUsePendingQueueActions = !hasDurableOutboxOperation && !isAcceptedLocalPendingProjection(message);
         const deliveryBlockedPresentation = deliveryVisualState.deliveryBlockedPresentation ?? null;
-        const deliveryStateLabel = getPendingDeliveryStateLabel(deliveryVisualState);
+        const providerDeliveryLabelKey = session && deliveryVisualState.kind === 'delivering'
+            ? resolvePendingDeliveryLabelKeyForSession({
+                session,
+                localId: message.localId ?? null,
+                detail: message.pendingDeliveryDetail,
+            })
+            : null;
+        const deliveryStateLabel = getPendingDeliveryStateLabel(
+            deliveryVisualState,
+            providerDeliveryLabelKey ? t(providerDeliveryLabelKey) : null,
+        );
         const blockedDeliveryLabel = deliveryBlockedPresentation
             ? t(deliveryBlockedPresentation.labelKey)
             : null;
-        const canUseDirectDeliveryActions = canUseDirectPendingDeliveryActions(message, hasDecryptFailure);
+        const canUseDirectDeliveryActions = !hasDurableOutboxOperation
+            && !isCancellationState
+            && !providerEffectPossible
+            && canUseDirectPendingDeliveryActions(message, hasDecryptFailure);
+        const transientAction = session && deliveryVisualState.kind === 'delivering'
+            ? resolvePendingDeliveryTransientActionForSession({
+                session,
+                localId: getPendingMaterializingKey(message),
+                wireMode: pendingInputServerWireMode,
+            })
+            : null;
 
         const menuItems = (() => {
             const items: DropdownMenuItem[] = [];
-            if (usesDeliveryResolutionActions) {
-                items.push({ id: 'retryDelivery', title: t('session.pendingMessages.actions.retryDelivery'), icon: <Ionicons name="refresh-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
-                items.push({ id: 'markDeliveryHandled', title: t('session.pendingMessages.actions.markHandled'), icon: <Ionicons name="checkmark-done-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+            if (isCancellationState) {
                 items.push({ id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
-            } else if (canUsePendingQueueActions) {
+            } else if (isSendFailed) {
+                items.push({ id: 'retrySend', title: t('session.pendingMessages.actions.retrySend'), icon: <Ionicons name="refresh-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+                items.push({ id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+            } else if (hasDurableOutboxOperation) {
+                items.push({ id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+            }
+            if (!isCancellationState && usesDeliveryResolutionActions) {
+                if (transientAction?.id === 'interrupt_and_run') {
+                    items.push({
+                        id: 'interruptAndRun',
+                        testID: `pendingMessages.interruptAndRun:${message.id}`,
+                        title: t('session.pendingMessages.actions.interruptAndRunNow'),
+                        icon: <Ionicons name="flash-outline" size={16} color={theme.colors.text.secondary} />,
+                        disabled: deliveryActionBusy || pendingInputInterruptAndRun.busy,
+                    });
+                }
+                if (isUncertainDelivery) {
+                    items.push({
+                        id: 'continueWaiting',
+                        testID: `pendingMessages.continueWaiting:${message.id}`,
+                        title: t('session.pendingMessages.actions.continueWaiting'),
+                        icon: <Ionicons name="time-outline" size={16} color={theme.colors.text.secondary} />,
+                    });
+                    items.push({
+                        id: 'dismissDelivery',
+                        testID: `pendingMessages.dismissDelivery:${message.id}`,
+                        title: t('session.pendingMessages.actions.dismiss'),
+                        icon: <Ionicons name="archive-outline" size={16} color={theme.colors.text.secondary} />,
+                        disabled: deliveryActionBusy,
+                    });
+                    items.push({
+                        id: 'sendDeliveryAsNew',
+                        testID: `pendingMessages.sendDeliveryAsNew:${message.id}`,
+                        title: t('session.pendingMessages.actions.sendAsNew'),
+                        icon: <Ionicons name="paper-plane-outline" size={16} color={theme.colors.text.secondary} />,
+                        disabled: deliveryActionBusy,
+                    });
+                }
+                items.push({ id: 'markDeliveryHandled', title: t('session.pendingMessages.actions.markHandled'), icon: <Ionicons name="checkmark-done-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+                if (canRemoveDelivery) {
+                    items.push({ id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+                }
+            } else if (!isCancellationState && canUsePendingQueueActions) {
                 items.push({ id: 'edit', title: t('session.pendingMessages.actions.edit'), icon: <Ionicons name="pencil-outline" size={16} color={theme.colors.text.secondary} /> });
                 items.push({ id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} /> });
             }
@@ -526,6 +781,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                 items={menuItems}
                 onSelect={async (itemId) => {
                     setOpenMenuKey(null);
+                    if (itemId === 'continueWaiting') return;
                     if (itemId === 'edit') await handleEdit(message);
                     if (itemId === 'remove') {
                         if (usesDeliveryResolutionActions) {
@@ -534,8 +790,13 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                             await handleRemove(message.id);
                         }
                     }
-                    if (itemId === 'retryDelivery') await handleRetryDelivery(message);
+                    if (itemId === 'retrySend') await handleRetrySend(message);
                     if (itemId === 'markDeliveryHandled') await handleMarkDeliveryHandled(message);
+                    if (itemId === 'dismissDelivery') await handleDismissDelivery(message);
+                    if (itemId === 'sendDeliveryAsNew') await handleSendDeliveryAsNew(message);
+                    if (itemId === 'interruptAndRun' && transientAction?.id === 'interrupt_and_run') {
+                        await handleInterruptAndRun(message, transientAction);
+                    }
                     if (itemId === 'steerNow') await handleSteerNow(message);
                     if (itemId === 'sendNow') await handleSendNow(message);
                 }}
@@ -560,7 +821,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                             onPress={toggle}
                             testID={`pendingMessages.message:${message.id}`}
                             accessibilityRole="button"
-                            accessibilityLabel={t('session.pendingMessages.title')}
+                            accessibilityLabel={`${t('session.pendingMessages.title')} · ${deliveryStateLabel}`}
                             style={({ pressed }) => ([
                                 styles.userMessageBubble,
                                 { backgroundColor: theme.colors.message.user.background, opacity: pressed ? 0.82 : 0.9 },
@@ -644,6 +905,63 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                             </View>
                         ) : null}
 
+                        {isSendFailed ? (
+                            <View
+                                testID={`pendingMessages.sendFailedNotice:${message.id}`}
+                                style={[
+                                    styles.blockedDeliveryNotice,
+                                    {
+                                        backgroundColor: theme.colors.surface.base,
+                                        borderColor: theme.colors.state.danger.foreground,
+                                    },
+                                ]}
+                            >
+                                <Ionicons name="alert-circle-outline" size={12} color={theme.colors.state.danger.foreground} />
+                                <Text style={[styles.blockedDeliveryNoticeText, { color: theme.colors.text.secondary }]}>
+                                    {t('session.pendingMessages.sendFailedNotice')}
+                                </Text>
+                                <Pressable
+                                    testID={`pendingMessages.sendFailedRetry:${message.id}`}
+                                    accessibilityRole="button"
+                                    accessibilityLabel={t('session.pendingMessages.actions.retrySend')}
+                                    accessibilityState={{ disabled: deliveryActionBusy, busy: deliveryActionBusy }}
+                                    disabled={deliveryActionBusy}
+                                    onPress={() => { void handleRetrySend(message); }}
+                                    style={({ pressed }) => ([
+                                        styles.nonSteerableNoticeAction,
+                                        {
+                                            borderColor: theme.colors.border.default,
+                                            backgroundColor: pressed ? theme.colors.surface.pressedOverlay : theme.colors.surface.base,
+                                            opacity: deliveryActionBusy ? 0.7 : 1,
+                                        },
+                                    ])}
+                                >
+                                    <Ionicons name="refresh-outline" size={12} color={theme.colors.text.secondary} />
+                                    <Text style={[styles.nonSteerableNoticeActionText, { color: theme.colors.text.secondary }]}>
+                                        {t('session.pendingMessages.actions.retrySend')}
+                                    </Text>
+                                </Pressable>
+                            </View>
+                        ) : null}
+
+                        {deliveryVisualState.kind === 'queued_behind_turn' ? (
+                            <View
+                                testID={`pendingMessages.queuedReason:${deliveryVisualState.queuedBehindTurn?.reason ?? 'waiting_for_foreground_turn'}:${message.id}`}
+                                style={[
+                                    styles.blockedDeliveryNotice,
+                                    {
+                                        backgroundColor: theme.colors.surface.base,
+                                        borderColor: theme.colors.border.default,
+                                    },
+                                ]}
+                            >
+                                <Ionicons name="time-outline" size={12} color={theme.colors.text.secondary} />
+                                <Text style={[styles.blockedDeliveryNoticeText, { color: theme.colors.text.secondary }]}>
+                                    {getPendingQueuedReasonNotice(deliveryVisualState, queuedBehindTurnMinutes)}
+                                </Text>
+                            </View>
+                        ) : null}
+
                         {isWeb ? (
                             <View
                                 testID={`pendingMessages.actionsOverlay:${message.id}`}
@@ -653,7 +971,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     !(hoveredMessageId === message.id || menuOpen) ? styles.messageActionContainerHidden : null,
                                 ]}
                             >
-                                {props.pendingMessages.length > 1 ? (
+                                {canReorderPendingMessages ? (
                                     renderDragHandle({
                                         children: (
                                             <ReorderDragHandleAffordance
@@ -664,12 +982,12 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                         accessibilityLabel: t('common.reorder'),
                                     })
                                 ) : null}
-                                {usesDeliveryResolutionActions ? (
+                                {isSendFailed ? (
                                     <IconAction
-                                        testID={`pendingMessages.retryDelivery:${message.id}`}
-                                        accessibilityLabel={t('session.pendingMessages.actions.retryDelivery')}
+                                        testID={`pendingMessages.retrySend:${message.id}`}
+                                        accessibilityLabel={t('session.pendingMessages.actions.retrySend')}
                                         icon="refresh-outline"
-                                        onPress={() => handleRetryDelivery(message)}
+                                        onPress={() => handleRetrySend(message)}
                                         disabled={deliveryActionBusy}
                                     />
                                 ) : null}
@@ -682,12 +1000,22 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                         disabled={deliveryActionBusy}
                                     />
                                 ) : null}
-                                {usesDeliveryResolutionActions ? (
+                                {canRemoveDelivery ? (
                                     <IconAction
                                         testID={`pendingMessages.remove:${message.id}`}
                                         accessibilityLabel={t('common.remove')}
                                         icon="trash-outline"
                                         onPress={() => handleRemoveDelivery(message)}
+                                        tone="destructive"
+                                        disabled={deliveryActionBusy}
+                                    />
+                                ) : null}
+                                {hasDurableOutboxOperation && !usesDeliveryResolutionActions ? (
+                                    <IconAction
+                                        testID={`pendingMessages.remove:${message.id}`}
+                                        accessibilityLabel={t('common.remove')}
+                                        icon="trash-outline"
+                                        onPress={() => handleRemove(message.id)}
                                         tone="destructive"
                                         disabled={deliveryActionBusy}
                                     />
@@ -726,7 +1054,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     />
                                 ) : null}
                             </View>
-                        ) : props.pendingMessages.length > 1 ? (
+                        ) : canReorderPendingMessages ? (
                             <View style={styles.messageActionContainer}>
                                 {renderDragHandle({
                                     children: (
@@ -745,19 +1073,28 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         );
     }, [
         canSteerNow,
+        canReorderPendingMessages,
         hoveredMessageId,
         collapseThresholdChars,
         collapsedLines,
         expandedMessageIds,
         handleEdit,
+        handleDismissDelivery,
+        handleInterruptAndRun,
         handleMarkDeliveryHandled,
         handleRemove,
         handleRemoveDelivery,
-        handleRetryDelivery,
+        handleRetrySend,
+        handleSendDeliveryAsNew,
         handleSendNow,
         handleSteerNow,
+        hasProviderDeliveryInFlight,
         isWeb,
         materializingLocalIds,
+        pendingInputInterruptAndRun.busy,
+        pendingInputServerWireMode,
+        session,
+        sessionRuntimeInput,
         openMenuKey,
         pendingIndexById,
         props.pendingMessages.length,

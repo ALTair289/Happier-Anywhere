@@ -6,7 +6,8 @@ import { apiSocket } from '../api/session/apiSocket';
 import { createRpcCallError, isRpcMethodNotAvailableError, readRpcErrorCode as readSessionRpcErrorCode } from '../runtime/rpcErrors';
 import { assertRpcResponseWithSuccess } from '../runtime/assertRpcResponseWithSuccess';
 import { buildResumeHappySessionRpcParams, type ResumeHappySessionRpcParams } from '../domains/session/resume/resumeSessionPayload';
-import { readSpawnSessionRpcTimeoutMsFromEnv } from '../domains/session/spawn/spawnSessionRpcTimeout';
+import { readForkSessionRpcTimeoutMsFromEnv, readSpawnSessionRpcTimeoutMsFromEnv } from '../domains/session/spawn/spawnSessionRpcTimeout';
+import { randomUUID } from '@/platform/randomUUID';
 import { storage } from '../domains/state/storage';
 import { nowServerMs } from '../runtime/time';
 import type { PermissionMode } from '@/sync/domains/permissions/permissionTypes';
@@ -128,13 +129,6 @@ interface SessionBashResponse {
     error?: string;
 }
 
-// Kill session operation types
-interface SessionKillResponse {
-    success: boolean;
-    message: string;
-    errorCode?: string;
-}
-
 const INACTIVE_SESSION_RPC_UNAVAILABLE_ERROR = 'Session RPC unavailable for inactive session';
 
 // Response types for spawn session
@@ -195,6 +189,7 @@ export interface ResumeSessionOptions {
      * consumed without replaying older turns.
      */
     initialTranscriptAfterSeq?: number;
+    executionAuthorization?: import('@happier-dev/protocol').SpawnSessionExecutionAuthorization;
     /**
      * Optional native goal to apply immediately after attaching/resuming the provider session,
      * before any pending user-message queue is drained.
@@ -219,6 +214,11 @@ export interface ResumeSessionOptions {
  * to the existing Happy session and resumes the agent.
  */
 export async function resumeSession(options: ResumeSessionOptions): Promise<ResumeSessionResult> {
+    // Single owner of the "resuming" lifecycle marker: every resume initiation funnels through this
+    // op (direct resume + pending-queue wake resume), so marking here keeps header/composer/list in
+    // sync without per-surface transient flags. The marker is settled by the store on first
+    // post-attach activity (or a bounded decay); we only clear it eagerly when the resume fails.
+    storage.getState().markSessionResuming(options.sessionId);
     try {
         const accountSettingsPreparation = typeof options.accountSettingsVersionHint === 'number'
             ? {}
@@ -249,6 +249,7 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
             agentRuntimeDescriptorV1,
             accountSettingsVersionHint,
             initialTranscriptAfterSeq,
+            executionAuthorization,
             initialGoal,
             preferRequestedMachineTarget,
             preferScopedMachineRpc,
@@ -259,6 +260,7 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
         const machineId = preferRequestedMachineTarget ? rawMachineId.trim() : machineTarget?.machineId ?? rawMachineId.trim();
         const directory = preferRequestedMachineTarget ? rawDirectory.trim() : machineTarget?.basePath ?? rawDirectory.trim();
         if (!machineId || !directory) {
+            storage.getState().clearSessionResuming(sessionId);
             return {
                 type: 'error',
                 errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
@@ -291,6 +293,7 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
             ...(typeof modelUpdatedAt === 'number' ? { modelUpdatedAt } : {}),
             ...(typeof accountSettingsVersionHint === 'number' ? { accountSettingsVersionHint } : {}),
             ...(typeof initialTranscriptAfterSeq === 'number' ? { initialTranscriptAfterSeq } : {}),
+            ...(executionAuthorization ? { executionAuthorization } : {}),
             ...(initialGoal ? { initialGoal } : {}),
             experimentalCodexAcp,
             codexBackendMode,
@@ -305,8 +308,13 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
             timeoutMs: readSpawnSessionRpcTimeoutMsFromEnv(),
             ...(preferScopedMachineRpc ? { preferScoped: true } : {}),
         });
-        return normalizeSpawnSessionResult(result);
+        const normalizedResult = normalizeSpawnSessionResult(result);
+        if (normalizedResult.type === 'error') {
+            storage.getState().clearSessionResuming(sessionId);
+        }
+        return normalizedResult;
     } catch (error) {
+        storage.getState().clearSessionResuming(options.sessionId);
         if (isAccountSettingsScopeChangedDuringSpawnPreparationError(error)) {
             return {
                 type: 'error',
@@ -430,6 +438,10 @@ export async function forkSession(options: ForkSessionOptions): Promise<SessionF
         };
     }
     try {
+        // Stable per-user-action idempotency key: transport-level retries inside
+        // machineRpcWithServerScope reuse it, so the daemon coalesces them onto
+        // the in-flight fork instead of committing a second provider-side fork.
+        const requestId = randomUUID();
         const raw = await machineRpcWithServerScope<unknown, unknown>({
             machineId,
             method: RPC_METHODS.SESSION_FORK,
@@ -440,8 +452,14 @@ export async function forkSession(options: ForkSessionOptions): Promise<SessionF
                 strategy: options.strategy,
                 replaySummaryRunner: options.replaySummaryRunner,
                 replayMaxSeedChars: options.replayMaxSeedChars,
+                requestId,
             },
             serverId,
+            // Fork can block on the provider-side fork plus an accept-then-async
+            // spawn resolution; keep the ack budget above the daemon's resolution
+            // window (90s default) so a slow-but-healthy fork does not trigger
+            // timeout-driven retries.
+            timeoutMs: readForkSessionRpcTimeoutMsFromEnv(),
         });
 
         const parsed = SessionForkRpcResultSchema.safeParse(raw);
@@ -717,29 +735,11 @@ export async function sessionBash(sessionId: string, request: SessionBashRequest
     }
 }
 
-/**
- * Kill the session process immediately
- */
-export async function sessionKill(sessionId: string): Promise<SessionKillResponse> {
-    try {
-        const response = await sessionRpcWithPreferredSessionScope<SessionKillResponse, {}>({
-            sessionId,
-            method: 'killSession',
-            payload: {},
-        });
-        return assertRpcResponseWithSuccess<SessionKillResponse>(response);
-    } catch (error) {
-        return {
-            success: false,
-            message: error instanceof Error ? error.message : 'Unknown error',
-            errorCode: readSessionRpcErrorCode(error),
-        };
-    }
-}
-
 export interface SessionStopResponse {
     success: boolean;
     message?: string;
+    code?: 'session_stop_requested' | 'session_stop_not_found' | 'session_stop_unsupported' | 'session_stop_failed';
+    recovery?: 'wait_for_inactive' | 'upgrade_runtime';
 }
 
 /**
@@ -747,7 +747,7 @@ export interface SessionStopResponse {
  *
  * Primary behavior: stop through the supervising daemon when the hosting machine is reachable.
  * Compatibility fallback: ask the runner to terminate via session RPC.
- * Last-resort cleanup: if no process-control RPC is available, mark the session inactive server-side.
+ * If neither lifecycle owner supports Stop, return explicit upgrade recovery without changing reachability.
  */
 export async function sessionStop(sessionId: string): Promise<SessionStopResponse> {
     return await sessionStopWithServerScope(sessionId, {
@@ -764,43 +764,32 @@ export async function sessionStopWithServerScope(
         serverId: opts?.serverId ?? null,
     });
     if (stopResult.success) {
-        applyStoppedSessionToLocalList(sessionId);
         return { success: true };
     }
 
-    return { success: false, message: stopResult.message };
-}
+    if (stopResult.reason === 'requested') {
+        return {
+            success: false,
+            message: stopResult.message,
+            code: 'session_stop_requested',
+            recovery: stopResult.recovery,
+        };
+    }
 
-function applyStoppedSessionToLocalList(sessionId: string): void {
-    const timestamp = nowServerMs();
-    const state = storage.getState();
-    state.applySessionListRenderablePatches([
-        {
-            sessionId,
-            patch: {
-                active: false,
-                activeAt: timestamp,
-                thinking: false,
-                thinkingAt: timestamp,
-                presence: timestamp,
-                updatedAt: timestamp,
-            },
-        },
-    ]);
+    if (stopResult.reason === 'not_found') {
+        return { success: false, message: stopResult.message, code: 'session_stop_not_found' };
+    }
 
-    const session = state.sessions?.[sessionId];
-    if (!session) return;
-    state.applySessions([
-        {
-            ...session,
-            active: false,
-            activeAt: timestamp,
-            thinking: false,
-            thinkingAt: timestamp,
-            presence: timestamp,
-            updatedAt: timestamp,
-        },
-    ]);
+    if (stopResult.reason === 'unsupported') {
+        return {
+            success: false,
+            message: stopResult.message,
+            code: 'session_stop_unsupported',
+            recovery: stopResult.recovery,
+        };
+    }
+
+    return { success: false, message: stopResult.message, code: 'session_stop_failed' };
 }
 
 export interface SessionArchiveResponse {
@@ -1008,6 +997,5 @@ export async function sessionRename(
 export type {
     SessionBashRequest,
     SessionBashResponse,
-    SessionKillResponse,
     SessionRenameResponse
 };

@@ -4,13 +4,22 @@ import { storage } from '@/sync/domains/state/storage';
 import { Encryption } from '@/sync/encryption/encryption';
 import type { RawRecord } from '@/sync/typesRaw';
 
-import { fetchAndApplyPendingMessagesV2 } from './pendingQueueV2';
+import { fetchAndApplyPendingMessagesV2 as fetchAndApplyPendingMessagesV2Impl } from './pendingQueueV2';
 import {
     createPendingQueueEncryption,
     encryptRawRecordForPending,
     getSessionEncryptionOrThrow,
     resetPendingQueueState,
 } from './pendingQueueV2.testHelpers';
+
+const outboxScope = { serverId: 'server-test', accountId: 'account-test' } as const;
+const fetchAndApplyPendingMessagesV2 = (
+    params: Omit<Parameters<typeof fetchAndApplyPendingMessagesV2Impl>[0], 'outboxScope'>,
+) => fetchAndApplyPendingMessagesV2Impl({
+    ...params,
+    outboxScope,
+    isOutboxScopeCurrent: () => true,
+});
 
 describe('pendingQueueV2 decrypt mapping', () => {
     beforeEach(() => {
@@ -98,6 +107,206 @@ describe('pendingQueueV2 decrypt mapping', () => {
         const messages = storage.getState().sessionPending[sessionId]?.messages ?? [];
         expect(messages.map((m) => m.localId)).toEqual(['a']);
         expect(messages[0]?.text).toBe('ok');
+    });
+
+    it('retains an explicit malformed requested action as blocked unsupported work', async () => {
+        const sessionId = 's_malformed_pending_action';
+        const encryption = await createPendingQueueEncryption({ sessionId });
+
+        await fetchAndApplyPendingMessagesV2({
+            sessionId,
+            encryption,
+            request: async () => Response.json({
+                pending: [{
+                    localId: 'malformed-action',
+                    content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'keep visible' } } },
+                    requestedActionMalformed: true,
+                    deliveryStatus: { status: 'blocked', reason: 'unsupported_action' },
+                    status: 'queued',
+                    position: 0,
+                    createdAt: 1,
+                    updatedAt: 1,
+                }],
+            }),
+        });
+
+        const messages = storage.getState().sessionPending[sessionId]?.messages ?? [];
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toMatchObject({
+            localId: 'malformed-action',
+            text: 'keep visible',
+            requestedActionMalformed: true,
+            pendingDeliveryStatus: 'blocked',
+            pendingDeliveryBlockedReason: 'unsupported_action',
+        });
+        expect(messages[0]?.requestedAction).toBeUndefined();
+    });
+
+    it('preserves an acknowledged local external handoff across an empty refresh', async () => {
+        const sessionId = 's_external_handoff_empty_refresh';
+        const encryption = await createPendingQueueEncryption({ sessionId });
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: 'external-local',
+            localId: 'external-local',
+            createdAt: 1,
+            updatedAt: 2,
+            source: 'local_outbound',
+            deliveryStatus: 'accepted',
+            pendingDeliveryStatus: 'external_handoff',
+            pendingOutboxScope: outboxScope,
+            text: 'still unresolved',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'still unresolved' }, meta: {} },
+        });
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: 'external-other-account',
+            localId: 'external-other-account',
+            createdAt: 1,
+            updatedAt: 2,
+            source: 'local_outbound',
+            deliveryStatus: 'accepted',
+            pendingDeliveryStatus: 'external_handoff',
+            pendingOutboxScope: { serverId: 'server-test', accountId: 'other-account' },
+            text: 'must not leak',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'must not leak' }, meta: {} },
+        });
+
+        await fetchAndApplyPendingMessagesV2({
+            sessionId,
+            encryption,
+            request: async () => Response.json({ pending: [] }),
+        });
+
+        expect(storage.getState().sessionPending[sessionId]?.messages).toEqual([
+            expect.objectContaining({
+                localId: 'external-local',
+                pendingDeliveryStatus: 'external_handoff',
+                text: 'still unresolved',
+            }),
+        ]);
+    });
+
+    it('reallocates retained external-handoff and legacy-unscoped projections that collide with server rows', async () => {
+        const sessionId = 's_external_handoff_server_projection_collision';
+        const encryption = await createPendingQueueEncryption({ sessionId });
+        const serverLocalId = 'server-local-id';
+        const externalLocalId = 'external-local-id';
+        const legacyServerLocalId = 'legacy-server-local-id';
+        const legacyLocalId = 'legacy-local-id';
+        const externalRawRecord = {
+            role: 'user' as const,
+            content: { type: 'text' as const, text: 'retained handoff content' },
+            meta: { custody: 'external' },
+        };
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: serverLocalId,
+            localId: externalLocalId,
+            createdAt: 1,
+            updatedAt: 2,
+            source: 'local_outbound',
+            deliveryStatus: 'accepted',
+            pendingDeliveryStatus: 'external_handoff',
+            pendingOutboxScope: outboxScope,
+            text: 'retained handoff content',
+            rawRecord: externalRawRecord,
+        });
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: legacyServerLocalId,
+            localId: legacyLocalId,
+            createdAt: 1,
+            updatedAt: 2,
+            source: 'local_outbound',
+            deliveryStatus: 'queued',
+            text: 'retained legacy content',
+            rawRecord: {
+                role: 'user',
+                content: { type: 'text', text: 'retained legacy content' },
+                meta: { custody: 'legacy' },
+            },
+        });
+
+        await fetchAndApplyPendingMessagesV2({
+            sessionId,
+            encryption,
+            request: async () => Response.json({
+                pending: [
+                    {
+                        localId: serverLocalId,
+                        content: {
+                            t: 'plain',
+                            v: { role: 'user', content: { type: 'text', text: 'unrelated server row' } },
+                        },
+                        status: 'queued',
+                        position: 0,
+                        createdAt: 3,
+                        updatedAt: 4,
+                    },
+                    {
+                        localId: legacyServerLocalId,
+                        content: {
+                            t: 'plain',
+                            v: { role: 'user', content: { type: 'text', text: 'another server row' } },
+                        },
+                        status: 'discarded',
+                        position: 1,
+                        createdAt: 3,
+                        updatedAt: 4,
+                        discardedAt: 4,
+                        discardedReason: 'manual',
+                    },
+                ],
+            }),
+        });
+
+        const messages = storage.getState().sessionPending[sessionId]?.messages ?? [];
+        expect(messages).toHaveLength(3);
+        expect(messages).toContainEqual(expect.objectContaining({
+            id: serverLocalId,
+            localId: serverLocalId,
+            source: 'server_pending',
+            text: 'unrelated server row',
+        }));
+        expect(messages).toContainEqual(expect.objectContaining({
+            id: expect.not.stringMatching(new RegExp(`^${serverLocalId}$`)),
+            localId: externalLocalId,
+            pendingDeliveryStatus: 'external_handoff',
+            pendingOutboxScope: outboxScope,
+            text: 'retained handoff content',
+            rawRecord: externalRawRecord,
+        }));
+        const legacyProjection = messages.find((message) => message.localId === legacyLocalId);
+        expect(legacyProjection).toEqual(expect.objectContaining({
+            localId: legacyLocalId,
+            text: 'retained legacy content',
+            rawRecord: expect.objectContaining({ meta: { custody: 'legacy' } }),
+        }));
+        expect(legacyProjection?.id).not.toBe(legacyServerLocalId);
+        expect(legacyProjection?.pendingOutboxScope).toBeUndefined();
+        expect(storage.getState().sessionPending[sessionId]?.discarded).toContainEqual(
+            expect.objectContaining({ id: legacyServerLocalId, localId: legacyServerLocalId }),
+        );
+    });
+
+    it('removes a settled Pending row when the canonical server snapshot no longer retains it', async () => {
+        const sessionId = 's_settled_pending_disappears';
+        const encryption = await createPendingQueueEncryption({ sessionId });
+        let pending = [{
+            localId: 'settled-row',
+            content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'settled' } } },
+            status: 'delivering',
+            position: 0,
+            createdAt: 1,
+            updatedAt: 1,
+        }];
+        const request = async () => new Response(JSON.stringify({ pending }), { status: 200 });
+
+        await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
+        expect(storage.getState().sessionPending[sessionId]?.messages.map((message) => message.localId))
+            .toEqual(['settled-row']);
+
+        pending = [];
+        await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
+
+        expect(storage.getState().sessionPending[sessionId]?.messages ?? []).toEqual([]);
     });
 
     it('maps old-server queued rows without delivery fields to visible server queued messages', async () => {
@@ -216,6 +425,75 @@ describe('pendingQueueV2 decrypt mapping', () => {
         expect((messages[1] as any).pendingDeliveryBlockedReason).toBe('payload_too_large');
     });
 
+    it('uses typed deliveryStatus over raw deliveryState fields when projecting UI status', async () => {
+        const sessionId = 's_typed_delivery_status_pending';
+        const encryption = await createPendingQueueEncryption({ sessionId });
+
+        await fetchAndApplyPendingMessagesV2({
+            sessionId,
+            encryption,
+            request: async () =>
+                new Response(
+                    JSON.stringify({
+                        pending: [
+                            {
+                                localId: 'typed-delivering',
+                                content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'typed delivering' } } },
+                                status: 'queued',
+                                deliveryState: null,
+                                deliveryStatus: { status: 'delivering', detail: 'custody_observed' },
+                                position: 0,
+                                createdAt: 1,
+                                updatedAt: 1,
+                            },
+                            {
+                                localId: 'typed-blocked',
+                                content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'typed blocked' } } },
+                                status: 'queued',
+                                deliveryState: null,
+                                deliveryBlockedReason: null,
+                                deliveryStatus: { status: 'blocked', reason: 'runtime_disposed_before_delivery' },
+                                position: 1,
+                                createdAt: 2,
+                                updatedAt: 2,
+                            },
+                            {
+                                localId: 'typed-queued',
+                                content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'typed queued' } } },
+                                status: 'queued',
+                                deliveryState: 'delivering',
+                                deliveryStatus: { status: 'queued' },
+                                position: 2,
+                                createdAt: 3,
+                                updatedAt: 3,
+                            },
+                            {
+                                localId: 'typed-external-handoff',
+                                content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'typed external handoff' } } },
+                                status: 'queued',
+                                deliveryState: 'external_handoff',
+                                deliveryStatus: { status: 'external_handoff' },
+                                position: 3,
+                                createdAt: 4,
+                                updatedAt: 4,
+                            },
+                        ],
+                    }),
+                    { status: 200 },
+                ),
+        });
+
+        const messages = storage.getState().sessionPending[sessionId]?.messages ?? [];
+        expect(messages.map((message) => (message as any).pendingDeliveryStatus)).toEqual([
+            'server_delivering',
+            'blocked',
+            'server_queued',
+            'external_handoff',
+        ]);
+        expect(messages[0]?.pendingDeliveryDetail).toBe('custody_observed');
+        expect((messages[1] as any).pendingDeliveryBlockedReason).toBe('runtime_disposed_before_delivery');
+    });
+
     it('skips malformed pending rows and keeps valid rows while retaining decrypt failures explicitly', async () => {
         const sessionId = 's_test_mixed';
         const encryption = await createPendingQueueEncryption({ sessionId, seedByte: 9 });
@@ -272,7 +550,7 @@ describe('pendingQueueV2 decrypt mapping', () => {
                                 createdAt: 4,
                                 updatedAt: 4,
                                 discardedAt: 5,
-                                discardedReason: 'switch_to_local',
+                                discardedReason: 'runtime_switch',
                             },
                         ],
                     }),
@@ -285,7 +563,7 @@ describe('pendingQueueV2 decrypt mapping', () => {
         expect(pendingState?.messages[0]?.text).toBe('queued');
         expect(pendingState?.messages[1]).toMatchObject({ pendingDecryptFailure: { kind: 'decrypt_failed' } });
         expect(pendingState?.discarded.map((message) => message.localId)).toEqual(['discarded-valid']);
-        expect(pendingState?.discarded[0]?.discardedReason).toBe('switch_to_local');
+        expect(pendingState?.discarded[0]?.discardedReason).toBe('runtime_switch');
     });
 
     it('retains queued and discarded rows with an explicit failure state when decrypt fails', async () => {

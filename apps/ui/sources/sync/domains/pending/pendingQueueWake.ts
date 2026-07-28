@@ -7,6 +7,7 @@ import type { PermissionModeOverrideForSpawn } from '@/sync/domains/permissions/
 import { buildResumeSessionBaseOptionsFromSession } from '@/sync/domains/session/resume/resumeSessionBase';
 import { readMachineControlTargetForSession } from '@/sync/ops/sessionMachineTarget';
 import { deriveSessionInputReadinessState } from '@/sync/domains/session/control/deriveSessionInputReadinessState';
+import { getSessionLocalControlState } from '@/sync/domains/session/control/sessionLocalControl';
 import {
     deriveLatestPendingRequestObservedAtFromSession,
 } from '@/sync/domains/session/pending/listPendingSessionRequests';
@@ -37,11 +38,15 @@ export function getPendingQueueWakeResumeOptions(opts: {
 }): PendingQueueWakeResumeOptions | null {
     const { sessionId, session, resumeCapabilityOptions, resumeTargetOverride, permissionOverride, canWakeMachineId } = opts;
 
-    // Only gate waking on "idle" when the session is actively running.
+    // Only gate waking on foreground input readiness when the session is actively running.
     // For inactive/archived sessions, `thinking` / `agentState.requests` can be stale; blocking wake would
     // strand pending-queue messages until the user sends another message (or the state refreshes).
     const isSessionActive = session.active === true && session.presence === 'online';
     if (isSessionActive) {
+        const localControl = getSessionLocalControlState(session);
+        if (localControl?.attached === true && localControl.remoteWritable !== true) {
+            return null;
+        }
         const requests = session.agentState?.requests;
         const hasRuntimeRequests = Boolean(requests && Object.keys(requests).length > 0);
         const inputReadiness = deriveSessionInputReadinessState({

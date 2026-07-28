@@ -2,7 +2,15 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { storage } from '@/sync/domains/state/storage';
 import type { Session } from '@/sync/domains/state/storageTypes';
-import { updatePendingMessageV2 } from './pendingQueueV2';
+import { loadPendingOutboxForSession, savePendingOutboxMessage } from '@/sync/domains/state/pendingOutboxPersistence';
+import { getPersistenceStorage } from '@/sync/domains/state/persistence';
+import { scopedSessionLocalStateKey } from '@/sync/domains/state/sessionLocalStateKeys';
+import {
+    deletePendingMessageV2 as deletePendingMessageV2Impl,
+    fetchAndApplyPendingMessagesV2,
+    replayPersistedPendingOutboxForSession,
+    updatePendingMessageV2 as updatePendingMessageV2Impl,
+} from './pendingQueueV2';
 import {
     buildSession,
     createPendingQueueEncryption,
@@ -10,9 +18,506 @@ import {
     resetPendingQueueState,
 } from './pendingQueueV2.testHelpers';
 
+const outboxScope = { serverId: 'server-update', accountId: 'account-update' } as const;
+const otherOutboxScope = { serverId: 'server-update', accountId: 'account-other' } as const;
+const updatePendingMessageV2 = (
+    params: Omit<Parameters<typeof updatePendingMessageV2Impl>[0], 'outboxScope'>,
+) => updatePendingMessageV2Impl({ ...params, outboxScope });
+const deletePendingMessageV2 = (
+    params: Omit<Parameters<typeof deletePendingMessageV2Impl>[0], 'outboxScope'>,
+) => deletePendingMessageV2Impl({ ...params, outboxScope });
+
 describe('pendingQueueV2 updatePendingMessageV2', () => {
     beforeEach(() => {
         resetPendingQueueState();
+    });
+
+    it('retires exact-scope enqueue custody after a successful PATCH', async () => {
+        const sessionId = 's_test_patch_retires_enqueue';
+        const pendingId = 'p-enqueue';
+        const rawRecord = { role: 'user' as const, content: { type: 'text' as const, text: 'old' }, meta: {} };
+        storage.getState().applySessions([buildSession({ sessionId, overrides: { encryptionMode: 'plain' } })]);
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: pendingId, localId: pendingId, createdAt: 1, updatedAt: 1, source: 'server_pending',
+            deliveryStatus: 'accepted', text: 'old', rawRecord,
+        });
+        savePendingOutboxMessage({
+            sessionId, localId: pendingId, createdAt: 1, text: 'old', rawRecord,
+            request: { v: 1, body: JSON.stringify({ localId: pendingId, content: { t: 'plain', v: rawRecord }, messageRole: 'user' }) },
+        }, outboxScope);
+
+        await updatePendingMessageV2({
+            sessionId, pendingId, text: 'new', encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async () => new Response('{}', { status: 200 }),
+        });
+
+        expect(loadPendingOutboxForSession(sessionId, outboxScope)).toEqual([]);
+        expect(storage.getState().sessionPending[sessionId]?.messages).toEqual([
+            expect.objectContaining({ id: pendingId, source: 'server_pending', text: 'new' }),
+        ]);
+    });
+
+    it('acknowledges ambiguous enqueue custody after PATCH without manufacturing snapshot provenance', async () => {
+        const sessionId = 's_test_patch_canonicalizes_ambiguous_enqueue';
+        const pendingId = 'patch-canonicalizes-ambiguous-enqueue';
+        const rawRecord = { role: 'user' as const, content: { type: 'text' as const, text: 'old ambiguous' }, meta: {} };
+        storage.getState().applySessions([buildSession({ sessionId, overrides: { encryptionMode: 'plain' } })]);
+        const save = (scope: typeof outboxScope | typeof otherOutboxScope) => savePendingOutboxMessage({
+            sessionId,
+            localId: pendingId,
+            createdAt: 1,
+            text: 'old ambiguous',
+            rawRecord,
+            request: {
+                v: 1,
+                body: JSON.stringify({ localId: pendingId, content: { t: 'plain', v: rawRecord }, messageRole: 'user' }),
+            },
+        }, scope);
+        save(outboxScope);
+        save(otherOutboxScope);
+        replayPersistedPendingOutboxForSession(sessionId, outboxScope);
+
+        await updatePendingMessageV2({
+            sessionId,
+            pendingId,
+            text: 'server-proven edit',
+            encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async () => new Response('{}', { status: 200 }),
+        });
+
+        expect(loadPendingOutboxForSession(sessionId, outboxScope)).toEqual([]);
+        expect(loadPendingOutboxForSession(sessionId, otherOutboxScope)).toEqual([
+            expect.objectContaining({ localId: pendingId, operation: 'enqueue' }),
+        ]);
+        expect(storage.getState().sessionPending[sessionId]?.messages).toEqual([
+            expect.objectContaining({
+                localId: pendingId,
+                source: 'local_outbound',
+                deliveryStatus: 'accepted',
+                pendingOutboxOperation: undefined,
+                sendState: undefined,
+                text: 'server-proven edit',
+            }),
+        ]);
+
+        let failedDeleteCalled = false;
+        await expect(deletePendingMessageV2({
+            sessionId,
+            pendingId,
+            request: async () => {
+                failedDeleteCalled = true;
+                return new Response(null, { status: 500 });
+            },
+        })).rejects.toThrow('Failed to delete pending message (500)');
+        expect(failedDeleteCalled).toBe(true);
+        expect(storage.getState().sessionPending[sessionId]?.messages).toHaveLength(1);
+
+        let absentDeleteCalled = false;
+        await deletePendingMessageV2({
+            sessionId,
+            pendingId,
+            request: async () => {
+                absentDeleteCalled = true;
+                return new Response(null, { status: 404 });
+            },
+        });
+        expect(absentDeleteCalled).toBe(true);
+        expect(storage.getState().sessionPending[sessionId]?.messages ?? []).toEqual([]);
+    });
+
+    it('updates the exact canonical row when an earlier quarantine diagnostic shares its localId', async () => {
+        const sessionId = 's_test_patch_exact_canonical_collision';
+        const pendingId = 'canonical-collision-local';
+        const diagnosticId = 'quarantine-diagnostic-id';
+        const canonicalRawRecord = { role: 'user' as const, content: { type: 'text' as const, text: 'canonical old' }, meta: { owner: 'server' } };
+        storage.getState().applySessions([buildSession({ sessionId, overrides: { encryptionMode: 'plain' } })]);
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: diagnosticId,
+            localId: pendingId,
+            createdAt: 1,
+            updatedAt: 1,
+            source: 'local_outbound',
+            deliveryStatus: 'queued',
+            pendingDeliveryStatus: 'blocked',
+            pendingOutboxScope: outboxScope,
+            pendingOutboxQuarantineReason: 'unsupported_persisted_operation',
+            text: 'diagnostic must remain unchanged',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'diagnostic must remain unchanged' }, meta: {} },
+        });
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: pendingId,
+            localId: pendingId,
+            createdAt: 2,
+            updatedAt: 2,
+            source: 'server_pending',
+            deliveryStatus: 'accepted',
+            text: 'canonical old',
+            rawRecord: canonicalRawRecord,
+        });
+
+        await updatePendingMessageV2({
+            sessionId,
+            pendingId,
+            text: 'canonical new',
+            encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async () => new Response('{}', { status: 200 }),
+        });
+
+        expect(storage.getState().sessionPending[sessionId]?.messages).toEqual([
+            expect.objectContaining({
+                id: diagnosticId,
+                pendingOutboxQuarantineReason: 'unsupported_persisted_operation',
+                text: 'diagnostic must remain unchanged',
+            }),
+            expect.objectContaining({
+                id: pendingId,
+                source: 'server_pending',
+                text: 'canonical new',
+                rawRecord: expect.objectContaining({
+                    content: { type: 'text', text: 'canonical new' },
+                    meta: { owner: 'server' },
+                }),
+            }),
+        ]);
+    });
+
+    it('updates same-scope canonical authority despite real same-localId quarantine custody', async () => {
+        const sessionId = 's_test_patch_canonical_with_durable_quarantine';
+        const pendingId = 'canonical-with-durable-quarantine';
+        const diagnosticId = 'durable-quarantine-diagnostic';
+        storage.getState().applySessions([buildSession({ sessionId, overrides: { encryptionMode: 'plain' } })]);
+        getPersistenceStorage().set(
+            scopedSessionLocalStateKey('session-pending-outbox-v1', outboxScope),
+            JSON.stringify({
+                [sessionId]: [{
+                    localId: pendingId,
+                    createdAt: 1,
+                    text: 'durable quarantine',
+                    rawRecord: { role: 'user' },
+                    operation: 'replace',
+                    request: { v: 1, body: JSON.stringify({ localId: pendingId, content: { t: 'plain', v: {} }, messageRole: 'user' }) },
+                }],
+            }),
+        );
+        expect(loadPendingOutboxForSession(sessionId, outboxScope)).toEqual([
+            expect.objectContaining({ localId: pendingId, operation: 'quarantined' }),
+        ]);
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: diagnosticId,
+            localId: pendingId,
+            createdAt: 1,
+            updatedAt: 1,
+            source: 'local_outbound',
+            deliveryStatus: 'queued',
+            pendingDeliveryStatus: 'blocked',
+            pendingOutboxScope: outboxScope,
+            pendingOutboxQuarantineReason: 'unsupported_persisted_operation',
+            text: 'diagnostic remains',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'diagnostic remains' }, meta: {} },
+        });
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: pendingId,
+            localId: pendingId,
+            createdAt: 2,
+            updatedAt: 2,
+            source: 'server_pending',
+            deliveryStatus: 'accepted',
+            pendingOutboxScope: outboxScope,
+            text: 'canonical old',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'canonical old' }, meta: {} },
+        });
+        let requestCalled = false;
+
+        await updatePendingMessageV2({
+            sessionId,
+            pendingId,
+            text: 'canonical new',
+            encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async () => {
+                requestCalled = true;
+                return new Response('{}', { status: 200 });
+            },
+        });
+
+        expect(requestCalled).toBe(true);
+        expect(loadPendingOutboxForSession(sessionId, outboxScope)).toEqual([
+            expect.objectContaining({ localId: pendingId, operation: 'quarantined' }),
+        ]);
+        expect(storage.getState().sessionPending[sessionId]?.messages).toEqual([
+            expect.objectContaining({ id: diagnosticId, text: 'diagnostic remains' }),
+            expect.objectContaining({ id: pendingId, source: 'server_pending', text: 'canonical new' }),
+        ]);
+    });
+
+    it('keeps the caller-resolved synthetic projection authoritative when its canonical localId is another scoped row id', async () => {
+        const sessionId = 's_test_patch_scoped_identity_precedes_raw_id';
+        const pendingId = 'scoped-identity-precedes-raw-id';
+        const canonicalId = 'scoped-identity-synthetic-projection';
+        storage.getState().applySessions([buildSession({ sessionId, overrides: { encryptionMode: 'plain' } })]);
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: pendingId,
+            localId: 'unrelated-local-identity',
+            createdAt: 1,
+            updatedAt: 1,
+            source: 'server_pending',
+            deliveryStatus: 'accepted',
+            pendingDeliveryStatus: 'server_queued',
+            pendingOutboxScope: outboxScope,
+            text: 'unrelated must remain',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'unrelated must remain' }, meta: { owner: 'raw-id-collider' } },
+        });
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: canonicalId,
+            localId: pendingId,
+            createdAt: 2,
+            updatedAt: 2,
+            source: 'server_pending',
+            deliveryStatus: 'accepted',
+            pendingDeliveryStatus: 'server_queued',
+            pendingOutboxScope: outboxScope,
+            text: 'target old',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'target old' }, meta: { owner: 'synthetic-target' } },
+        });
+
+        let patchBody: unknown;
+
+        await updatePendingMessageV2({
+            sessionId,
+            pendingId: canonicalId,
+            text: 'target new',
+            encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async (path, init) => {
+                expect(path).toBe(`/v2/sessions/${sessionId}/pending/${pendingId}`);
+                patchBody = JSON.parse(String(init?.body));
+                return new Response('{}', { status: 200 });
+            },
+        });
+
+        expect(patchBody).toMatchObject({
+            content: {
+                t: 'plain',
+                v: expect.objectContaining({
+                    content: { type: 'text', text: 'target new' },
+                    meta: { owner: 'synthetic-target' },
+                }),
+            },
+        });
+        expect(storage.getState().sessionPending[sessionId]?.messages).toEqual([
+            expect.objectContaining({ id: pendingId, localId: 'unrelated-local-identity', text: 'unrelated must remain' }),
+            expect.objectContaining({
+                id: canonicalId,
+                localId: pendingId,
+                text: 'target new',
+                rawRecord: expect.objectContaining({ meta: { owner: 'synthetic-target' } }),
+            }),
+        ]);
+    });
+
+    it('uses exact-scope canonical server authority before durable and another-scope quarantine fences', async () => {
+        const sessionId = 's_test_patch_canonical_precedes_quarantine_fences';
+        const pendingId = 'canonical-precedes-quarantine-fences';
+        const canonicalId = 'canonical-precedes-quarantine-synthetic';
+        const sameScopeDiagnosticId = 'same-scope-diagnostic-stays-fenced';
+        storage.getState().applySessions([buildSession({ sessionId, overrides: { encryptionMode: 'plain' } })]);
+        getPersistenceStorage().set(
+            scopedSessionLocalStateKey('session-pending-outbox-v1', outboxScope),
+            JSON.stringify({
+                [sessionId]: [{
+                    localId: pendingId,
+                    createdAt: 1,
+                    text: 'durable quarantine',
+                    rawRecord: { role: 'user' },
+                    operation: 'replace',
+                    request: { v: 1, body: JSON.stringify({ localId: pendingId, content: { t: 'plain', v: {} }, messageRole: 'user' }) },
+                }],
+            }),
+        );
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: pendingId,
+            localId: 'other-scope-quarantine-owner',
+            createdAt: 1,
+            updatedAt: 1,
+            source: 'local_outbound',
+            deliveryStatus: 'queued',
+            pendingDeliveryStatus: 'blocked',
+            pendingOutboxScope: otherOutboxScope,
+            pendingOutboxQuarantineReason: 'unsupported_persisted_operation',
+            text: 'other scope diagnostic',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'other scope diagnostic' }, meta: {} },
+        });
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: canonicalId,
+            localId: pendingId,
+            createdAt: 2,
+            updatedAt: 2,
+            source: 'server_pending',
+            deliveryStatus: 'accepted',
+            pendingDeliveryStatus: 'server_queued',
+            pendingOutboxScope: outboxScope,
+            text: 'target old',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'target old' }, meta: {} },
+        });
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: sameScopeDiagnosticId,
+            localId: 'same-scope-diagnostic-local',
+            createdAt: 3,
+            updatedAt: 3,
+            source: 'local_outbound',
+            deliveryStatus: 'queued',
+            pendingDeliveryStatus: 'blocked',
+            pendingOutboxScope: outboxScope,
+            pendingOutboxQuarantineReason: 'unsupported_persisted_operation',
+            text: 'same scope diagnostic',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'same scope diagnostic' }, meta: {} },
+        });
+        let requestCount = 0;
+
+        await updatePendingMessageV2({
+            sessionId,
+            pendingId,
+            text: 'target new',
+            encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async () => {
+                requestCount += 1;
+                return new Response('{}', { status: 200 });
+            },
+        });
+        await expect(updatePendingMessageV2({
+            sessionId,
+            pendingId: sameScopeDiagnosticId,
+            text: 'must remain blocked',
+            encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async () => {
+                requestCount += 1;
+                return new Response('{}', { status: 200 });
+            },
+        })).rejects.toThrow('Persisted Pending outbox row is quarantined');
+
+        expect(requestCount).toBe(1);
+        expect(loadPendingOutboxForSession(sessionId, outboxScope)).toEqual([
+            expect.objectContaining({ localId: pendingId, operation: 'quarantined' }),
+        ]);
+        expect(storage.getState().sessionPending[sessionId]?.messages).toEqual([
+            expect.objectContaining({ id: pendingId, pendingOutboxScope: otherOutboxScope, text: 'other scope diagnostic' }),
+            expect.objectContaining({ id: canonicalId, pendingOutboxScope: outboxScope, text: 'target new' }),
+            expect.objectContaining({ id: sameScopeDiagnosticId, text: 'same scope diagnostic' }),
+        ]);
+    });
+
+    it('fails closed when an exact-scope cancellation is outstanding', async () => {
+        const sessionId = 's_test_patch_cancel_fails_closed';
+        const pendingId = 'p-cancel';
+        const rawRecord = { role: 'user' as const, content: { type: 'text' as const, text: 'old' }, meta: {} };
+        storage.getState().applySessions([buildSession({ sessionId, overrides: { encryptionMode: 'plain' } })]);
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: pendingId, localId: pendingId, createdAt: 1, updatedAt: 1,
+            source: 'server_pending', deliveryStatus: 'accepted', text: 'old', rawRecord,
+        });
+        savePendingOutboxMessage({
+            sessionId, localId: pendingId, createdAt: 1, text: 'old', rawRecord, operation: 'cancel',
+            request: { v: 1, body: JSON.stringify({ localId: pendingId, content: { t: 'plain', v: rawRecord }, messageRole: 'user' }) },
+        }, outboxScope);
+        let requestCalled = false;
+
+        await expect(updatePendingMessageV2({
+            sessionId, pendingId, text: 'new', encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async () => { requestCalled = true; return new Response('{}', { status: 200 }); },
+        })).rejects.toThrow('Pending message cancellation is outstanding');
+
+        expect(requestCalled).toBe(false);
+        expect(loadPendingOutboxForSession(sessionId, outboxScope)).toEqual([
+            expect.objectContaining({ localId: pendingId, operation: 'cancel' }),
+        ]);
+    });
+
+    it('does not retire cancellation custody that starts while PATCH is in flight', async () => {
+        const sessionId = 's_test_patch_cancel_race';
+        const pendingId = 'p-race';
+        const rawRecord = { role: 'user' as const, content: { type: 'text' as const, text: 'old' }, meta: {} };
+        storage.getState().applySessions([buildSession({ sessionId, overrides: { encryptionMode: 'plain' } })]);
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: pendingId, localId: pendingId, createdAt: 1, updatedAt: 1,
+            source: 'server_pending', deliveryStatus: 'accepted', text: 'old', rawRecord,
+        });
+        savePendingOutboxMessage({
+            sessionId, localId: pendingId, createdAt: 1, text: 'old', rawRecord,
+            request: { v: 1, body: JSON.stringify({ localId: pendingId, content: { t: 'plain', v: rawRecord }, messageRole: 'user' }) },
+        }, outboxScope);
+        let patchStarted!: () => void;
+        const patchStartedGate = new Promise<void>((resolve) => { patchStarted = resolve; });
+        let releasePatch!: () => void;
+        const patchGate = new Promise<void>((resolve) => { releasePatch = resolve; });
+        let deleteStarted!: () => void;
+        const deleteStartedGate = new Promise<void>((resolve) => { deleteStarted = resolve; });
+        let releaseDelete!: () => void;
+        const deleteGate = new Promise<void>((resolve) => { releaseDelete = resolve; });
+        const update = updatePendingMessageV2({
+            sessionId,
+            pendingId,
+            text: 'new',
+            encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async () => {
+                patchStarted();
+                await patchGate;
+                return new Response('{}', { status: 200 });
+            },
+        });
+        await patchStartedGate;
+        const deletion = deletePendingMessageV2({
+            sessionId,
+            pendingId,
+            request: async () => {
+                deleteStarted();
+                await deleteGate;
+                return new Response(null, { status: 500 });
+            },
+        });
+        await deleteStartedGate;
+        releasePatch();
+        await update;
+
+        expect(loadPendingOutboxForSession(sessionId, outboxScope)).toEqual([
+            expect.objectContaining({ localId: pendingId, operation: 'cancel' }),
+        ]);
+        releaseDelete();
+        await expect(deletion).rejects.toThrow('Failed to delete pending message (500)');
+    });
+
+    it('does not resurrect a row successfully deleted while PATCH is in flight', async () => {
+        const sessionId = 's_test_patch_delete_success_race';
+        const pendingId = 'p-delete-race';
+        const rawRecord = { role: 'user' as const, content: { type: 'text' as const, text: 'old' }, meta: {} };
+        storage.getState().applySessions([buildSession({ sessionId, overrides: { encryptionMode: 'plain' } })]);
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: pendingId, localId: pendingId, createdAt: 1, updatedAt: 1,
+            source: 'server_pending', deliveryStatus: 'accepted', text: 'old', rawRecord,
+        });
+        let patchStarted!: () => void;
+        const patchStartedGate = new Promise<void>((resolve) => { patchStarted = resolve; });
+        let releasePatch!: () => void;
+        const patchGate = new Promise<void>((resolve) => { releasePatch = resolve; });
+        const update = updatePendingMessageV2({
+            sessionId,
+            pendingId,
+            text: 'new',
+            encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async () => {
+                patchStarted();
+                await patchGate;
+                return new Response('{}', { status: 200 });
+            },
+        });
+        await patchStartedGate;
+
+        await deletePendingMessageV2({
+            sessionId,
+            pendingId,
+            request: async () => new Response(null, { status: 200 }),
+        });
+        releasePatch();
+        await update;
+
+        expect(storage.getState().sessionPending[sessionId]?.messages ?? []).toEqual([]);
     });
 
     it('preserves outgoing meta fields when existing.rawRecord is missing', async () => {
@@ -468,5 +973,68 @@ describe('pendingQueueV2 updatePendingMessageV2', () => {
         expect(pending).toHaveLength(1);
         expect(pending[0]?.text).toBe('new text');
         expect(pending[0]?.pendingDecryptFailure).toBeUndefined();
+    });
+
+    it('invalidates an older held-decrypt snapshot before applying a successful edit', async () => {
+        const sessionId = 's_update_invalidates_held_snapshot';
+        const pendingId = 'held-snapshot-pending';
+        const encryption = await createPendingQueueEncryption({ sessionId, seedByte: 13 });
+        storage.getState().applySessions([buildSession({ sessionId })]);
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: pendingId,
+            localId: pendingId,
+            createdAt: 1,
+            updatedAt: 1,
+            source: 'server_pending',
+            text: 'before edit',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'before edit' }, meta: {} },
+        });
+        let decryptStarted!: () => void;
+        const decryptStartedGate = new Promise<void>((resolve) => { decryptStarted = resolve; });
+        let releaseDecrypt!: () => void;
+        const decryptGate = new Promise<void>((resolve) => { releaseDecrypt = resolve; });
+        const staleRefresh = fetchAndApplyPendingMessagesV2({
+            sessionId,
+            outboxScope,
+            isOutboxScopeCurrent: () => true,
+            encryption: {
+                getSessionEncryption: () => ({
+                    decryptRaw: async () => {
+                        decryptStarted();
+                        await decryptGate;
+                        return { role: 'user', content: { type: 'text', text: 'stale snapshot text' }, meta: {} };
+                    },
+                }),
+            },
+            request: async () => Response.json({
+                pending: [{
+                    localId: pendingId,
+                    messageRole: 'user',
+                    content: { t: 'encrypted', c: 'stale-ciphertext' },
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    status: 'queued',
+                    position: 0,
+                    createdAt: 1,
+                    updatedAt: 2,
+                    discardedAt: null,
+                    discardedReason: null,
+                }],
+            }),
+        });
+        await decryptStartedGate;
+
+        await updatePendingMessageV2({
+            sessionId,
+            pendingId,
+            text: 'edited text',
+            encryption,
+            request: async () => new Response('{}', { status: 200 }),
+        });
+        releaseDecrypt();
+        await staleRefresh;
+
+        expect(storage.getState().sessionPending[sessionId]?.messages).toEqual([
+            expect.objectContaining({ localId: pendingId, text: 'edited text' }),
+        ]);
     });
 });

@@ -1,27 +1,20 @@
-import { MessageAckResponseSchema } from '@happier-dev/protocol/updates';
-
 import { storage } from '@/sync/domains/state/storage';
-import { resolveSentFrom } from '@/sync/domains/messages/sentFrom';
-import { buildSendMessageMeta } from '@/sync/domains/messages/buildSendMessageMeta';
-import { getAgentCore, resolveAgentIdFromFlavor } from '@/agents/catalog/catalog';
+import type { Session } from '@/sync/domains/state/storageTypes';
 import type { RawRecord } from '@/sync/typesRaw';
-import { createEphemeralServerSocketClient } from '@/sync/runtime/orchestration/serverScopedRpc/createEphemeralServerSocketClient';
-import { resolveScopedSessionDataKey } from '@/sync/runtime/orchestration/serverScopedRpc/resolveScopedSessionDataKey';
 import { resolveServerScopedSessionContext } from '@/sync/runtime/orchestration/serverScopedRpc/resolveServerScopedSessionContext';
-import { randomUUID } from '@/platform/randomUUID';
-import { socketEmitWithAckFallback } from '@/sync/engine/socket/socketEmitWithAckFallback';
-import { assertEndpointAuthenticatedWithProbe } from '@/sync/runtime/connectivity/assertEndpointAuthenticatedWithProbe';
-import { isTerminalAuthError } from '@/sync/runtime/connectivity/authErrors';
-import { raceSocketIoAckTimeout } from '@/sync/runtime/socketIoAckTimeout';
+import { resolveScopedPendingSessionEncryption } from '@/sync/runtime/orchestration/serverScopedRpc/resolveScopedPendingSessionEncryption';
 import { getSyncSingleton } from '@/sync/runtime/getSyncSingleton';
+import { enqueuePendingMessageV2 } from '@/sync/engine/pending/pendingQueueV2';
+import { createServerAccountScope } from '@/sync/domains/scope/serverAccountScope';
+import { randomUUID } from '@/platform/randomUUID';
+import { selectSessionPendingRequestedAction } from '@/sync/domains/session/control/submitMode';
+import { getServerFeaturesSnapshot } from '@/sync/api/capabilities/serverFeaturesClient';
+import {
+  resolvePendingInputServerWireMode,
+  type PendingInputServerWireMode,
+} from '@/sync/engine/pending/pendingInputServerWireContract';
 
-import type { ResolvedServerSessionRpcContext } from './resolveServerScopedSessionContext';
-
-type ScopedSocketClientLike = Readonly<{
-  timeout: (ms: number) => { emitWithAck: (event: string, payload: any) => Promise<unknown> };
-  emit: (event: string, payload: any) => void;
-  disconnect: () => void;
-}>;
+import { createSessionRequestForResolvedServerScope } from './createSessionRequestWithServerScope';
 
 type ScopedSessionEncryptionLike = Readonly<{
   encryptRawRecord: (record: RawRecord) => Promise<string>;
@@ -31,29 +24,48 @@ export type ServerScopedSessionSendMessageResult =
   | Readonly<{ ok: true; ack?: unknown }>
   | Readonly<{ ok: false; errorCode: string; error: string }>;
 
-type Deps = Readonly<{
+export type ServerScopedSessionSendMessageDeps = Readonly<{
+  getSession: (sessionId: string) => Session | null;
   resolveContext: typeof resolveServerScopedSessionContext;
-  resolveSessionDataKey: typeof resolveScopedSessionDataKey;
-  createSocket: (params: Readonly<{ serverUrl: string; token: string; timeoutMs: number }>) => Promise<ScopedSocketClientLike>;
-  assertScopedEndpointAuthenticated: (
-    context: Extract<ResolvedServerSessionRpcContext, { scope: 'scoped' }>,
-    options?: Readonly<{ forceProbe?: boolean }>,
-  ) => Promise<void> | void;
   getScopedSessionEncryption: (params: Readonly<{
     context: Awaited<ReturnType<typeof resolveServerScopedSessionContext>>;
     sessionId: string;
   }>) => Promise<ScopedSessionEncryptionLike>;
-  sendMessageActive: (
+  enqueuePendingMessageActive: (
     sessionId: string,
     message: string,
     displayText?: string,
     metaOverrides?: Record<string, unknown>,
-    options?: Readonly<{ localId?: string | null }>,
-  ) => Promise<void>;
+    options?: Readonly<{
+      localId?: string | null;
+      requestedAction: import('@happier-dev/protocol').PendingRequestedActionV1;
+    }>,
+  ) => Promise<Readonly<{
+    localId: string;
+    accepted: boolean;
+    cancelled?: true;
+  }>>;
+  schedulePendingOutboxRetry: (params: Readonly<{
+    sessionId: string;
+    localId: string;
+    outboxScope: import('@/sync/domains/scope/serverAccountScope').ServerAccountScope;
+  }>) => void;
+  markSessionLiveTailIntent: (sessionId: string) => void;
 }>;
 
 function normalizeId(raw: unknown): string {
   return String(raw ?? '').trim();
+}
+
+function resolveWireRequestedAction(params: Readonly<{
+  requestedAction: import('@happier-dev/protocol').PendingRequestedActionV1;
+  providerDeliveryIntent?: 'immediate' | 'first_turn' | null;
+  wireMode: PendingInputServerWireMode;
+}>): import('@happier-dev/protocol').PendingRequestedActionV1 {
+  return params.providerDeliveryIntent === 'first_turn'
+    && params.wireMode !== 'pending_input_v1'
+    ? { v: 1, kind: 'enqueue' }
+    : params.requestedAction;
 }
 
 async function defaultGetScopedSessionEncryption(params: Readonly<{
@@ -63,26 +75,13 @@ async function defaultGetScopedSessionEncryption(params: Readonly<{
   if (params.context.scope !== 'scoped') {
     throw new Error('Expected scoped context');
   }
-
-  const context = params.context as Extract<ResolvedServerSessionRpcContext, { scope: 'scoped' }>;
-  const sessionDataKey = await resolveScopedSessionDataKey({
-    serverId: context.targetServerId,
-    serverUrl: context.targetServerUrl,
-    token: context.token,
+  return await resolveScopedPendingSessionEncryption({
+    context: params.context,
     sessionId: params.sessionId,
-    timeoutMs: context.timeoutMs,
-    decryptEncryptionKey: (value) => context.encryption.decryptEncryptionKey(value),
   });
-
-  await context.encryption.initializeSessions(new Map([[params.sessionId, sessionDataKey]]));
-  const sessionEncryption = context.encryption.getSessionEncryption(params.sessionId);
-  if (!sessionEncryption) {
-    throw new Error(`Session encryption not found for ${params.sessionId}`);
-  }
-  return sessionEncryption as unknown as ScopedSessionEncryptionLike;
 }
 
-export function createServerScopedSessionSendMessage(deps?: Partial<Deps>): Readonly<{
+export function createServerScopedSessionSendMessage(deps?: Partial<ServerScopedSessionSendMessageDeps>): Readonly<{
   sendSessionMessageWithServerScope: (args: Readonly<{
     sessionId: string;
     message: string;
@@ -92,31 +91,27 @@ export function createServerScopedSessionSendMessage(deps?: Partial<Deps>): Read
     metaOverrides?: Record<string, unknown> | null;
     profileId?: string | null;
     localId?: string | null;
+    providerDeliveryIntent?: 'immediate' | 'first_turn' | null;
   }>) => Promise<ServerScopedSessionSendMessageResult>;
 }> {
-  const d: Deps = {
+  const d: ServerScopedSessionSendMessageDeps = {
+    getSession: deps?.getSession ?? ((sessionId) => storage.getState().sessions[sessionId] ?? null),
     resolveContext: deps?.resolveContext ?? resolveServerScopedSessionContext,
-    resolveSessionDataKey: deps?.resolveSessionDataKey ?? resolveScopedSessionDataKey,
-    createSocket: deps?.createSocket ?? (async (params) => await createEphemeralServerSocketClient(params)),
-    assertScopedEndpointAuthenticated:
-      deps?.assertScopedEndpointAuthenticated ??
-      (async (context, options) => {
-        await assertEndpointAuthenticatedWithProbe({
-          serverId: context.targetServerId,
-          serverUrl: context.targetServerUrl,
-          forceProbe: options?.forceProbe === true,
-          timeoutMs: context.timeoutMs,
-        });
-      }),
     getScopedSessionEncryption: deps?.getScopedSessionEncryption ?? defaultGetScopedSessionEncryption,
-    sendMessageActive:
-      deps?.sendMessageActive ??
-      (async (sessionId, message, displayText, metaOverrides, options) => {
-        await getSyncSingleton().sendMessage(sessionId, message, displayText, metaOverrides, {
-          ...(options?.localId ? { localId: options.localId } : {}),
-          bypassPendingQueueReason: 'server_scoped_rpc_active',
-        });
-      }),
+    enqueuePendingMessageActive:
+      deps?.enqueuePendingMessageActive ??
+      (async (sessionId, message, displayText, metaOverrides, options) =>
+        await getSyncSingleton().enqueuePendingMessage(
+          sessionId,
+          message,
+          displayText,
+          metaOverrides,
+          { localId: options?.localId, requestedAction: options?.requestedAction ?? { v: 1, kind: 'enqueue' } },
+        )),
+    schedulePendingOutboxRetry:
+      deps?.schedulePendingOutboxRetry ?? ((params) => getSyncSingleton().schedulePendingOutboxOperationRetry(params)),
+    markSessionLiveTailIntent:
+      deps?.markSessionLiveTailIntent ?? ((sessionId) => getSyncSingleton().markSessionLiveTailIntent(sessionId)),
   };
 
   const sendSessionMessageWithServerScope = async (args: Readonly<{
@@ -128,6 +123,7 @@ export function createServerScopedSessionSendMessage(deps?: Partial<Deps>): Read
     metaOverrides?: Record<string, unknown> | null;
     profileId?: string | null;
     localId?: string | null;
+    providerDeliveryIntent?: 'immediate' | 'first_turn' | null;
   }>): Promise<ServerScopedSessionSendMessageResult> => {
     const sessionId = normalizeId(args.sessionId);
     const message = String(args.message ?? '');
@@ -144,112 +140,115 @@ export function createServerScopedSessionSendMessage(deps?: Partial<Deps>): Read
 
     const timeoutMs = typeof args.timeoutMs === 'number' && args.timeoutMs > 0 ? args.timeoutMs : 30_000;
     const context = await d.resolveContext({ serverId: args.serverId, timeoutMs });
+    const session = d.getSession(sessionId);
+    const requestedAction = selectSessionPendingRequestedAction({
+      session,
+      firstTurn: args.providerDeliveryIntent === 'first_turn',
+      timingOverride: args.providerDeliveryIntent === 'immediate' ? 'send_now' : undefined,
+    });
+
+    const completeProviderRequiredDelivery = async (result: Readonly<{
+      localId: string;
+      accepted: boolean;
+      cancelled?: true;
+      terminal?: true;
+    }>): Promise<ServerScopedSessionSendMessageResult> => {
+      if (result.cancelled === true) {
+        return {
+          ok: false,
+          errorCode: 'PENDING_MESSAGE_CANCELLED',
+          error: 'Pending message was cancelled before dispatch',
+        };
+      }
+      if (!result.accepted) {
+        return {
+          ok: true,
+          ack: { ok: true, localId: result.localId, persistence: 'pending', accepted: false },
+        };
+      }
+      if (result.terminal === true) {
+        return {
+          ok: true,
+          ack: { ok: true, localId: result.localId, persistence: 'terminal', accepted: true },
+        };
+      }
+      if (!session) {
+        return { ok: false, errorCode: 'session_not_found', error: 'session_not_found' };
+      }
+      return {
+        ok: true,
+        ack: { ok: true, localId: result.localId, persistence: 'pending', accepted: false },
+      };
+    };
 
     if (context.scope === 'active') {
-      await d.sendMessageActive(
+      const activeLocalId = requestedLocalId || randomUUID();
+      const activeRequestedAction = args.providerDeliveryIntent === 'first_turn'
+        ? resolveWireRequestedAction({
+          requestedAction,
+          providerDeliveryIntent: args.providerDeliveryIntent,
+          wireMode: resolvePendingInputServerWireMode(await getServerFeaturesSnapshot()),
+        })
+        : requestedAction;
+      const result = await d.enqueuePendingMessageActive(
         sessionId,
         message,
         displayText,
         Object.keys(metaOverrides).length > 0 ? metaOverrides : undefined,
-        requestedLocalId ? { localId: requestedLocalId } : undefined,
+        {
+          localId: activeLocalId,
+          requestedAction: activeRequestedAction,
+        },
       );
-      return { ok: true, ack: { ok: true } };
+      return await completeProviderRequiredDelivery(result);
     }
 
-    // Scoped path: build + encrypt record, then emit `message` over an ephemeral scoped socket.
-    const state: any = storage.getState();
-    const session: any = state?.sessions?.[sessionId] ?? null;
     if (!session) {
       return { ok: false, errorCode: 'session_not_found', error: 'session_not_found' };
     }
-    const sessionEncryptionMode: 'e2ee' | 'plain' = session.encryptionMode === 'plain' ? 'plain' : 'e2ee';
-
-    const permissionMode = (session.permissionMode || 'default') as string;
-    const flavor = session.metadata?.flavor;
-    const agentId = resolveAgentIdFromFlavor(flavor);
-    const modelMode = session.modelMode || (agentId ? getAgentCore(agentId).model.defaultMode : 'default');
-    const model =
-      agentId && getAgentCore(agentId).model.supportsSelection && modelMode !== 'default' ? modelMode : undefined;
-
-    const sentFrom = resolveSentFrom();
-    const meta = buildSendMessageMeta({
-      sentFrom,
-      permissionMode: permissionMode || 'default',
-      model,
-      displayText,
-      agentId: agentId ?? null,
-      settings: state?.settings ?? {},
-      session,
-      metaOverrides: Object.keys(metaOverrides).length > 0 ? metaOverrides : undefined,
+    const outboxScope = createServerAccountScope(context.targetServerId, context.targetAccountId);
+    if (!outboxScope) throw new Error('Scoped pending delivery requires a server-account scope');
+    const scopedLocalId = requestedLocalId || randomUUID();
+    const wireMode = resolvePendingInputServerWireMode(await getServerFeaturesSnapshot({
+      serverId: context.targetServerId,
+    }));
+    const wireRequestedAction = resolveWireRequestedAction({
+      requestedAction,
+      providerDeliveryIntent: args.providerDeliveryIntent,
+      wireMode,
     });
-
-    const record: RawRecord = {
-      role: 'user',
-      content: { type: 'text', text: message },
-      meta,
-    };
-
-    const messagePayload =
-      sessionEncryptionMode === 'plain'
-        ? { t: 'plain' as const, v: record }
-        : await (async () => {
-            const sessionEncryption = await d.getScopedSessionEncryption({ context, sessionId });
-            return await sessionEncryption.encryptRawRecord(record);
-          })();
-    const localId = requestedLocalId || randomUUID();
-
-    const payload = {
-      sid: sessionId,
-      message: messagePayload,
-      localId,
-      sentFrom,
-      permissionMode: permissionMode || 'default',
-      messageRole: 'user' as const,
-    };
-
-    const socket = await d.createSocket({ serverUrl: context.targetServerUrl, token: context.token, timeoutMs: context.timeoutMs });
-    try {
-      await d.assertScopedEndpointAuthenticated(context);
-      const rawAck = await socketEmitWithAckFallback({
-        emitWithAck: async (event, payload, opts) => {
-          const timeoutMs = typeof opts?.timeoutMs === 'number' && opts.timeoutMs > 0 ? opts.timeoutMs : context.timeoutMs;
-          return await raceSocketIoAckTimeout(
-            socket.timeout(timeoutMs).emitWithAck(event, payload),
-            timeoutMs,
-          );
+    d.markSessionLiveTailIntent(sessionId);
+    const result = await enqueuePendingMessageV2({
+      sessionId,
+      text: message,
+      displayText,
+      localId: scopedLocalId,
+      metaOverrides: Object.keys(metaOverrides).length > 0 ? metaOverrides : undefined,
+      encryption: {
+        getSessionEncryption: async (candidateSessionId: string) => candidateSessionId === sessionId
+          ? await d.getScopedSessionEncryption({ context, sessionId })
+          : null,
+      },
+      outboxScope,
+      requestedAction: wireRequestedAction,
+      wireMode,
+      onWireContractMismatch: async () => {
+        await getServerFeaturesSnapshot({
+          serverId: context.targetServerId,
+          force: true,
+        });
+      },
+      request: createSessionRequestForResolvedServerScope({
+        context,
+        activeRequest: async () => {
+          throw new Error('Unexpected active request for scoped provider delivery');
         },
-        send: (event, payload) => {
-          socket.emit(event, payload);
-        },
-        event: 'message',
-        payload,
-        timeoutMs: context.timeoutMs,
-        onNoAck: () => {},
-        beforeFallback: () => d.assertScopedEndpointAuthenticated(context, { forceProbe: true }),
-      });
-      if (!rawAck) {
-        return { ok: true, ack: { ok: false, state: 'ack_unknown', localId } };
-      }
-      const parsed = MessageAckResponseSchema.safeParse(rawAck);
-      if (!parsed.success) {
-        return { ok: false, errorCode: 'send_failed', error: 'send_failed' };
-      }
-      if (parsed.data.ok !== true) {
-        return { ok: false, errorCode: 'send_failed', error: parsed.data.error ?? 'send_failed' };
-      }
-      return { ok: true, ack: parsed.data };
-    } catch (e: unknown) {
-      if (isTerminalAuthError(e)) {
-        throw e;
-      }
-      return { ok: false, errorCode: 'send_failed', error: e instanceof Error ? e.message : 'send_failed' };
-    } finally {
-      try {
-        socket.disconnect();
-      } catch {
-        // ignore
-      }
+      }),
+    });
+    if (result.accepted === false && !result.terminal && !result.waitingForWireMode) {
+      d.schedulePendingOutboxRetry({ sessionId, localId: result.localId, outboxScope });
     }
+    return await completeProviderRequiredDelivery(result);
   };
 
   return { sendSessionMessageWithServerScope };

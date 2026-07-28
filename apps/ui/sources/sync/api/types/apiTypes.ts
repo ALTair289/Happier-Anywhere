@@ -2,8 +2,10 @@ import { z } from 'zod';
 import { ChangeEntrySchema, ChangesResponseSchema } from '@happier-dev/protocol/changes';
 import {
     SessionMessageAttentionImpactSchema,
+    SessionMessageDeliveryResolutionV1Schema,
     SessionMessageRoleSchema,
     SessionStoredMessageContentSchema,
+    SessionTranscriptObservationProvenanceV1Schema,
 } from '@happier-dev/protocol';
 import { EphemeralUpdateSchema, type EphemeralUpdate, UpdateBodySchema, UpdateContainerSchema } from '@happier-dev/protocol/updates';
 
@@ -21,6 +23,10 @@ export const ApiMessageSchema = z.object({
     content: SessionStoredMessageContentSchema,
     createdAt: z.number(),
     updatedAt: z.number().optional(),
+    sourceCreatedAt: z.number().int().min(0).optional(),
+    sourceUpdatedAt: z.number().int().min(0).optional(),
+    transcriptObservationProvenance: SessionTranscriptObservationProvenanceV1Schema.optional(),
+    deliveryResolution: SessionMessageDeliveryResolutionV1Schema.optional(),
 });
 
 export type ApiMessage = z.infer<typeof ApiMessageSchema>;

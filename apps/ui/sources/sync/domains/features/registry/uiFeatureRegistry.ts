@@ -144,12 +144,6 @@ export const UI_FEATURE_REGISTRY = {
     'sharing.pendingDeliveryState': {
         settingsToggle: undefined,
     },
-    'sharing.pendingDeliveryAttempts': {
-        settingsToggle: undefined,
-    },
-    'sharing.pendingDeliveryAttemptClaims': {
-        settingsToggle: undefined,
-    },
     sessions: {
         settingsToggle: undefined,
     },

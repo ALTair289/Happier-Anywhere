@@ -6,6 +6,7 @@ import {
   resolveServerProfileScopeIdForIdentifier,
 } from '@/sync/domains/server/serverProfiles';
 import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
+import { parseToken } from '@/utils/auth/parseToken';
 
 import type { ScopedRpcSessionEncryptionContext } from './serverScopedRpcTypes';
 
@@ -20,6 +21,7 @@ export type ResolvedServerSessionRpcContext =
       timeoutMs: number;
       targetServerId: string;
       targetServerUrl: string;
+      targetAccountId: string;
       token: string;
       encryption: ScopedRpcSessionEncryptionContext;
     }>;
@@ -40,6 +42,7 @@ async function buildScopedContext(params: Readonly<{
     timeoutMs: params.timeoutMs,
     targetServerId: params.serverId,
     targetServerUrl: params.serverUrl,
+    targetAccountId: parseToken(credentials.token),
     token: credentials.token,
     encryption,
   };

@@ -68,7 +68,9 @@ export function recordSessionMessageDeliveryDecision(params: Readonly<{
     telemetry.record('ui.sessionMessage.delivery.decision', {
         sessionId: params.sessionId,
         callerSurface: params.callerSurface?.trim() || 'unknown',
-        requestedLocalId: params.localId?.trim() || null,
+        requestedLocalId: typeof params.localId === 'string' && params.localId.trim().length > 0
+            ? params.localId
+            : null,
         mode: params.selectedMode,
         decisionReason: params.decisionReason?.trim() || 'unknown',
         configuredMode: params.configuredMode,

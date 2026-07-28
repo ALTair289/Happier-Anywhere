@@ -5,14 +5,12 @@ import {
     didSessionListRenderablePlacementRelevantTimingChange,
     didSessionListRenderableStructuralFieldsChange,
     didSessionListRenderableWarmCacheFieldsChange,
-    isSessionListRenderableRuntimeActivityLeaseOnlyChange,
     isSessionListRenderableWarmCacheProgressOnlyChange,
     preserveSessionListRenderableStaleFields,
     preserveSessionListRenderableTransientState,
     type SessionListRenderablePatchFields,
     type SessionListRenderableSession,
 } from '../../domains/session/listing/sessionListRenderable';
-import { nowServerMs } from '../../runtime/time';
 
 export type SessionListRenderablePatch = Readonly<{
     sessionId: string;
@@ -24,6 +22,8 @@ export type SessionListRenderableStoreUpdatePlan = Readonly<{
     noop: boolean;
     changedCount: number;
     removedCount: number;
+    changedSessionIds: readonly string[];
+    removedSessionIds: readonly string[];
     missingCount: number;
     noopPatchCount: number;
     listViewFieldChangeCount: number;
@@ -77,7 +77,6 @@ function didPreservePendingFlags(
 export type SessionListRenderableChangeAssessment = Readonly<{
     didListViewFieldsChange: boolean;
     didAttentionPromotionFieldsChange: boolean;
-    didRuntimeActivityLeaseOnlyChange: boolean;
     shouldRefreshListViewRow: boolean;
     needsSessionListViewDataRebuild: boolean;
     warmCacheChange: 'none' | 'immediate' | 'deferred';
@@ -107,19 +106,12 @@ export function assessSessionListRenderableChange(input: Readonly<{
         input.previous,
         input.next,
     );
-    const didRuntimeActivityLeaseOnlyChange = isSessionListRenderableRuntimeActivityLeaseOnlyChange({
-        previous: input.previous,
-        next: input.next,
-        nowMs: nowServerMs(),
-    });
-
     const shouldRefreshListViewRow = resolveShouldRefreshListViewRow({
         previous: input.previous,
         next: input.next,
         didListViewFieldsChange,
         didListViewRowFieldsChange,
         didAttentionPromotionFieldsChange,
-        didRuntimeActivityLeaseOnlyChange,
         placementGroupingEnabled: input.rebuildOnAttentionPromotionFieldsChange,
     });
 
@@ -129,7 +121,6 @@ export function assessSessionListRenderableChange(input: Readonly<{
             && !didAttentionPromotionFieldsChange
             && (
                 isSessionListRenderableWarmCacheProgressOnlyChange(input.previous, input.next)
-                || didRuntimeActivityLeaseOnlyChange
             )
             ? 'deferred'
             : 'immediate';
@@ -137,7 +128,6 @@ export function assessSessionListRenderableChange(input: Readonly<{
     return {
         didListViewFieldsChange,
         didAttentionPromotionFieldsChange,
-        didRuntimeActivityLeaseOnlyChange,
         shouldRefreshListViewRow,
         needsSessionListViewDataRebuild: didListViewFieldsChange
             || (input.rebuildOnAttentionPromotionFieldsChange && didAttentionPromotionFieldsChange),
@@ -151,12 +141,10 @@ function resolveShouldRefreshListViewRow(input: Readonly<{
     didListViewFieldsChange: boolean;
     didListViewRowFieldsChange: boolean;
     didAttentionPromotionFieldsChange: boolean;
-    didRuntimeActivityLeaseOnlyChange: boolean;
     placementGroupingEnabled: boolean;
 }>): boolean {
     if (input.didListViewFieldsChange) return false;
     if (input.didListViewRowFieldsChange) return true;
-    if (input.didRuntimeActivityLeaseOnlyChange) return true;
     // Timing-only placement changes (extended working windows, refreshed
     // retention inputs) skip the structural rebuild but must still reach the
     // committed view data so the UI re-evaluates placement against fresh
@@ -185,6 +173,8 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
         : false;
     let changedCount = 0;
     let removedCount = 0;
+    const changedSessionIds: string[] = [];
+    const removedSessionIds: string[] = [];
     let listViewFieldChangeCount = 0;
     const listViewRowRefreshSessionIds: string[] = [];
     let attentionPromotionFieldChangeCount = 0;
@@ -224,6 +214,7 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
         if (!previousRenderable || nextRenderable !== previousRenderable) {
             didAnyRenderableChange = true;
             changedCount += 1;
+            changedSessionIds.push(incomingRenderable.id);
             if (assessment.didListViewFieldsChange) {
                 listViewFieldChangeCount += 1;
             }
@@ -257,6 +248,7 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
                 }
                 delete nextRenderables[sessionId];
                 removedCount += 1;
+                removedSessionIds.push(sessionId);
                 didImmediateWarmCacheRelevantRenderableChange = true;
                 needsSessionListViewDataRebuild = true;
             }
@@ -268,6 +260,8 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
         noop: !didAnyRenderableChange && !needsSessionListViewDataRebuild,
         changedCount,
         removedCount,
+        changedSessionIds,
+        removedSessionIds,
         missingCount: 0,
         noopPatchCount: 0,
         listViewFieldChangeCount,
@@ -321,6 +315,7 @@ export function planSessionListRenderablePatches(input: Readonly<{
     const previousRenderables = input.previousRenderables;
     let nextRenderables = previousRenderables;
     let changedCount = 0;
+    const changedSessionIds: string[] = [];
     let missingCount = 0;
     let noopPatchCount = 0;
     let listViewFieldChangeCount = 0;
@@ -345,6 +340,7 @@ export function planSessionListRenderablePatches(input: Readonly<{
         }
 
         changedCount += 1;
+        changedSessionIds.push(sessionId);
         const assessment = assessSessionListRenderableChange({
             previous: previousRenderable,
             next: nextRenderable,
@@ -382,6 +378,8 @@ export function planSessionListRenderablePatches(input: Readonly<{
         noop: nextRenderables === previousRenderables && !needsSessionListViewDataRebuild,
         changedCount,
         removedCount: 0,
+        changedSessionIds,
+        removedSessionIds: [],
         missingCount,
         noopPatchCount,
         listViewFieldChangeCount,

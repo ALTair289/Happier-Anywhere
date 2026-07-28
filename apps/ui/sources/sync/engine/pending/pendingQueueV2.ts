@@ -1,5 +1,19 @@
 import { storage } from '@/sync/domains/state/storage';
-import type { Encryption } from '@/sync/encryption/encryption';
+import {
+    assertSafePendingIdPathSegment,
+    findPendingOutboxMessage,
+    loadPendingOutboxForSession,
+    markPendingOutboxMessageCancelRequested,
+    removePendingOutboxMessage,
+    savePendingOutboxMessage,
+    type PersistedPendingOutboxMessage,
+} from '@/sync/domains/state/pendingOutboxPersistence';
+import {
+    areServerAccountScopesEqual,
+    serverAccountScopeKeySuffix,
+    type ServerAccountScope,
+} from '@/sync/domains/scope/serverAccountScope';
+import { getActiveServerAccountScope } from '@/sync/domains/scope/activeServerAccountScope';
 import { nowServerMs } from '@/sync/runtime/time';
 import { RawRecordSchema, type RawRecord } from '@/sync/typesRaw';
 import { randomUUID } from '@/platform/randomUUID';
@@ -16,20 +30,56 @@ import { throwAuthenticationResponseErrorIfNeeded } from '@/sync/runtime/connect
 import { isTransientConnectivityError } from '@/sync/runtime/connectivity/transientConnectivityErrors';
 import {
     normalizePendingDeliveryBlockedReason,
+    parsePendingDeliveryStatusV1,
+    PendingRequestedActionV1Schema,
+    readPendingLocalId,
     SessionStoredMessageContentSchema,
     type PendingDeliveryBlockedReason,
+    type PendingDeliveryStatusV1 as ProtocolPendingDeliveryStatusV1,
+    type PendingRequestedActionV1,
     type SessionStoredMessageContent,
 } from '@happier-dev/protocol';
 import { t } from '@/text';
+import {
+    isPendingOutboxProjectionForIdentity,
+    isPendingOutboxProjectionInScope,
+    isPendingOutboxQuarantineProjectionForIdentity,
+    pendingOutboxProjectionIdentityKey,
+    type PendingOutboxProjectionIdentity,
+} from './pendingOutboxProjectionIdentity';
+import type { PendingInputServerWireMode } from './pendingInputServerWireContract';
 
-type PendingStatus = 'queued' | 'delivering' | 'blocked' | 'discarded' | 'unknown';
+function assertServerRequestedActionAcknowledged(payload: unknown, requestedAction: PendingRequestedActionV1): void {
+    const acknowledged = isPlainObject(payload)
+        ? PendingRequestedActionV1Schema.safeParse(payload.requestedAction)
+        : null;
+    if (!acknowledged?.success || acknowledged.data.kind !== requestedAction.kind) {
+        throw new Error('Server did not acknowledge the persisted Pending requested action');
+    }
+}
+
+type PendingStatus = 'queued' | 'delivering' | 'external_handoff' | 'blocked' | 'discarded' | 'unknown';
+
+export type PendingMessageEnqueueResultV2 = Readonly<{
+    localId: string;
+    accepted: boolean;
+    cancelled?: true;
+    settled?: true;
+    terminal?: true;
+    externalHandoffClaimed?: true;
+    waitingForWireMode?: true;
+}>;
 
 type PendingRow = {
     localId: string;
-    content: SessionStoredMessageContent;
+    messageRole: 'user' | 'non_user' | null;
+    content: SessionStoredMessageContent | null;
+    requestedAction?: PendingRequestedActionV1;
+    requestedActionMalformed?: true;
     status: PendingStatus;
     statusRaw: string;
     deliveryStateRaw: string | null;
+    deliveryStatus: ProtocolPendingDeliveryStatusV1 | null;
     position: number;
     createdAt: number;
     updatedAt: number;
@@ -43,6 +93,20 @@ type PendingDecryptFailure = Readonly<{
     kind: 'decrypt_failed';
 }>;
 
+export type PendingQueueEncryption = Readonly<{
+    getSessionEncryption: (sessionId: string) => Readonly<{
+        encryptRawRecord: (record: RawRecord) => Promise<string>;
+    }> | null | undefined | Promise<Readonly<{
+        encryptRawRecord: (record: RawRecord) => Promise<string>;
+    }> | null | undefined>;
+}>;
+
+export type PendingQueueReadEncryption = Readonly<{
+    getSessionEncryption: (sessionId: string) => Readonly<{
+        decryptRaw: (payload: string) => Promise<unknown>;
+    }> | null | undefined;
+}>;
+
 function assertPendingResponseOk(response: Response, message: string): void {
     if (response.ok) return;
     throwAuthenticationResponseErrorIfNeeded(response.status);
@@ -51,6 +115,210 @@ function assertPendingResponseOk(response: Response, message: string): void {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expectedKeys: readonly string[]): boolean {
+    const actual = Object.keys(value).sort();
+    const expected = [...expectedKeys].sort();
+    return actual.length === expected.length
+        && actual.every((key, index) => key === expected[index]);
+}
+
+function isSafeNonNegativeInteger(value: unknown): value is number {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function createPendingServerUpgradeRequiredError(): Error & { code: 'server-upgrade-required' } {
+    return Object.assign(
+        new Error('This Pending action requires a newer server'),
+        { code: 'server-upgrade-required' as const },
+    );
+}
+
+function serializePendingEnqueueBodyForWire(params: Readonly<{
+    canonicalBody: string;
+    wireMode: Exclude<PendingInputServerWireMode, 'indeterminate'>;
+    requestedAction: PendingRequestedActionV1;
+    deliveryMode?: 'external_handoff';
+}>): string {
+    if (params.wireMode === 'pending_input_v1') return params.canonicalBody;
+    if (params.requestedAction.kind !== 'enqueue' || params.deliveryMode !== undefined) {
+        throw createPendingServerUpgradeRequiredError();
+    }
+
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(params.canonicalBody) as unknown;
+    } catch {
+        throw new Error('Persisted pending outbox envelope is invalid');
+    }
+    if (!isPlainObject(parsed) || readPendingLocalId(parsed.localId) === null) {
+        throw new Error('Persisted pending outbox envelope is invalid');
+    }
+    const content = SessionStoredMessageContentSchema.safeParse(parsed.content);
+    const ciphertext = typeof parsed.ciphertext === 'string' && parsed.ciphertext.length > 0
+        ? parsed.ciphertext
+        : null;
+    if (content.success === Boolean(ciphertext)) {
+        throw new Error('Persisted pending outbox envelope must contain exactly one content carrier');
+    }
+    return JSON.stringify(content.success
+        ? { localId: parsed.localId, content: content.data }
+        : { localId: parsed.localId, ciphertext: ciphertext! });
+}
+
+function assertPendingEnqueueAcknowledgedForWire(params: Readonly<{
+    payload: unknown;
+    wireMode: Exclude<PendingInputServerWireMode, 'indeterminate'>;
+    localId: string;
+    requestedAction: PendingRequestedActionV1;
+}>): void {
+    if (params.wireMode === 'pending_input_v1') {
+        assertServerRequestedActionAcknowledged(params.payload, params.requestedAction);
+        const payload = isPlainObject(params.payload) ? params.payload : null;
+        if (payload?.terminal === true) {
+            const message = isPlainObject(payload.message) ? payload.message : null;
+            if (
+                !message
+                || typeof message.id !== 'string'
+                || message.id.trim().length === 0
+                || !isSafeNonNegativeInteger(message.seq)
+                || readPendingLocalId(message.localId) !== params.localId
+            ) {
+                throw new Error('Server did not prove the exact committed Pending message');
+            }
+        } else {
+            const pending = payload && isPlainObject(payload.pending) ? payload.pending : null;
+            if (!pending || readPendingLocalId(pending.localId) !== params.localId) {
+                throw new Error('Server did not prove the exact persisted Pending row');
+            }
+        }
+        return;
+    }
+
+    if (!isPlainObject(params.payload) || !hasExactKeys(params.payload, [
+        'didWrite',
+        'pending',
+        'pendingCount',
+        'pendingVersion',
+    ])) {
+        throw new Error('Released server returned an invalid Pending enqueue acknowledgement');
+    }
+    if (
+        typeof params.payload.didWrite !== 'boolean'
+        || !isSafeNonNegativeInteger(params.payload.pendingCount)
+        || !isSafeNonNegativeInteger(params.payload.pendingVersion)
+        || !isPlainObject(params.payload.pending)
+    ) {
+        throw new Error('Released server returned an invalid Pending enqueue acknowledgement');
+    }
+    const pending = params.payload.pending;
+    if (!hasExactKeys(pending, [
+        'localId',
+        'content',
+        'status',
+        'position',
+        'createdAt',
+        'updatedAt',
+        'discardedAt',
+        'discardedReason',
+        'authorAccountId',
+    ])) {
+        throw new Error('Released server returned an invalid Pending enqueue acknowledgement');
+    }
+    const parsedContent = SessionStoredMessageContentSchema.safeParse(pending.content);
+    const validDiscardedAt = pending.discardedAt === null || isSafeNonNegativeInteger(pending.discardedAt);
+    const validDiscardedReason = pending.discardedReason === null || typeof pending.discardedReason === 'string';
+    if (
+        pending.localId !== params.localId
+        || !parsedContent.success
+        || (pending.status !== 'queued' && pending.status !== 'discarded')
+        || !isSafeNonNegativeInteger(pending.position)
+        || !isSafeNonNegativeInteger(pending.createdAt)
+        || !isSafeNonNegativeInteger(pending.updatedAt)
+        || !validDiscardedAt
+        || !validDiscardedReason
+        || typeof pending.authorAccountId !== 'string'
+        || pending.authorAccountId.trim().length === 0
+    ) {
+        throw new Error('Released server returned an invalid Pending enqueue acknowledgement');
+    }
+}
+
+function assertPendingEnqueueAcknowledgedAndRefreshOnMismatch(params: Readonly<{
+    payload: unknown;
+    wireMode: Exclude<PendingInputServerWireMode, 'indeterminate'>;
+    localId: string;
+    requestedAction: PendingRequestedActionV1;
+    onWireContractMismatch?: () => void | Promise<void>;
+}>): void {
+    try {
+        assertPendingEnqueueAcknowledgedForWire(params);
+    } catch (error) {
+        try {
+            void Promise.resolve(params.onWireContractMismatch?.()).catch(() => {});
+        } catch {
+            // A refresh failure cannot replace the original response-contract failure.
+        }
+        throw error;
+    }
+}
+
+function readPendingEnqueueDeliveryMode(body: string): 'external_handoff' | undefined {
+    try {
+        const parsed = JSON.parse(body) as unknown;
+        return isPlainObject(parsed) && parsed.deliveryMode === 'external_handoff'
+            ? 'external_handoff'
+            : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function readPendingEnqueueRequestedAction(body: string): PendingRequestedActionV1 | null {
+    try {
+        const parsed = JSON.parse(body) as unknown;
+        if (!isPlainObject(parsed)) return null;
+        if (!("requestedAction" in parsed)) return { v: 1, kind: 'enqueue' };
+        const action = PendingRequestedActionV1Schema.safeParse(parsed.requestedAction);
+        return action.success ? action.data : null;
+    } catch {
+        return null;
+    }
+}
+
+function readPendingEnqueueFrozenEnvelope(body: string): Readonly<{
+    content: SessionStoredMessageContent;
+    requestedAction: PendingRequestedActionV1;
+    deliveryMode?: 'external_handoff';
+}> | null {
+    try {
+        const parsed = JSON.parse(body) as unknown;
+        if (!isPlainObject(parsed) || parsed.messageRole !== 'user') return null;
+        const requestedAction = readPendingEnqueueRequestedAction(body);
+        if (!requestedAction) return null;
+        const parsedContent = SessionStoredMessageContentSchema.safeParse(parsed.content);
+        const ciphertext = typeof parsed.ciphertext === 'string' && parsed.ciphertext.length > 0
+            ? parsed.ciphertext
+            : null;
+        if (parsedContent.success === Boolean(ciphertext)) return null;
+        return {
+            content: parsedContent.success ? parsedContent.data : { t: 'encrypted', c: ciphertext! },
+            requestedAction,
+            ...(readPendingEnqueueDeliveryMode(body) === 'external_handoff'
+                ? { deliveryMode: 'external_handoff' as const }
+                : {}),
+        };
+    } catch {
+        return null;
+    }
+}
+
+function mapTypedPendingStatusToUiStatus(status: ProtocolPendingDeliveryStatusV1): PendingStatus {
+    if (status.status === 'queued' || status.status === 'delivering' || status.status === 'external_handoff' || status.status === 'blocked' || status.status === 'discarded') {
+        return status.status;
+    }
+    return 'unknown';
 }
 
 function parsePendingRows(raw: unknown): PendingRow[] | null {
@@ -62,9 +330,15 @@ function parsePendingRows(raw: unknown): PendingRow[] | null {
     for (const item of pending) {
         if (!isPlainObject(item)) continue;
         const localId = item.localId;
+        const messageRole = item.messageRole;
         const content = item.content;
+        const parsedRequestedAction = item.requestedAction == null
+            ? PendingRequestedActionV1Schema.safeParse({ v: 1, kind: 'enqueue' })
+            : PendingRequestedActionV1Schema.safeParse(item.requestedAction);
+        const requestedActionMalformed = item.requestedActionMalformed === true || !parsedRequestedAction.success;
         const status = item.status;
         const deliveryState = item.deliveryState;
+        const typedDeliveryStatus = parsePendingDeliveryStatusV1(item.deliveryStatus);
         const position = item.position;
         const createdAt = item.createdAt;
         const updatedAt = item.updatedAt;
@@ -73,10 +347,9 @@ function parsePendingRows(raw: unknown): PendingRow[] | null {
         const deliveryBlockedReason = item.deliveryBlockedReason;
         const authorAccountId = item.authorAccountId;
 
-        if (typeof localId !== 'string' || localId.length === 0) continue;
-        if (!isPlainObject(content)) continue;
+        const parsedLocalId = readPendingLocalId(localId);
+        if (parsedLocalId === null) continue;
         const contentParsed = SessionStoredMessageContentSchema.safeParse(content);
-        if (!contentParsed.success) continue;
         const statusRaw = typeof status === 'string' && status.length > 0 ? status : 'unknown';
         const legacyStatus: PendingStatus =
             statusRaw === 'queued' || statusRaw === 'delivering' || statusRaw === 'blocked' || statusRaw === 'discarded'
@@ -87,28 +360,47 @@ function parsePendingRows(raw: unknown): PendingRow[] | null {
             : null;
         const parsedStatus: PendingStatus = legacyStatus !== 'discarded' && deliveryStateRaw
             ? (
-                deliveryStateRaw === 'queued' || deliveryStateRaw === 'delivering' || deliveryStateRaw === 'blocked'
+                deliveryStateRaw === 'queued' || deliveryStateRaw === 'delivering' || deliveryStateRaw === 'external_handoff' || deliveryStateRaw === 'blocked'
                     ? deliveryStateRaw
                     : 'unknown'
             )
             : legacyStatus;
-        if (typeof position !== 'number' || !Number.isFinite(position)) continue;
-        if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) continue;
-        if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt)) continue;
+        const effectiveStatus = requestedActionMalformed && legacyStatus !== 'discarded'
+            ? 'blocked'
+            : typedDeliveryStatus
+            ? mapTypedPendingStatusToUiStatus(typedDeliveryStatus)
+            : parsedStatus;
+        const effectiveStatusRaw = requestedActionMalformed && legacyStatus !== 'discarded'
+            ? 'blocked'
+            : typedDeliveryStatus
+            ? typedDeliveryStatus.status
+            : legacyStatus !== 'discarded' && deliveryStateRaw ? deliveryStateRaw : statusRaw;
+        const parsedCreatedAt = typeof createdAt === 'number' && Number.isFinite(createdAt) ? createdAt : 0;
 
         out.push({
-            localId,
-            content: contentParsed.data,
-            status: parsedStatus,
-            statusRaw: legacyStatus !== 'discarded' && deliveryStateRaw ? deliveryStateRaw : statusRaw,
+            localId: parsedLocalId,
+            messageRole: messageRole === 'user' ? 'user' : messageRole == null ? null : 'non_user',
+            content: contentParsed.success ? contentParsed.data : null,
+            ...(parsedRequestedAction.success && !requestedActionMalformed
+                ? { requestedAction: parsedRequestedAction.data }
+                : {}),
+            ...(requestedActionMalformed ? { requestedActionMalformed: true as const } : {}),
+            status: effectiveStatus,
+            statusRaw: effectiveStatusRaw,
             deliveryStateRaw,
-            position,
-            createdAt,
-            updatedAt,
+            deliveryStatus: requestedActionMalformed && legacyStatus !== 'discarded'
+                ? { status: 'blocked', reason: 'unsupported_action' }
+                : typedDeliveryStatus,
+            position: typeof position === 'number' && Number.isFinite(position) ? position : Number.MAX_SAFE_INTEGER,
+            createdAt: parsedCreatedAt,
+            updatedAt: typeof updatedAt === 'number' && Number.isFinite(updatedAt) ? updatedAt : parsedCreatedAt,
             discardedAt: typeof discardedAt === 'number' && Number.isFinite(discardedAt) ? discardedAt : null,
             discardedReason: typeof discardedReason === 'string' && discardedReason.length > 0 ? discardedReason : null,
-            deliveryBlockedReason:
-                typeof deliveryBlockedReason === 'string' && deliveryBlockedReason.length > 0
+            deliveryBlockedReason: requestedActionMalformed && legacyStatus !== 'discarded'
+                ? 'unsupported_action'
+                : typedDeliveryStatus?.status === 'blocked'
+                ? typedDeliveryStatus.reason
+                : typeof deliveryBlockedReason === 'string' && deliveryBlockedReason.length > 0
                     ? deliveryBlockedReason
                     : null,
             authorAccountId: typeof authorAccountId === 'string' && authorAccountId.length > 0 ? authorAccountId : null,
@@ -117,8 +409,269 @@ function parsePendingRows(raw: unknown): PendingRow[] | null {
     return out;
 }
 
+/**
+ * Update the local send-acknowledgment state of an optimistic (`local_outbound`) pending row.
+ * `unconfirmed` = the write is being retried after a stall/transient failure; `failed` = automatic
+ * retries gave up; `undefined` = confirmed/normal. This is the single owner of the visible outbox
+ * marker so the derived visual state (`send_unconfirmed`/`send_failed`) stays consistent. No-op if
+ * the row is gone or already accepted.
+ */
+export function setPendingMessageSendState(
+    sessionId: string,
+    localId: string,
+    sendState: 'unconfirmed' | 'failed' | undefined,
+    outboxScope: ServerAccountScope,
+): void {
+    if (sendState !== undefined) {
+        const durable = findPendingOutboxMessage(sessionId, localId, outboxScope);
+        if (!durable || durable.operation === 'quarantined') return;
+    }
+    const identity = { sessionId, localId, outboxScope } satisfies PendingOutboxProjectionIdentity;
+    const existing = storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
+        isPendingOutboxProjectionForIdentity(message, identity)
+    );
+    if (!existing) return;
+    if (existing.deliveryStatus === 'accepted' && sendState !== undefined) return;
+    if (existing.sendState === sendState) return;
+    storage.getState().upsertPendingMessage(sessionId, { ...existing, sendState });
+}
+
+function findPendingOutboxProjection(
+    sessionId: string,
+    localId: string,
+    outboxScope: ServerAccountScope,
+): PendingMessage | null {
+    const identity = { sessionId, localId, outboxScope } satisfies PendingOutboxProjectionIdentity;
+    return storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
+        isPendingOutboxProjectionForIdentity(message, identity)
+    ) ?? null;
+}
+
+function findPendingOutboxQuarantineProjection(
+    sessionId: string,
+    localId: string,
+    outboxScope: ServerAccountScope,
+): PendingMessage | null {
+    const identity = { sessionId, localId, outboxScope } satisfies PendingOutboxProjectionIdentity;
+    return storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
+        isPendingOutboxQuarantineProjectionForIdentity(message, identity)
+    ) ?? null;
+}
+
+function findCanonicalServerPendingProjection(
+    sessionId: string,
+    localId: string,
+    outboxScope: ServerAccountScope,
+): PendingMessage | null {
+    return storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
+        message.source === 'server_pending'
+        && (message.localId ?? message.id) === localId
+        && (!message.pendingOutboxScope || areServerAccountScopesEqual(message.pendingOutboxScope, outboxScope))
+    ) ?? null;
+}
+
+function findPendingProjectionForServerMutation(
+    sessionId: string,
+    pendingId: string,
+    outboxScope: ServerAccountScope,
+): PendingMessage | null {
+    const messages = storage.getState().sessionPending[sessionId]?.messages ?? [];
+    const isEligible = (message: PendingMessage): boolean =>
+        message.pendingOutboxQuarantineReason === undefined
+        && (!message.pendingOutboxScope || areServerAccountScopesEqual(message.pendingOutboxScope, outboxScope));
+    const exactScopedProjection = messages.find((message) =>
+        message.id === pendingId
+        && message.pendingOutboxScope !== undefined
+        && areServerAccountScopesEqual(message.pendingOutboxScope, outboxScope)
+        && message.pendingOutboxQuarantineReason === undefined
+    );
+    if (exactScopedProjection) return exactScopedProjection;
+    const exactScopedIdentity = messages.find((message) =>
+        (message.localId ?? message.id) === pendingId
+        && message.pendingOutboxScope !== undefined
+        && areServerAccountScopesEqual(message.pendingOutboxScope, outboxScope)
+        && message.pendingOutboxQuarantineReason === undefined
+    );
+    if (exactScopedIdentity) return exactScopedIdentity;
+    const canonicalServerProjection = messages.find((message) =>
+        message.source === 'server_pending'
+        && message.localId === pendingId
+        && isEligible(message)
+    );
+    if (canonicalServerProjection) return canonicalServerProjection;
+    const exactId = messages.find((message) => message.id === pendingId && isEligible(message));
+    if (exactId) return exactId;
+    const identity = { sessionId, localId: pendingId, outboxScope } satisfies PendingOutboxProjectionIdentity;
+    return messages.find((message) => isPendingOutboxProjectionForIdentity(message, identity)) ?? null;
+}
+
+function resolvePendingServerMutationTarget(
+    sessionId: string,
+    callerPendingId: string,
+    outboxScope: ServerAccountScope,
+): Readonly<{ projection: PendingMessage | null; localId: string }> {
+    const projection = findPendingProjectionForServerMutation(sessionId, callerPendingId, outboxScope);
+    return {
+        projection,
+        localId: projection?.localId ?? projection?.id ?? callerPendingId,
+    };
+}
+
+function findCurrentPendingServerMutationProjection(
+    sessionId: string,
+    mutationTarget: Readonly<{ projection: PendingMessage | null; localId: string }>,
+    outboxScope: ServerAccountScope,
+): PendingMessage | null {
+    if (!mutationTarget.projection) return null;
+    return storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
+        message.id === mutationTarget.projection!.id
+        && (message.localId ?? message.id) === mutationTarget.localId
+        && message.pendingOutboxQuarantineReason === undefined
+        && (!message.pendingOutboxScope || areServerAccountScopesEqual(message.pendingOutboxScope, outboxScope))
+    ) ?? null;
+}
+
+function removePendingOutboxProjectionIfOwned(
+    sessionId: string,
+    localId: string,
+    outboxScope: ServerAccountScope,
+): void {
+    const existing = findPendingOutboxProjection(sessionId, localId, outboxScope);
+    if (existing) storage.getState().removePendingMessage(sessionId, existing.id);
+}
+
+function removeSettledPendingOutboxLocalProjectionIfOwned(
+    sessionId: string,
+    localId: string,
+    outboxScope: ServerAccountScope,
+): void {
+    const identity = { sessionId, localId, outboxScope } satisfies PendingOutboxProjectionIdentity;
+    const existing = storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
+        message.source === 'local_outbound'
+        && isPendingOutboxProjectionForIdentity(message, identity)
+    );
+    if (existing) storage.getState().removePendingMessage(sessionId, existing.id);
+}
+
+function markPendingProjectionAcknowledgedIfOwned(
+    sessionId: string,
+    localId: string,
+    outboxScope: ServerAccountScope,
+): void {
+    const identity = { sessionId, localId, outboxScope } satisfies PendingOutboxProjectionIdentity;
+    const currentProjection = findPendingProjectionForServerMutation(sessionId, localId, outboxScope);
+    if (currentProjection?.source !== 'local_outbound'
+        || currentProjection.pendingOutboxOperation === 'cancel'
+        || !isPendingOutboxProjectionForIdentity(currentProjection, identity)) return;
+    storage.getState().upsertPendingMessage(sessionId, {
+        ...currentProjection,
+        deliveryStatus: 'accepted',
+        pendingOutboxOperation: undefined,
+        sendState: undefined,
+    });
+}
+
+function removeProjectionsAfterConfirmedCancellation(
+    sessionId: string,
+    localId: string,
+    outboxScope: ServerAccountScope,
+): void {
+    const identity = { sessionId, localId, outboxScope } satisfies PendingOutboxProjectionIdentity;
+    for (const message of storage.getState().sessionPending[sessionId]?.messages ?? []) {
+        if (message.id !== localId && message.localId !== localId) continue;
+        if (message.pendingDeliveryStatus === 'external_handoff') continue;
+        const scopedCanonicalServerProjection = message.source === 'server_pending'
+            && (!message.pendingOutboxScope || areServerAccountScopesEqual(message.pendingOutboxScope, outboxScope));
+        if (scopedCanonicalServerProjection || isPendingOutboxProjectionForIdentity(message, identity)) {
+            storage.getState().removePendingMessage(sessionId, message.id);
+        }
+    }
+}
+
+function markPendingOutboxProjectionAcceptedIfOwned(
+    sessionId: string,
+    localId: string,
+    outboxScope: ServerAccountScope,
+    rawRecord: RawRecord,
+    pendingDeliveryStatus?: PendingDeliveryStatus,
+): boolean {
+    const existing = findPendingOutboxProjection(sessionId, localId, outboxScope);
+    if (!existing) return false;
+    storage.getState().upsertPendingMessage(sessionId, {
+        ...existing,
+        updatedAt: nowServerMs(),
+        deliveryStatus: 'accepted',
+        pendingDeliveryStatus,
+        sendState: undefined,
+        pendingOutboxOperation: undefined,
+        rawRecord,
+    });
+    return true;
+}
+
+function preserveInvalidExternalHandoffProjection(params: Readonly<{
+    sessionId: string;
+    persisted: PersistedPendingOutboxMessage;
+    outboxScope: ServerAccountScope;
+}>): false {
+    const localId = params.persisted.localId;
+    const existing = findPendingOutboxProjection(params.sessionId, localId, params.outboxScope);
+    if (!existing) return false;
+    const pendingDecryptFailure: PendingDecryptFailure = { kind: 'decrypt_failed' };
+    storage.getState().upsertPendingMessage(params.sessionId, {
+        ...existing,
+        source: 'server_pending',
+        deliveryStatus: 'accepted',
+        pendingDeliveryStatus: 'external_handoff',
+        pendingOutboxScope: params.outboxScope,
+        pendingOutboxOperation: undefined,
+        sendState: undefined,
+        text: params.persisted.text,
+        displayText: undefined,
+        rawRecord: { pendingDecryptFailure },
+        pendingDecryptFailure,
+    });
+    return false;
+}
+
+function markConfirmedExternalHandoffProjection(params: Readonly<{
+    sessionId: string;
+    persisted: PersistedPendingOutboxMessage;
+    outboxScope: ServerAccountScope;
+    rawRecord: RawRecord | null;
+}>): void {
+    const canonicalServerProjection = findCanonicalServerPendingProjection(
+        params.sessionId,
+        params.persisted.localId,
+        params.outboxScope,
+    );
+    if (canonicalServerProjection) {
+        storage.getState().upsertPendingMessage(params.sessionId, {
+            ...canonicalServerProjection,
+            deliveryStatus: 'accepted',
+            pendingDeliveryStatus: 'external_handoff',
+            pendingOutboxScope: params.outboxScope,
+            pendingOutboxOperation: undefined,
+            sendState: undefined,
+        });
+        return;
+    }
+    if (params.rawRecord) {
+        markPendingOutboxProjectionAcceptedIfOwned(
+            params.sessionId,
+            params.persisted.localId,
+            params.outboxScope,
+            params.rawRecord,
+            'external_handoff',
+        );
+        return;
+    }
+    preserveInvalidExternalHandoffProjection(params);
+}
+
 function resolvePendingDeliveryStatus(row: Pick<PendingRow, 'status'>): PendingDeliveryStatus {
     if (row.status === 'delivering') return 'server_delivering';
+    if (row.status === 'external_handoff') return 'external_handoff';
     if (row.status === 'blocked' || row.status === 'unknown') return 'blocked';
     return 'server_queued';
 }
@@ -133,9 +686,9 @@ function resolvePendingDeliveryBlockedReason(row: Pick<PendingRow, 'status' | 'd
     return reason ? { reason } : { reason: 'unknown', rawReason: row.deliveryBlockedReason };
 }
 
-function coerceDiscardReason(value: string | null): 'switch_to_local' | 'manual' {
-    if (value === 'switch_to_local') return 'switch_to_local';
-    return 'manual';
+function coerceDiscardReason(value: string | null): string | null {
+    const trimmed = typeof value === 'string' ? value.trim() : '';
+    return trimmed.length > 0 ? trimmed : null;
 }
 
 function coercePendingUserTextRecord(decrypted: unknown): { rawRecord: RawRecord; text: string; displayText?: string } | null {
@@ -153,79 +706,182 @@ function coercePendingUserTextRecord(decrypted: unknown): { rawRecord: RawRecord
     return { rawRecord: record, text, displayText };
 }
 
-const enqueueCommitTailsBySessionId = new Map<string, Promise<void>>();
-const deletedPendingLocalIdsBySessionId = new Map<string, Set<string>>();
+const enqueueCommitTailsByScopedSession = new Map<string, Promise<void>>();
+const deletedPendingLocalIdsByScopedSession = new Map<string, Set<string>>();
+const pendingCancellationRequestedLocalIdsByScopedSession = new Map<string, Set<string>>();
+type PendingSnapshotRefreshToken = Readonly<{
+    acceptedLocalIdsAfterCapture: Set<string>;
+}>;
+const latestPendingSnapshotRefreshByScopedSession = new Map<string, PendingSnapshotRefreshToken>();
+const inFlightPendingEnqueueByProjectionIdentity = new Map<
+    string,
+    ReturnType<typeof enqueuePendingMessageV2Owned>
+>();
 
-function runPendingEnqueueCommitInOrder<T>(sessionId: string, op: () => Promise<T>): Promise<T> {
-    const prev = enqueueCommitTailsBySessionId.get(sessionId) ?? Promise.resolve();
+function pendingScopedSessionKey(scope: ServerAccountScope, sessionId: string): string {
+    const normalizedSessionId = sessionId.trim();
+    return `${serverAccountScopeKeySuffix(scope)}:${normalizedSessionId.length}:${normalizedSessionId}`;
+}
+
+function markPendingLocalIdAcceptedAfterSnapshotCapture(
+    scope: ServerAccountScope,
+    sessionId: string,
+    localId: string,
+): void {
+    latestPendingSnapshotRefreshByScopedSession
+        .get(pendingScopedSessionKey(scope, sessionId))
+        ?.acceptedLocalIdsAfterCapture.add(localId);
+}
+
+function pendingSnapshotContainsEveryAcceptedLocalIdAfterCapture(
+    refreshToken: PendingSnapshotRefreshToken,
+    rows: ReadonlyArray<Pick<PendingRow, 'localId'>>,
+): boolean {
+    if (refreshToken.acceptedLocalIdsAfterCapture.size === 0) return true;
+    const rowLocalIds = new Set(rows.map((row) => row.localId));
+    return [...refreshToken.acceptedLocalIdsAfterCapture].every((localId) => rowLocalIds.has(localId));
+}
+
+function pendingMessagePath(sessionId: string, pendingId: string): string {
+    assertSafePendingIdPathSegment(pendingId);
+    return `/v2/sessions/${sessionId}/pending/${encodeURIComponent(pendingId)}`;
+}
+
+function assertPendingOutboxTransportAllowed(
+    sessionId: string,
+    localId: string,
+    outboxScope: ServerAccountScope,
+): void {
+    assertSafePendingIdPathSegment(localId);
+    if (findCanonicalServerPendingProjection(sessionId, localId, outboxScope)) return;
+    const exactScopeQuarantine = storage.getState().sessionPending[sessionId]?.messages.find((message) =>
+        message.id === localId
+        && message.pendingOutboxQuarantineReason !== undefined
+        && areServerAccountScopesEqual(message.pendingOutboxScope, outboxScope)
+    );
+    if (exactScopeQuarantine) {
+        throw new Error('Persisted Pending outbox row is quarantined');
+    }
+    if (findPendingOutboxMessage(sessionId, localId, outboxScope)?.operation === 'quarantined') {
+        throw new Error('Persisted Pending outbox row is quarantined');
+    }
+}
+
+function runPendingEnqueueCommitInOrder<T>(
+    scope: ServerAccountScope,
+    sessionId: string,
+    op: () => Promise<T>,
+): Promise<T> {
+    const key = pendingScopedSessionKey(scope, sessionId);
+    const prev = enqueueCommitTailsByScopedSession.get(key) ?? Promise.resolve();
     const next = prev.catch(() => undefined).then(op);
     const settled = next.then(
         () => undefined,
         () => undefined,
     );
     const tail = settled.finally(() => {
-        if (enqueueCommitTailsBySessionId.get(sessionId) === tail) {
-            enqueueCommitTailsBySessionId.delete(sessionId);
+        if (enqueueCommitTailsByScopedSession.get(key) === tail) {
+            enqueueCommitTailsByScopedSession.delete(key);
         }
     });
-    enqueueCommitTailsBySessionId.set(sessionId, tail);
+    enqueueCommitTailsByScopedSession.set(key, tail);
     return next;
 }
 
-function markPendingLocalIdDeleted(sessionId: string, localId: string): void {
-    const deleted = deletedPendingLocalIdsBySessionId.get(sessionId) ?? new Set<string>();
+function markPendingLocalIdDeleted(scope: ServerAccountScope, sessionId: string, localId: string): void {
+    const key = pendingScopedSessionKey(scope, sessionId);
+    const deleted = deletedPendingLocalIdsByScopedSession.get(key) ?? new Set<string>();
     deleted.add(localId);
-    deletedPendingLocalIdsBySessionId.set(sessionId, deleted);
+    deletedPendingLocalIdsByScopedSession.set(key, deleted);
 }
 
-function isPendingLocalIdDeleted(sessionId: string, localId: string): boolean {
-    return deletedPendingLocalIdsBySessionId.get(sessionId)?.has(localId) === true;
+function markPendingCancellationRequested(scope: ServerAccountScope, sessionId: string, localId: string): void {
+    const key = pendingScopedSessionKey(scope, sessionId);
+    const requested = pendingCancellationRequestedLocalIdsByScopedSession.get(key) ?? new Set<string>();
+    requested.add(localId);
+    pendingCancellationRequestedLocalIdsByScopedSession.set(key, requested);
 }
 
-function clearDeletedPendingLocalId(sessionId: string, localId: string): void {
-    const deleted = deletedPendingLocalIdsBySessionId.get(sessionId);
+function isPendingCancellationRequested(scope: ServerAccountScope, sessionId: string, localId: string): boolean {
+    return pendingCancellationRequestedLocalIdsByScopedSession.get(pendingScopedSessionKey(scope, sessionId))?.has(localId) === true;
+}
+
+function clearDeletedPendingLocalId(scope: ServerAccountScope, sessionId: string, localId: string): void {
+    const key = pendingScopedSessionKey(scope, sessionId);
+    const deleted = deletedPendingLocalIdsByScopedSession.get(key);
     if (!deleted) return;
     deleted.delete(localId);
     if (deleted.size === 0) {
-        deletedPendingLocalIdsBySessionId.delete(sessionId);
+        deletedPendingLocalIdsByScopedSession.delete(key);
     }
 }
 
-function filterDeletedPendingRows<T extends Pick<PendingRow, 'localId'>>(sessionId: string, rows: T[]): T[] {
-    const deleted = deletedPendingLocalIdsBySessionId.get(sessionId);
+function clearPendingCancellationRequested(scope: ServerAccountScope, sessionId: string, localId: string): void {
+    const key = pendingScopedSessionKey(scope, sessionId);
+    const requested = pendingCancellationRequestedLocalIdsByScopedSession.get(key);
+    if (!requested) return;
+    requested.delete(localId);
+    if (requested.size === 0) pendingCancellationRequestedLocalIdsByScopedSession.delete(key);
+}
+
+function filterDeletedPendingRows<T extends Pick<PendingRow, 'localId'>>(
+    scope: ServerAccountScope | undefined,
+    sessionId: string,
+    rows: T[],
+): T[] {
+    if (!scope) return rows;
+    const deleted = deletedPendingLocalIdsByScopedSession.get(pendingScopedSessionKey(scope, sessionId));
     if (!deleted || deleted.size === 0) return rows;
     return rows.filter((row) => !deleted.has(row.localId));
 }
 
-function pruneDeletedPendingLocalIds(sessionId: string, rows: Pick<PendingRow, 'localId'>[]): void {
-    const deleted = deletedPendingLocalIdsBySessionId.get(sessionId);
+function pruneDeletedPendingLocalIdsProvenAbsent(
+    scope: ServerAccountScope | undefined,
+    sessionId: string,
+    rows: ReadonlyArray<Pick<PendingRow, 'localId'>>,
+): void {
+    if (!scope) return;
+    const key = pendingScopedSessionKey(scope, sessionId);
+    const deleted = deletedPendingLocalIdsByScopedSession.get(key);
     if (!deleted || deleted.size === 0) return;
-
     const presentLocalIds = new Set(rows.map((row) => row.localId));
     for (const localId of deleted) {
-        if (!presentLocalIds.has(localId)) {
+        const projectionKey = pendingOutboxProjectionIdentityKey({ sessionId, localId, outboxScope: scope });
+        if (!presentLocalIds.has(localId) && !inFlightPendingEnqueueByProjectionIdentity.has(projectionKey)) {
             deleted.delete(localId);
         }
     }
-
-    if (deleted.size === 0) {
-        deletedPendingLocalIdsBySessionId.delete(sessionId);
-    }
+    if (deleted.size === 0) deletedPendingLocalIdsByScopedSession.delete(key);
 }
 
-async function deleteAcceptedTombstonedPendingMessage(params: {
+async function deletePendingOutboxMessageAtServer(params: {
     sessionId: string;
     localId: string;
     request: (path: string, init?: RequestInit) => Promise<Response>;
 }): Promise<void> {
+    const response = await params.request(pendingMessagePath(params.sessionId, params.localId), { method: 'DELETE' });
+    if (!response.ok && response.status !== 404) {
+        assertPendingResponseOk(response, 'Failed to delete pending message');
+    }
+}
+
+async function completePendingOutboxCancellationIfRequested(params: {
+    sessionId: string;
+    localId: string;
+    outboxScope: ServerAccountScope;
+    request: (path: string, init?: RequestInit) => Promise<Response>;
+}): Promise<boolean> {
+    const row = findPendingOutboxMessage(params.sessionId, params.localId, params.outboxScope);
+    if (row?.operation !== 'cancel') return false;
     try {
-        const response = await params.request(`/v2/sessions/${params.sessionId}/pending/${params.localId}`, { method: 'DELETE' });
-        if (!response.ok) {
-            assertPendingResponseOk(response, 'Failed to delete pending message');
-        }
-        clearDeletedPendingLocalId(params.sessionId, params.localId);
-    } catch {
-        return;
+        await deletePendingOutboxMessageAtServer(params);
+        markPendingLocalIdDeleted(params.outboxScope, params.sessionId, params.localId);
+        removePendingOutboxMessage(params.sessionId, params.localId, params.outboxScope);
+        clearPendingCancellationRequested(params.outboxScope, params.sessionId, params.localId);
+        return true;
+    } catch (error) {
+        clearPendingCancellationRequested(params.outboxScope, params.sessionId, params.localId);
+        throw error;
     }
 }
 
@@ -257,26 +913,243 @@ function buildPendingDecryptFailureMessage(params: {
     };
 }
 
-function withPendingDeliveryState<T extends PendingMessage>(row: PendingRow, message: T): T {
+function withPendingDeliveryState<T extends PendingMessage>(
+    row: PendingRow,
+    message: T,
+    outboxScope: ServerAccountScope,
+): T {
     const pendingDeliveryStatus = resolvePendingDeliveryStatus(row);
     const { reason: pendingDeliveryBlockedReason, rawReason: pendingDeliveryBlockedReasonRaw } = resolvePendingDeliveryBlockedReason(row);
     return {
         ...message,
+        ...(pendingDeliveryStatus === 'external_handoff' ? { pendingOutboxScope: outboxScope } : {}),
+        ...(row.requestedAction ? { requestedAction: row.requestedAction } : {}),
+        ...(row.requestedActionMalformed ? { requestedActionMalformed: true as const } : {}),
         pendingDeliveryStatus,
+        ...(row.deliveryStatus?.status === 'delivering' && row.deliveryStatus.detail
+            ? { pendingDeliveryDetail: row.deliveryStatus.detail }
+            : {}),
         ...(pendingDeliveryBlockedReason ? { pendingDeliveryBlockedReason } : {}),
         ...(pendingDeliveryBlockedReasonRaw ? { pendingDeliveryBlockedReasonRaw } : {}),
         ...(row.status === 'unknown' ? { pendingDeliveryStatusRaw: row.statusRaw } : {}),
     };
 }
 
-function mergeServerPendingMessagesWithLocalOutbound(params: Readonly<{
+function arePendingEnvelopeValuesEqual(left: unknown, right: unknown): boolean {
+    if (Object.is(left, right)) return true;
+    if (left == null || right == null) return left === right;
+    if (Array.isArray(left) || Array.isArray(right)) {
+        return Array.isArray(left)
+            && Array.isArray(right)
+            && left.length === right.length
+            && left.every((value, index) => arePendingEnvelopeValuesEqual(value, right[index]));
+    }
+    if (typeof left !== 'object' || typeof right !== 'object') return false;
+    const leftRecord = left as Record<string, unknown>;
+    const rightRecord = right as Record<string, unknown>;
+    const leftKeys = Object.keys(leftRecord);
+    const rightKeys = Object.keys(rightRecord);
+    return leftKeys.length === rightKeys.length
+        && leftKeys.every((key) => key in rightRecord
+            && arePendingEnvelopeValuesEqual(leftRecord[key], rightRecord[key]));
+}
+
+function isCompatibleCommittedPendingEnvelope(
+    outbox: PersistedPendingOutboxMessage,
+    serverRow: PendingRow,
+): boolean {
+    if (outbox.operation !== 'enqueue') return false;
+    if (serverRow.requestedActionMalformed === true) return false;
+    const frozen = readPendingEnqueueFrozenEnvelope(outbox.request.body);
+    const serverRequestedAction = serverRow.requestedAction ?? { v: 1, kind: 'enqueue' as const };
+    if (!frozen || (serverRow.messageRole !== null && serverRow.messageRole !== 'user')) return false;
+    const serverDeliveryMode = serverRow.status === 'external_handoff' ? 'external_handoff' : undefined;
+    if (frozen.deliveryMode !== serverDeliveryMode) return false;
+    return arePendingEnvelopeValuesEqual(frozen.content, serverRow.content)
+        && arePendingEnvelopeValuesEqual(frozen.requestedAction, serverRequestedAction);
+}
+
+type PendingProjectionIdOccupant = Pick<
+    PendingMessage,
+    'id' | 'localId' | 'pendingOutboxScope' | 'pendingOutboxQuarantineReason'
+>;
+
+function allocatePendingOutboxProjectionId(params: Readonly<{
+    identity: PendingOutboxProjectionIdentity;
+    quarantined: boolean;
+    occupiedMessages: readonly PendingProjectionIdOccupant[];
+    preferredProjectionId?: string;
+}>): string {
+    if (params.preferredProjectionId !== undefined
+        && !params.occupiedMessages.some((message) => message.id === params.preferredProjectionId)) {
+        return params.preferredProjectionId;
+    }
+    let projectionId = params.quarantined
+        ? `pending-outbox-quarantine:${pendingOutboxProjectionIdentityKey(params.identity)}`
+        : params.identity.localId;
+    const isSameProjection = params.quarantined
+        ? isPendingOutboxQuarantineProjectionForIdentity
+        : isPendingOutboxProjectionForIdentity;
+    const isOccupiedByAnotherProjection = (candidateId: string): boolean =>
+        params.occupiedMessages.some((message) =>
+            message.id === candidateId && !isSameProjection(message, params.identity)
+        );
+    if (!isOccupiedByAnotherProjection(projectionId)) return projectionId;
+    const baseId = `pending-outbox${params.quarantined ? '-quarantine' : ''}:${pendingOutboxProjectionIdentityKey(params.identity)}`;
+    projectionId = baseId;
+    for (let suffix = 1; isOccupiedByAnotherProjection(projectionId); suffix += 1) {
+        projectionId = `${baseId}:${suffix}`;
+    }
+    return projectionId;
+}
+
+function buildPendingOutboxProjection(
+    row: PersistedPendingOutboxMessage,
+    outboxScope: ServerAccountScope,
+    occupiedMessages: readonly PendingProjectionIdOccupant[] = [
+        ...(storage.getState().sessionPending[row.sessionId]?.messages ?? []),
+        ...(storage.getState().sessionPending[row.sessionId]?.discarded ?? []),
+    ],
+    preferredProjectionId?: string,
+): PendingMessage {
+    const requestedAction = readPendingEnqueueRequestedAction(row.request.body);
+    const quarantined = row.operation === 'quarantined';
+    const requestedActionMalformed = !quarantined && requestedAction === null;
+    const identity = {
+        sessionId: row.sessionId,
+        localId: row.localId,
+        outboxScope,
+    } satisfies PendingOutboxProjectionIdentity;
+    const projectionId = allocatePendingOutboxProjectionId({
+        identity,
+        quarantined,
+        occupiedMessages,
+        preferredProjectionId,
+    });
+    const parsedRawRecord = RawRecordSchema.safeParse(row.rawRecord);
+    const projectionRawRecord: RawRecord = parsedRawRecord.success && parsedRawRecord.data.role === 'user'
+        ? parsedRawRecord.data
+        : {
+            role: 'user',
+            content: { type: 'text', text: row.text },
+            meta: {},
+        };
+    return {
+        id: projectionId,
+        localId: row.localId,
+        createdAt: row.createdAt,
+        updatedAt: row.createdAt,
+        source: 'local_outbound',
+        deliveryStatus: 'queued',
+        pendingOutboxScope: outboxScope,
+        ...(quarantined
+            ? {
+                pendingOutboxQuarantineReason: row.pendingOutboxQuarantineReason,
+                pendingDeliveryStatus: 'blocked' as const,
+                pendingDeliveryBlockedReason: 'unknown' as const,
+            }
+            : {
+                pendingOutboxOperation: row.operation,
+                sendState: 'unconfirmed' as const,
+            }),
+        ...(requestedAction ? { requestedAction } : {}),
+        ...(requestedActionMalformed
+            ? {
+                requestedActionMalformed: true as const,
+                pendingDeliveryStatus: 'blocked' as const,
+                pendingDeliveryBlockedReason: 'unsupported_action' as const,
+                sendState: undefined,
+            }
+            : {}),
+        text: row.text,
+        displayText: row.displayText,
+        rawRecord: projectionRawRecord,
+    };
+}
+
+function ensurePendingOutboxQuarantineProjection(
+    row: PersistedPendingOutboxMessage,
+    outboxScope: ServerAccountScope,
+): PendingMessage {
+    const existing = findPendingOutboxQuarantineProjection(row.sessionId, row.localId, outboxScope);
+    if (existing) return existing;
+    const projection = buildPendingOutboxProjection(row, outboxScope);
+    storage.getState().upsertPendingMessage(row.sessionId, projection);
+    return projection;
+}
+
+function isAcknowledgedScopedPendingProjection(message: PendingMessage): boolean {
+    return message.deliveryStatus === 'accepted'
+        || (message.source === 'server_pending' && message.pendingDeliveryStatus === 'external_handoff');
+}
+
+function isCanonicalServerExternalHandoffProjection(message: PendingMessage): boolean {
+    return message.source === 'server_pending' && message.pendingDeliveryStatus === 'external_handoff';
+}
+
+function reconcileServerPendingSnapshotWithLocalOutbound(params: Readonly<{
     sessionId: string;
+    outboxScope: ServerAccountScope;
+    serverPendingRows: PendingRow[];
     serverPendingMessages: PendingMessage[];
     serverDiscardedMessages: DiscardedPendingMessage[];
-}>): PendingMessage[] {
+}>): Readonly<{
+    messages: PendingMessage[];
+    discarded: DiscardedPendingMessage[];
+}> {
     const existing = storage.getState().sessionPending[params.sessionId]?.messages ?? [];
-    if (existing.length === 0) return params.serverPendingMessages;
+    const serverPendingRowsByLocalId = new Map(params.serverPendingRows.map((row) => [row.localId, row]));
+    const outboxRows = loadPendingOutboxForSession(params.sessionId, params.outboxScope);
+    const outboxRowsByProjectionKey = new Map(outboxRows.map((row) => [
+        pendingOutboxProjectionIdentityKey({
+            sessionId: params.sessionId,
+            localId: row.localId,
+            outboxScope: params.outboxScope,
+        }),
+        row,
+    ]));
+    const projectionKeyForServerMessage = (message: Pick<PendingMessage, 'id' | 'localId'>): string =>
+        pendingOutboxProjectionIdentityKey({
+            sessionId: params.sessionId,
+            localId: message.localId ?? message.id,
+            outboxScope: params.outboxScope,
+        });
 
+    // Any same-scope server row proves persistence for this identity and retires executable enqueue
+    // custody. Envelope mismatches remain diagnostic on the authoritative server projection; they
+    // never preserve a replayable local writer that could resurrect after the server row disappears.
+    const conflictingServerLocalIds = new Set<string>();
+    for (const message of params.serverPendingMessages) {
+        const outbox = outboxRowsByProjectionKey.get(projectionKeyForServerMessage(message));
+        const serverRow = serverPendingRowsByLocalId.get(message.localId ?? message.id);
+        if (outbox?.operation === 'enqueue' && serverRow) {
+            if (!isCompatibleCommittedPendingEnvelope(outbox, serverRow)) {
+                conflictingServerLocalIds.add(outbox.localId);
+            }
+            removePendingOutboxMessage(params.sessionId, outbox.localId, params.outboxScope);
+        }
+    }
+    for (const message of params.serverDiscardedMessages) {
+        const outbox = outboxRowsByProjectionKey.get(projectionKeyForServerMessage(message));
+        if (outbox?.operation === 'enqueue') {
+            removePendingOutboxMessage(params.sessionId, outbox.localId, params.outboxScope);
+        }
+    }
+
+    const serverPendingMessages = params.serverPendingMessages.map((message) =>
+        conflictingServerLocalIds.has(message.localId ?? message.id)
+            ? { ...message, pendingOutboxConflict: true as const }
+            : message
+    );
+    const retainedOutboxRows = loadPendingOutboxForSession(params.sessionId, params.outboxScope);
+    const retainedOutboxRowsByProjectionKey = new Map(retainedOutboxRows.map((row) => [
+        pendingOutboxProjectionIdentityKey({
+            sessionId: params.sessionId,
+            localId: row.localId,
+            outboxScope: params.outboxScope,
+        }),
+        row,
+    ]));
     const serverLocalIds = new Set<string>();
     for (const message of params.serverPendingMessages) {
         if (message.localId) serverLocalIds.add(message.localId);
@@ -284,31 +1157,148 @@ function mergeServerPendingMessagesWithLocalOutbound(params: Readonly<{
     for (const message of params.serverDiscardedMessages) {
         if (message.localId) serverLocalIds.add(message.localId);
     }
+    const serverProjectionIds = new Set([
+        ...serverPendingMessages.map((message) => message.id),
+        ...params.serverDiscardedMessages.map((message) => message.id),
+    ]);
+    const scopedLocalOutbound = existing.filter((message) => {
+        if (message.source !== 'local_outbound' || !isPendingOutboxProjectionInScope(message, params.outboxScope)) {
+            return false;
+        }
+        if (message.pendingOutboxQuarantineReason !== undefined) return false;
+        if (message.localId && serverLocalIds.has(message.localId)) return false;
+        if (serverProjectionIds.has(message.id)) return false;
+        const localId = message.localId ?? message.id;
+        const projectionKey = pendingOutboxProjectionIdentityKey({
+            sessionId: params.sessionId,
+            localId,
+            outboxScope: params.outboxScope,
+        });
+        const durableRow = retainedOutboxRowsByProjectionKey.get(projectionKey);
+        return (durableRow !== undefined && durableRow.operation !== 'quarantined')
+            || (
+                isPendingCancellationRequested(params.outboxScope, params.sessionId, localId)
+                && inFlightPendingEnqueueByProjectionIdentity.has(projectionKey)
+            );
+    });
 
-    const preservedLocalOutbound = existing.filter((message) => {
+    const preservedUnscopedLocalOutbound = existing.filter((message) => {
+        if (message.pendingOutboxScope) return false;
         if (message.localId && serverLocalIds.has(message.localId)) return false;
         return message.source === 'local_outbound'
             || (message.source == null && message.deliveryStatus === 'accepted');
     });
-    if (preservedLocalOutbound.length === 0) return params.serverPendingMessages;
-
-    const merged = [...params.serverPendingMessages];
-    const mergedIds = new Set(merged.map((message) => message.id));
-    for (const message of preservedLocalOutbound) {
-        if (mergedIds.has(message.id)) continue;
-        merged.push(message);
-        mergedIds.add(message.id);
+    const preservedUnresolvedExternalHandoffs = existing.filter((message) => {
+        const localId = message.localId ?? message.id;
+        return message.pendingDeliveryStatus === 'external_handoff'
+            && isPendingOutboxProjectionInScope(message, params.outboxScope)
+            && !serverLocalIds.has(localId);
+    });
+    const preservedLocalOutboundCandidates = [
+        ...scopedLocalOutbound,
+        ...preservedUnscopedLocalOutbound,
+        ...preservedUnresolvedExternalHandoffs,
+    ];
+    const preservedLocalOutbound: PendingMessage[] = [];
+    const retainedScopedProjectionIndexes = new Map<string, number>();
+    for (const message of preservedLocalOutboundCandidates) {
+        if (message.pendingOutboxScope) {
+            const projectionKey = pendingOutboxProjectionIdentityKey({
+                sessionId: params.sessionId,
+                localId: message.localId ?? message.id,
+                outboxScope: message.pendingOutboxScope,
+            });
+            const retainedIndex = retainedScopedProjectionIndexes.get(projectionKey);
+            if (retainedIndex !== undefined) {
+                const retained = preservedLocalOutbound[retainedIndex]!;
+                if ((!isAcknowledgedScopedPendingProjection(retained)
+                    && isAcknowledgedScopedPendingProjection(message))
+                    || (!isCanonicalServerExternalHandoffProjection(retained)
+                        && isCanonicalServerExternalHandoffProjection(message))) {
+                    preservedLocalOutbound[retainedIndex] = message;
+                }
+                continue;
+            }
+            retainedScopedProjectionIndexes.set(projectionKey, preservedLocalOutbound.length);
+        }
+        preservedLocalOutbound.push(message);
     }
-    return merged;
+    const preservedProjectionKeys = new Set<string>();
+    for (const [index, message] of preservedLocalOutbound.entries()) {
+        if (!message.pendingOutboxScope) continue;
+        const projectionKey = pendingOutboxProjectionIdentityKey({
+            sessionId: params.sessionId,
+            localId: message.localId ?? message.id,
+            outboxScope: message.pendingOutboxScope,
+        });
+        preservedProjectionKeys.add(projectionKey);
+        const retainedOutbox = retainedOutboxRowsByProjectionKey.get(projectionKey);
+        if (retainedOutbox?.operation === 'enqueue' && isAcknowledgedScopedPendingProjection(message)) {
+            removePendingOutboxMessage(params.sessionId, retainedOutbox.localId, params.outboxScope);
+            preservedLocalOutbound[index] = {
+                ...message,
+                source: 'server_pending',
+                pendingOutboxOperation: undefined,
+                sendState: undefined,
+            };
+        }
+    }
+    for (const [projectionKey, row] of retainedOutboxRowsByProjectionKey) {
+        if (row.operation !== 'quarantined'
+            && (serverLocalIds.has(row.localId) || preservedProjectionKeys.has(projectionKey))) continue;
+        const existingProjection = row.operation === 'quarantined'
+            ? findPendingOutboxQuarantineProjection(params.sessionId, row.localId, params.outboxScope)
+            : findPendingOutboxProjection(params.sessionId, row.localId, params.outboxScope);
+        const projection = buildPendingOutboxProjection(row, params.outboxScope, [
+            ...serverPendingMessages,
+            ...params.serverDiscardedMessages,
+            ...preservedLocalOutbound,
+        ], existingProjection?.id);
+        preservedLocalOutbound.push(projection);
+        preservedProjectionKeys.add(projectionKey);
+    }
+    if (preservedLocalOutbound.length === 0) {
+        return { messages: serverPendingMessages, discarded: params.serverDiscardedMessages };
+    }
+
+    const merged = [...serverPendingMessages];
+    for (const [retainedIndex, message] of preservedLocalOutbound.entries()) {
+        const localId = message.localId ?? message.id;
+        const projectionId = allocatePendingOutboxProjectionId({
+            identity: {
+                sessionId: params.sessionId,
+                localId,
+                outboxScope: params.outboxScope,
+            },
+            quarantined: message.pendingOutboxQuarantineReason !== undefined,
+            occupiedMessages: [
+                ...merged,
+                ...params.serverDiscardedMessages,
+                ...preservedLocalOutbound.filter((_, candidateIndex) => candidateIndex !== retainedIndex),
+            ],
+            preferredProjectionId: message.id,
+        });
+        const collisionSafeMessage = projectionId === message.id
+            ? message
+            : { ...message, id: projectionId };
+        merged.push(collisionSafeMessage);
+    }
+    return { messages: merged, discarded: params.serverDiscardedMessages };
 }
 
 async function readPendingRowDecryptedContent(params: {
     row: Pick<PendingRow, 'content' | 'localId' | 'createdAt' | 'updatedAt'>;
-    sessionEncryption: ReturnType<Encryption['getSessionEncryption']>;
+    sessionEncryption: ReturnType<PendingQueueReadEncryption['getSessionEncryption']>;
 }): Promise<
     | { kind: 'ok'; value: unknown }
     | { kind: 'decrypt_failed'; message: ReturnType<typeof buildPendingDecryptFailureMessage> }
 > {
+    if (params.row.content === null) {
+        return {
+            kind: 'decrypt_failed',
+            message: buildPendingDecryptFailureMessage({ row: params.row }),
+        };
+    }
     if (params.row.content.t !== 'encrypted') {
         return { kind: 'ok', value: params.row.content.v };
     }
@@ -343,38 +1333,70 @@ async function readPendingRowDecryptedContent(params: {
 
 export async function fetchAndApplyPendingMessagesV2(params: {
     sessionId: string;
-    encryption: Encryption;
+    encryption: PendingQueueReadEncryption;
     request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
+    isOutboxScopeCurrent?: () => boolean | Promise<boolean>;
 }): Promise<void> {
     const { sessionId, encryption, request } = params;
+    const refreshKey = pendingScopedSessionKey(params.outboxScope, sessionId);
+    const refreshToken: PendingSnapshotRefreshToken = {
+        acceptedLocalIdsAfterCapture: new Set<string>(),
+    };
+    latestPendingSnapshotRefreshByScopedSession.set(refreshKey, refreshToken);
 
+    try {
     const session = storage.getState().sessions[sessionId] ?? null;
     const sessionEncryptionMode: 'e2ee' | 'plain' = session?.encryptionMode === 'plain' ? 'plain' : 'e2ee';
     const sessionEncryption = sessionEncryptionMode === 'plain' ? null : encryption.getSessionEncryption(sessionId);
 
     const response = await request(`/v2/sessions/${sessionId}/pending?includeDiscarded=1`, { method: 'GET' });
+    const isRefreshScopeCurrent = async (): Promise<boolean> => {
+        if (latestPendingSnapshotRefreshByScopedSession.get(refreshKey) !== refreshToken) return false;
+        let isScopeCurrent: boolean;
+        if (params.isOutboxScopeCurrent) {
+            isScopeCurrent = await params.isOutboxScopeCurrent();
+        } else {
+            const activeScope = getActiveServerAccountScope();
+            isScopeCurrent = activeScope !== null
+                && isPendingOutboxProjectionInScope({ pendingOutboxScope: activeScope }, params.outboxScope);
+        }
+        return isScopeCurrent
+            && latestPendingSnapshotRefreshByScopedSession.get(refreshKey) === refreshToken;
+    };
+    if (!await isRefreshScopeCurrent()) return;
     if (!response.ok) {
         throwAuthenticationResponseErrorIfNeeded(response.status);
-        storage.getState().applyPendingLoaded(sessionId);
-        storage.getState().applyDiscardedPendingMessages(sessionId, []);
+        storage.getState().applyPendingSnapshot(sessionId, {
+            messages: storage.getState().sessionPending[sessionId]?.messages ?? [],
+            discarded: [],
+        });
         return;
     }
 
     const json = await response.json().catch(() => null);
+    if (!await isRefreshScopeCurrent()) return;
     const rows = parsePendingRows(json);
     if (!rows) {
-        storage.getState().applyPendingLoaded(sessionId);
-        storage.getState().applyDiscardedPendingMessages(sessionId, []);
+        storage.getState().applyPendingSnapshot(sessionId, {
+            messages: storage.getState().sessionPending[sessionId]?.messages ?? [],
+            discarded: [],
+        });
         return;
     }
+    if (!pendingSnapshotContainsEveryAcceptedLocalIdAfterCapture(refreshToken, rows)) return;
 
-    pruneDeletedPendingLocalIds(sessionId, rows);
-    const visibleRows = filterDeletedPendingRows(sessionId, rows);
+    // This snapshot was parsed before any awaited decrypt work. It may retire only
+    // tombstones that it already proves absent; newer cancellations remain fenced.
+    pruneDeletedPendingLocalIdsProvenAbsent(params.outboxScope, sessionId, rows);
 
-    const queued = visibleRows
+    // Map the complete authoritative snapshot before consulting transient deletion tombstones.
+    // A concurrent DELETE can still fail while decrypting; final publication is the fence that
+    // decides whether its row remains suppressed or is restored from this mapped snapshot.
+    const queued = rows
         .filter((r) => r.status !== 'discarded')
         .sort((a, b) => a.position - b.position || a.createdAt - b.createdAt || a.localId.localeCompare(b.localId));
-    const discarded = visibleRows
+    const discarded = rows
         .filter((r) => r.status === 'discarded')
         .sort((a, b) => (a.discardedAt ?? a.updatedAt) - (b.discardedAt ?? b.updatedAt));
 
@@ -385,13 +1407,13 @@ export async function fetchAndApplyPendingMessagesV2(params: {
             sessionEncryption,
         });
         if (decrypted.kind === 'decrypt_failed') {
-            pendingMessages.push(withPendingDeliveryState(r, decrypted.message));
+            pendingMessages.push(withPendingDeliveryState(r, decrypted.message, params.outboxScope));
             continue;
         }
 
         const coerced = coercePendingUserTextRecord(decrypted.value);
         if (!coerced) {
-            pendingMessages.push(withPendingDeliveryState(r, buildPendingDecryptFailureMessage({ row: r })));
+            pendingMessages.push(withPendingDeliveryState(r, buildPendingDecryptFailureMessage({ row: r }), params.outboxScope));
             continue;
         }
         pendingMessages.push(withPendingDeliveryState(r, {
@@ -403,7 +1425,7 @@ export async function fetchAndApplyPendingMessagesV2(params: {
             text: coerced.text,
             displayText: coerced.displayText,
             rawRecord: coerced.rawRecord,
-        }));
+        }, params.outboxScope));
     }
 
     const discardedMessages: DiscardedPendingMessage[] = [];
@@ -415,6 +1437,8 @@ export async function fetchAndApplyPendingMessagesV2(params: {
         if (decrypted.kind === 'decrypt_failed') {
             discardedMessages.push({
                 ...decrypted.message,
+                ...(r.requestedAction ? { requestedAction: r.requestedAction } : {}),
+                ...(r.requestedActionMalformed ? { requestedActionMalformed: true as const } : {}),
                 discardedAt: r.discardedAt ?? r.updatedAt,
                 discardedReason: coerceDiscardReason(r.discardedReason),
             });
@@ -425,6 +1449,8 @@ export async function fetchAndApplyPendingMessagesV2(params: {
         if (!coerced) {
             discardedMessages.push({
                 ...buildPendingDecryptFailureMessage({ row: r }),
+                ...(r.requestedAction ? { requestedAction: r.requestedAction } : {}),
+                ...(r.requestedActionMalformed ? { requestedActionMalformed: true as const } : {}),
                 discardedAt: r.discardedAt ?? r.updatedAt,
                 discardedReason: coerceDiscardReason(r.discardedReason),
             });
@@ -436,6 +1462,8 @@ export async function fetchAndApplyPendingMessagesV2(params: {
             createdAt: r.createdAt,
             updatedAt: r.updatedAt,
             source: 'server_pending',
+            ...(r.requestedAction ? { requestedAction: r.requestedAction } : {}),
+            ...(r.requestedActionMalformed ? { requestedActionMalformed: true as const } : {}),
             text: coerced.text,
             displayText: coerced.displayText,
             rawRecord: coerced.rawRecord,
@@ -444,26 +1472,74 @@ export async function fetchAndApplyPendingMessagesV2(params: {
         });
     }
 
-    storage.getState().applyPendingMessages(sessionId, mergeServerPendingMessagesWithLocalOutbound({
+    if (!await isRefreshScopeCurrent()) return;
+    if (!pendingSnapshotContainsEveryAcceptedLocalIdAfterCapture(refreshToken, rows)) return;
+    const finalVisibleRows = filterDeletedPendingRows(params.outboxScope, sessionId, rows);
+    const finalVisibleLocalIds = new Set(finalVisibleRows.map((row) => row.localId));
+    const finalQueued = queued.filter((row) => finalVisibleLocalIds.has(row.localId));
+    const reconciled = reconcileServerPendingSnapshotWithLocalOutbound({
         sessionId,
-        serverPendingMessages: pendingMessages,
-        serverDiscardedMessages: discardedMessages,
-    }));
-    storage.getState().applyDiscardedPendingMessages(sessionId, discardedMessages);
+        outboxScope: params.outboxScope,
+        serverPendingRows: finalQueued,
+        serverPendingMessages: pendingMessages.filter((message) =>
+            typeof message.localId === 'string' && finalVisibleLocalIds.has(message.localId)),
+        serverDiscardedMessages: discardedMessages.filter((message) =>
+            typeof message.localId === 'string' && finalVisibleLocalIds.has(message.localId)),
+    });
+    storage.getState().applyPendingSnapshot(sessionId, reconciled);
+    } finally {
+        if (latestPendingSnapshotRefreshByScopedSession.get(refreshKey) === refreshToken) {
+            latestPendingSnapshotRefreshByScopedSession.delete(refreshKey);
+        }
+    }
 }
 
-export async function enqueuePendingMessageV2(params: {
+export function enqueuePendingMessageV2(
+    params: Parameters<typeof enqueuePendingMessageV2Owned>[0],
+): ReturnType<typeof enqueuePendingMessageV2Owned> {
+    if (params.localId !== undefined && readPendingLocalId(params.localId) === null) {
+        throw new Error('Pending localId must not be blank');
+    }
+    const localId = readPendingLocalId(params.localId) ?? randomUUID();
+    assertSafePendingIdPathSegment(localId);
+    const identityKey = pendingOutboxProjectionIdentityKey({
+        sessionId: params.sessionId,
+        localId,
+        outboxScope: params.outboxScope,
+    });
+    const existing = inFlightPendingEnqueueByProjectionIdentity.get(identityKey);
+    if (existing) return existing;
+
+    const operation = enqueuePendingMessageV2Owned({ ...params, localId });
+    inFlightPendingEnqueueByProjectionIdentity.set(identityKey, operation);
+    const clear = (): void => {
+        if (inFlightPendingEnqueueByProjectionIdentity.get(identityKey) === operation) {
+            inFlightPendingEnqueueByProjectionIdentity.delete(identityKey);
+        }
+    };
+    void operation.then(clear, clear);
+    return operation;
+}
+
+async function enqueuePendingMessageV2Owned(params: {
     sessionId: string;
     text: string;
     displayText?: string;
-    encryption: Encryption;
+    localId?: string;
+    deliveryMode?: 'external_handoff';
+    encryption: PendingQueueEncryption;
     metaOverrides?: Record<string, unknown>;
     fetchArtifactWithBody?: (artifactId: string) => Promise<DecryptedArtifact | null>;
     updateArtifact?: (artifact: DecryptedArtifact) => void;
     request: (path: string, init?: RequestInit) => Promise<Response>;
     onLocalPendingProjectionCreated?: (event: Readonly<{ localId: string }>) => void;
-}): Promise<Readonly<{ localId: string; accepted: boolean }>> {
+    outboxScope: ServerAccountScope;
+    requestedAction: PendingRequestedActionV1;
+    wireMode: PendingInputServerWireMode;
+    onWireContractMismatch?: () => void | Promise<void>;
+}): Promise<PendingMessageEnqueueResultV2> {
     const { sessionId, text, displayText, encryption, request, metaOverrides } = params;
+    const outboxScope = params.outboxScope;
 
     storage.getState().markSessionOptimisticThinking(sessionId);
 
@@ -472,20 +1548,47 @@ export async function enqueuePendingMessageV2(params: {
         storage.getState().clearSessionOptimisticThinking(sessionId);
         throw new Error(`Session ${sessionId} not found in storage`);
     }
-    const sessionEncryptionMode: 'e2ee' | 'plain' = session.encryptionMode === 'plain' ? 'plain' : 'e2ee';
-    const sessionEncryption = sessionEncryptionMode === 'plain' ? null : encryption.getSessionEncryption(sessionId);
-    if (sessionEncryptionMode === 'e2ee' && !sessionEncryption) {
+    if (params.localId !== undefined && readPendingLocalId(params.localId) === null) {
         storage.getState().clearSessionOptimisticThinking(sessionId);
-        throw new Error(`Session ${sessionId} not found`);
+        throw new Error('Pending localId must not be blank');
     }
-
+    const requestedLocalId = readPendingLocalId(params.localId) ?? '';
+    const localId = requestedLocalId || randomUUID();
+    const existingOutboxRow = requestedLocalId
+        ? findPendingOutboxMessage(sessionId, requestedLocalId, outboxScope)
+        : null;
+    if (existingOutboxRow?.operation === 'quarantined') {
+        ensurePendingOutboxQuarantineProjection(existingOutboxRow, outboxScope);
+        storage.getState().clearSessionOptimisticThinking(sessionId);
+        return { localId, accepted: false, terminal: true };
+    }
+    const frozenEnvelope = existingOutboxRow
+        ? readPendingEnqueueFrozenEnvelope(existingOutboxRow.request.body)
+        : null;
+    if (existingOutboxRow && !frozenEnvelope) {
+        storage.getState().clearSessionOptimisticThinking(sessionId);
+        throw new Error('Persisted pending outbox envelope is invalid');
+    }
+    const requestedAction = frozenEnvelope?.requestedAction
+        ?? PendingRequestedActionV1Schema.parse(params.requestedAction);
+    const deliveryMode = existingOutboxRow
+        ? frozenEnvelope?.deliveryMode
+        : params.deliveryMode;
+    const wireMode = params.wireMode;
+    if (
+        wireMode === 'released_server_v0_2_1'
+        && (requestedAction.kind !== 'enqueue' || deliveryMode !== undefined)
+    ) {
+        storage.getState().clearSessionOptimisticThinking(sessionId);
+        throw createPendingServerUpgradeRequiredError();
+    }
+    const sessionEncryptionMode: 'e2ee' | 'plain' = session.encryptionMode === 'plain' ? 'plain' : 'e2ee';
     const permissionMode = session.permissionMode || 'default';
     const flavor = session.metadata?.flavor;
     const agentId = resolveAgentIdFromFlavor(flavor);
     const modelMode = session.modelMode || (agentId ? getAgentCore(agentId).model.defaultMode : 'default');
     const model = agentId && getAgentCore(agentId).model.supportsSelection && modelMode !== 'default' ? modelMode : undefined;
-    const localId = randomUUID();
-    const rawRecord: RawRecord = {
+    const candidateRawRecord: unknown = existingOutboxRow?.rawRecord ?? {
         role: 'user',
         content: { type: 'text', text },
         meta: buildSendMessageMeta({
@@ -499,159 +1602,488 @@ export async function enqueuePendingMessageV2(params: {
             metaOverrides: metaOverrides as any,
         }),
     };
-
-    const createdAt = nowServerMs();
+    const parsedRawRecord = RawRecordSchema.safeParse(candidateRawRecord);
+    const rawRecord = parsedRawRecord.success && parsedRawRecord.data.role === 'user'
+        ? parsedRawRecord.data
+        : null;
+    if (!rawRecord && !existingOutboxRow) {
+        storage.getState().clearSessionOptimisticThinking(sessionId);
+        throw new Error('Persisted pending outbox projection is invalid');
+    }
+    const canonicalText = existingOutboxRow?.text ?? text;
+    const canonicalDisplayText = existingOutboxRow?.displayText ?? displayText;
+    const createdAt = existingOutboxRow?.createdAt ?? nowServerMs();
     const updatedAt = createdAt;
 
-    storage.getState().upsertPendingMessage(sessionId, {
-        id: localId,
-        localId,
-        createdAt,
-        updatedAt,
-        source: 'local_outbound',
-        deliveryStatus: 'queued',
-        text,
-        displayText,
-        rawRecord,
-    });
-    params.onLocalPendingProjectionCreated?.({ localId });
+    const authoritativeServerProjection = existingOutboxRow
+        ? findCanonicalServerPendingProjection(sessionId, localId, outboxScope)
+        : null;
+    const existingLocalProjection = existingOutboxRow
+        ? findPendingOutboxProjection(sessionId, localId, outboxScope)
+        : null;
+    if (!authoritativeServerProjection && !existingLocalProjection && (existingOutboxRow || rawRecord)) {
+        const identity = { sessionId, localId, outboxScope } satisfies PendingOutboxProjectionIdentity;
+        storage.getState().upsertPendingMessage(sessionId, existingOutboxRow
+            ? buildPendingOutboxProjection(existingOutboxRow, outboxScope)
+            : {
+                id: allocatePendingOutboxProjectionId({
+                    identity,
+                    quarantined: false,
+                    occupiedMessages: [
+                        ...(storage.getState().sessionPending[sessionId]?.messages ?? []),
+                        ...(storage.getState().sessionPending[sessionId]?.discarded ?? []),
+                    ],
+                }),
+                localId,
+                createdAt,
+                updatedAt,
+                source: 'local_outbound',
+                deliveryStatus: 'queued',
+                pendingOutboxScope: outboxScope,
+                pendingOutboxOperation: 'enqueue',
+                requestedAction,
+                text: canonicalText,
+                displayText: canonicalDisplayText,
+                rawRecord: rawRecord!,
+            });
+        params.onLocalPendingProjectionCreated?.({ localId });
+    }
 
+    let serverCommitMayExist = false;
     try {
-        const outcome = await runPendingEnqueueCommitInOrder(sessionId, async () => {
-            if (isPendingLocalIdDeleted(sessionId, localId)) {
-                return { committed: false };
+        const outcome = await runPendingEnqueueCommitInOrder(outboxScope, sessionId, async () => {
+            const sessionEncryption = existingOutboxRow || sessionEncryptionMode === 'plain'
+                ? null
+                : await encryption.getSessionEncryption(sessionId);
+            if (!existingOutboxRow && sessionEncryptionMode === 'e2ee' && !sessionEncryption) {
+                throw new Error(`Session ${sessionId} not found`);
+            }
+            if (!existingOutboxRow) {
+                savePendingOutboxMessage({
+                    sessionId,
+                    localId,
+                    createdAt,
+                    text: canonicalText,
+                    displayText: canonicalDisplayText,
+                    rawRecord: rawRecord!,
+                    request: {
+                        v: 1,
+                        body: JSON.stringify(sessionEncryptionMode === 'plain'
+                            ? { localId, content: { t: 'plain' as const, v: rawRecord! }, messageRole: 'user' as const, requestedAction, ...(deliveryMode ? { deliveryMode } : {}) }
+                            : { localId, ciphertext: await sessionEncryption!.encryptRawRecord(rawRecord!), messageRole: 'user' as const, requestedAction, ...(deliveryMode ? { deliveryMode } : {}) }),
+                    },
+                }, outboxScope);
+            }
+            if (isPendingCancellationRequested(outboxScope, sessionId, localId)) {
+                markPendingOutboxMessageCancelRequested(sessionId, localId, outboxScope);
+            }
+            const outboxRow = findPendingOutboxMessage(sessionId, localId, outboxScope);
+            if (!outboxRow) {
+                return { committed: false, cancelled: false, settled: true };
+            }
+            if (outboxRow.operation === 'cancel') {
+                await completePendingOutboxCancellationIfRequested({ sessionId, localId, outboxScope, request });
+                return { committed: false, cancelled: true, settled: false };
+            }
+            if (wireMode === 'indeterminate') {
+                return { committed: false, cancelled: false, settled: false, waitingForWireMode: true as const };
             }
 
-            let writeBody: Record<string, unknown>;
-            if (sessionEncryptionMode === 'plain') {
-                writeBody = { localId, content: { t: 'plain', v: rawRecord }, messageRole: 'user' };
-            } else {
-                const ciphertext = await sessionEncryption!.encryptRawRecord(rawRecord);
-                writeBody = { localId, ciphertext, messageRole: 'user' };
-            }
-
+            // A scoped request wrapper can reject after the underlying transport has returned.
+            // Treat an entered write as ambiguous until an explicit non-success response proves
+            // rejection, so postflight scope fencing cannot destroy exact durable custody.
+            serverCommitMayExist = true;
             const response = await request(`/v2/sessions/${sessionId}/pending`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(writeBody),
+                body: serializePendingEnqueueBodyForWire({
+                    canonicalBody: outboxRow.request.body,
+                    wireMode,
+                    requestedAction,
+                    ...(deliveryMode ? { deliveryMode } : {}),
+                }),
             });
             if (!response.ok) {
+                serverCommitMayExist = false;
                 assertPendingResponseOk(response, 'Failed to enqueue pending message');
             }
-            return { committed: true };
+            const payload = await response.json().catch(() => null) as unknown;
+            assertPendingEnqueueAcknowledgedAndRefreshOnMismatch({
+                payload,
+                wireMode,
+                localId,
+                requestedAction,
+                onWireContractMismatch: params.onWireContractMismatch,
+            });
+            const terminal = isPlainObject(payload) && payload.terminal === true;
+            if (deliveryMode === 'external_handoff') {
+                const pending = isPlainObject(payload) && isPlainObject(payload.pending) ? payload.pending : null;
+                const status = pending ? parsePendingDeliveryStatusV1(pending.deliveryStatus) : null;
+                if (status?.status !== 'external_handoff') {
+                    throw new Error('Server did not atomically claim external handoff');
+                }
+                // The acknowledgement proves unresolved provider custody before any concurrent
+                // durable cancellation can complete and remove the local projection.
+                markConfirmedExternalHandoffProjection({
+                    sessionId,
+                    persisted: outboxRow,
+                    outboxScope,
+                    rawRecord,
+                });
+            }
+            if (!findPendingOutboxMessage(sessionId, localId, outboxScope)) {
+                return { committed: true, cancelled: false, settled: true, terminal };
+            }
+            if (isPendingCancellationRequested(outboxScope, sessionId, localId)) {
+                markPendingOutboxMessageCancelRequested(sessionId, localId, outboxScope);
+            }
+            const cancellationCompleted = await completePendingOutboxCancellationIfRequested({ sessionId, localId, outboxScope, request });
+            if (cancellationCompleted) {
+                return { committed: true, cancelled: true, settled: false };
+            }
+            const currentAfterCancellationYield = findPendingOutboxMessage(sessionId, localId, outboxScope);
+            if (!currentAfterCancellationYield) {
+                return { committed: true, cancelled: false, settled: true, terminal };
+            }
+            if (currentAfterCancellationYield.operation !== 'enqueue') {
+                if (currentAfterCancellationYield.operation === 'cancel'
+                    && await completePendingOutboxCancellationIfRequested({ sessionId, localId, outboxScope, request })) {
+                    return { committed: true, cancelled: true, settled: false };
+                }
+                return { committed: true, cancelled: false, settled: true, terminal };
+            }
+            markPendingLocalIdAcceptedAfterSnapshotCapture(outboxScope, sessionId, localId);
+            removePendingOutboxMessage(sessionId, localId, outboxScope);
+            if (deliveryMode !== 'external_handoff') {
+                if (rawRecord) {
+                    markPendingOutboxProjectionAcceptedIfOwned(
+                        sessionId,
+                        localId,
+                        outboxScope,
+                        rawRecord,
+                    );
+                } else {
+                    removePendingOutboxProjectionIfOwned(sessionId, localId, outboxScope);
+                }
+            }
+            return { committed: true, cancelled: false, settled: false, terminal };
         });
 
-        if (isPendingLocalIdDeleted(sessionId, localId)) {
-            if (outcome.committed) {
-                await deleteAcceptedTombstonedPendingMessage({ sessionId, localId, request });
-            } else {
-                clearDeletedPendingLocalId(sessionId, localId);
-            }
-            return { localId, accepted: true };
+        if ('waitingForWireMode' in outcome && outcome.waitingForWireMode === true) {
+            storage.getState().clearSessionOptimisticThinking(sessionId);
+            return { localId, accepted: false, waitingForWireMode: true };
         }
 
-        storage.getState().upsertPendingMessage(sessionId, {
-            id: localId,
+        if (outcome.settled) {
+            removeSettledPendingOutboxLocalProjectionIfOwned(sessionId, localId, outboxScope);
+            storage.getState().clearSessionOptimisticThinking(sessionId);
+            return { localId, accepted: true, settled: true };
+        }
+
+        if (outcome.cancelled) {
+            if (findPendingOutboxProjection(sessionId, localId, outboxScope)?.pendingDeliveryStatus === 'external_handoff') {
+                clearDeletedPendingLocalId(outboxScope, sessionId, localId);
+            }
+            removeProjectionsAfterConfirmedCancellation(sessionId, localId, outboxScope);
+            storage.getState().clearSessionOptimisticThinking(sessionId);
+            return { localId, accepted: true, cancelled: true };
+        }
+
+        return {
             localId,
-            createdAt,
-            updatedAt: nowServerMs(),
-            source: 'local_outbound',
-            deliveryStatus: 'accepted',
-            text,
-            displayText,
-            rawRecord,
-        });
-        return { localId, accepted: true };
+            accepted: true,
+            ...(outcome.terminal ? { terminal: true as const } : {}),
+            ...(deliveryMode === 'external_handoff' ? { externalHandoffClaimed: true as const } : {}),
+        };
     } catch (e) {
         if (isTransientConnectivityError(e)) {
+            // The write did not confirm (stalled/aborted server). Keep the message durably visible
+            // as "unconfirmed" (spinner + retry underway) instead of a silent perpetual spinner, and
+            // let the caller schedule the enqueue retry that owns the eventual failed transition.
+            // The persisted outbox row is intentionally retained for replay.
+            setPendingMessageSendState(sessionId, localId, 'unconfirmed', outboxScope);
             storage.getState().clearSessionOptimisticThinking(sessionId);
             return { localId, accepted: false };
         }
-        storage.getState().removePendingMessage(sessionId, localId);
+        if (serverCommitMayExist) {
+            setPendingMessageSendState(sessionId, localId, 'unconfirmed', outboxScope);
+            storage.getState().clearSessionOptimisticThinking(sessionId);
+            return { localId, accepted: false };
+        }
+        if (existingOutboxRow) {
+            setPendingMessageSendState(sessionId, localId, 'unconfirmed', outboxScope);
+            storage.getState().clearSessionOptimisticThinking(sessionId);
+            throw e;
+        }
+        if (isPendingCancellationRequested(outboxScope, sessionId, localId)) {
+            clearDeletedPendingLocalId(outboxScope, sessionId, localId);
+            storage.getState().clearSessionOptimisticThinking(sessionId);
+            throw e;
+        }
+        // A definitive initial rejection happened before any ambiguous retry state existed.
+        removePendingOutboxMessage(sessionId, localId, outboxScope);
+        removePendingOutboxProjectionIfOwned(sessionId, localId, outboxScope);
         storage.getState().clearSessionOptimisticThinking(sessionId);
         throw e;
     }
 }
 
-export async function retryPendingMessageEnqueueV2(params: {
+/**
+ * Replay the persisted outbox for a session on open: re-hydrate any durable rows that are not
+ * already present in the in-memory pending slice as `local_outbound`/`unconfirmed` so they are
+ * visible and retriable, and return the localIds that need an enqueue retry scheduled. Rows that
+ * the server has already resolved are reconciled and cleared by the subsequent pending refresh +
+ * retry (which re-POSTs with the same localId; the server dedupes).
+ */
+export function replayPersistedPendingOutboxForSession(
+    sessionId: string,
+    outboxScope: ServerAccountScope,
+): string[] {
+    const persisted = loadPendingOutboxForSession(sessionId, outboxScope);
+    if (persisted.length === 0) return [];
+
+    const existing = storage.getState().sessionPending[sessionId]?.messages ?? [];
+    const serverOwnedLocalIds = new Set(existing
+        .filter((message) => message.source === 'server_pending'
+            && (!message.pendingOutboxScope || areServerAccountScopesEqual(message.pendingOutboxScope, outboxScope)))
+        .map((message) => message.localId ?? message.id));
+    const discardedServerOwnedLocalIds = new Set(
+        (storage.getState().sessionPending[sessionId]?.discarded ?? [])
+            .filter((message) => message.source === 'server_pending')
+            .map((message) => message.localId ?? message.id),
+    );
+    const existingProjectionKeys = new Set<string>();
+    for (const message of existing) {
+        if (!isPendingOutboxProjectionInScope(message, outboxScope)) continue;
+        const projectionKey = pendingOutboxProjectionIdentityKey({
+            sessionId,
+            localId: message.localId ?? message.id,
+            outboxScope,
+        });
+        if (message.pendingOutboxQuarantineReason === undefined && message.source === 'local_outbound') {
+            existingProjectionKeys.add(projectionKey);
+        }
+    }
+
+    const localIdsNeedingRetry: string[] = [];
+    for (const row of persisted) {
+        const discardedServerOwnsIdentity = discardedServerOwnedLocalIds.has(row.localId);
+        if (discardedServerOwnsIdentity && row.operation === 'enqueue') {
+            removePendingOutboxMessage(sessionId, row.localId, outboxScope);
+            continue;
+        }
+        const existingProjection = findPendingOutboxProjection(sessionId, row.localId, outboxScope);
+        if (row.operation !== 'quarantined' && existingProjection?.sendState !== 'failed') {
+            localIdsNeedingRetry.push(row.localId);
+        }
+        const projectionKey = pendingOutboxProjectionIdentityKey({ sessionId, localId: row.localId, outboxScope });
+        if (row.operation === 'quarantined') {
+            ensurePendingOutboxQuarantineProjection(row, outboxScope);
+            continue;
+        }
+        if (serverOwnedLocalIds.has(row.localId) || discardedServerOwnsIdentity) continue;
+        if (existingProjectionKeys.has(projectionKey)) continue;
+        storage.getState().upsertPendingMessage(sessionId, buildPendingOutboxProjection(row, outboxScope));
+    }
+    return localIdsNeedingRetry;
+}
+
+export async function retryPendingOutboxOperationV2(params: {
     sessionId: string;
     localId: string;
-    encryption: Encryption;
     request: (path: string, init?: RequestInit) => Promise<Response>;
-}): Promise<Readonly<{ accepted: boolean }>> {
-    const { sessionId, localId, encryption, request } = params;
-    const existing = storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
-        message.localId === localId || message.id === localId
-    );
-    if (!existing || existing.deliveryStatus === 'accepted') {
-        return { accepted: true };
+    outboxScope: ServerAccountScope;
+    wireMode: PendingInputServerWireMode;
+    onWireContractMismatch?: () => void | Promise<void>;
+}): Promise<Readonly<{ accepted: boolean; terminal?: true; waitingForWireMode?: true }>> {
+    const { sessionId, localId, request } = params;
+    assertSafePendingIdPathSegment(localId);
+    const outboxScope = params.outboxScope;
+    const persisted = findPendingOutboxMessage(sessionId, localId, outboxScope);
+    if (!persisted) return { accepted: true };
+    if (persisted.operation === 'quarantined') {
+        ensurePendingOutboxQuarantineProjection(persisted, outboxScope);
+        return { accepted: false, terminal: true };
     }
-    const parsed = RawRecordSchema.safeParse(existing.rawRecord);
-    if (!parsed.success || parsed.data.role !== 'user') {
-        storage.getState().removePendingMessage(sessionId, existing.id);
-        return { accepted: true };
+    const pendingLocalId = persisted.localId;
+    const existing = findPendingOutboxProjection(sessionId, pendingLocalId, outboxScope);
+    const parsed = RawRecordSchema.safeParse(persisted.rawRecord);
+    const deliveryMode = readPendingEnqueueDeliveryMode(persisted.request.body);
+    const requestedAction = readPendingEnqueueRequestedAction(persisted.request.body);
+    const wireMode = params.wireMode;
+    const projectionRawRecord = parsed.success && parsed.data.role === 'user' ? parsed.data : null;
+    if (!requestedAction) {
+        const projection = existing ?? buildPendingOutboxProjection(persisted, outboxScope);
+        storage.getState().upsertPendingMessage(sessionId, {
+            ...projection,
+            requestedAction: undefined,
+            requestedActionMalformed: true,
+            pendingDeliveryStatus: 'blocked',
+            pendingDeliveryBlockedReason: 'unsupported_action',
+            sendState: undefined,
+        });
+        return { accepted: false, terminal: true };
+    }
+    if (
+        wireMode === 'released_server_v0_2_1'
+        && (requestedAction.kind !== 'enqueue' || deliveryMode !== undefined)
+    ) {
+        throw createPendingServerUpgradeRequiredError();
     }
 
-    const session = storage.getState().sessions[sessionId];
-    if (!session) {
-        storage.getState().removePendingMessage(sessionId, existing.id);
-        return { accepted: true };
-    }
-    const sessionEncryptionMode: 'e2ee' | 'plain' = session.encryptionMode === 'plain' ? 'plain' : 'e2ee';
-    const sessionEncryption = sessionEncryptionMode === 'plain' ? null : encryption.getSessionEncryption(sessionId);
-    if (sessionEncryptionMode === 'e2ee' && !sessionEncryption) {
-        storage.getState().clearSessionOptimisticThinking(sessionId);
-        return { accepted: false };
-    }
-
+    let serverCommitMayExist = false;
     try {
-        const outcome = await runPendingEnqueueCommitInOrder(sessionId, async () => {
-            if (isPendingLocalIdDeleted(sessionId, existing.localId ?? existing.id)) {
-                return { committed: false };
+        const outcome = await runPendingEnqueueCommitInOrder(outboxScope, sessionId, async () => {
+            if (isPendingCancellationRequested(outboxScope, sessionId, pendingLocalId)) {
+                markPendingOutboxMessageCancelRequested(sessionId, pendingLocalId, outboxScope);
+            }
+            const current = findPendingOutboxMessage(sessionId, pendingLocalId, outboxScope);
+            if (current?.operation === 'cancel') {
+                await completePendingOutboxCancellationIfRequested({
+                    sessionId,
+                    localId: pendingLocalId,
+                    outboxScope,
+                    request,
+                });
+                return { committed: false, cancelled: true };
+            }
+            if (!current) return { committed: false, cancelled: false, settled: true };
+            if (wireMode === 'indeterminate') {
+                return { committed: false, cancelled: false, waitingForWireMode: true as const };
             }
 
-            const writeBody =
-                sessionEncryptionMode === 'plain'
-                    ? { localId: existing.localId ?? existing.id, content: { t: 'plain' as const, v: parsed.data }, messageRole: 'user' }
-                    : { localId: existing.localId ?? existing.id, ciphertext: await sessionEncryption!.encryptRawRecord(parsed.data), messageRole: 'user' };
+            if (deliveryMode === 'external_handoff'
+                && !findPendingOutboxProjection(sessionId, pendingLocalId, outboxScope)) {
+                storage.getState().upsertPendingMessage(
+                    sessionId,
+                    buildPendingOutboxProjection(current, outboxScope),
+                );
+            }
 
+            // Keep exact replay custody ambiguous if the request wrapper rejects in its
+            // postflight scope fence after the transport may already have committed.
+            serverCommitMayExist = true;
             const response = await request(`/v2/sessions/${sessionId}/pending`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(writeBody),
+                body: serializePendingEnqueueBodyForWire({
+                    canonicalBody: current.request.body,
+                    wireMode,
+                    requestedAction,
+                    ...(deliveryMode ? { deliveryMode } : {}),
+                }),
             });
             if (!response.ok) {
+                serverCommitMayExist = false;
                 assertPendingResponseOk(response, 'Failed to enqueue pending message');
             }
-            return { committed: true };
+            const payload = await response.json().catch(() => null) as unknown;
+            assertPendingEnqueueAcknowledgedAndRefreshOnMismatch({
+                payload,
+                wireMode,
+                localId: pendingLocalId,
+                requestedAction,
+                onWireContractMismatch: params.onWireContractMismatch,
+            });
+            if (deliveryMode === 'external_handoff') {
+                const pending = isPlainObject(payload) && isPlainObject(payload.pending) ? payload.pending : null;
+                const status = pending ? parsePendingDeliveryStatusV1(pending.deliveryStatus) : null;
+                if (status?.status !== 'external_handoff') {
+                    throw new Error('Server did not retain external handoff');
+                }
+                // Stamp only from the confirmed response and the frozen enqueue delivery mode,
+                // before a concurrent cancellation can finish its DELETE.
+                markConfirmedExternalHandoffProjection({
+                    sessionId,
+                    persisted: current,
+                    outboxScope,
+                    rawRecord: projectionRawRecord,
+                });
+            }
+            if (!findPendingOutboxMessage(sessionId, pendingLocalId, outboxScope)) {
+                return { committed: true, cancelled: false, settled: true };
+            }
+            if (isPendingCancellationRequested(outboxScope, sessionId, pendingLocalId)) {
+                markPendingOutboxMessageCancelRequested(sessionId, pendingLocalId, outboxScope);
+            }
+            const cancellationCompleted = await completePendingOutboxCancellationIfRequested({
+                sessionId,
+                localId: pendingLocalId,
+                outboxScope,
+                request,
+            });
+            if (cancellationCompleted) {
+                return { committed: true, cancelled: true };
+            }
+            const currentAfterCancellationYield = findPendingOutboxMessage(sessionId, pendingLocalId, outboxScope);
+            if (!currentAfterCancellationYield) {
+                return { committed: true, cancelled: false, settled: true };
+            }
+            if (currentAfterCancellationYield.operation !== 'enqueue') {
+                if (currentAfterCancellationYield.operation === 'cancel'
+                    && await completePendingOutboxCancellationIfRequested({
+                        sessionId,
+                        localId: pendingLocalId,
+                        outboxScope,
+                        request,
+                    })) {
+                    return { committed: true, cancelled: true };
+                }
+                return { committed: true, cancelled: false, settled: true };
+            }
+
+            // The server enqueue acknowledgement is the durable UI-success boundary.
+            markPendingLocalIdAcceptedAfterSnapshotCapture(outboxScope, sessionId, pendingLocalId);
+            removePendingOutboxMessage(sessionId, pendingLocalId, outboxScope);
+            const projectionAccepted = deliveryMode === 'external_handoff'
+                ? false
+                : projectionRawRecord
+                ? markPendingOutboxProjectionAcceptedIfOwned(
+                    sessionId,
+                    pendingLocalId,
+                    outboxScope,
+                    projectionRawRecord,
+                )
+                : (removePendingOutboxProjectionIfOwned(sessionId, pendingLocalId, outboxScope), false);
+            if (projectionAccepted) {
+                storage.getState().markSessionOptimisticThinking(sessionId);
+            }
+            return { committed: true, cancelled: false, settled: false };
         });
 
-        const localId = existing.localId ?? existing.id;
-        if (isPendingLocalIdDeleted(sessionId, localId)) {
-            if (outcome.committed) {
-                await deleteAcceptedTombstonedPendingMessage({ sessionId, localId, request });
-            } else {
-                clearDeletedPendingLocalId(sessionId, localId);
-            }
+        if ('waitingForWireMode' in outcome && outcome.waitingForWireMode === true) {
+            return { accepted: false, waitingForWireMode: true };
+        }
+
+        if (outcome.settled) {
+            removeSettledPendingOutboxLocalProjectionIfOwned(sessionId, pendingLocalId, outboxScope);
             return { accepted: true };
         }
 
-        storage.getState().upsertPendingMessage(sessionId, {
-            ...existing,
-            updatedAt: nowServerMs(),
-            source: 'local_outbound',
-            deliveryStatus: 'accepted',
-            rawRecord: parsed.data,
-        });
-        storage.getState().markSessionOptimisticThinking(sessionId);
+        if (outcome.cancelled) {
+            removePendingOutboxMessage(sessionId, pendingLocalId, outboxScope);
+            if (findPendingOutboxProjection(sessionId, pendingLocalId, outboxScope)?.pendingDeliveryStatus === 'external_handoff') {
+                clearDeletedPendingLocalId(outboxScope, sessionId, pendingLocalId);
+            }
+            removeProjectionsAfterConfirmedCancellation(sessionId, pendingLocalId, outboxScope);
+            if (existing) storage.getState().clearSessionOptimisticThinking(sessionId);
+            return { accepted: true };
+        }
+
         return { accepted: true };
     } catch (e) {
         if (isTransientConnectivityError(e)) {
-            storage.getState().clearSessionOptimisticThinking(sessionId);
+            setPendingMessageSendState(sessionId, pendingLocalId, 'unconfirmed', outboxScope);
+            if (existing) storage.getState().clearSessionOptimisticThinking(sessionId);
             return { accepted: false };
         }
-        storage.getState().removePendingMessage(sessionId, existing.id);
-        storage.getState().clearSessionOptimisticThinking(sessionId);
+        if (serverCommitMayExist) {
+            setPendingMessageSendState(sessionId, pendingLocalId, 'unconfirmed', outboxScope);
+            if (existing) storage.getState().clearSessionOptimisticThinking(sessionId);
+            throw e;
+        }
+        setPendingMessageSendState(sessionId, pendingLocalId, 'failed', outboxScope);
+        if (existing) storage.getState().clearSessionOptimisticThinking(sessionId);
         throw e;
     }
 }
@@ -660,23 +2092,31 @@ export async function updatePendingMessageV2(params: {
     sessionId: string;
     pendingId: string;
     text: string;
-    encryption: Encryption;
+    encryption: PendingQueueEncryption;
     fetchArtifactWithBody?: (artifactId: string) => Promise<DecryptedArtifact | null>;
     updateArtifact?: (artifact: DecryptedArtifact) => void;
     request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
 }): Promise<void> {
-    const { sessionId, pendingId, text, encryption, request } = params;
+    const { sessionId, text, encryption, request } = params;
+    const mutationTarget = resolvePendingServerMutationTarget(sessionId, params.pendingId, params.outboxScope);
+    const pendingId = mutationTarget.localId;
+    assertPendingOutboxTransportAllowed(sessionId, pendingId, params.outboxScope);
 
     const session = storage.getState().sessions[sessionId] ?? null;
     const sessionEncryptionMode: 'e2ee' | 'plain' = session?.encryptionMode === 'plain' ? 'plain' : 'e2ee';
-    const sessionEncryption = sessionEncryptionMode === 'plain' ? null : encryption.getSessionEncryption(sessionId);
+    const sessionEncryption = sessionEncryptionMode === 'plain' ? null : await encryption.getSessionEncryption(sessionId);
     if (sessionEncryptionMode === 'e2ee' && !sessionEncryption) {
         throw new Error(`Session ${sessionId} not found`);
     }
 
-    const existing = storage.getState().sessionPending[sessionId]?.messages?.find((m) => m.id === pendingId);
+    const existing = findCurrentPendingServerMutationProjection(sessionId, mutationTarget, params.outboxScope);
     if (!existing) {
         throw new Error('Pending message not found');
+    }
+    const pendingOutbox = findPendingOutboxMessage(sessionId, pendingId, params.outboxScope);
+    if (pendingOutbox?.operation === 'cancel') {
+        throw new Error('Pending message cancellation is outstanding');
     }
 
     const rawRecord: RawRecord = (() => {
@@ -701,23 +2141,23 @@ export async function updatePendingMessageV2(params: {
         const modelMode = session?.modelMode || (agentId ? getAgentCore(agentId).model.defaultMode : 'default');
         const model = agentId && getAgentCore(agentId).model.supportsSelection && modelMode !== 'default' ? modelMode : undefined;
 
-	        return {
-	            role: 'user',
-	            content: { type: 'text', text },
-	            meta: buildSendMessageMeta({
-	                sentFrom: resolveSentFrom(),
-	                permissionMode: permissionMode || 'default',
-	                model,
-	                displayText:
-	                    existing.pendingDecryptFailure
-	                        ? undefined
-	                        : (typeof existing.displayText === 'string' ? existing.displayText : undefined),
-	                agentId,
-	                settings: storage.getState().settings,
-	                session,
-	            }),
-	        };
-	    })();
+        return {
+            role: 'user',
+            content: { type: 'text', text },
+            meta: buildSendMessageMeta({
+                sentFrom: resolveSentFrom(),
+                permissionMode: permissionMode || 'default',
+                model,
+                displayText:
+                    existing.pendingDecryptFailure
+                        ? undefined
+                        : (typeof existing.displayText === 'string' ? existing.displayText : undefined),
+                agentId,
+                settings: storage.getState().settings,
+                session,
+            }),
+        };
+    })();
 
     const writeBody =
         sessionEncryptionMode === 'plain'
@@ -725,7 +2165,7 @@ export async function updatePendingMessageV2(params: {
             : { ciphertext: await sessionEncryption!.encryptRawRecord(rawRecord), messageRole: 'user' };
     const updatedAt = nowServerMs();
 
-    const response = await request(`/v2/sessions/${sessionId}/pending/${pendingId}`, {
+    const response = await request(pendingMessagePath(sessionId, pendingId), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(writeBody),
@@ -734,49 +2174,193 @@ export async function updatePendingMessageV2(params: {
         assertPendingResponseOk(response, 'Failed to update pending message');
     }
 
-	    storage.getState().upsertPendingMessage(sessionId, {
-	        ...existing,
-	        pendingDecryptFailure: undefined,
-	        text,
-	        updatedAt,
-	        rawRecord,
-	        displayText: existing.pendingDecryptFailure ? undefined : existing.displayText,
-	    });
-	}
+    latestPendingSnapshotRefreshByScopedSession.delete(pendingScopedSessionKey(params.outboxScope, sessionId));
+    const currentPendingOutbox = findPendingOutboxMessage(sessionId, pendingId, params.outboxScope);
+    if (currentPendingOutbox?.operation === 'cancel') return;
+    const currentProjection = findCurrentPendingServerMutationProjection(sessionId, mutationTarget, params.outboxScope);
+    if (!currentProjection) return;
+    if (currentPendingOutbox?.operation === 'enqueue') {
+        removePendingOutboxMessage(sessionId, pendingId, params.outboxScope);
+    }
+    storage.getState().upsertPendingMessage(sessionId, {
+        ...currentProjection,
+        pendingDecryptFailure: undefined,
+        text,
+        updatedAt,
+        rawRecord,
+        displayText: currentProjection.pendingDecryptFailure ? undefined : currentProjection.displayText,
+    });
+    if (currentPendingOutbox?.operation === 'enqueue') {
+        markPendingProjectionAcknowledgedIfOwned(sessionId, pendingId, params.outboxScope);
+    }
+}
+
+export async function updatePendingRequestedActionV2(params: {
+    sessionId: string;
+    localId: string;
+    requestedAction: PendingRequestedActionV1;
+    request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
+    wireMode: PendingInputServerWireMode;
+}): Promise<void> {
+    if (params.wireMode !== 'pending_input_v1') {
+        throw createPendingServerUpgradeRequiredError();
+    }
+    const localId = params.localId;
+    assertPendingOutboxTransportAllowed(params.sessionId, localId, params.outboxScope);
+    const response = await params.request(`${pendingMessagePath(params.sessionId, localId)}/action`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestedAction: params.requestedAction }),
+    });
+    const payload = await response.json().catch(() => null) as { error?: unknown; didUpdate?: unknown } | null;
+    if (!response.ok) {
+        const errorCode = typeof payload?.error === 'string' ? payload.error : undefined;
+        throw Object.assign(
+            new Error(`Failed to update Pending requested action (${response.status})`),
+            ...(errorCode ? [{ code: errorCode }] : []),
+        );
+    }
+    if (typeof payload?.didUpdate !== 'boolean') {
+        throw new Error('Pending requested-action response is missing didUpdate');
+    }
+    const currentOutbox = findPendingOutboxMessage(
+        params.sessionId,
+        localId,
+        params.outboxScope,
+    );
+    if (currentOutbox?.operation === 'enqueue') {
+        removePendingOutboxMessage(params.sessionId, localId, params.outboxScope);
+    }
+    markPendingProjectionAcknowledgedIfOwned(
+        params.sessionId,
+        localId,
+        params.outboxScope,
+    );
+    latestPendingSnapshotRefreshByScopedSession.delete(
+        pendingScopedSessionKey(params.outboxScope, params.sessionId),
+    );
+}
 
 export async function deletePendingMessageV2(params: {
     sessionId: string;
     pendingId: string;
     request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
 }): Promise<void> {
-    const { sessionId, pendingId, request } = params;
-    const existing = storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
-        message.id === pendingId || message.localId === pendingId
+    const { sessionId, request } = params;
+    const mutationTarget = resolvePendingServerMutationTarget(sessionId, params.pendingId, params.outboxScope);
+    const pendingId = mutationTarget.localId;
+    assertPendingOutboxTransportAllowed(sessionId, pendingId, params.outboxScope);
+    const identity = { sessionId, localId: pendingId, outboxScope: params.outboxScope } satisfies PendingOutboxProjectionIdentity;
+    const pendingMessages = storage.getState().sessionPending[sessionId]?.messages ?? [];
+    const collidingMessages = pendingMessages.filter((message) =>
+        message.id === params.pendingId || message.localId === params.pendingId
     );
-    if (existing?.source === 'local_outbound' && existing.deliveryStatus === 'queued') {
-        markPendingLocalIdDeleted(sessionId, existing.localId ?? existing.id);
-        storage.getState().removePendingMessage(sessionId, existing.id);
-        storage.getState().clearSessionOptimisticThinking(sessionId);
+    const existing = mutationTarget.projection;
+    if (!existing && collidingMessages.some((message) => message.pendingOutboxScope != null)) return;
+    const retainedOutboxCandidate = findPendingOutboxMessage(sessionId, pendingId, params.outboxScope);
+    // A quarantine diagnostic and a canonical server row may share the same opaque localId.
+    // Only executable enqueue/cancel custody enters the cancellation owner.
+    const retainedOutbox = retainedOutboxCandidate?.operation === 'quarantined'
+        ? null
+        : retainedOutboxCandidate;
+    const localProjectionAwaitingPersistence = existing?.source === 'local_outbound'
+        && existing.deliveryStatus === 'queued'
+        && isPendingOutboxProjectionForIdentity(existing, identity);
+    if (retainedOutbox || localProjectionAwaitingPersistence) {
+        const localId = retainedOutbox?.localId ?? existing!.localId ?? existing!.id;
+        const outboxScope = params.outboxScope;
+        markPendingCancellationRequested(outboxScope, sessionId, localId);
+        markPendingOutboxMessageCancelRequested(sessionId, localId, outboxScope);
+        if (existing && isPendingOutboxProjectionForIdentity(existing, identity)) {
+            storage.getState().upsertPendingMessage(sessionId, {
+                ...existing,
+                pendingOutboxOperation: 'cancel',
+            });
+        }
+        let cancellationConfirmed = false;
+        try {
+            cancellationConfirmed = await runPendingEnqueueCommitInOrder(outboxScope, sessionId, async () => {
+                markPendingCancellationRequested(outboxScope, sessionId, localId);
+                markPendingOutboxMessageCancelRequested(
+                    sessionId,
+                    localId,
+                    outboxScope,
+                );
+                return await completePendingOutboxCancellationIfRequested({ sessionId, localId, outboxScope, request });
+            });
+            if (cancellationConfirmed) {
+                removeProjectionsAfterConfirmedCancellation(sessionId, localId, outboxScope);
+            }
+            const currentProjection = findPendingOutboxProjection(sessionId, localId, outboxScope);
+            const currentExternalHandoff = storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
+                (message.localId ?? message.id) === localId
+                && message.pendingDeliveryStatus === 'external_handoff'
+                && (!message.pendingOutboxScope || areServerAccountScopesEqual(message.pendingOutboxScope, outboxScope))
+            );
+            if (currentExternalHandoff) {
+                clearDeletedPendingLocalId(outboxScope, sessionId, localId);
+            }
+            if (!cancellationConfirmed
+                && currentProjection
+                && currentProjection.pendingDeliveryStatus !== 'external_handoff') {
+                removePendingOutboxProjectionIfOwned(sessionId, localId, outboxScope);
+            }
+            storage.getState().clearSessionOptimisticThinking(sessionId);
+        } catch (error) {
+            clearPendingCancellationRequested(outboxScope, sessionId, localId);
+            setPendingMessageSendState(sessionId, localId, 'failed', outboxScope);
+            storage.getState().clearSessionOptimisticThinking(sessionId);
+            throw error;
+        }
+        if (!cancellationConfirmed) {
+            clearPendingCancellationRequested(outboxScope, sessionId, localId);
+        }
         return;
     }
 
-    const response = await request(`/v2/sessions/${sessionId}/pending/${pendingId}`, { method: 'DELETE' });
-    if (!response.ok) {
+    const suppressStaleSnapshot = existing?.pendingDeliveryStatus !== 'external_handoff';
+    const response = await request(pendingMessagePath(sessionId, pendingId), { method: 'DELETE' });
+    if (!response.ok && response.status !== 404) {
         assertPendingResponseOk(response, 'Failed to delete pending message');
     }
-    storage.getState().removePendingMessage(sessionId, pendingId);
+    const currentCanonicalProjection = findCanonicalServerPendingProjection(
+        sessionId,
+        pendingId,
+        params.outboxScope,
+    );
+    const currentOutboxProjection = findPendingOutboxProjection(
+        sessionId,
+        pendingId,
+        params.outboxScope,
+    );
+    if (currentCanonicalProjection?.pendingDeliveryStatus === 'external_handoff'
+        || currentOutboxProjection?.pendingDeliveryStatus === 'external_handoff') {
+        clearDeletedPendingLocalId(params.outboxScope, sessionId, pendingId);
+        return;
+    }
+    if (suppressStaleSnapshot) markPendingLocalIdDeleted(params.outboxScope, sessionId, pendingId);
+    storage.getState().removePendingMessage(
+        sessionId,
+        currentCanonicalProjection?.id ?? currentOutboxProjection?.id ?? pendingId,
+    );
 }
 
 export async function discardPendingMessageV2(params: {
     sessionId: string;
     pendingId: string;
     reason?: 'switch_to_local' | 'manual';
-    encryption: Encryption;
+    encryption: PendingQueueReadEncryption;
     request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
+    isOutboxScopeCurrent?: () => boolean | Promise<boolean>;
 }): Promise<void> {
-    const { sessionId, pendingId, reason, encryption, request } = params;
+    const { sessionId, reason, encryption, request } = params;
+    const pendingId = resolvePendingServerMutationTarget(sessionId, params.pendingId, params.outboxScope).localId;
+    assertPendingOutboxTransportAllowed(sessionId, pendingId, params.outboxScope);
 
-    const response = await request(`/v2/sessions/${sessionId}/pending/${pendingId}/discard`, {
+    const response = await request(`${pendingMessagePath(sessionId, pendingId)}/discard`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason }),
@@ -784,37 +2368,23 @@ export async function discardPendingMessageV2(params: {
     if (!response.ok) {
         assertPendingResponseOk(response, 'Failed to discard pending message');
     }
-    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
-}
-
-export async function retryPendingDeliveryV2(params: {
-    sessionId: string;
-    pendingId: string;
-    encryption: Encryption;
-    request: (path: string, init?: RequestInit) => Promise<Response>;
-}): Promise<void> {
-    const { sessionId, pendingId, encryption, request } = params;
-
-    const response = await request(`/v2/sessions/${sessionId}/pending/${pendingId}/delivery/retry`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-    });
-    if (!response.ok) {
-        assertPendingResponseOk(response, 'Failed to retry pending delivery');
-    }
-    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
+    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request, outboxScope: params.outboxScope, isOutboxScopeCurrent: params.isOutboxScopeCurrent });
 }
 
 export async function markPendingDeliveryHandledV2(params: {
     sessionId: string;
     pendingId: string;
-    encryption: Encryption;
+    encryption: PendingQueueReadEncryption;
     request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
+    isOutboxScopeCurrent?: () => boolean | Promise<boolean>;
 }): Promise<void> {
-    const { sessionId, pendingId, encryption, request } = params;
+    const { sessionId, encryption, request } = params;
+    const mutationTarget = resolvePendingServerMutationTarget(sessionId, params.pendingId, params.outboxScope);
+    const pendingId = mutationTarget.localId;
+    assertPendingOutboxTransportAllowed(sessionId, pendingId, params.outboxScope);
 
-    const response = await request(`/v2/sessions/${sessionId}/pending/${pendingId}/delivery/handled`, {
+    const response = await request(`${pendingMessagePath(sessionId, pendingId)}/delivery/handled`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -822,46 +2392,132 @@ export async function markPendingDeliveryHandledV2(params: {
     if (!response.ok) {
         assertPendingResponseOk(response, 'Failed to mark pending delivery handled');
     }
-    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
+    const existing = findCurrentPendingServerMutationProjection(sessionId, mutationTarget, params.outboxScope);
+    if (existing) storage.getState().removePendingMessage(sessionId, existing.id);
+    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request, outboxScope: params.outboxScope, isOutboxScopeCurrent: params.isOutboxScopeCurrent });
+}
+
+export async function blockPendingDeliveryV2(params: {
+    sessionId: string;
+    pendingId: string;
+    reason: PendingDeliveryBlockedReason;
+    encryption: PendingQueueReadEncryption;
+    request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
+    isOutboxScopeCurrent?: () => boolean | Promise<boolean>;
+}): Promise<void> {
+    const { sessionId, reason, encryption, request } = params;
+    const pendingId = resolvePendingServerMutationTarget(
+        sessionId,
+        params.pendingId,
+        params.outboxScope,
+    ).localId;
+    assertPendingOutboxTransportAllowed(sessionId, pendingId, params.outboxScope);
+
+    const response = await request(`${pendingMessagePath(sessionId, pendingId)}/delivery/block`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
+    });
+    assertPendingResponseOk(response, 'Failed to block pending delivery');
+    await fetchAndApplyPendingMessagesV2({
+        sessionId,
+        encryption,
+        request,
+        outboxScope: params.outboxScope,
+        isOutboxScopeCurrent: params.isOutboxScopeCurrent,
+    });
+}
+
+export async function dismissPendingDeliveryV2(params: {
+    sessionId: string;
+    pendingId: string;
+    encryption: PendingQueueReadEncryption;
+    request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
+    isOutboxScopeCurrent?: () => boolean | Promise<boolean>;
+}): Promise<void> {
+    const { sessionId, encryption, request } = params;
+    const pendingId = resolvePendingServerMutationTarget(sessionId, params.pendingId, params.outboxScope).localId;
+    assertPendingOutboxTransportAllowed(sessionId, pendingId, params.outboxScope);
+    const response = await request(`${pendingMessagePath(sessionId, pendingId)}/delivery/dismiss`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+    });
+    assertPendingResponseOk(response, 'Failed to dismiss pending delivery');
+    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request, outboxScope: params.outboxScope, isOutboxScopeCurrent: params.isOutboxScopeCurrent });
+}
+
+export async function sendPendingDeliveryAsNewV2(params: {
+    sessionId: string;
+    pendingId: string;
+    encryption: PendingQueueReadEncryption;
+    request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
+    isOutboxScopeCurrent?: () => boolean | Promise<boolean>;
+}): Promise<void> {
+    const { sessionId, encryption, request } = params;
+    const pendingId = resolvePendingServerMutationTarget(sessionId, params.pendingId, params.outboxScope).localId;
+    assertPendingOutboxTransportAllowed(sessionId, pendingId, params.outboxScope);
+    const response = await request(`${pendingMessagePath(sessionId, pendingId)}/delivery/send-as-new`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+    });
+    assertPendingResponseOk(response, 'Failed to send pending delivery as new');
+    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request, outboxScope: params.outboxScope, isOutboxScopeCurrent: params.isOutboxScopeCurrent });
 }
 
 export async function restoreDiscardedPendingMessageV2(params: {
     sessionId: string;
     pendingId: string;
-    encryption: Encryption;
+    encryption: PendingQueueReadEncryption;
     request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
+    isOutboxScopeCurrent?: () => boolean | Promise<boolean>;
 }): Promise<void> {
     const { sessionId, pendingId, encryption, request } = params;
+    assertPendingOutboxTransportAllowed(sessionId, pendingId, params.outboxScope);
 
-    const response = await request(`/v2/sessions/${sessionId}/pending/${pendingId}/restore`, { method: 'POST' });
+    const response = await request(`${pendingMessagePath(sessionId, pendingId)}/restore`, { method: 'POST' });
     if (!response.ok) {
         assertPendingResponseOk(response, 'Failed to restore discarded message');
     }
-    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
+    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request, outboxScope: params.outboxScope, isOutboxScopeCurrent: params.isOutboxScopeCurrent });
 }
 
 export async function deleteDiscardedPendingMessageV2(params: {
     sessionId: string;
     pendingId: string;
-    encryption: Encryption;
+    encryption: PendingQueueReadEncryption;
     request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
+    isOutboxScopeCurrent?: () => boolean | Promise<boolean>;
 }): Promise<void> {
     const { sessionId, pendingId, encryption, request } = params;
+    assertPendingOutboxTransportAllowed(sessionId, pendingId, params.outboxScope);
 
-    const response = await request(`/v2/sessions/${sessionId}/pending/${pendingId}`, { method: 'DELETE' });
-    if (!response.ok) {
+    const response = await request(pendingMessagePath(sessionId, pendingId), { method: 'DELETE' });
+    if (!response.ok && response.status !== 404) {
         assertPendingResponseOk(response, 'Failed to delete discarded message');
     }
-    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
+    markPendingLocalIdDeleted(params.outboxScope, sessionId, pendingId);
+    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request, outboxScope: params.outboxScope, isOutboxScopeCurrent: params.isOutboxScopeCurrent });
 }
 
 export async function reorderPendingMessagesV2(params: {
     sessionId: string;
     orderedLocalIds: string[];
-    encryption: Encryption;
+    encryption: PendingQueueReadEncryption;
     request: (path: string, init?: RequestInit) => Promise<Response>;
+    outboxScope: ServerAccountScope;
+    isOutboxScopeCurrent?: () => boolean | Promise<boolean>;
 }): Promise<void> {
     const { sessionId, orderedLocalIds, encryption, request } = params;
+    for (const localId of orderedLocalIds) {
+        assertPendingOutboxTransportAllowed(sessionId, localId, params.outboxScope);
+    }
 
     const response = await request(`/v2/sessions/${sessionId}/pending/reorder`, {
         method: 'POST',
@@ -871,5 +2527,5 @@ export async function reorderPendingMessagesV2(params: {
     if (!response.ok) {
         assertPendingResponseOk(response, 'Failed to reorder pending messages');
     }
-    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
+    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request, outboxScope: params.outboxScope, isOutboxScopeCurrent: params.isOutboxScopeCurrent });
 }

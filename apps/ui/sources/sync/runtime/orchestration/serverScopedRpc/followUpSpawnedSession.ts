@@ -1,13 +1,15 @@
 import type { AuthCredentials } from '@/auth/storage/tokenStorage';
-import type { SessionMessageDirectBypassReason } from '@/sync/domains/session/control/submitMode';
 import type { Session } from '@/sync/domains/state/storageTypes';
 import { storage } from '@/sync/domains/state/storage';
-import { sync, type SessionUserMessageRuntimeRpcDeliveryMode } from '@/sync/sync';
+import { sync } from '@/sync/sync';
 import { createNotAuthenticatedError, isAuthenticationResponseStatus } from '@/sync/runtime/connectivity/authErrors';
 
 import { fetchSessionByIdWithServerScope } from './fetchSessionByIdWithServerScope';
 import { resolveServerScopedSessionContext } from './resolveServerScopedSessionContext';
-import { sendSessionMessageWithServerScope } from './serverScopedSessionSendMessage';
+import {
+    createServerScopedSessionSendMessage,
+    sendSessionMessageWithServerScope,
+} from './serverScopedSessionSendMessage';
 
 type AppliedSession = Omit<Session, 'presence'> & { presence?: 'online' | number };
 
@@ -118,22 +120,13 @@ function getDefaultActiveSync() {
                 await sync.refreshSessions();
             }
         },
-        sendMessage: async (
+        enqueuePendingMessage: async (
             sessionId: string,
             text: string,
             displayText?: string,
             metaOverrides?: Record<string, unknown>,
-            options?: Readonly<{
-                profileId?: string | null;
-                localId?: string | null;
-                bypassPendingQueueReason?: SessionMessageDirectBypassReason;
-                runtimeRpcDeliveryMode?: SessionUserMessageRuntimeRpcDeliveryMode;
-            }>,
-        ) => {
-            if (typeof sync.sendMessage === 'function') {
-                await sync.sendMessage(sessionId, text, displayText, metaOverrides, options);
-            }
-        },
+            options?: Readonly<{ localId?: string | null; requestedAction: import('@happier-dev/protocol').PendingRequestedActionV1 }>,
+        ) => await sync.enqueuePendingMessage(sessionId, text, displayText, metaOverrides, options),
     };
 }
 
@@ -161,9 +154,7 @@ export function createFollowUpSpawnedSessionWithServerScope(deps?: Readonly<{
     resolveContext?: typeof resolveServerScopedSessionContext;
     fetchSessionById?: typeof fetchSessionByIdWithServerScope;
     sendSessionMessageWithServerScope?: typeof sendSessionMessageWithServerScope;
-    activeSync?: Readonly<Omit<ActiveSyncLike, 'ensureSessionVisibleForMessageRoute'>> & {
-        ensureSessionVisibleForMessageRoute?: ActiveSyncLike['ensureSessionVisibleForMessageRoute'];
-    };
+    activeSync?: Partial<ActiveSyncLike> & Pick<ActiveSyncLike, 'refreshSessions'>;
     ensureSessionVisibleForMessageRoute?: (
         sessionId: string,
         options?: Readonly<{ forceRefresh?: boolean; serverId?: string }>,
@@ -183,8 +174,7 @@ export function createFollowUpSpawnedSessionWithServerScope(deps?: Readonly<{
 }> {
     const resolveContext = deps?.resolveContext ?? resolveServerScopedSessionContext;
     const fetchSessionById = deps?.fetchSessionById ?? fetchSessionByIdWithServerScope;
-    const sendScopedMessage = deps?.sendSessionMessageWithServerScope ?? sendSessionMessageWithServerScope;
-    const activeSync = deps?.activeSync ?? getDefaultActiveSync();
+    const activeSync = { ...getDefaultActiveSync(), ...(deps?.activeSync ?? {}) };
     const ensureSessionVisibleForMessageRoute = deps?.ensureSessionVisibleForMessageRoute
         ?? activeSync.ensureSessionVisibleForMessageRoute;
     const getStoredSession = deps?.getStoredSession ?? ((sessionId: string) => storage.getState().sessions[sessionId] ?? null);
@@ -208,35 +198,41 @@ export function createFollowUpSpawnedSessionWithServerScope(deps?: Readonly<{
 
         try {
             const context = await resolveContext({ serverId: params.targetServerId ?? null });
+            const sendScopedMessage = deps?.sendSessionMessageWithServerScope
+                ?? createServerScopedSessionSendMessage({
+                    resolveContext: async () => context,
+                    enqueuePendingMessageActive: activeSync.enqueuePendingMessage,
+                    getSession: getStoredSession,
+                }).sendSessionMessageWithServerScope;
             const trimmedInitialMessage = String(params.initialMessageText ?? '').trim();
 
             if (context.scope === 'active') {
                 const explicitTargetServerId = String(params.targetServerId ?? '').trim();
                 if (trimmedInitialMessage.length > 0) {
-                    await ensureSessionHydratedForNavigation({
-                        sessionId,
-                        serverId: explicitTargetServerId,
-                        getStoredSession,
-                        ensureSessionVisibleForMessageRoute,
-                    });
+                    const sessionWasAlreadyStored = Boolean(getStoredSession(sessionId));
+                    if (!sessionWasAlreadyStored) {
+                        await ensureSessionHydratedForNavigation({
+                            sessionId,
+                            serverId: explicitTargetServerId,
+                            getStoredSession,
+                            ensureSessionVisibleForMessageRoute,
+                        });
+                    }
 
-                    await activeSync.sendMessage(
+                    const result = await sendScopedMessage({
                         sessionId,
-                        trimmedInitialMessage,
-                        typeof params.displayText === 'string' ? params.displayText : undefined,
-                        params.metaOverrides ?? undefined,
-                        params.profileId || params.messageLocalId
-                            ? {
-                                ...(params.profileId ? { profileId: params.profileId } : {}),
-                                ...(params.messageLocalId ? { localId: params.messageLocalId } : {}),
-                                bypassPendingQueueReason: 'spawned_session_follow_up',
-                                runtimeRpcDeliveryMode: 'required',
-                            }
-                            : {
-                                bypassPendingQueueReason: 'spawned_session_follow_up',
-                                runtimeRpcDeliveryMode: 'required',
-                            },
-                    );
+                        message: trimmedInitialMessage,
+                        serverId: params.targetServerId ?? null,
+                        displayText: typeof params.displayText === 'string' ? params.displayText : undefined,
+                        metaOverrides: params.metaOverrides ?? undefined,
+                        profileId: params.profileId,
+                        localId: params.messageLocalId,
+                        providerDeliveryIntent: 'first_turn',
+                    });
+                    if (!result.ok) {
+                        throw new Error(result.error || 'Failed to send message');
+                    }
+
                     return;
                 }
 
@@ -274,6 +270,7 @@ export function createFollowUpSpawnedSessionWithServerScope(deps?: Readonly<{
                     metaOverrides: params.metaOverrides ?? undefined,
                     profileId: params.profileId,
                     localId: params.messageLocalId,
+                    providerDeliveryIntent: 'first_turn',
                 });
                 if (!result.ok) {
                     throw new Error(result.error || 'Failed to send message');

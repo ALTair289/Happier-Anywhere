@@ -125,6 +125,8 @@ export interface SessionsDomainSlice {
     clearSessionActionDrafts: (sessionId: string) => void;
     markSessionOptimisticThinking: (sessionId: string) => void;
     clearSessionOptimisticThinking: (sessionId: string) => void;
+    markSessionResuming: (sessionId: string) => void;
+    clearSessionResuming: (sessionId: string) => void;
     clearSessionThinkingGrace: (sessionId: string) => void;
     markSessionViewed: (sessionId: string) => void;
     updateSessionPermissionMode: (sessionId: string, mode: PermissionMode) => void;
@@ -169,6 +171,10 @@ export interface MessagesDomainSlice {
 export interface PendingDomainSlice {
     sessionPending: Record<string, SessionPending>;
     applyPendingLoaded: (sessionId: string) => void;
+    applyPendingSnapshot: (sessionId: string, snapshot: Readonly<{
+        messages: PendingMessage[];
+        discarded: DiscardedPendingMessage[];
+    }>) => void;
     applyPendingMessages: (sessionId: string, messages: PendingMessage[]) => void;
     applyDiscardedPendingMessages: (sessionId: string, messages: DiscardedPendingMessage[]) => void;
     pruneServerPendingMessages: (sessionId: string) => void;
@@ -178,9 +184,12 @@ export interface PendingDomainSlice {
 
 export interface TranscriptLoadingDomainSlice {
     sessionCatchUpNewerInFlight: Record<string, number>;
+    sessionTailContiguousFloorSeq: Record<string, number>;
     isSessionCatchingUpNewer: (sessionId: string) => boolean;
     beginSessionCatchUpNewer: (sessionId: string) => void;
     endSessionCatchUpNewer: (sessionId: string) => void;
+    getSessionTailContiguousFloorSeq: (sessionId: string) => number | null;
+    setSessionTailContiguousFloorSeq: (sessionId: string, floorSeq: number | null) => void;
 }
 
 export interface RealtimeDomainSlice {
