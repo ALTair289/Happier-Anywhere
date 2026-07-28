@@ -1,7 +1,6 @@
 import {
     V2SessionListResponseSchema,
     V2SessionByIdNotFoundSchema,
-    type SessionRuntimeActivitySourceClassV1,
     type V2SessionListResponse,
     type V2SessionRecord,
 } from '@happier-dev/protocol';
@@ -12,6 +11,7 @@ import {
     type SyncPerformanceTelemetryFields,
 } from '@/sync/runtime/syncPerformanceTelemetry';
 import { HappyError } from '@/utils/errors/errors';
+import { resolveSessionRuntimeActivityProjectionFields } from './sessionRuntimeActivityProjection';
 
 type SessionRequest = (path: string, init: RequestInit) => Promise<Response>;
 type SessionListRequestHeadersOptions = Readonly<{
@@ -82,14 +82,9 @@ function readNullableNumber(value: unknown): number | null | undefined {
     return readNumber(value);
 }
 
-function readNonNegativeInteger(value: unknown): number | undefined {
-    if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
-    return Math.max(0, Math.trunc(value));
-}
-
-function readNullableNonNegativeInteger(value: unknown): number | null | undefined {
-    if (value == null) return null;
-    return readNonNegativeInteger(value);
+function readPositiveSafeInteger(value: unknown): number | undefined {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) return undefined;
+    return value;
 }
 
 function readOptionalBoolean(value: unknown): boolean | undefined {
@@ -103,15 +98,6 @@ function readOptionalString(value: unknown): string | undefined {
 function readNullableString(value: unknown): string | null | undefined {
     if (value == null) return null;
     return typeof value === 'string' ? value : undefined;
-}
-
-function readRuntimeActivitySourceClass(value: unknown): SessionRuntimeActivitySourceClassV1 | null | undefined {
-    if (value == null) return null;
-    return value === 'provider_detached_task'
-        || value === 'provider_autonomous_output'
-        || value === 'mixed'
-            ? value
-            : undefined;
 }
 
 function readRollbackEligibleTurnStarts(value: unknown): readonly number[] | null | undefined {
@@ -197,8 +183,7 @@ function coerceLegacySessionRecord(raw: unknown): V2SessionRecord | null {
     const shareAccessLevel = readOptionalString(shareRecord?.accessLevel) ?? topLevelAccessLevel;
     const shareCanApprovePermissions = readOptionalBoolean(shareRecord?.canApprovePermissions) ?? topLevelCanApprovePermissions;
     const rollbackEligibleTurnStarts = readRollbackEligibleTurnStarts(raw.rollbackEligibleTurnStarts);
-    const runtimeActivityActiveCount = readNonNegativeInteger(raw.runtimeActivityActiveCount);
-    const runtimeActivityIsIdle = runtimeActivityActiveCount === 0;
+    const runtimeActivityProjection = resolveSessionRuntimeActivityProjectionFields({}, raw);
 
     return {
         id,
@@ -217,6 +202,9 @@ function coerceLegacySessionRecord(raw: unknown): V2SessionRecord | null {
         lastViewedSessionSeq: readNullableNumber(raw.lastViewedSessionSeq),
         pendingPermissionRequestCount: readNumber(raw.pendingPermissionRequestCount) ?? undefined,
         pendingUserActionRequestCount: readNumber(raw.pendingUserActionRequestCount) ?? undefined,
+        pendingRequestObservedAt: readNullableNumber(raw.pendingRequestObservedAt),
+        latestReadyEventSeq: readNullableNumber(raw.latestReadyEventSeq),
+        latestReadyEventAt: readNullableNumber(raw.latestReadyEventAt),
         latestTurnId: readNullableString(raw.latestTurnId),
         latestTurnStatus: raw.latestTurnStatus === 'in_progress'
             || raw.latestTurnStatus === 'completed'
@@ -227,16 +215,10 @@ function coerceLegacySessionRecord(raw: unknown): V2SessionRecord | null {
                     ? null
                     : undefined,
         latestTurnStatusObservedAt: readNullableNumber(raw.latestTurnStatusObservedAt),
-        runtimeActivityActiveCount,
-        runtimeActivityObservedAt: runtimeActivityIsIdle
-            ? null
-            : readNullableNonNegativeInteger(raw.runtimeActivityObservedAt),
-        runtimeActivityExpiresAt: runtimeActivityIsIdle
-            ? null
-            : readNullableNonNegativeInteger(raw.runtimeActivityExpiresAt),
-        runtimeActivitySourceClass: runtimeActivityIsIdle
-            ? null
-            : readRuntimeActivitySourceClass(raw.runtimeActivitySourceClass),
+        runtimeActivityState: runtimeActivityProjection.runtimeActivityState,
+        runtimeActivityRevision: runtimeActivityProjection.runtimeActivityRevision,
+        runtimeActivityActiveCount: runtimeActivityProjection.runtimeActivityActiveCount,
+        runtimeActivityObservedAt: runtimeActivityProjection.runtimeActivityObservedAt,
         lastRuntimeIssue: raw.lastRuntimeIssue === null
             || (raw.lastRuntimeIssue && typeof raw.lastRuntimeIssue === 'object')
                 ? raw.lastRuntimeIssue as V2SessionRecord['lastRuntimeIssue']
@@ -245,6 +227,8 @@ function coerceLegacySessionRecord(raw: unknown): V2SessionRecord | null {
         pendingCount: readNumber(raw.pendingCount) ?? undefined,
         pendingBlockedCount: readNumber(raw.pendingBlockedCount) ?? undefined,
         pendingVersion: readNumber(raw.pendingVersion) ?? undefined,
+        thinking: readOptionalBoolean(raw.thinking),
+        thinkingAt: readNumber(raw.thinkingAt) ?? undefined,
         dataEncryptionKey: readNullableString(raw.dataEncryptionKey) ?? null,
         share:
             shareAccessLevel && typeof shareCanApprovePermissions === 'boolean'
@@ -269,7 +253,9 @@ function parseCompatSessionListResponse(raw: unknown, telemetryFields?: SyncPerf
 function parseCompatSessionListResponseValue(raw: unknown): V2SessionListResponse | null {
     const parsed = V2SessionListResponseSchema.safeParse(raw);
     if (parsed.success) {
-        return parsed.data;
+        const sessions = parsed.data.sessions.map((row) => coerceLegacySessionRecord(row));
+        if (sessions.some((row) => row === null)) return null;
+        return { ...parsed.data, sessions: sessions as V2SessionRecord[] };
     }
 
     if (!isRecord(raw) || !Array.isArray(raw.sessions)) {
@@ -292,7 +278,8 @@ export function parseCompatSessionByIdResponse(raw: unknown): { session: V2Sessi
     if (isRecord(raw) && isRecord(raw.session)) {
         const parsed = V2SessionListResponseSchema.safeParse({ sessions: [raw.session] });
         if (parsed.success && parsed.data.sessions[0]) {
-            return { session: parsed.data.sessions[0] };
+            const coerced = coerceLegacySessionRecord(parsed.data.sessions[0]);
+            return coerced ? { session: coerced } : null;
         }
 
         const coerced = coerceLegacySessionRecord(raw.session);

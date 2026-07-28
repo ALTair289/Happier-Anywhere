@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { Session } from '@/sync/domains/state/storageTypes';
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
-import { buildUpdatedSessionFromSocketUpdate } from './syncSessions';
+import {
+  buildUpdatedSessionFromSocketUpdate,
+  buildUpdatedSessionProjectionFromSocketUpdate,
+} from './syncSessions';
 
 function createSession(params: { sessionId: string; encryptionMode: 'plain' | 'e2ee' }): Session {
   const now = 1_700_000_000_000;
@@ -141,16 +144,16 @@ describe('buildUpdatedSessionFromSocketUpdate (plaintext)', () => {
     expect(nextSession.latestTurnStatusObservedAt).toBe(123_456);
   });
 
-  it('clears legacy thinking when update-session marks the runtime inactive', async () => {
+  it('applies a complete canonical runtime activity update', async () => {
     const base = createSession({ sessionId: 's1', encryptionMode: 'plain' });
 
     const { nextSession } = await buildUpdatedSessionFromSocketUpdate({
       session: base,
       updateBody: {
+        runtimeActivityState: 'active',
         runtimeActivityActiveCount: 2,
         runtimeActivityObservedAt: 123_456,
-        runtimeActivityExpiresAt: 223_456,
-        runtimeActivitySourceClass: 'provider_detached_task',
+        runtimeActivityRevision: 4,
       },
       updateSeq: 10,
       updateCreatedAt: 456,
@@ -158,24 +161,27 @@ describe('buildUpdatedSessionFromSocketUpdate (plaintext)', () => {
     });
 
     expect(nextSession.runtimeActivityActiveCount).toBe(2);
+    expect(nextSession.runtimeActivityState).toBe('active');
     expect(nextSession.runtimeActivityObservedAt).toBe(123_456);
-    expect(nextSession.runtimeActivityExpiresAt).toBe(223_456);
-    expect(nextSession.runtimeActivitySourceClass).toBe('provider_detached_task');
+    expect(nextSession.runtimeActivityRevision).toBe(4);
   });
 
-  it('clears runtime activity source class when an update-session payload clears activity', async () => {
+  it('atomically replaces the Runtime Activity tuple when activity becomes idle', async () => {
     const base = {
       ...createSession({ sessionId: 's1', encryptionMode: 'plain' }),
+      runtimeActivityState: 'active' as const,
       runtimeActivityActiveCount: 1,
       runtimeActivityObservedAt: 100,
-      runtimeActivityExpiresAt: 200,
-      runtimeActivitySourceClass: 'provider_detached_task' as const,
+      runtimeActivityRevision: 3,
     };
 
     const { nextSession } = await buildUpdatedSessionFromSocketUpdate({
       session: base,
       updateBody: {
+        runtimeActivityState: 'idle',
         runtimeActivityActiveCount: 0,
+        runtimeActivityObservedAt: 200,
+        runtimeActivityRevision: 4,
       },
       updateSeq: 10,
       updateCreatedAt: 456,
@@ -183,10 +189,108 @@ describe('buildUpdatedSessionFromSocketUpdate (plaintext)', () => {
     });
 
     expect(nextSession.runtimeActivityActiveCount).toBe(0);
-    expect(nextSession.runtimeActivityObservedAt).toBeNull();
-    expect(nextSession.runtimeActivityExpiresAt).toBeNull();
-    expect(nextSession.runtimeActivitySourceClass).toBeNull();
+    expect(nextSession.runtimeActivityObservedAt).toBe(200);
+    expect(nextSession.runtimeActivityRevision).toBe(4);
   });
+
+  it.each(['projection-only', 'hydrated'] as const)(
+    'applies runtime activity patches monotonically through the %s socket branch',
+    async (branch) => {
+      const base = {
+        ...createSession({ sessionId: `s_runtime_activity_${branch}`, encryptionMode: 'plain' }),
+        runtimeActivityState: 'active' as const,
+        runtimeActivityActiveCount: 2,
+        runtimeActivityObservedAt: 500,
+        runtimeActivityRevision: 5,
+      };
+
+      const applyUpdate = async (session: Session, updateBody: Record<string, unknown>): Promise<Session> => {
+        const common = {
+          session,
+          updateBody,
+          updateSeq: 10,
+          updateCreatedAt: 600,
+        };
+        if (branch === 'projection-only') {
+          return buildUpdatedSessionProjectionFromSocketUpdate(common);
+        }
+        return (await buildUpdatedSessionFromSocketUpdate({
+          ...common,
+          updateBody: {
+            ...updateBody,
+            metadata: {
+              version: (session.metadataVersion ?? 0) + 1,
+              value: JSON.stringify(session.metadata),
+            },
+          },
+          sessionEncryption: null,
+        })).nextSession;
+      };
+
+      const expectActivity = (session: Session, expected: {
+        state: 'active' | 'idle' | 'unknown';
+        activeCount: number;
+        observedAt: number | null;
+        revision: number;
+      }) => {
+        expect({
+          state: session.runtimeActivityState,
+          activeCount: session.runtimeActivityActiveCount,
+          observedAt: session.runtimeActivityObservedAt,
+          revision: session.runtimeActivityRevision,
+        }).toEqual(expected);
+      };
+
+      const unrelated = await applyUpdate(base, { activeAt: 550 });
+      expectActivity(unrelated, {
+        state: 'active',
+        activeCount: 2,
+        observedAt: 500,
+        revision: 5,
+      });
+
+      for (const revision of [5, 4]) {
+        const outOfOrder = await applyUpdate(base, {
+          runtimeActivityState: 'idle',
+          runtimeActivityActiveCount: 0,
+          runtimeActivityObservedAt: 550,
+          runtimeActivityRevision: revision,
+        });
+        expectActivity(outOfOrder, {
+          state: 'active',
+          activeCount: 2,
+          observedAt: 500,
+          revision: 5,
+        });
+      }
+
+      const newer = await applyUpdate(base, {
+        runtimeActivityState: 'active',
+        runtimeActivityActiveCount: 1,
+        runtimeActivityObservedAt: 575,
+        runtimeActivityRevision: 6,
+      });
+      expectActivity(newer, {
+        state: 'active',
+        activeCount: 1,
+        observedAt: 575,
+        revision: 6,
+      });
+
+      const malformedButOrdered = await applyUpdate(newer, {
+        runtimeActivityState: 'active',
+        runtimeActivityActiveCount: 0,
+        runtimeActivityObservedAt: 590,
+        runtimeActivityRevision: 7,
+      });
+      expectActivity(malformedButOrdered, {
+        state: 'active',
+        activeCount: 1,
+        observedAt: 575,
+        revision: 6,
+      });
+    },
+  );
 
   it('applies runtime activity projection fields from update-session payloads', async () => {
     const base = {

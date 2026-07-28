@@ -11,6 +11,12 @@ function buildUpdate(params: {
     messageId: string;
     messageSeq: number;
     attentionImpact?: { affectsUnread: boolean; affectsMeaningfulActivity: boolean };
+    sourceCreatedAt?: number;
+    sourceUpdatedAt?: number;
+    transcriptObservationProvenance?: {
+        kind: 'non_dependent';
+        source: 'background' | 'external' | 'sidechain' | 'history';
+    };
     content?: { t: 'encrypted'; c: string } | { t: 'plain'; v: unknown };
 }): {
     id: string;
@@ -23,6 +29,9 @@ function buildUpdate(params: {
             id: string;
             seq: number;
             attentionImpact?: { affectsUnread: boolean; affectsMeaningfulActivity: boolean };
+            sourceCreatedAt?: number;
+            sourceUpdatedAt?: number;
+            transcriptObservationProvenance?: NonNullable<Parameters<typeof buildUpdate>[0]['transcriptObservationProvenance']>;
             content: { t: 'encrypted'; c: string } | { t: 'plain'; v: unknown };
             localId: null;
             createdAt: number;
@@ -41,6 +50,11 @@ function buildUpdate(params: {
                 id: params.messageId,
                 seq: params.messageSeq,
                 ...(params.attentionImpact ? { attentionImpact: params.attentionImpact } : {}),
+                ...(params.sourceCreatedAt !== undefined ? { sourceCreatedAt: params.sourceCreatedAt } : {}),
+                ...(params.sourceUpdatedAt !== undefined ? { sourceUpdatedAt: params.sourceUpdatedAt } : {}),
+                ...(params.transcriptObservationProvenance !== undefined
+                    ? { transcriptObservationProvenance: params.transcriptObservationProvenance }
+                    : {}),
                 content: params.content ?? { t: 'encrypted', c: 'x' },
                 localId: null,
                 createdAt: 1_000,
@@ -134,6 +148,35 @@ describe('handleNewMessageSocketUpdate', () => {
 
         const normalized = applyMessages.mock.calls?.[0]?.[1]?.[0] as NormalizedMessage | undefined;
         expect(normalized?.seq).toBe(2);
+    });
+
+    it('preserves authenticated transcript-observation metadata on normalized socket messages', async () => {
+        const { params, applyMessages } = buildHarness({
+            updateData: buildUpdate({
+                sid: 's1',
+                messageId: 'm2',
+                messageSeq: 2,
+                sourceCreatedAt: 100,
+                sourceUpdatedAt: 200,
+                transcriptObservationProvenance: {
+                    kind: 'non_dependent',
+                    source: 'history',
+                },
+            }),
+        });
+
+        await handleNewMessageSocketUpdate(params);
+
+        expect(applyMessages.mock.calls[0]?.[1]?.[0]).toMatchObject({
+            id: 'm2',
+            seq: 2,
+            sourceCreatedAt: 100,
+            sourceUpdatedAt: 200,
+            transcriptObservationProvenance: {
+                kind: 'non_dependent',
+                source: 'history',
+            },
+        });
     });
 
     it('does not trigger catch-up when message seq is contiguous', async () => {
@@ -597,6 +640,11 @@ describe('handleNewMessageSocketUpdate', () => {
     it('emits lifecycle callback for turn_aborted socket messages', async () => {
         const onTaskLifecycleEvent = vi.fn();
         const { params } = buildHarness({
+            updateData: buildUpdate({
+                sid: 's1',
+                messageId: 'm2',
+                messageSeq: 2,
+            }),
             getSessionEncryption: () => ({
                 decryptMessage: async () => ({
                     id: 'm2',
@@ -621,6 +669,58 @@ describe('handleNewMessageSocketUpdate', () => {
             type: 'turn_aborted',
             id: 'task_1',
             createdAt: 1_000,
+        });
+    });
+
+    it('materializes recovered lifecycle history without reopening the live turn or activity projection', async () => {
+        const onTaskLifecycleEvent = vi.fn();
+        const { params, applySessions } = buildHarness({
+            updateData: buildUpdate({
+                sid: 's1',
+                messageId: 'history-task-started',
+                messageSeq: 2,
+                attentionImpact: { affectsUnread: true, affectsMeaningfulActivity: true },
+                sourceCreatedAt: 100,
+                sourceUpdatedAt: 200,
+                transcriptObservationProvenance: {
+                    kind: 'non_dependent',
+                    source: 'history',
+                },
+            }),
+            getSession: () => ({
+                ...buildSession('s1'),
+                updatedAt: 500,
+                meaningfulActivityAt: 500,
+                latestTurnStatus: 'completed',
+            }),
+            getSessionEncryption: () => ({
+                decryptMessage: async () => ({
+                    id: 'history-task-started',
+                    localId: null,
+                    createdAt: 1_000,
+                    content: {
+                        role: 'agent',
+                        content: {
+                            type: 'acp',
+                            provider: 'codex',
+                            data: { type: 'task_started', id: 'old-task' },
+                        },
+                    },
+                }),
+            }),
+            onTaskLifecycleEvent,
+        });
+
+        await handleNewMessageSocketUpdate(params);
+
+        expect(onTaskLifecycleEvent).not.toHaveBeenCalled();
+        expect(applySessions).toHaveBeenCalledTimes(1);
+        expect(applySessions.mock.calls[0]?.[0]?.[0]).toMatchObject({
+            seq: 2,
+            updatedAt: 500,
+            meaningfulActivityAt: 500,
+            thinking: false,
+            latestTurnStatus: 'completed',
         });
     });
 

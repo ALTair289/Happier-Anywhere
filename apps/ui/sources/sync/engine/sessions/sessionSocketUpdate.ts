@@ -18,6 +18,10 @@ import type {
 import { decideDurableSessionRealtimeRoute } from '@/sync/domains/session/realtime/sessionRealtimeRouting';
 import { getTaskLifecycleEventFromRawContent, type TaskLifecycleEvent } from './taskLifecycle';
 import { isLegacyMemoryArtifactTranscriptRow } from './legacyMemoryArtifactTranscriptRows';
+import {
+    applyTranscriptObservationMetadata,
+    isRecoveredHistoryTranscriptObservation,
+} from '@/sync/domains/messages/transcriptObservationProvenance';
 
 type SessionMessageEncryption = {
     decryptMessage: (message: any) => Promise<any>;
@@ -298,6 +302,7 @@ function buildMessageSessionProjectionPatch(params: Readonly<{
     updateType: 'new-message' | 'message-updated';
 }>): SessionProjectionPatch {
     const currentSeq = params.session.seq ?? 0;
+    const isRecoveredHistory = isRecoveredHistoryTranscriptObservation(params.rawMessage);
     const attentionImpact = storedSessionMessageAttentionImpact(params.rawMessage);
     const nextSessionSeq = computeNextSessionSeqFromUpdate({
         currentSessionSeq: currentSeq,
@@ -319,7 +324,8 @@ function buildMessageSessionProjectionPatch(params: Readonly<{
     // Loaded message edits can arrive for every streaming content update. When they only advance the
     // socket event timestamp, the transcript apply below is sufficient and a session projection update
     // just adds session-list churn.
-    const advancesUpdatedAt = updateCreatedAt !== null
+    const advancesUpdatedAt = !isRecoveredHistory
+        && updateCreatedAt !== null
         && updateCreatedAt > currentUpdatedAt
         && (params.updateType === 'new-message' || advancesSeq || advancesMeaningfulActivityAt);
 
@@ -365,6 +371,7 @@ async function handleSessionMessageSocketUpdate(params: HandleSessionMessageSock
     const rawMessage = 'message' in body
         ? (body as { message?: ApiMessage }).message
         : undefined;
+    const isRecoveredHistory = isRecoveredHistoryTranscriptObservation(rawMessage);
     const updateType = inferLifecycle ? 'new-message' : 'message-updated';
     const prevMaterializedMaxSeq = getSessionMaterializedMaxSeq(sessionId);
     const sessionMessagesLoaded = isSessionMessagesLoaded(sessionId);
@@ -523,8 +530,12 @@ async function handleSessionMessageSocketUpdate(params: HandleSessionMessageSock
                     normalizeMessage,
                 )
                 : normalizeMessage();
+            if (lastMessage) {
+                applyTranscriptObservationMetadata(lastMessage, rawMessage);
+            }
 
-            const { isTaskComplete, isTaskStarted, lifecycleEvent } = inferLifecycle
+            const shouldInferLifecycle = inferLifecycle && !isRecoveredHistory;
+            const { isTaskComplete, isTaskStarted, lifecycleEvent } = shouldInferLifecycle
                 ? inferTaskLifecycleFromMessageContent(decrypted.content, decrypted.createdAt)
                 : { isTaskComplete: false, isTaskStarted: false, lifecycleEvent: null };
             const latestTurnStatus = latestTurnStatusFromLifecycleEvent(lifecycleEvent);
@@ -546,8 +557,8 @@ async function handleSessionMessageSocketUpdate(params: HandleSessionMessageSock
                     updateType,
                 });
                 const lifecyclePatch: Partial<Session> = {
-                    ...(inferLifecycle && isTaskComplete ? { thinking: false } : {}),
-                    ...(inferLifecycle && isTaskStarted && shouldApplyLifecycleStatus ? { thinking: true } : {}),
+                    ...(shouldInferLifecycle && isTaskComplete ? { thinking: false } : {}),
+                    ...(shouldInferLifecycle && isTaskStarted && shouldApplyLifecycleStatus ? { thinking: true } : {}),
                     ...(shouldApplyLifecycleStatus ? {
                         latestTurnStatus,
                         latestTurnStatusObservedAt: lifecycleEvent?.createdAt ?? updateData.createdAt,

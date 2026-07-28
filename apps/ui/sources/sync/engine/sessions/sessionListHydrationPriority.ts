@@ -9,6 +9,35 @@ type SessionListHydrationPriorityRow = Readonly<{
     active?: boolean;
 }>;
 
+type SessionListAttentionHydrationPriorityRow = Readonly<{
+    pendingPermissionRequestCount?: number | null;
+    pendingUserActionRequestCount?: number | null;
+    latestTurnStatus?: string | null;
+    lastRuntimeIssue?: unknown;
+    latestReadyEventSeq?: number | null;
+    lastViewedSessionSeq?: number | null;
+}>;
+
+export function isSessionListRowAttentionHydrationPriority(
+    row: SessionListAttentionHydrationPriorityRow,
+): boolean {
+    if ((row.pendingPermissionRequestCount ?? 0) > 0 || (row.pendingUserActionRequestCount ?? 0) > 0) {
+        return true;
+    }
+    if (row.latestTurnStatus === 'failed' && row.lastRuntimeIssue != null) {
+        return true;
+    }
+    const latestReadyEventSeq = normalizeSessionListPrioritySeq(row.latestReadyEventSeq);
+    return latestReadyEventSeq !== null
+        && latestReadyEventSeq > (normalizeSessionListPrioritySeq(row.lastViewedSessionSeq) ?? 0);
+}
+
+function normalizeSessionListPrioritySeq(value: number | null | undefined): number | null {
+    return typeof value === 'number' && Number.isFinite(value)
+        ? Math.max(0, Math.trunc(value))
+        : null;
+}
+
 type SessionListHydrationPriorityParams<Row extends SessionListHydrationPriorityRow> = Readonly<{
     rows: readonly Row[];
     requiredSessionIds?: ReadonlySet<string> | readonly string[];

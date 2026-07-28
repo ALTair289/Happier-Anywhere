@@ -16,6 +16,7 @@ import {
 } from '@/sync/runtime/connectivity/authErrors';
 
 import { parsePlainSessionAgentState, parsePlainSessionMetadata } from './parsePlainSessionPayload';
+import { resolveSessionRuntimeActivityProjectionFields } from './sessionRuntimeActivityProjection';
 import {
   looksLikeCurrentV2SessionNotFound404,
   looksLikeMissingV2SessionRoute404,
@@ -331,8 +332,10 @@ export async function fetchAndApplySessionById(params: Readonly<{
     });
   const rollbackEligibleTurnStarts = listRollbackEligibleTurnStarts(sessionTurns);
 
+  const runtimeActivityProjection = resolveSessionRuntimeActivityProjectionFields({}, row);
   const nextSession = {
     ...row,
+    ...runtimeActivityProjection,
     serverId: typeof params.serverId === 'string' && params.serverId.trim().length > 0 ? params.serverId.trim() : undefined,
     encryptionMode,
     thinking: false,

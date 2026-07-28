@@ -1,96 +1,78 @@
-import type { SessionRuntimeActivitySourceClassV1 } from '@happier-dev/protocol';
+import {
+    mergeSessionRuntimeActivityProjection,
+    parseSessionRuntimeActivityProjectionFields,
+    type SessionRuntimeActivityProjection,
+    type SessionRuntimeActivityState,
+} from '@happier-dev/protocol';
 
 export type SessionRuntimeActivityProjectionBase = Readonly<{
+    runtimeActivityState?: SessionRuntimeActivityState | null;
     runtimeActivityActiveCount?: number | null;
     runtimeActivityObservedAt?: number | null;
-    runtimeActivityExpiresAt?: number | null;
-    runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
+    runtimeActivityRevision?: number | null;
 }>;
 
 export type SessionRuntimeActivityProjectionFields = Readonly<{
+    runtimeActivityState: SessionRuntimeActivityState;
     runtimeActivityActiveCount: number;
     runtimeActivityObservedAt: number | null;
-    runtimeActivityExpiresAt: number | null;
-    runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1 | null;
+    runtimeActivityRevision: number;
 }>;
 
 export type SessionRuntimeActivityProjectionPatch = Partial<SessionRuntimeActivityProjectionFields>;
 
+export type SessionRuntimeActivityResyncTrigger = Readonly<{
+    reason: 'equal_revision_conflict';
+    current: SessionRuntimeActivityProjection;
+    incoming: SessionRuntimeActivityProjection;
+}>;
+
+export type SessionRuntimeActivityResyncHandler = (
+    trigger: SessionRuntimeActivityResyncTrigger,
+) => void;
+
 export function hasSessionRuntimeActivityProjectionFields(updateBody: unknown): boolean {
-    if (!updateBody || typeof updateBody !== 'object') return false;
-    return [
-        'runtimeActivityActiveCount',
-        'runtimeActivityObservedAt',
-        'runtimeActivityExpiresAt',
-        'runtimeActivitySourceClass',
-    ].some((key) => Object.prototype.hasOwnProperty.call(updateBody, key));
+    return parseSessionRuntimeActivityProjectionFields(updateBody).kind !== 'absent';
 }
 
 export function resolveSessionRuntimeActivityProjectionFields(
-    base: SessionRuntimeActivityProjectionBase,
+    _base: SessionRuntimeActivityProjectionBase,
     updateBody: unknown,
-): SessionRuntimeActivityProjectionFields {
-    const body = updateBody && typeof updateBody === 'object'
-        ? updateBody as Record<string, unknown>
-        : {};
-    const activeCount = readNonNegativeInteger(body.runtimeActivityActiveCount)
-        ?? readNonNegativeInteger(base.runtimeActivityActiveCount)
-        ?? 0;
-    const clear = activeCount === 0
-        && Object.prototype.hasOwnProperty.call(body, 'runtimeActivityActiveCount');
-    const observedAt = readNullableFiniteTimestamp(body.runtimeActivityObservedAt);
-    const expiresAt = readNullableFiniteTimestamp(body.runtimeActivityExpiresAt);
-    const sourceClass = readRuntimeActivitySourceClass(body.runtimeActivitySourceClass);
-
-    return {
-        runtimeActivityActiveCount: activeCount,
-        runtimeActivityObservedAt: clear
-            ? null
-            : observedAt !== undefined
-                ? observedAt
-                : base.runtimeActivityObservedAt ?? null,
-        runtimeActivityExpiresAt: clear
-            ? null
-            : expiresAt !== undefined
-                ? expiresAt
-                : base.runtimeActivityExpiresAt ?? null,
-        runtimeActivitySourceClass: clear
-            ? null
-            : sourceClass !== undefined
-                ? sourceClass
-                : base.runtimeActivitySourceClass ?? null,
-    };
+): SessionRuntimeActivityProjectionPatch {
+    const parsed = parseSessionRuntimeActivityProjectionFields(updateBody);
+    return parsed.kind === 'valid' ? toStoredFields(parsed.projection) : {};
 }
 
 export function buildSessionRuntimeActivityProjectionPatch(
     base: SessionRuntimeActivityProjectionBase,
     updateBody: unknown,
+    onResyncRequired?: SessionRuntimeActivityResyncHandler,
 ): SessionRuntimeActivityProjectionPatch {
-    if (!hasSessionRuntimeActivityProjectionFields(updateBody)) return {};
-    return resolveSessionRuntimeActivityProjectionFields(base, updateBody);
+    const incoming = parseSessionRuntimeActivityProjectionFields(updateBody);
+    if (incoming.kind !== 'valid') return {};
+
+    const current = parseSessionRuntimeActivityProjectionFields(base);
+    if (current.kind !== 'valid') return toStoredFields(incoming.projection);
+
+    const result = mergeSessionRuntimeActivityProjection(current.projection, incoming.projection);
+    if (result.decision === 'replace') return toStoredFields(result.projection);
+    if (result.decision === 'resync_conflict') {
+        onResyncRequired?.({
+            reason: 'equal_revision_conflict',
+            current: current.projection,
+            incoming: incoming.projection,
+        });
+    }
+    return {};
 }
 
-function readFiniteTimestamp(value: unknown): number | undefined {
-    return typeof value === 'number' && Number.isFinite(value)
-        ? Math.trunc(value)
-        : undefined;
-}
-
-function readNullableFiniteTimestamp(value: unknown): number | null | undefined {
-    if (value === null) return null;
-    return readFiniteTimestamp(value);
-}
-
-function readNonNegativeInteger(value: unknown): number | undefined {
-    if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
-    return Math.max(0, Math.trunc(value));
-}
-
-function readRuntimeActivitySourceClass(value: unknown): SessionRuntimeActivitySourceClassV1 | null | undefined {
-    if (value === null) return null;
-    return value === 'provider_detached_task'
-        || value === 'provider_autonomous_output'
-        || value === 'mixed'
-            ? value
-            : undefined;
+function toStoredFields(
+    projection: SessionRuntimeActivityProjection,
+): SessionRuntimeActivityProjectionFields {
+    return {
+        runtimeActivityState: projection.state,
+        runtimeActivityActiveCount: projection.activeCount,
+        runtimeActivityObservedAt: projection.observedAt,
+        runtimeActivityRevision: projection.revision,
+    };
 }

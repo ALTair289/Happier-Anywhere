@@ -26,7 +26,9 @@ import type { EncryptionScopeInput } from '@/sync/encryption/encryption';
 
 import { parsePlainSessionAgentState, parsePlainSessionMetadata } from './parsePlainSessionPayload';
 import { fetchSessionListPageCompat } from './sessionHttpCompat';
+import { resolveSessionRuntimeActivityProjectionFields } from './sessionRuntimeActivityProjection';
 import {
+    isSessionListRowAttentionHydrationPriority,
     normalizeSessionListHydrationSessionIds,
     orderRowsForSessionListHydration,
 } from './sessionListHydrationPriority';
@@ -159,21 +161,59 @@ function normalizeSessionListTimestamp(value: number | null | undefined): number
         : null;
 }
 
-function isSessionListRowAttentionHydrationPriority(row: SessionListRow): boolean {
-    if ((row.pendingPermissionRequestCount ?? 0) > 0 || (row.pendingUserActionRequestCount ?? 0) > 0) {
-        return true;
-    }
-    if (row.latestTurnStatus === 'failed' && row.lastRuntimeIssue != null) {
-        return true;
-    }
-    return normalizeSessionListSeq(row.latestReadyEventSeq) !== null
-        && (normalizeSessionListSeq(row.latestReadyEventSeq) ?? 0) > (normalizeSessionListSeq(row.lastViewedSessionSeq) ?? 0);
+function buildHydratedSessionFromDecryptedRow(
+    row: SessionListRow,
+    encryptionMode: 'e2ee' | 'plain',
+    decryptedState: Readonly<{ metadata: any; agentState: any }>,
+    serverId?: string | null,
+): HydratedSession {
+    const runtimeActivityProjection = resolveSessionRuntimeActivityProjectionFields({}, row);
+    const latestTurnStatus = row.latestTurnStatus ?? null;
+    const latestTurnStatusObservedAt = row.latestTurnStatusObservedAt ?? null;
+    const runtimePresence = resolveSessionRuntimePresenceFields({
+        thinking: row.thinking === true,
+        thinkingAt: normalizeSessionListTimestamp(row.thinkingAt ?? null) ?? 0,
+        latestTurnStatus,
+        latestTurnStatusObservedAt,
+    });
+
+    return {
+        ...row,
+        serverId: typeof serverId === 'string' && serverId.trim().length > 0 ? serverId.trim() : undefined,
+        encryptionMode,
+        thinking: runtimePresence.thinking,
+        thinkingAt: runtimePresence.thinkingAt,
+        metadata: decryptedState.metadata,
+        agentState: decryptedState.agentState,
+        metadataUnavailable: row.metadata != null && decryptedState.metadata == null,
+        accessLevel: normalizeAccessLevel(row.share?.accessLevel),
+        canApprovePermissions: row.share?.canApprovePermissions ?? undefined,
+        latestReadyEventSeq: normalizeSessionListSeq(row.latestReadyEventSeq ?? null),
+        latestReadyEventAt: normalizeSessionListTimestamp(row.latestReadyEventAt ?? null),
+        pendingRequestObservedAt: normalizeSessionListTimestamp(row.pendingRequestObservedAt ?? null),
+        latestTurnStatus,
+        latestTurnStatusObservedAt,
+        ...runtimeActivityProjection,
+        rollbackEligibleTurnStarts: (row as Record<string, unknown>).rollbackEligibleTurnStarts === undefined
+            ? null
+            : readRollbackEligibleTurnStarts((row as Record<string, unknown>).rollbackEligibleTurnStarts),
+        presence: row.active ? 'online' : row.activeAt,
+    };
+}
+
+function buildPlainHydratedSessionFromRow(row: SessionListRow): HydratedSession | null {
+    if (row.encryptionMode !== 'plain') return null;
+    return buildHydratedSessionFromDecryptedRow(row, 'plain', {
+        metadata: parsePlainSessionMetadata(row.metadata),
+        agentState: parsePlainSessionAgentState(row.agentState),
+    });
 }
 
 function buildRenderableFromRowAndCache(
     row: SessionListRow,
     cachedEntry: SessionListCacheEntryV1 | undefined,
     existingSession?: Session | null | undefined,
+    currentRenderable?: SessionListRenderableSession | null | undefined,
 ): SessionListRenderableSession {
     const rowRecord = row as Record<string, unknown>;
     const metadataMatches = cachedEntry?.metadataVersion === row.metadataVersion;
@@ -182,6 +222,11 @@ function buildRenderableFromRowAndCache(
     const existingMetadataMatches = existingSession?.metadataVersion === row.metadataVersion
         && existingRenderable?.metadata != null;
     const existingAgentStateMatches = existingSession?.agentStateVersion === row.agentStateVersion;
+    const currentMetadataMatches = row.encryptionMode === 'plain'
+        && currentRenderable?.metadataVersion === row.metadataVersion
+        && currentRenderable.metadata != null;
+    const currentAgentStateMatches = row.encryptionMode === 'plain'
+        && currentRenderable?.agentStateVersion === row.agentStateVersion;
     const metadataFromCache: SessionListRenderableMetadata | null = isSessionListCacheEntryMetadataUsable(cachedEntry)
         ? {
             name: cachedEntry.name,
@@ -197,13 +242,38 @@ function buildRenderableFromRowAndCache(
         : null;
     const useMatchingCacheMetadata = metadataMatches && metadataFromCache != null;
     const useExistingSessionMetadata = !useMatchingCacheMetadata && existingMetadataMatches;
-    const useStaleCacheMetadata = !useMatchingCacheMetadata && !useExistingSessionMetadata && metadataFromCache != null;
+    const useCurrentRenderableMetadata =
+        !useMatchingCacheMetadata && !useExistingSessionMetadata && currentMetadataMatches;
     const staleCacheMetadataVersion = cachedEntry?.metadataVersion ?? row.metadataVersion;
+    const plainHydratedSession = !useMatchingCacheMetadata && !useExistingSessionMetadata && !useCurrentRenderableMetadata
+        ? buildPlainHydratedSessionFromRow(row)
+        : null;
+    const plainRenderable = plainHydratedSession?.metadata != null
+        ? buildSessionListRenderableFromSession(plainHydratedSession as Session)
+        : null;
+    if (plainRenderable && !existingSession && !currentRenderable && metadataFromCache == null) {
+        return plainRenderable;
+    }
+    const usePlainRenderableMetadata =
+        !useMatchingCacheMetadata
+        && !useExistingSessionMetadata
+        && !useCurrentRenderableMetadata
+        && plainRenderable?.metadata != null;
+    const useStaleCacheMetadata =
+        !useMatchingCacheMetadata
+        && !useExistingSessionMetadata
+        && !useCurrentRenderableMetadata
+        && !usePlainRenderableMetadata
+        && metadataFromCache != null;
     const renderableMetadata = useMatchingCacheMetadata || useStaleCacheMetadata
         ? metadataFromCache
         : useExistingSessionMetadata
             ? existingRenderable?.metadata ?? null
-            : null;
+            : useCurrentRenderableMetadata
+                ? currentRenderable?.metadata ?? null
+                : usePlainRenderableMetadata
+                    ? plainRenderable?.metadata ?? null
+                    : null;
 
     const hasPendingPermissionRequests =
         typeof row.pendingPermissionRequestCount === 'number'
@@ -212,7 +282,11 @@ function buildRenderableFromRowAndCache(
                 ? cachedEntry?.hasPendingPermissionRequests === true
                 : existingAgentStateMatches
                     ? existingRenderable?.hasPendingPermissionRequests === true
-                    : undefined;
+                    : currentAgentStateMatches
+                        ? currentRenderable?.hasPendingPermissionRequests === true
+                        : plainRenderable
+                            ? plainRenderable.hasPendingPermissionRequests === true
+                            : undefined;
     const hasPendingUserActionRequests =
         typeof row.pendingUserActionRequestCount === 'number'
             ? row.pendingUserActionRequestCount > 0
@@ -220,7 +294,11 @@ function buildRenderableFromRowAndCache(
                 ? cachedEntry?.hasPendingUserActionRequests === true
                 : existingAgentStateMatches
                     ? existingRenderable?.hasPendingUserActionRequests === true
-                    : undefined;
+                    : currentAgentStateMatches
+                        ? currentRenderable?.hasPendingUserActionRequests === true
+                        : plainRenderable
+                            ? plainRenderable.hasPendingUserActionRequests === true
+                            : undefined;
     const lastViewedSessionSeq = normalizeLastViewedSessionSeq(row.lastViewedSessionSeq);
     const latestReadyEventSeq =
         normalizeSessionListSeq(row.latestReadyEventSeq ?? null)
@@ -230,7 +308,10 @@ function buildRenderableFromRowAndCache(
         ?? normalizeSessionListTimestamp(existingSession?.latestReadyEventAt ?? null);
     const pendingRequestObservedAt =
         normalizeSessionListTimestamp(row.pendingRequestObservedAt ?? null)
-        ?? normalizeSessionListTimestamp(existingRenderable?.pendingRequestObservedAt ?? null);
+        ?? normalizeSessionListTimestamp(existingRenderable?.pendingRequestObservedAt ?? null)
+        ?? normalizeSessionListTimestamp(currentRenderable?.pendingRequestObservedAt ?? null)
+        ?? normalizeSessionListTimestamp(plainRenderable?.pendingRequestObservedAt ?? null);
+    const runtimeActivityProjection = resolveSessionRuntimeActivityProjectionFields({}, row);
     const latestTurnStatus = row.latestTurnStatus ?? null;
     const latestTurnStatusObservedAt = row.latestTurnStatusObservedAt ?? null;
     const runtimePresence = resolveSessionRuntimePresenceFields({
@@ -289,10 +370,7 @@ function buildRenderableFromRowAndCache(
         hasPendingUserActionRequests,
         latestTurnStatus,
         latestTurnStatusObservedAt,
-        runtimeActivityActiveCount: row.runtimeActivityActiveCount,
-        runtimeActivityObservedAt: row.runtimeActivityObservedAt ?? null,
-        runtimeActivityExpiresAt: row.runtimeActivityExpiresAt ?? null,
-        runtimeActivitySourceClass: row.runtimeActivitySourceClass ?? null,
+        ...runtimeActivityProjection,
         lastRuntimeIssue: row.lastRuntimeIssue ?? null,
         latestReadyEventSeq,
         latestReadyEventAt,
@@ -311,10 +389,10 @@ function isCurrentRenderableCompleteForWarmHydration(
     if (currentRenderable.metadataVersion < row.metadataVersion) return false;
     if (currentRenderable.agentStateVersion < row.agentStateVersion) return false;
     if ((currentRenderable.archivedAt ?? null) !== (row.archivedAt ?? null)) return false;
+    if ((currentRenderable.runtimeActivityState ?? null) !== (row.runtimeActivityState ?? null)) return false;
     if ((currentRenderable.runtimeActivityActiveCount ?? null) !== (row.runtimeActivityActiveCount ?? null)) return false;
     if ((currentRenderable.runtimeActivityObservedAt ?? null) !== (row.runtimeActivityObservedAt ?? null)) return false;
-    if ((currentRenderable.runtimeActivityExpiresAt ?? null) !== (row.runtimeActivityExpiresAt ?? null)) return false;
-    if ((currentRenderable.runtimeActivitySourceClass ?? null) !== (row.runtimeActivitySourceClass ?? null)) return false;
+    if ((currentRenderable.runtimeActivityRevision ?? null) !== (row.runtimeActivityRevision ?? null)) return false;
     if (row.metadata != null && currentRenderable.metadata == null) return false;
     if (
         row.agentState != null
@@ -335,6 +413,7 @@ function needsWarmHydration(params: {
     isRequiredHydrationRow?: boolean;
 }): boolean {
     const { row } = params;
+    if (params.isRequiredHydrationRow) return true;
     const existingSession = params.existingSession;
     if (existingSession) {
         const existingMetadataMatches = existingSession.metadataVersion === row.metadataVersion
@@ -346,7 +425,6 @@ function needsWarmHydration(params: {
         }
         return true;
     }
-    if (params.isRequiredHydrationRow) return true;
     return !isCurrentRenderableCompleteForWarmHydration(row, params.currentRenderable);
 }
 
@@ -846,40 +924,7 @@ async function decryptSessionRow(
                             return { metadata, agentState };
                         })();
 
-                const latestTurnStatus = row.latestTurnStatus ?? null;
-                const latestTurnStatusObservedAt = row.latestTurnStatusObservedAt ?? null;
-                const runtimePresence = resolveSessionRuntimePresenceFields({
-                    thinking: row.thinking === true,
-                    thinkingAt: normalizeSessionListTimestamp(row.thinkingAt ?? null) ?? 0,
-                    latestTurnStatus,
-                    latestTurnStatusObservedAt,
-                });
-
-                return {
-                    ...row,
-                    serverId: typeof serverId === 'string' && serverId.trim().length > 0 ? serverId.trim() : undefined,
-                    encryptionMode,
-                    thinking: runtimePresence.thinking,
-                    thinkingAt: runtimePresence.thinkingAt,
-                    metadata: decryptedState.metadata,
-                    agentState: decryptedState.agentState,
-                    metadataUnavailable: row.metadata != null && decryptedState.metadata == null,
-                    accessLevel: normalizeAccessLevel(row.share?.accessLevel),
-                    canApprovePermissions: row.share?.canApprovePermissions ?? undefined,
-                    latestReadyEventSeq: normalizeSessionListSeq(row.latestReadyEventSeq ?? null),
-                    latestReadyEventAt: normalizeSessionListTimestamp(row.latestReadyEventAt ?? null),
-                    pendingRequestObservedAt: normalizeSessionListTimestamp(row.pendingRequestObservedAt ?? null),
-                    latestTurnStatus,
-                    latestTurnStatusObservedAt,
-                    runtimeActivityActiveCount: row.runtimeActivityActiveCount,
-                    runtimeActivityObservedAt: row.runtimeActivityObservedAt ?? null,
-                    runtimeActivityExpiresAt: row.runtimeActivityExpiresAt ?? null,
-                    runtimeActivitySourceClass: row.runtimeActivitySourceClass ?? null,
-                    rollbackEligibleTurnStarts: (row as Record<string, unknown>).rollbackEligibleTurnStarts === undefined
-                        ? null
-                        : readRollbackEligibleTurnStarts((row as Record<string, unknown>).rollbackEligibleTurnStarts),
-                    presence: row.active ? 'online' : row.activeAt,
-                };
+                return buildHydratedSessionFromDecryptedRow(row, encryptionMode, decryptedState, serverId);
             } catch (error) {
                 console.error(`[sessionsSnapshot] Failed to decrypt session ${row.id}`, error);
                 return null;
@@ -1348,6 +1393,7 @@ export async function fetchAndApplySessions(params: {
                 row,
                 cachedSessionListEntries[row.id],
                 params.getExistingSession?.(row.id),
+                params.getCurrentSessionListRenderable?.(row.id),
             )),
         );
         appliedRenderableCount = renderables.length;

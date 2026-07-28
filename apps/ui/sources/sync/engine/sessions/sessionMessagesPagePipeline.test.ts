@@ -11,6 +11,9 @@ function buildEncryptedApiMessage(params: {
     seq: number;
     updatedAt?: number;
     sidechainId?: string | null;
+    sourceCreatedAt?: number;
+    sourceUpdatedAt?: number;
+    transcriptObservationProvenance?: ApiMessage['transcriptObservationProvenance'];
 }): ApiMessage {
     return {
         id: params.id,
@@ -23,6 +26,11 @@ function buildEncryptedApiMessage(params: {
         },
         createdAt: 1_000 + params.seq,
         updatedAt: params.updatedAt ?? 2_000 + params.seq,
+        ...(params.sourceCreatedAt !== undefined ? { sourceCreatedAt: params.sourceCreatedAt } : {}),
+        ...(params.sourceUpdatedAt !== undefined ? { sourceUpdatedAt: params.sourceUpdatedAt } : {}),
+        ...(params.transcriptObservationProvenance !== undefined
+            ? { transcriptObservationProvenance: params.transcriptObservationProvenance }
+            : {}),
     };
 }
 
@@ -125,6 +133,55 @@ describe('runSessionMessagesPagePipeline', () => {
         });
     });
 
+    it('preserves authenticated transcript-observation metadata on normalized page messages', async () => {
+        const recoveredHistory = buildEncryptedApiMessage({
+            id: 'history-1',
+            seq: 42,
+            sourceCreatedAt: 100,
+            sourceUpdatedAt: 200,
+            transcriptObservationProvenance: {
+                kind: 'non_dependent',
+                source: 'history',
+            },
+        });
+        const request = vi.fn(async () => new Response(
+            JSON.stringify({ messages: [recoveredHistory], hasMore: false }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ));
+        const applyMessages = vi.fn();
+
+        await runSessionMessagesPagePipeline({
+            sessionId: 's1',
+            purpose: 'initial',
+            page: {
+                direction: 'initial',
+                requestPath: '/v1/sessions/s1/messages?limit=1',
+                scope: 'main',
+                sidechainId: null,
+                limit: 1,
+            },
+            lifecyclePolicy: 'suppress',
+            getSessionEncryption: () => ({
+                decryptMessages: async (messages: ApiMessage[]) => messages.map((message) => buildTextContent(message)),
+            }),
+            request,
+            sessionReceivedMessages: new Map<string, Map<string, number>>(),
+            applyMessages,
+            log: { log: () => {} },
+        });
+
+        expect(applyMessages.mock.calls[0]?.[1]?.[0]).toMatchObject({
+            id: 'history-1',
+            seq: 42,
+            sourceCreatedAt: 100,
+            sourceUpdatedAt: 200,
+            transcriptObservationProvenance: {
+                kind: 'non_dependent',
+                source: 'history',
+            },
+        });
+    });
+
     it('uses an explicit target-window purpose and lifecycle policy instead of treating newer-side target pages as live-tail newer pages', async () => {
         syncPerformanceTelemetry.configure({
             enabled: true,
@@ -179,5 +236,48 @@ describe('runSessionMessagesPagePipeline', () => {
         const requestEvent = events.find((event) => event.name === 'sync.sessions.messages.request');
         expect(requestEvent?.fields.targetWindow).toBe(1);
         expect(requestEvent?.fields.newer ?? 0).toBe(0);
+    });
+
+    it('does not emit live lifecycle effects for explicitly recovered history on an emitting page', async () => {
+        const recoveredLifecycle = buildEncryptedApiMessage({
+            id: 'history-lifecycle',
+            seq: 101,
+            sourceCreatedAt: 100,
+            sourceUpdatedAt: 200,
+            transcriptObservationProvenance: {
+                kind: 'non_dependent',
+                source: 'history',
+            },
+        });
+        const request = vi.fn(async () => new Response(
+            JSON.stringify({ messages: [recoveredLifecycle], hasMore: false }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ));
+        const applyMessages = vi.fn();
+        const onTaskLifecycleEvent = vi.fn();
+
+        await runSessionMessagesPagePipeline({
+            sessionId: 's1',
+            purpose: 'newer',
+            page: {
+                direction: 'newer',
+                requestPath: '/v1/sessions/s1/messages?afterSeq=100&limit=1',
+                scope: 'main',
+                sidechainId: null,
+                afterSeq: 100,
+                limit: 1,
+            },
+            lifecyclePolicy: 'emit',
+            getSessionEncryption: () => ({
+                decryptMessages: async (messages: ApiMessage[]) => messages.map((message) => buildLifecycleContent(message)),
+            }),
+            request,
+            sessionReceivedMessages: new Map<string, Map<string, number>>(),
+            applyMessages,
+            onTaskLifecycleEvent,
+            log: { log: () => {} },
+        });
+
+        expect(onTaskLifecycleEvent).not.toHaveBeenCalled();
     });
 });

@@ -17,7 +17,7 @@ import {
     type SessionMessagesPageOptions,
 } from './sessionMessagesPagePipeline';
 import {
-    resolveSessionRuntimeActivityProjectionFields,
+    buildSessionRuntimeActivityProjectionPatch,
 } from './sessionRuntimeActivityProjection';
 export { handleNewMessageSocketUpdate } from './sessionSocketUpdate';
 export { handleMessageUpdatedSocketUpdate } from './sessionSocketUpdate';
@@ -123,7 +123,7 @@ export function buildUpdatedSessionProjectionFromSocketUpdate(params: {
         ?? (typeof updateBody.thinking === 'boolean' || updateBody.active === false
             ? projectedActiveAt
             : session.thinkingAt);
-    const runtimeActivityProjection = resolveSessionRuntimeActivityProjectionFields(session, updateBody);
+    const runtimeActivityPatch = buildSessionRuntimeActivityProjectionPatch(session, updateBody);
 
     return {
         ...session,
@@ -188,10 +188,7 @@ export function buildUpdatedSessionProjectionFromSocketUpdate(params: {
                 : updateBody.latestTurnStatusObservedAt === null
                     ? null
                     : session.latestTurnStatusObservedAt,
-        runtimeActivityActiveCount: runtimeActivityProjection.runtimeActivityActiveCount,
-        runtimeActivityObservedAt: runtimeActivityProjection.runtimeActivityObservedAt,
-        runtimeActivityExpiresAt: runtimeActivityProjection.runtimeActivityExpiresAt,
-        runtimeActivitySourceClass: runtimeActivityProjection.runtimeActivitySourceClass,
+        ...runtimeActivityPatch,
         lastRuntimeIssue:
             updateBody.lastRuntimeIssue === null
             || (updateBody.lastRuntimeIssue && typeof updateBody.lastRuntimeIssue === 'object')

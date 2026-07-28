@@ -343,10 +343,10 @@ describe('fetchAndApplySessions (/v2/sessions snapshot)', () => {
                         encryptionMode: 'plain',
                         metadata: JSON.stringify({ path: '/repo', host: 'host' }),
                         agentState: JSON.stringify({}),
+                        runtimeActivityState: 'active',
                         runtimeActivityActiveCount: 1,
                         runtimeActivityObservedAt: 1_000,
-                        runtimeActivityExpiresAt: 2_000,
-                        runtimeActivitySourceClass: 'provider_detached_task',
+                        runtimeActivityRevision: 1,
                     }),
                 ],
                 nextCursor: null,
@@ -371,11 +371,72 @@ describe('fetchAndApplySessions (/v2/sessions snapshot)', () => {
             expect.objectContaining({
                 id: 'runtime-active',
                 runtimeActivityActiveCount: 1,
+                runtimeActivityState: 'active',
                 runtimeActivityObservedAt: 1_000,
-                runtimeActivityExpiresAt: 2_000,
-                runtimeActivitySourceClass: 'provider_detached_task',
+                runtimeActivityRevision: 1,
             }),
         ], { replace: true });
+    });
+
+    it('hydrates a required changed session when only its runtime activity tuple advanced', async () => {
+        const requestSpy = vi.fn(async () =>
+            jsonResponse({
+                sessions: [
+                    buildSessionRow({
+                        id: 'runtime-transition',
+                        encryptionMode: 'plain',
+                        metadata: JSON.stringify({ path: '/repo', host: 'host' }),
+                        metadataVersion: 1,
+                        agentState: JSON.stringify({}),
+                        agentStateVersion: 0,
+                        runtimeActivityState: 'idle',
+                        runtimeActivityActiveCount: 0,
+                        runtimeActivityObservedAt: 2_000,
+                        runtimeActivityRevision: 35,
+                    }),
+                ],
+                nextCursor: null,
+                hasNext: false,
+            }),
+        );
+        const { encryption } = createEncryptionHarness();
+        const applySessions = vi.fn();
+        const existingSession = buildExistingSession({
+            id: 'runtime-transition',
+            metadata: { path: '/repo', host: 'host' },
+            metadataVersion: 1,
+            agentState: {},
+            agentStateVersion: 0,
+            runtimeActivityState: 'active',
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 1_000,
+            runtimeActivityRevision: 34,
+        });
+
+        await fetchAndApplySessions({
+            credentials: { token: 't', secret: 's' } as AuthCredentials,
+            encryption,
+            sessionDataKeys: new Map<string, Uint8Array>(),
+            request: requestSpy,
+            applySessions,
+            applySessionListRenderables: vi.fn(),
+            getExistingSession: () => existingSession,
+            getCurrentSessionListRenderable: () => buildSessionListRenderableFromSession(existingSession),
+            requiredHydrationSessionIds: ['runtime-transition'],
+            awaitSessionListHydration: true,
+            repairInvalidReadStateV1: async () => {},
+            log: { log: () => {} },
+        });
+
+        expect(applySessions).toHaveBeenCalledWith([
+            expect.objectContaining({
+                id: 'runtime-transition',
+                runtimeActivityState: 'idle',
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: 2_000,
+                runtimeActivityRevision: 35,
+            }),
+        ]);
     });
 
     it('does not send canonical pinned ids to /v2/sessions and still de-duplicates rows', async () => {
@@ -1092,6 +1153,197 @@ describe('fetchAndApplySessions (/v2/sessions snapshot)', () => {
         );
     });
 
+    it('builds plaintext row renderables synchronously equivalent to plain hydration without enqueueing hydration', async () => {
+        const plainRow = buildSessionRow({
+            id: 's_plain_renderable',
+            seq: 7,
+            createdAt: 100,
+            updatedAt: 500,
+            active: true,
+            activeAt: 450,
+            encryptionMode: 'plain',
+            metadata: JSON.stringify({
+                name: 'Plain row title',
+                summary: { text: 'Plain summary', updatedAt: 490 },
+                path: '/work/plain',
+                homeDir: '/work',
+                host: 'dev-host',
+                machineId: 'machine-1',
+                flavor: 'codex',
+                directSessionV1: { v: 1, providerId: 'codex' },
+                readStateV1: { v: 1, sessionSeq: 3, pendingActivityAt: 0, updatedAt: 480 },
+            }),
+            metadataVersion: 3,
+            agentState: JSON.stringify({
+                requests: {
+                    req_user_action: {
+                        tool: 'AskUserQuestion',
+                        arguments: { question: 'Choose one' },
+                        createdAt: 470,
+                    },
+                },
+                completedRequests: {},
+            }),
+            agentStateVersion: 4,
+            latestReadyEventSeq: 6,
+            latestReadyEventAt: 490,
+            latestTurnStatus: 'completed',
+            latestTurnStatusObservedAt: 495,
+        });
+
+        const renderableRequest = vi.fn(async () =>
+            jsonResponse({ sessions: [plainRow], nextCursor: null, hasNext: false }),
+        );
+        const hydratedRequest = vi.fn(async () =>
+            jsonResponse({ sessions: [plainRow], nextCursor: null, hasNext: false }),
+        );
+        const { encryption } = createEncryptionHarness();
+        const currentRenderables: Record<string, SessionListRenderableSession> = {};
+        const renderableApplySessions = vi.fn();
+        const applySessionListRenderables = vi.fn((renderables: SessionListRenderableSession[]) => {
+            for (const renderable of renderables) {
+                currentRenderables[renderable.id] = renderable;
+            }
+        });
+
+        syncPerformanceTelemetry.configure({
+            enabled: true,
+            slowThresholdMs: 1_000_000,
+            flushIntervalMs: 60_000,
+        });
+        syncPerformanceTelemetry.reset();
+
+        await fetchAndApplySessions({
+            credentials: { token: 't', secret: 's' },
+            encryption,
+            sessionDataKeys: new Map<string, Uint8Array>(),
+            request: renderableRequest,
+            applySessions: renderableApplySessions,
+            applySessionListRenderables,
+            getCurrentSessionListRenderable: (sessionId) => currentRenderables[sessionId] ?? null,
+            repairInvalidReadStateV1: async () => {},
+            log: { log: () => {} },
+            sessionListBackgroundHydrationMaxRows: 0,
+        });
+
+        const hydratedSessions: Session[] = [];
+        await fetchAndApplySessions({
+            credentials: { token: 't', secret: 's' },
+            encryption,
+            sessionDataKeys: new Map<string, Uint8Array>(),
+            request: hydratedRequest,
+            applySessions: (sessions) => {
+                hydratedSessions.push(...(sessions as Session[]));
+            },
+            repairInvalidReadStateV1: async () => {},
+            log: { log: () => {} },
+        });
+
+        const syncRenderable = currentRenderables.s_plain_renderable;
+        const hydratedRenderable = buildSessionListRenderableFromSession(hydratedSessions[0]!);
+        expect(syncRenderable).toEqual(hydratedRenderable);
+        expect(syncRenderable).toEqual(expect.objectContaining({
+            metadata: expect.objectContaining({
+                name: 'Plain row title',
+                summaryText: 'Plain summary',
+                path: '/work/plain',
+                host: 'dev-host',
+            }),
+            hasPendingUserActionRequests: true,
+        }));
+        expect(renderableApplySessions).not.toHaveBeenCalled();
+        const hydrationCandidatesEvent = syncPerformanceTelemetry.snapshot().events.find(
+            (event) => event.name === 'sync.sessions.snapshot.hydrationCandidates',
+        );
+        expect(hydrationCandidatesEvent?.fields).toEqual(expect.objectContaining({
+            candidateRows: 0,
+            alreadyWarmRows: 1,
+        }));
+    });
+
+    it('reuses current plaintext renderable metadata when the row version is unchanged and parsing would fail', async () => {
+        const plainRow = buildSessionRow({
+            id: 's_plain_current_cache',
+            seq: 7,
+            createdAt: 100,
+            updatedAt: 500,
+            active: true,
+            activeAt: 450,
+            encryptionMode: 'plain',
+            metadata: '{broken-json',
+            metadataVersion: 3,
+            agentState: JSON.stringify({}),
+            agentStateVersion: 4,
+        });
+        const currentRenderable: SessionListRenderableSession = {
+            id: 's_plain_current_cache',
+            seq: 7,
+            createdAt: 100,
+            updatedAt: 500,
+            active: true,
+            activeAt: 450,
+            metadataVersion: 3,
+            agentStateVersion: 4,
+            metadata: {
+                name: 'Cached current title',
+                path: '/work/current',
+                host: 'current-host',
+            },
+            thinking: false,
+            thinkingAt: 0,
+            presence: 'online',
+            hasPendingPermissionRequests: false,
+            hasPendingUserActionRequests: false,
+        };
+        const currentRenderables: Record<string, SessionListRenderableSession> = {
+            s_plain_current_cache: currentRenderable,
+        };
+        const requestSpy = vi.fn(async () =>
+            jsonResponse({ sessions: [plainRow], nextCursor: null, hasNext: false }),
+        );
+        const { encryption } = createEncryptionHarness();
+        const applySessions = vi.fn();
+        const applySessionListRenderables = vi.fn((renderables: SessionListRenderableSession[]) => {
+            for (const renderable of renderables) {
+                currentRenderables[renderable.id] = renderable;
+            }
+        });
+
+        syncPerformanceTelemetry.configure({
+            enabled: true,
+            slowThresholdMs: 1_000_000,
+            flushIntervalMs: 60_000,
+        });
+        syncPerformanceTelemetry.reset();
+
+        await fetchAndApplySessions({
+            credentials: { token: 't', secret: 's' },
+            encryption,
+            sessionDataKeys: new Map<string, Uint8Array>(),
+            request: requestSpy,
+            applySessions,
+            applySessionListRenderables,
+            getCurrentSessionListRenderable: (sessionId) => currentRenderables[sessionId] ?? null,
+            repairInvalidReadStateV1: async () => {},
+            log: { log: () => {} },
+            sessionListBackgroundHydrationMaxRows: 0,
+        });
+
+        expect(currentRenderables.s_plain_current_cache?.metadata).toEqual(expect.objectContaining({
+            name: 'Cached current title',
+            path: '/work/current',
+            host: 'current-host',
+        }));
+        expect(applySessions).not.toHaveBeenCalled();
+        const hydrationCandidatesEvent = syncPerformanceTelemetry.snapshot().events.find(
+            (event) => event.name === 'sync.sessions.snapshot.hydrationCandidates',
+        );
+        expect(hydrationCandidatesEvent?.fields).toEqual(expect.objectContaining({
+            candidateRows: 0,
+            alreadyWarmRows: 1,
+        }));
+    });
+
     it('projects canonical readable activity into first-usable session list renderables', async () => {
         const requestSpy = vi.fn(async () =>
             jsonResponse({
@@ -1234,6 +1486,10 @@ describe('fetchAndApplySessions (/v2/sessions snapshot)', () => {
                         latestReadyEventAt: 2_200,
                         latestTurnStatus: 'in_progress',
                         latestTurnStatusObservedAt: 1_900,
+                        runtimeActivityState: 'unknown',
+                        runtimeActivityActiveCount: 0,
+                        runtimeActivityObservedAt: null,
+                        runtimeActivityRevision: 0,
                         encryptionMode: 'plain',
                         metadata: JSON.stringify({ path: '/repo/projected', host: 'dev' }),
                         agentState: JSON.stringify({}),

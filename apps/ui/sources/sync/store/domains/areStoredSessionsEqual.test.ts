@@ -84,19 +84,15 @@ describe('areStoredSessionsEqual', () => {
         )).toBe(false);
     });
 
-    it('detects runtime activity projection changes so raw lease updates are retained', () => {
+    it('detects runtime activity projection changes so higher revisions are retained', () => {
         expect(areStoredSessionsEqual(
             session({
                 runtimeActivityActiveCount: 1,
                 runtimeActivityObservedAt: 100,
-                runtimeActivityExpiresAt: 200,
-                runtimeActivitySourceClass: 'provider_detached_task',
             }),
             session({
                 runtimeActivityActiveCount: 1,
                 runtimeActivityObservedAt: 150,
-                runtimeActivityExpiresAt: 250,
-                runtimeActivitySourceClass: 'provider_detached_task',
             }),
         )).toBe(false);
     });
@@ -106,14 +102,25 @@ describe('areStoredSessionsEqual', () => {
             session({
                 runtimeActivityActiveCount: 0,
                 runtimeActivityObservedAt: null,
-                runtimeActivityExpiresAt: null,
-                runtimeActivitySourceClass: null,
             }),
             session({
                 runtimeActivityActiveCount: 1,
                 runtimeActivityObservedAt: 100,
-                runtimeActivityExpiresAt: 200,
-                runtimeActivitySourceClass: 'provider_detached_task',
+            }),
+        )).toBe(false);
+    });
+
+    it('detects explicit v2 state and revision changes without lease timestamps', () => {
+        expect(areStoredSessionsEqual(
+            session({
+                runtimeActivityState: 'unknown',
+                runtimeActivityActiveCount: 0,
+                runtimeActivityRevision: 8,
+            }),
+            session({
+                runtimeActivityState: 'idle',
+                runtimeActivityActiveCount: 0,
+                runtimeActivityRevision: 9,
             }),
         )).toBe(false);
     });

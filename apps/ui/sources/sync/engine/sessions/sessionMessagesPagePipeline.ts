@@ -7,6 +7,10 @@ import { readStoredSessionMessage } from '@/sync/runtime/readStoredSessionConten
 import { writeSyncDebugLog } from '@/sync/runtime/syncDebugLogging';
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 import { normalizeRawMessage, type NormalizedMessage } from '@/sync/typesRaw';
+import {
+    applyTranscriptObservationMetadata,
+    isRecoveredHistoryTranscriptObservation,
+} from '@/sync/domains/messages/transcriptObservationProvenance';
 import { getTaskLifecycleEventFromRawContent, type TaskLifecycleEvent } from './taskLifecycle';
 
 export type SessionMessagesEncryption = {
@@ -415,7 +419,7 @@ export async function runSessionMessagesPagePipeline(params: {
             if (isLegacyMemoryArtifactTranscriptRow(decrypted)) {
                 continue;
             }
-            if (params.lifecyclePolicy === 'emit') {
+            if (params.lifecyclePolicy === 'emit' && !isRecoveredHistoryTranscriptObservation(inputMessage)) {
                 const lifecycleEvent = getTaskLifecycleEventFromRawContent(decrypted.content, decrypted.createdAt);
                 if (lifecycleEvent) {
                     params.onTaskLifecycleEvent?.(lifecycleEvent);
@@ -426,6 +430,7 @@ export async function runSessionMessagesPagePipeline(params: {
                 messageRole: decrypted.messageRole ?? undefined,
             });
             if (normalized) {
+                applyTranscriptObservationMetadata(normalized, inputMessage);
                 applySidechainScopeMetadata({
                     normalizedMessage: normalized,
                     inputSidechainId: inputMessage?.sidechainId,

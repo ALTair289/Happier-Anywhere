@@ -69,6 +69,7 @@ import {
 import {
     isTerminalPrimaryTurnStatus,
     resolveSessionRuntimePresenceFields,
+    SESSION_RESUMING_PRESENTATION_TIMEOUT_MS,
 } from '../../domains/session/attention/deriveSessionRuntimePresentationState';
 import { setActiveServerSessionListCache } from '../sessionListCache';
 import { getActiveServerSnapshot } from '../../domains/server/serverRuntime';
@@ -162,6 +163,8 @@ export type SessionsDomain = {
     updateSessionDraft: (sessionId: string, draft: string | null) => void;
     markSessionOptimisticThinking: (sessionId: string) => void;
     clearSessionOptimisticThinking: (sessionId: string) => void;
+    markSessionResuming: (sessionId: string) => void;
+    clearSessionResuming: (sessionId: string) => void;
     clearSessionThinkingGrace: (sessionId: string) => void;
     markSessionViewed: (sessionId: string) => void;
     updateSessionPermissionMode: (sessionId: string, mode: PermissionMode) => void;
@@ -259,6 +262,11 @@ const optimisticThinkingTimeouts = createKeyedTimeoutScheduler();
 // between "working" and "online" between output chunks.
 const SESSION_THINKING_GRACE_TIMEOUT_MS = 3_000;
 const thinkingGraceTimeouts = createKeyedTimeoutScheduler();
+
+// UI-only "resuming" lifecycle marker (single owner). Set at resume initiation and cleared on the
+// first post-attach activity; a bounded decay timer guarantees a crashed/never-settling resume
+// cannot latch the indicator forever.
+const resumingTimeouts = createKeyedTimeoutScheduler();
 
 let actionDraftIdCounter = 0;
 function createActionDraftId(nowMs: number): string {
@@ -719,6 +727,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                 const existingModelModeUpdatedAt = previousSession?.modelModeUpdatedAt;
                 const savedModelModeUpdatedAt = savedModelModeUpdatedAts[session.id];
                 const existingOptimisticThinkingAt = previousSession?.optimisticThinkingAt ?? null;
+                const existingResumingAt = previousSession?.resumingAt ?? null;
                 const existingThinkingGraceUntil = previousSession?.thinkingGraceUntil ?? null;
                 const runtimePresence = resolveSessionRuntimePresenceFields({
                     thinking: session.thinking,
@@ -861,6 +870,33 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                     thinkingGraceTimeouts.cancel(session.id);
                 }
 
+                const mergedOptimisticThinkingAt = runtimePresence.thinking ? null : existingOptimisticThinkingAt;
+
+                // Resuming lifecycle (single owner): preserve the explicit marker until the first
+                // post-attach activity settles it. Settle only on genuine NEW activity — real
+                // thinking, an advanced turn boundary / ready / meaningful event relative to the
+                // previous snapshot, or a live-and-idle reconnect with no pending optimistic work.
+                // A mere presence heartbeat (which creeps activeAt without advancing frozen event
+                // timestamps) never settles or resurrects the marker.
+                let mergedResumingAt = existingResumingAt;
+                if (existingResumingAt !== null) {
+                    const isLiveOwner = presence === 'online' && session.active === true;
+                    const activityAdvanced =
+                        (session.latestTurnStatusObservedAt ?? 0) > (previousSession?.latestTurnStatusObservedAt ?? 0)
+                        || (session.meaningfulActivityAt ?? 0) > (previousSession?.meaningfulActivityAt ?? 0)
+                        || (session.latestReadyEventAt ?? 0) > (previousSession?.latestReadyEventAt ?? 0);
+                    const connectedIdleWithoutPendingWork =
+                        isLiveOwner && hasTerminalTurnProjection && mergedOptimisticThinkingAt === null;
+                    const shouldSettleResuming =
+                        runtimePresence.thinking === true
+                        || (isLiveOwner && activityAdvanced)
+                        || connectedIdleWithoutPendingWork;
+                    if (shouldSettleResuming) {
+                        mergedResumingAt = null;
+                        resumingTimeouts.cancel(session.id);
+                    }
+                }
+
                 const nextSession: Session = {
                     ...session,
                     ...resolveMergedSessionReadyEvent({
@@ -873,7 +909,8 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                     draft: hasLoadedSession
                         ? (existingDraft ?? null)
                         : (savedDraft ?? session.draft ?? null),
-                    optimisticThinkingAt: runtimePresence.thinking ? null : existingOptimisticThinkingAt,
+                    optimisticThinkingAt: mergedOptimisticThinkingAt,
+                    resumingAt: mergedResumingAt,
                     thinkingGraceUntil: mergedThinkingGraceUntil,
                     permissionMode: mergedPermissionMode,
                     // Preserve local coordination timestamp (not synced to server)
@@ -1668,6 +1705,119 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                 sessions: nextSessions,
             };
         }),
+        markSessionResuming: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+            const resumingAt = Date.now();
+
+            const nextSessions = {
+                ...state.sessions,
+                [sessionId]: {
+                    ...session,
+                    resumingAt,
+                },
+            };
+
+            resumingTimeouts.schedule(sessionId, SESSION_RESUMING_PRESENTATION_TIMEOUT_MS, () => {
+                set((s) => {
+                    const current = s.sessions[sessionId];
+                    if (!current) return s;
+                    if (current.resumingAt !== resumingAt) return s;
+                    const currentRenderable = s.sessionListRenderables[sessionId];
+                    const nextRenderables = currentRenderable?.resumingAt === resumingAt
+                        ? {
+                            ...s.sessionListRenderables,
+                            [sessionId]: {
+                                ...currentRenderable,
+                                resumingAt: null,
+                            },
+                        }
+                        : s.sessionListRenderables;
+                    const nextStateBase = {
+                        ...s,
+                        sessions: {
+                            ...s.sessions,
+                            [sessionId]: {
+                                ...current,
+                                resumingAt: null,
+                            },
+                        },
+                        sessionListRenderables: nextRenderables,
+                    };
+                    const shouldRebuildSessionListViewData = nextRenderables !== s.sessionListRenderables
+                        && shouldRebuildOnSessionPlacementFieldsChange(s.settings);
+                    return {
+                        ...nextStateBase,
+                        sessionListViewData: shouldRebuildSessionListViewData
+                            ? buildSessionListViewDataForState(nextStateBase)
+                            : s.sessionListViewData,
+                    };
+                });
+            });
+
+            const renderable = state.sessionListRenderables[sessionId];
+            const nextRenderables = renderable && (renderable.resumingAt ?? null) !== resumingAt
+                ? {
+                    ...state.sessionListRenderables,
+                    [sessionId]: {
+                        ...renderable,
+                        resumingAt,
+                    },
+                }
+                : state.sessionListRenderables;
+            const nextStateBase = {
+                ...state,
+                sessions: nextSessions,
+                sessionListRenderables: nextRenderables,
+            };
+            const shouldRebuildSessionListViewData = nextRenderables !== state.sessionListRenderables
+                && shouldRebuildOnSessionPlacementFieldsChange(state.settings);
+
+            return {
+                ...nextStateBase,
+                sessionListViewData: shouldRebuildSessionListViewData
+                    ? buildSessionListViewDataForState(nextStateBase)
+                    : state.sessionListViewData,
+            };
+        }),
+        clearSessionResuming: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+            if (!session.resumingAt) return state;
+
+            resumingTimeouts.cancel(sessionId);
+
+            const renderable = state.sessionListRenderables[sessionId];
+            const nextRenderables = renderable && (renderable.resumingAt ?? null) !== null
+                ? {
+                    ...state.sessionListRenderables,
+                    [sessionId]: {
+                        ...renderable,
+                        resumingAt: null,
+                    },
+                }
+                : state.sessionListRenderables;
+            const nextStateBase = {
+                ...state,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: {
+                        ...session,
+                        resumingAt: null,
+                    },
+                },
+                sessionListRenderables: nextRenderables,
+            };
+            const shouldRebuildSessionListViewData = nextRenderables !== state.sessionListRenderables
+                && shouldRebuildOnSessionPlacementFieldsChange(state.settings);
+
+            return {
+                ...nextStateBase,
+                sessionListViewData: shouldRebuildSessionListViewData
+                    ? buildSessionListViewDataForState(nextStateBase)
+                    : state.sessionListViewData,
+            };
+        }),
         clearSessionThinkingGrace: (sessionId: string) => set((state) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
@@ -1967,6 +2117,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
         },
         deleteSession: (sessionId: string) => set((state) => {
             optimisticThinkingTimeouts.cancel(sessionId);
+            resumingTimeouts.cancel(sessionId);
             thinkingGraceTimeouts.cancel(sessionId);
 
 	            // Remove session from sessions

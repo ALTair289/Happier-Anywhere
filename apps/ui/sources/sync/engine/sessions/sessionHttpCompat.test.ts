@@ -10,7 +10,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe('fetchSessionListPageCompat', () => {
-    it('preserves public runtime activity projection fields when coercing legacy session rows', async () => {
+    it('does not reinterpret incomplete session-row projections as current activity', async () => {
         const request = vi.fn(async (path: string) => {
             if (path === '/v2/sessions?limit=50') {
                 return jsonResponse({ error: 'Not found', path: '/v2/sessions' }, 404);
@@ -31,8 +31,6 @@ describe('fetchSessionListPageCompat', () => {
                         dataEncryptionKey: null,
                         runtimeActivityActiveCount: 2,
                         runtimeActivityObservedAt: 40,
-                        runtimeActivityExpiresAt: 50,
-                        runtimeActivitySourceClass: 'provider_detached_task',
                     }],
                 });
             }
@@ -46,11 +44,9 @@ describe('fetchSessionListPageCompat', () => {
         });
 
         expect(page.source).toBe('v1');
-        expect(page.sessions[0]).toEqual(expect.objectContaining({
-            runtimeActivityActiveCount: 2,
-            runtimeActivityObservedAt: 40,
-            runtimeActivityExpiresAt: 50,
-            runtimeActivitySourceClass: 'provider_detached_task',
+        expect(page.sessions[0]).not.toEqual(expect.objectContaining({
+            runtimeActivityRevision: expect.anything(),
         }));
     });
+
 });

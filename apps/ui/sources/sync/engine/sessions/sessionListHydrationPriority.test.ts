@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest';
 
-import { orderRowsForSessionListHydration } from './sessionListHydrationPriority';
+import {
+    isSessionListRowAttentionHydrationPriority,
+    orderRowsForSessionListHydration,
+} from './sessionListHydrationPriority';
 
 describe('orderRowsForSessionListHydration', () => {
+    it.each(['active', 'unknown', 'idle'] as const)(
+        'does not prioritize canonical %s runtime activity when deciding hydration',
+        (state) => {
+            const rowWithRuntimeActivity = {
+                pendingPermissionRequestCount: 0,
+                runtimeActivityState: state,
+            };
+            expect(isSessionListRowAttentionHydrationPriority(rowWithRuntimeActivity)).toBe(false);
+        },
+    );
+
     it('keeps required and route ids ahead of active viewing ids', () => {
         const params = {
             rows: [
