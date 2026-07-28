@@ -50,7 +50,6 @@ export default React.memo(function SessionSettingsScreen() {
     const [sessionListActiveColorMode, setSessionListActiveColorMode] = useSettingMutable('sessionListActiveColorModeV1');
     const [sessionListAttentionPromotionMode, setSessionListAttentionPromotionMode] = useSettingMutable('sessionListAttentionPromotionModeV1');
     const [sessionListWorkingPlacementMode, setSessionListWorkingPlacementMode] = useSettingMutable('sessionListWorkingPlacementModeV1');
-    const [sessionListSeparateBackgroundWork, setSessionListSeparateBackgroundWork] = useSettingMutable('sessionListSeparateBackgroundWork');
     const [workspacePathDisplayModeV1, setWorkspacePathDisplayModeV1] = useSettingMutable('workspacePathDisplayModeV1');
     const [workspaceFaviconsEnabled, setWorkspaceFaviconsEnabled] = useSettingMutable('workspaceFaviconsEnabled');
     const [workspaceMachineSubtitlesEnabled, setWorkspaceMachineSubtitlesEnabled] = useSettingMutable('workspaceMachineSubtitlesEnabled');
@@ -799,21 +798,6 @@ export default React.memo(function SessionSettingsScreen() {
                     }}
                     items={sessionListWorkingPlacementModeItems}
                     onSelect={handleSessionListWorkingPlacementModeSelect}
-                />
-                <Item
-                    title={t('settingsSession.sessionList.separateBackgroundWorkTitle')}
-                    subtitle={sessionListSeparateBackgroundWork === true
-                        ? t('settingsSession.sessionList.separateBackgroundWorkEnabledSubtitle')
-                        : t('settingsSession.sessionList.separateBackgroundWorkDisabledSubtitle')}
-                    icon={<Ionicons name="layers-outline" size={29} color={theme.colors.accent.indigo} />}
-                    rightElement={
-                        <Switch
-                            value={sessionListSeparateBackgroundWork === true}
-                            onValueChange={(next) => setSessionListSeparateBackgroundWork(Boolean(next))}
-                        />
-                    }
-                    showChevron={false}
-                    onPress={() => setSessionListSeparateBackgroundWork(sessionListSeparateBackgroundWork !== true)}
                 />
                 <DropdownMenu
                     open={openWorkingIndicatorMenu}
