@@ -5,7 +5,10 @@ import { parseEnvToObject } from '../utils/env/dotenv.mjs';
 import { getWorkspaceDir, resolveStackEnvPath } from '../utils/paths/paths.mjs';
 import { stackExistsSync } from '../utils/stack/stacks.mjs';
 import { STACK_WRAPPER_PRESERVE_KEYS, scrubHappierStackEnv } from '../utils/env/scrub_env.mjs';
-import { applyStackActiveServerScopeEnv } from '../utils/auth/stable_scope_id.mjs';
+import {
+  applyStackActiveServerScopeEnv,
+  applyStackDaemonLifecycleScopeEnv,
+} from '../utils/auth/stable_scope_id.mjs';
 import { getStackRuntimeStatePath, isPidAlive, readStackRuntimeStateFile } from '../utils/stack/runtime_state.mjs';
 import { readStackRuntimeStateWithDaemonSync } from '../utils/stack/runtime_daemon_state.mjs';
 import { checkDaemonStatePingAware } from '../daemon.mjs';
@@ -116,6 +119,11 @@ export async function withStackEnv({
     ...extraEnv,
   };
   env = applyStackActiveServerScopeEnv({
+    env,
+    stackName,
+    cliIdentity: (env.HAPPIER_STACK_CLI_IDENTITY ?? '').toString().trim() || 'default',
+  });
+  env = applyStackDaemonLifecycleScopeEnv({
     env,
     stackName,
     cliIdentity: (env.HAPPIER_STACK_CLI_IDENTITY ?? '').toString().trim() || 'default',

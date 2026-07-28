@@ -144,6 +144,31 @@ test('withStackEnv preserves explicit local stack runtime override env vars from
   });
 });
 
+test('withStackEnv replaces a foreign daemon lifecycle scope with the selected stack scope', async () => {
+  await withTempStackEnvFixture(async ({ stackName }) => {
+    const previousActiveServerId = process.env.HAPPIER_ACTIVE_SERVER_ID;
+    const previousLifecycleScopeId = process.env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID;
+    process.env.HAPPIER_ACTIVE_SERVER_ID = 'stack_other__id_default';
+    process.env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID = 'stack_other__id_default';
+
+    try {
+      await withStackEnv({
+        stackName,
+        reconcileDaemonRuntimeState: false,
+        fn: async ({ env }) => {
+          assert.equal(env.HAPPIER_ACTIVE_SERVER_ID, 'stack_sanitize__id_default');
+          assert.equal(env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID, 'stack_sanitize__id_default');
+        },
+      });
+    } finally {
+      if (typeof previousActiveServerId === 'undefined') delete process.env.HAPPIER_ACTIVE_SERVER_ID;
+      else process.env.HAPPIER_ACTIVE_SERVER_ID = previousActiveServerId;
+      if (typeof previousLifecycleScopeId === 'undefined') delete process.env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID;
+      else process.env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID = previousLifecycleScopeId;
+    }
+  });
+});
+
 test('withStackEnv does not carry a foreign stack Expo port allocation into the selected stack', async () => {
   await withTempStackEnvFixture(async ({ stackName, storageDir }) => {
     const keys = [
