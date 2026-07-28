@@ -636,7 +636,6 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
         }),
         [isPinnedSession, scopedMutationServerId, session, sessionStatus.isConnected],
     );
-    const canStopSession = sessionActionTarget.canStop;
     const canArchiveSession = sessionActionTarget.canArchive;
     const canDeleteSession = sessionActionTarget.canDelete;
     const visibleSessionActionIds = React.useMemo(
@@ -1136,7 +1135,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             onPress={() => router.push(routeScope.buildHref(session.id, { suffix: '/sharing' }))}
                         />
                     )}
-                    {sessionStatus.isConnected && canStopSession && stopInfoItemProps && (
+                    {visibleSessionActionIds.has(SESSION_ACTION_STOP_ID) && stopInfoItemProps && (
                         <Item
                             {...stopInfoItemProps}
                             onPress={handleStopSession}
