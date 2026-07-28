@@ -204,6 +204,75 @@ describe('ComposerKeyboardScrollInset', () => {
         expect(onHeightChange).toHaveBeenLastCalledWith(134);
     });
 
+    it('never republishes a superseded inset when the subscription re-subscribes', async () => {
+        // Send collapses the composer: the writer notifies the new total, but the shared
+        // values it wrote in the same pass still read the PRE-collapse composer height
+        // (guest-runtime writes are async). Any consumer identity churn re-runs this
+        // effect, and re-deriving the inset there republishes that superseded total to the
+        // transcript viewport owner as a geometry change that never happened.
+        const listeners = new Set<(height: number) => void>();
+        let notifiedInset = 200;
+        const layout = {
+            ...createMockComposerKeyboardLayout({
+                bottomInset: 66,
+                composerHeight: 134, // stale read: the composer already collapsed to 58
+                keyboardHeightForInset: 66,
+                listBottomInset: 200, // stale read: the writer just computed 124
+            }),
+            subscribeListBottomInset: (listener: (height: number) => void) => {
+                listeners.add(listener);
+                listener(notifiedInset);
+                return () => {
+                    listeners.delete(listener);
+                };
+            },
+        } satisfies ComposerKeyboardLayout;
+
+        const onHeightChangeBeforeSend = vi.fn();
+        const screen = await renderScreen(
+            <ComposerKeyboardProvider layout={layout}>
+                <ComposerKeyboardScrollInset
+                    testID="transcript-composer-keyboard-inset"
+                    onHeightChange={onHeightChangeBeforeSend}
+                />
+            </ComposerKeyboardProvider>,
+        );
+
+        const readHeight = () => {
+            const node = screen.findByTestId('transcript-composer-keyboard-inset');
+            if (!node) {
+                throw new Error('Expected transcript composer keyboard inset to render.');
+            }
+            const styles = Array.isArray(node.props.style) ? node.props.style : [node.props.style];
+            return styles.reduce<number | undefined>((height, style) => (
+                typeof style?.height === 'number' ? style.height : height
+            ), undefined);
+        };
+
+        expect(readHeight()).toBe(200);
+
+        await act(async () => {
+            notifiedInset = 124;
+            for (const listener of listeners) {
+                listener(124);
+            }
+        });
+        expect(readHeight()).toBe(124);
+
+        const onHeightChangeAfterSend = vi.fn();
+        await screen.update(
+            <ComposerKeyboardProvider layout={layout}>
+                <ComposerKeyboardScrollInset
+                    testID="transcript-composer-keyboard-inset"
+                    onHeightChange={onHeightChangeAfterSend}
+                />
+            </ComposerKeyboardProvider>,
+        );
+
+        expect(onHeightChangeAfterSend.mock.calls.map(([height]) => height)).not.toContain(200);
+        expect(readHeight()).toBe(124);
+    });
+
     it('falls back to measured composer height when the native list inset has not replayed yet', async () => {
         const onHeightChange = vi.fn();
         const layout = {
