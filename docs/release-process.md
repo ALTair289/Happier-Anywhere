@@ -45,6 +45,67 @@ Notes:
 
 Deploy branches typically include `deploy/<env>/ui`, `deploy/<env>/server`, `deploy/<env>/website`, and `deploy/<env>/docs` (depending on what changed and which options you select).
 
+### Release authority and binary integrity
+
+Privileged release writes run only in the hosted workflows. A non-dry local
+`scripts/pipeline/run.mjs release` invocation validates its inputs and dispatches
+`release.yml`; it does not publish assets, move deploy refs, load release
+secrets, or call deployment hooks itself. Local `--dry-run` planning uses
+remote-advertised identities and object-only fetches, so it does not update or
+prune local branch, remote-tracking, or tag refs.
+
+For CLI, stack, server-runtime, and UI-web binary releases:
+
+1. The hosted workflow binds the authorized source commit once.
+2. It publishes the version-tagged Release first. Existing immutable tags,
+   assets, and bytes must match; they are never moved or clobbered.
+3. It downloads that Release and verifies the complete checksummed and signed
+   asset set.
+4. A separate promotion step projects those exact bytes into the rolling
+   Release, downloads them again, and checks byte equality, checksums, and the
+   minisign signature.
+5. For a channel with no published rolling Release yet, promotion creates one
+   native GitHub draft on the real rolling tag, uploads and audits by Release
+   id, then publishes that same draft. It does not create a temporary staging
+   tag or ref.
+6. For an already-published rolling Release, promotion retains the bounded
+   fail-closed prune/repopulate/retry path. Only after its audit succeeds does
+   the workflow advance the rolling tag and notes/version marker.
+
+An initial native draft is not visible through the public Release lookup until
+publication. Existing rolling replacement is deliberately recoverable rather
+than atomic: downloads from the rolling tag can fail during the bounded
+prune/repopulation interval, while the verified version-tagged Release remains
+available throughout.
+
+If a rolling upload is interrupted after the immutable Release was published,
+rerun the owning publisher with the same `channel` and its version as
+`retry_version`. Leave `source_ref=auto`: recovery derives the exact authorized
+SHA from the product's immutable version tag, so it remains valid after the
+channel branch and current control-checkout package base advance. Recovery
+accepts only the latest published immutable Release for that product and
+channel; it does not permit rollback to an arbitrary older version. The
+supported publishers are:
+
+- **PUBLISH — CLI Binaries (GitHub)** (`publish-cli-binaries.yml`)
+- **PUBLISH — Stack Binaries (GitHub)** (`publish-hstack-binaries.yml`)
+- **PUBLISH — Server Runtime (GitHub)** (`publish-server-runtime.yml`)
+- **PUBLISH — UI Web Bundle (GitHub)** (`publish-ui-web.yml`)
+
+This recovery path copies the existing immutable bytes; it does not rebuild,
+allocate a new version, sign new bytes, or mutate the immutable Release. For
+example:
+
+```bash
+gh workflow run publish-server-runtime.yml \
+  --repo OWNER/REPOSITORY \
+  --ref dev \
+  -f channel=preview \
+  -f source_ref=auto \
+  -f allow_stable=false \
+  -f retry_version=0.2.2-preview.123
+```
+
 ## Deploy branches → production infrastructure
 
 Pushes to `deploy/<env>/*` are intended to trigger deployment automation (for example, calling a protected deploy hook behind Cloudflare Access). How deployments are performed is intentionally decoupled from how code is promoted into deploy branches.
