@@ -802,6 +802,33 @@ describe('persistence', () => {
     });
 
     describe('new session draft', () => {
+        it('rehydrates only a non-empty opaque launch user-attempt id', () => {
+            const base = {
+                input: 'prompt',
+                selectedMachineId: 'machine-a',
+                selectedPath: '/repo',
+                selectedProfileId: null,
+                agentType: 'claude',
+                permissionMode: 'default',
+                modelMode: 'default',
+                acpSessionModeId: null,
+                updatedAt: Date.now(),
+            };
+            store.set('new-session-draft-v1', JSON.stringify({
+                ...base,
+                launchUserAttemptId: '  opaque-attempt-a  ',
+            }));
+            expect(loadNewSessionDraft()?.launchUserAttemptId).toBe('opaque-attempt-a');
+
+            store.set('new-session-draft-v1', JSON.stringify({
+                ...base,
+                launchUserAttemptId: { prompt: 'must-not-be-accepted' },
+            }));
+            expect(loadNewSessionDraft()).not.toEqual(expect.objectContaining({
+                launchUserAttemptId: expect.anything(),
+            }));
+        });
+
         it('roundtrips acpSessionModeId when persisted', () => {
             store.set(
                 'new-session-draft-v1',

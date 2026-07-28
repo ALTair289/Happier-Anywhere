@@ -56,6 +56,7 @@ export function useNewSessionAuthoringState(params: Readonly<{
     getSessionOnlySecretValueEncByProfileIdByEnvVarName: () => BuildPersistedInputs['sessionOnlySecretValueEncByProfileIdByEnvVarName'];
     agentNewSessionOptionStateByAgentId: Record<string, Record<string, unknown>>;
     draftScope: ServerAccountScope | null;
+    launchUserAttemptId?: string | null;
 }>): Readonly<{
     authoringContext: ReturnType<typeof buildNewSessionAuthoringContext>;
     currentAuthoringDraft: SessionAuthoringDraft;
@@ -147,22 +148,29 @@ export function useNewSessionAuthoringState(params: Readonly<{
     const effectiveAutomationDraft = authoringContext.effectiveAutomationDraft;
     const canCreate = authoringContext.canSubmit;
 
-    const buildCurrentPersistedDraft = React.useCallback(() => buildPersistedNewSessionDraftFromAuthoringDraft({
-        draft: currentAuthoringDraft,
-        machineId: params.selectedMachineId,
-        entryIntent: params.automationRequestedByRoute ? 'automation' : 'session',
-        selectedSecretId: params.selectedSecretId,
-        selectedSecretIdByProfileIdByEnvVarName: params.selectedSecretIdByProfileIdByEnvVarName,
-        sessionOnlySecretValueEncByProfileIdByEnvVarName: params.getSessionOnlySecretValueEncByProfileIdByEnvVarName(),
-        agentNewSessionOptionStateByAgentId: params.agentNewSessionOptionStateByAgentId,
-        targetServerId: params.targetServerId,
-        windowsRemoteSessionLaunchModeOverride: params.windowsRemoteSessionLaunchModeOverride,
-        updatedAt: Date.now(),
-    }), [
+    const buildCurrentPersistedDraft = React.useCallback(() => {
+        const draft = buildPersistedNewSessionDraftFromAuthoringDraft({
+            draft: currentAuthoringDraft,
+            machineId: params.selectedMachineId,
+            entryIntent: params.automationRequestedByRoute ? 'automation' : 'session',
+            selectedSecretId: params.selectedSecretId,
+            selectedSecretIdByProfileIdByEnvVarName: params.selectedSecretIdByProfileIdByEnvVarName,
+            sessionOnlySecretValueEncByProfileIdByEnvVarName: params.getSessionOnlySecretValueEncByProfileIdByEnvVarName(),
+            agentNewSessionOptionStateByAgentId: params.agentNewSessionOptionStateByAgentId,
+            targetServerId: params.targetServerId,
+            windowsRemoteSessionLaunchModeOverride: params.windowsRemoteSessionLaunchModeOverride,
+            updatedAt: Date.now(),
+        });
+        const launchUserAttemptId = typeof params.launchUserAttemptId === 'string'
+            ? params.launchUserAttemptId.trim()
+            : '';
+        return launchUserAttemptId ? { ...draft, launchUserAttemptId } : draft;
+    }, [
         currentAuthoringDraft,
         params.agentNewSessionOptionStateByAgentId,
         params.automationRequestedByRoute,
         params.getSessionOnlySecretValueEncByProfileIdByEnvVarName,
+        params.launchUserAttemptId,
         params.selectedMachineId,
         params.selectedSecretId,
         params.selectedSecretIdByProfileIdByEnvVarName,

@@ -150,6 +150,23 @@ describe('useNewSessionScreenModel (draft hydration — core)', () => {
         }));
     });
 
+    it('rehydrates and durably updates the principal launch user-attempt id', async () => {
+        persistedDraft.launchUserAttemptId = 'opaque-attempt-a';
+        await renderNewSessionScreenModel(() => {});
+
+        expect(useCreateNewSessionArgsRef.current?.launchUserAttemptId).toBe('opaque-attempt-a');
+        expect(useCreateNewSessionArgsRef.current?.launchIntentSignature).toEqual(expect.any(String));
+        const updateAttempt = useCreateNewSessionArgsRef.current?.onLaunchUserAttemptIdChange;
+        expect(updateAttempt).toEqual(expect.any(Function));
+
+        await act(async () => {
+            (updateAttempt as (value: string | null) => void)('opaque-attempt-b');
+        });
+        expect(saveNewSessionDraftMock).toHaveBeenLastCalledWith(
+            expect.objectContaining({ launchUserAttemptId: 'opaque-attempt-b' }),
+        );
+    });
+
     it('hydrates the persisted target server when no route server is selected', async () => {
         targetServerState.allowedTargetServerIds = ['server-a', 'server-b'];
         persistedDraft.targetServerId = 'server-b';

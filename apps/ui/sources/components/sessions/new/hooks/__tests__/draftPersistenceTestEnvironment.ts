@@ -155,6 +155,7 @@ const persistedDraft = vi.hoisted(() => ({
     codexBackendMode?: unknown;
     targetServerId?: string | null;
     windowsRemoteSessionLaunchModeOverride?: { machineId: string; mode: 'hidden' | 'windows_terminal' | 'console' } | null;
+    launchUserAttemptId?: string;
 });
 
 const cliDetectionState = vi.hoisted(() => ({
@@ -976,6 +977,7 @@ export function resetDraftPersistenceState(): void {
     delete persistedDraft.resumeSessionId;
     delete persistedDraft.targetServerId;
     delete persistedDraft.windowsRemoteSessionLaunchModeOverride;
+    delete persistedDraft.launchUserAttemptId;
     persistedDraft.selectedMachineId = 'machine-2';
     persistedDraft.selectedPath = '/repo/custom';
     persistedDraft.updatedAt = 123;

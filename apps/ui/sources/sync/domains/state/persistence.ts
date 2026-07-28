@@ -165,6 +165,8 @@ export type NewSessionAgentType = AgentId;
 
 export interface NewSessionDraft {
     input: string;
+    /** Opaque identity of the unresolved user launch intent; never contains prompt/config data. */
+    launchUserAttemptId?: string;
     selectedMachineId: string | null;
     selectedPath: string | null;
     entryIntent?: 'session' | 'automation' | null;
@@ -762,6 +764,7 @@ export function loadNewSessionDraft(scope?: ServerAccountScope | null): NewSessi
         }
 
         const input = typeof parsed.input === 'string' ? parsed.input : '';
+        const launchUserAttemptId = parseDraftNonEmptyString((parsed as any).launchUserAttemptId);
         const selectedMachineId = typeof parsed.selectedMachineId === 'string' ? parsed.selectedMachineId : null;
         const selectedPath = typeof parsed.selectedPath === 'string' ? parsed.selectedPath : null;
         const entryIntent = parseDraftEntryIntent((parsed as any).entryIntent);
@@ -827,6 +830,7 @@ export function loadNewSessionDraft(scope?: ServerAccountScope | null): NewSessi
 
         return {
             input,
+            ...(launchUserAttemptId ? { launchUserAttemptId } : {}),
             selectedMachineId,
             selectedPath,
             ...(entryIntent ? { entryIntent } : {}),

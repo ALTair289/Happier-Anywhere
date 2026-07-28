@@ -299,6 +299,18 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         setScopedPersistedDraft(nextDraft);
     }, []);
     const persistedDraft = shouldReplacePersistedDraftSelections ? null : scopedPersistedDraft;
+    const [launchUserAttemptId, setLaunchUserAttemptId] = React.useState<string | null>(() => (
+        typeof persistedDraft?.launchUserAttemptId === 'string'
+            ? persistedDraft.launchUserAttemptId
+            : null
+    ));
+    React.useEffect(() => {
+        setLaunchUserAttemptId(
+            typeof persistedDraft?.launchUserAttemptId === 'string'
+                ? persistedDraft.launchUserAttemptId
+                : null,
+        );
+    }, [draftScope, persistedDraft?.launchUserAttemptId]);
     const requestedSpawnServerId = React.useMemo(() => {
         const normalizedRouteServerId = normalizeOptionalParam(spawnServerIdParam);
         const routeServerId = typeof normalizedRouteServerId === 'string' ? normalizedRouteServerId.trim() : '';
@@ -1643,7 +1655,36 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         getSessionOnlySecretValueEncByProfileIdByEnvVarName: () => getSessionOnlySecretValueEncByProfileIdByEnvVarName() ?? {},
         agentNewSessionOptionStateByAgentId,
         draftScope,
+        launchUserAttemptId,
     });
+
+    const onLaunchUserAttemptIdChange = React.useCallback((nextUserAttemptId: string | null) => {
+        const normalized = typeof nextUserAttemptId === 'string' && nextUserAttemptId.trim().length > 0
+            ? nextUserAttemptId.trim()
+            : null;
+        setLaunchUserAttemptId(normalized);
+        const currentDraft = buildCurrentPersistedDraft();
+        if (normalized) {
+            persistDraftIfEnabled({ ...currentDraft, launchUserAttemptId: normalized });
+            return;
+        }
+        const nextDraft = { ...currentDraft };
+        delete nextDraft.launchUserAttemptId;
+        persistDraftIfEnabled(nextDraft);
+    }, [buildCurrentPersistedDraft, persistDraftIfEnabled]);
+    const launchIntentSignature = React.useMemo(() => JSON.stringify({
+        draft: currentAuthoringDraft,
+        machineId: selectedMachineId,
+        targetServerId: targetServerId ?? null,
+    }), [currentAuthoringDraft, selectedMachineId, targetServerId]);
+    const previousLaunchIntentSignatureRef = React.useRef(launchIntentSignature);
+    React.useEffect(() => {
+        if (previousLaunchIntentSignatureRef.current === launchIntentSignature) return;
+        previousLaunchIntentSignatureRef.current = launchIntentSignature;
+        if (launchUserAttemptId) {
+            onLaunchUserAttemptIdChange(null);
+        }
+    }, [launchIntentSignature, launchUserAttemptId, onLaunchUserAttemptIdChange]);
 
     const { handleCreateSession } = useCreateNewSession({
         router,
@@ -1685,6 +1726,9 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         allowedTargetServerIds: allowedTargetServerIds.length > 0 ? allowedTargetServerIds : resolvedSettingsTarget.allowedServerIds,
         draftScope,
         disableDraftPersistence,
+        launchIntentSignature,
+        launchUserAttemptId,
+        onLaunchUserAttemptIdChange,
     });
 
     const {
@@ -1747,6 +1791,7 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         draftPersistenceEnabled,
         draftPersistenceGenerationRef,
         draftTextLength: sessionPrompt.length,
+        draftChangeKey: launchIntentSignature,
     });
 
     const submitAccessibilityLabel = newSessionAuthoringContext.submitAccessibilityLabelKey
