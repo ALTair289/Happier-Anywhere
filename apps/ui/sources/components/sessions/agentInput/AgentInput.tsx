@@ -14,6 +14,7 @@ import {
     resolveLiveInputTextStatus,
 } from './liveInputState';
 import { isGlassComposerSurface } from './composerSurfaceStyle';
+import { resolveComposerSelectionRestore } from './composerSelectionRestore';
 import { Typography } from '@/constants/Typography';
 import type { PermissionMode, ModelMode } from '@/sync/domains/permissions/permissionTypes';
 import { findModelOptionForEffectiveModelId, getModelOptionsForSession, supportsFreeformModelSelectionForSession, type ModelOption } from '@/sync/domains/models/modelOptions';
@@ -1380,6 +1381,10 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const deferredParentTextSyncRef = React.useRef<AgentInputPendingParentTextSync | null>(null);
     const deferredParentTextSyncTimerRef = React.useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
     const inputScopeKeyRef = React.useRef<string | null>(props.sessionId ?? null);
+    // Selection restore is an OPEN-time resumption: applied at most once per generation,
+    // and voided as soon as the user edits (see composerSelectionRestore).
+    const consumedSelectionRestoreTokenRef = React.useRef<string | null>(null);
+    const composerEditedSinceOpenRef = React.useRef(false);
     const [uncontrolledStructuredInputMentions, setUncontrolledStructuredInputMentions] = React.useState<ComposerStructuredInputMention[]>([]);
     const structuredInputMentions = props.structuredInputMentions ?? uncontrolledStructuredInputMentions;
     const structuredInputMentionsRef = React.useRef<readonly ComposerStructuredInputMention[]>(structuredInputMentions);
@@ -1510,6 +1515,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
     React.useEffect(() => {
         historyAppliedInputStateRef.current = null;
+        // A different session/scope is a fresh open, so its persisted selection is
+        // eligible again.
+        composerEditedSinceOpenRef.current = false;
     }, [props.sessionId, historyScope]);
 
 
@@ -1586,6 +1594,11 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     }, [props.sessionId]);
 
     const handleComposerTextChange = React.useCallback((text: string) => {
+        // A persisted selection describes the text as it was at OPEN. The moment the user
+        // edits, those offsets describe text that no longer exists — and the stored value
+        // can be a RANGE, so re-applying it would select a word and let the next keystroke
+        // replace it. Void the restore for this composer from here on.
+        composerEditedSinceOpenRef.current = true;
         setHasAutocompleteTextInteraction(true);
         const isProgrammaticHistoryApply = historyAppliedInputStateRef.current?.state.text === text;
         if (isProgrammaticHistoryApply || !shouldDeferAgentInputParentTextSync(lastControlledValueRef.current, text)) {
@@ -1598,7 +1611,14 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
     React.useEffect(() => {
         const selection = props.inputPersistence?.initialSelection;
-        if (!selection) return;
+        const decision = resolveComposerSelectionRestore({
+            token: props.inputPersistence?.restoreToken,
+            lastConsumedToken: consumedSelectionRestoreTokenRef.current,
+            hasEditedSinceOpen: composerEditedSinceOpenRef.current,
+            hasSelection: Boolean(selection),
+        });
+        consumedSelectionRestoreTokenRef.current = decision.consumedToken;
+        if (!decision.apply || !selection) return;
         const liveTextLength = inputRef.current?.getText?.().length ?? props.value.length;
         recordLargeTextInputDiagnostic({
             phase: 'selection-restore',
