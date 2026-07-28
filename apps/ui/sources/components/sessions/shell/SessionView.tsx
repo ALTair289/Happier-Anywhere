@@ -2774,11 +2774,9 @@ function SessionViewLoaded({
     ]);
     const staleSessionRunnerStatus = React.useMemo(() => readActionableStaleSessionRunnerStatus({
         sessionId,
-        sessionActive: session.active === true,
         machineId: staleSessionRunnerMachineId,
         metadata: staleSessionRunnerMetadata,
     }), [
-        session.active,
         sessionId,
         staleSessionRunnerMachineId,
         staleSessionRunnerMetadata,

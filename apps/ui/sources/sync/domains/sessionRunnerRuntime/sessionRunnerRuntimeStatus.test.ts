@@ -38,7 +38,6 @@ describe('sessionRunnerRuntimeStatus', () => {
     it('returns an actionable stale status from canonical daemon runtime state', () => {
         const status = readActionableStaleSessionRunnerStatus({
             sessionId: 's1',
-            sessionActive: true,
             machineId: 'machine-1',
             metadata: {
                 [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: staleRuntimeState(),
@@ -57,10 +56,26 @@ describe('sessionRunnerRuntimeStatus', () => {
         });
     });
 
-    it('fails closed when daemon status is missing, malformed, current, unsupported, or not active', () => {
+    it('keeps an exact daemon-owned stale runner actionable after the server session becomes inactive', () => {
+        const status = readActionableStaleSessionRunnerStatus({
+            sessionId: 's1',
+            machineId: 'machine-1',
+            metadata: {
+                [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: staleRuntimeState(),
+            },
+        });
+
+        expect(status).toMatchObject({
+            sessionId: 's1',
+            machineId: 'machine-1',
+            expectedRunnerPid: 123,
+            expectedProcessCommandHash: 'hash-old',
+        });
+    });
+
+    it('fails closed when daemon status is missing, malformed, current, unsupported, or ineligible', () => {
         const cases: ReadonlyArray<Readonly<{
             name: string;
-            sessionActive?: boolean;
             machineId?: string | null;
             metadata: unknown;
         }>> = [
@@ -69,7 +84,6 @@ describe('sessionRunnerRuntimeStatus', () => {
             { name: 'current status', metadata: { [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: staleRuntimeState({ versionState: 'current' }) } },
             { name: 'missing machine target', machineId: null, metadata: { [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: staleRuntimeState() } },
             { name: 'missing daemon machine identity', metadata: { [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: staleRuntimeState({ machineId: null }) } },
-            { name: 'inactive session', sessionActive: false, metadata: { [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: staleRuntimeState() } },
             {
                 name: 'unsupported restart',
                 metadata: {
@@ -135,7 +149,6 @@ describe('sessionRunnerRuntimeStatus', () => {
             expect(
                 readActionableStaleSessionRunnerStatus({
                     sessionId: 's1',
-                    sessionActive: testCase.sessionActive ?? true,
                     machineId: testCase.machineId === undefined ? 'machine-1' : testCase.machineId,
                     metadata: testCase.metadata,
                 }),
@@ -147,7 +160,6 @@ describe('sessionRunnerRuntimeStatus', () => {
     it('rejects stale status for a different session or machine identity', () => {
         expect(readActionableStaleSessionRunnerStatus({
             sessionId: 's1',
-            sessionActive: true,
             machineId: 'machine-1',
             metadata: {
                 [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: staleRuntimeState({ sessionId: 's2' }),
@@ -156,7 +168,6 @@ describe('sessionRunnerRuntimeStatus', () => {
 
         expect(readActionableStaleSessionRunnerStatus({
             sessionId: 's1',
-            sessionActive: true,
             machineId: 'machine-1',
             metadata: {
                 [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: staleRuntimeState({ machineId: 'machine-2' }),

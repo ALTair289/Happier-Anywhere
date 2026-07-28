@@ -20,7 +20,6 @@ export type ActionableStaleSessionRunnerStatus = Readonly<{
 
 type ReadActionableStaleSessionRunnerStatusParams = Readonly<{
     sessionId: string;
-    sessionActive: boolean;
     machineId?: string | null;
     metadata: unknown;
 }>;
@@ -54,7 +53,7 @@ export function readActionableStaleSessionRunnerStatus(
 ): ActionableStaleSessionRunnerStatus | null {
     const sessionId = readNonEmptyString(params.sessionId);
     const machineId = readNonEmptyString(params.machineId);
-    if (!sessionId || !machineId || params.sessionActive !== true) return null;
+    if (!sessionId || !machineId) return null;
     if (!isRecord(params.metadata)) return null;
 
     const parsedState = SessionRunnerRuntimeStateV1Schema.safeParse(
