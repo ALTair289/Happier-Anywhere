@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     getStorage,
     registerLocalVoiceEngineHarnessHooks,
-    sendMessage,
+    submitMessage,
 } from './localVoiceEngine.testHarness';
 
 describe('local voice engine (turn-based) smoke', () => {
@@ -22,8 +22,9 @@ describe('local voice engine (turn-based) smoke', () => {
 
         await toggleLocalVoiceTurn('s1');
         expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-        expect(sendMessage).toHaveBeenCalledWith('s1', 'hello world', undefined, undefined, {
-            bypassPendingQueueReason: 'voice_turn_immediate',
+        expect(submitMessage).toHaveBeenCalledWith('s1', 'hello world', undefined, undefined, {
+            callerSurface: 'voice_turn',
+            forceImmediate: true,
         });
         // After a turn completes, the local voice session remains active (ready for another turn)
         // until the user explicitly hangs up.

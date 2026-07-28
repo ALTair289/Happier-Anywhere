@@ -17,7 +17,7 @@ import {
     setActiveServerAndSwitch,
     sessionExecutionRunStart,
     sendSessionMessageWithServerScope,
-    sendMessage,
+    submitMessage,
 } from './localVoiceEngine.testHarness';
 import { RPC_ERROR_CODES } from '@happier-dev/protocol/rpc';
 import type { VoiceAgentClient } from '@/voice/agent/types';
@@ -141,7 +141,7 @@ describe('local voice engine agent behavior', () => {
         createdAudioPlayers[0].__emit('playbackStatusUpdate', { didJustFinish: true });
         await stopPromise;
 
-        expect(sendMessage).not.toHaveBeenCalled();
+        expect(submitMessage).not.toHaveBeenCalled();
 
         const events = (useVoiceActivityStore.getState().eventsBySessionId[VOICE_AGENT_GLOBAL_SESSION_ID] ?? []) as any[];
         expect(events.some((e) => e.kind === 'user.text' && String(e.text).includes('hello world'))).toBe(true);
@@ -229,7 +229,7 @@ describe('local voice engine agent behavior', () => {
             sessionId: 's1',
             message: 'Please do X.',
         }));
-        expect(sendMessage).not.toHaveBeenCalled();
+        expect(submitMessage).not.toHaveBeenCalled();
     });
 
     it('agent mode can update tracked sessions via tool actions', async () => {
@@ -787,7 +787,7 @@ describe('local voice engine agent behavior', () => {
         expect(daemonVoiceAgentStart).toHaveBeenCalledTimes(1);
         expect(globalThis.fetch).toHaveBeenCalledTimes(2);
         expect((globalThis.fetch as any).mock.calls[1]?.[0]).toContain('/v1/chat/completions');
-        expect(sendMessage).not.toHaveBeenCalled();
+        expect(submitMessage).not.toHaveBeenCalled();
     });
 
     it('recreates daemon agent handle when daemon reports VOICE_AGENT_NOT_FOUND', async () => {

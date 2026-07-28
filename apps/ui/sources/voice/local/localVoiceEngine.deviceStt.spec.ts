@@ -4,7 +4,7 @@ import {
     emitSpeechRecEvent,
     getStorage,
     registerLocalVoiceEngineHarnessHooks,
-    sendMessage,
+    submitMessage,
     setPlatformOs,
     speechRecAbort,
     speechRecStart,
@@ -111,8 +111,9 @@ describe('local voice engine device STT (experimental)', () => {
 
         await stopPromise;
 
-        expect(sendMessage).toHaveBeenCalledWith('s1', 'hello from device stt', undefined, undefined, {
-            bypassPendingQueueReason: 'voice_turn_immediate',
+        expect(submitMessage).toHaveBeenCalledWith('s1', 'hello from device stt', undefined, undefined, {
+            callerSurface: 'voice_turn',
+            forceImmediate: true,
         });
         expect((globalThis.fetch as any).mock.calls.length).toBe(0);
     });
@@ -233,10 +234,11 @@ describe('local voice engine device STT (experimental)', () => {
         expect(speechRecStop).toHaveBeenCalledTimes(1);
         emitSpeechRecEvent('end', {});
 
-        await waitForCallCount(sendMessage, 1);
+        await waitForCallCount(submitMessage, 1);
         await waitForCallCount(speechRecStart, 2);
-        expect(sendMessage).toHaveBeenCalledWith('s1', 'hands free message', undefined, undefined, {
-            bypassPendingQueueReason: 'voice_turn_immediate',
+        expect(submitMessage).toHaveBeenCalledWith('s1', 'hands free message', undefined, undefined, {
+            callerSurface: 'voice_turn',
+            forceImmediate: true,
         });
         expect(speechRecStart).toHaveBeenCalledTimes(2);
         expect(getLocalVoiceState().status).toBe('recording');
@@ -332,9 +334,10 @@ describe('local voice engine device STT (experimental)', () => {
         expect(speechRecStop).toHaveBeenCalledTimes(1);
         emitSpeechRecEvent('end', {});
 
-        await waitForCallCount(sendMessage, 1);
-        expect(sendMessage).toHaveBeenCalledWith('s1', 'timed hands free', undefined, undefined, {
-            bypassPendingQueueReason: 'voice_turn_immediate',
+        await waitForCallCount(submitMessage, 1);
+        expect(submitMessage).toHaveBeenCalledWith('s1', 'timed hands free', undefined, undefined, {
+            callerSurface: 'voice_turn',
+            forceImmediate: true,
         });
     });
 });

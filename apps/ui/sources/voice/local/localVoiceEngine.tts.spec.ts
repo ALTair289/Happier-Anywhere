@@ -9,7 +9,7 @@ import {
     emitSpeechRecEvent,
     getStorage,
     registerLocalVoiceEngineHarnessHooks,
-    sendMessage,
+    submitMessage,
     speechRecStart,
     setPlatformOs,
 } from './localVoiceEngine.testHarness';
@@ -90,7 +90,7 @@ describe('local voice engine TTS behavior', () => {
                 arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
             });
 
-        sendMessage.mockImplementationOnce(() => {
+        submitMessage.mockImplementationOnce(() => {
             storage.__setState({
                 sessionMessages: {
                     s1: {
@@ -150,7 +150,7 @@ describe('local voice engine TTS behavior', () => {
             json: async () => ({ text: 'hello world' }),
         });
 
-        sendMessage.mockImplementationOnce(() => {
+        submitMessage.mockImplementationOnce(() => {
             storage.__setState({
                 sessionMessages: {
                     s1: {
@@ -227,7 +227,7 @@ describe('local voice engine TTS behavior', () => {
             onStoppedRef.current?.();
         });
 
-        sendMessage.mockImplementationOnce(() => {
+        submitMessage.mockImplementationOnce(() => {
             storage.__setState({
                 sessionMessages: {
                     s1: {
@@ -298,7 +298,7 @@ describe('local voice engine TTS behavior', () => {
             onStoppedRef.current?.();
         });
 
-        sendMessage.mockImplementationOnce(() => {
+        submitMessage.mockImplementationOnce(() => {
             storage.__setState({
                 sessionMessages: {
                     s1: {
@@ -365,7 +365,7 @@ describe('local voice engine TTS behavior', () => {
                 arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
             });
 
-        sendMessage.mockImplementationOnce(() => {
+        submitMessage.mockImplementationOnce(() => {
             storage.__setState({
                 sessionMessages: {
                     s1: {
@@ -484,7 +484,7 @@ describe('local voice engine TTS behavior', () => {
             json: async () => ({ text: 'hello world' }),
         });
 
-        sendMessage.mockRejectedValueOnce(new Error('send failed'));
+        submitMessage.mockRejectedValueOnce(new Error('send failed'));
 
         const { toggleLocalVoiceTurn } = localVoiceEngine;
         await toggleLocalVoiceTurn('s1');
@@ -535,7 +535,7 @@ describe('local voice engine TTS behavior', () => {
                 arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
             });
 
-        sendMessage.mockImplementationOnce(() => {
+        submitMessage.mockImplementationOnce(() => {
             storage.__setState({
                 sessionMessages: {
                     s1: {
@@ -588,7 +588,7 @@ describe('local voice engine TTS behavior', () => {
             json: async () => ({ text: 'hello world' }),
         });
 
-        sendMessage.mockImplementationOnce(() => {
+        submitMessage.mockImplementationOnce(() => {
             storage.__throwGetStateOnce(new Error('boom'));
         });
 
@@ -645,7 +645,7 @@ describe('local voice engine TTS behavior', () => {
                     arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
                 });
 
-            sendMessage.mockImplementationOnce(() => {
+            submitMessage.mockImplementationOnce(() => {
                 storage.__setState({
                     sessionMessages: {
                         s1: {

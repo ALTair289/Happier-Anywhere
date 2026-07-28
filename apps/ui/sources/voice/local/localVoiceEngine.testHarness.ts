@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, vi } from 'vitest';
+import { VOICE_AGENT_GLOBAL_SESSION_ID } from '@/voice/agent/voiceAgentGlobalSessionId';
 
-export const sendMessage = vi.fn();
+export const submitMessage = vi.fn();
+export const enqueuePendingMessage = vi.fn();
 export const daemonVoiceAgentStart = vi.fn();
 export const daemonVoiceAgentSendTurn = vi.fn();
 export const daemonVoiceAgentWelcome = vi.fn();
@@ -230,7 +232,8 @@ export async function flushMicrotasks(turns: number = 1) {
 
 vi.mock('@/sync/sync', () => ({
     sync: {
-        sendMessage,
+        submitMessage,
+        enqueuePendingMessage,
         ensureSessionVisibleForMessageRoute: vi.fn(async () => {}),
         refreshSessionMessages: vi.fn(async () => {}),
         patchSessionMetadataWithRetry: async (sessionId: string, patch: (metadata: any) => any) => {
@@ -255,6 +258,24 @@ vi.mock('@/sync/sync', () => ({
         },
     },
 }));
+
+vi.mock('@/voice/sessionBinding/resolveVoiceSessionBinding', async (importOriginal) => {
+    const original = await importOriginal<typeof import('@/voice/sessionBinding/resolveVoiceSessionBinding')>();
+    return {
+        ...original,
+        resolveVoiceSessionBindingByControlSessionId: ({ controlSessionId }: { controlSessionId: string }) => ({
+            adapterId: 'local_conversation',
+            controlSessionId,
+            conversationSessionId: controlSessionId === VOICE_AGENT_GLOBAL_SESSION_ID
+                ? 'voice-test-conversation'
+                : controlSessionId,
+            transcriptMode: 'synthetic',
+            targetSessionId: controlSessionId === VOICE_AGENT_GLOBAL_SESSION_ID ? null : controlSessionId,
+            updatedAt: 1,
+        }),
+        resolveVoiceSessionBindingByConversationSessionId: () => null,
+    };
+});
 
 vi.mock('@/sync/ops/sessionExecutionRuns', () => ({
     sessionExecutionRunStart: (sessionId: string, request: any) => sessionExecutionRunStart(sessionId, request),
@@ -485,7 +506,19 @@ export function registerLocalVoiceEngineHarnessHooks() {
     beforeEach(async () => {
         vi.resetModules();
         console.error = (() => {}) as any;
-        sendMessage.mockReset();
+        submitMessage.mockReset();
+        enqueuePendingMessage.mockReset();
+        enqueuePendingMessage.mockImplementation(async (
+            _sessionId: string,
+            _text: string,
+            _displayText: string | undefined,
+            _metaOverrides: Record<string, unknown> | undefined,
+            options: Readonly<{ localId?: string | null }>,
+        ) => ({
+            localId: String(options?.localId ?? ''),
+            accepted: true,
+            externalHandoffClaimed: true,
+        }));
         daemonVoiceAgentStart.mockReset();
         daemonVoiceAgentSendTurn.mockReset();
         daemonVoiceAgentStartTurnStream.mockReset();

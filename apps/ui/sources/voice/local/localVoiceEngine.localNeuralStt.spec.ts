@@ -9,7 +9,7 @@ import {
   sherpaStreamingCreate,
   sherpaStreamingFinish,
   sherpaStreamingPushFrame,
-  sendMessage,
+  submitMessage,
 } from './localVoiceEngine.testHarness';
 
 describe('local voice engine local neural STT (streaming)', () => {
@@ -68,8 +68,9 @@ describe('local voice engine local neural STT (streaming)', () => {
     const stopPromise = toggleLocalVoiceTurn('s1');
     await stopPromise;
 
-    expect(sendMessage).toHaveBeenCalledWith('s1', 'hello sherpa', undefined, undefined, {
-      bypassPendingQueueReason: 'voice_turn_immediate',
+    expect(submitMessage).toHaveBeenCalledWith('s1', 'hello sherpa', undefined, undefined, {
+      callerSurface: 'voice_turn',
+      forceImmediate: true,
     });
   });
 

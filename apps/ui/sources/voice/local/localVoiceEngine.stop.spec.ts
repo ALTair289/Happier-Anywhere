@@ -4,7 +4,7 @@ import {
   emitSpeechRecEvent,
   getStorage,
   registerLocalVoiceEngineHarnessHooks,
-  sendMessage,
+  submitMessage,
   speechRecStart,
   speechRecStop,
 } from './localVoiceEngine.testHarness';
@@ -20,7 +20,7 @@ describe('local voice engine stop', () => {
 
     await stopLocalVoiceSession();
     expect(getLocalVoiceState().status).toBe('idle');
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(submitMessage).not.toHaveBeenCalled();
     expect((globalThis.fetch as any).mock.calls.length).toBe(0);
   });
 
@@ -61,7 +61,7 @@ describe('local voice engine stop', () => {
     emitSpeechRecEvent('end', {});
     await stopPromise;
 
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(submitMessage).not.toHaveBeenCalled();
   });
 });
 
