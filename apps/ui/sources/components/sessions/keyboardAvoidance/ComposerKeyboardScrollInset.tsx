@@ -47,18 +47,32 @@ export function ComposerKeyboardScrollInset(props: Readonly<{
             applyHeight(0);
             return undefined;
         }
-        applyHeight(resolveCurrentInsetHeight(layout));
-        if (layout.subscribeListBottomInset) {
-            // The notified payload is computed by the writer from its own fresh inputs and is
-            // the canonical inset on every platform. Re-deriving from shared-value reads at
-            // delivery time is stale on native: guest-runtime writes are async, so `.value`
-            // lags the payload by one step and the final composer-growth update is lost
-            // (live-diagnosed 2026-07-09: transcript rows rendered under the composer).
-            return layout.subscribeListBottomInset((nextHeight) => {
-                applyHeight(nextHeight);
-            });
+        const subscribeListBottomInset = layout.subscribeListBottomInset;
+        if (!subscribeListBottomInset) {
+            applyHeight(resolveCurrentInsetHeight(layout));
+            return undefined;
         }
-        return undefined;
+        // The notified payload is computed by the writer from its own fresh inputs and is
+        // the canonical inset on every platform. Re-deriving from shared-value reads at
+        // delivery time is stale on native: guest-runtime writes are async, so `.value`
+        // lags the payload by one step and the final composer-growth update is lost
+        // (live-diagnosed 2026-07-09: transcript rows rendered under the composer).
+        //
+        // Subscribing FIRST is what keeps that rule true for every later effect run too: the
+        // writer replays its last notified total synchronously, so the local derivation is
+        // only ever a seed for a layout that has never notified one. Applying it before the
+        // subscription republished a superseded inset on every re-subscribe — after a send
+        // that is the pre-collapse composer height, and `onHeightChange` carries it to the
+        // transcript viewport owner as a usable-geometry change that never happened.
+        let replayedNotifiedInset = false;
+        const unsubscribe = subscribeListBottomInset((nextHeight) => {
+            replayedNotifiedInset = true;
+            applyHeight(nextHeight);
+        });
+        if (!replayedNotifiedInset) {
+            applyHeight(resolveCurrentInsetHeight(layout));
+        }
+        return unsubscribe;
     }, [applyHeight, layout]);
 
     if (!layout) {
