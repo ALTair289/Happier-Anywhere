@@ -1,33 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { TranscriptNavigationEntry } from './transcriptNavigationTypes';
 import {
     awaitTranscriptNavigationJumpHandler,
     createEmptyTranscriptNavigationPaneSnapshot,
     createTranscriptNavigationPaneStore,
     transcriptNavigationPaneStore,
 } from './transcriptNavigationPaneStore';
-
-function entry(overrides: Partial<TranscriptNavigationEntry> & Pick<TranscriptNavigationEntry, 'id' | 'sessionId' | 'seq'>): TranscriptNavigationEntry {
-    const { id, sessionId, seq, ...rest } = overrides;
-    return {
-        id,
-        sessionId,
-        seq,
-        routeMessageId: null,
-        transcriptBlockIndex: null,
-        kind: 'user-turn',
-        role: 'user',
-        label: id,
-        promptPreview: id,
-        responsePreview: null,
-        createdAtMs: null,
-        pinned: false,
-        pinnedAtMs: null,
-        loaded: true,
-        ...rest,
-    };
-}
 
 describe('transcript navigation pane store', () => {
     it('starts with an empty per-session snapshot', () => {
@@ -41,21 +19,14 @@ describe('transcript navigation pane store', () => {
         const store = createTranscriptNavigationPaneStore();
         const listener = vi.fn();
         const unsubscribe = store.subscribe('s1', listener);
-        const entries = [entry({ id: 'turn-1', sessionId: 's1', seq: 1 })];
         const onEntryPress = vi.fn();
 
         store.set('s1', {
-            activeEntryId: 'turn-1',
-            entries,
             onEntryPress,
         });
 
         expect(listener).toHaveBeenCalledTimes(1);
-        expect(store.get('s1')).toMatchObject({
-            activeEntryId: 'turn-1',
-            entries,
-            sessionId: 's1',
-        });
+        expect(store.get('s1')).toMatchObject({ sessionId: 's1' });
         expect(store.get('s1').onEntryPress).toBe(onEntryPress);
 
         store.set('s1', null);
@@ -65,8 +36,6 @@ describe('transcript navigation pane store', () => {
 
         unsubscribe();
         store.set('s1', {
-            activeEntryId: null,
-            entries,
             onEntryPress,
         });
         expect(listener).toHaveBeenCalledTimes(2);
@@ -76,14 +45,11 @@ describe('transcript navigation pane store', () => {
         const store = createTranscriptNavigationPaneStore();
         const s1Listener = vi.fn();
         const s2Listener = vi.fn();
-        const entries = [entry({ id: 'turn-1', sessionId: 's1', seq: 1 })];
 
         store.subscribe('s1', s1Listener);
         store.subscribe('s2', s2Listener);
 
         store.set('s1', {
-            activeEntryId: null,
-            entries,
             onEntryPress: vi.fn(),
         });
 
@@ -99,7 +65,6 @@ describe('awaitTranscriptNavigationJumpHandler', () => {
     });
 
     it('resolves with the handler a host publishes AFTER the press, never before the reveal commits', async () => {
-        const entries = [entry({ id: 'turn-1', sessionId: 'await-session', seq: 1 })];
         const onEntryPress = vi.fn();
         let observedHandlerWhileWaiting: unknown = 'unobserved';
 
@@ -114,8 +79,6 @@ describe('awaitTranscriptNavigationJumpHandler', () => {
         expect(observedHandlerWhileWaiting).toBe('unobserved');
 
         transcriptNavigationPaneStore.set('await-session', {
-            activeEntryId: null,
-            entries,
             onEntryPress,
         });
 
@@ -125,8 +88,6 @@ describe('awaitTranscriptNavigationJumpHandler', () => {
     it('yields a task before handing back an already-registered handler', async () => {
         const onEntryPress = vi.fn();
         transcriptNavigationPaneStore.set('await-session', {
-            activeEntryId: null,
-            entries: [entry({ id: 'turn-1', sessionId: 'await-session', seq: 1 })],
             onEntryPress,
         });
 

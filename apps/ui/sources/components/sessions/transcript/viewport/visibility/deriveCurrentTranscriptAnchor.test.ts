@@ -50,6 +50,36 @@ describe('deriveCurrentTranscriptAnchor', () => {
         });
     });
 
+    it('keeps a landed jump target current while the previous turn still grazes the leading row', () => {
+        // Live reproduction: jumping to turn-2 aligns its row, but the renderer
+        // reports the previous turn's tail as the leading visible row (index 10
+        // minus 1/2). Containment then answers "turn-1", which is geometrically
+        // true and useless — the reader was PUT on turn-2.
+        for (const firstSourceIndex of [8, 9]) {
+            expect(deriveCurrentTranscriptAnchor({
+                anchors: ANCHORS,
+                landedAnchorId: 'turn-2',
+                preferUserTurnAnchor: true,
+                visibleSourceRange: { firstSourceIndex, lastSourceIndex: 18 },
+            })).toEqual({
+                currentAnchorId: 'turn-2',
+                visibleAnchorIds: ['turn-2'],
+            });
+        }
+    });
+
+    it('ignores a landed anchor that is no longer among the anchors', () => {
+        expect(deriveCurrentTranscriptAnchor({
+            anchors: ANCHORS,
+            landedAnchorId: 'turn-dropped',
+            preferUserTurnAnchor: true,
+            visibleSourceRange: { firstSourceIndex: 9, lastSourceIndex: 18 },
+        })).toEqual({
+            currentAnchorId: 'turn-1',
+            visibleAnchorIds: ['turn-2'],
+        });
+    });
+
     it('reports every anchor inside the visible source range', () => {
         expect(deriveCurrentTranscriptAnchor({
             anchors: ANCHORS,

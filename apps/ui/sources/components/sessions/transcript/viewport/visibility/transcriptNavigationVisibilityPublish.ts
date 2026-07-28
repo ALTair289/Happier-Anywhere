@@ -2,7 +2,6 @@ import type {
     TranscriptListShellRef,
     TranscriptRendererVisibleSourceIndexRange,
 } from '@/components/sessions/transcript/viewport/shell/renderer/types';
-import type { ScrollableChatListRef } from '@/components/sessions/transcript/viewport/transcriptScrollableListTypes';
 
 import {
     deriveCurrentTranscriptAnchor,
@@ -16,26 +15,15 @@ import {
 } from './transcriptNavigationVisibilityStore';
 
 /**
- * The renderer's own visible-index window (`readVisibleSourceIndexRange`), in
- * the same source-index space as `listData` — the ONE viewport fact navigation
- * visibility consumes on web and native, Legend and FlashList alike.
- */
-export type TranscriptRendererVisibleIndexRange = TranscriptRendererVisibleSourceIndexRange;
-
-/**
- * The mounted transcript list is described by two mirrored first-party handle
- * types: the renderer seam's `TranscriptListShellRef`, which declares the
- * navigation reader, and the command-side `ScrollableChatListRef` the hosts
- * hold. Resolving the reader HERE keeps the bridge between those two shapes in
- * one place instead of spreading it over every publish trigger; deleting it is
- * a one-line change once `ScrollableChatListRef` declares the reader too.
+ * Reads the renderer's own visible window — the ONE viewport fact navigation
+ * visibility consumes on web and native, Legend and FlashList alike — and
+ * normalizes a renderer that cannot answer yet to `null` (an UNMEASURED frame,
+ * never "viewing row 0").
  */
 export function readRendererVisibleSourceIndexRange(
-    listNode: ScrollableChatListRef | TranscriptListShellRef | null | undefined,
+    listNode: TranscriptListShellRef | null | undefined,
 ): TranscriptRendererVisibleSourceIndexRange | null {
-    const read = (listNode as Pick<TranscriptListShellRef, 'readVisibleSourceIndexRange'> | null | undefined)
-        ?.readVisibleSourceIndexRange;
-    return read?.() ?? null;
+    return listNode?.readVisibleSourceIndexRange?.() ?? null;
 }
 
 export type TranscriptNavigationVisibilityWriteDecision =
@@ -43,7 +31,7 @@ export type TranscriptNavigationVisibilityWriteDecision =
     | Readonly<{ kind: 'skip'; reason: 'unmeasured-viewport' | 'no-subscribers' }>;
 
 function normalizeVisibleSourceRange(
-    range: TranscriptRendererVisibleIndexRange | null | undefined,
+    range: TranscriptRendererVisibleSourceIndexRange | null | undefined,
     itemCount: number,
 ): TranscriptVisibleSourceRange | null {
     if (!Number.isInteger(itemCount) || itemCount <= 0) return null;
@@ -70,7 +58,8 @@ function normalizeVisibleSourceRange(
 export function resolveTranscriptNavigationVisibilityWrite(input: Readonly<{
     anchors: readonly TranscriptNavigationAnchorCandidate[];
     itemCount: number;
-    visibleSourceRange: TranscriptRendererVisibleIndexRange | null | undefined;
+    landedAnchorId?: string | null;
+    visibleSourceRange: TranscriptRendererVisibleSourceIndexRange | null | undefined;
 }>): TranscriptNavigationVisibilityWriteDecision {
     if (input.anchors.length === 0) {
         return { kind: 'write', snapshot: EMPTY_TRANSCRIPT_NAVIGATION_VISIBILITY_SNAPSHOT };
@@ -81,6 +70,7 @@ export function resolveTranscriptNavigationVisibilityWrite(input: Readonly<{
         kind: 'write',
         snapshot: deriveCurrentTranscriptAnchor({
             anchors: input.anchors,
+            landedAnchorId: input.landedAnchorId,
             preferUserTurnAnchor: true,
             visibleSourceRange,
         }),
@@ -95,11 +85,13 @@ export function resolveTranscriptNavigationVisibilityWrite(input: Readonly<{
 export function publishTranscriptNavigationVisibility(params: Readonly<{
     anchors: readonly TranscriptNavigationAnchorCandidate[];
     itemCount: number;
-    readVisibleSourceRange: () => TranscriptRendererVisibleIndexRange | null | undefined;
+    /** Jump-landing intent; wins `currentAnchorId` while it is still an anchor. */
+    landedAnchorId?: string | null;
+    readVisibleSourceRange: () => TranscriptRendererVisibleSourceIndexRange | null | undefined;
     store: NavigationVisibilityStore;
 }>): TranscriptNavigationVisibilityWriteDecision {
     if (!params.store.hasSubscribers()) return { kind: 'skip', reason: 'no-subscribers' };
-    let visibleSourceRange: TranscriptRendererVisibleIndexRange | null | undefined = null;
+    let visibleSourceRange: TranscriptRendererVisibleSourceIndexRange | null | undefined = null;
     try {
         visibleSourceRange = params.readVisibleSourceRange();
     } catch {
@@ -109,6 +101,7 @@ export function publishTranscriptNavigationVisibility(params: Readonly<{
     const decision = resolveTranscriptNavigationVisibilityWrite({
         anchors: params.anchors,
         itemCount: params.itemCount,
+        landedAnchorId: params.landedAnchorId,
         visibleSourceRange,
     });
     if (decision.kind === 'write') params.store.set(decision.snapshot);

@@ -73,8 +73,13 @@ import {
 import { transcriptNavigationPaneStore } from '@/components/sessions/transcript/navigation/transcriptNavigationPaneStore';
 import {
     deriveTranscriptNavigationRuntimeAnchors,
+    resolveTranscriptNavigationAnchorIdForJumpTarget,
     type TranscriptNavigationRuntimeAnchor,
 } from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationRuntimeAnchors';
+import {
+    resolveRetainedTranscriptNavigationLandedAnchor,
+    type TranscriptNavigationLandedAnchor,
+} from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationLandedAnchor';
 import {
     collectTranscriptNavigationMessageIdsForItem,
     transcriptNavigationRoleForMessage,
@@ -280,7 +285,9 @@ export type TranscriptJumpHost = Readonly<{
         target: TranscriptJumpTarget,
         options?: Readonly<{ align?: TranscriptViewportJumpAlignment; preferTargetWindow?: boolean }>,
     ): Promise<TranscriptJumpResult>;
-    observeWebTranscriptNavigationVisibilityForSession(): void;
+    observeWebTranscriptNavigationVisibilityForSession(
+        input?: Readonly<{ genuineUserMovement?: boolean }>,
+    ): void;
     observeWebGenuineScrollMovement(params: Readonly<{
         distanceFromBottom: number;
         isTrusted: boolean;
@@ -764,8 +771,12 @@ export function useTranscriptJumpHost(deps: TranscriptJumpHostDeps): TranscriptJ
 
     const listDataRef = React.useRef(listData);
     useCommittedTranscriptRef(listDataRef, listData);
-    const listLayoutHeightForVisibilityRef = React.useRef(listLayoutHeight);
-    useCommittedTranscriptRef(listLayoutHeightForVisibilityRef, listLayoutHeight);
+
+    // Jump-landing intent, held only until the reader takes the viewport back.
+    // A ref, not a store: the single publication point below is still the only
+    // thing that writes navigation visibility, and the host must not re-render
+    // when this changes.
+    const landedNavigationAnchorRef = React.useRef<TranscriptNavigationLandedAnchor | null>(null);
 
     /**
      * The ONE navigation-visibility publication point, in renderer index space
@@ -774,16 +785,29 @@ export function useTranscriptJumpHost(deps: TranscriptJumpHostDeps): TranscriptJ
      * and no layout read, so this stays free on the per-scroll-frame path, and it
      * reports null rather than row 0 while the renderer is still unmeasured.
      */
-    const observeWebTranscriptNavigationVisibilityForSession = React.useCallback(() => {
+    const observeWebTranscriptNavigationVisibilityForSession = React.useCallback((
+        input?: Readonly<{ genuineUserMovement?: boolean }>,
+    ) => {
+        const anchors = transcriptNavigationRuntimeAnchorsRef.current;
+        // Retention is resolved HERE, immediately before the write, so the frame
+        // that carries the reader's own movement already publishes containment.
+        const landedNavigationAnchor = resolveRetainedTranscriptNavigationLandedAnchor({
+            anchors,
+            genuineUserMovement: input?.genuineUserMovement === true,
+            landed: landedNavigationAnchorRef.current,
+            sessionId,
+        });
+        landedNavigationAnchorRef.current = landedNavigationAnchor;
         publishTranscriptNavigationVisibility({
-            anchors: transcriptNavigationRuntimeAnchorsRef.current,
+            anchors,
             itemCount: listDataRef.current.length,
-            readVisibleSourceRange: () => {
-                // A frame with no measured viewport is UNMEASURED, not empty:
-                // reporting a range here would clobber a good snapshot.
-                if (!(listLayoutHeightForVisibilityRef.current > 0)) return null;
-                return readRendererVisibleSourceIndexRange(listRef.current);
-            },
+            landedAnchorId: landedNavigationAnchor?.anchorId ?? null,
+            // "Am I measured yet" is the RENDERER's fact, and its reader already
+            // answers null while it cannot place a window. Gating on the host's
+            // own layout height as well was wrong: on web that state stays 0 for
+            // this shell, so a renderer reporting a perfectly good window was
+            // still discarded as `unmeasured-viewport` and the rail never lit up.
+            readVisibleSourceRange: () => readRendererVisibleSourceIndexRange(listRef.current),
             store: getTranscriptNavigationVisibilityStore(sessionId),
         });
     }, [
@@ -805,6 +829,29 @@ export function useTranscriptJumpHost(deps: TranscriptJumpHostDeps): TranscriptJ
         listLayoutHeight,
         observeWebTranscriptNavigationVisibilityForSession,
         transcriptNavigationRuntimeAnchors,
+    ]);
+
+    /**
+     * The landing seam that already drives the jump highlight also records where
+     * the reader was put, and publishes it. A target-window landing produces no
+     * scroll frame of its own, so without publishing here the rail keeps showing
+     * the pre-jump anchor indefinitely.
+     */
+    const handleJumpLanded = React.useCallback((
+        result: Extract<TranscriptJumpResult, { status: 'scrolled' | 'window-rendered' }>,
+    ) => {
+        const anchorId = resolveTranscriptNavigationAnchorIdForJumpTarget({
+            anchors: transcriptNavigationRuntimeAnchorsRef.current,
+            target: result.target,
+        });
+        landedNavigationAnchorRef.current = anchorId ? { anchorId, sessionId } : null;
+        observeWebTranscriptNavigationVisibilityForSession();
+        onJumpLanded?.(result);
+    }, [
+        observeWebTranscriptNavigationVisibilityForSession,
+        onJumpLanded,
+        sessionId,
+        transcriptNavigationRuntimeAnchorsRef,
     ]);
 
     const observeWebGenuineScrollMovement = React.useCallback((params: Readonly<{
@@ -899,6 +946,10 @@ export function useTranscriptJumpHost(deps: TranscriptJumpHostDeps): TranscriptJ
     }, [resolveWebTranscriptTargetObservation]);
 
     const jumpToBottom = React.useCallback(() => {
+        // Returning to the live tail is its own explicit destination: it replaces
+        // whatever a previous landing claimed, and its own scroll frames are
+        // programmatic, so nothing else would release the claim.
+        landedNavigationAnchorRef.current = null;
         const plan = lifecycleHost.planExplicitJumpTakeover({
             reason: 'jump-to-bottom',
             sessionId,
@@ -1057,7 +1108,7 @@ export function useTranscriptJumpHost(deps: TranscriptJumpHostDeps): TranscriptJ
                         targetScrollTop: st - 1,
                     });
                 } : undefined,
-                onJumpLanded,
+                onJumpLanded: handleJumpLanded,
                 pageTowardTarget: async () => {
                     const syncLoadOlderOptions = resolveSyncLoadOlderOptions();
                     const loadOlderResult = forkedTranscriptEnabled
@@ -1157,6 +1208,7 @@ export function useTranscriptJumpHost(deps: TranscriptJumpHostDeps): TranscriptJ
         endExplicitJumpWriteBarrier,
         executeViewportCommandWithAnimation,
         forkedTranscriptEnabled,
+        handleJumpLanded,
         invalidateViewportAnchorCapture,
         isPinnedRef,
         isTranscriptJumpTargetInRenderedWindow,
@@ -1164,7 +1216,6 @@ export function useTranscriptJumpHost(deps: TranscriptJumpHostDeps): TranscriptJ
         isWebTranscriptTargetMounted,
         lastPinOffsetForIntentRef,
         lastRouteJumpProtectionClearingWebMovementAtMsRef,
-        onJumpLanded,
         onViewportChangeRef,
         pendingJumpSeqViewportPromotionRef,
         pinThresholdPxRef,
@@ -1226,15 +1277,14 @@ export function useTranscriptJumpHost(deps: TranscriptJumpHostDeps): TranscriptJ
         return request ? handleTranscriptNavigationRailJump(entry, request) : undefined;
     }, [handleTranscriptNavigationRailJump, sessionId]);
 
-    // The pane payload carries the session's entries and their press handler —
-    // facts the host owns. The ACTIVE entry is not one of them: it is the
-    // navigation visibility store's, and subscribing to it here re-rendered the
-    // entire transcript host on every turn-boundary crossing. Consumers read the
-    // anchor from `useTranscriptNavigationCurrentAnchorId(sessionId)` directly.
+    // The only fact the pane needs from the host is "where do I send a press".
+    // Entries come from the session-scoped derivation owner and the active entry
+    // from the navigation visibility store, so both survive with no transcript
+    // mounted; republishing either here would restore the split-brain — and
+    // subscribing to the anchor here re-rendered the whole transcript host on
+    // every turn-boundary crossing.
     React.useLayoutEffect(() => {
         transcriptNavigationPaneStore.set(sessionId, {
-            activeEntryId: null,
-            entries: transcriptNavigationEntries,
             onEntryPress: handleTranscriptNavigationPaneEntryPress,
         });
         return () => {
@@ -1243,7 +1293,6 @@ export function useTranscriptJumpHost(deps: TranscriptJumpHostDeps): TranscriptJ
     }, [
         handleTranscriptNavigationPaneEntryPress,
         sessionId,
-        transcriptNavigationEntries,
     ]);
 
     React.useEffect(() => {

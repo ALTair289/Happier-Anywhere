@@ -144,8 +144,15 @@ export type TranscriptScrollIngressCallbacks = Readonly<{
      * Re-derives navigation visibility from the renderer's visible index window.
      * Platform-agnostic: index space is the ONE anchor derivation, so native
      * scroll frames publish through exactly the same owner as web ones.
+     *
+     * `genuineUserMovement` is this frame's user-authority classification. It is
+     * what releases a jump landing's hold on the current anchor: the reader
+     * taking the viewport back outranks the landing, while the landing's own
+     * programmatic write does not.
      */
-    observeWebTranscriptNavigationVisibility(): void;
+    observeWebTranscriptNavigationVisibility(
+        input: Readonly<{ genuineUserMovement: boolean }>,
+    ): void;
     preemptEntryRestoreTransaction(): void;
     promotePendingJumpSeqViewportSnapshot(input: Readonly<{
         distanceFromBottom: number;
@@ -213,7 +220,14 @@ export function observeTranscriptScrollIngress(
     });
     if (!observation) return { consumed: true, observation: null };
 
-    callbacks.observeWebTranscriptNavigationVisibility();
+    // Native user authority is the trusted-gesture flag; Legend hands web frames
+    // its own canonical classification up front. Both are known before the first
+    // publish, so a released landing publishes containment on this very frame.
+    callbacks.observeWebTranscriptNavigationVisibility({
+        genuineUserMovement: observation.platform === 'native'
+            ? observation.isTrusted
+            : input.webMovementFact?.isGenuineUserMovement === true,
+    });
 
     const recordNativeScrollObservation = (
         reason: TranscriptViewportTelemetryObservationReason = 'observed',
@@ -364,8 +378,12 @@ export function observeTranscriptScrollIngress(
             && (hasRendererWebMovementFact || observation.isTrusted);
         if (hasWebUserAuthority) {
             callbacks.recordWebRouteJumpProtectionClearingMovement(input.nowMs);
-        }
-        if (hasWebUserAuthority) {
+            if (!hasRendererWebMovementFact) {
+                // The app-owned DOM classifier answers only here (it sits behind
+                // the jump-promotion gate above), so a renderer without its own
+                // movement fact publishes the landing release on this frame.
+                callbacks.observeWebTranscriptNavigationVisibility({ genuineUserMovement: true });
+            }
             callbacks.preemptEntryRestoreTransaction();
         } else {
             callbacks.verifyWebEntryRestoreTransaction();

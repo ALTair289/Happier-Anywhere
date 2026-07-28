@@ -181,8 +181,8 @@ export function useTranscriptNavigationVisibilityHasSubscribers(
  * that merely re-derives the same current turn.
  *
  * This and {@link useTranscriptNavigationVisibleAnchorIds} are the navigation
- * surfaces' own subscription point (the rail today; the navigation pane is the
- * next consumer to migrate off the host-published snapshot).
+ * surfaces' own subscription point — the rail and the pane both read the
+ * current anchor here, never from a host-published snapshot.
  */
 export function useTranscriptNavigationCurrentAnchorId(
     storeOrSessionId: NavigationVisibilityStore | string,

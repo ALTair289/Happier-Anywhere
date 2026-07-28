@@ -3,6 +3,7 @@ import type {
     TranscriptNavigationEntry,
     TranscriptNavigationRole,
 } from '../../navigation/transcriptNavigationTypes';
+import type { TranscriptJumpTarget } from '../jump/transcriptJumpTargetTypes';
 
 export type TranscriptNavigationRuntimeAnchorMessage = Readonly<{
     messageId: string;
@@ -18,8 +19,17 @@ export type TranscriptNavigationRenderedAnchorSource = Readonly<{
     messages: readonly TranscriptNavigationRuntimeAnchorMessage[];
 }>;
 
+/**
+ * A resolved anchor keeps the entry identity it was matched from, so a jump
+ * target (built from those same fields by the navigation jump plan) can be
+ * mapped back to its anchor without a second identity vocabulary.
+ */
 export type TranscriptNavigationRuntimeAnchor = TranscriptNavigationAnchorCandidate & Readonly<{
     messageIds: readonly string[];
+    role: TranscriptNavigationRole;
+    routeMessageId: string | null;
+    seq: number | null;
+    transcriptBlockIndex: number | null;
 }>;
 
 function normalizeString(value: unknown): string | null {
@@ -126,8 +136,48 @@ export function deriveTranscriptNavigationRuntimeAnchors(params: Readonly<{
             kind: entry.kind,
             sourceIndex: normalizeInteger(source.sourceIndex) ?? 0,
             messageIds: dedupeStrings(source.messageIds),
+            role: normalizeRole(entry.role),
+            routeMessageId: normalizeString(entry.routeMessageId),
+            seq: normalizeInteger(entry.seq),
+            transcriptBlockIndex: normalizeInteger(entry.transcriptBlockIndex),
         });
         seen.add(id);
     }
     return anchors;
+}
+
+/**
+ * Inverse of the navigation jump plan: a rail/pane press builds its target from
+ * the entry's route id, seq, block index, and role, so an anchor carrying those
+ * same fields identifies the jump's destination. A bare-seq target (deep link,
+ * route jump) can match several anchors sharing that seq; the earliest rendered
+ * row wins, which is exactly the row the seq jump command itself lands on.
+ */
+export function resolveTranscriptNavigationAnchorIdForJumpTarget(params: Readonly<{
+    anchors: readonly TranscriptNavigationRuntimeAnchor[];
+    target: TranscriptJumpTarget;
+}>): string | null {
+    const target = params.target;
+    const routeMessageId = target.kind === 'route-message-id' ? normalizeString(target.routeMessageId) : null;
+    const seq = normalizeInteger(target.kind === 'seq' ? target.seq : target.seqHint);
+    const transcriptBlockIndex = target.kind === 'route-message-id'
+        ? normalizeInteger(target.transcriptBlockIndex)
+        : null;
+    const role = target.kind === 'route-message-id' ? normalizeRole(target.role) : 'unknown';
+    if (!routeMessageId && seq === null) return null;
+
+    let best: TranscriptNavigationRuntimeAnchor | null = null;
+    for (const anchor of params.anchors) {
+        if (routeMessageId !== null) {
+            if (anchor.routeMessageId !== routeMessageId) continue;
+            // `seqHint` is a hint: it only discriminates when both sides know one.
+            if (seq !== null && anchor.seq !== null && anchor.seq !== seq) continue;
+        } else if (anchor.seq !== seq) {
+            continue;
+        }
+        if (transcriptBlockIndex !== null && anchor.transcriptBlockIndex !== transcriptBlockIndex) continue;
+        if (role !== 'unknown' && anchor.role !== role) continue;
+        if (best === null || anchor.sourceIndex < best.sourceIndex) best = anchor;
+    }
+    return best?.id ?? null;
 }

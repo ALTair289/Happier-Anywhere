@@ -94,6 +94,10 @@ function createStableMembers() {
         resolveWebScrollMetrics: vi.fn<() => WebTranscriptScrollMetrics | null>(() => null),
         scrollPinRef: createRef({ isPinned: true, lastActivityKey: null, newActivityCount: 0 }),
         stampViewportAnchorForEmit: vi.fn((anchor: unknown) => anchor ?? null),
+        // ChatList holds this as a plain React ref, so it is a STABLE member —
+        // a fresh ref object per render would be a fixture artifact, not the
+        // deps-object churn this contract is about.
+        transcriptNavigationRuntimeAnchorsRef: createRef([]),
         waitForNextVisualUpdate: vi.fn(() => Promise.resolve()),
         webDomObservation: {
             observeGenuineScrollMovement: vi.fn(() => ({
@@ -127,7 +131,6 @@ function buildDeps(members: ReturnType<typeof createStableMembers>): JumpHostDep
         targetWindowHasMoreNewer: false,
         targetWindowIsWindowMode: false,
         transcriptNavigationEntries: [],
-        transcriptNavigationRuntimeAnchorsRef: createRef([]),
         transcriptNavigationRenderedSources: [],
         usesNativeFlashListBottomMaintenance: false,
     } as unknown as JumpHostDeps;

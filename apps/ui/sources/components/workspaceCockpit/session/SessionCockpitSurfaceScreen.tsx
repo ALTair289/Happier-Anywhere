@@ -30,7 +30,6 @@ import {
     type SessionPaneUrlState,
 } from '@/components/sessions/panes/url/sessionPaneUrlState';
 import { SessionView } from '@/components/sessions/shell/SessionView';
-import { useTranscriptNavigationPaneSnapshot } from '@/components/sessions/transcript/navigation/transcriptNavigationPaneStore';
 import type { SessionRouteHydrationState } from '@/sync/domains/session/sessionRouteHydrationState';
 import { deferOnWeb } from '@/utils/platform/deferOnWeb';
 
@@ -63,7 +62,6 @@ export const SessionCockpitSurfaceScreen = React.memo((props: SessionCockpitSurf
     const activeRightTabId = pane.scopeState?.right?.activeTabId ?? null;
     const rightIsOpen = pane.scopeState?.right?.isOpen ?? false;
     const detailsIsOpen = pane.scopeState?.details?.isOpen ?? false;
-    const transcriptNavigationPaneSnapshot = useTranscriptNavigationPaneSnapshot(props.sessionId);
     const openRight = pane.openRight;
     const closeRight = pane.closeRight;
     const closeDetails = pane.closeDetails;
@@ -78,6 +76,14 @@ export const SessionCockpitSurfaceScreen = React.memo((props: SessionCockpitSurf
     const switchSurface = React.useCallback((surface: SessionMobileSurface) => {
         surfaceNavigationRef.current?.switchSurface(surface);
     }, []);
+
+    // The cockpit's only exit from a fullscreen surface back to the transcript. The
+    // navigation pane uses it both as its close affordance (button / Escape) and as the
+    // reveal that must precede a jump, since jumping into a hidden scene moves a viewport
+    // the reader cannot see.
+    const revealChatSurface = React.useCallback(() => {
+        switchSurface('chat');
+    }, [switchSurface]);
 
     React.useEffect(() => {
         if (!isFocused || !surfaceNavigation) return;
@@ -260,9 +266,8 @@ export const SessionCockpitSurfaceScreen = React.memo((props: SessionCockpitSurf
         return renderSessionChrome(
             <SessionCockpitFullscreenSurface screenTestID="session-transcript-navigation-screen" safeAreaPadding={false}>
                 <SessionTranscriptNavigationPane
-                    activeEntryId={transcriptNavigationPaneSnapshot.activeEntryId}
-                    entries={transcriptNavigationPaneSnapshot.entries}
-                    onEntryPress={transcriptNavigationPaneSnapshot.onEntryPress ?? (() => {})}
+                    onRequestClose={revealChatSurface}
+                    onRevealTranscript={revealChatSurface}
                     sessionId={props.sessionId}
                 />
             </SessionCockpitFullscreenSurface>,

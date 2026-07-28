@@ -206,6 +206,58 @@ describe('observeTranscriptScrollIngress', () => {
         expect(lifecycleHost.getState().bottomFollowState.mode).toBe('released');
     });
 
+    it('tells navigation visibility whether the reader genuinely moved before it publishes', () => {
+        const genuineUserMovementByCall: boolean[] = [];
+        const observeWebTranscriptNavigationVisibility = (input: Readonly<{ genuineUserMovement: boolean }>) => {
+            genuineUserMovementByCall.push(input.genuineUserMovement);
+        };
+
+        // A programmatic landing write: Legend classifies its own echo as NOT
+        // genuine, so the jump's landed anchor must survive the frame.
+        observeTranscriptScrollIngress(webScrollIngressInput({
+            webMovementFact: {
+                atEndPublicationCause: 'command',
+                direction: 1,
+                downwardIntent: true,
+                isGenuineUserMovement: false,
+                movedSinceLastObservation: true,
+                upwardIntent: false,
+            },
+        }), scrollIngressCallbacks({ observeWebTranscriptNavigationVisibility }));
+
+        expect(genuineUserMovementByCall).toEqual([false]);
+
+        observeTranscriptScrollIngress(webScrollIngressInput({
+            webMovementFact: {
+                atEndPublicationCause: 'layout',
+                direction: -1,
+                downwardIntent: false,
+                isGenuineUserMovement: true,
+                movedSinceLastObservation: true,
+                upwardIntent: true,
+            },
+        }), scrollIngressCallbacks({ observeWebTranscriptNavigationVisibility }));
+
+        expect(genuineUserMovementByCall).toEqual([false, true]);
+    });
+
+    it('publishes the release for a renderer whose movement fact only arrives after the promotion gate', () => {
+        const genuineUserMovementByCall: boolean[] = [];
+
+        observeTranscriptScrollIngress(webScrollIngressInput(), scrollIngressCallbacks({
+            observeWebTranscriptNavigationVisibility: (input) => {
+                genuineUserMovementByCall.push(input.genuineUserMovement);
+            },
+            resolveWebScrollMetrics: () => webMetrics({
+                clientHeight: 400,
+                scrollHeight: 1200,
+                scrollTop: 300,
+            }),
+        }));
+
+        expect(genuineUserMovementByCall).toEqual([false, true]);
+    });
+
     it('routes invalid native offsets to blank recovery outside telemetry recording', () => {
         const log: string[] = [];
 

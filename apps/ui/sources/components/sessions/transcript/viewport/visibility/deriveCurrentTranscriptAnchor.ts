@@ -23,6 +23,14 @@ export type TranscriptVisibleSourceRange = Readonly<{
 
 export type DeriveCurrentTranscriptAnchorInput = Readonly<{
     anchors: readonly TranscriptNavigationAnchorCandidate[];
+    /**
+     * The anchor a jump landing PUT the reader on, while that landing still
+     * owns the viewport. Intent outranks geometric containment: a landing
+     * routinely settles the renderer window one or two rows above the target
+     * row (the previous turn's tail still grazes the viewport top), and index
+     * space cannot tell that apart from genuinely reading the previous turn.
+     */
+    landedAnchorId?: string | null;
     preferUserTurnAnchor?: boolean;
     visibleSourceRange: TranscriptVisibleSourceRange | null | undefined;
 }>;
@@ -99,8 +107,15 @@ export function deriveCurrentTranscriptAnchor(
         ))
         .map((anchor) => anchor.id);
 
+    const landedAnchorId = typeof input.landedAnchorId === 'string' && input.landedAnchorId.length > 0
+        ? input.landedAnchorId
+        : null;
+
     const currentAnchorId = (
-        (input.preferUserTurnAnchor === true
+        (landedAnchorId !== null && anchors.some((anchor) => anchor.id === landedAnchorId)
+            ? landedAnchorId
+            : null)
+        ?? (input.preferUserTurnAnchor === true
             ? resolveContainingAnchorId(anchors, range.firstSourceIndex, 'user-turn')
             : null)
         ?? resolveContainingAnchorId(anchors, range.firstSourceIndex, null)

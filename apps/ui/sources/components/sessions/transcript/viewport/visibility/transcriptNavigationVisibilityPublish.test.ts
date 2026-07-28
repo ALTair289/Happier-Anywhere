@@ -52,6 +52,18 @@ describe('resolveTranscriptNavigationVisibilityWrite', () => {
         })).toEqual({ kind: 'skip', reason: 'unmeasured-viewport' });
     });
 
+    it('lets a landed jump anchor own current while the renderer still leads with the previous turn', () => {
+        expect(resolveTranscriptNavigationVisibilityWrite({
+            anchors: ANCHORS,
+            itemCount: 20,
+            landedAnchorId: 'turn-2',
+            visibleSourceRange: { startIndex: 7, endIndex: 14 },
+        })).toEqual({
+            kind: 'write',
+            snapshot: { currentAnchorId: 'turn-2', visibleAnchorIds: ['turn-2'] },
+        });
+    });
+
     it('normalizes an inverted renderer range and clamps it to the rendered item count', () => {
         expect(resolveTranscriptNavigationVisibilityWrite({
             anchors: ANCHORS,

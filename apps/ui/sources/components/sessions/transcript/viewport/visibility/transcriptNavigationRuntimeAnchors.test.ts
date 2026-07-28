@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { deriveTranscriptNavigationRuntimeAnchors } from './transcriptNavigationRuntimeAnchors';
+import {
+    deriveTranscriptNavigationRuntimeAnchors,
+    resolveTranscriptNavigationAnchorIdForJumpTarget,
+    type TranscriptNavigationRuntimeAnchor,
+} from './transcriptNavigationRuntimeAnchors';
 import type { TranscriptNavigationEntry } from '../../navigation/transcriptNavigationTypes';
 
 function pinnedToolEntry(params: Readonly<{
@@ -237,5 +241,71 @@ describe('transcriptNavigationRuntimeAnchors', () => {
                 messageIds: ['assistant-block-2'],
             },
         ]);
+    });
+});
+
+describe('resolveTranscriptNavigationAnchorIdForJumpTarget', () => {
+    const USER_TURN: TranscriptNavigationRuntimeAnchor = {
+        id: 'session-1:user-turn:10',
+        kind: 'user-turn',
+        sourceIndex: 4,
+        messageIds: ['u2'],
+        routeMessageId: 'local:u2',
+        seq: 10,
+        transcriptBlockIndex: 0,
+        role: 'user',
+    };
+    const PINNED_BLOCK_1: TranscriptNavigationRuntimeAnchor = {
+        id: 'session-1:pinned:block-1',
+        kind: 'pinned-assistant',
+        sourceIndex: 5,
+        messageIds: ['a2'],
+        routeMessageId: 'server:assistant-message',
+        seq: 10,
+        transcriptBlockIndex: 1,
+        role: 'assistant',
+    };
+    const PINNED_BLOCK_2: TranscriptNavigationRuntimeAnchor = {
+        ...PINNED_BLOCK_1,
+        id: 'session-1:pinned:block-2',
+        sourceIndex: 6,
+        messageIds: ['a3'],
+        transcriptBlockIndex: 2,
+    };
+    const ANCHORS = [USER_TURN, PINNED_BLOCK_1, PINNED_BLOCK_2];
+
+    it('maps a route-message-id target to the anchor sharing its block identity', () => {
+        expect(resolveTranscriptNavigationAnchorIdForJumpTarget({
+            anchors: ANCHORS,
+            target: {
+                kind: 'route-message-id',
+                routeMessageId: 'server:assistant-message',
+                seqHint: 10,
+                transcriptBlockIndex: 2,
+                role: 'assistant',
+            },
+        })).toBe('session-1:pinned:block-2');
+    });
+
+    it('maps a bare seq target to the user turn rather than a same-seq pinned block', () => {
+        expect(resolveTranscriptNavigationAnchorIdForJumpTarget({
+            anchors: ANCHORS,
+            target: { kind: 'seq', seq: 10 },
+        })).toBe('session-1:user-turn:10');
+    });
+
+    it('returns null when no anchor carries the target identity', () => {
+        expect(resolveTranscriptNavigationAnchorIdForJumpTarget({
+            anchors: ANCHORS,
+            target: { kind: 'seq', seq: 99 },
+        })).toBeNull();
+        expect(resolveTranscriptNavigationAnchorIdForJumpTarget({
+            anchors: ANCHORS,
+            target: {
+                kind: 'route-message-id',
+                routeMessageId: 'server:other-message',
+                seqHint: 10,
+            },
+        })).toBeNull();
     });
 });

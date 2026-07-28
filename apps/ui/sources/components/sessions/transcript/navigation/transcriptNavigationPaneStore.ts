@@ -1,9 +1,15 @@
-import type { TranscriptNavigationEntry, TranscriptNavigationEntryPressHandler } from './transcriptNavigationTypes';
+import type { TranscriptNavigationEntryPressHandler } from './transcriptNavigationTypes';
 
+/**
+ * Registry of the transcript host's jump handler, keyed by session.
+ *
+ * It deliberately carries nothing else: navigation entries come from the session-scoped
+ * derivation owner (`useSessionTranscriptNavigationEntries`) and the active position comes
+ * from the visibility store, so both work with no transcript mounted. Publishing either of
+ * them here again would re-create the split-brain those owners removed.
+ */
 export type TranscriptNavigationPaneSnapshot = Readonly<{
     sessionId: string;
-    entries: readonly TranscriptNavigationEntry[];
-    activeEntryId: string | null;
     onEntryPress: TranscriptNavigationEntryPressHandler | null;
 }>;
 
@@ -12,15 +18,12 @@ export type TranscriptNavigationPaneStore = Readonly<{
     set: (
         sessionId: string,
         next: Readonly<{
-            entries: readonly TranscriptNavigationEntry[];
-            activeEntryId: string | null;
             onEntryPress: TranscriptNavigationEntryPressHandler;
         }> | null,
     ) => void;
     subscribe: (sessionId: string, listener: () => void) => () => void;
 }>;
 
-const EMPTY_ENTRIES: readonly TranscriptNavigationEntry[] = Object.freeze([]);
 const emptySnapshotsBySessionId = new Map<string, TranscriptNavigationPaneSnapshot>();
 
 /**
@@ -41,8 +44,6 @@ export function createEmptyTranscriptNavigationPaneSnapshot(sessionId: string): 
     const existing = emptySnapshotsBySessionId.get(normalizedSessionId);
     if (existing) return existing;
     const snapshot = {
-        activeEntryId: null,
-        entries: EMPTY_ENTRIES,
         onEntryPress: null,
         sessionId: normalizedSessionId,
     };
@@ -57,10 +58,6 @@ function normalizeSnapshot(
     const normalizedSessionId = normalizeSessionId(sessionId);
     if (!next) return createEmptyTranscriptNavigationPaneSnapshot(normalizedSessionId);
     return {
-        activeEntryId: typeof next.activeEntryId === 'string' && next.activeEntryId.length > 0
-            ? next.activeEntryId
-            : null,
-        entries: next.entries,
         onEntryPress: next.onEntryPress,
         sessionId: normalizedSessionId,
     };
@@ -68,8 +65,6 @@ function normalizeSnapshot(
 
 function snapshotsEqual(left: TranscriptNavigationPaneSnapshot, right: TranscriptNavigationPaneSnapshot): boolean {
     return left.sessionId === right.sessionId
-        && left.activeEntryId === right.activeEntryId
-        && left.entries === right.entries
         && left.onEntryPress === right.onEntryPress;
 }
 
