@@ -308,7 +308,6 @@ export function startDevReloadCoordinator({
       retryEpisodeSignature = episodeSignature;
       retryEpisodeState = 'initial';
     } else if (retryEpisodeState === 'scheduled' || retryEpisodeState === 'consumed') {
-      logger.log?.('[local] watch: unchanged reload episode already has its bounded retry disposition.');
       return;
     }
     admittedSignature = episodeSignature;
