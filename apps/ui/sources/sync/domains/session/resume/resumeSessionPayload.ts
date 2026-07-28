@@ -6,6 +6,7 @@ import {
     SessionAttachMetadataIdentityPolicySchema,
     SessionAuthoringValueV1Schema,
     SessionInitialGoalRequestV1Schema,
+    SpawnSessionExecutionAuthorizationSchema,
     type SessionAttachMetadataIdentityPolicy,
     type AgentRuntimeDescriptorV1,
     type BackendTargetRefV1,
@@ -15,6 +16,7 @@ import {
 import { isPermissionMode, type PermissionMode } from '../../permissions/permissionTypes';
 
 import { buildCodexBackendTransportFields, type CodexBackendTransportFields } from '../codexBackendTransport';
+import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 
 export type ResumeHappySessionRpcParams = CodexBackendTransportFields & {
     type: 'resume-session';
@@ -36,6 +38,7 @@ export type ResumeHappySessionRpcParams = CodexBackendTransportFields & {
     modelUpdatedAt?: number;
     accountSettingsVersionHint?: number;
     initialTranscriptAfterSeq?: number;
+    executionAuthorization?: import('@happier-dev/protocol').SpawnSessionExecutionAuthorization;
     initialGoal?: SessionInitialGoalRequestV1;
 };
 
@@ -64,6 +67,7 @@ const ResumeHappySessionRpcParamsSchema = z.object({
     modelUpdatedAt: z.number().optional(),
     accountSettingsVersionHint: z.number().int().min(0).optional(),
     initialTranscriptAfterSeq: z.number().int().min(0).optional(),
+    executionAuthorization: SpawnSessionExecutionAuthorizationSchema.optional(),
     initialGoal: SessionInitialGoalRequestV1Schema.optional(),
     experimentalCodexAcp: z.literal(true).optional(),
     codexBackendMode: z.enum(['mcp', 'acp', 'appServer']).optional(),
@@ -80,7 +84,7 @@ export function buildResumeHappySessionRpcParams(input: BuildResumeHappySessionR
         connectedServicesUpdatedAt,
         ...rest
     } = input;
-    const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+    const normalizedModelId = readNonBlankSessionControlIdentifier(modelId) ?? '';
     const includeModelOverride =
         normalizedModelId.length > 0 &&
         normalizedModelId !== 'default' &&

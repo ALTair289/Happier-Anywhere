@@ -3,6 +3,16 @@ import { describe, expect, test } from 'vitest';
 import { buildResumeHappySessionRpcParams } from './resumeSessionPayload';
 
 describe('buildResumeHappySessionRpcParams', () => {
+    test('preserves exact nonblank opaque model identifiers', () => {
+        expect(buildResumeHappySessionRpcParams({
+            sessionId: 's1',
+            directory: '/tmp',
+            backendTarget: { kind: 'builtInAgent', agentId: 'cursor' },
+            modelId: ' model-a ',
+            modelUpdatedAt: 123,
+        })).toEqual(expect.objectContaining({ modelId: ' model-a ', modelUpdatedAt: 123 }));
+    });
+
     test('builds typed params for resume-session', () => {
         expect(buildResumeHappySessionRpcParams({
             sessionId: 's1',
@@ -305,6 +315,20 @@ describe('buildResumeHappySessionRpcParams', () => {
                     vendorSessionId: 'codex-session-1',
                 },
             },
+        });
+    });
+
+    test('carries fresh user-request execution authorization through the resume RPC payload', () => {
+        expect(buildResumeHappySessionRpcParams({
+            sessionId: 's1',
+            directory: '/tmp',
+            backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+            initialTranscriptAfterSeq: 41,
+            executionAuthorization: { provenance: 'user_request', requestId: ' message-1 ' },
+        })).toMatchObject({
+            type: 'resume-session',
+            initialTranscriptAfterSeq: 41,
+            executionAuthorization: { provenance: 'user_request', requestId: ' message-1 ' },
         });
     });
 });

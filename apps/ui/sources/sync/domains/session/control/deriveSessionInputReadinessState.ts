@@ -1,7 +1,4 @@
-import type {
-    PrimaryTurnStatusV1,
-    SessionRuntimeActivitySourceClassV1,
-} from '@happier-dev/protocol';
+import type { PrimaryTurnStatusV1 } from '@happier-dev/protocol';
 
 import {
     isFreshTimestamp,
@@ -30,10 +27,6 @@ export type DeriveSessionInputReadinessStateInput = Readonly<{
     thinkingAt?: number | null;
     latestTurnStatus?: PrimaryTurnStatusV1 | null;
     latestTurnStatusObservedAt?: number | null;
-    runtimeActivityActiveCount?: number | null;
-    runtimeActivityObservedAt?: number | null;
-    runtimeActivityExpiresAt?: number | null;
-    runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
     hasPendingPermissionRequests?: boolean | null;
     hasPendingUserActionRequests?: boolean | null;
     pendingRequestObservedAt?: number | null;

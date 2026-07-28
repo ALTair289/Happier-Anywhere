@@ -5,39 +5,48 @@ import { deriveSessionInputReadinessState } from './deriveSessionInputReadinessS
 describe('deriveSessionInputReadinessState', () => {
     const nowMs = 1_000_000;
 
-    it('does not treat display-only provider runtime activity as input-busy', () => {
-        const readiness = deriveSessionInputReadinessState({
+    it('accepts the next turn when foreground and serviceability facts are ready', () => {
+        const input = {
             active: true,
-            activeAt: nowMs - 10_000,
             presence: 'online',
             thinking: false,
-            thinkingAt: 0,
-            latestTurnStatus: 'completed',
-            latestTurnStatusObservedAt: nowMs - 5_000,
-            runtimeActivityActiveCount: 1,
-            runtimeActivityObservedAt: nowMs - 1_000,
-            runtimeActivityExpiresAt: nowMs + 60_000,
-            runtimeActivitySourceClass: 'provider_detached_task',
-        }, nowMs);
+            latestTurnStatus: 'completed' as const,
+            latestTurnStatusObservedAt: nowMs - 1,
+            get runtimeActivityState(): never {
+                throw new Error('input readiness must not read Activity presentation fields');
+            },
+            get runtimeActivitySourceClass(): never {
+                throw new Error('input readiness must not read Activity presentation fields');
+            },
+        };
 
-        expect(readiness.disposition).toBe('accepts_next_turn');
-        expect(readiness.isInputBusy).toBe(false);
-        expect(readiness.canWakePendingQueue).toBe(true);
+        expect(deriveSessionInputReadinessState(input, nowMs)).toEqual({
+            disposition: 'accepts_next_turn',
+            isInputBusy: false,
+            canWakePendingQueue: true,
+        });
     });
 
-    it('treats a fresh foreground in-progress turn as input-busy', () => {
-        const readiness = deriveSessionInputReadinessState({
+    it('treats a fresh foreground turn as input-busy and exposes steer only by capability', () => {
+        const input = {
             active: true,
-            activeAt: nowMs - 1_000,
+            activeAt: nowMs - 1,
             presence: 'online',
-            thinking: false,
-            thinkingAt: 0,
-            latestTurnStatus: 'in_progress',
-            latestTurnStatusObservedAt: nowMs - 1_000,
-        }, nowMs);
+            latestTurnStatus: 'in_progress' as const,
+            latestTurnStatusObservedAt: nowMs - 1,
+        };
 
-        expect(readiness.disposition).toBe('blocked');
-        expect(readiness.isInputBusy).toBe(true);
-        expect(readiness.canWakePendingQueue).toBe(false);
+        expect(deriveSessionInputReadinessState(input, nowMs)).toMatchObject({
+            disposition: 'blocked',
+            isInputBusy: true,
+        });
+        expect(deriveSessionInputReadinessState({
+            ...input,
+            inFlightSteerSupported: true,
+            inFlightSteerAvailable: true,
+        }, nowMs)).toMatchObject({
+            disposition: 'steer_available',
+            isInputBusy: true,
+        });
     });
 });
