@@ -13,8 +13,28 @@ import { resolveClaudeBrowseSourceOptions } from '@/agents/providers/claude/dire
 import { claudeGoalActionCapabilityProfile, claudeSupportsEditableGoals } from '@/agents/providers/claude/workState/claudeEditableGoals';
 import { buildClaudeSessionHandoffProviderPatch } from '@/agents/providers/claude/sessionHandoff';
 import { isClaudeUnifiedAttachedSessionTerminalAvailable } from '@/agents/providers/claude/attachedSessionTerminal';
+import { resolveClaudePendingDeliveryLabelKey } from '@/agents/providers/claude/pendingDeliveryPresentation';
 
 export const CLAUDE_UI_BEHAVIOR_OVERRIDE: AgentUiBehavior = {
+    pendingDelivery: {
+        resolveLabelKey: ({ session, localId, detail }) => resolveClaudePendingDeliveryLabelKey({
+            localId,
+            detail,
+            custodyObservedLocalId: session.agentState?.capabilities?.pendingInputInterruptAndRunLocalId,
+        }),
+        resolveTransientAction: ({ session, localId, wireMode }) => {
+            if (wireMode !== 'pending_input_v1') return null;
+            const capabilities = session.agentState?.capabilities;
+            if (capabilities?.pendingInputInterruptAndRunLocalId !== localId) return null;
+            return {
+                id: 'interrupt_and_run',
+                localId,
+                ...(typeof capabilities.pendingInputInterruptAndRunStateAt === 'number'
+                    ? { stateAtMs: capabilities.pendingInputInterruptAndRunStateAt }
+                    : {}),
+            };
+        },
+    },
     attachedSessionTerminal: {
         isAvailable: ({ session }) => isClaudeUnifiedAttachedSessionTerminalAvailable(session),
     },

@@ -36,6 +36,11 @@ describe('resolveAgentUiBehaviorFromFlavor', () => {
         expect(behavior?.sessionUsage?.supportsExactContextUsageBadge).toBe(false);
     });
 
+    it('projects pending delivery presentation through the Claude provider behavior', () => {
+        expect(resolveAgentUiBehaviorFromFlavor('claude')?.pendingDelivery?.resolveLabelKey).toBeTypeOf('function');
+        expect(resolveAgentUiBehaviorFromFlavor('codex')?.pendingDelivery?.resolveLabelKey).toBeUndefined();
+    });
+
     it('exposes editable goals for explicit codex app-server sessions and rejects explicit alternate modes', () => {
         expect(supportsEditableSessionGoals({
             agentId: 'codex',

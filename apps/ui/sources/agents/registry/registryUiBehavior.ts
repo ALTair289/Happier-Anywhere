@@ -5,6 +5,7 @@ import type {
     AgentRuntimeDescriptorV1,
     DirectSessionLinkEnsureRequest,
     DirectSessionsSource,
+    PendingDeliveryDetailV1,
 } from '@happier-dev/protocol';
 import type { DetailsTab } from '@/components/appShell/panes/model/appPaneReducer';
 import type { AgentId } from './registryCore';
@@ -25,6 +26,13 @@ import { PI_UI_BEHAVIOR_OVERRIDE } from '@/agents/providers/pi/uiBehavior';
 import { CUSTOM_ACP_UI_BEHAVIOR_OVERRIDE } from '@/agents/providers/customAcp/uiBehavior';
 import type { AgentInputExtraActionChip } from '@/components/sessions/agentInput';
 import { resolveAgentIdFromSessionMetadata } from '@happier-dev/agents';
+import type { PendingInputServerWireMode } from '@/sync/engine/pending/pendingInputServerWireContract';
+
+export type PendingDeliveryTransientAction = Readonly<{
+    id: 'interrupt_and_run';
+    localId: string;
+    stateAtMs?: number;
+}>;
 
 type CapabilityResults = Partial<Record<CapabilityId, CapabilityDetectResult>>;
 export type SessionComposerNonSteerablePayloadReason = Extract<NonSteerablePayloadReason, 'provider_config_change_refused'>;
@@ -70,6 +78,20 @@ export type AgentSessionHandoffProviderPatch = Readonly<{
 }>;
 
 export type AgentUiBehavior = Readonly<{
+    pendingDelivery?: Readonly<{
+        resolveLabelKey?: (ctx: {
+            agentId: AgentId;
+            session: Session;
+            localId: string | null;
+            detail: PendingDeliveryDetailV1 | undefined;
+        }) => TranslationKey | null;
+        resolveTransientAction?: (ctx: {
+            agentId: AgentId;
+            session: Session;
+            localId: string;
+            wireMode: PendingInputServerWireMode;
+        }) => PendingDeliveryTransientAction | null;
+    }>;
     attachedSessionTerminal?: Readonly<{
         isAvailable?: (ctx: {
             agentId: AgentId;
@@ -247,6 +269,9 @@ export type NewSessionPreflightIssue = Readonly<{
 
 function mergeAgentUiBehavior(a: AgentUiBehavior, b: AgentUiBehavior): AgentUiBehavior {
     return {
+        ...(a.pendingDelivery || b.pendingDelivery
+            ? { pendingDelivery: { ...(a.pendingDelivery ?? {}), ...(b.pendingDelivery ?? {}) } }
+            : {}),
         ...(a.attachedSessionTerminal || b.attachedSessionTerminal
             ? {
                 attachedSessionTerminal: {
@@ -342,6 +367,36 @@ export function isAttachedSessionTerminalAvailableForSession(session: Session): 
     if (!agentId) return false;
     const isAvailable = AGENTS_UI_BEHAVIOR[agentId].attachedSessionTerminal?.isAvailable;
     return isAvailable?.({ agentId, session }) === true;
+}
+
+export function resolvePendingDeliveryTransientActionForSession(ctx: {
+    session: Session;
+    localId: string;
+    wireMode: PendingInputServerWireMode;
+}): PendingDeliveryTransientAction | null {
+    const agentId = resolveAgentIdFromSessionMetadata(ctx.session.metadata);
+    if (!agentId) return null;
+    return AGENTS_UI_BEHAVIOR[agentId].pendingDelivery?.resolveTransientAction?.({
+        agentId,
+        session: ctx.session,
+        localId: ctx.localId,
+        wireMode: ctx.wireMode,
+    }) ?? null;
+}
+
+export function resolvePendingDeliveryLabelKeyForSession(ctx: {
+    session: Session;
+    localId: string | null;
+    detail: PendingDeliveryDetailV1 | undefined;
+}): TranslationKey | null {
+    const agentId = resolveAgentIdFromSessionMetadata(ctx.session.metadata);
+    if (!agentId) return null;
+    return AGENTS_UI_BEHAVIOR[agentId].pendingDelivery?.resolveLabelKey?.({
+        agentId,
+        session: ctx.session,
+        localId: ctx.localId,
+        detail: ctx.detail,
+    }) ?? null;
 }
 
 export function getAgentResumeExperimentsFromSettings(agentId: AgentId, settings: Settings): AgentResumeExperiments {
