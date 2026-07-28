@@ -241,6 +241,7 @@ describe('MessageView timestamps', () => {
             transcriptStreamingMarkdownRenderingEnabled: false,
             transcriptMessageSelectionEnabled: true,
             transcriptMessageSendToSessionEnabled: false,
+            debugInformationEnabled: false,
             workspacePath: null,
         } satisfies TranscriptMessageDisplayCommon;
         const forkCommon = {

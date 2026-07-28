@@ -138,6 +138,7 @@ const messageDisplayCommon = {
     transcriptStreamingSmoothingEnabled: true,
     transcriptMessageSelectionEnabled: true,
     transcriptMessageSendToSessionEnabled: false,
+    debugInformationEnabled: false,
     workspacePath: null,
 } satisfies TranscriptMessageDisplayCommon;
 
