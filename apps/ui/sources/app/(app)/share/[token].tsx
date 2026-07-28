@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -70,6 +70,14 @@ type PublicShareMessagesResponse = {
     messages: ApiMessage[];
 };
 
+type PublicShareDataset = Readonly<{
+    share: PublicShareResponse;
+    decryptedMetadata: Metadata | null;
+    messages: Message[];
+    loadGeneration: number;
+    tokenParam: string;
+}>;
+
 const PUBLIC_SHARE_MESSAGES_ACCESS_TOKEN_HEADER = 'x-public-share-messages-access-token';
 
 function getOwnerDisplayName(owner: ShareOwner | null): string {
@@ -123,9 +131,8 @@ export default memo(function PublicShareViewerScreen() {
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [consentInfo, setConsentInfo] = useState<PublicShareConsentResponse | null>(null);
-    const [share, setShare] = useState<PublicShareResponse | null>(null);
-    const [decryptedMetadata, setDecryptedMetadata] = useState<Metadata | null>(null);
-    const [messages, setMessages] = useState<Message[]>([]);
+    const [dataset, setDataset] = useState<PublicShareDataset | null>(null);
+    const loadGenerationRef = useRef(0);
 
     const authHeader = useMemo(() => {
         if (!credentials?.token) return null;
@@ -133,7 +140,13 @@ export default memo(function PublicShareViewerScreen() {
     }, [credentials?.token]);
 
     const load = useCallback(async (withConsent: boolean) => {
-        if (!tokenParam) {
+        const loadGeneration = ++loadGenerationRef.current;
+        const requestedTokenParam = tokenParam;
+        const isCurrentLoad = () => loadGenerationRef.current === loadGeneration;
+
+        if (!requestedTokenParam) {
+            setConsentInfo(null);
+            setDataset(null);
             setError(t('errors.invalidShareLink'));
             setIsLoading(false);
             return;
@@ -142,14 +155,12 @@ export default memo(function PublicShareViewerScreen() {
         setIsLoading(true);
         setError(null);
         setConsentInfo(null);
-        setShare(null);
-        setDecryptedMetadata(null);
-        setMessages([]);
+        setDataset(null);
 
         try {
             const path = withConsent
-                ? `/v1/public-share/${tokenParam}?consent=true`
-                : `/v1/public-share/${tokenParam}`;
+                ? `/v1/public-share/${requestedTokenParam}?consent=true`
+                : `/v1/public-share/${requestedTokenParam}`;
 
             const headers: Record<string, string> = {};
             if (authHeader) {
@@ -157,9 +168,11 @@ export default memo(function PublicShareViewerScreen() {
             }
 
             const response = await serverFetch(path, { method: 'GET', headers }, { includeAuth: false });
+            if (!isCurrentLoad()) return;
             if (!response.ok) {
                 if (response.status === 403) {
                     const data = await response.json();
+                    if (!isCurrentLoad()) return;
                     if (data?.requiresConsent) {
                         setConsentInfo(data as PublicShareConsentResponse);
                         setIsLoading(false);
@@ -172,10 +185,11 @@ export default memo(function PublicShareViewerScreen() {
             }
 
             const data = (await response.json()) as PublicShareResponse;
+            if (!isCurrentLoad()) return;
 
             const messagesPath = withConsent
-                ? `/v1/public-share/${tokenParam}/messages?consent=true`
-                : `/v1/public-share/${tokenParam}/messages`;
+                ? `/v1/public-share/${requestedTokenParam}/messages?consent=true`
+                : `/v1/public-share/${requestedTokenParam}/messages`;
             const messagesHeaders = { ...headers };
             if (typeof data.messagesAccessToken === 'string' && data.messagesAccessToken.trim().length > 0) {
                 messagesHeaders[PUBLIC_SHARE_MESSAGES_ACCESS_TOKEN_HEADER] = data.messagesAccessToken;
@@ -185,12 +199,14 @@ export default memo(function PublicShareViewerScreen() {
                 { method: 'GET', headers: messagesHeaders },
                 { includeAuth: false },
             );
+            if (!isCurrentLoad()) return;
             if (!messagesResponse.ok) {
                 setError(t('errors.operationFailed'));
                 setIsLoading(false);
                 return;
             }
             const messagesData = (await messagesResponse.json()) as PublicShareMessagesResponse;
+            if (!isCurrentLoad()) return;
             const shareMessages = Array.isArray(messagesData.messages) ? messagesData.messages : null;
             if (!shareMessages) {
                 setError(t('errors.operationFailed'));
@@ -208,14 +224,19 @@ export default memo(function PublicShareViewerScreen() {
 
             if (sessionEncryptionMode === 'plain') {
                 const normalized = await normalizePlainPublicShareMessages(shareMessages);
+                if (!isCurrentLoad()) return;
                 sortNormalizedMessagesOldestFirst(normalized);
 
                 const reducerState = createReducer();
                 const reduced = reducer(reducerState, normalized, plainAgentState);
 
-                setShare(data);
-                setDecryptedMetadata(plainMetadata);
-                setMessages(reduced.messages.slice(-200));
+                setDataset({
+                    share: data,
+                    decryptedMetadata: plainMetadata,
+                    messages: reduced.messages.slice(-200),
+                    loadGeneration,
+                    tokenParam: requestedTokenParam,
+                });
                 setIsLoading(false);
                 return;
             } else {
@@ -225,7 +246,8 @@ export default memo(function PublicShareViewerScreen() {
                     return;
                 }
 
-                const decryptedKey = await decryptDataKeyFromPublicShare(data.encryptedDataKey, tokenParam);
+                const decryptedKey = await decryptDataKeyFromPublicShare(data.encryptedDataKey, requestedTokenParam);
+                if (!isCurrentLoad()) return;
                 if (!decryptedKey) {
                     setError(t('session.sharing.failedToDecrypt'));
                     setIsLoading(false);
@@ -240,6 +262,7 @@ export default memo(function PublicShareViewerScreen() {
                     data.session.metadataVersion,
                     data.session.metadata
                 );
+                if (!isCurrentLoad()) return;
                 if (!e2eeMetadata) {
                     setError(t('session.sharing.failedToDecrypt'));
                     setIsLoading(false);
@@ -250,8 +273,10 @@ export default memo(function PublicShareViewerScreen() {
                     data.session.agentStateVersion,
                     data.session.agentState
                 );
+                if (!isCurrentLoad()) return;
 
                 const decryptedMessages = await sessionEncryption.decryptMessages(shareMessages);
+                if (!isCurrentLoad()) return;
                 const normalized: NormalizedMessage[] = [];
                 for (const m of decryptedMessages) {
                     if (!m || !m.content) {
@@ -277,13 +302,18 @@ export default memo(function PublicShareViewerScreen() {
                 const reducerState = createReducer();
                 const reduced = reducer(reducerState, normalized, e2eeAgentState);
 
-                setShare(data);
-                setDecryptedMetadata(e2eeMetadata);
-                setMessages(reduced.messages.slice(-200));
+                setDataset({
+                    share: data,
+                    decryptedMetadata: e2eeMetadata,
+                    messages: reduced.messages.slice(-200),
+                    loadGeneration,
+                    tokenParam: requestedTokenParam,
+                });
                 setIsLoading(false);
                 return;
             }
         } catch {
+            if (!isCurrentLoad()) return;
             setError(t('errors.operationFailed'));
             setIsLoading(false);
         }
@@ -291,9 +321,17 @@ export default memo(function PublicShareViewerScreen() {
 
     useEffect(() => {
         void load(false);
+        return () => {
+            loadGenerationRef.current += 1;
+        };
     }, [load]);
 
-    if (isLoading) {
+    const hasCurrentPublishedDataset = dataset?.tokenParam === tokenParam;
+    const publicDatasetKey = dataset && hasCurrentPublishedDataset
+        ? `public-share:${dataset.share.session.id}:${dataset.loadGeneration}`
+        : null;
+
+    if (isLoading || (dataset !== null && !hasCurrentPublishedDataset)) {
         return (
             <View style={[styles.center, { backgroundColor: theme.colors.background.canvas }]}>
                 <ActivitySpinner size="large" color={theme.colors.text.link} />
@@ -345,10 +383,11 @@ export default memo(function PublicShareViewerScreen() {
         );
     }
 
-    if (!share) {
+    if (!dataset || !publicDatasetKey) {
         return null;
     }
 
+    const { share, decryptedMetadata, messages } = dataset;
     const ownerName = getOwnerDisplayName(share.owner);
     const sessionName = decryptedMetadata?.name || decryptedMetadata?.path || t('session.sharing.session');
 
@@ -367,7 +406,9 @@ export default memo(function PublicShareViewerScreen() {
                 </View>
                 <View style={{ flex: 1, paddingTop: safeArea.top + headerHeight }}>
                     <TranscriptList
+                        key={publicDatasetKey}
                         sessionId={share.session.id}
+                        datasetKey={publicDatasetKey}
                         metadata={decryptedMetadata}
                         messages={messages}
                         bottomNotice={{

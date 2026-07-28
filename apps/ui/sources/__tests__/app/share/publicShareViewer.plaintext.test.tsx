@@ -1,6 +1,8 @@
 import { flushHookEffects } from '@/dev/testkit/hooks/flushHookEffects';
-import { renderScreen } from '@/dev/testkit';
-import { describe, expect, it, vi } from 'vitest';
+import { createDeferred, renderScreen } from '@/dev/testkit';
+import React from 'react';
+import { act } from 'react-test-renderer';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { installPublicShareViewerCommonModuleMocks } from './publicShareViewerTestHelpers';
 
 
@@ -10,6 +12,21 @@ import { installPublicShareViewerCommonModuleMocks } from './publicShareViewerTe
 const serverFetchSpy = vi.fn();
 const decryptDataKeyFromPublicShareSpy = vi.fn();
 const transcriptListSpy = vi.fn();
+const routeState = {
+    params: { token: 'tok-1' },
+    listeners: new Set<() => void>(),
+    reset() {
+        this.params = { token: 'tok-1' };
+    },
+    setToken(token: string) {
+        this.params = { token };
+        for (const listener of this.listeners) listener();
+    },
+    subscribe(listener: () => void) {
+        this.listeners.add(listener);
+        return () => this.listeners.delete(listener);
+    },
+};
 
 vi.mock('react-native-reanimated', () => ({}));
 
@@ -21,10 +38,18 @@ const routerMock = { back: vi.fn(), push: vi.fn(), replace: vi.fn() };
 installPublicShareViewerCommonModuleMocks({
     router: async () => {
         const { createExpoRouterMock } = await import('@/dev/testkit/mocks/router');
-        return createExpoRouterMock({
+        const mock = createExpoRouterMock({
             router: routerMock,
-            params: { token: 'tok-1' },
+            params: () => routeState.params,
         }).module;
+        return {
+            ...mock,
+            useLocalSearchParams: () => React.useSyncExternalStore(
+                (listener) => routeState.subscribe(listener),
+                () => routeState.params,
+                () => routeState.params,
+            ),
+        };
     },
 });
 
@@ -47,7 +72,7 @@ vi.mock('@/components/sessions/transcript/ChatHeaderView', () => ({
 vi.mock('@/components/sessions/transcript/TranscriptList', () => ({
     TranscriptList: (props: any) => {
         transcriptListSpy(props);
-        return null;
+        return React.createElement('TranscriptList', props);
     },
 }));
 
@@ -60,6 +85,13 @@ vi.mock('react-native-safe-area-context', () => ({
 }));
 
 describe('PublicShareViewerScreen (plaintext)', () => {
+    beforeEach(() => {
+        routeState.reset();
+        serverFetchSpy.mockReset();
+        decryptDataKeyFromPublicShareSpy.mockReset();
+        transcriptListSpy.mockClear();
+    });
+
     it('does not attempt DEK decryption for plaintext sessions', async () => {
         serverFetchSpy
             .mockResolvedValueOnce({
@@ -132,6 +164,7 @@ describe('PublicShareViewerScreen (plaintext)', () => {
         const last = transcriptListSpy.mock.calls[transcriptListSpy.mock.calls.length - 1]?.[0];
         expect(last).toEqual(expect.objectContaining({
             sessionId: 's1',
+            datasetKey: expect.any(String),
             metadata: expect.objectContaining({ name: 'Plain Session' }),
             messages: expect.any(Array),
             bottomNotice: expect.objectContaining({
@@ -140,6 +173,7 @@ describe('PublicShareViewerScreen (plaintext)', () => {
             }),
             isLoaded: true,
         }));
+        expect(last.datasetKey).not.toContain('tok-1');
         expect(last).not.toHaveProperty('interaction');
     });
 
@@ -398,5 +432,110 @@ describe('PublicShareViewerScreen (plaintext)', () => {
         const last = transcriptListSpy.mock.calls[transcriptListSpy.mock.calls.length - 1]?.[0];
         const seqs = Array.isArray(last?.messages) ? last.messages.map((m: any) => (m as any)?.seq ?? null) : [];
         expect(seqs).toEqual([2]);
+    });
+
+    it('ignores an out-of-order response from token A after same-session token B has loaded', async () => {
+        routeState.params = { token: 'token-a-secret' };
+        const tokenARoot = createDeferred<any>();
+        const tokenAMessages = createDeferred<any>();
+        const tokenBRoot = createDeferred<any>();
+        const tokenBMessages = createDeferred<any>();
+
+        const shareResponse = (name: string, messagesAccessToken: string) => ({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                session: {
+                    id: 'same-session',
+                    seq: 1,
+                    encryptionMode: 'plain',
+                    createdAt: 1,
+                    updatedAt: 2,
+                    active: true,
+                    activeAt: 2,
+                    metadata: JSON.stringify({ path: '/repo', host: 'devbox', name }),
+                    metadataVersion: 1,
+                    agentState: JSON.stringify({}),
+                    agentStateVersion: 1,
+                },
+                owner: { id: 'u1', username: 'alice', firstName: null, lastName: null, avatar: null },
+                accessLevel: 'view',
+                encryptedDataKey: null,
+                isConsentRequired: false,
+                messagesAccessToken,
+            }),
+        });
+        const messagesResponse = (id: string, text: string) => ({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                messages: [{
+                    id,
+                    seq: 1,
+                    localId: null,
+                    content: { t: 'plain', v: { role: 'user', content: { type: 'text', text } } },
+                    createdAt: 3,
+                    updatedAt: 3,
+                }],
+            }),
+        });
+
+        serverFetchSpy.mockImplementation((path: string) => {
+            if (path === '/v1/public-share/token-a-secret') {
+                return tokenARoot.promise;
+            }
+            if (path === '/v1/public-share/token-a-secret/messages') {
+                return tokenAMessages.promise;
+            }
+            if (path === '/v1/public-share/token-b-secret') {
+                return tokenBRoot.promise;
+            }
+            if (path === '/v1/public-share/token-b-secret/messages') {
+                return tokenBMessages.promise;
+            }
+            throw new Error(`Unexpected public-share path: ${path}`);
+        });
+
+        const { default: PublicShareViewerScreen } = await import('@/app/(app)/share/[token]');
+        await renderScreen(<PublicShareViewerScreen />);
+        await act(async () => {
+            tokenARoot.resolve(shareResponse('Token A', 'messages-a'));
+        });
+        await flushHookEffects({ cycles: 2, turns: 2 });
+        expect(serverFetchSpy).toHaveBeenCalledWith(
+            '/v1/public-share/token-a-secret/messages',
+            expect.anything(),
+            expect.anything(),
+        );
+
+        await act(async () => {
+            routeState.setToken('token-b-secret');
+        });
+        await act(async () => {
+            tokenBRoot.resolve(shareResponse('Token B', 'messages-b'));
+        });
+        await flushHookEffects({ cycles: 2, turns: 2 });
+        await act(async () => {
+            tokenBMessages.resolve(messagesResponse('message-b', 'from B'));
+        });
+        await flushHookEffects({ cycles: 2, turns: 2 });
+
+        const tokenBProps = transcriptListSpy.mock.calls[transcriptListSpy.mock.calls.length - 1]?.[0];
+        expect(tokenBProps).toEqual(expect.objectContaining({
+            metadata: expect.objectContaining({ name: 'Token B' }),
+            sessionId: 'same-session',
+        }));
+        expect(tokenBProps.messages.map((message: any) => message.realID)).toEqual(['message-b']);
+
+        tokenAMessages.resolve(messagesResponse('message-a', 'from A'));
+        await flushHookEffects({ cycles: 2, turns: 2 });
+
+        const finalProps = transcriptListSpy.mock.calls[transcriptListSpy.mock.calls.length - 1]?.[0];
+        expect(finalProps.metadata).toEqual(expect.objectContaining({ name: 'Token B' }));
+        expect(finalProps.messages.map((message: any) => message.realID)).toEqual(['message-b']);
+        expect(finalProps.datasetKey).toEqual(expect.any(String));
+        expect(finalProps.datasetKey).toBe(tokenBProps.datasetKey);
+        expect(finalProps.datasetKey).not.toContain('token-a-secret');
+        expect(finalProps.datasetKey).not.toContain('token-b-secret');
     });
 });
