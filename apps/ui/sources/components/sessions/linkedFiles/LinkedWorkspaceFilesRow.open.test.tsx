@@ -60,6 +60,7 @@ vi.hoisted(async () => {
 describe('LinkedWorkspaceFilesRow', () => {
     beforeEach(() => {
         flashListCompatMockState.mappingKeyCalls = [];
+        routerPushSpy.mockClear();
     });
 
     it('routes linked file chip keys through the FlashList mapping helper', async () => {
@@ -67,7 +68,11 @@ describe('LinkedWorkspaceFilesRow', () => {
 
         await renderScreen(
             <AppPaneProvider>
-                <LinkedWorkspaceFilesRow sessionId="s1" paths={['src/api.ts', 'src/ui.ts']} />
+                <LinkedWorkspaceFilesRow
+                    sessionId="s1"
+                    paths={['src/api.ts', 'src/ui.ts']}
+                    fileOpenEnabled
+                />
             </AppPaneProvider>,
         );
 
@@ -89,7 +94,7 @@ describe('LinkedWorkspaceFilesRow', () => {
 
         const screen = await renderScreen(
             <AppPaneProvider>
-                <LinkedWorkspaceFilesRow sessionId="s1" paths={['src/api.ts']} />
+                <LinkedWorkspaceFilesRow sessionId="s1" paths={['src/api.ts']} fileOpenEnabled />
                 <Probe />
             </AppPaneProvider>,
         );
@@ -103,5 +108,25 @@ describe('LinkedWorkspaceFilesRow', () => {
         expect(scope?.details?.isOpen).toBe(true);
         expect(scope?.details?.tabs?.[0]?.key).toBe('file:src/api.ts');
         expect(scope?.details?.activeTabKey).toBe('file:src/api.ts');
+    });
+
+    it('renders linked files as inert metadata when file opening is not granted', async () => {
+        const { LinkedWorkspaceFilesRow } = await import('./LinkedWorkspaceFilesRow');
+
+        const screen = await renderScreen(
+            <AppPaneProvider>
+                <LinkedWorkspaceFilesRow
+                    sessionId="public-session"
+                    paths={['src/api.ts']}
+                    fileOpenEnabled={false}
+                />
+            </AppPaneProvider>,
+        );
+
+        const fileChip = screen.findByTestId('linked-workspace-file:src/api.ts');
+        expect(fileChip?.type).toBe('View');
+        expect(fileChip?.props.accessibilityRole).toBe('text');
+        expect(fileChip?.props.onPress).toBeUndefined();
+        expect(routerPushSpy).not.toHaveBeenCalled();
     });
 });

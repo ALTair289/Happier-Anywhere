@@ -18,6 +18,7 @@ const LINKED_FILE_PREFIX = '@';
 export type LinkedWorkspaceFilesRowProps = Readonly<{
     sessionId: string;
     paths: readonly string[];
+    fileOpenEnabled: boolean;
 }>;
 
 const stylesheet = StyleSheet.create((theme) => ({
@@ -112,21 +113,37 @@ export const LinkedWorkspaceFilesRow = React.memo((props: LinkedWorkspaceFilesRo
 
     return (
         <View style={styles.row}>
-            {props.paths.map((path, index) => (
-                <Pressable
-                    key={getMappingKey(path, index)}
-                    testID={`linked-workspace-file:${path}`}
-                    onPress={() => openFile(path)}
-                    style={({ pressed }) => [styles.chip, pressed ? styles.chipPressed : null]}
-                    accessibilityRole="button"
-                >
+            {props.paths.map((path, index) => {
+                const content = (
+                    <>
                     <Ionicons name="document-text-outline" size={14} color={theme.colors.text.secondary} />
                     <Text style={styles.chipSubtle}>{LINKED_FILE_PREFIX}</Text>
                     <Text style={styles.chipText} numberOfLines={1}>
                         {getBasename(path)}
                     </Text>
-                </Pressable>
-            ))}
+                    </>
+                );
+                return props.fileOpenEnabled ? (
+                    <Pressable
+                        key={getMappingKey(path, index)}
+                        testID={`linked-workspace-file:${path}`}
+                        onPress={() => openFile(path)}
+                        style={({ pressed }) => [styles.chip, pressed ? styles.chipPressed : null]}
+                        accessibilityRole="button"
+                    >
+                        {content}
+                    </Pressable>
+                ) : (
+                    <View
+                        key={getMappingKey(path, index)}
+                        testID={`linked-workspace-file:${path}`}
+                        style={styles.chip}
+                        accessibilityRole="text"
+                    >
+                        {content}
+                    </View>
+                );
+            })}
         </View>
     );
 });

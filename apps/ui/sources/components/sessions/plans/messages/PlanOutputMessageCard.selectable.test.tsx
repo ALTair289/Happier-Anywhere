@@ -49,7 +49,9 @@ describe('PlanOutputMessageCard (selection)', () => {
       recommendedBackendId: 'backend_x',
     };
 
-    const screen = await renderScreen(<PlanOutputMessageCard payload={payload} sessionId="s1" />);
+    const screen = await renderScreen(
+      <PlanOutputMessageCard payload={payload} sessionId="s1" canSendMessages />,
+    );
 
     await act(async () => {
       await pressTestInstanceAsync(screen.findByTestId('adopt-plan-button')!);
@@ -60,6 +62,36 @@ describe('PlanOutputMessageCard (selection)', () => {
     expect(sessionId).toBe('s1');
     expect(String(text)).toContain('@happier/plan.adopt');
     expect(displayText).toBe('Adopt plan');
+  });
+
+  it('fails closed if a retained adopt callback is invoked after the transcript becomes read-only', async () => {
+    submitMessageSpy.mockClear();
+    const { PlanOutputMessageCard } = await import('./PlanOutputMessageCard');
+    const payload: any = {
+      kind: 'plan_output.v1',
+      runRef: { runId: 'run_1' },
+      summary: 'Do the thing',
+      sections: [{ title: 'Steps', items: ['one'] }],
+      risks: [],
+      milestones: [],
+    };
+    const screen = await renderScreen(
+      <PlanOutputMessageCard payload={payload} sessionId="s1" canSendMessages />,
+    );
+    const retainedOnPress = screen.findByTestId('adopt-plan-button')!.props.onPress;
+
+    await act(async () => {
+      screen.tree.update(
+        <PlanOutputMessageCard payload={payload} sessionId="s1" canSendMessages={false} />,
+      );
+    });
+    await act(async () => {
+      retainedOnPress();
+      await Promise.resolve();
+    });
+
+    expect(submitMessageSpy).not.toHaveBeenCalled();
+    expect(screen.findByTestId('adopt-plan-button')).toBeNull();
   });
 
   it('renders plan content text as selectable (but keeps action label non-selectable)', async () => {
@@ -76,7 +108,9 @@ describe('PlanOutputMessageCard (selection)', () => {
     };
 
     let tree!: renderer.ReactTestRenderer;
-    tree = (await renderScreen(<PlanOutputMessageCard payload={payload} sessionId="s1" />)).tree;
+    tree = (await renderScreen(
+      <PlanOutputMessageCard payload={payload} sessionId="s1" canSendMessages />,
+    )).tree;
 
     const findTextNode = (text: string) => findTestInstanceByTypeContainingText(tree, 'Text', text)!;
 
