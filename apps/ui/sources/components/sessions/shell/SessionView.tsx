@@ -294,7 +294,6 @@ import {
     ConnectedServiceIdSchema,
     SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
     SessionUsageLimitRecoveryV1Schema,
-    readSessionContinuationRecoveryFromMetadata,
     readProviderAccountUsageRecordIdsFromMetadata,
     type ConnectedServiceQuotaRecoveryCreditsV1,
     type SessionRunnerRuntimeStateV1,
@@ -508,16 +507,6 @@ function resolveUsageLimitRecoveryQuotaProfileRef(params: Readonly<{
     return null;
 }
 
-function hasContinuationRecoveryWorkToResume(metadata: unknown): boolean {
-    const recovery = readSessionContinuationRecoveryFromMetadata(metadata);
-    if (!recovery) return false;
-    return Object.values(recovery.attemptsById).some((attempt) => {
-        if (attempt.continuationRequired === false) return false;
-        return attempt.status !== 'suppressed_no_interrupted_turn'
-            && attempt.status !== 'suppressed_newer_user_input';
-    });
-}
-
 function formatResumeSessionFailureMessage(result: Readonly<{
     errorCode?: string | null;
     errorMessage?: string | null;
@@ -666,6 +655,8 @@ function resolveStaleSessionRunnerRestartViewStatus(
         case 'unsupported_daemon':
         case 'version_unknown':
             return result.status;
+        case 'refresh_unsupported':
+            return 'ineligible';
         case 'failure':
             return 'failed';
     }
@@ -688,8 +679,6 @@ function SessionAuthRecoveryBanner({ message, style }: Readonly<{
             title={t('connect.restoreAccount')}
             body={message}
             actionLabel={t('connect.restoreAccount')}
-        case 'refresh_unsupported':
-            return 'ineligible';
             actionAccessibilityLabel={t('connect.restoreAccount')}
             onActionPress={() => router.push('/restore')}
             style={style}
@@ -1295,6 +1284,7 @@ const SessionAgentInputRuntimeStatusBoundary = React.memo(function SessionAgentI
         <SessionAgentInputWithUsageAndRequests
             {...props}
             session={session}
+            sessionActive={sessionRuntimeStatusSource.active === true}
             connectionStatus={connectionStatus}
             showAbortButton={shouldShowAbortButtonForSessionState(sessionStatus.state)}
         />
@@ -1333,7 +1323,6 @@ function resolveRouteHydrationRetryStatusKey(
 
 type SessionViewProps = Readonly<{
     id: string;
-            sessionActive={sessionRuntimeStatusSource.active === true}
     routeServerId?: string | null;
     routeHydrationState?: SessionRouteHydrationState | null;
     jumpToSeq?: number | null;
@@ -2521,7 +2510,6 @@ function SessionViewLoaded({
     const hasInterruptedWorkToResume = React.useMemo(() => (
         session.active !== true
         || pendingMessages.length > 0
-        || hasContinuationRecoveryWorkToResume(session.metadata)
     ), [pendingMessages.length, session.active, session.metadata]);
     const baseUsageLimitRecoveryPresentation = React.useMemo(() => buildSessionUsageLimitRecoveryPresentation({
         featureEnabled: usageLimitRecoveryFeatureEnabled,
@@ -2705,6 +2693,8 @@ function SessionViewLoaded({
                 : {}),
         });
         if (result.ok) {
+            const noticeKey = resolveConnectedServiceQuotaRecoveryCreditReceiptNoticeKey(result.receipt.status);
+            if (noticeKey) await Modal.alert(t('common.info'), t(noticeKey));
             return true;
         }
         Modal.alert(t('common.error'), result.error);
@@ -2816,8 +2806,6 @@ function SessionViewLoaded({
     const activeStaleSessionRunnerOperationStatus = staleSessionRunnerOperationStatus
         && staleSessionRunnerStatus?.fingerprint === staleSessionRunnerOperationStatus.fingerprint
         ? { status: staleSessionRunnerOperationStatus.status }
-            const noticeKey = resolveConnectedServiceQuotaRecoveryCreditReceiptNoticeKey(result.receipt.status);
-            if (noticeKey) await Modal.alert(t('common.info'), t(noticeKey));
         : null;
     const staleSessionRunnerNoticePresentation = React.useMemo(() => buildStaleSessionRunnerNoticePresentation({
         status: staleSessionRunnerNoticeResolved ? null : staleSessionRunnerStatus,
