@@ -15,12 +15,28 @@ type ReactActEnvironmentGlobal = typeof globalThis & {
 
 vi.mock('react-native-reanimated', () => ({}));
 
-const historyReplaceStateSpy = vi.fn();
+const historyReplaceStateSpy = vi.fn((_state: unknown, _title: string, relativeUrl: string) => {
+    const windowValue = (globalThis as any).window;
+    if (!windowValue?.location) return;
+    const next = new URL(relativeUrl, windowValue.location.href);
+    windowValue.location.href = next.href;
+    windowValue.location.pathname = next.pathname;
+    windowValue.location.search = next.search;
+    windowValue.location.hash = next.hash;
+});
 const routerPushSpy = vi.fn();
 const routerReplaceSpy = vi.fn();
+const modalConfirmSpy = vi.hoisted(() => vi.fn(async () => false));
 
-const upsertActivateAndSwitchServerSpy = vi.fn(async (_params: { serverUrl: string; source: string; scope: string; refreshAuth: unknown }) => true);
+const upsertActivateAndSwitchServerSpy = vi.fn(async (_params: {
+    serverUrl: string;
+    source: string;
+    scope: string;
+    refreshAuth: unknown;
+    ensureConnection: boolean;
+}) => true);
 const refreshFromActiveServerSpy = vi.fn(async () => {});
+const authSnapshot = { isAuthenticated: true, refreshFromActiveServer: refreshFromActiveServerSpy };
 let activeServerUrl = 'https://api.happier.dev';
 let activeServerSnapshot: { serverId: string; serverUrl: string; generation: number } | null = null;
 
@@ -77,8 +93,15 @@ installRootLayoutRouteCommonModuleMocks({
 });
 
 vi.mock('@/auth/context/AuthContext', () => ({
-    useAuth: () => ({ isAuthenticated: true, refreshFromActiveServer: refreshFromActiveServerSpy }),
+    useAuth: () => authSnapshot,
 }));
+
+vi.mock('@/modal', async () => {
+    const { createModalModuleMock } = await import('@/dev/testkit/mocks/modal');
+    return createModalModuleMock({
+        spies: { confirm: modalConfirmSpy },
+    }).module;
+});
 
 vi.mock('@/auth/routing/authRouting', () => ({
     isPublicRouteForUnauthenticated: () => true,
@@ -177,11 +200,12 @@ vi.mock('@/sync/api/capabilities/getReadyServerFeatures', () => ({
 afterEach(() => {
     activeServerUrl = 'https://api.happier.dev';
     activeServerSnapshot = null;
-    historyReplaceStateSpy.mockReset();
+    historyReplaceStateSpy.mockClear();
     routerPushSpy.mockReset();
     routerReplaceSpy.mockReset();
-    upsertActivateAndSwitchServerSpy.mockReset();
-    refreshFromActiveServerSpy.mockReset();
+    upsertActivateAndSwitchServerSpy.mockClear();
+    refreshFromActiveServerSpy.mockClear();
+    modalConfirmSpy.mockClear();
     delete (globalThis as any).window;
     delete (globalThis as any).document;
     vi.restoreAllMocks();
@@ -227,19 +251,36 @@ describe('App RootLayout server override', () => {
             history: { replaceState: historyReplaceStateSpy },
         };
 
+        let resolveCommit!: (value: true) => void;
+        upsertActivateAndSwitchServerSpy.mockImplementationOnce(async () => (
+            await new Promise<true>((resolve) => { resolveCommit = resolve; })
+        ));
         await renderRootLayout();
+        await vi.waitFor(() => expect(upsertActivateAndSwitchServerSpy).toHaveBeenCalledTimes(1));
+        expect((globalThis as any).window.location.search).toBe(
+            '?url=https%3A%2F%2Fstack.example.test&auto=1',
+        );
+        expect(historyReplaceStateSpy).not.toHaveBeenCalled();
+        await React.act(async () => {
+            resolveCommit(true);
+            await Promise.resolve();
+        });
+        await vi.waitFor(() => expect(historyReplaceStateSpy).toHaveBeenCalledWith(null, '', '/server'));
 
         expect(upsertActivateAndSwitchServerSpy).toHaveBeenCalledWith({
             serverUrl: 'https://stack.example.test',
             source: 'url',
             scope: 'device',
             refreshAuth: refreshFromActiveServerSpy,
+            ensureConnection: true,
         });
-        expect(historyReplaceStateSpy).toHaveBeenCalledWith(null, '', '/server');
+        expect((globalThis as any).window.location.search).toBe('');
     });
 
-    it('treats loopback-equivalent `?server=` overrides as already-active and refreshes auth without switching servers', async () => {
+    it('retains a loopback-equivalent override when its connection/auth commit fails', async () => {
         activeServerUrl = 'http://localhost:4325';
+        upsertActivateAndSwitchServerSpy.mockRejectedValueOnce(new Error('connection failed'));
+        modalConfirmSpy.mockResolvedValueOnce(false);
         (globalThis as any).document = {};
         (globalThis as any).window = {
             location: {
@@ -254,9 +295,19 @@ describe('App RootLayout server override', () => {
 
         await renderRootLayout();
 
-        expect(upsertActivateAndSwitchServerSpy).not.toHaveBeenCalled();
-        expect(refreshFromActiveServerSpy).toHaveBeenCalled();
-        expect(historyReplaceStateSpy).toHaveBeenCalledWith(null, '', '/');
+        await vi.waitFor(() => expect(upsertActivateAndSwitchServerSpy).toHaveBeenCalledTimes(1));
+        await flushHookEffects();
+        expect(upsertActivateAndSwitchServerSpy).toHaveBeenCalledWith({
+            serverUrl: 'http://127.0.0.1:4325',
+            source: 'url',
+            scope: 'device',
+            refreshAuth: refreshFromActiveServerSpy,
+            ensureConnection: true,
+        });
+        expect(historyReplaceStateSpy).not.toHaveBeenCalled();
+        expect((globalThis as any).window.location.search).toBe(
+            '?server=http%3A%2F%2F127.0.0.1%3A4325',
+        );
     });
 
     it('redirects legacy `/?id=<sessionId>` deep-links to the canonical session route on web', async () => {

@@ -1,25 +1,14 @@
-import { Redirect, Stack, router, useGlobalSearchParams, usePathname, useSegments } from 'expo-router';
+import { Stack, router } from 'expo-router';
 import 'react-native-reanimated';
 import * as React from 'react';
-import { Keyboard, Platform, Pressable, TouchableOpacity, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { Keyboard, Platform, Pressable, TouchableOpacity } from 'react-native';
 import { isRunningOnMac } from '@/utils/platform/platform';
 import { useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useAuth } from '@/auth/context/AuthContext';
-import { isPublicRouteForUnauthenticated } from '@/auth/routing/authRouting';
 import { useFriendsIdentityReadiness } from '@/hooks/server/useFriendsIdentityReadiness';
-import { getActiveServerUrl, getTabActiveServerId } from '@/sync/domains/server/serverProfiles';
-import { isSameServerUrl, normalizeServerUrl, upsertActivateAndSwitchServer } from '@/sync/domains/server/activeServerSwitch';
-import { getPendingTerminalConnect } from '@/sync/domains/pending/pendingTerminalConnect';
-import { fireAndForget } from '@/utils/system/fireAndForget';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
-import { bootstrapActiveServerFromWebLocation, readWebServerUrlOverrideFromLocation } from '@/sync/domains/server/url/bootstrapActiveServerFromWebLocation';
-import { buildTerminalConnectWebHref } from '@/utils/path/terminalConnectUrl';
-import { useWebInitialRouteReconcile } from '@/hooks/ui/useWebInitialRouteReconcile';
-import { useHappierVoiceSupport } from '@/hooks/server/useHappierVoiceSupport';
-import { buildScopedSessionRouteHref } from '@/hooks/session/sessionRouteServerScope';
 import {
     createFriendsStackScreenOptions,
     createInboxStackScreenOptions,
@@ -29,7 +18,6 @@ import { ActivityLocalNotificationRuntime } from '@/activity/notifications/runti
 import { PushNotificationPermissionPrimingRuntime } from '@/activity/notifications/permission/PushNotificationPermissionPrimingRuntime';
 import { DesktopTrayRuntime } from '@/desktop/tray/DesktopTrayRuntime';
 import { ReleaseNotesAutoShowMount } from '@/changelog/releaseNotes';
-import { useNotificationResponseRouting } from '@/activity/notifications/runtime/useNotificationResponseRouting';
 import { createAppStackScreenOptions } from '@/components/navigation/createAppStackScreenOptions';
 import { MobileBottomChromeHost } from '@/components/navigation/mobile/chrome/MobileBottomChromeHost';
 import { AppHeaderCloseButton } from '@/components/navigation/AppHeaderCloseButton';
@@ -38,8 +26,9 @@ import { PetAppShellCompanionMount } from '@/components/pets/runtime/PetAppShell
 import { isDesktopPetOverlayWindowContext } from '@/components/pets/desktop/runtime/isDesktopPetOverlayWindowContext';
 import { SessionCockpitChromeRegistryProvider } from '@/components/workspaceCockpit/session/SessionCockpitChromeRegistry';
 import { safeRouterBack } from '@/utils/navigation/safeRouterBack';
+import { RootLayoutNavigationEffects } from '@/components/navigation/root/RootLayoutNavigationEffects';
+import { RootLayoutRedirectGate } from '@/components/navigation/root/RootLayoutRedirectGate';
 
-const bootstrappedWebServerOverride = bootstrapActiveServerFromWebLocation({ scope: 'device' });
 const DESKTOP_PET_OVERLAY_SCREEN_OPTIONS = { headerShown: false } as const;
 const MAIN_TAB_STACK_SCREEN_OPTIONS = { animation: 'none' } as const;
 const SESSION_COCKPIT_SURFACE_STACK_SCREEN_OPTIONS = {
@@ -74,244 +63,19 @@ function NewSessionKeyboardDismissHeaderTitle(): React.ReactElement {
 const AuthenticatedAppShellRuntimes = React.memo(function AuthenticatedAppShellRuntimes(): React.ReactElement {
     return (
         <>
-            <PushNotificationPermissionPrimingRuntime />
             <DesktopPetOverlayRuntimeMount />
             <PetAppShellCompanionMount />
             <ReleaseNotesAutoShowMount />
+            <PushNotificationPermissionPrimingRuntime />
         </>
     );
 });
 
-function pickFirstRouteParamString(value: string | string[] | undefined): string {
-    if (Array.isArray(value)) return String(value[0] ?? '').trim();
-    return String(value ?? '').trim();
-}
-
-function readLegacySessionIdFromWebLocation(): Readonly<{
-    sessionId: string;
-    serverId: string | null;
-    messageId: string | null;
-    jumpChildId: string | null;
-    cleanedRelativeUrl: string;
-}> | null {
-    if (typeof window === 'undefined') return null;
-    if (typeof window.location?.href !== 'string') return null;
-
-    try {
-        const current = new URL(window.location.href);
-        // Legacy deep-link format: `/?id=<sessionId>` (no longer generated, but may be in old links or buggy flows).
-        if (current.pathname !== '/') return null;
-
-        const rawSessionId = (current.searchParams.get('id') ?? '').trim();
-        if (!rawSessionId) return null;
-
-        const rawServerId = (current.searchParams.get('serverId') ?? '').trim();
-        const rawMessageId = (current.searchParams.get('messageId') ?? '').trim();
-        const rawJumpChildId = (current.searchParams.get('jumpChildId') ?? '').trim();
-
-        current.searchParams.delete('id');
-        const search = current.searchParams.toString();
-        const cleanedRelativeUrl = `${current.pathname}${search ? `?${search}` : ''}${current.hash ?? ''}`;
-        return {
-            sessionId: rawSessionId,
-            serverId: rawServerId || null,
-            messageId: rawMessageId || null,
-            jumpChildId: rawJumpChildId || null,
-            cleanedRelativeUrl,
-        };
-    } catch {
-        return null;
-    }
-}
-
-export default function RootLayout() {
+const RootLayoutShell = React.memo(function RootLayoutShell(): React.ReactElement {
     const auth = useAuth();
-    const segments = useSegments();
-    const pathname = usePathname();
-    const globalSearchParams = useGlobalSearchParams<{
-        server?: string | string[];
-        serverId?: string | string[];
-        url?: string | string[];
-        auto?: string | string[];
-    }>();
     const { theme } = useUnistyles();
     const friendsIdentityReadiness = useFriendsIdentityReadiness();
     const friendsIdentityReady = friendsIdentityReadiness.isReady;
-    const debugRouterEnabled = process.env.EXPO_PUBLIC_DEBUG === '1';
-    const happierVoiceSupported = useHappierVoiceSupport();
-
-    useWebInitialRouteReconcile({ routerPathname: pathname });
-
-    const bootstrappedWebServerOverrideHandledRef = React.useRef(false);
-    const serverOverrideParamSignal = React.useMemo(() => [
-        pickFirstRouteParamString(globalSearchParams.server),
-        pickFirstRouteParamString(globalSearchParams.serverId),
-        pickFirstRouteParamString(globalSearchParams.url),
-        pickFirstRouteParamString(globalSearchParams.auto),
-    ].join('\u0000'), [
-        globalSearchParams.auto,
-        globalSearchParams.server,
-        globalSearchParams.serverId,
-        globalSearchParams.url,
-    ]);
-    React.useEffect(() => {
-        const liveOverride = readWebServerUrlOverrideFromLocation();
-        const shouldUseBootstrappedOverride =
-            !liveOverride
-            && !bootstrappedWebServerOverrideHandledRef.current
-            && bootstrappedWebServerOverride;
-        const override = liveOverride ?? (shouldUseBootstrappedOverride ? bootstrappedWebServerOverride : null);
-        if (!override) return;
-        if (shouldUseBootstrappedOverride) {
-            bootstrappedWebServerOverrideHandledRef.current = true;
-        }
-
-        const desired = normalizeServerUrl(override.serverUrl);
-        if (!desired) return;
-
-        const current = normalizeServerUrl(getActiveServerUrl());
-        if (isSameServerUrl(desired, current)) {
-            if (bootstrappedWebServerOverride && isSameServerUrl(bootstrappedWebServerOverride.serverUrl, desired)) {
-                fireAndForget(auth.refreshFromActiveServer(), { tag: 'RootLayout.webServerOverrideBootstrapped.refreshAuth' });
-            }
-            try {
-                window.history.replaceState(null, '', override.cleanedRelativeUrl);
-            } catch {
-                // ignore
-            }
-            return;
-        }
-
-        fireAndForget((async () => {
-            try {
-                await upsertActivateAndSwitchServer({
-                    serverUrl: desired,
-                    source: 'url',
-                    scope: 'device',
-                    refreshAuth: auth.refreshFromActiveServer,
-                });
-            } catch {
-                // keep URL normalization best-effort; server switch can still be repaired elsewhere
-            }
-        })(), { tag: 'RootLayout.webServerOverride' });
-
-        try {
-            window.history.replaceState(null, '', override.cleanedRelativeUrl);
-        } catch {
-            // ignore
-        }
-    }, [auth, pathname, serverOverrideParamSignal]);
-
-    const legacySessionDeepLinkHandledRef = React.useRef(false);
-    React.useEffect(() => {
-        if (legacySessionDeepLinkHandledRef.current) return;
-        if (!auth.isAuthenticated) return;
-
-        const legacy = readLegacySessionIdFromWebLocation();
-        if (!legacy) return;
-        legacySessionDeepLinkHandledRef.current = true;
-
-        try {
-            window.history.replaceState(null, '', legacy.cleanedRelativeUrl);
-        } catch {
-            // ignore
-        }
-
-        const suffix = legacy.messageId ? `/message/${encodeURIComponent(legacy.messageId)}` : '';
-        router.replace(buildScopedSessionRouteHref({
-            sessionId: legacy.sessionId,
-            serverId: legacy.serverId,
-            suffix,
-            query: {
-                jumpChildId: legacy.jumpChildId,
-            },
-        }));
-    }, [auth.isAuthenticated]);
-
-    const shouldRedirect = !auth.isAuthenticated && !isPublicRouteForUnauthenticated(segments);
-    const pendingTerminalHandledRef = React.useRef(false);
-    useNotificationResponseRouting({
-        enabled: auth.isAuthenticated,
-        refreshAuth: auth.refreshFromActiveServer,
-    });
-
-    React.useEffect(() => {
-        if (!auth.isAuthenticated) {
-            pendingTerminalHandledRef.current = false;
-            return;
-        }
-
-        const pendingTerminalConnect = getPendingTerminalConnect();
-        if (pendingTerminalConnect) {
-            if (pendingTerminalHandledRef.current) return;
-            // Avoid leaking the terminal connect key via query params; use hash params on the dedicated
-            // `/terminal/connect` route instead.
-            const route = buildTerminalConnectWebHref({
-                publicKeyB64Url: pendingTerminalConnect.publicKeyB64Url,
-                serverUrl: pendingTerminalConnect.serverUrl,
-            });
-
-            // If we are already on the terminal-connect page (which persists a pending connect while
-            // clearing the URL hash for safety), do not navigate away.
-            if (segments.includes('terminal') && segments.includes('connect')) return;
-
-            const target = normalizeServerUrl(pendingTerminalConnect.serverUrl);
-            const active = normalizeServerUrl(getActiveServerUrl());
-            if (target && (target !== active || getTabActiveServerId())) {
-                pendingTerminalHandledRef.current = true;
-                fireAndForget((async () => {
-                    try {
-                        await upsertActivateAndSwitchServer({
-                            serverUrl: pendingTerminalConnect.serverUrl,
-                            source: 'url',
-                            scope: 'device',
-                            refreshAuth: auth.refreshFromActiveServer,
-                        });
-                    } catch {
-                        // keep navigation best-effort; terminal flow can still recover with explicit server param
-                    }
-                    router.push(route);
-                })(), { tag: 'RootLayout.pendingTerminalConnect' });
-                return;
-            }
-
-            pendingTerminalHandledRef.current = true;
-            router.push(route);
-            return;
-        }
-
-        pendingTerminalHandledRef.current = false;
-    }, [auth.isAuthenticated]);
-
-    // Server capability gating: if the server doesn't support Happier Voice (misconfigured/disabled),
-    // default the user's voice mode to off (they can still choose BYO ElevenLabs in settings).
-    React.useEffect(() => {
-        if (!auth.isAuthenticated) return;
-        if (happierVoiceSupported !== false) return;
-        let cancelled = false;
-        fireAndForget((async () => {
-            try {
-                // Defer loading sync/storage modules until needed to keep module evaluation light.
-                const [{ storage }, { sync }] = await Promise.all([
-                    import('@/sync/domains/state/storage'),
-                    import('@/sync/sync'),
-                ]);
-
-                if (cancelled) return;
-                const voice = (storage.getState().settings as any)?.voice ?? null;
-                const providerId = voice?.providerId ?? 'off';
-                const billingMode = voice?.adapters?.realtime_elevenlabs?.billingMode ?? 'happier';
-                if (providerId !== 'realtime_elevenlabs') return;
-                if (billingMode !== 'happier') return;
-                sync.applySettings({ voice: { ...voice, providerId: 'off' } }, { source: 'system' });
-            } catch {
-                // Non-fatal: feature gating should never crash the root layout.
-            }
-        })(), { tag: 'RootLayout.happierVoiceGate' });
-        return () => {
-            cancelled = true;
-        };
-    }, [auth.isAuthenticated, happierVoiceSupported]);
 
     // Use custom header on Android and Mac Catalyst, native header on iOS (non-Catalyst)
     const shouldUseCustomHeader = Platform.OS === 'android' || isRunningOnMac() || Platform.OS === 'web';
@@ -354,10 +118,6 @@ export default function RootLayout() {
             },
         };
     }, [auth.isAuthenticated]);
-    // Avoid rendering protected screens for a frame during redirect.
-    if (shouldRedirect) {
-        return <Redirect href="/" />;
-    }
 
     if (isDesktopPetOverlayWindow) {
         return (
@@ -376,14 +136,6 @@ export default function RootLayout() {
             <ActivityLocalNotificationRuntime />
             <DesktopTrayRuntime />
             {auth.isAuthenticated ? <AuthenticatedAppShellRuntimes /> : null}
-            {debugRouterEnabled && Platform.OS === 'web' ? (
-                <View
-                    testID="debug-router-pathname"
-                    style={{ position: 'absolute', top: 0, left: 0, opacity: 0, pointerEvents: 'none' }}
-                >
-                    <Text>{pathname}</Text>
-                </View>
-            ) : null}
             <Stack screenOptions={baseStackScreenOptions}>
             <Stack.Screen
                 name="desktop/pet-overlay"
@@ -788,5 +540,21 @@ export default function RootLayout() {
             </Stack>
             <MobileBottomChromeHost />
         </SessionCockpitChromeRegistryProvider>
+    );
+});
+
+export default function RootLayout(): React.ReactElement {
+    // Composition root: subscribes to nothing that changes per navigation, so the
+    // `<RootLayoutShell />` element reference stays stable and its Stack subtree is not
+    // re-rendered when the route changes. Navigation/auth side effects live in the null-rendering
+    // `<RootLayoutNavigationEffects />` sibling; the unauthenticated redirect check lives in the
+    // `<RootLayoutRedirectGate />`, the only navigation-subscribing owner in this render path.
+    return (
+        <>
+            <RootLayoutNavigationEffects />
+            <RootLayoutRedirectGate>
+                <RootLayoutShell />
+            </RootLayoutRedirectGate>
+        </>
     );
 }

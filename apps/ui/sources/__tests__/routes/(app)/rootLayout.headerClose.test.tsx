@@ -103,6 +103,7 @@ vi.mock('@/components/ui/text/Text', () => ({
 
 vi.mock('@/sync/domains/server/url/bootstrapActiveServerFromWebLocation', () => ({
     bootstrapActiveServerFromWebLocation: () => null,
+    commitWebServerUrlOverride: vi.fn(async () => undefined),
     readWebServerUrlOverrideFromLocation: () => null,
 }));
 
