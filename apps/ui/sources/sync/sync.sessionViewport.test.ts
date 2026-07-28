@@ -17,6 +17,9 @@ vi.mock('react-native-mmkv', () => {
         delete(key: string) {
             kvStore.delete(key);
         }
+        getAllKeys() {
+            return [...kvStore.keys()];
+        }
         clearAll() {
             kvStore.clear();
         }
@@ -60,7 +63,8 @@ describe('sync session viewport', () => {
             sessionId: string,
             state: Readonly<{
                 isPinned: boolean;
-                offsetY: number;
+                offsetY?: number;
+                shouldPersistViewport?: boolean;
                 shouldRestoreViewport?: boolean;
                 anchor?: unknown;
             }>
@@ -159,6 +163,79 @@ describe('sync session viewport', () => {
             isPinned: false,
             offsetY: 420,
             source: 'observed',
+        });
+    });
+
+    it('preserves live-tail default for position-unknown detach reports without prior observation', async () => {
+        const { sync } = await import('./sync');
+        const runtimeSync = sync as unknown as RuntimeViewportChangeSync;
+
+        sync.onSessionVisible('session-1');
+        runtimeSync.onSessionViewportChange('session-1', {
+            isPinned: false,
+            shouldPersistViewport: false,
+            shouldRestoreViewport: true,
+        });
+
+        // Position-unknown detach must not fabricate a restore distance; with no prior
+        // observed offset the stored record keeps the live-tail geometry (0) while flipping
+        // pinned state so conditional send intent works.
+        expect(sync.getSessionViewport('session-1')).toMatchObject({
+            isPinned: false,
+            offsetY: 0,
+            source: 'observed',
+            anchor: null,
+        });
+    });
+
+    it('preserves prior observed offset and anchor for position-unknown detach reports', async () => {
+        const { sync } = await import('./sync');
+        const runtimeSync = sync as unknown as RuntimeViewportChangeSync;
+
+        sync.onSessionViewportChange('session-1', {
+            isPinned: false,
+            offsetY: 420,
+            shouldRestoreViewport: true,
+            anchor: validViewportAnchor,
+        });
+
+        runtimeSync.onSessionViewportChange('session-1', {
+            isPinned: false,
+            shouldPersistViewport: false,
+            shouldRestoreViewport: true,
+        });
+
+        expect(sync.getSessionViewport('session-1')).toMatchObject({
+            isPinned: false,
+            offsetY: 420,
+            source: 'observed',
+            anchor: validViewportAnchor,
+        });
+    });
+
+    it('treats non-finite observed offsets as position-unknown', async () => {
+        const { sync } = await import('./sync');
+        const runtimeSync = sync as unknown as RuntimeViewportChangeSync;
+
+        sync.onSessionViewportChange('session-1', {
+            isPinned: false,
+            offsetY: 420,
+            shouldRestoreViewport: true,
+            anchor: validViewportAnchor,
+        });
+
+        runtimeSync.onSessionViewportChange('session-1', {
+            isPinned: false,
+            offsetY: Number.NaN,
+            shouldPersistViewport: false,
+            shouldRestoreViewport: true,
+        });
+
+        expect(sync.getSessionViewport('session-1')).toMatchObject({
+            isPinned: false,
+            offsetY: 420,
+            source: 'observed',
+            anchor: validViewportAnchor,
         });
     });
 
@@ -494,6 +571,35 @@ describe('sync session viewport', () => {
             source: 'default',
             anchor: null,
         });
+    });
+
+    it('deletes a same-session viewport another tab persisted after hydration', async () => {
+        const { sync } = await import('./sync');
+        const {
+            readPersistedSessionViewport,
+            upsertPersistedSessionViewport,
+        } = await import('./domains/state/sessionViewportPersistence');
+        const liveTailSync = sync as unknown as { markSessionLiveTailIntent: (sessionId: string) => void };
+
+        // Tab A hydrates an empty scope. Tab B then persists a detached viewport
+        // for the same session without updating tab A's in-memory ID set.
+        expect(sync.getSessionViewport('session-shared')).toBeNull();
+        upsertPersistedSessionViewport('session-shared', {
+            isPinned: false,
+            anchor: {
+                ...validViewportAnchor,
+                seq: 7,
+            },
+            offsetY: 420,
+            lastUpdatedAt: 2_000,
+        });
+        expect(readPersistedSessionViewport('session-shared')).not.toBeNull();
+
+        // Last-committer-wins: tab A's later live-tail intent is the durable
+        // delete, even though the session ID was absent at its first hydration.
+        liveTailSync.markSessionLiveTailIntent('session-shared');
+
+        expect(readPersistedSessionViewport('session-shared')).toBeNull();
     });
 
     it('does not persist transient unpinned viewport reports', async () => {

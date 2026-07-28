@@ -13,6 +13,9 @@ vi.mock('react-native-mmkv', () => {
         delete(key: string) {
             kvStore.delete(key);
         }
+        getAllKeys() {
+            return [...kvStore.keys()];
+        }
         clearAll() {
             kvStore.clear();
         }
@@ -50,20 +53,24 @@ vi.mock('@/voice/context/voiceHooks', () => ({
     },
 }));
 
-const resumeSessionSpy = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => ({ type: 'success' as const })));
+const resumeSessionSpy = vi.hoisted(() => vi.fn(async (_options: unknown) => ({ type: 'success' as const })));
 vi.mock('@/sync/ops', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/sync/ops')>();
     return {
         ...actual,
-        resumeSession: (...args: unknown[]) => resumeSessionSpy(...args),
+        resumeSession: resumeSessionSpy,
     };
 });
 
 import { storage } from './domains/state/storage';
 import type { Machine, Session } from './domains/state/storageTypes';
+import { getActiveServerSnapshot } from './domains/server/serverRuntime';
 import { apiSocket } from '@/sync/api/session/apiSocket';
 import { RpcError } from '@happier-dev/protocol/rpcErrors';
 import { RPC_ERROR_CODES } from '@happier-dev/protocol/rpc';
+import { TokenStorage } from '@/auth/storage/tokenStorage';
+import { getActiveServerAccountScope } from './domains/scope/activeServerAccountScope';
+import { readPersistedSessionViewport } from './domains/state/sessionViewportPersistence';
 
 const initialStorageState = storage.getState();
 
@@ -126,16 +133,87 @@ function createRpcMethodNotAvailableError(): RpcError {
     return new RpcError('RPC method not available', RPC_ERROR_CODES.METHOD_NOT_AVAILABLE);
 }
 
+function tokenForSub(sub: string): string {
+    const payload = globalThis.btoa(JSON.stringify({ sub }))
+        .replaceAll('+', '-')
+        .replaceAll('/', '_')
+        .replaceAll('=', '');
+    return `e30.${payload}.signature`;
+}
+
 describe('sync.sendMessage wake-after-send', () => {
     beforeEach(() => {
         storage.setState(initialStorageState, true);
         kvStore.clear();
+        storage.getState().activateProfileScope({
+            serverId: getActiveServerSnapshot().serverId,
+            accountId: 'sync-wake-after-send-test-account',
+        });
         appStateAddListener.mockClear();
         resumeSessionSpy.mockClear();
     });
 
     afterEach(() => {
         vi.restoreAllMocks();
+    });
+
+    it('clears detached restore state before the first optimistic mutation for an own send without SessionView', async () => {
+        const sessionId = 's_cross_mount_own_send';
+        storage.getState().applySessions([createPlainSession({ sessionId })]);
+
+        const { sync } = await import('./sync');
+        sync.onSessionViewportChange(sessionId, {
+            isPinned: false,
+            offsetY: 420,
+            shouldRestoreViewport: true,
+            anchor: {
+                kind: 'message',
+                messageId: 'message-1',
+                seq: 1,
+                itemId: 'msg:message-1',
+                itemOffsetPx: 12,
+                capturedAtMs: 1_000,
+            },
+        });
+        expect(readPersistedSessionViewport(sessionId, getActiveServerAccountScope())).toMatchObject({
+            isPinned: false,
+            offsetY: 420,
+        });
+
+        const markLiveTailIntent = vi.spyOn(sync, 'markSessionLiveTailIntent');
+        const originalMarkOptimisticThinking = storage.getState().markSessionOptimisticThinking;
+        const markOptimisticThinking = vi
+            .spyOn(storage.getState(), 'markSessionOptimisticThinking')
+            .mockImplementation((candidateSessionId) => {
+                expect(candidateSessionId).toBe(sessionId);
+                expect(markLiveTailIntent).toHaveBeenCalledTimes(1);
+                expect(sync.getSessionViewport(sessionId)).toMatchObject({
+                    isPinned: true,
+                    offsetY: 0,
+                    source: 'default',
+                    anchor: null,
+                });
+                expect(readPersistedSessionViewport(sessionId, getActiveServerAccountScope())).toBeNull();
+                originalMarkOptimisticThinking(candidateSessionId);
+            });
+
+        sync.setMessageTransport({
+            emitWithAck: vi.fn(async (_event, payload: any) => ({
+                ok: true,
+                id: 'message-1',
+                seq: 1,
+                localId: payload.localId,
+                didWrite: true,
+            })) as any,
+            send: vi.fn(),
+        });
+
+        await sync.sendMessage(sessionId, 'first prompt before SessionView mounts');
+
+        expect(markLiveTailIntent).toHaveBeenCalledTimes(1);
+        expect(markLiveTailIntent.mock.invocationCallOrder[0]).toBeLessThan(
+            markOptimisticThinking.mock.invocationCallOrder[0]!,
+        );
     });
 
     it('wakes the daemon with the current session authoring snapshot after sending a message via the server commit path', async () => {
@@ -177,17 +255,18 @@ describe('sync.sendMessage wake-after-send', () => {
         }]);
 
         const { sync } = await import('./sync');
+        // Boundary fixture: install the machine-encryption reader normally created by authenticated Sync setup.
         (sync as any).encryption = {
             getMachineEncryption: () => ({}),
         };
 
         vi.spyOn(apiSocket, 'sessionRPC').mockRejectedValue(createRpcMethodNotAvailableError());
         sync.setMessageTransport({
-            emitWithAck: vi.fn(async () => ({
+            emitWithAck: vi.fn(async (_event, payload: any) => ({
                 ok: true,
                 id: 'm1',
                 seq: 37,
-                localId: null,
+                localId: payload.localId,
                 didWrite: true,
             })) as any,
             send: vi.fn(),
@@ -241,11 +320,11 @@ describe('sync.sendMessage wake-after-send', () => {
 
         vi.spyOn(apiSocket, 'sessionRPC').mockRejectedValue(createRpcMethodNotAvailableError());
         sync.setMessageTransport({
-            emitWithAck: vi.fn(async () => ({
+            emitWithAck: vi.fn(async (_event, payload: any) => ({
                 ok: true,
                 id: 'm1',
                 seq: 37,
-                localId: null,
+                localId: payload.localId,
                 didWrite: true,
             })) as any,
             send: vi.fn(),
@@ -264,7 +343,7 @@ describe('sync.sendMessage wake-after-send', () => {
         );
     });
 
-    it('wakes inactive sessions after submitMessage enqueues through the pending queue', async () => {
+    it('uses the canonical pending wake after action acknowledgement without direct execution authorization', async () => {
         const sessionId = 's_pending_submit_wake';
         storage.getState().applyMachines([createMachine({ id: 'm1', active: true })], true);
         storage.getState().applySessions([{
@@ -282,17 +361,48 @@ describe('sync.sendMessage wake-after-send', () => {
         }]);
 
         const { sync } = await import('./sync');
+        vi.spyOn(TokenStorage, 'getCredentialsForServerUrl').mockResolvedValue({
+            token: tokenForSub('sync-wake-after-send-test-account'),
+            secret: Buffer.from(new Uint8Array(32).fill(7)).toString('base64url'),
+        });
         (sync as any).encryption = {
             getSessionEncryption: () => null,
+            getMachineEncryption: () => ({}),
         };
 
-        vi.spyOn(apiSocket, 'request').mockImplementation(async () => {
+        vi.spyOn(apiSocket, 'request').mockImplementation(async (_path, init) => {
             const current = storage.getState().sessions[sessionId];
             storage.getState().applySessions([{
                 ...current,
                 seq: 30,
             }]);
-            return new Response(null, { status: 204 });
+            const requestBody = JSON.parse(String(init?.body ?? '{}')) as {
+                localId?: unknown;
+                content?: unknown;
+                requestedAction?: unknown;
+            };
+            if (requestBody.requestedAction) {
+                return Response.json({
+                    requestedAction: requestBody.requestedAction,
+                    pending: { localId: requestBody.localId },
+                });
+            }
+            return Response.json({
+                didWrite: true,
+                pending: {
+                    localId: requestBody.localId,
+                    content: requestBody.content,
+                    status: 'queued',
+                    position: 0,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    discardedAt: null,
+                    discardedReason: null,
+                    authorAccountId: 'sync-wake-after-send-test-account',
+                },
+                pendingCount: 1,
+                pendingVersion: 1,
+            });
         });
 
         await sync.submitMessage(sessionId, 'hello pending');
@@ -301,16 +411,16 @@ describe('sync.sendMessage wake-after-send', () => {
             `/v2/sessions/${sessionId}/pending`,
             expect.objectContaining({ method: 'POST' }),
         );
-        expect(resumeSessionSpy).toHaveBeenCalledTimes(1);
-        expect(resumeSessionSpy).toHaveBeenCalledWith(
-            expect.objectContaining({
-                sessionId,
-                machineId: 'm1',
-                directory: '/tmp/project',
-                backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
-                initialTranscriptAfterSeq: 12,
-            }),
-        );
+        await vi.waitFor(() => expect(resumeSessionSpy).toHaveBeenCalledTimes(1));
+        expect(resumeSessionSpy).toHaveBeenCalledWith({
+            sessionId,
+            machineId: 'm1',
+            directory: '/tmp/project',
+            backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+            resume: 'codex-1',
+            codexBackendMode: 'appServer',
+            initialTranscriptAfterSeq: 12,
+        });
     });
 
     it('rejects submitMessage pending intent on old CLI without direct delivery', async () => {

@@ -72,12 +72,13 @@ vi.mock('@/auth/encryption/createEncryptionFromAuthCredentials', () => ({
 }));
 
 const voiceOnReadyMock = vi.hoisted(() => vi.fn());
+const voiceOnMessagesMock = vi.hoisted(() => vi.fn());
 vi.mock('@/voice/context/voiceHooks', () => ({
     voiceHooks: {
         onSessionFocus: vi.fn(),
         onSessionOffline: vi.fn(),
         onSessionOnline: vi.fn(),
-        onMessages: vi.fn(),
+        onMessages: (...args: unknown[]) => voiceOnMessagesMock(...args),
         onReady: (...args: unknown[]) => voiceOnReadyMock(...args),
         reportContextualUpdate: vi.fn(),
     },
@@ -149,6 +150,7 @@ describe('Sync ready notification dedupe', () => {
         storage.setState(initialStorageState, true);
         kvStore.clear();
         voiceOnReadyMock.mockReset();
+        voiceOnMessagesMock.mockReset();
         notifyActivityReadyMock.mockReset();
 
         const { sync } = await import('./sync');
@@ -190,5 +192,25 @@ describe('Sync ready notification dedupe', () => {
                 }),
             ]),
         );
+    });
+
+    it('does not send recovered history to live message hooks while queue-dependent output still emits once', async () => {
+        const { sync } = await import('./sync');
+        const syncForTest = sync as unknown as SyncReadyNotificationTestAccess;
+        storage.getState().applySessions([createSession('s1')]);
+
+        syncForTest.applyMessages('s1', [{
+            ...assistantTextMessage(1, 'Recovered output'),
+            sourceCreatedAt: 100,
+            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+        }]);
+        syncForTest.applyMessages('s1', [{
+            ...assistantTextMessage(2, 'Live output'),
+        }]);
+
+        expect(voiceOnMessagesMock).toHaveBeenCalledTimes(1);
+        expect(voiceOnMessagesMock).toHaveBeenCalledWith('s1', [
+            expect.objectContaining({ kind: 'agent-text', text: 'Live output' }),
+        ]);
     });
 });

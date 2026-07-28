@@ -27,6 +27,30 @@ describe('MetadataSchema', () => {
         });
     });
 
+    it('hydrates legacy attachment-retirement metadata that omitted terminal mode', () => {
+        const parsed = MetadataSchema.parse({
+            path: '/tmp',
+            host: 'host',
+            terminal: {
+                controlServiceabilityV1: {
+                    v: 1,
+                    attachmentId: 'attachment-retired',
+                    state: 'unknown',
+                    observedAt: 123,
+                    reason: 'attachment_retired',
+                    retired: true,
+                },
+            },
+        });
+
+        expect(parsed.terminal?.mode).toBeUndefined();
+        expect(parsed.terminal?.controlServiceabilityV1).toMatchObject({
+            attachmentId: 'attachment-retired',
+            state: 'unknown',
+            retired: true,
+        });
+    });
+
     it('should preserve Auggie vendor session metadata when present', () => {
         const parsed = MetadataSchema.parse({
             path: '/tmp',

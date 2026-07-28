@@ -1206,6 +1206,51 @@ describe('socket update handling: plaintext update-session', () => {
                 text: 'saving locally',
                 rawRecord: {},
             },
+            {
+                id: 'local-accepted-1',
+                localId: 'local-accepted-1',
+                createdAt: 3,
+                updatedAt: 3,
+                source: 'local_outbound',
+                deliveryStatus: 'accepted',
+                pendingDeliveryStatus: 'server_delivering',
+                text: 'already handed to the server',
+                rawRecord: {},
+            },
+            {
+                id: 'local-external-1',
+                localId: 'local-external-1',
+                createdAt: 4,
+                updatedAt: 4,
+                source: 'local_outbound',
+                deliveryStatus: 'accepted',
+                pendingDeliveryStatus: 'external_handoff',
+                text: 'external custody remains visible',
+                rawRecord: {},
+            },
+            {
+                id: 'local-blocked-1',
+                localId: 'local-blocked-1',
+                createdAt: 5,
+                updatedAt: 5,
+                source: 'local_outbound',
+                deliveryStatus: 'accepted',
+                pendingDeliveryStatus: 'blocked',
+                text: 'blocked custody remains visible',
+                rawRecord: {},
+            },
+            {
+                id: 'local-cancel-1',
+                localId: 'local-cancel-1',
+                createdAt: 6,
+                updatedAt: 6,
+                source: 'local_outbound',
+                deliveryStatus: 'accepted',
+                pendingDeliveryStatus: 'server_delivering',
+                pendingOutboxOperation: 'cancel',
+                text: 'cancel custody remains visible',
+                rawRecord: {},
+            },
         ]);
         const params = buildBaseParams();
 
@@ -1227,6 +1272,9 @@ describe('socket update handling: plaintext update-session', () => {
 
         expect(storage.getState().sessionPending[sessionId]?.messages.map((message) => message.id)).toEqual([
             'local-outbound-1',
+            'local-external-1',
+            'local-blocked-1',
+            'local-cancel-1',
         ]);
     });
 
@@ -1496,10 +1544,10 @@ describe('socket update handling: plaintext update-session', () => {
                 thinkingAt: 0,
                 presence: 'online',
                 latestTurnStatus: 'completed',
+                runtimeActivityState: 'idle',
                 runtimeActivityActiveCount: 0,
                 runtimeActivityObservedAt: null,
-                runtimeActivityExpiresAt: null,
-                runtimeActivitySourceClass: null,
+                runtimeActivityRevision: 1,
             },
         ]);
 
@@ -1513,10 +1561,10 @@ describe('socket update handling: plaintext update-session', () => {
                 body: {
                     t: 'update-session',
                     id: 's_cached_runtime_activity_projection',
+                    runtimeActivityState: 'active',
                     runtimeActivityActiveCount: 1,
                     runtimeActivityObservedAt: 1200,
-                    runtimeActivityExpiresAt: 132_000,
-                    runtimeActivitySourceClass: 'provider_detached_task',
+                    runtimeActivityRevision: 2,
                 },
             },
         });
@@ -1524,9 +1572,9 @@ describe('socket update handling: plaintext update-session', () => {
         expect(storage.getState().sessionListRenderables['s_cached_runtime_activity_projection']).toEqual(
             expect.objectContaining({
                 runtimeActivityActiveCount: 1,
+                runtimeActivityState: 'active',
                 runtimeActivityObservedAt: 1200,
-                runtimeActivityExpiresAt: 132_000,
-                runtimeActivitySourceClass: 'provider_detached_task',
+                runtimeActivityRevision: 2,
                 updatedAt: 1237,
             }),
         );

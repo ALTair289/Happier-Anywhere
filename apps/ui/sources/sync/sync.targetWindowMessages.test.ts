@@ -12,6 +12,9 @@ vi.mock('react-native-mmkv', () => {
         delete(key: string) {
             kvStore.delete(key);
         }
+        getAllKeys() {
+            return [...kvStore.keys()];
+        }
         clearAll() {
             kvStore.clear();
         }
@@ -252,6 +255,90 @@ describe('sync target-window message adapter', () => {
             targetSeq: 331,
             targetPresent: true,
         });
+    });
+
+    it('distinguishes native and web transient request failures from persistent not-ready failure', async () => {
+        await seedSession();
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        const connectivityTimeout = new Error('request timed out');
+        connectivityTimeout.name = 'ServerFetchConnectivityTimeoutError';
+        requestMock
+            .mockRejectedValueOnce(new TypeError('Network request failed'))
+            .mockRejectedValueOnce(new Error('Failed to fetch'))
+            .mockRejectedValueOnce(connectivityTimeout)
+            .mockRejectedValueOnce(new Error('operation has timed out'))
+            .mockRejectedValueOnce(new Error('persistent target-window pipeline failure'));
+
+        const { sync } = await import('./sync');
+        const nativeTransientResult = await sync.loadTargetWindowMessages(
+            SESSION_ID,
+            { kind: 'seq', seq: 331 },
+            { limit: 1 },
+        );
+        const webTransientResult = await sync.loadTargetWindowMessages(
+            SESSION_ID,
+            { kind: 'seq', seq: 331 },
+            { limit: 1 },
+        );
+        const connectivityTimeoutResult = await sync.loadTargetWindowMessages(
+            SESSION_ID,
+            { kind: 'seq', seq: 331 },
+            { limit: 1 },
+        );
+        const ackTimeoutResult = await sync.loadTargetWindowMessages(
+            SESSION_ID,
+            { kind: 'seq', seq: 331 },
+            { limit: 1 },
+        );
+        const persistentResult = await sync.loadTargetWindowMessages(
+            SESSION_ID,
+            { kind: 'seq', seq: 331 },
+            { limit: 1 },
+        );
+
+        expect(nativeTransientResult.status).toBe('retryable_error');
+        expect(webTransientResult.status).toBe('retryable_error');
+        expect(connectivityTimeoutResult.status).toBe('retryable_error');
+        expect(ackTimeoutResult.status).toBe('retryable_error');
+        expect(persistentResult.status).toBe('not_ready');
+        expect(consoleError).toHaveBeenCalledTimes(5);
+    });
+
+    it('notifies target-window subscribers on window activation and live-tail exit, with stable inactive identity', async () => {
+        // Window transitions that do not coincide with message-store changes (fully deduped
+        // replacement windows, jump-to-bottom window exits) must still re-render the
+        // transcript: the UI subscribes to the canonical window-state owner.
+        await seedSession();
+        requestMock.mockResolvedValueOnce(new Response(
+            JSON.stringify({ messages: [plainMessage('m331', 331)], hasMore: false, nextBeforeSeq: null }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )).mockResolvedValueOnce(new Response(
+            JSON.stringify({ messages: [], hasMore: false, nextAfterSeq: null }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ));
+
+        const { sync } = await import('./sync');
+        const inactiveA = sync.getSessionTargetWindowState('never-activated-session');
+        const inactiveB = sync.getSessionTargetWindowState('never-activated-session');
+        expect(inactiveA).toBe(inactiveB);
+
+        let notifications = 0;
+        const unsubscribe = sync.subscribeSessionTargetWindowState(SESSION_ID, () => {
+            notifications += 1;
+        });
+
+        await sync.loadTargetWindowMessages(SESSION_ID, { kind: 'seq', seq: 331 }, { limit: 1 });
+        expect(notifications).toBeGreaterThanOrEqual(1);
+
+        const afterActivation = notifications;
+        sync.markSessionLiveTailIntent(SESSION_ID);
+        expect(notifications).toBeGreaterThan(afterActivation);
+        expect(sync.getSessionTargetWindowState(SESSION_ID).isWindowMode).toBe(false);
+
+        const beforeUnsubscribe = notifications;
+        unsubscribe();
+        sync.markSessionLiveTailIntent(SESSION_ID);
+        expect(notifications).toBe(beforeUnsubscribe);
     });
 
     it('exposes the canonical per-session target-window state', async () => {

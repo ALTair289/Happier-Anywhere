@@ -699,6 +699,117 @@ describe('sync socket offline tracking', () => {
     })).toBe(false);
   });
 
+  it('hydrates a required changed session by id when the bounded session snapshot omits it', async () => {
+    upsertAndActivateServer({ serverUrl: 'http://localhost:53288', scope: 'tab' });
+    stubSnapshotRefreshFetch();
+    apiSocketRequestMock.mockImplementation(async (path) => {
+      if (path === '/v2/sessions/s_required_changed') {
+        return new Response(JSON.stringify({
+          session: {
+            id: 's_required_changed',
+            createdAt: 1,
+            updatedAt: 35,
+            seq: 7,
+            active: false,
+            activeAt: 34,
+            encryptionMode: 'plain',
+            dataEncryptionKey: null,
+            metadataVersion: 1,
+            metadata: JSON.stringify({ path: '/workspace', host: 'localhost' }),
+            agentStateVersion: 1,
+            agentState: JSON.stringify({ controlledByUser: false }),
+            runtimeActivityState: 'idle',
+            runtimeActivityActiveCount: 0,
+            runtimeActivityObservedAt: 35,
+            runtimeActivityRevision: 35,
+            share: null,
+          },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ error: `unexpected path ${path}` }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    (sync as any).credentials = { token: 'hdr.eyJzdWIiOiJ0ZXN0In0.sig', secret: 'secret' };
+    (sync as any).encryption = {
+      decryptEncryptionKey: async () => null,
+      initializeSessions: async () => {},
+      removeSessionEncryption: () => {},
+      getSessionEncryption: () => null,
+    };
+
+    await (sync as any).fetchSessions({
+      requiredHydrationSessionIds: ['s_required_changed'],
+      prioritizeSessionIds: ['s_required_changed'],
+      awaitSessionListHydration: true,
+      hydrationTelemetrySource: 'changesCatchUp',
+    });
+
+    expect(apiSocketRequestMock).toHaveBeenCalledWith(
+      '/v2/sessions/s_required_changed',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(storage.getState().sessions.s_required_changed).toEqual(expect.objectContaining({
+      id: 's_required_changed',
+      active: false,
+      runtimeActivityState: 'idle',
+      runtimeActivityActiveCount: 0,
+      runtimeActivityRevision: 35,
+    }));
+  });
+
+  it('retires a required changed session when exact hydration proves it was deleted', async () => {
+    upsertAndActivateServer({ serverUrl: 'http://localhost:53288', scope: 'tab' });
+    stubSnapshotRefreshFetch();
+    storage.setState((state) => ({
+      ...state,
+      sessions: {
+        ...state.sessions,
+        s_deleted_while_offline: {
+          id: 's_deleted_while_offline',
+          seq: 7,
+          encryptionMode: 'plain',
+          metadata: {},
+          agentState: null,
+        } as any,
+      },
+    }), true);
+    apiSocketRequestMock.mockImplementation(async (path) => {
+      if (path === '/v2/sessions/s_deleted_while_offline') {
+        return new Response(JSON.stringify({ error: 'Session not found' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ error: `unexpected path ${path}` }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    (sync as any).credentials = { token: 'hdr.eyJzdWIiOiJ0ZXN0In0.sig', secret: 'secret' };
+    (sync as any).encryption = {
+      decryptEncryptionKey: async () => null,
+      initializeSessions: async () => {},
+      removeSessionEncryption: vi.fn(),
+      getSessionEncryption: () => null,
+    };
+
+    await expect((sync as any).fetchSessions({
+      requiredHydrationSessionIds: ['s_deleted_while_offline'],
+      prioritizeSessionIds: ['s_deleted_while_offline'],
+      awaitSessionListHydration: true,
+      hydrationTelemetrySource: 'changesCatchUp',
+    })).resolves.toBeUndefined();
+
+    expect(apiSocketRequestMock).toHaveBeenCalledWith(
+      '/v2/sessions/s_deleted_while_offline',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(storage.getState().sessions.s_deleted_while_offline).toBeUndefined();
+    expect((sync as any).encryption.removeSessionEncryption).toHaveBeenCalledWith('s_deleted_while_offline');
+  });
+
   it('marks server-backed pinned rows as required hydration during session list fetches', async () => {
     const profile = upsertAndActivateServer({ serverUrl: 'http://localhost:53288', scope: 'tab' });
     storage.getState().applySessionOrganizationSnapshot(profile.id, {
