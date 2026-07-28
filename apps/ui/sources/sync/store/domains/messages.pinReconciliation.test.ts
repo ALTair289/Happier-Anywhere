@@ -115,4 +115,47 @@ describe('messages domain: pin route reconciliation', () => {
             routeMessageId: 'server:server-a1',
         }]);
     });
+
+    it('reconciles a pin using the exact whitespace-bearing opaque local id', () => {
+        const localPin = pin({ routeMessageId: 'local: local-a1 ' });
+        savePersistedSessionMessagePins('s1', [localPin], scopeA);
+        const { domain } = createHarness({
+            sessions: {
+                s1: {
+                    id: 's1',
+                    seq: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    active: true,
+                    activeAt: 1,
+                    lastViewedSessionSeq: 1,
+                    metadataVersion: 1,
+                    agentStateVersion: 1,
+                    metadata: null,
+                    agentState: null,
+                    thinking: false,
+                    thinkingAt: 0,
+                    presence: 'online',
+                    permissionMode: null,
+                    permissionModeUpdatedAt: 0,
+                },
+            },
+        });
+
+        // Narrow fixture: reconciliation reads only the identity and route fields supplied here.
+        domain.applyMessages('s1', [{
+            id: 'server-a1',
+            seq: 42,
+            localId: ' local-a1 ',
+            createdAt: 2_000,
+            isSidechain: false,
+            role: 'agent',
+            content: [{ type: 'text', text: 'hydrated answer' }],
+        } as any]);
+
+        expect(readPersistedSessionMessagePins('s1', scopeA)).toEqual([{
+            ...localPin,
+            routeMessageId: 'server:server-a1',
+        }]);
+    });
 });

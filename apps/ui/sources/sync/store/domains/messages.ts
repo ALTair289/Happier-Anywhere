@@ -37,6 +37,7 @@ import {
     isTranscriptRenderableAggregate,
     type TranscriptRenderableAggregate,
 } from '@/sync/domains/messages/transcriptRenderableAggregate';
+import { isRecoveredHistoryTranscriptObservation } from '@/sync/domains/messages/transcriptObservationProvenance';
 
 import { clearSessionTranscriptDerivedCachesForSession } from '../../runtime/sessionTranscriptDerivedCaches';
 
@@ -284,6 +285,7 @@ function inferLatestUserPermissionModeFromChangedMessages(
     let best: { mode: PermissionMode; updatedAt: number } | null = null;
 
     for (const message of messages) {
+        if (isRecoveredHistoryTranscriptObservation(message)) continue;
         if (message.kind !== 'user-text') continue;
         const rawMode = message.meta?.permissionMode;
         const modeStr = typeof rawMode === 'string' ? rawMode : null;
@@ -317,6 +319,7 @@ function findLatestThinkingMessageId(params: Readonly<{
         const id = params.idsOldestFirst[i]!;
         const message = params.messagesById[id];
         if (!message) continue;
+        if (isRecoveredHistoryTranscriptObservation(message)) continue;
         if (message.kind !== 'agent-text') continue;
         if (message.isThinking === true) return message.id;
     }
@@ -345,8 +348,9 @@ function buildPinRouteHydrationFacts(messages: ReadonlyArray<Message>): readonly
     for (const message of messages) {
         const role = resolvePinRoleForMessage(message);
         if (!role) continue;
-        const localId = typeof (message as { localId?: unknown }).localId === 'string'
-            ? (message as { localId: string }).localId.trim()
+        const candidateLocalId = (message as { localId?: unknown }).localId;
+        const localId = typeof candidateLocalId === 'string' && candidateLocalId.trim().length > 0
+            ? candidateLocalId
             : '';
         const previousRouteMessageIds = localId ? [`local:${localId}`] : [];
         facts.push({
@@ -587,6 +591,7 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                 // Messages are already normalized, no need to process them again
                 const normalizedMessages = messages;
                 const didSeeThinkingUpdateFromInput = normalizedMessages.some((m) => {
+                    if (isRecoveredHistoryTranscriptObservation(m)) return false;
                     if (!m || (m as any).role !== 'agent') return false;
                     const content = (m as any).content;
                     if (!Array.isArray(content)) return false;
@@ -691,7 +696,11 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                         idsToInsert.push(message.id);
                     }
 
-                    if (message.kind === 'agent-text' && message.isThinking === true) {
+                    if (
+                        !isRecoveredHistoryTranscriptObservation(message)
+                        && message.kind === 'agent-text'
+                        && message.isThinking === true
+                    ) {
                         const prevText = prev && prev.kind === 'agent-text' ? prev.text : null;
                         if (!prev || prev.kind !== 'agent-text' || prev.isThinking !== true || prevText !== message.text) {
                             didSeeThinkingTextChange = true;
@@ -701,7 +710,11 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                     messagesById[message.id] = message;
                     messageRevisionsById[message.id] = (messageRevisionsById[message.id] ?? 0) + 1;
 
-                    if (message.kind === 'agent-text' && message.isThinking === true) {
+                    if (
+                        !isRecoveredHistoryTranscriptObservation(message)
+                        && message.kind === 'agent-text'
+                        && message.isThinking === true
+                    ) {
                         if (latestThinkingMessageId == null) {
                             latestThinkingMessageId = message.id;
                         } else {
@@ -809,7 +822,11 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                 if (pendingState && pendingState.messages.length > 0) {
                     const localIdsToClear = new Set<string>();
                     for (const m of processedMessages) {
-                        if (m.kind === 'user-text' && m.localId) {
+                        if (
+                            !isRecoveredHistoryTranscriptObservation(m)
+                            && m.kind === 'user-text'
+                            && m.localId
+                        ) {
                             localIdsToClear.add(m.localId);
                         }
                     }
@@ -1150,7 +1167,14 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
 
             const messagesById: Record<string, Message> = {};
             const messageRevisionsById: Record<string, number> = {};
-            clearSessionTranscriptDerivedCachesForSession(sessionId);
+            // Deliberately NOT clearing the derived transcript caches here: this reset
+            // keeps an empty entry for in-place truncation UNDER A MOUNTED VIEW, and the
+            // per-session message-array cache is the mounted transcript's last-known-good
+            // guard through the reset -> refetch window (see useSessionMessages). Purging
+            // it here rendered an empty frame mid-session, which Legend's web build
+            // answers by re-hiding the whole list until re-layout (whole-transcript
+            // flicker, live defect 2026-07-12). The derived-cache release seam is owned
+            // by the no-mounted-surface paths only: evictSessionMessages and deleteSession.
             return {
                 ...state,
                 sessionMessages: {

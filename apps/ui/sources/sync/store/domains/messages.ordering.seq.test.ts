@@ -102,6 +102,60 @@ describe('messages domain: ordering', () => {
         expect(get().sessionListRenderables.s1.seq).toBe(3);
     });
 
+    it('preserves transcript-observation metadata while retaining server seq as canonical order', () => {
+        const { get, domain } = createHarness({
+            sessions: {
+                s1: {
+                    id: 's1',
+                    seq: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    active: true,
+                    activeAt: 1,
+                    lastViewedSessionSeq: 1,
+                    metadataVersion: 1,
+                    agentStateVersion: 1,
+                    metadata: null,
+                    agentState: null,
+                    thinking: false,
+                    thinkingAt: 0,
+                    presence: 'online',
+                },
+            },
+        });
+
+        domain.applyMessages('s1', [
+            {
+                id: 'history-3',
+                seq: 3,
+                localId: null,
+                createdAt: 9_000,
+                sourceCreatedAt: 100,
+                sourceUpdatedAt: 200,
+                transcriptObservationProvenance: {
+                    kind: 'non_dependent',
+                    source: 'history',
+                },
+                isSidechain: false,
+                role: 'agent',
+                content: [{ type: 'text', text: 'recovered' }],
+            } as any,
+        ]);
+
+        const stored = Object.values(get().sessionMessages.s1.messagesById)[0] as any;
+        expect(stored).toMatchObject({
+            seq: 3,
+            createdAt: 9_000,
+            sourceCreatedAt: 100,
+            sourceUpdatedAt: 200,
+            transcriptObservationProvenance: {
+                kind: 'non_dependent',
+                source: 'history',
+            },
+        });
+        expect(get().sessions.s1.seq).toBe(3);
+    });
+
     it('updates session-list renderable pending flags when agent state adds a permission request without advancing seq', () => {
         const { get, domain } = createHarness({
             sessions: {
@@ -399,6 +453,55 @@ describe('messages domain: ordering', () => {
         expect(get().sessionMessages.s1.latestReadyEventAt).toBe(2_000);
     });
 
+    it('does not surface ready notification state from recovered history, while a live ready event still does once', () => {
+        const { domain } = createHarness({
+            sessions: {
+                s1: {
+                    id: 's1',
+                    createdAt: 1,
+                    active: false,
+                    activeAt: 1,
+                    metadataVersion: 1,
+                    metadata: null,
+                },
+            },
+        });
+
+        const recovered = domain.applyMessages('s1', [{
+            id: 'history-ready',
+            seq: 2,
+            localId: null,
+            createdAt: 2_000,
+            sourceCreatedAt: 100,
+            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+            isSidechain: false,
+            role: 'event',
+            content: { type: 'ready' },
+        } as any]);
+        const live = domain.applyMessages('s1', [{
+            id: 'live-ready',
+            seq: 3,
+            localId: null,
+            createdAt: 3_000,
+            isSidechain: false,
+            role: 'event',
+            content: { type: 'ready' },
+        } as any]);
+
+        expect(recovered).toEqual({
+            changed: [],
+            hasReadyEvent: false,
+            latestReadyEventSeq: null,
+            latestReadyEventAt: null,
+        });
+        expect(live).toMatchObject({
+            changed: [],
+            hasReadyEvent: true,
+            latestReadyEventSeq: 3,
+            latestReadyEventAt: 3_000,
+        });
+    });
+
     it('keeps the highest ready seq and reset clears ready metadata', () => {
         const { get, domain } = createHarness({
             sessions: {
@@ -555,6 +658,78 @@ describe('messages domain: ordering', () => {
         expect(get().sessionPending.s1.messages.map((message: any) => message.id)).toEqual(['pending-server-local-1']);
     });
 
+    it('does not clear a live optimistic pending row from a recovered historical localId collision', () => {
+        const { get, domain } = createHarness({
+            sessions: {
+                s1: {
+                    id: 's1',
+                    createdAt: 1,
+                    active: true,
+                    activeAt: 1,
+                    metadataVersion: 1,
+                    metadata: null,
+                    agentState: null,
+                },
+            },
+            sessionPending: {
+                s1: {
+                    isLoaded: true,
+                    discarded: [],
+                    messages: [{
+                        id: 'pending-live',
+                        localId: 'shared-local',
+                        source: 'local_outbound',
+                        createdAt: 1_000,
+                        updatedAt: 1_000,
+                        text: 'live pending',
+                        rawRecord: { role: 'user', content: { type: 'text', text: 'live pending' } },
+                    }],
+                },
+            },
+        });
+
+        domain.applyMessages('s1', [{
+            id: 'history-user',
+            seq: 2,
+            localId: 'shared-local',
+            createdAt: 9_000,
+            sourceCreatedAt: 100,
+            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+            isSidechain: false,
+            role: 'user',
+            content: { type: 'text', text: 'old user message' },
+        } as any]);
+
+        expect(get().sessionPending.s1.messages.map((message: any) => message.id)).toEqual(['pending-live']);
+        expect(get().sessionMessages.s1.messageIdsOldestFirst).toHaveLength(1);
+    });
+
+    it('retains recovered history when its localId collides with an already materialized live row', () => {
+        const { get, domain } = createHarness({ sessions: { s1: { id: 's1', createdAt: 1, updatedAt: 1 } } });
+        domain.applyMessages('s1', [{
+            id: 'live-user',
+            seq: 1,
+            localId: 'shared-local',
+            createdAt: 1_000,
+            isSidechain: false,
+            role: 'user',
+            content: { type: 'text', text: 'live' },
+        } as any]);
+        domain.applyMessages('s1', [{
+            id: 'history-user',
+            seq: 2,
+            localId: 'shared-local',
+            createdAt: 9_000,
+            sourceCreatedAt: 100,
+            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+            isSidechain: false,
+            role: 'user',
+            content: { type: 'text', text: 'history' },
+        } as any]);
+
+        expect(get().sessionMessages.s1.messageIdsOldestFirst).toHaveLength(2);
+    });
+
     it('tracks latest thinking activity time only when a thinking message changes', () => {
         const { get, domain } = createHarness({
             sessions: {
@@ -636,6 +811,165 @@ describe('messages domain: ordering', () => {
         expect(get().sessionMessages.s1.latestThinkingMessageActivityAtMs).toBe(3_000);
 
         nowSpy.mockRestore();
+    });
+
+    it('stores recovered thinking without replacing the live current-turn thinking projection', () => {
+        const { get, domain } = createHarness({
+            sessions: {
+                s1: {
+                    id: 's1',
+                    seq: 0,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    active: true,
+                    activeAt: 1,
+                    metadataVersion: 1,
+                    agentStateVersion: 1,
+                    metadata: null,
+                    agentState: null,
+                    thinking: true,
+                    thinkingAt: 1,
+                    presence: 'online',
+                },
+            },
+        });
+
+        domain.applyMessages('s1', [{
+            id: 'live-thinking',
+            seq: 1,
+            localId: null,
+            createdAt: 1_000,
+            isSidechain: false,
+            role: 'agent',
+            content: [{ type: 'thinking', thinking: 'live', uuid: 'live-thinking', parentUUID: null }],
+        } as any]);
+        const liveThinkingId = get().sessionMessages.s1.latestThinkingMessageId;
+        const liveThinkingActivityAt = get().sessionMessages.s1.latestThinkingMessageActivityAtMs;
+
+        domain.applyMessages('s1', [{
+            id: 'history-thinking',
+            seq: 2,
+            localId: null,
+            createdAt: 2_000,
+            sourceCreatedAt: 100,
+            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+            isSidechain: false,
+            role: 'agent',
+            content: [{ type: 'thinking', thinking: 'old', uuid: 'history-thinking', parentUUID: null }],
+        } as any]);
+
+        expect(get().sessionMessages.s1.messageIdsOldestFirst).toHaveLength(2);
+        expect(get().sessionMessages.s1.latestThinkingMessageId).toBe(liveThinkingId);
+        expect(get().sessionMessages.s1.latestThinkingMessageActivityAtMs).toBe(liveThinkingActivityAt);
+    });
+
+    it('keeps recovered text separate from the active live stream even when stream keys match', () => {
+        const { get, domain } = createHarness({
+            sessions: {
+                s1: {
+                    id: 's1',
+                    seq: 0,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    active: true,
+                    activeAt: 1,
+                    metadataVersion: 1,
+                    agentStateVersion: 1,
+                    metadata: null,
+                    agentState: null,
+                    thinking: true,
+                    thinkingAt: 1,
+                    presence: 'online',
+                },
+            },
+        });
+
+        domain.applyMessages('s1', [{
+            id: 'live-stream',
+            seq: 1,
+            localId: null,
+            createdAt: 1_000,
+            isSidechain: false,
+            role: 'agent',
+            meta: { happierStreamKey: 'shared-stream' },
+            content: [{ type: 'text', text: 'live', uuid: 'live', parentUUID: null }],
+        } as any]);
+        domain.applyMessages('s1', [{
+            id: 'history-stream',
+            seq: 2,
+            localId: null,
+            createdAt: 2_000,
+            sourceCreatedAt: 100,
+            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+            isSidechain: false,
+            role: 'agent',
+            meta: { happierStreamKey: 'shared-stream' },
+            content: [{ type: 'text', text: 'history', uuid: 'history', parentUUID: null }],
+        } as any]);
+
+        const stored = get().sessionMessages.s1.messageIdsOldestFirst
+            .map((id: string) => get().sessionMessages.s1.messagesById[id]);
+        expect(stored).toHaveLength(2);
+        expect(stored.map((message: any) => message.text)).toEqual(['live', 'history']);
+        expect(stored[1]).toMatchObject({
+            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+        });
+    });
+
+    it('renders a recovered context-reset event without resetting live turn usage', () => {
+        const { get, domain } = createHarness({
+            sessions: {
+                s1: {
+                    id: 's1',
+                    seq: 0,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    active: true,
+                    activeAt: 1,
+                    metadataVersion: 1,
+                    agentStateVersion: 1,
+                    metadata: null,
+                    agentState: null,
+                    thinking: true,
+                    thinkingAt: 1,
+                    presence: 'online',
+                },
+            },
+        });
+
+        domain.applyMessages('s1', [{
+            id: 'live-usage',
+            seq: 1,
+            localId: null,
+            createdAt: 1_000,
+            isSidechain: false,
+            role: 'agent',
+            usage: {
+                input_tokens: 5,
+                output_tokens: 3,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+            content: [{ type: 'text', text: 'live', uuid: 'live-usage', parentUUID: null }],
+        } as any]);
+
+        domain.applyMessages('s1', [{
+            id: 'history-reset',
+            seq: 2,
+            localId: null,
+            createdAt: 9_000,
+            sourceCreatedAt: 100,
+            transcriptObservationProvenance: { kind: 'non_dependent', source: 'history' },
+            isSidechain: false,
+            role: 'event',
+            content: { type: 'message', message: 'Context was reset' },
+        } as any]);
+
+        expect(get().sessionMessages.s1.messageIdsOldestFirst).toHaveLength(2);
+        expect(get().sessions.s1.latestUsage).toMatchObject({
+            inputTokens: 5,
+            outputTokens: 3,
+        });
     });
 
     it('records applyMessages telemetry when sync performance telemetry is enabled', () => {

@@ -7,6 +7,7 @@ import {
   readAcpToolCallSnapshotRevision,
   readMessageToolSnapshotRevision,
 } from '../helpers/toolCallSnapshotRevision';
+import { isRecoveredHistoryTranscriptObservation } from '../../domains/messages/transcriptObservationProvenance';
 
 export function runMessageToEventConversion({
   state,
@@ -43,8 +44,9 @@ export function runMessageToEventConversion({
   let readyAt: number | null = null;
 
   for (const msg of nonSidechainMessages) {
+    const isRecoveredHistory = isRecoveredHistoryTranscriptObservation(msg);
     // Check if we've already processed this message
-    if (msg.role === 'user' && msg.localId && state.localIds.has(msg.localId)) {
+    if (!isRecoveredHistory && msg.role === 'user' && msg.localId && state.localIds.has(msg.localId)) {
       continue;
     }
     if (state.messageIds.has(msg.id)) {
@@ -61,17 +63,20 @@ export function runMessageToEventConversion({
     if (msg.role === 'event' && msg.content.type === 'ready') {
       // Mark as processed to prevent duplication but don't add to messages
       state.messageIds.set(msg.id, msg.id);
-      hasReadyEvent = true;
-      const seq = normalizeTranscriptSeq(msg.seq);
-      if (seq !== null) {
-        latestReadyEventSeq = latestReadyEventSeq === null ? seq : Math.max(latestReadyEventSeq, seq);
+      if (!isRecoveredHistory) {
+        hasReadyEvent = true;
+        const seq = normalizeTranscriptSeq(msg.seq);
+        if (seq !== null) {
+          latestReadyEventSeq = latestReadyEventSeq === null ? seq : Math.max(latestReadyEventSeq, seq);
+        }
+        readyAt = readyAt === null ? msg.createdAt : Math.max(readyAt, msg.createdAt);
       }
-      readyAt = readyAt === null ? msg.createdAt : Math.max(readyAt, msg.createdAt);
       continue;
     }
 
     // Handle context reset events - reset state and let the message be shown
     if (
+      !isRecoveredHistory &&
       msg.role === 'event' &&
       msg.content.type === 'message' &&
       msg.content.message === 'Context was reset'
@@ -97,6 +102,7 @@ export function runMessageToEventConversion({
 
     // Handle compaction completed events - reset context but keep todos
     if (
+      !isRecoveredHistory &&
       msg.role === 'event' &&
       (
         (msg.content.type === 'message' && msg.content.message === 'Compaction completed') ||
@@ -127,7 +133,7 @@ export function runMessageToEventConversion({
       convertedEvents.push({ message: msg, event });
       // Mark as processed to prevent duplication
       state.messageIds.set(msg.id, msg.id);
-      if (msg.role === 'user' && msg.localId) {
+      if (!isRecoveredHistoryTranscriptObservation(msg) && msg.role === 'user' && msg.localId) {
         state.localIds.set(msg.localId, msg.id);
       }
     } else {
@@ -150,7 +156,9 @@ export function runMessageToEventConversion({
       text: null,
 	      meta: message.meta,
 	    });
-	    setThinkingMergeCursor(state, null, 'message-to-event');
+	    if (!isRecoveredHistoryTranscriptObservation(message)) {
+	      setThinkingMergeCursor(state, null, 'message-to-event');
+	    }
 	    changed.add(mid);
 	  }
 

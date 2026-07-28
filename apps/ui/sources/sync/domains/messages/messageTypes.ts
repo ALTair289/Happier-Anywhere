@@ -1,5 +1,6 @@
 import { AgentEvent } from '../../typesRaw';
 import { MessageMeta } from './messageMetaTypes';
+import type { TranscriptObservationMetadata } from './transcriptObservationProvenance';
 
 export type ToolCall = {
     // Provider-side identifier for this tool call (e.g. ACP callId, Claude tool_use id).
@@ -44,7 +45,7 @@ export type UserTextMessage = {
     text: string;
     displayText?: string; // Optional text to display in UI instead of actual text
     meta?: MessageMeta;
-}
+} & TranscriptObservationMetadata;
 
 export type ModeSwitchMessage = {
     kind: 'agent-event';
@@ -55,7 +56,7 @@ export type ModeSwitchMessage = {
     createdAt: number;
     event: AgentEvent;
     meta?: MessageMeta;
-}
+} & TranscriptObservationMetadata;
 
 export type AgentTextMessage = {
     kind: 'agent-text';
@@ -68,7 +69,7 @@ export type AgentTextMessage = {
     text: string;
     isThinking?: boolean;
     meta?: MessageMeta;
-}
+} & TranscriptObservationMetadata;
 
 export type ToolCallMessage = {
     kind: 'tool-call';
@@ -81,6 +82,6 @@ export type ToolCallMessage = {
     tool: ToolCall;
     children: Message[];
     meta?: MessageMeta;
-}
+} & TranscriptObservationMetadata;
 
 export type Message = UserTextMessage | AgentTextMessage | ToolCallMessage | ModeSwitchMessage;

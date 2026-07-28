@@ -106,6 +106,39 @@ describe('buildTranscriptRenderableAggregate', () => {
         expect(aggregate.messageCount).toBe(0);
         expect(aggregate.requestStates.size).toBe(0);
     });
+
+    it('excludes only explicitly recovered history from unread and meaningful-activity watermarks', () => {
+        const legacyLiveMessageWithSourceTime = agentText({
+            id: 'legacy-live',
+            createdAt: 1_000,
+            seq: 10,
+            sourceCreatedAt: 100,
+        });
+        const recoveredHistory = agentText({
+            id: 'recovered-history',
+            createdAt: 9_000,
+            seq: 90,
+            sourceCreatedAt: 200,
+            transcriptObservationProvenance: {
+                kind: 'non_dependent',
+                source: 'history',
+            },
+        });
+        const live = agentText({
+            id: 'queue-live',
+            createdAt: 2_000,
+            seq: 20,
+        });
+
+        const aggregate = buildTranscriptRenderableAggregate({
+            messages: [legacyLiveMessageWithSourceTime, live, recoveredHistory],
+            completedRequests: null,
+        });
+
+        expect(aggregate.latestCommittedMessageCreatedAt).toBe(2_000);
+        expect(aggregate.latestUnreadAffectingMessageSeq).toBe(20);
+        expect(aggregate.messageCount).toBe(3);
+    });
 });
 
 describe('applyMessageChangeToTranscriptRenderableAggregate', () => {

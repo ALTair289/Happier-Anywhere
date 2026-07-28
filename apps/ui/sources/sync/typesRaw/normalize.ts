@@ -1,6 +1,7 @@
 import type { SessionMessageRole } from '@happier-dev/protocol';
 
 import type { MessageMeta } from '../domains/messages/messageMetaTypes';
+import type { TranscriptObservationMetadata } from '../domains/messages/transcriptObservationProvenance';
 import {
     hasSyntheticNoResponseMeta,
     markSyntheticNoResponseMeta,
@@ -97,7 +98,7 @@ export type NormalizedMessage = ({
     sidechainId?: string,
     meta?: MessageMeta,
     usage?: UsageData,
-};
+} & TranscriptObservationMetadata;
 
 function readNonEmptyString(value: unknown): string | undefined {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;

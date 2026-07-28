@@ -133,6 +133,10 @@ import type { OrphanToolResultBucket } from "./helpers/orphanToolResults";
 import { isDebugFlagEnabled } from "./helpers/debugFlags";
 import { markRunningToolsUnavailable } from "./helpers/markRunningToolsUnavailable";
 import { compareIncomingTranscriptRowsOldestFirst, normalizeTranscriptSeq } from "../domains/messages/transcriptOrdering";
+import {
+    applyTranscriptObservationMetadata,
+    type TranscriptObservationMetadata,
+} from "../domains/messages/transcriptObservationProvenance";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -188,7 +192,7 @@ export type ReducerMessage = {
     event: AgentEvent | null;
     tool: ToolCall | null;
     meta?: MessageMeta;
-}
+} & TranscriptObservationMetadata;
 
 type StoredPermission = {
     tool: string;
@@ -513,6 +517,24 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         allocateId,
     });
 
+    const incomingObservationMetadataById = new Map(
+        orderedIncomingMessages.map((message) => [message.id, message] as const),
+    );
+    const incomingObservationMetadataByLocalId = new Map(
+        orderedIncomingMessages
+            .filter((message): message is typeof message & { localId: string } => typeof message.localId === 'string')
+            .map((message) => [message.localId, message] as const),
+    );
+    const applyIncomingObservationMetadata = (message: ReducerMessage): void => {
+        const source = (message.realID ? incomingObservationMetadataById.get(message.realID) : undefined)
+            ?? (message.localId ? incomingObservationMetadataByLocalId.get(message.localId) : undefined);
+        applyTranscriptObservationMetadata(message, source);
+    };
+    for (const id of changed) {
+        const message = state.messages.get(id);
+        if (message) applyIncomingObservationMetadata(message);
+    }
+
     if (typeof latestReadyEventAt === 'number') {
         markRunningToolsUnavailable({
             state,
@@ -529,7 +551,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
     // sidechain state only and are rendered under the owning tool-call when that tool-call exists.
     const sidechainChildIds = new Set<string>();
     for (const chain of state.sidechains.values()) {
-        for (const m of chain) sidechainChildIds.add(m.id);
+        for (const m of chain) {
+            sidechainChildIds.add(m.id);
+            if (changed.has(m.id)) applyIncomingObservationMetadata(m);
+        }
     }
 
     const filteredSidechainChildIds: string[] = [];
@@ -629,6 +654,16 @@ function processUsageData(state: ReducerState, usage: UsageData, timestamp: numb
 
 
 function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: ReducerState): Message | null {
+    const observationMetadata: TranscriptObservationMetadata = {
+        ...(reducerMsg.sourceCreatedAt !== undefined ? { sourceCreatedAt: reducerMsg.sourceCreatedAt } : {}),
+        ...(reducerMsg.sourceUpdatedAt !== undefined ? { sourceUpdatedAt: reducerMsg.sourceUpdatedAt } : {}),
+        ...(reducerMsg.transcriptObservationProvenance !== undefined
+            ? { transcriptObservationProvenance: reducerMsg.transcriptObservationProvenance }
+            : {}),
+        ...(reducerMsg.deliveryResolution !== undefined
+            ? { deliveryResolution: reducerMsg.deliveryResolution }
+            : {}),
+    };
     if (reducerMsg.role === 'user' && reducerMsg.text !== null) {
         const displayText = typeof reducerMsg.meta?.displayText === 'string' ? reducerMsg.meta.displayText : undefined;
         return {
@@ -641,7 +676,8 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             kind: 'user-text',
             text: reducerMsg.text,
             ...(displayText !== undefined ? { displayText } : {}),
-            meta: reducerMsg.meta
+            meta: reducerMsg.meta,
+            ...observationMetadata,
         };
     } else if (reducerMsg.role === 'agent' && reducerMsg.text !== null) {
         return {
@@ -654,7 +690,8 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             kind: 'agent-text',
             text: reducerMsg.text,
             ...(reducerMsg.isThinking && { isThinking: true }),
-            meta: reducerMsg.meta
+            meta: reducerMsg.meta,
+            ...observationMetadata,
         };
     } else if (reducerMsg.role === 'agent' && reducerMsg.tool !== null) {
         // Convert children recursively
@@ -682,7 +719,8 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             kind: 'tool-call',
             tool: { ...reducerMsg.tool },
             children: childMessages,
-            meta: reducerMsg.meta
+            meta: reducerMsg.meta,
+            ...observationMetadata,
         };
     } else if (reducerMsg.role === 'agent' && reducerMsg.event !== null) {
         return {
@@ -693,7 +731,8 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             createdAt: reducerMsg.createdAt,
             kind: 'agent-event',
             event: reducerMsg.event,
-            meta: reducerMsg.meta
+            meta: reducerMsg.meta,
+            ...observationMetadata,
         };
     }
 

@@ -43,6 +43,20 @@ function readToolResultError(result: unknown): string | null {
     return typeof error === 'string' ? error : null;
 }
 
+function buildCompletedRequestPlaceholderResult(completed: unknown): unknown {
+    const completedRecord = asRecord(completed);
+    const answerRecord = asRecord(completedRecord?.answers);
+    if (!answerRecord) return 'Approved';
+
+    const answers: Record<string, string> = {};
+    for (const [question, answer] of Object.entries(answerRecord)) {
+        if (typeof answer === 'string') {
+            answers[question] = answer;
+        }
+    }
+    return Object.keys(answers).length > 0 ? { answers } : 'Approved';
+}
+
 function hasRequestInterruptedPlaceholderText(message: Readonly<{ tool?: ToolCall | null }>): boolean {
     return message.tool?.permission?.reason === 'Request interrupted'
         || readToolResultError(message.tool?.result) === 'Request interrupted';
@@ -377,7 +391,7 @@ export function runAgentStatePermissionsPhase(params: Readonly<{
                                     hasChanged = true;
                                 }
                                 if (!message.tool.result) {
-                                    message.tool.result = 'Approved';
+                                    message.tool.result = buildCompletedRequestPlaceholderResult(completed);
                                     hasChanged = true;
                                 }
                             } else if (message.tool.state !== 'running') {
@@ -452,7 +466,7 @@ export function runAgentStatePermissionsPhase(params: Readonly<{
                         completedAt: completed.completedAt || Date.now(),
                         description: null,
                         result: completed.status === 'approved'
-                            ? 'Approved'
+                            ? buildCompletedRequestPlaceholderResult(completed)
                             : (completed.reason ? { error: completed.reason } : undefined),
                         permission: {
                             id: permId,
