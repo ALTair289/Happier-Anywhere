@@ -491,6 +491,154 @@ rl.on('line', (line) => {
   return scriptPath;
 }
 
+function makeFakePiRpcStalePreStartAssistantEndScript(dir: string): string {
+  const scriptPath = join(dir, 'fake-pi-rpc-stale-pre-start-assistant-end.js');
+  const script = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+
+rl.on('line', (line) => {
+  let command;
+  try {
+    command = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  switch (command.type) {
+    case 'new_session':
+      out({ id: command.id, type: 'response', command: 'new_session', success: true, data: { cancelled: false } });
+      break;
+    case 'get_state':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          sessionId: 'pi-session-stale-pre-start-assistant-end',
+          isStreaming: false,
+          isCompacting: false,
+          model: { id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }
+        }
+      });
+      break;
+    case 'get_available_models':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_available_models',
+        success: true,
+        data: { models: [{ id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }] }
+      });
+      break;
+    case 'get_commands':
+      out({ id: command.id, type: 'response', command: 'get_commands', success: true, data: { commands: [] } });
+      break;
+    case 'prompt':
+      out({ id: command.id, type: 'response', command: 'prompt', success: true });
+      out({
+        type: 'assistant_message_end',
+        terminalStatus: 'failed',
+        message: { role: 'assistant', content: [] }
+      });
+      setTimeout(() => {
+        out({ type: 'agent_start' });
+        out({
+          type: 'message_end',
+          message: {
+            role: 'assistant',
+            stopReason: 'stop',
+            content: [{ type: 'text', text: 'current turn completed' }]
+          }
+        });
+        out({ type: 'agent_end' });
+      }, 10);
+      break;
+    default:
+      out({ id: command.id, type: 'response', command: command.type, success: true });
+      break;
+  }
+});
+`;
+  writeFileSync(scriptPath, script, 'utf8');
+  chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function makeFakePiRpcStalePreStartTurnFailedScript(dir: string): string {
+  const scriptPath = join(dir, 'fake-pi-rpc-stale-pre-start-turn-failed.js');
+  const script = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+
+rl.on('line', (line) => {
+  let command;
+  try {
+    command = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  switch (command.type) {
+    case 'new_session':
+      out({ id: command.id, type: 'response', command: 'new_session', success: true, data: { cancelled: false } });
+      break;
+    case 'get_state':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          sessionId: 'pi-session-stale-pre-start-turn-failed',
+          isStreaming: false,
+          isCompacting: false,
+          model: { id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }
+        }
+      });
+      break;
+    case 'get_available_models':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_available_models',
+        success: true,
+        data: { models: [{ id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }] }
+      });
+      break;
+    case 'get_commands':
+      out({ id: command.id, type: 'response', command: 'get_commands', success: true, data: { commands: [] } });
+      break;
+    case 'prompt':
+      out({ id: command.id, type: 'response', command: 'prompt', success: true });
+      out({ type: 'turn_failed' });
+      setTimeout(() => {
+        out({ type: 'agent_start' });
+        out({
+          type: 'message_end',
+          message: {
+            role: 'assistant',
+            stopReason: 'stop',
+            content: [{ type: 'text', text: 'current turn completed after stale failure' }]
+          }
+        });
+        out({ type: 'agent_end' });
+      }, 10);
+      break;
+    default:
+      out({ id: command.id, type: 'response', command: command.type, success: true });
+      break;
+  }
+});
+`;
+  writeFileSync(scriptPath, script, 'utf8');
+  chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
 function makeFakePiRpcStructuredTurnFailedScript(dir: string): string {
   const scriptPath = join(dir, 'fake-pi-rpc-structured-turn-failed.js');
   const script = `
@@ -1630,6 +1778,74 @@ describe('PiRpcBackend prompt error handling', () => {
         data: 'Pi provider reported assistant_message_end failed without details after prompt acceptance',
       }));
       expect(JSON.stringify(messages)).not.toContain('sk-');
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('ignores a stale failed assistant_message_end before the accepted prompt emits agent_start', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-stale-pre-start-assistant-end-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcStalePreStartAssistantEndScript(workDir);
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: {
+        HAPPIER_PI_RPC_AGENT_END_SETTLE_MS: '10',
+      },
+    });
+
+    const messages: any[] = [];
+    backend.onMessage((message) => messages.push(message));
+
+    try {
+      const session = await backend.startSession();
+
+      await expect(backend.sendPrompt(session.sessionId, 'hello')).resolves.toBeUndefined();
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'model-output',
+        fullText: 'current turn completed',
+      }));
+      expect(messages).not.toContainEqual(expect.objectContaining({
+        type: 'status',
+        status: 'error',
+      }));
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('ignores a stale turn_failed before the accepted prompt emits agent_start', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-stale-pre-start-turn-failed-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcStalePreStartTurnFailedScript(workDir);
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: {
+        HAPPIER_PI_RPC_AGENT_END_SETTLE_MS: '10',
+      },
+    });
+
+    const messages: any[] = [];
+    backend.onMessage((message) => messages.push(message));
+
+    try {
+      const session = await backend.startSession();
+
+      await expect(backend.sendPrompt(session.sessionId, 'hello')).resolves.toBeUndefined();
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'model-output',
+        fullText: 'current turn completed after stale failure',
+      }));
+      expect(messages).not.toContainEqual(expect.objectContaining({
+        type: 'status',
+        status: 'error',
+      }));
     } finally {
       await backend.dispose();
     }

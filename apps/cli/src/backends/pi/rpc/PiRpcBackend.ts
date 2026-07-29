@@ -77,6 +77,8 @@ type PendingTurn = {
   agentEndActivityEpoch: number | null;
   /** True after Pi emitted `agent_start` for the prompt accepted by this pending turn. */
   agentStartObserved: boolean;
+  /** Terminal failure observed after admission but before Pi identified the current turn. */
+  preStartTerminalFailure: Error | null;
   /** Bumped on every Pi event so an in-flight liveness probe can detect stale state. */
   activityEpoch: number;
   /** Consecutive liveness probes where Pi claimed to be busy but emitted no events. */
@@ -1556,6 +1558,10 @@ export class PiRpcBackend implements AgentBackend {
     return Object.assign(error, { runtimeAuthClassification: classification });
   }
 
+  private isAcceptedPromptAwaitingAgentStart(): boolean {
+    return this.pendingTurn !== null && !this.pendingTurn.agentStartObserved;
+  }
+
   private async reportPiRuntimeAuthFailureToDaemon(
     classification: ConnectedServiceRuntimeFailureClassification,
   ): Promise<void> {
@@ -1588,7 +1594,7 @@ export class PiRpcBackend implements AgentBackend {
     const detail = this.readPiAssistantErrorMessage(event);
     if (!detail) return;
     this.tracePiRpcFailureBoundary('assistant_failure_event_detail_present', event);
-    if (this.pendingTurn && !this.pendingTurn.agentStartObserved) {
+    if (this.isAcceptedPromptAwaitingAgentStart()) {
       // A resumed Pi RPC session can replay a stale assistant error just after accepting the next
       // prompt. Do not fail that new turn unless Pi has emitted agent_start for it first.
       return;
@@ -1614,8 +1620,12 @@ export class PiRpcBackend implements AgentBackend {
 
   private handlePiTurnFailedEvent(event: Record<string, unknown>): void {
     if (!this.pendingTurn) return;
-    this.tracePiRpcFailureBoundary('turn_failed_event_matched', event);
     const detail = buildPiTurnFailedDiagnostic(event);
+    if (this.isAcceptedPromptAwaitingAgentStart()) {
+      this.pendingTurn.preStartTerminalFailure ??= new Error(detail);
+      return;
+    }
+    this.tracePiRpcFailureBoundary('turn_failed_event_matched', event);
     this.emitMessage({ type: 'terminal-output', data: detail });
     this.emitMessage({ type: 'status', status: 'error', detail });
     this.rejectPendingTurn(new Error(detail));
@@ -1624,9 +1634,13 @@ export class PiRpcBackend implements AgentBackend {
   private handlePiAssistantMessageEndTerminalFailureEvent(event: Record<string, unknown>): void {
     if (!this.pendingTurn) return;
     if (!isPiFailedAssistantTerminalEvent(event)) return;
-    this.tracePiRpcFailureBoundary('failed_assistant_terminal_event_matched', event);
     const detail = buildPiAssistantMessageEndFailedDiagnostic(event);
     const classification = this.classifyPiAssistantRuntimeAuthFailure(event);
+    if (this.isAcceptedPromptAwaitingAgentStart()) {
+      this.pendingTurn.preStartTerminalFailure ??= this.createPiAssistantFailureError(detail, classification);
+      return;
+    }
+    this.tracePiRpcFailureBoundary('failed_assistant_terminal_event_matched', event);
     this.emitMessage({ type: 'terminal-output', data: detail });
     this.emitMessage({ type: 'status', status: 'error', detail });
     if (classification) {
@@ -1683,6 +1697,13 @@ export class PiRpcBackend implements AgentBackend {
 
     if (normalizedEvent.type === 'agent_end') {
       if (this.pendingTurn) {
+        if (!this.pendingTurn.agentStartObserved && this.pendingTurn.preStartTerminalFailure) {
+          const failure = this.pendingTurn.preStartTerminalFailure;
+          this.emitMessage({ type: 'terminal-output', data: failure.message });
+          this.emitMessage({ type: 'status', status: 'error', detail: failure.message });
+          this.rejectPendingTurn(failure);
+          return;
+        }
         if (normalizedEvent.willRetry === true || this.pendingTurn.recoverableAssistantErrorObserved) {
           this.pendingTurn.agentEndObserved = false;
           this.pendingTurn.agentEndActivityEpoch = null;
@@ -1872,6 +1893,7 @@ export class PiRpcBackend implements AgentBackend {
       agentEndObserved: false,
       agentEndActivityEpoch: null,
       agentStartObserved: false,
+      preStartTerminalFailure: null,
       activityEpoch: 0,
       consecutiveSilentProbes: 0,
       livenessProbeInFlight: false,
@@ -2107,6 +2129,7 @@ export class PiRpcBackend implements AgentBackend {
       pending.agentEndObserved = false;
       pending.agentEndActivityEpoch = null;
       pending.agentStartObserved = true;
+      pending.preStartTerminalFailure = null;
       pending.recoverableAssistantErrorObserved = false;
       pending.lastCompactionEnd = null;
       pending.lastAssistantStopReason = null;
