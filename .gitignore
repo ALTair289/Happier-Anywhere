@@ -37,12 +37,16 @@ yarn-error.*
 .playwright-cli/
 .yarn-cache/
 .yarn-global/
+/apps/ui/.vite-node/
 
 # local build/log artifacts
 apps/stack/resume-invocations.log
 apps/stack/*.tgz
 packages/relay-server/*.tgz
 apps/server/output/
+
+# Local browser QA authentication state
+/apps/ui/p2-auth.json
 
 # macOS
 .DS_Store
