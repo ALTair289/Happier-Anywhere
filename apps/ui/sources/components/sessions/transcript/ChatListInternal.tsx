@@ -217,6 +217,7 @@ import {
     createTranscriptMeasurementHost,
 } from '@/components/sessions/transcript/measurement/transcriptMeasurementHost';
 import { estimateTranscriptRowHeightFromCache, estimateTranscriptRowHeightFromContent } from '@/components/sessions/transcript/measurement/estimateTranscriptRowHeightFromCache';
+import { resolveToolCallsGroupChromeVariant } from '@/components/sessions/transcript/toolCalls/units/toolCallsGroupChrome';
 import { buildTranscriptItemHeightSignatureKey } from '@/components/sessions/transcript/measurement/transcriptItemHeightCache';
 import { useTranscriptMeasurementHostWiring } from '@/components/sessions/transcript/measurement/useTranscriptMeasurementHostWiring';
 import {
@@ -1361,6 +1362,15 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         resolveViewportTelemetryMode,
         sessionId: props.sessionId,
     });
+    // Which chrome the tool rows paint. Resolved through the ROW RENDERERS' own owner
+    // (`resolveToolCallsGroupChromeVariant`, the same call every tool-group unit row makes) so
+    // the estimate below consumes one decision instead of re-deriving a second one from the
+    // underlying settings: in `cards` mode a tool row paints a whole ToolView card, not the
+    // single-line timeline row the flat estimate was calibrated on.
+    const toolCallsGroupChromeVariant = React.useMemo(
+        () => resolveToolCallsGroupChromeVariant(props.toolChromeCommon),
+        [props.toolChromeCommon],
+    );
     // Renderer size estimates come from the app's own measured-height cache: a prior
     // exact measurement beats the renderer's average-size learning for rows it has
     // not mounted yet (legend-list#492; live reopen/switch-back oscillation captures
@@ -1372,8 +1382,9 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         }) ?? estimateTranscriptRowHeightFromContent({
             getMessageById: getTurnMessageById,
             item,
+            toolCallsGroupChromeVariant,
         })
-    ), [buildRowShellSignature, getTurnMessageById, measurementReconciler]);
+    ), [buildRowShellSignature, getTurnMessageById, measurementReconciler, toolCallsGroupChromeVariant]);
     const getItemSizeVersion = React.useCallback((item: ChatTranscriptListItem): React.Key => (
         buildTranscriptItemHeightSignatureKey(buildRowShellSignature(item))
     ), [buildRowShellSignature]);
@@ -1554,8 +1565,6 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         sessionOpenLatch,
         setNativeMountSettleDeadlineReached,
         setNativeMountSettleStable,
-        usesNativeFlashListBottomMaintenance:
-            mainTranscriptRendererOwnerPolicy.usesNativeFlashListBottomMaintenance,
     });
     const paintTelemetry = useTranscriptPaintTelemetry({
         clearWebStablePaintRetry,

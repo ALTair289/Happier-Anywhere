@@ -13,7 +13,10 @@ import {
  * Single authority for the three measurement reads a FlashList host must make per render/commit:
  *   R1 recycle identity (shape-stable getItemType so cells never remount mid-stream),
  *   R2 reserved height (exact for stable rows; a monotonic PER-ITEM floor for streaming/prepended
- *      rows so FlashList never positions a neighbour from a height it will contradict within a frame),
+ *      rows so FlashList never positions a neighbour from a height it will contradict within a frame.
+ *      The floor lives only as long as the state that needs it: once a row settles, its reservation
+ *      is its own real measured height and never the peak it reached while growing — see
+ *      {@link isFloorShapeValid}),
  *   R3 global invalidation (the sole clearLayoutCacheOnUpdate decision: structural deltas only,
  *      coalesced per commit, never while a prepend/entry-restore transaction owns the viewport).
  *
@@ -59,7 +62,11 @@ export type TranscriptMeasurementReconciler = Readonly<{
     /** R1. Sole recycle-type authority. Pure function of the row's shape signature. */
     resolveRecycleType(signature: TranscriptItemHeightValiditySignature): string;
 
-    /** R2. Sole reservation producer. Exact for stable rows; monotonic per-item floor for non-stable; undefined if unknown. */
+    /**
+     * R2. Sole reservation producer. Exact for stable rows; a monotonic per-item floor for
+     * non-stable rows, valid only under the provenance it was measured in
+     * ({@link isFloorShapeValid}); undefined if unknown or provenance-stale.
+     */
     resolveReservation(signature: TranscriptItemHeightValiditySignature): TranscriptRowHeightReservation | undefined;
 
     /**
@@ -73,10 +80,12 @@ export type TranscriptMeasurementReconciler = Readonly<{
      * row, so the renderer re-sized already-scrolled-past rows from a flat content heuristic and
      * dragged every row below them (W-1 web scroll regression).
      *
-     * Returns `undefined` for a never-measured or reset-pending row. For a GROWING row
-     * ({@link TRANSCRIPT_GROWING_ROW_STATES}) the stored value is a deliberate cross-shape PEAK
-     * rather than a size, so it is not a valid prediction — callers filter those states first
-     * (`estimateTranscriptRowHeightFromCache`).
+     * Returns `undefined` for a never-measured or reset-pending row. This is the row's own last
+     * real onLayout height and never the growth-episode PEAK: the peak is an aggregate over frames
+     * the row no longer paints, so serving it as a prediction placed the next row from a height
+     * nothing paints (W17). Callers still filter the growing states first
+     * (`estimateTranscriptRowHeightFromCache`), because a growing row's last frame is stale by
+     * construction — its content is still arriving.
      */
     resolveLastMeasuredHeight(signature: TranscriptItemHeightValiditySignature): number | undefined;
 
@@ -109,10 +118,24 @@ export type TranscriptMeasurementReconcilerOptions = Readonly<{
 }>;
 
 type FloorState = Readonly<{
-    /** Last-measured monotonic floor for this exact item+geometry, or null while reset-pending. */
+    /**
+     * Monotonic floor for this item+geometry WITHIN the provenance recorded below, or null while
+     * reset-pending. For a growing row that provenance is the growth episode (the floor is a
+     * deliberate cross-shape peak); for every other row it is one content shape.
+     */
     minHeight: number | null;
+    /**
+     * The row's own last real onLayout height — no monotonic max, no aggregation. Kept apart from
+     * {@link FloorState.minHeight} because a growth-episode peak is not a size the row still paints
+     * (W17), while `resolveLastMeasuredHeight` must hand the renderer a real measurement.
+     */
+    lastMeasuredHeight: number | null;
     /** The content shape the floor was recorded from. Scopes the floor for shrink-capable rows. */
     structuralKey: string;
+    /** The presentation (recycle type) the floor was recorded from. */
+    kind: string;
+    /** The row state the floor was recorded in. Separates a growth-episode peak from a settled height. */
+    rowState: TranscriptItemHeightRowState;
 }>;
 
 /**
@@ -150,14 +173,37 @@ function buildFloorKey(signature: TranscriptItemHeightValiditySignature): string
  * For a shrink-capable row it is how the tallest historical height outlived its content: the reset
  * trigger cannot run at all on a fresh mount (`TranscriptRowShell` initialises both signature refs
  * to the current signature, so there is no previous signature to diff), and a viewport resize plus
- * return re-selects the same warm key. Serving and carrying over are therefore both gated on the
- * shape the floor was recorded from.
+ * return re-selects the same warm key. Serving and carrying over are therefore both gated here —
+ * one predicate, so the producer and the consumer of a floor can never disagree about its scope.
+ *
+ * A floor is only valid for the PROVENANCE it was recorded under:
+ *  - same presentation (`kind`): a `message:thinking` measurement is not a `message:agent` height;
+ *  - same growth classification: a height measured mid-growth is an aggregate of frames the row no
+ *    longer paints, and a settled height is not a bound on a row whose content is still arriving;
+ *  - and, once settled, the same content shape.
+ *
+ * W17 — the growth-classification leg is what makes the stale-peak state unreachable rather than
+ * correctable. A growing row's floor is deliberately carried across `structuralKey` churn (that is
+ * what stops a mid-stream frame from under-reserving), and `recordMeasuredHeight` stores the carried
+ * peak under the shape it was carried INTO. With `structuralKey` as the only gate, the instant the
+ * row settled at that same shape — which for an assistant message is the instant a tool call is
+ * committed after it, since `streaming` is `sessionActive && isLatestCommittedActivity` and the
+ * latest activity key is simply the last message — the peak compared equal and could never be
+ * refused again. Live web capture 2026-07-28 (`cmrdwwsd60bg0tmo6n0k6zq79`): [42, 24, 48]px of blank
+ * band under three settled messages, every one of them at a `msg->toolCalls` boundary, while every
+ * `toolCalls->*` boundary measured 0 — no tool row can hold a growing peak, because
+ * `resolveMessageRowState` pins tool-call messages to 'tool-progress' and every tool-group unit row
+ * to 'stable'. Gating on provenance releases the peak at the transition instead of on a later
+ * corrector, so no consumer ever observes it.
  */
 function isFloorShapeValid(
     floor: FloorState,
     signature: TranscriptItemHeightValiditySignature,
 ): boolean {
-    if (isGrowingRowState(signature.rowState)) return true;
+    if (floor.kind !== signature.kind) return false;
+    const floorIsGrowing = isGrowingRowState(floor.rowState);
+    if (floorIsGrowing !== isGrowingRowState(signature.rowState)) return false;
+    if (floorIsGrowing) return true;
     return floor.structuralKey === signature.structuralKey;
 }
 
@@ -252,8 +298,8 @@ export function createTranscriptMeasurementReconciler(
         ) {
             return { kind: 'floor', minHeight: floor.minHeight };
         }
-        // Never-measured, reset-pending, or shape-stale row: reserve NOTHING → FlashList's natural
-        // onLayout measures the row's real height. (No per-type median seed — see the module doc.)
+        // Never-measured, reset-pending, or provenance-stale row: reserve NOTHING → FlashList's
+        // natural onLayout measures the row's real height. (No per-type median seed — module doc.)
         return undefined;
     }
 
@@ -277,10 +323,14 @@ export function createTranscriptMeasurementReconciler(
 
         resolveLastMeasuredHeight(signature) {
             const floor = floorsByKey.get(buildFloorKey(signature));
-            if (floor === undefined || floor.minHeight === null || !isValidHeight(floor.minHeight)) {
+            if (
+                floor === undefined
+                || floor.lastMeasuredHeight === null
+                || !isValidHeight(floor.lastMeasuredHeight)
+            ) {
                 return undefined;
             }
-            return floor.minHeight;
+            return floor.lastMeasuredHeight;
         },
 
         recordMeasuredHeight(input) {
@@ -293,11 +343,16 @@ export function createTranscriptMeasurementReconciler(
                 cache.set(signature, { heightPx: measured });
             }
 
-            // Floor path: monotonic per item+geometry, WITHIN one content shape. A reset-pending
-            // (null) floor, or a floor recorded from a different shape on a shrink-capable row,
-            // re-seeds from this measurement (taking the new, possibly smaller, height); otherwise it
-            // only grows. Carrying the peak across a shrink-capable shape change is what let the
+            // Floor path: monotonic per item+geometry, WITHIN the provenance this measurement is
+            // taken under. A reset-pending (null) floor, or a floor recorded under a different
+            // provenance, re-seeds from this measurement (taking the new, possibly smaller, height);
+            // otherwise it only grows. Carrying a floor across a provenance change is what let the
             // tallest historical height leak back in after the row had already re-measured shorter.
+            //
+            // The carried value keeps growing across `structuralKey` churn WHILE the row grows, and
+            // `isFloorShapeValid` — not the stored `structuralKey` — is what refuses it once the
+            // row settles, so re-labelling it here can no longer resurrect it (W17). The row's own
+            // last real height is stored beside it, unaggregated, for the prediction consumer.
             const floorKey = buildFloorKey(signature);
             const existing = floorsByKey.get(floorKey);
             const carriedPeak = existing !== undefined
@@ -307,7 +362,10 @@ export function createTranscriptMeasurementReconciler(
                 : null;
             floorsByKey.set(floorKey, {
                 minHeight: carriedPeak === null ? measured : Math.max(carriedPeak, measured),
+                lastMeasuredHeight: measured,
                 structuralKey: signature.structuralKey,
+                kind: signature.kind,
+                rowState: signature.rowState,
             });
         },
 
@@ -315,7 +373,13 @@ export function createTranscriptMeasurementReconciler(
             const floorKey = buildFloorKey(input.signature);
             // Mark reset-pending (null) rather than deleting: a known-but-reset item re-seeds its
             // floor from the next real onLayout (so a collapse never reserves the pre-collapse height).
-            floorsByKey.set(floorKey, { minHeight: null, structuralKey: input.signature.structuralKey });
+            floorsByKey.set(floorKey, {
+                minHeight: null,
+                lastMeasuredHeight: null,
+                structuralKey: input.signature.structuralKey,
+                kind: input.signature.kind,
+                rowState: input.signature.rowState,
+            });
         },
 
         requestGlobalLayoutInvalidation(input) {
