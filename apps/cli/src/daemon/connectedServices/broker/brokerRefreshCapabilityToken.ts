@@ -12,8 +12,10 @@ import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
  *   token = base64url( HMAC-SHA256(controlToken, BROKER_REFRESH_SCOPE_LABEL) )
  *
  * Properties:
- *  - The broker holds ONLY this derived token (injected via the runtime child env), never the master.
- *    A leaked broker token cannot call the broad control surface (the broad endpoints keep
+ *  - The broker reads ONLY this derived token from the current 0600 minimal broker-state snapshot;
+ *    that provider-visible file never contains the master or a spawn-time token. A leaked broker
+ *    token cannot call the broad control
+ *    surface (the broad endpoints keep
  *    `requireAuth`, which compares the master token; the scoped token does not match it).
  *  - The daemon re-derives the same value from its in-memory master `controlToken` and constant-time
  *    compares — no extra persisted secret, no parallel token-store mechanism.
@@ -22,8 +24,6 @@ import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
  *  - It is PROVIDER-AGNOSTIC: OpenCode and Pi derive the SAME value, so a SINGLE bridge preHandler
  *    authorizes both brokers (no parallel per-provider refresh path / no parallel token mechanism).
  */
-export const CONNECTED_SERVICE_BROKER_REFRESH_TOKEN_ENV = 'HAPPIER_CONNECTED_SERVICE_BROKER_REFRESH_TOKEN';
-
 /**
  * Scope label folded into the HMAC. Versioned so a future scope/format change is unambiguous and
  * never collides with the master token or another derived capability. Provider-agnostic: every broker

@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
   CONNECTED_SERVICE_BROKER_REFRESH_SCOPE_LABEL,
-  CONNECTED_SERVICE_BROKER_REFRESH_TOKEN_ENV,
   deriveConnectedServiceBrokerRefreshToken,
   isValidConnectedServiceBrokerRefreshToken,
   CONNECTED_SERVICE_RUN_MATERIALIZE_SCOPE_LABEL,
@@ -53,12 +52,11 @@ describe('brokerRefreshCapabilityToken (shared, provider-agnostic)', () => {
     expect(isValidConnectedServiceBrokerRefreshToken(deriveConnectedServiceBrokerRefreshToken(master), '')).toBe(false);
   });
 
-  it('pins a versioned, provider-agnostic scope label + env name (the SAME token authorizes every broker)', () => {
+  it('pins a versioned, provider-agnostic scope label (the SAME token authorizes every broker)', () => {
     // Provider-agnostic so the OpenCode plugin AND the Pi extension derive the SAME scoped token, and a
     // SINGLE bridge preHandler (`requireBrokerRefreshAuth`) authorizes both. Versioned so a future
     // scope/format change is unambiguous.
     expect(CONNECTED_SERVICE_BROKER_REFRESH_SCOPE_LABEL).toBe('happier:connected-service-broker-refresh:v1');
-    expect(CONNECTED_SERVICE_BROKER_REFRESH_TOKEN_ENV).toBe('HAPPIER_CONNECTED_SERVICE_BROKER_REFRESH_TOKEN');
   });
 
   it('keeps run-materialize and broker-refresh scopes mutually exclusive (POST-WAVE-REVIEW F2 least privilege)', () => {

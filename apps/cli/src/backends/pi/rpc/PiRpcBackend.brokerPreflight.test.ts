@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  PI_BROKER_DAEMON_STATE_PATH_ENV,
+  PI_BROKER_STATE_PATH_ENV,
   PI_BROKER_LOAD_NONCE_ENV,
   PI_BROKER_SELECTIONS_ENV,
   PI_BROKER_SELECTION_IDENTITY_ENV,
@@ -94,7 +94,7 @@ describe('PiRpcBackend connected-service broker preflight (fail-closed)', () => 
       }),
       // Bridge target points at a file that does not exist ⇒ the preflight fails closed immediately
       // (no handshake polling, no network).
-      [PI_BROKER_DAEMON_STATE_PATH_ENV]: join(tmpdir(), 'happier-pi-broker-gate-no-daemon-state.json'),
+      [PI_BROKER_STATE_PATH_ENV]: join(tmpdir(), 'happier-pi-broker-gate-no-daemon-state.json'),
     });
     // Guard: if the gate ever lets execution through, reaching the process would surface a distinct
     // error so the assertion below would fail loudly rather than silently passing.
@@ -115,7 +115,7 @@ describe('PiRpcBackend connected-service broker preflight (fail-closed)', () => 
       [PI_BROKER_SELECTIONS_ENV]: serializePiBrokerSelections({
         anthropic: { serviceId: 'claude-subscription', profileId: 'claude-pro', accountId: null, planType: null },
       }),
-      [PI_BROKER_DAEMON_STATE_PATH_ENV]: join(tmpdir(), 'happier-pi-broker-gate-no-daemon-state.json'),
+      [PI_BROKER_STATE_PATH_ENV]: join(tmpdir(), 'happier-pi-broker-gate-no-daemon-state.json'),
     });
     priv.sessionId = null;
     priv.ensureProcess = async () => {
@@ -261,7 +261,7 @@ describe('PiRpcBackend connected-service broker preflight (fail-closed)', () => 
       [PI_BROKER_SELECTIONS_ENV]: serializePiBrokerSelections({
         anthropic: { serviceId: 'claude-subscription', profileId: 'claude-pro', accountId: null, planType: null },
       }),
-      [PI_BROKER_DAEMON_STATE_PATH_ENV]: join(tmpdir(), 'happier-pi-broker-gate-no-daemon-state.json'),
+      [PI_BROKER_STATE_PATH_ENV]: join(tmpdir(), 'happier-pi-broker-gate-no-daemon-state.json'),
     });
     priv.connectedBrokerPreflight = Promise.resolve({ ready: true });
     priv.spawnRpcProcess({ args: ['-e', 'setTimeout(() => {}, 10000)'] });

@@ -12,7 +12,7 @@ import {
 } from '@/backends/codex/connectedServices/codexChatGptAuthTokensRefreshBridgeContract';
 
 import {
-  PI_BROKER_DAEMON_STATE_PATH_ENV,
+  PI_BROKER_STATE_PATH_ENV,
   PI_BROKER_EXTENSION_VERSION_ENV,
   PI_BROKER_LOAD_NONCE_ENV,
   PI_BROKER_MARKER_PREFIX,
@@ -20,7 +20,6 @@ import {
   PI_BROKER_SELECTION_IDENTITY_ENV,
   type PiBrokerProvider,
 } from './piBrokerExtensionEnv';
-import { PI_BROKER_REFRESH_TOKEN_ENV } from './piBrokerCapabilityToken';
 
 /**
  * Version of the Happier Pi auth broker extension. Bump on any wire-shape change. Folded into the
@@ -28,7 +27,7 @@ import { PI_BROKER_REFRESH_TOKEN_ENV } from './piBrokerCapabilityToken';
  * yields a new managed fingerprint) and into the on-disk extension file name (so old + new co-exist
  * across upgrades).
  */
-export const PI_BROKER_EXTENSION_VERSION = '1';
+export const PI_BROKER_EXTENSION_VERSION = '2';
 
 function jsString(value: string): string {
   return JSON.stringify(value);
@@ -83,8 +82,7 @@ export function buildPiBrokerExtensionSource(): string {
   const anthropicBridge = buildBrokerBridgeCallSource({
     ...resolvePiBrokerBridgeParams('anthropic'),
     selectionsEnv: PI_BROKER_SELECTIONS_ENV,
-    daemonStatePathEnv: PI_BROKER_DAEMON_STATE_PATH_ENV,
-    refreshTokenEnv: PI_BROKER_REFRESH_TOKEN_ENV,
+    brokerStatePathEnv: PI_BROKER_STATE_PATH_ENV,
     pluginVersionEnv: PI_BROKER_EXTENSION_VERSION_ENV,
     pluginVersion: PI_BROKER_EXTENSION_VERSION,
     sessionTag: 'pi-broker',
@@ -93,8 +91,7 @@ export function buildPiBrokerExtensionSource(): string {
   const codexBridge = buildBrokerBridgeCallSource({
     ...resolvePiBrokerBridgeParams('openai'),
     selectionsEnv: PI_BROKER_SELECTIONS_ENV,
-    daemonStatePathEnv: PI_BROKER_DAEMON_STATE_PATH_ENV,
-    refreshTokenEnv: PI_BROKER_REFRESH_TOKEN_ENV,
+    brokerStatePathEnv: PI_BROKER_STATE_PATH_ENV,
     pluginVersionEnv: PI_BROKER_EXTENSION_VERSION_ENV,
     pluginVersion: PI_BROKER_EXTENSION_VERSION,
     sessionTag: 'pi-broker',
@@ -109,8 +106,7 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 
 const SELECTIONS_ENV = ${jsString(PI_BROKER_SELECTIONS_ENV)};
-const DAEMON_STATE_PATH_ENV = ${jsString(PI_BROKER_DAEMON_STATE_PATH_ENV)};
-const REFRESH_TOKEN_ENV = ${jsString(PI_BROKER_REFRESH_TOKEN_ENV)};
+const BROKER_STATE_PATH_ENV = ${jsString(PI_BROKER_STATE_PATH_ENV)};
 const EXTENSION_VERSION_ENV = ${jsString(PI_BROKER_EXTENSION_VERSION_ENV)};
 const SELECTION_IDENTITY_ENV = ${jsString(PI_BROKER_SELECTION_IDENTITY_ENV)};
 const LOAD_NONCE_ENV = ${jsString(PI_BROKER_LOAD_NONCE_ENV)};
@@ -122,38 +118,24 @@ const DEFAULT_TTL_MS = 45 * 60 * 1000;
 const BROKER_EPOCH_TTL_MS = 10 * 1000;
 
 // Per-provider bridge fetcher (shared source, block-scoped to avoid name collisions across providers).
-const fetchAnthropicAccessTokenFromBridge = (() => {
+const anthropicBridge = (() => {
 ${anthropicBridge}
-  return fetchAccessTokenFromBridge;
+  return { fetchAccessTokenFromBridge, readCurrentBrokerEndpoint };
 })();
-const fetchCodexAccessTokenFromBridge = (() => {
+const codexBridge = (() => {
 ${codexBridge}
-  return fetchAccessTokenFromBridge;
+  return { fetchAccessTokenFromBridge, readCurrentBrokerEndpoint };
 })();
 
 // Bridge tag (openai/anthropic) keys the fetcher + selections; Pi's provider id (openai-codex/anthropic)
 // keys registerProvider + the auth.json marker. Map between them.
 function fetcherForTag(bridgeTag) {
-  return bridgeTag === "openai" ? fetchCodexAccessTokenFromBridge : fetchAnthropicAccessTokenFromBridge;
+  return bridgeTag === "openai"
+    ? codexBridge.fetchAccessTokenFromBridge
+    : anthropicBridge.fetchAccessTokenFromBridge;
 }
 function registerProviderIdForTag(bridgeTag) {
   return bridgeTag === "openai" ? "openai-codex" : "anthropic";
-}
-
-function readScopedTokenForHandshake() {
-  const token = process.env[REFRESH_TOKEN_ENV];
-  return typeof token === "string" && token.trim().length > 0 ? token.trim() : null;
-}
-
-function readDaemonHttpPortForHandshake() {
-  const path = process.env[DAEMON_STATE_PATH_ENV];
-  if (typeof path !== "string" || path.trim().length === 0) return null;
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    return parsed && typeof parsed.httpPort === "number" ? parsed.httpPort : null;
-  } catch {
-    return null;
-  }
 }
 
 function readJsonEnv(name) {
@@ -231,12 +213,11 @@ async function sendLoadHandshake(providers) {
     if (typeof selectionIdentity !== "string" || selectionIdentity.trim().length === 0) return;
     const loadNonce = process.env[LOAD_NONCE_ENV];
     if (typeof loadNonce !== "string" || loadNonce.trim().length === 0) return;
-    const httpPort = readDaemonHttpPortForHandshake();
-    const scopedToken = readScopedTokenForHandshake();
-    if (!httpPort || !scopedToken || providers.length === 0) return;
-    await fetch("http://127.0.0.1:" + httpPort + LOADED_HANDSHAKE_PATH, {
+    if (providers.length === 0) return;
+    const daemonEndpoint = anthropicBridge.readCurrentBrokerEndpoint();
+    await fetch("http://127.0.0.1:" + daemonEndpoint.httpPort + LOADED_HANDSHAKE_PATH, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-happier-daemon-token": scopedToken },
+      headers: { "Content-Type": "application/json", "x-happier-daemon-token": daemonEndpoint.scopedToken },
       body: JSON.stringify({
         selectionIdentity: selectionIdentity,
         loadNonce: loadNonce,

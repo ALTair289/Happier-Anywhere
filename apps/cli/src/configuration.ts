@@ -176,6 +176,7 @@ class Configuration {
   public readonly privateKeyFile: string
   public readonly installationIdentityFile: string
   public readonly daemonStateFile: string
+  public readonly connectedServiceBrokerStateFile: string
   public readonly daemonLockFile: string
   // Session attach file pruning (best-effort; defense-in-depth for crash-before-read scenarios).
   public readonly sessionAttachFileMaxAgeMs: number
@@ -388,6 +389,7 @@ class Configuration {
       ? join(this.serversDir, daemonLifecycleScopeId)
       : this.activeServerDir
     this.daemonStateFile = join(daemonLifecycleDir, CANONICAL_DAEMON_STATE_BASENAME)
+    this.connectedServiceBrokerStateFile = join(daemonLifecycleDir, 'connected-service-broker.state.json')
     this.daemonLockFile = join(daemonLifecycleDir, `${CANONICAL_DAEMON_STATE_BASENAME}.lock`)
 
     const attachMaxAgeRaw = String(process.env.HAPPIER_SESSION_ATTACH_FILE_MAX_AGE_MS ?? '').trim();

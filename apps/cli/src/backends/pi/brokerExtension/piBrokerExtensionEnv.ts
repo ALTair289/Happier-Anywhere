@@ -4,9 +4,9 @@
  * The Pi connected-services materializer sets these env vars on the spawned Pi process; the broker
  * extension (loaded inside Pi's jiti runtime through Happier's `--extension` launch arg) reads them.
  * They carry NO secret — the OAuth refresh token never leaves the Happier daemon. The broker obtains a fresh
- * ACCESS token out-of-band from the daemon bridge and reads the daemon HTTP port from the daemon-state
- * file (0600) at call time; it authenticates with the SHARED scoped broker-refresh capability token
- * (injected via `HAPPIER_CONNECTED_SERVICE_BROKER_REFRESH_TOKEN`, never the master control token).
+ * ACCESS token out-of-band from the daemon bridge and reads one matching daemon port + SHARED scoped
+ * broker-refresh capability snapshot from a minimal broker-state file (0600) at call time. That file
+ * never contains the daemon control token.
  *
  * The broker SELECTIONS are keyed by the SHARED bridge provider tag (`openai`/`anthropic`) — identical
  * to the OpenCode broker — so the SHARED bridge-call source resolves them with no per-provider glue.
@@ -17,8 +17,8 @@
 /** JSON map of brokered bridge tags → their refresh selection + account identity (NO tokens). */
 export const PI_BROKER_SELECTIONS_ENV = 'HAPPIER_PI_BROKER_SELECTIONS';
 
-/** Absolute path to the Happier daemon-state file (carries `httpPort`/`controlToken`). Not secret. */
-export const PI_BROKER_DAEMON_STATE_PATH_ENV = 'HAPPIER_PI_BROKER_DAEMON_STATE_PATH';
+/** Absolute path to the Happier broker-state file. The path itself is not secret. */
+export const PI_BROKER_STATE_PATH_ENV = 'HAPPIER_PI_BROKER_STATE_PATH';
 
 /** Broker extension version (for the bridge sessionId + drift diagnostics). */
 export const PI_BROKER_EXTENSION_VERSION_ENV = 'HAPPIER_PI_BROKER_EXTENSION_VERSION';

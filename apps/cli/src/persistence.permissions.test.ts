@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { applyEnvValues, restoreEnvValues, snapshotEnvValues } from '@/testkit/env/envSnapshot';
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
 
@@ -48,7 +48,7 @@ describe('persistence file permissions (posix)', () => {
   it('writes daemon state with no group/other permissions', async () => {
     if (process.platform === 'win32') return;
     const { configuration } = await import('@/configuration');
-    const { writeDaemonState } = await import('@/persistence');
+    const { writeConnectedServiceBrokerState, writeDaemonState } = await import('@/persistence');
 
     writeDaemonState({
       pid: 1,
@@ -57,9 +57,22 @@ describe('persistence file permissions (posix)', () => {
       startedWithCliVersion: '0.0.0',
       controlToken: 'secret',
     });
+    writeConnectedServiceBrokerState({
+      httpPort: 2,
+      connectedServiceBrokerRefreshToken: 'scoped-secret',
+    });
 
     const s = await stat(configuration.daemonStateFile);
     expect(s.isFile()).toBe(true);
     expect(s.mode & 0o077).toBe(0);
+
+    const brokerState = await stat(configuration.connectedServiceBrokerStateFile);
+    expect(brokerState.isFile()).toBe(true);
+    expect(brokerState.mode & 0o077).toBe(0);
+    expect(JSON.parse(await readFile(configuration.connectedServiceBrokerStateFile, 'utf8'))).toEqual({
+      httpPort: 2,
+      connectedServiceBrokerRefreshToken: 'scoped-secret',
+    });
+    expect(await readFile(configuration.connectedServiceBrokerStateFile, 'utf8')).not.toContain('controlToken');
   });
 });

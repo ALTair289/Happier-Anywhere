@@ -13,8 +13,7 @@ import { buildBrokerBridgeCallSource } from './brokerBridgeCallSource';
  * `fetchAccessTokenFromBridge` so the same code path both runtimes embed is tested once, here.
  */
 const SELECTIONS_ENV = 'TEST_BROKER_SELECTIONS';
-const DAEMON_STATE_PATH_ENV = 'TEST_BROKER_DAEMON_STATE_PATH';
-const REFRESH_TOKEN_ENV = 'TEST_BROKER_REFRESH_TOKEN';
+const BROKER_STATE_PATH_ENV = 'TEST_BROKER_STATE_PATH';
 const PLUGIN_VERSION_ENV = 'TEST_BROKER_VERSION';
 const SELECTION_IDENTITY_ENV = 'TEST_BROKER_SELECTION_IDENTITY';
 
@@ -37,8 +36,7 @@ async function loadBridgeCaller(fixture: BridgeFixture): Promise<
   const source = buildBrokerBridgeCallSource({
     ...fixture,
     selectionsEnv: SELECTIONS_ENV,
-    daemonStatePathEnv: DAEMON_STATE_PATH_ENV,
-    refreshTokenEnv: REFRESH_TOKEN_ENV,
+    brokerStatePathEnv: BROKER_STATE_PATH_ENV,
     pluginVersionEnv: PLUGIN_VERSION_ENV,
     pluginVersion: '7',
     sessionTag: 'test-broker',
@@ -58,10 +56,18 @@ async function loadBridgeCaller(fixture: BridgeFixture): Promise<
   return mod.fetchAccessTokenFromBridge;
 }
 
-async function writeDaemonStateFile(token: string): Promise<string> {
+async function writeBrokerStateFile(params: Readonly<{
+  httpPort?: number;
+  brokerRefreshToken?: string;
+}> = {}): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'happier-broker-bridge-daemon-'));
-  const file = join(dir, 'daemon.state.json');
-  await writeFile(file, JSON.stringify({ httpPort: 41999, controlToken: token }), 'utf8');
+  const file = join(dir, 'connected-service-broker.state.json');
+  await writeFile(file, JSON.stringify({
+    httpPort: params.httpPort ?? 41999,
+    ...(params.brokerRefreshToken
+      ? { connectedServiceBrokerRefreshToken: params.brokerRefreshToken }
+      : {}),
+  }), 'utf8');
   return file;
 }
 
@@ -70,23 +76,22 @@ describe('brokerBridgeCallSource (shared bridge-call, exercised live)', () => {
 
   beforeEach(() => {
     delete process.env[SELECTIONS_ENV];
-    delete process.env[DAEMON_STATE_PATH_ENV];
-    delete process.env[REFRESH_TOKEN_ENV];
+    delete process.env[BROKER_STATE_PATH_ENV];
     delete process.env[PLUGIN_VERSION_ENV];
     delete process.env[SELECTION_IDENTITY_ENV];
   });
   afterEach(() => {
     globalThis.fetch = originalFetch;
     delete process.env[SELECTIONS_ENV];
-    delete process.env[DAEMON_STATE_PATH_ENV];
-    delete process.env[REFRESH_TOKEN_ENV];
+    delete process.env[BROKER_STATE_PATH_ENV];
     delete process.env[PLUGIN_VERSION_ENV];
     delete process.env[SELECTION_IDENTITY_ENV];
   });
 
-  it('reads httpPort from daemon-state, sends the SCOPED token, POSTs caller-owned bridge metadata', async () => {
-    process.env[DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile('master-MUST-NOT-LEAK');
-    process.env[REFRESH_TOKEN_ENV] = 'scoped-broker-token';
+  it('reads one minimal broker descriptor, sends the SCOPED token, and POSTs caller-owned bridge metadata', async () => {
+    process.env[BROKER_STATE_PATH_ENV] = await writeBrokerStateFile({
+      brokerRefreshToken: 'scoped-broker-token',
+    });
     const fixture = {
       providerTag: 'provider-a',
       bridgePath: '/connected-service-auth/service-a/access-token/refresh',
@@ -127,8 +132,9 @@ describe('brokerBridgeCallSource (shared bridge-call, exercised live)', () => {
   });
 
   it('omits a plan hint unless the caller declares one and forwards forceRefresh', async () => {
-    process.env[DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile('tok');
-    process.env[REFRESH_TOKEN_ENV] = 'scoped';
+    process.env[BROKER_STATE_PATH_ENV] = await writeBrokerStateFile({
+      brokerRefreshToken: 'scoped',
+    });
     const fixture = {
       providerTag: 'provider-b',
       bridgePath: '/connected-service-auth/service-b/access-token/refresh',
@@ -156,8 +162,9 @@ describe('brokerBridgeCallSource (shared bridge-call, exercised live)', () => {
   });
 
   it('preserves group selections and sends the broker selection identity so the daemon can resolve the effective account', async () => {
-    process.env[DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile('tok');
-    process.env[REFRESH_TOKEN_ENV] = 'scoped';
+    process.env[BROKER_STATE_PATH_ENV] = await writeBrokerStateFile({
+      brokerRefreshToken: 'scoped',
+    });
     process.env[SELECTION_IDENTITY_ENV] = 'opencode|connected|broker:1|openai-codex:stable-acct:';
     const fixture = {
       providerTag: 'provider-a',
@@ -208,8 +215,9 @@ describe('brokerBridgeCallSource (shared bridge-call, exercised live)', () => {
   });
 
   it('bounds the bridge fetch with an abort signal (RR-7: no unbounded wait in the provider auth path)', async () => {
-    process.env[DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile('tok');
-    process.env[REFRESH_TOKEN_ENV] = 'scoped-broker-token';
+    process.env[BROKER_STATE_PATH_ENV] = await writeBrokerStateFile({
+      brokerRefreshToken: 'scoped-broker-token',
+    });
     const fixture = {
       providerTag: 'provider-a',
       bridgePath: '/connected-service-auth/service-a/access-token/refresh',
@@ -237,8 +245,46 @@ describe('brokerBridgeCallSource (shared bridge-call, exercised live)', () => {
     expect(signals[0]).toBeInstanceOf(AbortSignal);
   });
 
-  it('throws a clear error when the scoped token is missing (fail-closed)', async () => {
-    process.env[DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile('tok');
+  it('uses the replacement daemon port and scoped capability from the same current state snapshot', async () => {
+    const brokerStatePath = await writeBrokerStateFile({
+      httpPort: 41001,
+      brokerRefreshToken: 'scoped-a',
+    });
+    process.env[BROKER_STATE_PATH_ENV] = brokerStatePath;
+    const fixture = {
+      providerTag: 'provider-a',
+      bridgePath: '/connected-service-auth/service-a/access-token/refresh',
+      serviceId: 'service-a',
+    };
+    process.env[SELECTIONS_ENV] = JSON.stringify({
+      [fixture.providerTag]: { serviceId: fixture.serviceId, profileId: 'p', accountId: null, planType: null },
+    });
+    const calls: Array<{ url: string; token: string | null }> = [];
+    globalThis.fetch = vi.fn(async (input: unknown, init: unknown) => {
+      calls.push({
+        url: String(input),
+        token: new Headers((init as RequestInit | undefined)?.headers ?? {}).get('x-happier-daemon-token'),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { accessToken: 'access' } }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const fetchAccessTokenFromBridge = await loadBridgeCaller(fixture);
+    await fetchAccessTokenFromBridge(false);
+
+    await writeFile(brokerStatePath, JSON.stringify({
+      httpPort: 41002,
+      connectedServiceBrokerRefreshToken: 'scoped-b',
+    }), 'utf8');
+    await fetchAccessTokenFromBridge(false);
+
+    expect(calls).toEqual([
+      { url: `http://127.0.0.1:41001${fixture.bridgePath}`, token: 'scoped-a' },
+      { url: `http://127.0.0.1:41002${fixture.bridgePath}`, token: 'scoped-b' },
+    ]);
+  });
+
+  it('throws a clear error when the current broker state lacks the scoped token (fail-closed)', async () => {
+    process.env[BROKER_STATE_PATH_ENV] = await writeBrokerStateFile();
     const fixture = {
       providerTag: 'provider-a',
       bridgePath: '/connected-service-auth/service-a/access-token/refresh',
@@ -248,6 +294,6 @@ describe('brokerBridgeCallSource (shared bridge-call, exercised live)', () => {
       [fixture.providerTag]: { serviceId: fixture.serviceId, profileId: 'p', accountId: null, planType: null },
     });
     const fetchAccessTokenFromBridge = await loadBridgeCaller(fixture);
-    await expect(fetchAccessTokenFromBridge(false)).rejects.toThrow(/scoped_token_missing/);
+    await expect(fetchAccessTokenFromBridge(false)).rejects.toThrow(/broker_state_incomplete/);
   });
 });

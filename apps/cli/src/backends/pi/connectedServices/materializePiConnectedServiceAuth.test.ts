@@ -7,14 +7,14 @@ import { describe, expect, it } from 'vitest';
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
 import {
-  PI_BROKER_DAEMON_STATE_PATH_ENV,
-  PI_BROKER_REFRESH_TOKEN_ENV,
+  PI_BROKER_STATE_PATH_ENV,
   PI_BROKER_SELECTIONS_ENV,
   PI_BROKER_SELECTION_IDENTITY_ENV,
   isPiBrokerMarker,
   parsePiBrokerSelections,
   resolvePiBrokerExtensionPath,
 } from '@/backends/pi/brokerExtension';
+import { configuration } from '@/configuration';
 
 import {
   applyPiCodingAgentDirChildEnvFormatting,
@@ -243,11 +243,12 @@ describe('materializePiConnectedServiceAuth', () => {
     expect(anthropicExpires).toBeLessThan(providerExpiresAt);
     expect(auth.anthropic.accountId).toBe('claude-account-id');
 
-    // Broker env: selections + daemon-state path + selection identity present; refresh-token env is the
-    // scoped capability token (or absent if no daemon control token in this test env), never the secret.
+    // Broker env: selections + minimal broker-state path + selection identity present; the capability
+    // itself is never copied into the child environment.
     const selections = parsePiBrokerSelections(res.env[PI_BROKER_SELECTIONS_ENV]);
     expect(selections.anthropic).toMatchObject({ serviceId: 'claude-subscription', profileId: 'claude-pro-oauth' });
-    expect(res.env[PI_BROKER_DAEMON_STATE_PATH_ENV]).toBeDefined();
+    expect(res.env[PI_BROKER_STATE_PATH_ENV]).toBe(configuration.connectedServiceBrokerStateFile);
+    expect(res.env[PI_BROKER_STATE_PATH_ENV]).not.toBe(configuration.daemonStateFile);
     expect(typeof res.env[PI_BROKER_SELECTION_IDENTITY_ENV]).toBe('string');
 
     await assertNoRefreshTokenLeak({
@@ -610,10 +611,8 @@ describe('materializePiConnectedServiceAuth', () => {
       anthropic: null,
     });
 
-    // If a scoped token was injected, it must be a derived (base64url) value, never a placeholder secret.
-    const scoped = res.env[PI_BROKER_REFRESH_TOKEN_ENV];
-    if (typeof scoped === 'string') {
-      expect(scoped.length).toBeGreaterThan(0);
-    }
+    // The scoped capability follows daemon replacement through broker-state; it is not frozen into
+    // the long-lived Pi child environment.
+    expect(res.env.HAPPIER_CONNECTED_SERVICE_BROKER_REFRESH_TOKEN).toBeUndefined();
   });
 });

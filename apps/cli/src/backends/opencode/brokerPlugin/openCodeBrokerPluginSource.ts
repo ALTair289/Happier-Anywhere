@@ -12,21 +12,20 @@ import {
 } from '@/backends/codex/connectedServices/codexChatGptAuthTokensRefreshBridgeContract';
 
 import {
-  OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
+  OPEN_CODE_BROKER_STATE_PATH_ENV,
   OPEN_CODE_BROKER_LOAD_NONCE_ENV,
   OPEN_CODE_BROKER_PLUGIN_VERSION_ENV,
   OPEN_CODE_BROKER_SELECTIONS_ENV,
   OPEN_CODE_BROKER_SELECTION_IDENTITY_ENV,
   type OpenCodeBrokerProvider,
 } from './openCodeBrokerPluginEnv';
-import { OPEN_CODE_BROKER_REFRESH_TOKEN_ENV } from './openCodeBrokerCapabilityToken';
 
 /**
  * Version of the Happier OpenCode auth broker plugin. Bump on any wire-shape change. It is folded
  * into the broker marker + selection identity (so a new plugin version yields a new managed-server
  * fingerprint) and into the on-disk plugin file name (so old + new co-exist across upgrades).
  */
-export const OPEN_CODE_BROKER_PLUGIN_VERSION = '1';
+export const OPEN_CODE_BROKER_PLUGIN_VERSION = '2';
 
 /** Canonical Codex backend constants (replicated from the official Codex CLI request shape). */
 export const OPEN_CODE_BROKER_CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
@@ -88,21 +87,20 @@ function resolveOpenCodeBrokerBridgeParams(provider: OpenCodeBrokerProvider) {
  *   - engages on Happier's broker auth marker (NOT on real provider tokens),
  *   - obtains a fresh ACCESS token from the Happier daemon bridge over local HTTP (the daemon is the
  *     sole refresher; NO refresh token is ever present here),
- *   - reads the daemon control token from the daemon-state file (0600) at call time — never the env,
+ *   - reads one matching daemon port + scoped capability snapshot from broker-state at call time,
  *   - shapes the provider request (Codex backend rewrite + headers, or Anthropic Bearer+beta),
  *   - caches the access token in-memory and refreshes once on a 401.
  */
 export function buildOpenCodeBrokerPluginSource(provider: OpenCodeBrokerProvider): string {
-  // The bridge-call portion (daemon-state read, scoped-token read, selection resolve, POST shape) is
+  // The bridge-call portion (atomic daemon endpoint read, selection resolve, POST shape) is
   // emitted by the SHARED, provider-agnostic builder so the OpenCode plugin and the Pi extension stay
   // in lockstep. Provider-owned bridge metadata supplies the endpoint/service-id facts; the shared
-  // builder owns only daemon-state read, scoped-token read, selection resolve, and POST mechanics.
+  // builder owns only broker-state read, selection resolve, and POST mechanics.
   const bridgeParams = resolveOpenCodeBrokerBridgeParams(provider);
   const sharedBridgeCallSource = buildBrokerBridgeCallSource({
     ...bridgeParams,
     selectionsEnv: OPEN_CODE_BROKER_SELECTIONS_ENV,
-    daemonStatePathEnv: OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
-    refreshTokenEnv: OPEN_CODE_BROKER_REFRESH_TOKEN_ENV,
+    brokerStatePathEnv: OPEN_CODE_BROKER_STATE_PATH_ENV,
     pluginVersionEnv: OPEN_CODE_BROKER_PLUGIN_VERSION_ENV,
     pluginVersion: OPEN_CODE_BROKER_PLUGIN_VERSION,
     sessionTag: 'opencode-broker',
@@ -275,11 +273,10 @@ async function sendLoadHandshake() {
     if (typeof selectionIdentity !== "string" || selectionIdentity.trim().length === 0) return;
     const loadNonce = process.env[LOAD_NONCE_ENV];
     if (typeof loadNonce !== "string" || loadNonce.trim().length === 0) return;
-    const httpPort = readDaemonHttpPort();
-    const scopedToken = readScopedToken();
-    await fetch("http://127.0.0.1:" + httpPort + LOADED_HANDSHAKE_PATH, {
+    const daemonEndpoint = readCurrentBrokerEndpoint();
+    await fetch("http://127.0.0.1:" + daemonEndpoint.httpPort + LOADED_HANDSHAKE_PATH, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-happier-daemon-token": scopedToken },
+      headers: { "Content-Type": "application/json", "x-happier-daemon-token": daemonEndpoint.scopedToken },
       body: JSON.stringify({
         selectionIdentity: selectionIdentity,
         loadNonce: loadNonce,

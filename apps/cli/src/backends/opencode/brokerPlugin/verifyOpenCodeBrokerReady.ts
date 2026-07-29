@@ -5,7 +5,7 @@ import { configuration } from '@/configuration';
 import { OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV } from '@/backends/opencode/server/openCodeManagedServerEnv';
 
 import {
-  OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
+  OPEN_CODE_BROKER_STATE_PATH_ENV,
   OPEN_CODE_BROKER_LOAD_NONCE_ENV,
   OPEN_CODE_BROKER_PROVIDERS,
   OPEN_CODE_BROKER_SELECTIONS_ENV,
@@ -37,13 +37,15 @@ async function fileExists(path: string): Promise<boolean> {
   return access(path).then(() => true).catch(() => false);
 }
 
-async function daemonStateUsable(path: string | undefined): Promise<boolean> {
+async function brokerStateUsable(path: string | undefined): Promise<boolean> {
   if (typeof path !== 'string' || path.trim().length === 0) return false;
   const content = await readFile(path, 'utf8').catch(() => null);
   if (content === null) return false;
   try {
     const parsed = JSON.parse(content) as Record<string, unknown>;
-    return typeof parsed.httpPort === 'number' && typeof parsed.controlToken === 'string' && parsed.controlToken.length > 0;
+    return typeof parsed.httpPort === 'number'
+      && typeof parsed.connectedServiceBrokerRefreshToken === 'string'
+      && parsed.connectedServiceBrokerRefreshToken.length > 0;
   } catch {
     return false;
   }
@@ -57,8 +59,8 @@ async function daemonStateUsable(path: string | undefined): Promise<boolean> {
  * For brokered sessions it confirms (a) each brokered provider's broker plugin `.js` file exists in
  * the connected config home's `opencode/plugin/` auto-load dir (OpenCode loads it from the redirected
  * `XDG_CONFIG_HOME`; live-verified that an absolute `OPENCODE_CONFIG_CONTENT.plugin` path or a `.mjs`
- * file does NOT load), and (b) the daemon-state bridge target is readable with a control token. If any
- * check fails the session MUST be failed with a clear materialization error — never silently fall back
+ * file does NOT load), and (b) the minimal broker-state target is readable with a scoped broker
+ * capability. If any check fails the session MUST be failed with a clear materialization error — never silently fall back
  * to native/upstream auth (the marker is itself non-functional without the plugin, so request-time
  * failure is the backstop).
  */
@@ -84,7 +86,7 @@ export async function verifyOpenCodeBrokerReadyForConnectedSession(
   if (brokeredProviders.length === 0) {
     return { ready: true };
   }
-  if (!(await daemonStateUsable(env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV]))) {
+  if (!(await brokerStateUsable(env[OPEN_CODE_BROKER_STATE_PATH_ENV]))) {
     return { ready: false, reason: 'broker_daemon_bridge_unreachable' };
   }
   const loadNonce = env[OPEN_CODE_BROKER_LOAD_NONCE_ENV];

@@ -4,9 +4,9 @@ import { SPAWN_SESSION_ERROR_CODES } from '@happier-dev/protocol';
 import { logger } from '@/ui/logger';
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
 import {
-  deriveOpenCodeBrokerRefreshToken,
   resetOpenCodeBrokerLoadHandshakesForTests,
 } from '@/backends/opencode/brokerPlugin';
+import { deriveConnectedServiceBrokerRefreshToken } from './connectedServices/broker/brokerRefreshCapabilityToken';
 import {
   resetBrokerBridgeEffectiveSelectionsForTests,
   markBrokerBridgeEffectiveSelectionUnavailable,
@@ -15,7 +15,7 @@ import {
 import { createDaemonControlApp, startDaemonControlServer } from './controlServer';
 
 /** Scoped broker-refresh token for the master control token the bridge endpoints now require (F2). */
-const BROKER_SCOPED_TOKEN = deriveOpenCodeBrokerRefreshToken('token');
+const BROKER_SCOPED_TOKEN = deriveConnectedServiceBrokerRefreshToken('token');
 import { buildRuntimeAuthRecoveryKey } from './connectedServices/runtimeAuth/recoveryKey/runtimeAuthRecoveryKey';
 import {
   RuntimeAuthRecoveryScheduler,

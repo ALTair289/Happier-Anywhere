@@ -17,6 +17,7 @@ import {
   requestSessionPendingQueueWakeV1,
 } from './sessions/pendingQueueWake';
 import { createRuntimeAuthRecoverySchedulerForDaemon } from './connectedServices/runtimeAuth/createRuntimeAuthRecoverySchedulerForDaemon';
+import { deriveConnectedServiceBrokerRefreshToken } from './connectedServices/broker/brokerRefreshCapabilityToken';
 import { createConnectedServiceCredentialApi } from '@/api/connectedServices/connectedServiceCredentialApi';
 import { resolveRoutedUsageLimitRecoveryResumePromptMode } from '@/session/usageLimitRecoveryControls/resolveRoutedUsageLimitRecoveryResumePromptMode';
 import type { ApiMachineClient } from '@/api/apiMachine';
@@ -58,6 +59,7 @@ import {
 import { CATALOG_AGENT_IDS } from '@/backends/types';
 import {
   writeDaemonState,
+  writeConnectedServiceBrokerState,
   DaemonLocallyPersistedState,
   acquireDaemonLock,
   releaseDaemonLock,
@@ -6610,6 +6612,10 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       if (didWriteDaemonState) return;
       didWriteDaemonState = true;
       writeDaemonState(fileState);
+      writeConnectedServiceBrokerState({
+        httpPort: controlPort,
+        connectedServiceBrokerRefreshToken: deriveConnectedServiceBrokerRefreshToken(controlToken),
+      });
       logger.debug('[DAEMON RUN] Daemon state written');
     };
     writeDaemonStateOnce();

@@ -6,7 +6,7 @@ import { brokerSelectionIdentityGroupSuffix } from '@/daemon/connectedServices/b
 import type { ConnectedServiceResolvedSelection } from '@/daemon/connectedServices/materialize/materializeConnectedServicesForSpawn';
 
 import {
-  OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
+  OPEN_CODE_BROKER_STATE_PATH_ENV,
   OPEN_CODE_BROKER_PLUGIN_VERSION,
   OPEN_CODE_BROKER_PLUGIN_VERSION_ENV,
   OPEN_CODE_BROKER_SELECTIONS_ENV,
@@ -128,7 +128,7 @@ export async function materializeOpenCodeConnectedServiceAuth(params: Materializ
 
   if (brokeredProviders.length > 0) {
     env[OPEN_CODE_BROKER_SELECTIONS_ENV] = serializeOpenCodeBrokerSelections(brokerSelections);
-    env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV] = configuration.daemonStateFile;
+    env[OPEN_CODE_BROKER_STATE_PATH_ENV] = configuration.connectedServiceBrokerStateFile;
     env[OPEN_CODE_BROKER_PLUGIN_VERSION_ENV] = OPEN_CODE_BROKER_PLUGIN_VERSION;
   }
 

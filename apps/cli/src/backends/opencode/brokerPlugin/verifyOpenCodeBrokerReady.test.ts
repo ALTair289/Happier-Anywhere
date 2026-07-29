@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV } from '@/backends/opencode/server/openCodeManagedServerEnv';
 
 import {
-  OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
+  OPEN_CODE_BROKER_STATE_PATH_ENV,
   OPEN_CODE_BROKER_LOAD_NONCE_ENV,
   OPEN_CODE_BROKER_SELECTIONS_ENV,
   serializeOpenCodeBrokerSelections,
@@ -15,10 +15,15 @@ import {
 import { ensureOpenCodeBrokerPluginAssets, resolveOpenCodeBrokerPluginPath } from './openCodeBrokerPluginAssets';
 import { verifyOpenCodeBrokerReadyForConnectedSession } from './verifyOpenCodeBrokerReady';
 
-async function writeDaemonState(): Promise<string> {
+async function writeBrokerState(options: Readonly<{ includeScopedCapability?: boolean }> = {}): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'happier-broker-ready-daemon-'));
-  const file = join(dir, 'daemon.state.json');
-  await writeFile(file, JSON.stringify({ httpPort: 1234, controlToken: 'tok' }), 'utf8');
+  const file = join(dir, 'connected-service-broker.state.json');
+  await writeFile(file, JSON.stringify({
+    httpPort: 1234,
+    ...(options.includeScopedCapability === false
+      ? {}
+      : { connectedServiceBrokerRefreshToken: 'scoped' }),
+  }), 'utf8');
   return file;
 }
 
@@ -39,7 +44,7 @@ describe('verifyOpenCodeBrokerReadyForConnectedSession (fail-closed preflight)',
     const env = {
       [OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]: 'opencode|connected|openai-codex:p:',
       [OPEN_CODE_BROKER_SELECTIONS_ENV]: serializeOpenCodeBrokerSelections({ openai: { serviceId: 'openai-codex', profileId: 'p', accountId: null, planType: null } }),
-      [OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV]: await writeDaemonState(),
+      [OPEN_CODE_BROKER_STATE_PATH_ENV]: await writeBrokerState(),
       [OPEN_CODE_BROKER_LOAD_NONCE_ENV]: 'spawn-missing-file',
     } as NodeJS.ProcessEnv;
     const result = await verifyOpenCodeBrokerReadyForConnectedSession(env, { happyHomeDir: home });
@@ -54,7 +59,7 @@ describe('verifyOpenCodeBrokerReadyForConnectedSession (fail-closed preflight)',
     const env = {
       [OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]: 'opencode|connected|openai-codex:p:',
       [OPEN_CODE_BROKER_SELECTIONS_ENV]: serializeOpenCodeBrokerSelections({ openai: { serviceId: 'openai-codex', profileId: 'p', accountId: null, planType: null } }),
-      [OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV]: await writeDaemonState(),
+      [OPEN_CODE_BROKER_STATE_PATH_ENV]: await writeBrokerState(),
       [OPEN_CODE_BROKER_LOAD_NONCE_ENV]: 'spawn-ready',
     } as NodeJS.ProcessEnv;
     expect(await verifyOpenCodeBrokerReadyForConnectedSession(env, {
@@ -70,7 +75,7 @@ describe('verifyOpenCodeBrokerReadyForConnectedSession (fail-closed preflight)',
     const env = {
       [OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]: 'opencode|connected|openai-codex:p:',
       [OPEN_CODE_BROKER_SELECTIONS_ENV]: serializeOpenCodeBrokerSelections({ openai: { serviceId: 'openai-codex', profileId: 'p', accountId: null, planType: null } }),
-      [OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV]: await writeDaemonState(),
+      [OPEN_CODE_BROKER_STATE_PATH_ENV]: await writeBrokerState(),
       [OPEN_CODE_BROKER_LOAD_NONCE_ENV]: 'spawn-not-loaded',
     } as NodeJS.ProcessEnv;
     const result = await verifyOpenCodeBrokerReadyForConnectedSession(env, {
@@ -86,8 +91,25 @@ describe('verifyOpenCodeBrokerReadyForConnectedSession (fail-closed preflight)',
     const env = {
       [OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]: 'opencode|connected|openai-codex:p:',
       [OPEN_CODE_BROKER_SELECTIONS_ENV]: serializeOpenCodeBrokerSelections({ openai: { serviceId: 'openai-codex', profileId: 'p', accountId: null, planType: null } }),
-      [OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV]: '/nonexistent/daemon.state.json',
+      [OPEN_CODE_BROKER_STATE_PATH_ENV]: '/nonexistent/connected-service-broker.state.json',
       [OPEN_CODE_BROKER_LOAD_NONCE_ENV]: 'spawn-unreachable',
+    } as NodeJS.ProcessEnv;
+    expect(await verifyOpenCodeBrokerReadyForConnectedSession(env, {
+      happyHomeDir: home,
+      verifyLoadHandshake: async () => true,
+    })).toEqual({ ready: false, reason: 'broker_daemon_bridge_unreachable' });
+  });
+
+  it('fails closed when broker state has no scoped capability', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'happier-broker-ready-'));
+    await ensureOpenCodeBrokerPluginAssets({ providers: ['openai'], happyHomeDir: home });
+    const env = {
+      [OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]: 'opencode|connected|openai-codex:p:',
+      [OPEN_CODE_BROKER_SELECTIONS_ENV]: serializeOpenCodeBrokerSelections({
+        openai: { serviceId: 'openai-codex', profileId: 'p', accountId: null, planType: null },
+      }),
+      [OPEN_CODE_BROKER_STATE_PATH_ENV]: await writeBrokerState({ includeScopedCapability: false }),
+      [OPEN_CODE_BROKER_LOAD_NONCE_ENV]: 'spawn-missing-capability',
     } as NodeJS.ProcessEnv;
     expect(await verifyOpenCodeBrokerReadyForConnectedSession(env, {
       happyHomeDir: home,

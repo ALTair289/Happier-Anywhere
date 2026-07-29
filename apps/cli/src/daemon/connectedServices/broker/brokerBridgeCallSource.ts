@@ -2,8 +2,8 @@
  * Shared, provider-agnostic bridge-call source for connected-service auth brokers.
  *
  * The OpenCode broker plugin (Bun runtime) and the Pi broker extension (jiti runtime) both need the
- * IDENTICAL daemon-bridge call: read the daemon HTTP port from the 0600 daemon-state file, read the
- * SCOPED broker-refresh capability token from the runtime env, resolve the brokered selection, and
+ * IDENTICAL daemon-bridge call: read the daemon HTTP port and its matching SCOPED broker-refresh
+ * capability token from one 0600 broker-state snapshot, resolve the brokered selection, and
  * POST to the shared daemon bridge to obtain a fresh ACCESS token (the daemon is the sole refresher;
  * NO refresh token is ever present in the runtime).
  *
@@ -14,7 +14,7 @@
  * The emitted source is self-contained ESM-statement JS that imports only `node:fs` `readFileSync` and
  * uses `fetch`/`process` globals. It defines:
  *   - `fetchAccessTokenFromBridge(forceRefresh)` → `{ accessToken, accountId, expiresAt }`
- *   - `readDaemonHttpPort()`, `readScopedToken()` (also used by a broker's load handshake)
+ *   - `readCurrentBrokerEndpoint()` (also used by a broker's load handshake)
  * Callers must place `import { createHash } from "node:crypto";` and
  * `import { readFileSync } from "node:fs";` at the top of the assembled module.
  */
@@ -32,8 +32,7 @@ function jsString(value: string): string {
 }
 
 /**
- * Build the shared bridge-call JS for one provider, parameterized by the broker's own env-var names so
- * the OpenCode and Pi brokers keep their distinct env namespaces while sharing the call logic.
+ * Build the shared bridge-call JS for one provider.
  */
 export function buildBrokerBridgeCallSource(params: Readonly<{
   /** Stable broker selection tag used to read this provider's entry from the selections env. */
@@ -44,10 +43,8 @@ export function buildBrokerBridgeCallSource(params: Readonly<{
   serviceId: string;
   /** Env var holding the JSON map of brokered providers → selection identity. */
   selectionsEnv: string;
-  /** Env var holding the absolute path to the daemon-state file (`httpPort` is read at call time). */
-  daemonStatePathEnv: string;
-  /** Env var holding the SCOPED broker-refresh capability token (NEVER the master control token). */
-  refreshTokenEnv: string;
+  /** Env var holding the absolute path to the minimal broker-state file (read at call time). */
+  brokerStatePathEnv: string;
   /** Env var holding the broker version (for the bridge sessionId only). */
   pluginVersionEnv: string;
   /** Fallback broker version literal (when the env var is unset). */
@@ -67,8 +64,7 @@ const BRIDGE_PATH = ${jsString(params.bridgePath)};
 const BRIDGE_FETCH_TIMEOUT_MS = 30000;
 const SERVICE_ID = ${jsString(params.serviceId)};
 const SELECTIONS_ENV = ${jsString(params.selectionsEnv)};
-const DAEMON_STATE_PATH_ENV = ${jsString(params.daemonStatePathEnv)};
-const REFRESH_TOKEN_ENV = ${jsString(params.refreshTokenEnv)};
+const BROKER_STATE_PATH_ENV = ${jsString(params.brokerStatePathEnv)};
 const PLUGIN_VERSION_ENV = ${jsString(params.pluginVersionEnv)};
 const PLUGIN_VERSION = ${jsString(params.pluginVersion)};
 const SESSION_TAG = ${jsString(params.sessionTag)};
@@ -82,30 +78,24 @@ function readJsonEnv(name) {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
-// Read ONLY the daemon HTTP port from the 0600 state file. The broker deliberately does NOT read the
-// master controlToken (least privilege): it authenticates with the SCOPED broker-refresh token from
-// its env, so even reading the state file cannot grant it the broad control surface.
-function readDaemonHttpPort() {
-  const path = process.env[DAEMON_STATE_PATH_ENV];
+// Read the current daemon endpoint and its matching scoped capability from ONE atomic broker snapshot.
+// This lets a surviving broker follow daemon replacement without combining the replacement port with
+// a stale spawn-time token. The descriptor never contains the broad daemon control token.
+function readCurrentBrokerEndpoint() {
+  const path = process.env[BROKER_STATE_PATH_ENV];
   if (typeof path !== "string" || path.trim().length === 0) {
-    throw new Error("happier_broker_daemon_state_path_missing");
+    throw new Error("happier_broker_state_path_missing");
   }
   let parsed;
   try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch (error) {
-    throw new Error("happier_broker_daemon_state_unreadable");
+    throw new Error("happier_broker_state_unreadable");
   }
   const httpPort = parsed && typeof parsed.httpPort === "number" ? parsed.httpPort : null;
-  if (!httpPort) throw new Error("happier_broker_daemon_state_incomplete");
-  return httpPort;
-}
-
-// The scoped broker-refresh capability token (NOT the master controlToken), injected via env.
-function readScopedToken() {
-  const token = process.env[REFRESH_TOKEN_ENV];
-  if (typeof token !== "string" || token.trim().length === 0) {
-    throw new Error("happier_broker_scoped_token_missing");
-  }
-  return token.trim();
+  const scopedToken = parsed && typeof parsed.connectedServiceBrokerRefreshToken === "string"
+    ? parsed.connectedServiceBrokerRefreshToken.trim()
+    : "";
+  if (!httpPort || !scopedToken) throw new Error("happier_broker_state_incomplete");
+  return { httpPort: httpPort, scopedToken: scopedToken };
 }
 
 function resolveSelection() {
@@ -175,8 +165,7 @@ function buildBridgeSelection(selection) {
 // when it is still valid and rotates ONLY when near-expiry or when forceRefresh is set (the 401-retry
 // path). Returns { accessToken, accountId, expiresAt }.
 async function fetchAccessTokenFromBridge(forceRefresh, failingAccessToken) {
-  const httpPort = readDaemonHttpPort();
-  const scopedToken = readScopedToken();
+  const daemonEndpoint = readCurrentBrokerEndpoint();
   const selection = resolveSelection();
   const body = {
     sessionId: SESSION_TAG + ":" + PROVIDER + ":" + (process.env[PLUGIN_VERSION_ENV] || PLUGIN_VERSION),
@@ -194,9 +183,9 @@ async function fetchAccessTokenFromBridge(forceRefresh, failingAccessToken) {
   const bridgeAbort = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
     ? { signal: AbortSignal.timeout(BRIDGE_FETCH_TIMEOUT_MS) }
     : {};
-  const response = await fetch("http://127.0.0.1:" + httpPort + BRIDGE_PATH, {
+  const response = await fetch("http://127.0.0.1:" + daemonEndpoint.httpPort + BRIDGE_PATH, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-happier-daemon-token": scopedToken },
+    headers: { "Content-Type": "application/json", "x-happier-daemon-token": daemonEndpoint.scopedToken },
     body: JSON.stringify(body),
     ...bridgeAbort,
   });

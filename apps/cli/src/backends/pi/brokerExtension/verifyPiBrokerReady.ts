@@ -1,7 +1,7 @@
 import { readFile, access } from 'node:fs/promises';
 
 import {
-  PI_BROKER_DAEMON_STATE_PATH_ENV,
+  PI_BROKER_STATE_PATH_ENV,
   PI_BROKER_LOAD_NONCE_ENV,
   PI_BROKER_PROVIDERS,
   PI_BROKER_SELECTIONS_ENV,
@@ -34,13 +34,15 @@ async function fileExists(path: string): Promise<boolean> {
   return access(path).then(() => true).catch(() => false);
 }
 
-async function daemonStateUsable(path: string | undefined): Promise<boolean> {
+async function brokerStateUsable(path: string | undefined): Promise<boolean> {
   if (typeof path !== 'string' || path.trim().length === 0) return false;
   const content = await readFile(path, 'utf8').catch(() => null);
   if (content === null) return false;
   try {
     const parsed = JSON.parse(content) as Record<string, unknown>;
-    return typeof parsed.httpPort === 'number' && typeof parsed.controlToken === 'string' && parsed.controlToken.length > 0;
+    return typeof parsed.httpPort === 'number'
+      && typeof parsed.connectedServiceBrokerRefreshToken === 'string'
+      && parsed.connectedServiceBrokerRefreshToken.length > 0;
   } catch {
     return false;
   }
@@ -52,7 +54,8 @@ async function daemonStateUsable(path: string | undefined): Promise<boolean> {
  * direct-API-key connected sessions (no brokered provider) it is a strict no-op (`ready: true`).
  *
  * For brokered sessions it confirms (a) the broker extension file exists at the path the launcher passes
- * to Pi's `--extension` arg, (b) the daemon-state bridge target is readable with a control token, and
+ * to Pi's `--extension` arg, (b) the minimal broker-state target is readable with a scoped broker
+ * capability, and
  * (c) a real load handshake arrived (the extension pings the daemon on activation) within a bounded
  * wait. If any check fails the session MUST be failed with a clear materialization error — never
  * silently fall back to native/upstream auth (the brokered credential carries no real refresh token, so
@@ -78,7 +81,7 @@ export async function verifyPiBrokerReadyForConnectedSession(
   if (brokeredProviders.length === 0) {
     return { ready: true };
   }
-  if (!(await daemonStateUsable(env[PI_BROKER_DAEMON_STATE_PATH_ENV]))) {
+  if (!(await brokerStateUsable(env[PI_BROKER_STATE_PATH_ENV]))) {
     return { ready: false, reason: 'broker_daemon_bridge_unreachable' };
   }
   const loadNonce = env[PI_BROKER_LOAD_NONCE_ENV];

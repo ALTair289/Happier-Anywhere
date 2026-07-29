@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
 import {
-  OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
+  OPEN_CODE_BROKER_STATE_PATH_ENV,
   OPEN_CODE_BROKER_PLUGIN_VERSION,
   OPEN_CODE_BROKER_PLUGIN_VERSION_ENV,
   OPEN_CODE_BROKER_SELECTIONS_ENV,
@@ -15,6 +15,7 @@ import {
   parseOpenCodeBrokerSelections,
 } from '@/backends/opencode/brokerPlugin';
 import { OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV } from '@/backends/opencode/server/openCodeManagedServerEnv';
+import { configuration } from '@/configuration';
 
 import { materializeOpenCodeConnectedServiceAuth } from './materializeOpenCodeConnectedServiceAuth';
 
@@ -76,7 +77,8 @@ describe('materializeOpenCodeConnectedServiceAuth', () => {
     expect(JSON.parse(result.env.OPENCODE_CONFIG_CONTENT ?? 'null')).toEqual({});
     const selections = parseOpenCodeBrokerSelections(result.env[OPEN_CODE_BROKER_SELECTIONS_ENV]);
     expect(selections.openai).toMatchObject({ serviceId: 'openai-codex', profileId: 'default', accountId: 'acct_123' });
-    expect(result.env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV]).toBeTruthy();
+    expect(result.env[OPEN_CODE_BROKER_STATE_PATH_ENV]).toBe(configuration.connectedServiceBrokerStateFile);
+    expect(result.env[OPEN_CODE_BROKER_STATE_PATH_ENV]).not.toBe(configuration.daemonStateFile);
     expect(result.env[OPEN_CODE_BROKER_PLUGIN_VERSION_ENV]).toBe(OPEN_CODE_BROKER_PLUGIN_VERSION);
     expect(result.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]).toContain('openai-codex:default:acct_123');
     // Config isolation: connected sessions get a Happier-owned config home.

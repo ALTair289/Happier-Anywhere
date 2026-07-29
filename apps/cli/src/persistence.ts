@@ -327,6 +327,11 @@ export interface DaemonLocallyPersistedState {
   controlToken?: string;
 }
 
+export interface ConnectedServiceBrokerLocallyPersistedState {
+  httpPort: number;
+  connectedServiceBrokerRefreshToken: string;
+}
+
 const DaemonLocallyPersistedStateSchemaV2 = z.object({
   pid: z.number().int().positive(),
   httpPort: z.number().int().positive(),
@@ -957,6 +962,17 @@ export function writeDaemonState(state: DaemonLocallyPersistedState): void {
 }
 
 /**
+ * Publish only the endpoint and scoped broker capability needed by provider children.
+ *
+ * This descriptor intentionally excludes the daemon control token. Surviving brokers reread the
+ * atomically replaced pair before each request, so daemon replacement changes the endpoint and
+ * capability together without exposing daemon-wide authority to the provider process.
+ */
+export function writeConnectedServiceBrokerState(state: ConnectedServiceBrokerLocallyPersistedState): void {
+  writeJsonAtomicSync(configuration.connectedServiceBrokerStateFile, state);
+}
+
+/**
  * Clean up daemon state file and, for stale cleanup paths, the lock file.
  */
 export async function clearDaemonState(options: Readonly<{ includeLockFile?: boolean }> = {}): Promise<void> {
@@ -965,6 +981,10 @@ export async function clearDaemonState(options: Readonly<{ includeLockFile?: boo
     await unlink(configuration.daemonStateFile);
   }
   await cleanupAtomicWriteTempFiles(configuration.daemonStateFile);
+  if (existsSync(configuration.connectedServiceBrokerStateFile)) {
+    await unlink(configuration.connectedServiceBrokerStateFile);
+  }
+  await cleanupAtomicWriteTempFiles(configuration.connectedServiceBrokerStateFile);
   await cleanupLegacyDaemonStateFilesBestEffort();
   // Also clean up lock file if it exists (for stale cleanup)
   if (includeLockFile && existsSync(configuration.daemonLockFile)) {

@@ -600,6 +600,7 @@ vi.mock('@/backends/catalog', async (importOriginal) => {
 
 vi.mock('@/persistence', () => ({
   writeDaemonState: vi.fn(),
+  writeConnectedServiceBrokerState: vi.fn(),
   acquireDaemonLock: vi.fn(async () => ({ release: vi.fn(async () => {}) })),
   releaseDaemonLock: vi.fn(async () => {}),
   readCredentials: vi.fn(async () => null),

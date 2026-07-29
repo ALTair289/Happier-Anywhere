@@ -27,11 +27,13 @@ import {
 import {
   OPEN_CODE_BROKER_LOADED_HANDSHAKE_PATH,
   OpenCodeBrokerLoadHandshakeRequestSchema,
-  isValidOpenCodeBrokerRefreshToken,
   recordOpenCodeBrokerLoadHandshake,
   wasOpenCodeBrokerLoadHandshakeObserved,
 } from '@/backends/opencode/brokerPlugin';
-import { isValidConnectedServiceRunMaterializeToken } from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
+import {
+  isValidConnectedServiceBrokerRefreshToken,
+  isValidConnectedServiceRunMaterializeToken,
+} from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
 import {
   EXECUTION_RUN_CONNECTED_SERVICE_MATERIALIZE_PATH,
   EXECUTION_RUN_CONNECTED_SERVICE_RELEASE_PATH,
@@ -673,7 +675,7 @@ export function createDaemonControlApp({
   const requireBrokerRefreshAuth = async (request: { headers: Record<string, unknown> }, reply: any): Promise<void> => {
     const rawHeader = (request.headers as any)['x-happier-daemon-token'];
     const provided = typeof rawHeader === 'string' ? rawHeader : Array.isArray(rawHeader) ? rawHeader[0] : null;
-    if (!isValidOpenCodeBrokerRefreshToken(provided, normalizedControlToken)) {
+    if (!isValidConnectedServiceBrokerRefreshToken(provided, normalizedControlToken)) {
       reply.code(401);
       return reply.send({ success: false as const, error: 'Unauthorized' });
     }
@@ -699,7 +701,7 @@ export function createDaemonControlApp({
       request.bridgeCallerMode = 'control';
       return;
     }
-    if (isValidOpenCodeBrokerRefreshToken(provided, normalizedControlToken)) {
+    if (isValidConnectedServiceBrokerRefreshToken(provided, normalizedControlToken)) {
       request.bridgeCallerMode = 'broker_scope';
       return;
     }

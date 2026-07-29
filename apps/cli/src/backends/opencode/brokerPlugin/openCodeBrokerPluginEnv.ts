@@ -7,15 +7,16 @@
  * — a contract test asserts the emitted plugin source references each name.
  *
  * NO secret (refresh token, daemon control token) is ever placed in these env values. The broker
- * obtains access tokens out-of-band from the Happier daemon bridge and reads the daemon control
- * token from the daemon-state file (0600) at call time, not from the env.
+ * obtains access tokens out-of-band from the Happier daemon bridge and reads one matching daemon
+ * port + scoped capability snapshot from a minimal broker-state file (0600). That file never contains
+ * the daemon control token.
  */
 
 /** JSON map of brokered providers → their refresh selection + account identity (NO tokens). */
 export const OPEN_CODE_BROKER_SELECTIONS_ENV = 'HAPPIER_OPENCODE_BROKER_SELECTIONS';
 
-/** Absolute path to the Happier daemon-state file (carries `httpPort`/`controlToken`). Not secret. */
-export const OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV = 'HAPPIER_OPENCODE_BROKER_DAEMON_STATE_PATH';
+/** Absolute path to the Happier broker-state file. The path itself is not secret. */
+export const OPEN_CODE_BROKER_STATE_PATH_ENV = 'HAPPIER_OPENCODE_BROKER_STATE_PATH';
 
 /** Broker plugin version (for cache-keying + drift diagnostics). */
 export const OPEN_CODE_BROKER_PLUGIN_VERSION_ENV = 'HAPPIER_OPENCODE_BROKER_PLUGIN_VERSION';

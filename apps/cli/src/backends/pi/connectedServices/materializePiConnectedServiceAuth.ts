@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { join, win32 } from 'node:path';
 
 import type { ConnectedServiceCredentialRecordV1, ConnectedServiceId } from '@happier-dev/protocol';
@@ -14,12 +13,11 @@ import {
 } from '@/daemon/connectedServices/shared/connectedServiceCredentialRecord';
 
 import {
-  PI_BROKER_DAEMON_STATE_PATH_ENV,
+  PI_BROKER_STATE_PATH_ENV,
   PI_BROKER_EXTENSION_VERSION_ENV,
   PI_BROKER_SELECTIONS_ENV,
   PI_BROKER_SELECTION_IDENTITY_ENV,
   PI_BROKER_EXTENSION_VERSION,
-  applyPiBrokerRefreshTokenEnv,
   buildPiBrokerMarker,
   ensurePiBrokerExtensionAsset,
   piBrokerServiceId,
@@ -55,22 +53,6 @@ export function applyPiCodingAgentDirChildEnvFormatting(
   env.PI_CODING_AGENT_DIR = formatPiCodingAgentDirForChildEnv(env.PI_CODING_AGENT_DIR, platform);
   if (typeof env.PI_CODING_AGENT_SESSION_DIR === 'string') {
     env.PI_CODING_AGENT_SESSION_DIR = formatPiSessionDirForChildEnv(env.PI_CODING_AGENT_SESSION_DIR, platform);
-  }
-}
-
-/**
- * Read the daemon master control token from the 0600 daemon-state file (best-effort). Used ONLY to
- * derive the SCOPED broker-refresh capability token for the Pi child env — the master token itself is
- * never placed in the Pi env, args, or `auth.json` (least privilege / no-leak).
- */
-function readDaemonControlTokenBestEffort(): string | null {
-  try {
-    const parsed = JSON.parse(readFileSync(configuration.daemonStateFile, 'utf8')) as { controlToken?: unknown };
-    return typeof parsed.controlToken === 'string' && parsed.controlToken.trim().length > 0
-      ? parsed.controlToken.trim()
-      : null;
-  } catch {
-    return null;
   }
 }
 
@@ -183,13 +165,14 @@ export async function materializePiConnectedServiceAuth(params: Readonly<{
 
   await writeJsonAtomic(join(agentDir, 'auth.json'), auth);
 
-  // Brokered sessions: write the broker extension + emit the broker env (selections, daemon-state path,
-  // version, stable selection identity, and the SCOPED refresh token). Direct-API-key / native Pi
-  // sessions skip all of this, so their agent dirs + env stay free of the broker.
+  // Brokered sessions: write the broker extension + emit the broker env (selections, broker-state path,
+  // version, and stable selection identity). The broker reads the current least-privilege capability
+  // atomically with the daemon port from the minimal descriptor. Direct-API-key / native Pi sessions skip all
+  // of this, so their agent dirs + env stay free of the broker.
   if (brokeredProviders.length > 0) {
     await ensurePiBrokerExtensionAsset(agentDir);
     env[PI_BROKER_SELECTIONS_ENV] = serializePiBrokerSelections(brokerSelections);
-    env[PI_BROKER_DAEMON_STATE_PATH_ENV] = configuration.daemonStateFile;
+    env[PI_BROKER_STATE_PATH_ENV] = configuration.connectedServiceBrokerStateFile;
     env[PI_BROKER_EXTENSION_VERSION_ENV] = PI_BROKER_EXTENSION_VERSION;
     // Stable selection identity (keys the broker load handshake + preflight match).
     env[PI_BROKER_SELECTION_IDENTITY_ENV] = [
@@ -198,9 +181,6 @@ export async function materializePiConnectedServiceAuth(params: Readonly<{
       `broker:${PI_BROKER_EXTENSION_VERSION}`,
       ...identityFragments.sort(),
     ].join('|');
-    // Inject ONLY the derived scoped broker-refresh token (never the master control token). Fail-closed:
-    // if the control token is unavailable the token is not injected and the preflight reports it.
-    applyPiBrokerRefreshTokenEnv(env, readDaemonControlTokenBestEffort);
   }
 
   return {

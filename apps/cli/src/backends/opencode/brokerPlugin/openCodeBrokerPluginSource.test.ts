@@ -6,14 +6,14 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
-  OPEN_CODE_BROKER_REFRESH_TOKEN_ENV,
+  OPEN_CODE_BROKER_STATE_PATH_ENV,
+  OPEN_CODE_BROKER_PLUGIN_VERSION,
   OPEN_CODE_BROKER_SELECTIONS_ENV,
   buildOpenCodeBrokerMarker,
   buildOpenCodeBrokerPluginSource,
-  deriveOpenCodeBrokerRefreshToken,
   serializeOpenCodeBrokerSelections,
 } from './index';
+import { deriveConnectedServiceBrokerRefreshToken } from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
 
 const REFRESH_TOKEN_SENTINEL = 'refresh-token-MUST-NOT-LEAK';
 const MASTER_CONTROL_TOKEN_SENTINEL = 'master-control-token-MUST-NOT-LEAK';
@@ -34,16 +34,14 @@ async function loadBrokerPlugin(provider: 'openai' | 'anthropic'): Promise<Broke
   return { loader: hooks.auth.loader, provider: hooks.auth.provider, raw: hooks as unknown as Record<string, unknown> };
 }
 
-async function writeDaemonStateFile(token: string): Promise<string> {
+async function writeBrokerStateFile(token: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'happier-broker-daemon-'));
-  const file = join(dir, 'daemon.state.json');
-  await writeFile(file, JSON.stringify({ httpPort: 51999, controlToken: token }), 'utf8');
+  const file = join(dir, 'connected-service-broker.state.json');
+  await writeFile(file, JSON.stringify({
+    httpPort: 51999,
+    connectedServiceBrokerRefreshToken: deriveConnectedServiceBrokerRefreshToken(token),
+  }), 'utf8');
   return file;
-}
-
-/** Inject the SCOPED broker-refresh token (NOT the master control token) into the broker's env. */
-function setScopedTokenFromMaster(masterControlToken: string): void {
-  process.env[OPEN_CODE_BROKER_REFRESH_TOKEN_ENV] = deriveOpenCodeBrokerRefreshToken(masterControlToken);
 }
 
 describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () => {
@@ -51,16 +49,14 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
 
   beforeEach(() => {
     delete process.env[OPEN_CODE_BROKER_SELECTIONS_ENV];
-    delete process.env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV];
-    delete process.env[OPEN_CODE_BROKER_REFRESH_TOKEN_ENV];
+    delete process.env[OPEN_CODE_BROKER_STATE_PATH_ENV];
     delete process.env.HAPPIER_OPENCODE_BROKER_LOAD_NONCE;
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
     delete process.env[OPEN_CODE_BROKER_SELECTIONS_ENV];
-    delete process.env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV];
-    delete process.env[OPEN_CODE_BROKER_REFRESH_TOKEN_ENV];
+    delete process.env[OPEN_CODE_BROKER_STATE_PATH_ENV];
     delete process.env.HAPPIER_OPENCODE_BROKER_LOAD_NONCE;
   });
 
@@ -71,17 +67,15 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
     const directKey = await loader(async () => ({ type: 'api', key: 'sk-real-openai-key' }));
     expect(directKey).toEqual({});
 
-    const marker = buildOpenCodeBrokerMarker('openai', '1');
+    const marker = buildOpenCodeBrokerMarker('openai', OPEN_CODE_BROKER_PLUGIN_VERSION);
     const brokered = await loader(async () => ({ type: 'api', key: marker }));
     expect(typeof brokered.fetch).toBe('function');
     expect(brokered.apiKey).toBe(marker);
   });
 
   it('Codex: fetches the access token from the daemon bridge and shapes the request (no refresh token anywhere)', async () => {
-    // The daemon-state file holds the MASTER control token, but the broker must NOT read it for auth:
-    // it sends the SCOPED broker-refresh token from its env (least privilege, plan §5 item 3).
-    process.env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile(MASTER_CONTROL_TOKEN_SENTINEL);
-    setScopedTokenFromMaster(MASTER_CONTROL_TOKEN_SENTINEL);
+    // The provider-visible descriptor contains only the endpoint and narrow capability.
+    process.env[OPEN_CODE_BROKER_STATE_PATH_ENV] = await writeBrokerStateFile(MASTER_CONTROL_TOKEN_SENTINEL);
     process.env[OPEN_CODE_BROKER_SELECTIONS_ENV] = serializeOpenCodeBrokerSelections({
       openai: { serviceId: 'openai-codex', profileId: 'codex-pro', accountId: null, planType: 'pro' },
     });
@@ -101,7 +95,10 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
     }) as unknown as typeof fetch;
 
     const { loader } = await loadBrokerPlugin('openai');
-    const result = await loader(async () => ({ type: 'api', key: buildOpenCodeBrokerMarker('openai', '1') }));
+    const result = await loader(async () => ({
+      type: 'api',
+      key: buildOpenCodeBrokerMarker('openai', OPEN_CODE_BROKER_PLUGIN_VERSION),
+    }));
     // The loader pins the Codex backend base URL so the AI SDK builds <baseURL>/responses.
     expect(result.baseURL).toBe('https://chatgpt.com/backend-api');
     const brokeredFetch = result.fetch as (input: string, init: RequestInit) => Promise<Response>;
@@ -116,7 +113,7 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
     expect(bridgeCall).toBeDefined();
     expect(bridgeCall!.url).toBe('http://127.0.0.1:51999/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh');
     // The scoped token (NOT the master) is sent; the master must never appear on the wire.
-    expect(bridgeCall!.headers.get('x-happier-daemon-token')).toBe(deriveOpenCodeBrokerRefreshToken(MASTER_CONTROL_TOKEN_SENTINEL));
+    expect(bridgeCall!.headers.get('x-happier-daemon-token')).toBe(deriveConnectedServiceBrokerRefreshToken(MASTER_CONTROL_TOKEN_SENTINEL));
     expect(bridgeCall!.headers.get('x-happier-daemon-token')).not.toBe(MASTER_CONTROL_TOKEN_SENTINEL);
     expect(JSON.parse(bridgeCall!.body)).toMatchObject({ selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'codex-pro' } });
 
@@ -144,8 +141,7 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
   });
 
   it('Codex: on a 401 it forces one bridge refresh (forceRefresh flag) and retries; the first call does NOT force', async () => {
-    process.env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile('tok');
-    setScopedTokenFromMaster('tok');
+    process.env[OPEN_CODE_BROKER_STATE_PATH_ENV] = await writeBrokerStateFile('tok');
     process.env[OPEN_CODE_BROKER_SELECTIONS_ENV] = serializeOpenCodeBrokerSelections({
       openai: { serviceId: 'openai-codex', profileId: 'p', accountId: 'a', planType: null },
     });
@@ -164,7 +160,10 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
     }) as unknown as typeof fetch;
 
     const { loader } = await loadBrokerPlugin('openai');
-    const result = await loader(async () => ({ type: 'api', key: buildOpenCodeBrokerMarker('openai', '1') }));
+    const result = await loader(async () => ({
+      type: 'api',
+      key: buildOpenCodeBrokerMarker('openai', OPEN_CODE_BROKER_PLUGIN_VERSION),
+    }));
     const brokeredFetch = result.fetch as (input: string, init: RequestInit) => Promise<Response>;
     const response = await brokeredFetch('https://api.openai.com/v1/responses', { method: 'POST', body: '{}' });
 
@@ -177,12 +176,12 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
   });
 
   it('pings the daemon load-handshake endpoint with the scoped token on plugin activation (F4)', async () => {
-    process.env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile(MASTER_CONTROL_TOKEN_SENTINEL);
-    setScopedTokenFromMaster(MASTER_CONTROL_TOKEN_SENTINEL);
+    process.env[OPEN_CODE_BROKER_STATE_PATH_ENV] = await writeBrokerStateFile(MASTER_CONTROL_TOKEN_SENTINEL);
     process.env[OPEN_CODE_BROKER_SELECTIONS_ENV] = serializeOpenCodeBrokerSelections({
       openai: { serviceId: 'openai-codex', profileId: 'codex-pro', accountId: null, planType: 'pro' },
     });
-    process.env.HAPPIER_OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY = 'opencode|connected|broker:1|openai-codex:codex-pro:';
+    const selectionIdentity = `opencode|connected|broker:${OPEN_CODE_BROKER_PLUGIN_VERSION}|openai-codex:codex-pro:`;
+    process.env.HAPPIER_OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY = selectionIdentity;
     process.env.HAPPIER_OPENCODE_BROKER_LOAD_NONCE = 'opencode-spawn-1';
     const calls: Array<{ url: string; headers: Headers; body: string }> = [];
     globalThis.fetch = vi.fn(async (input: unknown, init: unknown) => {
@@ -201,9 +200,9 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
       const handshake = calls.find((c) => c.url.includes('/connected-service-auth/broker/loaded'));
       expect(handshake).toBeDefined();
       expect(handshake!.url).toBe('http://127.0.0.1:51999/connected-service-auth/broker/loaded');
-      expect(handshake!.headers.get('x-happier-daemon-token')).toBe(deriveOpenCodeBrokerRefreshToken(MASTER_CONTROL_TOKEN_SENTINEL));
+      expect(handshake!.headers.get('x-happier-daemon-token')).toBe(deriveConnectedServiceBrokerRefreshToken(MASTER_CONTROL_TOKEN_SENTINEL));
       const body = JSON.parse(handshake!.body);
-      expect(body.selectionIdentity).toBe('opencode|connected|broker:1|openai-codex:codex-pro:');
+      expect(body.selectionIdentity).toBe(selectionIdentity);
       expect(body.loadNonce).toBe('opencode-spawn-1');
       expect(body.providers).toContain('openai');
       // No-leak: the handshake never carries the MASTER control token (header or body).
@@ -216,8 +215,7 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
   });
 
   it('Anthropic: uses Bearer + anthropic-beta, deletes x-api-key, and injects the Claude Code system identity', async () => {
-    process.env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile('tok');
-    setScopedTokenFromMaster('tok');
+    process.env[OPEN_CODE_BROKER_STATE_PATH_ENV] = await writeBrokerStateFile('tok');
     process.env[OPEN_CODE_BROKER_SELECTIONS_ENV] = serializeOpenCodeBrokerSelections({
       anthropic: { serviceId: 'claude-subscription', profileId: 'claude-pro', accountId: null, planType: null },
     });
@@ -234,7 +232,10 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
 
     const { loader, provider } = await loadBrokerPlugin('anthropic');
     expect(provider).toBe('anthropic');
-    const result = await loader(async () => ({ type: 'api', key: buildOpenCodeBrokerMarker('anthropic', '1') }));
+    const result = await loader(async () => ({
+      type: 'api',
+      key: buildOpenCodeBrokerMarker('anthropic', OPEN_CODE_BROKER_PLUGIN_VERSION),
+    }));
     const brokeredFetch = result.fetch as (input: string, init: RequestInit) => Promise<Response>;
 
     await brokeredFetch('https://api.anthropic.com/v1/messages', {

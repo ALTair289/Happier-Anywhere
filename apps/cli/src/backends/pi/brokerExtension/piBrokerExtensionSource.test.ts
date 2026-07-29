@@ -6,15 +6,15 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  PI_BROKER_DAEMON_STATE_PATH_ENV,
-  PI_BROKER_REFRESH_TOKEN_ENV,
+  PI_BROKER_STATE_PATH_ENV,
+  PI_BROKER_EXTENSION_VERSION,
   PI_BROKER_SELECTIONS_ENV,
   PI_BROKER_SELECTION_IDENTITY_ENV,
   buildPiBrokerExtensionSource,
-  derivePiBrokerRefreshToken,
   isPiBrokerMarker,
   serializePiBrokerSelections,
 } from './index';
+import { deriveConnectedServiceBrokerRefreshToken } from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
 
 const REFRESH_TOKEN_SENTINEL = 'provider-refresh-token-MUST-NOT-LEAK';
 const MASTER_CONTROL_TOKEN_SENTINEL = 'master-control-token-MUST-NOT-LEAK';
@@ -43,15 +43,14 @@ async function loadPiBrokerExtension(): Promise<{ registered: RegisteredProvider
   return { registered };
 }
 
-async function writeDaemonStateFile(token: string): Promise<string> {
+async function writeBrokerStateFile(token: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'happier-pi-broker-daemon-'));
-  const file = join(dir, 'daemon.state.json');
-  await writeFile(file, JSON.stringify({ httpPort: 52777, controlToken: token }), 'utf8');
+  const file = join(dir, 'connected-service-broker.state.json');
+  await writeFile(file, JSON.stringify({
+    httpPort: 52777,
+    connectedServiceBrokerRefreshToken: deriveConnectedServiceBrokerRefreshToken(token),
+  }), 'utf8');
   return file;
-}
-
-function setScopedTokenFromMaster(masterControlToken: string): void {
-  process.env[PI_BROKER_REFRESH_TOKEN_ENV] = derivePiBrokerRefreshToken(masterControlToken);
 }
 
 describe('piBrokerExtensionSource (generated artifact, exercised live)', () => {
@@ -59,8 +58,7 @@ describe('piBrokerExtensionSource (generated artifact, exercised live)', () => {
 
   const clearEnv = () => {
     delete process.env[PI_BROKER_SELECTIONS_ENV];
-    delete process.env[PI_BROKER_DAEMON_STATE_PATH_ENV];
-    delete process.env[PI_BROKER_REFRESH_TOKEN_ENV];
+    delete process.env[PI_BROKER_STATE_PATH_ENV];
     delete process.env[PI_BROKER_SELECTION_IDENTITY_ENV];
     delete process.env.HAPPIER_PI_BROKER_LOAD_NONCE;
   };
@@ -92,8 +90,7 @@ describe('piBrokerExtensionSource (generated artifact, exercised live)', () => {
   });
 
   it('Claude: refreshToken fetches the access token from the daemon bridge with the SCOPED token, returns a marker refresh (no leak)', async () => {
-    process.env[PI_BROKER_DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile(MASTER_CONTROL_TOKEN_SENTINEL);
-    setScopedTokenFromMaster(MASTER_CONTROL_TOKEN_SENTINEL);
+    process.env[PI_BROKER_STATE_PATH_ENV] = await writeBrokerStateFile(MASTER_CONTROL_TOKEN_SENTINEL);
     process.env[PI_BROKER_SELECTIONS_ENV] = serializePiBrokerSelections({
       anthropic: { serviceId: 'claude-subscription', profileId: 'claude-pro', accountId: null, planType: null },
     });
@@ -122,7 +119,7 @@ describe('piBrokerExtensionSource (generated artifact, exercised live)', () => {
     const bridgeCall = calls.find((c) => c.url.includes('/anthropic-auth-tokens/refresh'));
     expect(bridgeCall).toBeDefined();
     expect(bridgeCall!.url).toBe('http://127.0.0.1:52777/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh');
-    expect(bridgeCall!.headers.get('x-happier-daemon-token')).toBe(derivePiBrokerRefreshToken(MASTER_CONTROL_TOKEN_SENTINEL));
+    expect(bridgeCall!.headers.get('x-happier-daemon-token')).toBe(deriveConnectedServiceBrokerRefreshToken(MASTER_CONTROL_TOKEN_SENTINEL));
     expect(bridgeCall!.headers.get('x-happier-daemon-token')).not.toBe(MASTER_CONTROL_TOKEN_SENTINEL);
     expect(JSON.parse(bridgeCall!.body)).toMatchObject({
       selection: { kind: 'profile', serviceId: 'claude-subscription', profileId: 'claude-pro' },
@@ -141,8 +138,7 @@ describe('piBrokerExtensionSource (generated artifact, exercised live)', () => {
   });
 
   it('Codex: refreshToken targets the chatgpt bridge and forwards the plan type', async () => {
-    process.env[PI_BROKER_DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile('tok');
-    setScopedTokenFromMaster('tok');
+    process.env[PI_BROKER_STATE_PATH_ENV] = await writeBrokerStateFile('tok');
     process.env[PI_BROKER_SELECTIONS_ENV] = serializePiBrokerSelections({
       openai: { serviceId: 'openai-codex', profileId: 'codex-pro', accountId: 'acct_z', planType: 'pro' },
     });
@@ -172,12 +168,12 @@ describe('piBrokerExtensionSource (generated artifact, exercised live)', () => {
   });
 
   it('pings the shared daemon load-handshake endpoint with the scoped token on activation', async () => {
-    process.env[PI_BROKER_DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile(MASTER_CONTROL_TOKEN_SENTINEL);
-    setScopedTokenFromMaster(MASTER_CONTROL_TOKEN_SENTINEL);
+    process.env[PI_BROKER_STATE_PATH_ENV] = await writeBrokerStateFile(MASTER_CONTROL_TOKEN_SENTINEL);
     process.env[PI_BROKER_SELECTIONS_ENV] = serializePiBrokerSelections({
       anthropic: { serviceId: 'claude-subscription', profileId: 'claude-pro', accountId: null, planType: null },
     });
-    process.env[PI_BROKER_SELECTION_IDENTITY_ENV] = 'pi|connected|broker:1|anthropic:claude-pro:';
+    const selectionIdentity = `pi|connected|broker:${PI_BROKER_EXTENSION_VERSION}|anthropic:claude-pro:`;
+    process.env[PI_BROKER_SELECTION_IDENTITY_ENV] = selectionIdentity;
     process.env.HAPPIER_PI_BROKER_LOAD_NONCE = 'pi-spawn-1';
     const calls: Array<{ url: string; headers: Headers; body: string }> = [];
     globalThis.fetch = vi.fn(async (input: unknown, init: unknown) => {
@@ -192,9 +188,9 @@ describe('piBrokerExtensionSource (generated artifact, exercised live)', () => {
     const handshake = calls.find((c) => c.url.includes('/connected-service-auth/broker/loaded'));
     expect(handshake).toBeDefined();
     expect(handshake!.url).toBe('http://127.0.0.1:52777/connected-service-auth/broker/loaded');
-    expect(handshake!.headers.get('x-happier-daemon-token')).toBe(derivePiBrokerRefreshToken(MASTER_CONTROL_TOKEN_SENTINEL));
+    expect(handshake!.headers.get('x-happier-daemon-token')).toBe(deriveConnectedServiceBrokerRefreshToken(MASTER_CONTROL_TOKEN_SENTINEL));
     const body = JSON.parse(handshake!.body);
-    expect(body.selectionIdentity).toBe('pi|connected|broker:1|anthropic:claude-pro:');
+    expect(body.selectionIdentity).toBe(selectionIdentity);
     expect(body.loadNonce).toBe('pi-spawn-1');
     // The handshake reports the bridge provider tag (anthropic), which the daemon schema accepts.
     expect(body.providers).toContain('anthropic');

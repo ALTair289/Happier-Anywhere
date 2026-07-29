@@ -611,4 +611,49 @@ describe('daemon state canonicalization', () => {
             expect(tempWrites[tempWrites.length - 1]).not.toBe(tempWrites[tempWrites.length - 2]);
         });
     });
+
+    it('publishes and clears a lifecycle-scoped minimal connected-service broker descriptor', async () => {
+        await withTempDir('happier-cli-broker-state-lifecycle-', async (homeDir) => {
+            vi.resetModules();
+            envScope.patch({
+                HAPPIER_HOME_DIR: homeDir,
+                HAPPIER_ACTIVE_SERVER_ID: 'endpoint-profile',
+                HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-current__id_default',
+            });
+
+            const [{ configuration }, {
+                clearDaemonState,
+                writeConnectedServiceBrokerState,
+                writeDaemonState,
+            }] = await Promise.all([
+                import('./configuration'),
+                import('./persistence'),
+            ]);
+
+            writeDaemonState({
+                pid: 123,
+                httpPort: 5173,
+                startedAt: Date.now(),
+                startedWithCliVersion: '0.0.0-current',
+                controlToken: 'broad-control-token',
+            });
+            writeConnectedServiceBrokerState({
+                httpPort: 5173,
+                connectedServiceBrokerRefreshToken: 'scoped-broker-capability',
+            });
+
+            expect(dirname(configuration.connectedServiceBrokerStateFile)).toBe(dirname(configuration.daemonStateFile));
+            expect(configuration.connectedServiceBrokerStateFile).not.toBe(configuration.daemonStateFile);
+            expect(JSON.parse(readFileSync(configuration.connectedServiceBrokerStateFile, 'utf8'))).toEqual({
+                httpPort: 5173,
+                connectedServiceBrokerRefreshToken: 'scoped-broker-capability',
+            });
+            expect(readFileSync(configuration.connectedServiceBrokerStateFile, 'utf8')).not.toContain('broad-control-token');
+
+            await clearDaemonState({ includeLockFile: false });
+
+            expect(existsSync(configuration.daemonStateFile)).toBe(false);
+            expect(existsSync(configuration.connectedServiceBrokerStateFile)).toBe(false);
+        });
+    });
 });

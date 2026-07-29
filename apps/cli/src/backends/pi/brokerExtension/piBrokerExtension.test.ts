@@ -5,20 +5,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
-  CONNECTED_SERVICE_BROKER_REFRESH_SCOPE_LABEL,
-  CONNECTED_SERVICE_BROKER_REFRESH_TOKEN_ENV,
-  deriveConnectedServiceBrokerRefreshToken,
-} from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
-
-import {
-  PI_BROKER_REFRESH_SCOPE_LABEL,
-  PI_BROKER_REFRESH_TOKEN_ENV,
   PI_BROKER_LOAD_NONCE_ENV,
   PI_BROKER_SELECTIONS_ENV,
   PI_BROKER_SELECTION_IDENTITY_ENV,
-  applyPiBrokerRefreshTokenEnv,
   buildPiBrokerMarker,
-  derivePiBrokerRefreshToken,
   ensurePiBrokerExtensionAsset,
   isPiBrokerMarker,
   parsePiBrokerSelections,
@@ -26,14 +16,6 @@ import {
   serializePiBrokerSelections,
   verifyPiBrokerReadyForConnectedSession,
 } from './index';
-
-describe('piBrokerCapabilityToken (shared alias)', () => {
-  it('is a thin alias over the SHARED provider-agnostic core (same token authorizes OpenCode + Pi)', () => {
-    expect(PI_BROKER_REFRESH_SCOPE_LABEL).toBe(CONNECTED_SERVICE_BROKER_REFRESH_SCOPE_LABEL);
-    expect(PI_BROKER_REFRESH_TOKEN_ENV).toBe(CONNECTED_SERVICE_BROKER_REFRESH_TOKEN_ENV);
-    expect(derivePiBrokerRefreshToken('master')).toBe(deriveConnectedServiceBrokerRefreshToken('master'));
-  });
-});
 
 describe('piBrokerExtensionEnv markers + selections', () => {
   it('builds + recognises a versioned broker marker (never a real refresh token)', () => {
@@ -57,53 +39,18 @@ describe('piBrokerExtensionEnv markers + selections', () => {
   });
 });
 
-describe('applyPiBrokerRefreshTokenEnv (scoped-token injection, least privilege)', () => {
-  it('injects ONLY the derived scoped token for brokered sessions; master never appears', () => {
-    const env: Record<string, string> = {
-      [PI_BROKER_SELECTION_IDENTITY_ENV]: 'pi|connected|broker:1|anthropic:c:',
-      [PI_BROKER_SELECTIONS_ENV]: serializePiBrokerSelections({
-        anthropic: { serviceId: 'claude-subscription', profileId: 'c', accountId: null, planType: null },
-      }),
-    };
-    applyPiBrokerRefreshTokenEnv(env, () => 'MASTER-CONTROL-TOKEN');
-    expect(env[PI_BROKER_REFRESH_TOKEN_ENV]).toBe(derivePiBrokerRefreshToken('MASTER-CONTROL-TOKEN'));
-    expect(env[PI_BROKER_REFRESH_TOKEN_ENV]).not.toBe('MASTER-CONTROL-TOKEN');
-    for (const value of Object.values(env)) expect(value).not.toBe('MASTER-CONTROL-TOKEN');
-  });
-
-  it('is a strict no-op for native sessions (no selection identity)', () => {
-    const env: Record<string, string> = {};
-    applyPiBrokerRefreshTokenEnv(env, () => 'MASTER');
-    expect(env[PI_BROKER_REFRESH_TOKEN_ENV]).toBeUndefined();
-  });
-
-  it('is a strict no-op for direct-API-key sessions (selection identity but no brokered provider)', () => {
-    const env: Record<string, string> = { [PI_BROKER_SELECTION_IDENTITY_ENV]: 'pi|connected' };
-    applyPiBrokerRefreshTokenEnv(env, () => 'MASTER');
-    expect(env[PI_BROKER_REFRESH_TOKEN_ENV]).toBeUndefined();
-  });
-
-  it('fails closed when the master control token is unavailable (does not inject)', () => {
-    const env: Record<string, string> = {
-      [PI_BROKER_SELECTION_IDENTITY_ENV]: 'pi|connected|broker:1|anthropic:c:',
-      [PI_BROKER_SELECTIONS_ENV]: serializePiBrokerSelections({
-        anthropic: { serviceId: 'claude-subscription', profileId: 'c', accountId: null, planType: null },
-      }),
-    };
-    applyPiBrokerRefreshTokenEnv(env, () => null);
-    expect(env[PI_BROKER_REFRESH_TOKEN_ENV]).toBeUndefined();
-  });
-});
-
 describe('verifyPiBrokerReadyForConnectedSession (fail-closed preflight)', () => {
   let agentDir: string;
-  let daemonStatePath: string;
+  let brokerStatePath: string;
 
   beforeEach(async () => {
     const root = await mkdtemp(join(tmpdir(), 'happier-pi-broker-verify-'));
     agentDir = join(root, 'pi-agent-dir');
-    daemonStatePath = join(root, 'daemon.state.json');
-    await writeFile(daemonStatePath, JSON.stringify({ httpPort: 5, controlToken: 'tok' }), 'utf8');
+    brokerStatePath = join(root, 'connected-service-broker.state.json');
+    await writeFile(brokerStatePath, JSON.stringify({
+      httpPort: 5,
+      connectedServiceBrokerRefreshToken: 'scoped',
+    }), 'utf8');
   });
   afterEach(() => {
     // no shared global state
@@ -116,7 +63,7 @@ describe('verifyPiBrokerReadyForConnectedSession (fail-closed preflight)', () =>
       anthropic: { serviceId: 'claude-subscription', profileId: 'c', accountId: null, planType: null },
     }),
     [PI_BROKER_LOAD_NONCE_ENV]: 'pi-spawn-ready',
-    HAPPIER_PI_BROKER_DAEMON_STATE_PATH: daemonStatePath,
+    HAPPIER_PI_BROKER_STATE_PATH: brokerStatePath,
     ...overrides,
   });
 
@@ -144,7 +91,17 @@ describe('verifyPiBrokerReadyForConnectedSession (fail-closed preflight)', () =>
   it('fails closed when the daemon bridge is unreachable', async () => {
     await ensurePiBrokerExtensionAsset(agentDir);
     const readiness = await verifyPiBrokerReadyForConnectedSession(
-      brokeredEnv({ HAPPIER_PI_BROKER_DAEMON_STATE_PATH: join(agentDir, 'missing.json') }),
+      brokeredEnv({ HAPPIER_PI_BROKER_STATE_PATH: join(agentDir, 'missing.json') }),
+      { verifyLoadHandshake: async () => true },
+    );
+    expect(readiness).toEqual({ ready: false, reason: 'broker_daemon_bridge_unreachable' });
+  });
+
+  it('fails closed when broker state has no scoped capability', async () => {
+    await ensurePiBrokerExtensionAsset(agentDir);
+    await writeFile(brokerStatePath, JSON.stringify({ httpPort: 5 }), 'utf8');
+    const readiness = await verifyPiBrokerReadyForConnectedSession(
+      brokeredEnv(),
       { verifyLoadHandshake: async () => true },
     );
     expect(readiness).toEqual({ ready: false, reason: 'broker_daemon_bridge_unreachable' });

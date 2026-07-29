@@ -1,12 +1,10 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { basename } from 'node:path';
 
 import { resolveWindowsCommandInvocation } from '@happier-dev/cli-common/process';
 
-import { configuration } from '@/configuration';
 import { logger } from '@/ui/logger';
 import { requireProviderCliLaunchSpec } from '@/runtime/managedTools/requireProviderCliLaunchSpec';
 
@@ -19,7 +17,6 @@ import {
   OPEN_CODE_BROKER_LOAD_NONCE_ENV,
   OPEN_CODE_BROKER_PROVIDERS,
   OPEN_CODE_BROKER_SELECTIONS_ENV,
-  applyOpenCodeBrokerRefreshTokenEnv,
   ensureOpenCodeBrokerPluginAssets,
   parseOpenCodeBrokerSelections,
 } from '@/backends/opencode/brokerPlugin';
@@ -70,22 +67,6 @@ async function ensureConnectedOpenCodeBrokerAssetsBeforeSpawn(env: NodeJS.Proces
   }
   await ensureOpenCodeBrokerPluginAssets({ providers });
   return brokerLoadNonce;
-}
-
-/**
- * Read the daemon master control token from the 0600 daemon-state file (best-effort). Used ONLY to
- * derive the SCOPED broker-refresh capability token for the child env — the master token itself is
- * never placed in the OpenCode env (F2 least privilege).
- */
-function readDaemonControlTokenBestEffort(): string | null {
-  try {
-    const parsed = JSON.parse(readFileSync(configuration.daemonStateFile, 'utf8')) as { controlToken?: unknown };
-    return typeof parsed.controlToken === 'string' && parsed.controlToken.trim().length > 0
-      ? parsed.controlToken.trim()
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 export async function startManagedOpenCodeServer(params: Readonly<{
@@ -139,9 +120,6 @@ export async function startManagedOpenCodeServer(params: Readonly<{
     xdgRootDir: xdgRootDir.length > 0 ? xdgRootDir : null,
     isolateConfig,
   });
-  // Inject the SCOPED broker-refresh capability token (connected brokered sessions only). The master
-  // control token is read here to DERIVE it but is never placed in the child env (F2 least privilege).
-  applyOpenCodeBrokerRefreshTokenEnv(childEnv, readDaemonControlTokenBestEffort);
   const invocation = resolveWindowsCommandInvocation({
     command: cmd,
     args,

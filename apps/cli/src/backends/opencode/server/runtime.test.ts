@@ -24,7 +24,7 @@ import {
 } from './openCodeManagedServerEnv';
 import {
   OPEN_CODE_BROKER_SELECTIONS_ENV,
-  OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
+  OPEN_CODE_BROKER_STATE_PATH_ENV,
   OPEN_CODE_BROKER_LOAD_NONCE_ENV,
   ensureOpenCodeBrokerPluginAssets,
   serializeOpenCodeBrokerSelections,
@@ -10883,7 +10883,7 @@ describe('createOpenCodeServerRuntime — connected-service broker preflight (fa
     // Always control the broker inputs explicitly so the verdict is deterministic regardless of
     // the ambient process env.
     delete env[OPEN_CODE_BROKER_SELECTIONS_ENV];
-    delete env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV];
+    delete env[OPEN_CODE_BROKER_STATE_PATH_ENV];
     delete env[OPEN_CODE_BROKER_LOAD_NONCE_ENV];
     if (overrides.brokered) {
       env[OPEN_CODE_BROKER_SELECTIONS_ENV] = serializeOpenCodeBrokerSelections({
@@ -10891,7 +10891,7 @@ describe('createOpenCodeServerRuntime — connected-service broker preflight (fa
       });
     }
     if (typeof overrides.daemonStatePath === 'string') {
-      env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV] = overrides.daemonStatePath;
+      env[OPEN_CODE_BROKER_STATE_PATH_ENV] = overrides.daemonStatePath;
     }
     if (typeof overrides.brokerLoadNonce === 'string') {
       env[OPEN_CODE_BROKER_LOAD_NONCE_ENV] = overrides.brokerLoadNonce;
@@ -10931,7 +10931,7 @@ describe('createOpenCodeServerRuntime — connected-service broker preflight (fa
       HAPPIER_OPENCODE_SERVER_STATE_PATH: managedStatePath,
       [OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]: 'opencode|connected|openai-codex:primary:',
       [OPEN_CODE_BROKER_SELECTIONS_ENV]: brokerSelections,
-      [OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV]: daemonStatePath,
+      [OPEN_CODE_BROKER_STATE_PATH_ENV]: daemonStatePath,
       [OPEN_CODE_BROKER_LOAD_NONCE_ENV]: undefined,
     });
     reloadConfiguration();
