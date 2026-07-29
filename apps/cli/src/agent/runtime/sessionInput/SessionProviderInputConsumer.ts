@@ -304,6 +304,34 @@ export function createSessionProviderInputConsumer<Mode, Message>(
       : {}),
   };
 
+  const reconcileReservedProviderInputBatch = async (): Promise<void> => {
+    if (
+      !providerInputBatchReserved
+      || !opts.session.reconcilePendingQueueState
+      || !opts.session.shouldAttemptPendingMaterialization
+    ) {
+      return;
+    }
+
+    try {
+      await opts.session.reconcilePendingQueueState({ force: false });
+    } catch (error) {
+      logger.debug('[pendingQueue] reserved provider-input reconciliation deferred', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    const activeTurnSteerability = readActiveTurnSteerability(opts);
+    const pendingQueueDeliveryTiming = readPendingQueueDeliveryTiming(opts);
+    if (
+      opts.session.shouldAttemptPendingMaterialization(
+        buildAttemptOptions(activeTurnSteerability, pendingQueueDeliveryTiming),
+      )
+    ) {
+      providerInputBatchReserved = false;
+    }
+  };
+
   const drainPending = async (drainOpts?: DrainPendingOptions): Promise<DrainPendingResult> => {
     const previousTurn = drainPendingTurn;
     let releaseTurn: () => void = () => {};
@@ -318,7 +346,15 @@ export function createSessionProviderInputConsumer<Mode, Message>(
       if (!canStart) {
         return { materialized: 0, stoppedReason: 'aborted' };
       }
-      if (opts.messageQueue.size() > 0 || providerInputBatchReserved) {
+      if (opts.messageQueue.size() > 0) {
+        return { materialized: 0, stoppedReason: 'drain_disallowed' };
+      }
+      // A provider loop normally releases this reservation by dispatching the returned batch or
+      // requesting its next input. If the exact durable row is instead resolved/discarded outside
+      // that loop, reuse the session client's authoritative localId reconciliation before letting
+      // the anonymous local reservation hide later Pending work.
+      await reconcileReservedProviderInputBatch();
+      if (providerInputBatchReserved) {
         return { materialized: 0, stoppedReason: 'drain_disallowed' };
       }
       const callerShouldContinue = drainOpts?.shouldContinue;

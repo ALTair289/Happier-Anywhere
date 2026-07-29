@@ -3136,6 +3136,8 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     listDeliveryStatusesMock.mockResolvedValueOnce([
       { localId: 'later-local', status: 'queued' },
     ]);
+    await client.reconcilePendingQueueState({ force: true });
+    expect(client.shouldAttemptPendingMaterialization()).toBe(true);
     await expect(client.materializeNextPendingMessageSafely({ reconcileWhenEmpty: 'force' })).resolves.toMatchObject({
       type: 'materialized',
       localId: 'later-local',

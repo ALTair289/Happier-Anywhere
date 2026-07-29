@@ -133,6 +133,7 @@ export function createCatalogProviderAcpRuntime<TBackendOptions extends object =
     startupOverrides: params.startupOverrides,
     pendingQueue: {
       drainAfterStartOrLoad: true,
+      drainDuringTurn: params.inFlightSteer?.enabled === true,
       maxPopPerWake: params.pendingQueueDrainMaxPopPerWake,
       inputConsumer: params.providerInputConsumer,
     },

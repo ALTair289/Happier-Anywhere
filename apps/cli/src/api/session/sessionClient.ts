@@ -1696,6 +1696,12 @@ export class ApiSessionClient extends EventEmitter {
 
     async reconcilePendingQueueState(opts?: { force?: boolean }): Promise<boolean> {
         if (this.closed) return false;
+        // Keep the public queue reconciliation hook authoritative for both server projection and
+        // exact local provider custody. Generic input consumers call this hook when their cheap
+        // eligibility preflight is blocked; without this step, a server-resolved delivery can
+        // permanently hide a later queued row before the safe materialization owner gets a chance
+        // to run its own identical reconciliation.
+        await this.reconcileCanonicalPendingDeliveriesBeforeMaterialization();
         if (!opts?.force && this.pendingQueueState.known && this.pendingQueueState.pendingCount > 0) {
             return false;
         }

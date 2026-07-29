@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createApprovedPermissionHandler } from '@/testkit/backends/permissionHandler';
 import { createApiSessionClientFixture } from '@/testkit/backends/sessionFixtures';
@@ -44,5 +44,30 @@ describe('createCatalogProviderAcpRuntime session identity ownership', () => {
         reason: 'vendor-resume-unsupported',
       },
     })).toThrow(/advertises vendor resume/i);
+  });
+
+  it('runs the shared active-turn pending pump for a steer-capable catalog provider', async () => {
+    const pumpPendingWhileActive = vi.fn(async ({ abortSignal }: { abortSignal: AbortSignal }) => {
+      await new Promise<void>((resolve) => {
+        if (abortSignal.aborted) return resolve();
+        abortSignal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+    const runtime = createCatalogProviderAcpRuntime({
+      ...createParams(),
+      providerInputConsumer: {
+        ...createParams().providerInputConsumer,
+        pumpPendingWhileActive,
+      },
+      sessionIdentity: { kind: 'manifest-metadata' },
+      inFlightSteer: { enabled: true },
+    });
+
+    runtime.beginTurn();
+    await vi.waitFor(() => {
+      expect(pumpPendingWhileActive).toHaveBeenCalledTimes(1);
+    });
+
+    await runtime.reset();
   });
 });

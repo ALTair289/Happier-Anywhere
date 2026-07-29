@@ -558,6 +558,82 @@ describe('SessionProviderInputConsumer drainPending', () => {
     expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
   });
 
+  it('reconciles a reserved localId before allowing a later durable row to drain', async () => {
+    const messageQueue = new MessageQueue2<TestMode>(() => 'hash');
+    messageQueue.push('claimed send', { id: 'mode' }, {
+      userMessageLocalId: 'local-claimed-send',
+      pendingProviderAction: 'send',
+    });
+    let hasBlockingCanonicalDelivery = true;
+    const materializeNextPendingMessageSafely = vi.fn(async () => ({
+      type: 'materialized' as const,
+      localId: 'local-later-send',
+      seq: 9,
+      content: null,
+    }));
+    const reconcilePendingQueueState = vi.fn(async () => {
+      hasBlockingCanonicalDelivery = false;
+      return true;
+    });
+    const consumer = createSessionProviderInputConsumer({
+      messageQueue,
+      session: {
+        materializeNextPendingMessageSafely,
+        shouldAttemptPendingMaterialization: () => !hasBlockingCanonicalDelivery,
+        reconcilePendingQueueState,
+        waitForPendingEligibilityUpdate: async () => false,
+      },
+    });
+
+    await expect(consumer.waitForNextInput({ abortSignal: new AbortController().signal })).resolves.toMatchObject({
+      message: 'claimed send',
+      userMessageLocalIds: ['local-claimed-send'],
+    });
+
+    await expect(consumer.drainPending({ reason: 'reserved-local-id-retired' })).resolves.toEqual({
+      materialized: 1,
+      stoppedReason: 'max_pop_per_wake',
+    });
+    expect(reconcilePendingQueueState).toHaveBeenCalledWith({ force: false });
+    expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a reserved localId fenced when canonical reconciliation fails transiently', async () => {
+    const messageQueue = new MessageQueue2<TestMode>(() => 'hash');
+    messageQueue.push('claimed send', { id: 'mode' }, {
+      userMessageLocalId: 'local-claimed-send',
+      pendingProviderAction: 'send',
+    });
+    const materializeNextPendingMessageSafely = vi.fn(async () => ({
+      type: 'materialized' as const,
+      localId: 'local-later-send',
+      seq: 9,
+      content: null,
+    }));
+    const consumer = createSessionProviderInputConsumer({
+      messageQueue,
+      session: {
+        materializeNextPendingMessageSafely,
+        shouldAttemptPendingMaterialization: () => true,
+        reconcilePendingQueueState: async () => {
+          throw new Error('transient reconciliation failure');
+        },
+        waitForPendingEligibilityUpdate: async () => false,
+      },
+    });
+
+    await expect(consumer.waitForNextInput({ abortSignal: new AbortController().signal })).resolves.toMatchObject({
+      message: 'claimed send',
+      userMessageLocalIds: ['local-claimed-send'],
+    });
+
+    await expect(consumer.drainPending({ reason: 'reconciliation-failed' })).resolves.toEqual({
+      materialized: 0,
+      stoppedReason: 'drain_disallowed',
+    });
+    expect(materializeNextPendingMessageSafely).not.toHaveBeenCalled();
+  });
+
   it('uses structured pending materialization for a drain', async () => {
     const materializeNextPendingMessageSafely = vi
       .fn<() => Promise<MaterializeNextPendingResult>>()
