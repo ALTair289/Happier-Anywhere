@@ -99,7 +99,7 @@ describe('createClaudeUnifiedResumeChoiceStartupResolver', () => {
     })).resolves.toEqual({ status: 'handled' });
 
     expect(port.sentLiteral).toEqual(['1']);
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
   });
 
   it('auto-answers full-session resume through terminal control', async () => {
@@ -121,7 +121,7 @@ describe('createClaudeUnifiedResumeChoiceStartupResolver', () => {
     });
 
     expect(port.sentLiteral).toEqual(['2']);
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
   });
 
   it('does not repeatedly send an auto-answer after a terminal control failure', async () => {
@@ -150,7 +150,7 @@ describe('createClaudeUnifiedResumeChoiceStartupResolver', () => {
     })).resolves.toEqual({ status: 'unhandled' });
 
     expect(port.sentLiteral).toEqual(['2']);
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
   });
 
   it('asks the user once and sends the selected answer after the existing user-action RPC resolves', async () => {
@@ -187,7 +187,7 @@ describe('createClaudeUnifiedResumeChoiceStartupResolver', () => {
 
     await vi.waitFor(() => {
       expect(port.sentLiteral).toEqual(['1']);
-      expect(port.sentKeys).toEqual(['Enter']);
+      expect(port.sentKeys).toEqual([]);
     });
   });
 
@@ -237,7 +237,7 @@ describe('createClaudeUnifiedResumeChoiceStartupResolver', () => {
     releaseSettle();
     await vi.waitFor(() => {
       expect(port.sentLiteral).toEqual(['1']);
-      expect(port.sentKeys).toEqual(['Enter']);
+      expect(port.sentKeys).toEqual([]);
     });
   });
 
@@ -362,7 +362,7 @@ describe('createClaudeUnifiedResumeChoiceStartupResolver', () => {
     })).resolves.toEqual({ status: 'handled' });
 
     expect(port.sentLiteral).toEqual(['1']);
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
   });
 
   it('answers an orphan effort-change dialog with go-back when its target differs from the configured startup effort', async () => {
@@ -386,7 +386,7 @@ describe('createClaudeUnifiedResumeChoiceStartupResolver', () => {
     });
 
     expect(port.sentLiteral).toEqual(['2']);
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
   });
 
   it('leaves an effort-change dialog to the runtime-control apply episode while that driver owns it', async () => {
@@ -434,6 +434,6 @@ describe('createClaudeUnifiedResumeChoiceStartupResolver', () => {
     })).resolves.toEqual({ status: 'handled' });
 
     expect(port.sentLiteral).toEqual(['1']);
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
   });
 });

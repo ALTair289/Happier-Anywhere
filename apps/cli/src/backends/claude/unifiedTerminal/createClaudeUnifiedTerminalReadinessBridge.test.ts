@@ -536,7 +536,7 @@ describe('createClaudeUnifiedTerminalReadinessBridge', () => {
 
     expect(onStartupReady).not.toHaveBeenCalled();
     expect(port.sentLiteral).toEqual(['1']);
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
 
     nowMs += 10;
     await vi.advanceTimersByTimeAsync(10);

@@ -117,7 +117,7 @@ describe('Claude unified pending-injection dialog routing', () => {
     })).resolves.toMatchObject({ status: 'injected' });
 
     expect(port.sentLiteral).toEqual(['1']);
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
     expect(injectUserPrompt).toHaveBeenCalledTimes(1);
     await bridge.dispose();
   });

@@ -38,10 +38,7 @@ export type ClaudeUnifiedDialogOption = Readonly<{
   choice: string;
   label: string;
   description: string;
-  answer: Readonly<{
-    kind: 'literal_then_enter';
-    text: string;
-  }>;
+  answer: Readonly<{ kind: 'literal'; text: string }>;
   settingMutation?: Readonly<{
     settingId: 'claudeUnifiedTerminalWorkspaceTrust';
     value: 'always_trust_happier_workspaces' | 'always_reject_happier_workspaces';
@@ -102,7 +99,7 @@ function option(
     choice,
     label,
     description,
-    answer: { kind: 'literal_then_enter', text },
+    answer: { kind: 'literal', text },
     ...(settingMutation ? { settingMutation } : {}),
   };
 }

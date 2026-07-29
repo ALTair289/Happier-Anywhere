@@ -69,8 +69,8 @@ describe('Claude unified recognized dialog registry', () => {
         controlKeys: ['reasoningEffort', 'launchOption'],
       },
       options: [
-        { choice: 'confirm', answer: { kind: 'literal_then_enter', text: '1' } },
-        { choice: 'cancel', answer: { kind: 'literal_then_enter', text: '2' } },
+        { choice: 'confirm', answer: { kind: 'literal', text: '1' } },
+        { choice: 'cancel', answer: { kind: 'literal', text: '2' } },
       ],
     });
   });
@@ -98,8 +98,8 @@ describe('Claude unified recognized dialog registry', () => {
       owner: null,
       context: ['Reset conversation cache?'],
       options: [
-        { choice: '1', label: 'Yes, reset it', answer: { text: '1' } },
-        { choice: '2', label: 'No, go back', answer: { text: '2' } },
+        { choice: '1', label: 'Yes, reset it', answer: { kind: 'literal', text: '1' } },
+        { choice: '2', label: 'No, go back', answer: { kind: 'literal', text: '2' } },
       ],
     });
     expect(buildClaudeUnifiedDialogQuestionInput(dialog!)).toMatchObject({
@@ -145,19 +145,19 @@ describe('Claude unified recognized dialog registry', () => {
       dialogId: 'trust_folder',
       owner: null,
       options: [
-        { choice: 'trust_once', answer: { kind: 'literal_then_enter', text: '1' } },
+        { choice: 'trust_once', answer: { kind: 'literal', text: '1' } },
         {
           choice: 'always_trust_happier_workspaces',
-          answer: { kind: 'literal_then_enter', text: '1' },
+          answer: { kind: 'literal', text: '1' },
           settingMutation: {
             settingId: 'claudeUnifiedTerminalWorkspaceTrust',
             value: 'always_trust_happier_workspaces',
           },
         },
-        { choice: 'reject_once', answer: { kind: 'literal_then_enter', text: '2' } },
+        { choice: 'reject_once', answer: { kind: 'literal', text: '2' } },
         {
           choice: 'always_reject_happier_workspaces',
-          answer: { kind: 'literal_then_enter', text: '2' },
+          answer: { kind: 'literal', text: '2' },
           settingMutation: {
             settingId: 'claudeUnifiedTerminalWorkspaceTrust',
             value: 'always_reject_happier_workspaces',

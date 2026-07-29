@@ -34,6 +34,8 @@ export function createFakeControlPort(params: Readonly<{
   capturedAtMs?: number | undefined;
   /** Keys whose send reports `host_dead` AFTER `onSendSpecialKey` runs (host-race simulation). */
   failSendKeys?: readonly TerminalSpecialKey[] | undefined;
+  /** Literal texts whose send reports `host_dead` after the attempted write is recorded. */
+  failLiteralText?: readonly string[] | undefined;
   /** Capture indexes (0-based) that report `host_dead` instead of a screen. */
   failCaptureAtIndexes?: readonly number[] | undefined;
   /** Side-effect hook before a special key resolves (e.g. simulate Claude mutating settings on Enter). */
@@ -58,6 +60,9 @@ export function createFakeControlPort(params: Readonly<{
     async sendLiteralText(text) {
       sentLiteral.push(text);
       log.push({ type: 'literal', text });
+      if (params.failLiteralText?.includes(text)) {
+        return { status: 'host_dead', recoverable: false };
+      }
       return ok();
     },
     async sendRawSequence(sequence) {

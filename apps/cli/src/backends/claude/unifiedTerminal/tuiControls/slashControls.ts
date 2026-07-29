@@ -87,7 +87,6 @@ async function injectRegisteredDialogAnswer(params: Readonly<{
   const option = resolveClaudeUnifiedRegisteredDialogOption(params.state, params.entry, params.choice);
   if (!option) throw new Error(`missing_claude_dialog_option:${params.entry.dialogId}:${params.choice}`);
   await params.ctx.runtime.port.sendLiteralText(option.answer.text);
-  await params.ctx.runtime.port.sendSpecialKey('Enter');
   await params.ctx.runtime.wait(params.ctx.runtime.timings.commandSettleMs);
   const after = await captureScreenState(params.ctx.runtime.port);
   return after.kind === 'state' ? after.state : params.state;

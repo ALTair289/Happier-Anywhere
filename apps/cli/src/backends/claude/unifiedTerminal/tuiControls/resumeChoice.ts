@@ -37,7 +37,7 @@ export async function answerClaudeResumeChoiceDialog(params: Readonly<{
   choice: ClaudeUnifiedResumeChoiceAnswer;
   wait: (ms: number) => Promise<void>;
   settleMs: number;
-  /** Fired at the exact boundary where Enter was successfully written to Claude's terminal. */
+  /** Fired after the option's complete answer recipe was successfully written to Claude's terminal. */
   onSubmitted?: (() => void) | undefined;
 }>): Promise<ClaudeResumeChoiceDialogAnswerResult> {
   const before = await captureScreenState(params.port);
@@ -56,10 +56,6 @@ export async function answerClaudeResumeChoiceDialog(params: Readonly<{
   );
   if (sendOptionFailure) return sendOptionFailure;
 
-  const sendEnterFailure = controlFailureToResumeChoiceResult(
-    sendResultToFailure(await params.port.sendSpecialKey('Enter')),
-  );
-  if (sendEnterFailure) return sendEnterFailure;
   params.onSubmitted?.();
 
   await params.wait(params.settleMs);

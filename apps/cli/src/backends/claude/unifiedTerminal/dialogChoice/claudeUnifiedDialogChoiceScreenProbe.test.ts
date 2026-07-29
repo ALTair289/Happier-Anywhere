@@ -172,7 +172,7 @@ describe('createClaudeUnifiedDialogChoiceScreenProbe', () => {
     });
 
     await vi.waitFor(() => expect(port.sentLiteral).toEqual(['1']));
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
     expect(client.getAgentStateSnapshot().completedRequests.claude_dialog_choice_1).toMatchObject({
       status: 'approved',
       dialogId: 'effort_change',
@@ -202,7 +202,7 @@ describe('createClaudeUnifiedDialogChoiceScreenProbe', () => {
     });
 
     await vi.waitFor(() => expect(port.sentLiteral).toEqual(['1']));
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
     expect(client.getAgentStateSnapshot().completedRequests.claude_dialog_choice_1).toMatchObject({
       status: 'approved',
       dialogId: 'trust_folder',
@@ -224,7 +224,7 @@ describe('createClaudeUnifiedDialogChoiceScreenProbe', () => {
       dialogId: 'trust_folder',
     });
     await vi.waitFor(() => expect(port.sentLiteral).toEqual([literal]));
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
     expect(client.getAgentStateSnapshot().requests).toEqual({});
   });
 
@@ -241,6 +241,7 @@ describe('createClaudeUnifiedDialogChoiceScreenProbe', () => {
     });
 
     await vi.waitFor(() => expect(port.sentLiteral).toEqual(['2']));
+    expect(port.sentKeys).toEqual([]);
   });
 
   it('surfaces and answers a strictly parsed generic numbered dialog', async () => {
@@ -279,7 +280,7 @@ describe('createClaudeUnifiedDialogChoiceScreenProbe', () => {
       answers: { [CLAUDE_UNIFIED_DIALOG_CHOICE_QUESTION]: '2' },
     });
     await vi.waitFor(() => expect(port.sentLiteral).toEqual(['2']));
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual([]);
   });
 
   it('surfaces Claude 2.1.217 LSP recommendations through the generic private dialog owner', async () => {

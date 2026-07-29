@@ -654,7 +654,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
         abortSignal: new AbortController().signal,
       })).resolves.toEqual({ status: 'handled' });
       expect(port.sentLiteral).toEqual(['2']);
-      expect(port.sentKeys).toEqual(['Enter']);
+      expect(port.sentKeys).toEqual([]);
     });
 
     await claudeUnifiedTerminalLauncher(session, {
@@ -695,7 +695,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
         abortSignal: new AbortController().signal,
       })).resolves.toEqual({ status: 'handled' });
       expect(port.sentLiteral).toEqual(['1']);
-      expect(port.sentKeys).toEqual(['Enter']);
+      expect(port.sentKeys).toEqual([]);
     });
 
     await claudeUnifiedTerminalLauncher(session, {

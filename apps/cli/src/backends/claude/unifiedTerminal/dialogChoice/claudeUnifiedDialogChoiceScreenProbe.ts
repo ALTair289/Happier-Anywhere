@@ -72,8 +72,6 @@ async function answerClaudeUnifiedDialogChoice(params: Readonly<{
 
   const literalFailure = sendResultToFailure(await params.port.sendLiteralText(selected.answer.text));
   if (literalFailure) return { kind: 'failed' };
-  const enterFailure = sendResultToFailure(await params.port.sendSpecialKey('Enter'));
-  if (enterFailure) return { kind: 'failed' };
 
   await params.wait(params.settleMs);
   const after = await captureScreenState(params.port);

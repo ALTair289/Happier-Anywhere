@@ -88,11 +88,6 @@ async function answerStartupDialogOption(params: Readonly<{
   );
   if (sendOptionFailure) return sendOptionFailure;
 
-  const sendEnterFailure = controlFailureToStartupDialogResult(
-    sendResultToFailure(await params.port.sendSpecialKey('Enter')),
-  );
-  if (sendEnterFailure) return sendEnterFailure;
-
   await params.wait(params.settleMs);
   const after = await captureScreenState(params.port);
   if (after.kind !== 'state') {
