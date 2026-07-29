@@ -19,6 +19,7 @@ export type DeferredApiSessionTarget = Readonly<{
   sessionId: string;
   rpcHandlerManager: RpcHandlerManagerLike;
   beginRuntimeTermination?: () => void;
+  hasRuntimeTerminationStarted?: () => boolean;
   sendSessionEvent: (event: unknown, id?: string) => void;
   sendClaudeSessionMessage: (message: unknown, meta?: unknown) => void;
   recordClaudeJsonlMessageConsumed?: (message: unknown, meta?: unknown) => void;
@@ -540,6 +541,10 @@ export class DeferredApiSessionClient {
     this.runtimeTerminationStarted = true;
     this.target?.beginRuntimeTermination?.();
     if (!this.target) this.cancel();
+  }
+
+  hasRuntimeTerminationStarted(): boolean {
+    return this.runtimeTerminationStarted || this.target?.hasRuntimeTerminationStarted?.() === true;
   }
 
   getBufferStats(): DeferredSessionBufferStats {

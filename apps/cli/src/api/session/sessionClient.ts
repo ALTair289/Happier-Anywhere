@@ -5332,6 +5332,10 @@ export class ApiSessionClient extends EventEmitter {
         this.acceptedCanonicalPendingDeliveryOperationAbortController.abort();
     }
 
+    hasRuntimeTerminationStarted(): boolean {
+        return this.runtimeTerminationStarted;
+    }
+
     private async blockUnresolvedCanonicalPendingDeliveriesBeforeClose(): Promise<void> {
         const localIds = [...this.canonicalPendingDeliveryByLocalId.keys()];
         for (const localId of localIds) {

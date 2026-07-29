@@ -62,6 +62,8 @@ export interface SessionClientPort {
 
   /** Synchronously reject new provider input before runner termination cleanup begins. */
   beginRuntimeTermination?(): void;
+  /** Read the canonical runner-termination fence without inferring intent from child exit codes. */
+  hasRuntimeTerminationStarted?(): boolean;
 
   sendSessionEvent(event: SessionEventMessage, id?: string): void;
   sendClaudeSessionMessage(message: RawJSONLines, meta?: Record<string, unknown>): void;

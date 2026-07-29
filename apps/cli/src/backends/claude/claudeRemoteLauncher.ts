@@ -340,6 +340,15 @@ export { createClaudeReadyHandler as createClaudeRemoteReadyHandler };
 const MAX_CONSECUTIVE_REMOTE_UNIFIED_PARK_RELAUNCHES = 3;
 type ClaudeUnifiedTerminalRuntimeIssueSurfaceResult = ClaudeUnifiedTerminalRuntimeIssueHandlingResult;
 
+export function resolveClaudeRemoteLaunchErrorDisposition(params: Readonly<{
+    exitReason: 'switch' | 'exit' | null;
+    runtimeTerminationStarted: boolean;
+}>): 'ignore' | 'terminate' | 'surface' {
+    if (params.exitReason !== null) return 'ignore';
+    if (params.runtimeTerminationStarted) return 'terminate';
+    return 'surface';
+}
+
 export async function claudeRemoteLauncher(session: Session): Promise<'switch' | 'exit'> {
     logger.debug('[claudeRemoteLauncher] Starting remote launcher');
     const turnAssistantPreviewTracker = createTurnAssistantPreviewTracker();
@@ -1965,14 +1974,25 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     didUserAbortThisLaunch
                     && !exitReason
                     && isClaudeExecutionErrorAfterUserAbort(e);
+                const runtimeTerminationStarted = session.client.hasRuntimeTerminationStarted?.() === true;
                 logger.debug('[remote]: launch error', {
                     ...getLaunchErrorInfo(e),
                     abortError,
                     executionErrorAfterUserAbort,
+                    runtimeTerminationStarted,
                 });
 
-                if (exitReason) {
-                    // Exit already requested (switch/exit).
+                const errorDisposition = resolveClaudeRemoteLaunchErrorDisposition({
+                    exitReason,
+                    runtimeTerminationStarted,
+                });
+                if (errorDisposition === 'terminate') {
+                    // The outer runner is terminating. Do not start another provider launch while
+                    // its cleanup owns this session.
+                    exitReason = 'exit';
+                }
+                if (errorDisposition !== 'surface') {
+                    // The launcher or canonical runner lifecycle already owns teardown.
                 } else if (abortError || executionErrorAfterUserAbort) {
                     if (controller.signal.aborted) {
                         session.client.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
