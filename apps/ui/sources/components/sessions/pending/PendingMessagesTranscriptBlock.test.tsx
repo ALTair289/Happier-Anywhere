@@ -390,6 +390,40 @@ describe('PendingMessagesTranscriptBlock', () => {
         expect(sendPendingMessageNow).not.toHaveBeenCalled();
     });
 
+    it('explains that background work continues when sending to the foreground agent now', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        modalConfirm.mockResolvedValueOnce(false);
+        sessionValue = {
+            active: true,
+            presence: 'online',
+            thinking: false,
+            agentStateVersion: 1,
+            runtimeActivityState: 'active',
+            runtimeActivityActiveCount: 1,
+        };
+
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+            sessionId: 's1',
+            pendingMessages: [{ id: 'p1', text: 'hello', displayText: undefined, createdAt: 0, updatedAt: 0, localId: 'p1', rawRecord: {} }],
+            discardedMessages: [],
+        }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+        const sendNow = screen.findByTestId('pendingMessages.sendNow:p1');
+        expect(sendNow?.props.accessibilityLabel).toBe(
+            t('session.pendingMessages.actions.sendToAgentNow'),
+        );
+
+        await screen.pressByTestIdAsync('pendingMessages.sendNow:p1');
+
+        expect(modalConfirm).toHaveBeenCalledWith(
+            t('session.pendingMessages.sendConfirm.backgroundTitle'),
+            t('session.pendingMessages.sendConfirm.backgroundBody'),
+            { confirmText: t('session.pendingMessages.actions.sendToAgentNow') },
+        );
+        expect(sendPendingMessageNow).not.toHaveBeenCalled();
+    });
+
     it('keeps the durable server row after send-now when provider acceptance owns resolution', async () => {
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         modalConfirm.mockResolvedValueOnce(true);

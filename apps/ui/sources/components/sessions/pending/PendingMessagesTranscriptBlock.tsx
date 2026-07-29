@@ -191,9 +191,6 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
             ?? session?.agentState?.capabilities?.inFlightSteer,
     }, Date.now());
     const canSteerNow = canSteerNowForPendingActions(session, inputReadiness);
-    const sendNowConfirmationBody = inputReadiness.disposition === 'offline'
-        ? t('session.pendingMessages.sendConfirm.resumeBody')
-        : t('session.pendingMessages.sendConfirm.body');
     const pendingQueueDeliveryTiming = useSetting('sessionPendingQueueDeliveryTiming');
 
     // Join the canonical runtime working state into the pending presentation so a message queued
@@ -207,7 +204,26 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         thinkingAt: session?.thinkingAt,
         latestTurnStatus: session?.latestTurnStatus,
         latestTurnStatusObservedAt: session?.latestTurnStatusObservedAt,
+        runtimeActivityState: session?.runtimeActivityState,
+        runtimeActivityActiveCount: session?.runtimeActivityActiveCount,
+        runtimeActivityObservedAt: session?.runtimeActivityObservedAt,
+        runtimeActivityRevision: session?.runtimeActivityRevision,
     }, Date.now());
+    const sendNowActionLabel = canSteerNow
+        ? t('session.pendingMessages.actions.sendNowInterrupt')
+        : sessionRuntimePresentation.backgroundActive
+            ? t('session.pendingMessages.actions.sendToAgentNow')
+            : t('session.pendingMessages.actions.sendNow');
+    const sendNowConfirmationTitle = canSteerNow
+        ? t('session.pendingMessages.sendConfirm.interruptTitle')
+        : sessionRuntimePresentation.backgroundActive
+            ? t('session.pendingMessages.sendConfirm.backgroundTitle')
+            : t('session.pendingMessages.sendConfirm.title');
+    const sendNowConfirmationBody = inputReadiness.disposition === 'offline'
+        ? t('session.pendingMessages.sendConfirm.resumeBody')
+        : sessionRuntimePresentation.backgroundActive
+            ? t('session.pendingMessages.sendConfirm.backgroundBody')
+            : t('session.pendingMessages.sendConfirm.body');
     const sessionRuntimeInput = React.useMemo(() => ({
         isWorking: sessionRuntimePresentation.working,
         runtimeReachable: session?.active === true && session?.presence === 'online',
@@ -544,9 +560,9 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     const handleSendNow = React.useCallback(async (message: PendingMessage) => {
         const localId = getPendingMaterializingKey(message);
         const confirmed = await Modal.confirm(
-            canSteerNow ? t('session.pendingMessages.sendConfirm.interruptTitle') : t('session.pendingMessages.sendConfirm.title'),
+            sendNowConfirmationTitle,
             sendNowConfirmationBody,
-            { confirmText: canSteerNow ? t('session.pendingMessages.actions.sendNowInterrupt') : t('session.pendingMessages.actions.sendNow') },
+            { confirmText: sendNowActionLabel },
         );
         if (!confirmed) return;
 
@@ -568,7 +584,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         } finally {
             setPendingMaterializing(message, false);
         }
-    }, [canSteerNow, deleteAfterSend, props.sessionId, sendNowConfirmationBody, setPendingMaterializing, shouldRemoveDurableRowAfterSend]);
+    }, [deleteAfterSend, props.sessionId, sendNowActionLabel, sendNowConfirmationBody, sendNowConfirmationTitle, setPendingMaterializing, shouldRemoveDurableRowAfterSend]);
 
     const handleRequeueDiscarded = React.useCallback(async (pendingId: string) => {
         try {
@@ -613,9 +629,9 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
 
     const handleSendDiscardedNow = React.useCallback(async (message: DiscardedPendingMessage) => {
         const confirmed = await Modal.confirm(
-            canSteerNow ? t('session.pendingMessages.sendConfirm.interruptTitle') : t('session.pendingMessages.sendConfirm.title'),
+            sendNowConfirmationTitle,
             sendNowConfirmationBody,
-            { confirmText: canSteerNow ? t('session.pendingMessages.actions.sendNowInterrupt') : t('session.pendingMessages.actions.sendNow') },
+            { confirmText: sendNowActionLabel },
         );
         if (!confirmed) return;
 
@@ -634,7 +650,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         } catch (e) {
             Modal.alert(t('common.error'), e instanceof Error ? e.message : t('session.pendingMessages.errors.sendDiscardedFailed'));
         }
-    }, [canSteerNow, props.sessionId, sendNowConfirmationBody, shouldRemoveDurableRowAfterSend]);
+    }, [props.sessionId, sendNowActionLabel, sendNowConfirmationBody, sendNowConfirmationTitle, shouldRemoveDurableRowAfterSend]);
 
     const renderMessage = React.useCallback((args: {
         message: PendingMessage;
@@ -766,7 +782,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
             if (canUseDirectDeliveryActions) {
                 items.push({
                     id: 'sendNow',
-                    title: canSteerNow ? t('session.pendingMessages.actions.sendNowInterrupt') : t('session.pendingMessages.actions.sendNow'),
+                    title: sendNowActionLabel,
                     icon: <Ionicons name="paper-plane-outline" size={16} color={theme.colors.text.secondary} />,
                 });
             }
@@ -1048,7 +1064,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                 {canUseDirectDeliveryActions ? (
                                     <IconAction
                                         testID={`pendingMessages.sendNow:${message.id}`}
-                                        accessibilityLabel={canSteerNow ? t('session.pendingMessages.actions.sendNowInterrupt') : t('session.pendingMessages.actions.sendNow')}
+                                        accessibilityLabel={sendNowActionLabel}
                                         icon="paper-plane-outline"
                                         onPress={() => handleSendNow(message)}
                                     />
@@ -1095,6 +1111,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         pendingInputServerWireMode,
         session,
         sessionRuntimeInput,
+        sendNowActionLabel,
         openMenuKey,
         pendingIndexById,
         props.pendingMessages.length,
@@ -1118,7 +1135,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
             ...(canSteerNow ? [{ id: 'steerNow', title: t('session.pendingMessages.actions.steerNow'), icon: <Ionicons name="navigate-outline" size={16} color={theme.colors.text.secondary} /> } as const] : []),
             {
                 id: 'sendNow',
-                title: canSteerNow ? t('session.pendingMessages.actions.sendNowInterrupt') : t('session.pendingMessages.actions.sendNow'),
+                title: sendNowActionLabel,
                 icon: <Ionicons name="paper-plane-outline" size={16} color={theme.colors.text.secondary} />,
             } as const,
         ];
@@ -1208,7 +1225,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                 ) : null}
                                 <IconAction
                                     testID={`pendingMessages.discarded.sendNow:${message.id}`}
-                                    accessibilityLabel={canSteerNow ? t('session.pendingMessages.actions.sendNowInterrupt') : t('session.pendingMessages.actions.sendNow')}
+                                    accessibilityLabel={sendNowActionLabel}
                                     icon="paper-plane-outline"
                                     onPress={() => handleSendDiscardedNow(message)}
                                 />
@@ -1228,6 +1245,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         handleSteerDiscardedNow,
         isWeb,
         openMenuKey,
+        sendNowActionLabel,
         theme.colors.input.background,
         theme.colors.text.primary,
         theme.colors.text.secondary,
