@@ -7,7 +7,7 @@ import {
 } from './entryPresentation';
 
 describe('entry presentation join', () => {
-    it('reveals a keyed entry only after both the entry owner and renderer settle', () => {
+    it('reveals a started placement on the entry owner confirming the restore landed', () => {
         const pending = createEntryPresentationState(createEntryPresentationKey({
             platform: 'native',
             sessionId: 'session-a',
@@ -16,7 +16,11 @@ describe('entry presentation join', () => {
         const ownerConfirmed = reduceEntryPresentationState(rendererStarted, { type: 'entry-confirmed' });
 
         expect(rendererStarted.released).toBe(false);
-        expect(ownerConfirmed.released).toBe(false);
+        // `entry-confirmed` is the owner's OBSERVED alignment with the restore target, so the
+        // frame is already at the anchor. Waiting for the renderer's own finish after that adds
+        // no correctness and, when the renderer never emits one, leaves the reader behind the
+        // first-paint placeholder until its deadline (live web repro, 2026-07-29).
+        expect(ownerConfirmed.released).toBe(true);
         expect(reduceEntryPresentationState(ownerConfirmed, { type: 'renderer-settled' }).released).toBe(true);
     });
 

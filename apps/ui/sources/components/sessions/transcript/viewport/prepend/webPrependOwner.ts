@@ -266,6 +266,7 @@ export function createWebPrependOwner(): WebPrependOwner {
             rangeReservePx: resolveWebTranscriptPrependRangeReservePx({
                 baselineScrollHeight: pendingAnchor.anchor.metrics.scrollHeight,
                 currentScrollHeight: params.currentMetrics.scrollHeight,
+                viewportHeight: params.currentMetrics.clientHeight,
             }),
             sessionId: params.sessionId,
         };
@@ -543,11 +544,12 @@ function scheduleIndexRecoveryEffect(sessionId: string): WebPrependOwnerEffect {
 
 function resolveRangeReserveEffect(
     anchor: WebTranscriptPrependAnchor,
-    metrics: Pick<WebTranscriptScrollMetrics, 'scrollHeight'>,
+    metrics: Pick<WebTranscriptScrollMetrics, 'clientHeight' | 'scrollHeight'>,
 ): WebPrependOwnerEffect {
     const reservePx = resolveWebTranscriptPrependRangeReservePx({
         baselineScrollHeight: anchor.metrics.scrollHeight,
         currentScrollHeight: metrics.scrollHeight,
+        viewportHeight: metrics.clientHeight,
     });
     return reservePx > 0
         ? { reservePx, type: 'set-web-range-reserve' }

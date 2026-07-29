@@ -13,6 +13,7 @@ function facts(overrides: Partial<TranscriptFirstPaintFacts> = {}): TranscriptFi
         entryPlacementPending: false,
         firstListPaintObserved: true,
         firstListPaintPending: false,
+        initialPlacementPending: false,
         isLoaded: false,
         itemCount: 10,
         markdownRuntimePending: false,
@@ -29,6 +30,10 @@ const coveringFactsByReason: ReadonlyArray<Readonly<{
 }>> = [
     { facts: facts({ nativePlacementPending: true }), reason: 'native-placement' },
     { facts: facts({ entryPlacementPending: true }), reason: 'entry-placement' },
+    {
+        facts: facts({ firstListPaintObserved: false, initialPlacementPending: true }),
+        reason: 'entry-placement',
+    },
     { facts: facts({ markdownRuntimePending: true }), reason: 'markdown-runtime' },
     {
         facts: facts({ firstListPaintObserved: false, routeHydrationPending: true }),
@@ -120,6 +125,53 @@ describe('transcript first-paint presentation policy', () => {
         }));
 
         expect(presentation).toEqual({ covered: false, outcome: 'deadline-fallback' });
+    });
+
+    it('releases the web bottom-entry landing hold on this entry\'s own painted rows', () => {
+        expect(resolveTranscriptFirstPaintPresentation(facts({
+            firstListPaintObserved: true,
+            initialPlacementPending: true,
+            isLoaded: true,
+            itemCount: 10,
+        }))).toEqual({ covered: false, outcome: 'content-presentable' });
+    });
+
+    it('keeps a bottom entry covered until its rows have actually painted', () => {
+        expect(resolveTranscriptFirstPaintPresentation(facts({
+            firstListPaintObserved: false,
+            firstListPaintPending: true,
+            initialPlacementPending: true,
+            isLoaded: true,
+            itemCount: 10,
+        }))).toEqual({ covered: true, reason: 'entry-placement' });
+    });
+
+    it('never reveals painted rows before a keyed anchor restore has placed them', () => {
+        expect(resolveTranscriptFirstPaintPresentation(facts({
+            entryPlacementPending: true,
+            firstListPaintObserved: true,
+            initialPlacementPending: false,
+            isLoaded: true,
+            itemCount: 10,
+        }))).toEqual({ covered: true, reason: 'entry-placement' });
+    });
+
+    it('never reveals painted rows before the native entry restore write', () => {
+        expect(resolveTranscriptFirstPaintPresentation(facts({
+            firstListPaintObserved: true,
+            isLoaded: true,
+            itemCount: 10,
+            nativePlacementPending: true,
+        }))).toEqual({ covered: true, reason: 'native-placement' });
+    });
+
+    it('never reveals painted rows whose Markdown text the web runtime still renders hidden', () => {
+        expect(resolveTranscriptFirstPaintPresentation(facts({
+            firstListPaintObserved: true,
+            isLoaded: true,
+            itemCount: 10,
+            markdownRuntimePending: true,
+        }))).toEqual({ covered: true, reason: 'markdown-runtime' });
     });
 
     it('resolves one fallback delay from the shared mount-settle tuning', () => {

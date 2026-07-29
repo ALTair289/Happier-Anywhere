@@ -45,6 +45,14 @@ function createWindowGapDescriptor(params: Readonly<{
     };
 }
 
+/**
+ * Whether the window display left out a loaded MESSAGE row on the given side of the presented
+ * run. Seqless synthetic chrome is deliberately not counted: omitting it does not mean earlier
+ * or later messages exist, and a gap row claiming so would be a false affordance.
+ *
+ * Scanning only the two sides is sufficient because the presented run is a contiguous source
+ * span (`resolveTranscriptTargetWindowDisplay`) — nothing can be omitted from its middle.
+ */
 function hasOmittedSequenceItem<TItem extends TranscriptTargetWindowDisplayItem>(params: Readonly<{
     direction: 'older' | 'newer';
     displayItems: readonly TItem[];
@@ -157,6 +165,14 @@ export function resolveTranscriptTargetWindowHostFacts<TItem extends TranscriptT
  * floor is contiguous with the live tail. Tail display must not glue the stale prefix
  * onto the island; target-window display is unaffected (jumps below the floor render
  * through their own window). Rows without a seq are synthetic tail chrome and stay.
+ *
+ * The island opens at the first row at or above the floor and everything from there on is kept
+ * whole. Decomposed item seqs are locally non-monotonic (a turn or tool group anchors on its
+ * FIRST message while neighbouring units already covered later seqs), so a below-floor anchor
+ * can sit INSIDE the island rather than in the stale prefix. Filtering the whole list dropped
+ * it from the middle of the tail, and the single older gap row sits at the top — it can never
+ * describe a hole punched below itself, so those rows were withheld with no affordance at all.
+ * Only the stale prefix ahead of the island is still filtered, which is where the gap row is.
  */
 function boundTailItemsToContiguousFloor<TItem extends TranscriptTargetWindowDisplayItem>(params: Readonly<{
     items: readonly TItem[];
@@ -165,12 +181,29 @@ function boundTailItemsToContiguousFloor<TItem extends TranscriptTargetWindowDis
 }>): readonly TItem[] {
     const floorSeq = params.tailContiguousFloorSeq;
     if (typeof floorSeq !== 'number' || !Number.isFinite(floorSeq) || floorSeq <= 0) return params.items;
-    const isAboveFloor = (item: TItem): boolean => {
+    const resolveItemSeq = (item: TItem): number | null => {
         const rawSeq = params.resolveSeq ? params.resolveSeq(item) : item.seq;
-        if (typeof rawSeq !== 'number' || !Number.isFinite(rawSeq) || rawSeq < 0) return true;
-        return Math.trunc(rawSeq) >= floorSeq;
+        if (typeof rawSeq !== 'number' || !Number.isFinite(rawSeq) || rawSeq < 0) return null;
+        return Math.trunc(rawSeq);
     };
-    return params.items.every(isAboveFloor) ? params.items : params.items.filter(isAboveFloor);
+    let islandStartIndex = params.items.length;
+    for (let index = 0; index < params.items.length; index += 1) {
+        const item = params.items[index];
+        if (!item) continue;
+        // Rows without a seq are synthetic chrome: they never open the island.
+        const seq = resolveItemSeq(item);
+        if (seq !== null && seq >= floorSeq) {
+            islandStartIndex = index;
+            break;
+        }
+    }
+    if (islandStartIndex === 0) return params.items;
+    // Ahead of the island: the stale prefix the floor exists to withhold, minus the synthetic
+    // chrome that carries no seq of its own. From the island start: kept whole.
+    const bounded = params.items.filter((item, index) => (
+        index >= islandStartIndex || resolveItemSeq(item) === null
+    ));
+    return bounded.length === params.items.length ? params.items : bounded;
 }
 
 export function useTranscriptTargetWindowHostAdapter<TItem extends TranscriptTargetWindowDisplayItem>(params: Readonly<{

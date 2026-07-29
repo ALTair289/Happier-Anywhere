@@ -152,9 +152,18 @@ export function resolveTranscriptTargetWindowDisplay<TItem extends TranscriptTar
 
     const firstIndex = targetGroup[0]?.index ?? 0;
     const lastIndex = targetGroup[targetGroup.length - 1]?.index ?? -1;
+    // The presented run is the group's CONTIGUOUS SOURCE SPAN, not just its seq-matched
+    // entries. Rows the seq scan skipped — a seqless fork divider/pending block, or a
+    // decomposition unit whose locally non-monotonic anchor seq falls outside the window
+    // range — can sit BETWEEN two entries of the same group. Presenting only the matched
+    // entries punches holes into the middle of the run, and a window gap row is an EDGE
+    // affordance: it can say "older"/"newer", never "and one row in the middle". Those rows
+    // would be withheld with no affordance at all. Keeping the span contiguous is what makes
+    // the older/newer gap rows a complete description of what the window left out. The span
+    // is still bounded by the group, so this cannot widen the render window beyond it.
     return {
         mode: 'window',
-        items: targetGroup.map((entry) => entry.item),
+        items: targetGroup.length > 0 ? params.items.slice(firstIndex, lastIndex + 1) : [],
         windowId: params.windowState.windowId,
         targetSeq,
         targetPresent: true,

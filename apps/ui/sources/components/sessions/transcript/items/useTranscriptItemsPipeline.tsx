@@ -975,9 +975,11 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
     const renderedRevealRecordGeneration = revealedPaintedContentRef.current.generation;
     const presentation = resolveTranscriptFirstPaintPresentation({
         deadlineElapsed: firstPaintDeadlineElapsedSessionId === sessionId,
-        // One placement fact: whichever owner is placing this session's entry viewport. The
-        // keyed join and the bottom-entry landing are mutually exclusive by construction above.
-        entryPlacementPending: entryPlacementPending || initialPlacementPending,
+        // Two placements, two owners, two readiness sources — mutually exclusive by construction
+        // above. The keyed join is released by its own owner-plus-renderer outcome and outranks
+        // the paint it places; the bottom-entry landing is released by the renderer confirmation
+        // or, sooner, by the rows it only settles having painted.
+        entryPlacementPending,
         firstListPaintObserved,
         // Only the web Legend renderer reports an onLoad first-paint fact; the other
         // configurations have no such fact and must not be held waiting for one.
@@ -985,6 +987,7 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
             platformOS === 'web' &&
             rendererKind === 'legendList' &&
             !firstListPaintObserved,
+        initialPlacementPending,
         isLoaded,
         itemCount,
         // Both remaining data-availability facts only describe rows the transcript already

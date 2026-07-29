@@ -27,7 +27,6 @@ export function useTranscriptNativeMountSettleLifecycle(params: Readonly<{
     sessionOpenLatch: SessionOpenLatch;
     setNativeMountSettleDeadlineReached: (value: boolean) => void;
     setNativeMountSettleStable: (value: boolean) => void;
-    usesNativeFlashListBottomMaintenance: boolean;
 }>) {
     const {
         closeEntryViewportOwnership,
@@ -47,7 +46,6 @@ export function useTranscriptNativeMountSettleLifecycle(params: Readonly<{
         sessionOpenLatch,
         setNativeMountSettleDeadlineReached,
         setNativeMountSettleStable,
-        usesNativeFlashListBottomMaintenance,
     } = params;
 
     const observeMountSettleMetrics = React.useCallback((options: Readonly<{
@@ -103,8 +101,19 @@ export function useTranscriptNativeMountSettleLifecycle(params: Readonly<{
         setNativeMountSettleStable,
     ]);
 
+    // Mount settle is a native placement fact, not a renderer fact: its inputs are the list layout
+    // commit and composer inset observations, which the host produces identically under Legend and
+    // FlashList. This producer used to install only when `usesNativeFlashListBottomMaintenance`
+    // (`rendererKind === 'flashList' && !web`) was true, so under the shipped Legend renderer it
+    // never ran: `nativeMountSettleStable` stayed false forever and the deadline never fired,
+    // leaving the reveal gate it feeds with no facts at all.
+    //
+    // The deadline below is the sole bound on that gate. It must remain unconditional on native:
+    // `resolveNativeMountSettleIntervalDecision` returns `deadline` as soon as `nowMs` passes
+    // `transcriptInitialFillBudgetMs + transcriptMountSettleQuiescentWindowMs`, whatever the settle
+    // state, so a transcript can never be withheld waiting for a signal that will not arrive.
     React.useEffect(() => {
-        if (!usesNativeFlashListBottomMaintenance) return undefined;
+        if (platformOS === 'web') return undefined;
         const tuning = sync.getSyncTuning();
         const intervalMs = tuning.transcriptMountSettleQuiescentWindowMs;
         const deadlineMs = Date.now() + tuning.transcriptInitialFillBudgetMs + intervalMs;
@@ -127,8 +136,8 @@ export function useTranscriptNativeMountSettleLifecycle(params: Readonly<{
         applyNativeMountSettleIntervalDecision,
         lifecycleHost,
         nativeMountSettleAutoPinSuppressedRef,
+        platformOS,
         sessionId,
-        usesNativeFlashListBottomMaintenance,
     ]);
 
     const recordLayoutCommitObserved = React.useCallback(() => {
