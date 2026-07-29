@@ -279,13 +279,13 @@ const unitStyles = StyleSheet.create((theme) => ({
         backgroundColor: theme.colors.surface.inset ?? theme.colors.surface.base,
     },
     unitCardsHeaderCap: {
-        borderTopLeftRadius: 14,
-        borderTopRightRadius: 14,
+        borderTopLeftRadius: theme.borderRadius.xl,
+        borderTopRightRadius: theme.borderRadius.xl,
         overflow: 'hidden',
     },
     unitCardsFooterCap: {
-        borderBottomLeftRadius: 14,
-        borderBottomRightRadius: 14,
+        borderBottomLeftRadius: theme.borderRadius.xl,
+        borderBottomRightRadius: theme.borderRadius.xl,
         overflow: 'hidden',
     },
     unitFeed: {
@@ -296,14 +296,14 @@ const unitStyles = StyleSheet.create((theme) => ({
         paddingHorizontal: 10,
     },
     unitFeedBackgroundHeaderCap: {
-        borderTopLeftRadius: 14,
-        borderTopRightRadius: 14,
+        borderTopLeftRadius: theme.borderRadius.xl,
+        borderTopRightRadius: theme.borderRadius.xl,
         overflow: 'hidden',
         paddingTop: 6,
     },
     unitFeedBackgroundFooterCap: {
-        borderBottomLeftRadius: 14,
-        borderBottomRightRadius: 14,
+        borderBottomLeftRadius: theme.borderRadius.xl,
+        borderBottomRightRadius: theme.borderRadius.xl,
         overflow: 'hidden',
         paddingBottom: 6,
     },

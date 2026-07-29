@@ -25,10 +25,48 @@ function isTerminalConnectWebPathname(pathname: string | null | undefined): bool
     return route === TERMINAL_CONNECT_ROUTE;
 }
 
-const stylesheet = StyleSheet.create(() => ({
+/**
+ * Radius on the sidebar-facing side of the content sheet only. The window-facing edges stay
+ * square so the sheet reads as flush to the window and never stacks its own curve on top of
+ * the OS window's rounded corners.
+ */
+const CONTENT_SHEET_SEAM_RADIUS_PX = 16;
+
+/** Width of the seam shadow strip. Must exceed twice the shadow's negative spread. */
+const CONTENT_SHEET_SEAM_SHADOW_WIDTH_PX = 16;
+
+const stylesheet = StyleSheet.create((theme) => ({
     desktopDrawerRoot: {
         flex: 1,
         position: 'relative',
+        // The plane the content sheet lies on. Painted here so the sheet's rounded
+        // sidebar-facing corners reveal the canvas rather than whatever is behind the app.
+        backgroundColor: theme.colors.background.canvas,
+    },
+    /**
+     * The seam. A zero-width overlay sitting exactly on the sidebar/content boundary, above
+     * both, casting the sheet's lift shadow leftward onto the sidebar.
+     *
+     * It exists because the shadow cannot be declared on the scene itself: react-navigation
+     * wraps the scene in an overflow:hidden container, which clips any shadow before it
+     * reaches the sidebar. This overlay is outside that container, so it is the only place
+     * the cast can come from.
+     *
+     * The strip is anchored so its RIGHT edge lands on the seam, and it is wide enough that a
+     * negative spread still leaves a positive shadow box — a 1px strip with a -6px spread
+     * collapses to negative dimensions and paints nothing at all. x-offset only, so the shadow
+     * falls on the sidebar and never washes over the sheet. Dark needs roughly 3x the alpha to
+     * register over a dark canvas.
+     */
+    contentSheetSeamShadow: {
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        width: CONTENT_SHEET_SEAM_SHADOW_WIDTH_PX,
+        zIndex: 2,
+        boxShadow: theme.dark
+            ? '-8px 0 14px -4px rgba(0, 0, 0, 0.55)'
+            : '-8px 0 14px -4px rgba(0, 0, 0, 0.18)',
     },
 }));
 
@@ -203,16 +241,54 @@ export const SidebarNavigator = React.memo((props: SidebarNavigatorProps) => {
             drawerType: 'permanent' as const,
             drawerStyle: {
                 backgroundColor: theme.colors.background.canvas,
-                borderRightWidth: StyleSheet.hairlineWidth,
-                borderRightColor: theme.colors.border.default,
+                // No right border: the seam is now the content sheet's rounded edge plus its
+                // shadow. A border here would double the line and square off the sheet's curve.
                 width: drawerWidth,
+                // react-navigation stacks the permanent drawer at z-index 1, above the scene,
+                // which swallows the sheet's left-cast shadow entirely. Dropping the drawer to
+                // the default stacking order lets DOM order decide (drawer first, scene second),
+                // so the sheet paints — and casts — over the sidebar as it should. Only the
+                // permanent drawer is affected; sliding drawer types keep their own stacking.
+                zIndex: 0,
+            },
+            // The content sheet: flush to the window on top/right/bottom, treated only on the
+            // edge that meets the sidebar.
+            //
+            // Deliberately NO backgroundColor — each route keeps painting whatever it paints
+            // today (sessions paint surface.base, some screens paint canvas), and this only
+            // clips it. So the seam changes geometry, never tone.
+            //
+            // The lift shadow is x-offset with a NEGATIVE spread so it hugs the seam instead of
+            // fanning across the sidebar. Web-only: a negative-spread, x-offset-only shadow is
+            // not expressible in the native shadow API, so native keeps its hairline.
+            sceneStyle: {
+                borderTopLeftRadius: CONTENT_SHEET_SEAM_RADIUS_PX,
+                borderBottomLeftRadius: CONTENT_SHEET_SEAM_RADIUS_PX,
+                overflow: 'hidden' as const,
+                // NOTE: the shadow is NOT cast from here. react-navigation wraps the scene in a
+                // container with overflow:hidden, so a leftward shadow declared on this element
+                // is clipped at the seam and never reaches the sidebar. It is drawn by the
+                // dedicated seam overlay below instead.
+                ...(Platform.OS === 'web'
+                    ? {}
+                    : {
+                        borderLeftWidth: StyleSheet.hairlineWidth,
+                        borderLeftColor: theme.colors.border.default,
+                    }),
             },
             drawerActiveTintColor: 'transparent',
             drawerInactiveTintColor: 'transparent',
             drawerItemStyle: { display: 'none' as const },
             drawerLabelStyle: { display: 'none' as const },
         };
-    }, [desktopDrawerEnabled, showPermanentDrawer, drawerWidth, theme.colors.border.default, theme.colors.background.canvas]);
+    }, [
+        desktopDrawerEnabled,
+        showPermanentDrawer,
+        drawerWidth,
+        theme.colors.border.default,
+        theme.colors.background.canvas,
+        theme.dark,
+    ]);
 
     // Always render SidebarView but hide it when not needed
     const drawerContent = React.useCallback(
@@ -277,6 +353,12 @@ export const SidebarNavigator = React.memo((props: SidebarNavigatorProps) => {
                 screenOptions={drawerNavigationOptions}
                 drawerContent={showPermanentDrawer ? drawerContent : undefined}
             />
+            {Platform.OS === 'web' && showPermanentDrawer ? (
+                <View
+                    pointerEvents="none"
+                    style={[styles.contentSheetSeamShadow, { left: drawerWidth - CONTENT_SHEET_SEAM_SHADOW_WIDTH_PX }]}
+                />
+            ) : null}
         </DesktopMainContentDragSurface>
     );
 });

@@ -1822,7 +1822,7 @@ const styles = StyleSheet.create((theme) => ({
       backgroundColor: theme.colors.message.user.background,
       paddingHorizontal: 14,
       paddingVertical: 8,
-      borderRadius: 12,
+      borderRadius: theme.borderRadius.xl,
       maxWidth: '100%',
     },
   userStructuredMessageWrapper: {
@@ -1840,9 +1840,11 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.message.event.foreground,
   },
   agentMessageContainer: {
+    // No background, border or overflow clip on this container, so a radius here
+    // renders nothing — it only made the transcript's radius census look wider than
+    // the surfaces the user can actually see. Removed rather than unified.
     marginHorizontal: 16,
     paddingBottom: 22,
-    borderRadius: 16,
     alignSelf: 'stretch',
     position: 'relative',
     maxWidth: '100%',

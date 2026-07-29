@@ -134,7 +134,7 @@ export const ToolCallsGroupViewWithSessionCommon = React.memo((props: ToolCallsG
     const showFeedBackground = normalizedChromeMode === 'activity_feed' && transcriptToolCallsGroupShowBackground === true;
     const feedBackgroundStyle = showFeedBackground
         ? {
-            borderRadius: 14,
+            borderRadius: theme.borderRadius.xl,
             backgroundColor: theme.colors.feed.card.background,
             overflow: 'hidden' as const,
             paddingHorizontal: 10,
@@ -315,7 +315,7 @@ const styles = StyleSheet.create((theme) => ({
         marginBottom: 22,
     },
     containerCards: {
-        borderRadius: 14,
+        borderRadius: theme.borderRadius.xl,
         backgroundColor: theme.colors.surface.inset ?? theme.colors.surface.base,
         overflow: 'hidden',
     },

@@ -29,10 +29,10 @@ export type SidebarViewProps = Readonly<{
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
         flex: 1,
-        borderStyle: 'solid',
+        // No border. This drew a hairline on all FOUR sides of the sidebar, so the top,
+        // bottom and left strokes ran along the window edge for no reason, and the right
+        // stroke doubled the drawer's own divider at the seam.
         backgroundColor: theme.colors.background.canvas,
-        borderWidth: StyleSheet.hairlineWidth,
-        borderColor: theme.colors.border.default,
         overflow: 'visible',
     },
 }));
