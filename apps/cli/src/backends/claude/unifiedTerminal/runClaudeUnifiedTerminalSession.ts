@@ -2178,6 +2178,19 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                       ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS,
                     onStalled: async () => {
                       await dialogChoiceScreenProbe?.probe();
+                      if (!captureInputStateForGuard || !steerDraftClearPort) return;
+                      const compactResidue = await clearOwnLeftoverComposerDraft({
+                        captureInputState: () => captureInputStateForGuard(activeHandle),
+                        sendClearKey: async () => {
+                          await steerDraftClearPort.sendSpecialKey('Escape');
+                        },
+                        ownComposerTexts: { matches: () => false },
+                        resumeSummaryCompactResidue,
+                      });
+                      if (compactResidue.status !== 'cleared') return;
+                      lifecycleBridge?.settleAttemptLocalCommandAborted(
+                        'resume_summary_compact_idle_residue',
+                      );
                     },
                     onStarvation: () => {
                       // Mid-turn stall budget exhausted with the turn still active (e.g. an API-retry

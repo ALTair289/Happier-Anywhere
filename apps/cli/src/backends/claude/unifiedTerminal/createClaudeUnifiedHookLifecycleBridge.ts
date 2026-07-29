@@ -42,6 +42,7 @@ export type ClaudeUnifiedHookLifecycleBridge = ClaudeUnifiedStartableDisposable 
   observeLiveProviderActivityRow(message: unknown, expectedSessionId: string): void;
   handleProviderActivityObservationLoss(reason: string): void;
   settleAttemptLocalCommandCompleted(): Promise<void>;
+  settleAttemptLocalCommandAborted(source: string): boolean;
 }>;
 
 export type ClaudeUnifiedPromptTurnTerminalEvent = Readonly<{
@@ -697,6 +698,19 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
       tracker?.handleProviderActivityObservationLoss(reason);
     },
     settleAttemptLocalCommandCompleted: settleCompletedTurn,
+    settleAttemptLocalCommandAborted(source) {
+      const activeLifecycle = lifecycle;
+      if (!activeLifecycle) return false;
+      const snapshot = activeLifecycle.snapshot();
+      if (!snapshot.active || snapshot.terminal) return false;
+      activeLifecycle.observe({
+        type: 'turn_terminal',
+        providerTurnId: snapshot.providerTurnId,
+        reason: 'aborted',
+        source,
+      });
+      return true;
+    },
     dispose() {
       if (disposed) return;
       disposed = true;

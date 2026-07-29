@@ -132,6 +132,23 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
       },
       async sendLiteralText(text) {
         expect(text).toBe('1');
+        resumeAnswerSubmitted = true;
+        screenText = composerScreen('/compact ');
+        const hook = subscribedHook;
+        if (!hook) throw new Error('resume answer ran before the provider hook bridge subscribed');
+        hook({
+          hook_event_name: 'SessionStart',
+          session_id: claudeSessionId,
+          transcript_path: transcriptPath,
+          source: 'resume',
+        });
+        hook({
+          hook_event_name: 'UserPromptSubmit',
+          session_id: claudeSessionId,
+          transcript_path: transcriptPath,
+          prompt: '/compact',
+        });
+        compactPromptSubmitted = true;
         return { status: 'sent', at: Date.now() };
       },
       async sendRawSequence() {
@@ -139,25 +156,7 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
       },
       async sendSpecialKey(key) {
         sentKeys.push(key);
-        if (key === 'Enter') {
-          resumeAnswerSubmitted = true;
-          screenText = composerScreen('/compact ', true);
-          const hook = subscribedHook;
-          if (!hook) throw new Error('resume answer ran before the provider hook bridge subscribed');
-          hook({
-            hook_event_name: 'SessionStart',
-            session_id: claudeSessionId,
-            transcript_path: transcriptPath,
-            source: 'resume',
-          });
-          hook({
-            hook_event_name: 'UserPromptSubmit',
-            session_id: claudeSessionId,
-            transcript_path: transcriptPath,
-            prompt: '/compact',
-          });
-          compactPromptSubmitted = true;
-        } else if (key === 'Escape') {
+        if (key === 'Escape') {
           screenText = composerScreen('');
         }
         return { status: 'sent', at: Date.now() };
@@ -230,6 +229,8 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
           },
         }),
       lifecycleCompletionQuiescenceMs: 0,
+      dialogTurnStallScreenProbeQuietMs: 10,
+      dialogTurnStallScreenProbeMaxAttempts: 1,
       dialogTurnEndScreenProbeDelaysMs: [],
     });
 
@@ -237,13 +238,6 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
       await waitUntil(() => resumeAnswerSubmitted);
       await waitUntil(() => compactPromptSubmitted);
       await waitUntil(() => compactResidueProvenanceArmed);
-      screenText = composerScreen('/compact ');
-      subscribedHook?.({
-        hook_event_name: 'Stop',
-        session_id: claudeSessionId,
-        transcript_path: transcriptPath,
-        background_tasks: [],
-      });
 
       await waitUntil(() => sentKeys.includes('Escape'));
       await waitUntil(() => injectUserPrompt.mock.calls.length === 1);
@@ -259,7 +253,7 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
         message: { role: 'user', content: pendingPrompt },
       })}\n`);
       await waitUntil(() => onPromptAcceptedByProvider.mock.calls.length === 1);
-      expect(sentKeys).toEqual(['Enter', 'Escape']);
+      expect(sentKeys).toEqual(['Escape']);
       expect(injectUserPrompt).toHaveBeenCalledTimes(1);
       expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
         message: pendingPrompt,
