@@ -32,8 +32,8 @@ function isTerminalConnectWebPathname(pathname: string | null | undefined): bool
  */
 const CONTENT_SHEET_SEAM_RADIUS_PX = 16;
 
-/** Width of the seam shadow strip. Must exceed twice the shadow's negative spread. */
-const CONTENT_SHEET_SEAM_SHADOW_WIDTH_PX = 16;
+/** Width of the seam shadow strip. Kept narrow and butted against the seam so the cast hugs it. */
+const CONTENT_SHEET_SEAM_SHADOW_WIDTH_PX = 2;
 
 const stylesheet = StyleSheet.create((theme) => ({
     desktopDrawerRoot: {
@@ -52,11 +52,11 @@ const stylesheet = StyleSheet.create((theme) => ({
      * reaches the sidebar. This overlay is outside that container, so it is the only place
      * the cast can come from.
      *
-     * The strip is anchored so its RIGHT edge lands on the seam, and it is wide enough that a
-     * negative spread still leaves a positive shadow box — a 1px strip with a -6px spread
-     * collapses to negative dimensions and paints nothing at all. x-offset only, so the shadow
-     * falls on the sidebar and never washes over the sheet. Dark needs roughly 3x the alpha to
-     * register over a dark canvas.
+     * Geometry matters more than it looks. The strip's RIGHT edge sits on the seam and the cast
+     * is x-offset only with NO negative spread: a negative spread on a narrow strip either
+     * collapses the shadow to nothing (spread >= half the width) or pushes it clear of the seam,
+     * leaving a flat gap between the shadow and the edge it is supposed to describe. Blur alone
+     * gives the falloff. Dark needs roughly 3x the alpha to register over a dark canvas.
      */
     contentSheetSeamShadow: {
         position: 'absolute',
@@ -65,8 +65,8 @@ const stylesheet = StyleSheet.create((theme) => ({
         width: CONTENT_SHEET_SEAM_SHADOW_WIDTH_PX,
         zIndex: 2,
         boxShadow: theme.dark
-            ? '-8px 0 14px -4px rgba(0, 0, 0, 0.55)'
-            : '-8px 0 14px -4px rgba(0, 0, 0, 0.18)',
+            ? '-5px 0 12px rgba(0, 0, 0, 0.42)'
+            : '-5px 0 12px rgba(0, 0, 0, 0.13)',
     },
 }));
 
