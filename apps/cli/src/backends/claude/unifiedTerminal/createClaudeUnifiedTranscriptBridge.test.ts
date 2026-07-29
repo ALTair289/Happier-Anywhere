@@ -714,6 +714,26 @@ describe('createClaudeUnifiedTranscriptBridge', () => {
           patch: { status: 'killed' },
         }),
       });
+
+      await appendRawJsonl(secondTranscriptPath, {
+        type: 'queue-operation',
+        operation: 'enqueue',
+        sessionId: 'activity-session-2',
+        content: [
+          '<task-notification>',
+          '<task-id>live-task</task-id>',
+          '<status>completed</status>',
+          '</task-notification>',
+        ].join(''),
+      });
+      await waitUntil(() => onLiveProviderTaskJsonlValue.mock.calls.length === 3);
+      expect(onLiveProviderTaskJsonlValue).toHaveBeenLastCalledWith({
+        sessionId: 'activity-session-2',
+        value: expect.objectContaining({
+          type: 'queue-operation',
+          operation: 'enqueue',
+        }),
+      });
     } finally {
       await bridge.dispose();
     }

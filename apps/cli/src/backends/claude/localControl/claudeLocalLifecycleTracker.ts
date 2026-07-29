@@ -17,7 +17,10 @@ import {
   type ClaudeProviderTaskActivity,
 } from '../providerActivity/createClaudeProviderActivityLedger';
 import { readClaudeTranscriptTurnSignal } from './readClaudeTranscriptTurnSignal';
-import { isClaudeTranscriptTaskNotification } from './readClaudeTranscriptProviderActivity';
+import {
+  isClaudeTranscriptTaskNotification,
+  readClaudeTranscriptProviderActivity,
+} from './readClaudeTranscriptProviderActivity';
 import type { createClaudeProviderRuntimeActivityAdapter } from '../providerActivity/createClaudeProviderRuntimeActivityAdapter';
 
 function readNonEmptyString(value: unknown): string | null {
@@ -117,8 +120,23 @@ export function createClaudeLocalLifecycleTracker(opts: Readonly<{
     const row = message as Record<string, unknown>;
     if (row.isReplay === true || row.is_replay === true) return;
     const activity = readClaudeProviderTaskActivity(message);
-    if (!activity || activity.sessionId !== expectedSessionId) return;
-    observeProviderActivityFact(activity);
+    if (activity) {
+      if (activity.sessionId !== expectedSessionId) return;
+      observeProviderActivityFact(activity);
+      return;
+    }
+
+    const transcriptActivity = readClaudeTranscriptProviderActivity(message as RawJSONLines);
+    if (
+      transcriptActivity?.type !== 'task_notification'
+      || !transcriptActivity.terminal
+      || !transcriptActivity.taskId
+    ) return;
+    observeProviderActivityFact({
+      type: 'terminal',
+      sessionId: expectedSessionId,
+      taskId: transcriptActivity.taskId,
+    });
   };
 
   const observe = (event: LocalTurnLifecycleEvent | null): void => {

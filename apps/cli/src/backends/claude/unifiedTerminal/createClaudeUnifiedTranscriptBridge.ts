@@ -287,7 +287,7 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
     const row = input.value && typeof input.value === 'object' && !Array.isArray(input.value)
       ? input.value as Readonly<Record<string, unknown>>
       : null;
-    const rawSessionId = row?.session_id;
+    const rawSessionId = row?.session_id ?? row?.sessionId;
     const rowSessionId = typeof rawSessionId === 'string' ? rawSessionId.trim() : '';
     if (!rowSessionId || rowSessionId !== input.sessionId) return;
     opts.onLiveProviderTaskJsonlValue?.(input);
