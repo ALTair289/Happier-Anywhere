@@ -1062,8 +1062,16 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
             },
         });
         try {
+            // The deadline contract is only observable while the viewport is left measurably
+            // short of the live tail, so the growth must be one the same render's measurement
+            // pass cannot cancel. A fixed delta is not: this mount lands with cold per-row
+            // over-estimate still in the content length, and the corrections that arrive with
+            // the grown row subtract it, which can erase a similarly sized growth outright.
+            // Sizing the grown tail row past the parked offset plus a full viewport leaves a
+            // gap larger than the rest of the list, so no estimate correction can close it.
+            const grownLastHeight = 120 + scrollElement.scrollTop + scrollElement.clientHeight;
             await act(async () => {
-                root.render(render(900));
+                root.render(render(grownLastHeight));
             });
             act(() => {
                 listRef.current?.observeInitialPresentationSettlement?.({
