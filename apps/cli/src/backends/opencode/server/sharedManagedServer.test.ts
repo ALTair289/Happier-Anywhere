@@ -248,7 +248,7 @@ describe('resolveSharedManagedOpenCodeServerBaseUrl', () => {
     }));
   });
 
-  it('does not reuse a healthy v2 managed server owned by a previous daemon instance', async () => {
+  it('reuses a healthy current-generation managed server across daemon replacement', async () => {
     const commandLine = 'opencode serve --hostname=127.0.0.1 --port=1234';
     const deps = {
       withLock: async <T>(fn: () => Promise<T>) => await fn(),
@@ -283,19 +283,11 @@ describe('resolveSharedManagedOpenCodeServerBaseUrl', () => {
 
     const out = await resolveSharedManagedOpenCodeServerBaseUrl(deps);
 
-    expect(out).toEqual({ baseUrl: 'http://127.0.0.1:9999', didStart: true });
-    expect(deps.probeHealth).not.toHaveBeenCalled();
+    expect(out).toEqual({ baseUrl: 'http://127.0.0.1:1234', didStart: false });
+    expect(deps.probeHealth).toHaveBeenCalledWith('http://127.0.0.1:1234');
     expect(deps.killPid).not.toHaveBeenCalled();
-    expect(deps.startServer).toHaveBeenCalledTimes(1);
-    expect(deps.writeState.mock.calls.at(-1)?.[0]).toMatchObject({
-      v: 2,
-      baseUrl: 'http://127.0.0.1:9999',
-      pid: 222,
-      status: 'ready',
-      launchEnvFingerprint: 'scope-a',
-      activeServerDir: '/tmp/happy/servers/cloud',
-      daemonInstanceId: 'new-daemon',
-    });
+    expect(deps.startServer).not.toHaveBeenCalled();
+    expect(deps.writeState).not.toHaveBeenCalled();
   });
 
   it('Lane F: a same-account token refresh keeps the launch fingerprint stable so the managed server is reused (zero restarts)', async () => {

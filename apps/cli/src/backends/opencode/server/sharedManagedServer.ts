@@ -85,7 +85,6 @@ type ReleaseForAuthSwitchDeps = Readonly<{
   readProcessStartTimeMs: (pid: number) => Promise<number | null> | number | null;
   killPid: (pid: number, drainMs: number) => Promise<boolean> | boolean;
   currentActiveServerDir: string;
-  currentDaemonInstanceId: string;
   expectedOwnerToken: string;
   drainMs: number;
   trackedClaimCountForLaunchFingerprint?: () => Promise<number> | number;
@@ -107,7 +106,6 @@ type ReleaseForAuthSwitchResult = Readonly<{
     | 'state_missing'
     | 'state_untrusted'
     | 'owner_token_mismatch'
-    | 'daemon_instance_mismatch'
     | 'active_server_dir_mismatch'
     | 'pid_dead'
     | 'process_identity_mismatch'
@@ -128,18 +126,6 @@ function readPositiveInt(value: unknown): number | null {
   const numeric = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return null;
   return Math.floor(numeric);
-}
-
-function stateBelongsToCurrentDaemonOwner(
-  state: SharedManagedOpenCodeServerState,
-  deps: Pick<ResolveDeps, 'currentActiveServerDir' | 'currentDaemonInstanceId'>,
-): boolean {
-  if (state.v !== 2) return true;
-  const currentDaemonInstanceId = readNonEmptyString(deps.currentDaemonInstanceId ?? null);
-  const currentActiveServerDir = readNonEmptyString(deps.currentActiveServerDir ?? null);
-  if (!currentDaemonInstanceId || !currentActiveServerDir) return true;
-  return state.daemonInstanceId === currentDaemonInstanceId
-    && state.activeServerDir === currentActiveServerDir;
 }
 
 export function resolveManagedOpenCodeDaemonOwnerIdFromState(
@@ -191,7 +177,6 @@ type ManagedOpenCodeStartupScanStateDecision = Readonly<{
   reason:
     | 'verified_live_state'
     | 'state_untrusted'
-    | 'daemon_instance_mismatch'
     | 'active_server_dir_mismatch'
     | 'pid_dead'
     | 'process_identity_mismatch';
@@ -240,7 +225,6 @@ async function resolveOpenCodeConnectedServiceInFlightTurnQueryBestEffort(): Pro
 
 export function decideManagedOpenCodeStartupScanStateAction(input: Readonly<{
   state: SharedManagedOpenCodeServerState;
-  currentDaemonInstanceId: string;
   currentActiveServerDir: string;
   isPidAlive: boolean;
   processInfo: ManagedServerProcessInfo | null;
@@ -248,9 +232,6 @@ export function decideManagedOpenCodeStartupScanStateAction(input: Readonly<{
 }>): ManagedOpenCodeStartupScanStateDecision {
   if (!isTrustedManagedOpenCodeStateV2(input.state)) {
     return { action: 'drop', reason: 'state_untrusted' };
-  }
-  if (input.state.daemonInstanceId !== input.currentDaemonInstanceId) {
-    return { action: 'drop', reason: 'daemon_instance_mismatch' };
   }
   if (input.state.activeServerDir !== input.currentActiveServerDir) {
     return { action: 'drop', reason: 'active_server_dir_mismatch' };
@@ -290,12 +271,11 @@ export function decideManagedOpenCodeStartupScanOrphanReapAction(input: Readonly
 
 async function hasTrustedManagedOpenCodeStateIdentityForTermination(
   state: SharedManagedOpenCodeServerState,
-  deps: Pick<ResolveDeps, 'currentActiveServerDir' | 'currentDaemonInstanceId' | 'readProcessStartTimeMs'>,
+  deps: Pick<ResolveDeps, 'currentActiveServerDir' | 'readProcessStartTimeMs'>,
   processInfo: ManagedServerProcessInfo | null,
 ): Promise<boolean> {
-  const currentDaemonInstanceId = readNonEmptyString(deps.currentDaemonInstanceId ?? null);
   const currentActiveServerDir = readNonEmptyString(deps.currentActiveServerDir ?? null);
-  if (!currentDaemonInstanceId || !currentActiveServerDir) return false;
+  if (!currentActiveServerDir) return false;
 
   const observedStartTimeMs = await Promise.resolve(
     deps.readProcessStartTimeMs
@@ -304,7 +284,6 @@ async function hasTrustedManagedOpenCodeStateIdentityForTermination(
   ).catch(() => null);
   const decision = decideManagedOpenCodeStartupScanStateAction({
     state,
-    currentDaemonInstanceId,
     currentActiveServerDir,
     isPidAlive: true,
     processInfo,
@@ -519,9 +498,8 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
       && state.launchEnvFingerprint !== desiredLaunchFingerprint,
     );
     if (state && deps.isPidAlive(state.pid) && isLoopbackManagedOpenCodeBaseUrl(state.baseUrl)) {
-      const ownerMismatch = !stateBelongsToCurrentDaemonOwner(state, deps);
       const brokerLoadNonceMissing = deps.currentBrokerLoadNonceRequired === true && !state.brokerLoadNonce;
-      const healthy = ownerMismatch || launchFingerprintMismatch || brokerLoadNonceMissing
+      const healthy = launchFingerprintMismatch || brokerLoadNonceMissing
         ? false
         : await deps.probeHealth(state.baseUrl).catch(() => false);
       if (healthy) {
@@ -549,7 +527,7 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
             await invokeKillPidBestEffort(deps.killPid, state.pid);
           }
         }
-      } else if (!ownerMismatch && deps.getProcessInfo && deps.killPid) {
+      } else if (deps.getProcessInfo && deps.killPid) {
         const info = await deps.getProcessInfo(state.pid).catch(() => null);
         if (await hasTrustedManagedOpenCodeStateIdentityForTermination(state, deps, info)) {
           await invokeKillPidBestEffort(deps.killPid, state.pid);
@@ -802,11 +780,6 @@ export async function releaseForAuthSwitchFromState(
       return { released: false, reason: 'owner_token_mismatch' };
     }
 
-    if (state.daemonInstanceId !== deps.currentDaemonInstanceId) {
-      await deps.removeState().catch(() => {});
-      return { released: false, reason: 'daemon_instance_mismatch' };
-    }
-
     if (state.activeServerDir !== deps.currentActiveServerDir) {
       await deps.removeState().catch(() => {});
       return { released: false, reason: 'active_server_dir_mismatch' };
@@ -894,7 +867,6 @@ export async function releaseForAuthSwitch(
       });
     },
     currentActiveServerDir: configuration.activeServerDir,
-    currentDaemonInstanceId: resolveCurrentManagedServerOwnerId(),
     expectedOwnerToken: normalizedOwnerToken,
     drainMs,
     trackedClaimCountForLaunchFingerprint: () => {
@@ -951,7 +923,6 @@ export async function ensureSharedManagedOpenCodeServerBaseUrl(params: Readonly<
           : null;
         const decision = decideManagedOpenCodeStartupScanStateAction({
           state,
-          currentDaemonInstanceId: resolveCurrentManagedServerOwnerId(),
           currentActiveServerDir: configuration.activeServerDir,
           isPidAlive: pidAlive,
           processInfo,

@@ -45,7 +45,29 @@ describe('releaseForAuthSwitchFromState', () => {
       readProcessStartTimeMs: async () => 2501,
       killPid,
       currentActiveServerDir: '/tmp/happy/servers/cloud',
-      currentDaemonInstanceId: 'cloud',
+      expectedOwnerToken: 'owner-token-a',
+      drainMs: 9_000,
+    });
+
+    expect(result).toEqual({ released: true, reason: 'released' });
+    expect(killPid).toHaveBeenCalledWith(777, 9_000);
+    expect(removeState).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases an exactly validated prior managed server after daemon replacement', async () => {
+    const state = buildState({ daemonInstanceId: 'old-daemon' });
+    const killPid = vi.fn(async () => true);
+    const removeState = vi.fn(async () => {});
+
+    const result = await releaseForAuthSwitchFromState({
+      withLock: async <T>(fn: () => Promise<T>) => await fn(),
+      readState: async () => state,
+      removeState,
+      isPidAlive: () => true,
+      getProcessInfo: async () => ({ name: 'opencode', cmd: 'opencode serve --hostname=127.0.0.1 --port=43111' }),
+      readProcessStartTimeMs: async () => 2501,
+      killPid,
+      currentActiveServerDir: '/tmp/happy/servers/cloud',
       expectedOwnerToken: 'owner-token-a',
       drainMs: 9_000,
     });
@@ -69,7 +91,6 @@ describe('releaseForAuthSwitchFromState', () => {
       readProcessStartTimeMs: async () => 2500,
       killPid,
       currentActiveServerDir: '/tmp/happy/servers/cloud',
-      currentDaemonInstanceId: 'cloud',
       expectedOwnerToken: 'another-owner-token',
       drainMs: 9_000,
     });
@@ -93,7 +114,6 @@ describe('releaseForAuthSwitchFromState', () => {
       readProcessStartTimeMs: async () => 2500,
       killPid,
       currentActiveServerDir: '/tmp/happy/servers/cloud',
-      currentDaemonInstanceId: 'cloud',
       expectedOwnerToken: 'owner-token-a',
       drainMs: 9_000,
     });
@@ -117,7 +137,6 @@ describe('releaseForAuthSwitchFromState', () => {
       readProcessStartTimeMs: async () => 2500,
       killPid,
       currentActiveServerDir: '/tmp/happy/servers/cloud',
-      currentDaemonInstanceId: 'cloud',
       expectedOwnerToken: 'owner-token-a',
       drainMs: 9_000,
     });
@@ -141,7 +160,6 @@ describe('releaseForAuthSwitchFromState', () => {
       readProcessStartTimeMs: async () => 2500,
       killPid,
       currentActiveServerDir: '/tmp/happy/servers/cloud',
-      currentDaemonInstanceId: 'cloud',
       expectedOwnerToken: 'owner-token-a',
       drainMs: 9_000,
       trackedClaimCountForLaunchFingerprint: async () => 2,
@@ -167,7 +185,6 @@ describe('releaseForAuthSwitchFromState', () => {
       readProcessStartTimeMs: async () => 2500,
       killPid,
       currentActiveServerDir: '/tmp/happy/servers/cloud',
-      currentDaemonInstanceId: 'cloud',
       expectedOwnerToken: 'owner-token-a',
       drainMs: 9_000,
       trackedClaimCountForLaunchFingerprint: async () => 1,
@@ -196,7 +213,6 @@ describe('releaseForAuthSwitchFromState', () => {
       readProcessStartTimeMs: async () => 2500,
       killPid,
       currentActiveServerDir: '/tmp/happy/servers/cloud',
-      currentDaemonInstanceId: 'cloud',
       expectedOwnerToken: 'owner-token-a',
       drainMs: 9_000,
       trackedClaimCountForLaunchFingerprint: async () => 1,
@@ -223,7 +239,6 @@ describe('releaseForAuthSwitchFromState', () => {
       readProcessStartTimeMs: async () => 2500,
       killPid,
       currentActiveServerDir: '/tmp/happy/servers/cloud',
-      currentDaemonInstanceId: 'cloud',
       expectedOwnerToken: 'owner-token-a',
       drainMs: 9_000,
       trackedClaimCountForLaunchFingerprint: async () => 1,
@@ -253,7 +268,6 @@ describe('releaseForAuthSwitchFromState', () => {
       readProcessStartTimeMs: async () => 2500,
       killPid,
       currentActiveServerDir: '/tmp/happy/servers/cloud',
-      currentDaemonInstanceId: 'cloud',
       expectedOwnerToken: 'owner-token-a',
       drainMs: 9_000,
       trackedClaimCountForLaunchFingerprint: async () => 2,
@@ -268,11 +282,23 @@ describe('releaseForAuthSwitchFromState', () => {
 });
 
 describe('decideManagedOpenCodeStartupScanStateAction', () => {
+  it('keeps exact live state created by a prior daemon instance', () => {
+    const state = buildState({ daemonInstanceId: 'old-daemon' });
+    const decision = decideManagedOpenCodeStartupScanStateAction({
+      state,
+      currentActiveServerDir: '/tmp/happy/servers/cloud',
+      isPidAlive: true,
+      processInfo: { name: 'opencode', cmd: 'opencode serve --hostname=127.0.0.1 --port=43111' },
+      observedStartTimeMs: 2501,
+    });
+
+    expect(decision).toEqual({ action: 'keep', reason: 'verified_live_state' });
+  });
+
   it('drops trusted state when live process identity no longer matches (PID reuse safety)', () => {
     const state = buildState();
     const decision = decideManagedOpenCodeStartupScanStateAction({
       state,
-      currentDaemonInstanceId: 'cloud',
       currentActiveServerDir: '/tmp/happy/servers/cloud',
       isPidAlive: true,
       processInfo: { name: 'python', cmd: 'python unrelated-worker.py' },
