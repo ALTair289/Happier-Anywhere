@@ -1015,7 +1015,12 @@ describe("sessionUpdateHandler", () => {
 
         const handler = getSocketHandler(socket, "pending-materialize-next");
         const callback = vi.fn();
-        await handler({ sid: "s-stale-provider", deliveryState: "provider" }, callback);
+        await handler({
+            sid: "s-stale-provider",
+            deliveryState: "provider",
+            deliveryTiming: "after_foreground_ready",
+            foregroundState: "ready",
+        }, callback);
 
         expect(callback).toHaveBeenCalledWith({
             ok: true,
@@ -1079,11 +1084,18 @@ describe("sessionUpdateHandler", () => {
 
         const handler = getSocketHandler(socket, "pending-materialize-next");
         const callback = vi.fn();
-        await handler({ sid: "s-provider", deliveryState: "provider" }, callback);
+        await handler({
+            sid: "s-provider",
+            deliveryState: "provider",
+            deliveryTiming: "after_foreground_ready",
+            foregroundState: "ready",
+        }, callback);
 
         expect(materializeNextPendingMessageForCurrentPublisher).toHaveBeenCalledWith({
             actorUserId: "user-1",
             sessionId: "s-provider",
+            deliveryTiming: "after_foreground_ready",
+            foregroundState: "ready",
             trustedPublisherFence: {
                 accountId: "user-1",
                 machineId: "machine-1",
@@ -1138,12 +1150,14 @@ describe("sessionUpdateHandler", () => {
             sid: "s-runtime-idle",
             deliveryState: "provider",
             deliveryTiming: "after_runtime_idle",
+            foregroundState: "ready",
         }, callback);
 
         expect(materializeNextPendingMessageForCurrentPublisher).toHaveBeenCalledWith({
             actorUserId: "user-1",
             sessionId: "s-runtime-idle",
             deliveryTiming: "after_runtime_idle",
+            foregroundState: "ready",
             trustedPublisherFence: {
                 accountId: "user-1",
                 machineId: "machine-1",
@@ -1189,6 +1203,55 @@ describe("sessionUpdateHandler", () => {
         },
     );
 
+    it("rejects an omitted delivery timing on the current provider-materialization socket contract", async () => {
+        const socket = createFakeSocket();
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-missing-timing" } as any,
+            {
+                presence: { resolveCurrentPublisher, runAsCurrentPublisher },
+                binding: { accountId: "user-1", machineId: "machine-1", sessionId: "s-missing-timing" },
+            },
+        );
+
+        const handler = getSocketHandler(socket, "pending-materialize-next");
+        const callback = vi.fn();
+        await handler({
+            sid: "s-missing-timing",
+            deliveryState: "provider",
+        }, callback);
+
+        expect(callback).toHaveBeenCalledWith({ ok: false, error: "invalid-params" });
+        expect(materializeNextPendingMessage).not.toHaveBeenCalled();
+        expect(materializeNextPendingMessageForCurrentPublisher).not.toHaveBeenCalled();
+    });
+
+    it("rejects an omitted foreground state on the current provider-materialization socket contract", async () => {
+        const socket = createFakeSocket();
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-missing-foreground" } as any,
+            {
+                presence: { resolveCurrentPublisher, runAsCurrentPublisher },
+                binding: { accountId: "user-1", machineId: "machine-1", sessionId: "s-missing-foreground" },
+            },
+        );
+
+        const handler = getSocketHandler(socket, "pending-materialize-next");
+        const callback = vi.fn();
+        await handler({
+            sid: "s-missing-foreground",
+            deliveryState: "provider",
+            deliveryTiming: "after_foreground_ready",
+        }, callback);
+
+        expect(callback).toHaveBeenCalledWith({ ok: false, error: "invalid-params" });
+        expect(materializeNextPendingMessage).not.toHaveBeenCalled();
+        expect(materializeNextPendingMessageForCurrentPublisher).not.toHaveBeenCalled();
+    });
+
     it("preserves unresolved-head backpressure through socket pending materialization", async () => {
         materializeNextPendingMessageForCurrentPublisher.mockResolvedValueOnce({
             ok: true,
@@ -1213,7 +1276,12 @@ describe("sessionUpdateHandler", () => {
 
         const handler = getSocketHandler(socket, "pending-materialize-next");
         const callback = vi.fn();
-        await handler({ sid: "s-head-blocked", deliveryState: "provider" }, callback);
+        await handler({
+            sid: "s-head-blocked",
+            deliveryState: "provider",
+            deliveryTiming: "after_foreground_ready",
+            foregroundState: "ready",
+        }, callback);
 
         expect(callback).toHaveBeenCalledWith({
             ok: true,

@@ -40,15 +40,20 @@ describe("pendingMessageService (shared sessions)", () => {
     let harness: LightSqliteHarness;
     type CurrentPublisherMaterializeParams = Omit<
         Parameters<typeof materializeNextPendingMessageForCurrentPublisher>[0],
-        "trustedPublisherFence"
-    >;
+        "deliveryTiming" | "trustedPublisherFence"
+    > & {
+        deliveryTiming?: Parameters<typeof materializeNextPendingMessageForCurrentPublisher>[0]["deliveryTiming"];
+    };
     type TrustedPublisherFence = Parameters<
         typeof materializeNextPendingMessageForCurrentPublisher
     >[0]["trustedPublisherFence"];
-    type TestMaterializeParams = CurrentPublisherMaterializeParams & {
-        deliveryState?: "provider";
-        trustedPublisherFence?: TrustedPublisherFence;
-    };
+    type TestMaterializeParams =
+        Omit<CurrentPublisherMaterializeParams, "foregroundState">
+        & Partial<Pick<CurrentPublisherMaterializeParams, "foregroundState">>
+        & {
+            deliveryState?: "provider";
+            trustedPublisherFence?: TrustedPublisherFence;
+        };
     const currentMaterializationFenceBySession = new Map<string, Promise<TrustedPublisherFence>>();
 
     beforeAll(async () => {
@@ -190,6 +195,8 @@ describe("pendingMessageService (shared sessions)", () => {
         }
         return await materializeNextPendingMessageForCurrentPublisher({
             ...commonParams,
+            deliveryTiming: commonParams.deliveryTiming ?? "after_foreground_ready",
+            foregroundState: commonParams.foregroundState ?? "ready",
             trustedPublisherFence: fence,
         });
     };
@@ -3466,6 +3473,7 @@ describe("pendingMessageService (shared sessions)", () => {
             trustedPublisherFence,
             expectedPendingVersion: 999,
             deliveryTiming: "after_runtime_idle",
+            foregroundState: "ready",
         });
         expect(first).toMatchObject({
             ok: true,
@@ -3487,6 +3495,8 @@ describe("pendingMessageService (shared sessions)", () => {
         await expect(materializeNextPendingMessageForCurrentPublisher({
             actorUserId: owner.id,
             sessionId: session.id,
+            deliveryTiming: "after_foreground_ready",
+            foregroundState: "ready",
             trustedPublisherFence,
         })).resolves.toMatchObject({
             ok: true,
@@ -3627,6 +3637,8 @@ describe("pendingMessageService (shared sessions)", () => {
         await expect(materializeNextPendingMessageForCurrentPublisher({
             actorUserId: owner.id,
             sessionId: session.id,
+            deliveryTiming: "after_foreground_ready",
+            foregroundState: "ready",
             trustedPublisherFence: predecessorFence,
         })).resolves.toEqual({ ok: false, error: "forbidden" });
         await expect(db.sessionPendingMessage.findUniqueOrThrow({
@@ -3639,6 +3651,8 @@ describe("pendingMessageService (shared sessions)", () => {
         const claimed = await materializeNextPendingMessageForCurrentPublisher({
             actorUserId: owner.id,
             sessionId: session.id,
+            deliveryTiming: "after_foreground_ready",
+            foregroundState: "ready",
             trustedPublisherFence: successorFence,
         });
         expect(claimed).toMatchObject({ ok: true, didMaterialize: true, message: { localId } });
@@ -3653,6 +3667,8 @@ describe("pendingMessageService (shared sessions)", () => {
         await expect(materializeNextPendingMessageForCurrentPublisher({
             actorUserId: owner.id,
             sessionId: session.id,
+            deliveryTiming: "after_foreground_ready",
+            foregroundState: "ready",
             trustedPublisherFence: predecessorFence,
         })).resolves.toEqual({ ok: false, error: "forbidden" });
         await expect(db.sessionPendingMessage.findUniqueOrThrow({
@@ -3674,6 +3690,8 @@ describe("pendingMessageService (shared sessions)", () => {
         await expect(materializeNextPendingMessageForCurrentPublisher({
             actorUserId: owner.id,
             sessionId: session.id,
+            deliveryTiming: "after_foreground_ready",
+            foregroundState: "ready",
             trustedPublisherFence: predecessorFence,
         })).resolves.toMatchObject({ ok: true, didMaterialize: true, message: { localId } });
 

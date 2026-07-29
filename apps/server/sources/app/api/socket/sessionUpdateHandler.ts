@@ -919,22 +919,19 @@ export function sessionUpdateHandler(
                     return;
                 }
                 const deliveryTimingParseResult = parsePendingMaterializeDeliveryTiming(data);
-                const deliveryTiming = deliveryTimingParseResult.status === "valid"
-                    ? deliveryTimingParseResult.value
-                    : undefined;
                 const foregroundState = data?.foregroundState;
                 const expectedRuntimeActivityRevision = typeof data?.expectedRuntimeActivityRevision === "number"
                     && Number.isSafeInteger(data.expectedRuntimeActivityRevision)
                     && data.expectedRuntimeActivityRevision >= 0
                     ? data.expectedRuntimeActivityRevision
                     : undefined;
-                if (deliveryTimingParseResult.status === "invalid") {
+                if (deliveryTimingParseResult.status !== "valid") {
                     respond({ ok: false, error: 'invalid-params' });
                     return;
                 }
+                const deliveryTiming = deliveryTimingParseResult.value;
                 if (
-                    foregroundState !== undefined
-                    && foregroundState !== "ready"
+                    foregroundState !== "ready"
                     && foregroundState !== "active_steerable"
                     && foregroundState !== "active_unsteerable"
                 ) {
@@ -945,8 +942,8 @@ export function sessionUpdateHandler(
                     actorUserId: userId,
                     sessionId: sid,
                     ...(expectedPendingVersion !== undefined ? { expectedPendingVersion } : {}),
-                    ...(deliveryTiming ? { deliveryTiming } : {}),
-                    ...(foregroundState ? { foregroundState } : {}),
+                    deliveryTiming,
+                    foregroundState,
                     ...(expectedRuntimeActivityRevision !== undefined ? { expectedRuntimeActivityRevision } : {}),
                 };
                 const trusted = trustedTranscriptObservationPublisher;

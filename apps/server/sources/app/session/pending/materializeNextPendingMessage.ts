@@ -232,8 +232,8 @@ export async function materializeNextPendingMessageForCurrentPublisher(params: R
     sessionId: string;
     trustedPublisherFence: TrustedPendingPublisherFence;
     expectedPendingVersion?: number;
-    deliveryTiming?: SessionPendingQueueDeliveryTiming;
-    foregroundState?: PendingForegroundState;
+    deliveryTiming: SessionPendingQueueDeliveryTiming;
+    foregroundState: PendingForegroundState;
     expectedRuntimeActivityRevision?: number;
 }>): Promise<MaterializeNextPendingMessageResult> {
     return await materializeNextPendingMessage({

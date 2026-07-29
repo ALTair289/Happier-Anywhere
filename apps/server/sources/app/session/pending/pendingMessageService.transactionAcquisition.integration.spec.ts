@@ -133,6 +133,8 @@ describe("pendingMessageService transaction acquisition", () => {
         await expect(materializeNextPendingMessageForCurrentPublisher({
             actorUserId: owner.id,
             sessionId: session.id,
+            deliveryTiming: "after_foreground_ready",
+            foregroundState: "ready",
             trustedPublisherFence,
         })).resolves.toMatchObject({ ok: true, didMaterialize: true });
 
