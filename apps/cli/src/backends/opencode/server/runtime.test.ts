@@ -5157,6 +5157,84 @@ describe('createOpenCodeServerRuntime', () => {
     }
   });
 
+  it('fails an exact-parent completed assistant carrying a provider error from authoritative inventory', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000));
+    let runtime: ReturnType<typeof createOpenCodeServerRuntime> | null = null;
+    let promptPromise: Promise<void> | null = null;
+    try {
+      const client = createFakeClient();
+      let promptUserMessageId = '';
+      let promptSubmitted = false;
+      let statusReadCount = 0;
+      client.sessionPromptAsync = vi.fn(async (input) => {
+        promptUserMessageId = input.messageId ?? '';
+        promptSubmitted = true;
+      });
+      client.sessionMessagesList = vi.fn(async () => {
+        if (!promptSubmitted) return [];
+        return [
+          {
+            info: {
+              id: promptUserMessageId,
+              role: 'user',
+              sessionID: 'ses_1',
+              time: { created: 1_005 },
+            },
+            parts: [{ id: 'part_current_user', type: 'text', text: 'hello' }],
+          },
+          {
+            info: {
+              id: 'msg_exact_parent_provider_error',
+              role: 'assistant',
+              sessionID: 'ses_1',
+              parentID: promptUserMessageId,
+              time: { created: 1_010, completed: 1_020 },
+              error: {
+                name: 'UnknownError',
+                data: { message: 'happier_broker_bridge_status_401' },
+              },
+            },
+            parts: [],
+          },
+        ];
+      });
+      client.sessionStatusList = vi.fn(async () => {
+        if (!promptSubmitted) return {};
+        statusReadCount += 1;
+        return statusReadCount === 1 ? { ses_1: { type: 'busy' } } : {};
+      });
+
+      const started = await beginOpenCodePromptForTest({
+        client,
+        session: mirrorLifecycleMarkersForTest(createFakeSession()),
+        localId: 'local-exact-parent-provider-error',
+        env: {
+          ...process.env,
+          HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS: '25',
+          HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS: '25',
+          HAPPIER_OPENCODE_SERVER_IDLE_WITHOUT_TERMINAL_ASSISTANT_TIMEOUT_MS: '1000',
+          HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
+        },
+      });
+      runtime = started.runtime;
+      promptPromise = started.promptPromise;
+      const outcome = observePromiseSettlement(promptPromise);
+
+      await advanceTimersAndFlush(25);
+
+      expect(outcome.status).toBe('rejected');
+      await expect(promptPromise).rejects.toThrow('happier_broker_bridge_status_401');
+      expect(sentAgentMessagesOfType(started.session, 'task_complete')).toHaveLength(0);
+      expect(started.session.sessionTurnLifecycle.failTurn).toHaveBeenCalledTimes(1);
+    } finally {
+      await runtime?.cancel().catch(() => {});
+      await promptPromise?.catch(() => undefined);
+      await runtime?.reset().catch(() => {});
+      vi.useRealTimers();
+    }
+  });
+
   it('rejects stale and wrong-parent terminal inventory instead of satisfying idle completion', async () => {
     const restoreEnv = withEnvForTest({
       HAPPIER_OPENCODE_SERVER_STATUS_POLL_ENABLED: '0',

@@ -45,6 +45,12 @@ export function classifyOpenCodeAssistantCompletion(messageOrInfo: unknown): Ope
     return { kind: 'non_terminal', messageId, completedAtMs: null, finish };
   }
 
+  // Provider failures are settled by the runtime's existing session-error or authoritative-history
+  // reconciliation owner. Never let a completed error envelope manufacture terminal success first.
+  if (info?.error != null) {
+    return { kind: 'non_terminal', messageId, completedAtMs: null, finish };
+  }
+
   if (finish && CONTINUATION_FINISHES.has(finish)) {
     return { kind: 'continuation', messageId, completedAtMs: null, finish };
   }

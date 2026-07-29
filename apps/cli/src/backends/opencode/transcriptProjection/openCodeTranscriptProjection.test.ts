@@ -126,6 +126,19 @@ describe('OpenCode transcript projection', () => {
         time: { completed: 11 },
       },
     }).kind).toBe('terminal_success');
+
+    expect(classifyOpenCodeAssistantCompletion({
+      info: {
+        id: 'msg_failed',
+        role: 'assistant',
+        finish: 'stop',
+        time: { completed: 12 },
+        error: {
+          name: 'UnknownError',
+          data: { message: 'provider failed before generating output' },
+        },
+      },
+    }).kind).toBe('non_terminal');
   });
 
   it('never treats compaction internals as assistant completion', () => {

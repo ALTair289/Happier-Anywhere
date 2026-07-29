@@ -96,6 +96,10 @@ import {
   classifyOpenCodeMessageForProjection,
   classifyOpenCodePartForProjection,
 } from '../transcriptProjection';
+import {
+  readOpenCodeNestedRecord,
+  readOpenCodeTimestampMs,
+} from '../transcriptProjection/openCodeProjectionParsing';
 
 function mergeSessionWorkStateIntoMetadata(
   metadata: Metadata,
@@ -2243,6 +2247,8 @@ export function createOpenCodeServerRuntime(params: {
 
     const candidatesByMessageId = new Map<string, Readonly<{
       info: Record<string, unknown>;
+      providerError: unknown | null;
+      providerErrorFingerprint: string | null;
       text: string;
     }>>();
     for (const rawMessage of rawMessages) {
@@ -2256,18 +2262,68 @@ export function createOpenCodeServerRuntime(params: {
       if (projection.kind !== 'assistant_transcript' || !messageId) continue;
       if (prePromptMessageIds.has(messageId)) continue;
       if (readNonBlankOpaqueIdentifier(info.parentID) !== currentUserMessageId) continue;
-      if (classifyOpenCodeAssistantCompletion(info).kind !== 'terminal_success') continue;
+      const providerError = info.error ?? null;
+      const providerErrorCompletedAtMs = providerError === null
+        ? null
+        : readOpenCodeTimestampMs(
+          readOpenCodeNestedRecord(info, 'time')?.completed,
+          { allowSecondsNumber: false },
+        );
+      if (
+        providerErrorCompletedAtMs === null
+        && classifyOpenCodeAssistantCompletion(info).kind !== 'terminal_success'
+      ) {
+        continue;
+      }
 
       const text = extractOpenCodeTextHistoryItems([message])
         .find((item) => item.role === 'assistant' && item.messageId === messageId)?.text ?? '';
+      let providerErrorFingerprint: string | null = null;
+      if (providerError !== null) {
+        try {
+          providerErrorFingerprint = JSON.stringify(providerError) ?? 'unserializable-provider-error';
+        } catch {
+          providerErrorFingerprint = 'unserializable-provider-error';
+        }
+      }
       const existing = candidatesByMessageId.get(messageId);
-      if (existing && existing.text !== text) return false;
-      candidatesByMessageId.set(messageId, { info, text });
+      if (
+        existing
+        && (
+          existing.text !== text
+          || existing.providerErrorFingerprint !== providerErrorFingerprint
+        )
+      ) {
+        return false;
+      }
+      candidatesByMessageId.set(messageId, {
+        info,
+        providerError,
+        providerErrorFingerprint,
+        text,
+      });
     }
     if (candidatesByMessageId.size !== 1) return false;
 
     const [messageId, candidate] = candidatesByMessageId.entries().next().value ?? [];
     if (!messageId || !candidate) return false;
+    if (candidate.providerError !== null) {
+      const failureText = extractOpenCodeErrorText(candidate.providerError);
+      const failureError = failureText
+        ? new Error(failureText)
+        : candidate.providerError instanceof Error
+          ? candidate.providerError
+          : new Error('OpenCode provider session error');
+      const terminalMarkerId = ensureActiveLifecycleMarkerId();
+      setThinking(false);
+      await flushAndClearStreamWriters({
+        reason: 'abort',
+        interruptedReason: 'provider_session_error',
+      });
+      surfaceOpenCodeRuntimeFailure('session_error', candidate.providerError, terminalMarkerId);
+      rejectTurn(failureError);
+      return false;
+    }
     if (candidate.text) {
       enableDurableCommitsForLiveMessageProjection(sessionId, messageId);
       applyInlinePartTextSnapshot({
