@@ -146,7 +146,6 @@ function resolveApiAuthGroupGenerationConflict(error: unknown): number | null {
 // usage-limit switch (observed across several sessions during a server-timeout window).
 const AUTH_GROUP_LOAD_RETRY_ATTEMPTS = 2;
 const AUTH_GROUP_LOAD_RETRY_BASE_DELAY_MS = 250;
-const DEFAULT_GROUP_QUOTA_PROBE_TIMEOUT_MS = 8_000;
 
 function defaultSwitchCoordinatorSleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -176,45 +175,6 @@ async function loadConnectedServiceAuthGroupWithRetry(input: Readonly<{
       await input.sleepMs(input.baseDelayMs * (attempt + 1));
     }
   }
-}
-
-function resolveGroupQuotaProbeTimeoutMs(value: number | null | undefined): number | null {
-  if (value === null) return null;
-  if (value === undefined) return DEFAULT_GROUP_QUOTA_PROBE_TIMEOUT_MS;
-  if (!Number.isFinite(value)) return DEFAULT_GROUP_QUOTA_PROBE_TIMEOUT_MS;
-  const normalized = Math.trunc(value);
-  return normalized > 0 ? normalized : null;
-}
-
-async function runQuotaSnapshotProbeWithTimeout(input: Readonly<{
-  timeoutMs: number | null;
-  probe: () => Promise<void>;
-}>): Promise<void> {
-  if (input.timeoutMs === null) {
-    await input.probe();
-    return;
-  }
-
-  const timeoutMs = input.timeoutMs;
-  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-  const probePromise = input.probe().then(
-    () => ({ status: 'completed' as const }),
-    (error) => ({ status: 'failed' as const, error }),
-  );
-  const timeoutPromise = new Promise<Readonly<{ status: 'timed_out' }>>((resolve) => {
-    timeoutHandle = setTimeout(() => {
-      resolve({ status: 'timed_out' });
-    }, timeoutMs);
-    (timeoutHandle as unknown as { unref?: () => void })?.unref?.();
-  });
-
-  const result = await Promise.race([probePromise, timeoutPromise]);
-  if (timeoutHandle) {
-    clearTimeout(timeoutHandle);
-  }
-  timeoutHandle = null;
-  if (result.status === 'timed_out') return;
-  if (result.status === 'failed') throw result.error;
 }
 
 export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: Readonly<{
@@ -269,7 +229,6 @@ export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: R
     profileIds: ReadonlyArray<string>;
     reason: string;
   }>) => Promise<void>;
-  quotaProbeTimeoutMs?: number | null;
   resolveCredentialRevision?: (
     serviceId: ConnectedServiceId,
     profileId: string | null,
@@ -392,16 +351,14 @@ export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: R
     ...(params.probeQuotaSnapshotsForGroup ? {
       probeQuotaSnapshotsForGroup: async (input) => {
         const serviceId = ConnectedServiceIdSchema.parse(input.serviceId);
-        await runQuotaSnapshotProbeWithTimeout({
-          timeoutMs: resolveGroupQuotaProbeTimeoutMs(params.quotaProbeTimeoutMs),
-          probe: async () => {
-            await params.probeQuotaSnapshotsForGroup?.({
-              serviceId,
-              groupId: input.groupId,
-              profileIds: input.profileIds,
-              reason: input.reason,
-            });
-          },
+        // The quota coordinator already owns bounded provider fetches, leases, and credential
+        // refresh. A shorter outer race detached that still-mutating owner from the selection
+        // which depended on it, allowing a stale revision to be committed.
+        await params.probeQuotaSnapshotsForGroup?.({
+          serviceId,
+          groupId: input.groupId,
+          profileIds: input.profileIds,
+          reason: input.reason,
         });
       },
     } : {}),

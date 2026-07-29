@@ -742,6 +742,14 @@ export class ConnectedServiceRefreshCoordinator {
     const key = `${input.serviceId}::${input.groupId}`;
     const cached = this.canonicalGroupStateCache.get(key);
     if (cached && now - cached.atMs < 15_000) return cached.group;
+    return await this.refreshCanonicalGroupStateForRefresh(input, now);
+  }
+
+  private async refreshCanonicalGroupStateForRefresh(
+    input: Readonly<{ serviceId: ConnectedServiceId; groupId: string }>,
+    now: number,
+  ): Promise<Readonly<{ activeProfileId: string | null; generation: number }> | null> {
+    const key = `${input.serviceId}::${input.groupId}`;
     let group: Readonly<{ activeProfileId: string | null; generation: number }> | null = null;
     const reader = this.params.api.getConnectedServiceAuthGroup;
     if (typeof reader === 'function') {
@@ -1500,6 +1508,10 @@ export class ConnectedServiceRefreshCoordinator {
     );
     const rematerialized: SpawnTarget[] = [];
     const failed: RematerializedTargetFailure[] = [];
+    const canonicalGroupStateReads = new Map<
+      string,
+      Promise<Readonly<{ activeProfileId: string | null; generation: number }> | null>
+    >();
     for (const rawTarget of affected) {
       // SHARED group homes are owned by the group's CURRENT canonical active profile. Rewrite them
       // from canonical state only — a spawn-time selection snapshot may be stale (deferred switch,
@@ -1507,8 +1519,15 @@ export class ConnectedServiceRefreshCoordinator {
       // other's account token in the shared home. Fail closed when canonical state is unreadable.
       const target = await canonicalizeTargetSelectionsForRematerialization({
         target: rawTarget,
-        resolveCanonicalGroupState: async (input) =>
-          await this.resolveCanonicalGroupStateForRefresh(input, this.params.now()),
+        resolveCanonicalGroupState: async (input) => {
+          const key = `${input.serviceId}::${input.groupId}`;
+          let read = canonicalGroupStateReads.get(key);
+          if (!read) {
+            read = this.refreshCanonicalGroupStateForRefresh(input, this.params.now());
+            canonicalGroupStateReads.set(key, read);
+          }
+          return await read;
+        },
       });
       if (!target) {
         failed.push({

@@ -470,7 +470,7 @@ describe('createDaemonConnectedServiceAuthGroupSwitchCoordinator', () => {
     expect(sleepMs).toHaveBeenCalledTimes(1);
   });
 
-  it('does not let a slow quota probe block reactive recovery indefinitely', async () => {
+  it('does not detach a timed-out quota probe and commit while it can still refresh the candidate', async () => {
     vi.useFakeTimers();
     try {
       const api = {
@@ -478,9 +478,13 @@ describe('createDaemonConnectedServiceAuthGroupSwitchCoordinator', () => {
         updateConnectedServiceAuthGroupActiveProfile: vi.fn(async () => group('backup', 2)),
         updateConnectedServiceAuthGroupRuntimeState: vi.fn(async () => group('primary', 1)),
       };
+      let releaseProbe!: () => void;
+      const probePending = new Promise<void>((resolve) => {
+        releaseProbe = resolve;
+      });
       const restartSession = vi.fn(async () => {});
       const probeQuotaSnapshotsForGroup = vi.fn(async () => {
-        await new Promise<void>(() => {});
+        await probePending;
       });
       const coordinator = createTestDaemonConnectedServiceAuthGroupSwitchCoordinator({
         api,
@@ -489,7 +493,6 @@ describe('createDaemonConnectedServiceAuthGroupSwitchCoordinator', () => {
         nowMs: () => 1_000,
         restartSession,
         probeQuotaSnapshotsForGroup,
-        quotaProbeTimeoutMs: 25,
       });
 
       const result = coordinator.switchAfterClassifiedFailure({
@@ -501,6 +504,8 @@ describe('createDaemonConnectedServiceAuthGroupSwitchCoordinator', () => {
 
       await vi.advanceTimersByTimeAsync(25);
 
+      expect(api.updateConnectedServiceAuthGroupActiveProfile).not.toHaveBeenCalled();
+      releaseProbe();
       await expect(result).resolves.toMatchObject({
         status: 'switched',
         activeProfileId: 'backup',

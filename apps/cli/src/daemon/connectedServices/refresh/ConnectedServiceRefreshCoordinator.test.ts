@@ -1771,6 +1771,8 @@ afterEach(() => {
         randomBytes: (length) => randomBytes(length),
       })],
     ]);
+    let canonicalActiveProfileId = 'workA';
+    let canonicalGeneration = 4;
     const api = {
       getConnectedServiceCredentialSealed: vi.fn(async (input: { profileId: string }) => {
         const ciphertext = sealedByProfileId.get(input.profileId);
@@ -1796,8 +1798,8 @@ afterEach(() => {
       getConnectedServiceAuthGroup: vi.fn(async () => ({
         serviceId: 'claude-subscription',
         groupId: 'pool',
-        activeProfileId: 'workA',
-        generation: 4,
+        activeProfileId: canonicalActiveProfileId,
+        generation: canonicalGeneration,
       })),
     } as unknown as ApiClient;
     completeCredentialAuthorityBoundaryFixture(api);
@@ -1886,7 +1888,17 @@ afterEach(() => {
     });
     if (!groupConfigDir) throw new Error('fixture: group config dir must resolve');
 
-    return { coordinator, onAuthUpdated, groupConfigDir, now, api };
+    return {
+      coordinator,
+      onAuthUpdated,
+      groupConfigDir,
+      now,
+      api,
+      setCanonicalGroupState(activeProfileId: string, generation: number) {
+        canonicalActiveProfileId = activeProfileId;
+        canonicalGeneration = generation;
+      },
+    };
   }
 
   it('distributes a spawn-preflight rotation to registered targets (RR-1: rotate+distribute is one transaction)', async () => {
@@ -1983,6 +1995,73 @@ afterEach(() => {
     harness.onAuthUpdated.mockClear();
     await harness.coordinator.tickOnce();
     expect(harness.onAuthUpdated).not.toHaveBeenCalled();
+  });
+
+  it('uses the canonical active credential when distributing from a stale member binding', async () => {
+    const harness = await buildGroupHomeOwnershipHarness();
+
+    await writeClaudeCodeCredentialsFile({
+      claudeConfigDir: harness.groupConfigDir,
+      payload: {
+        claudeAiOauth: {
+          accessToken: 'dead-old-access',
+          expiresAt: harness.now + 60 * 60_000,
+          scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+        },
+      },
+      preserveNewerExistingCredential: false,
+    });
+
+    const rematerialize = harness.coordinator as unknown as {
+      rematerializeTargetsForBindingDetailed(binding: Readonly<{
+        serviceId: 'claude-subscription';
+        profileId: string;
+      }>): Promise<unknown>;
+    };
+    await rematerialize.rematerializeTargetsForBindingDetailed({
+      serviceId: 'claude-subscription',
+      profileId: 'workB',
+    });
+
+    const credential = JSON.parse(await readFile(join(harness.groupConfigDir, '.credentials.json'), 'utf8'));
+    expect(credential.claudeAiOauth.accessToken).toBe('active-access');
+    expect(harness.api.getConnectedServiceCredentialSealed).toHaveBeenCalledWith({
+      serviceId: 'claude-subscription',
+      profileId: 'workA',
+    });
+  });
+
+  it('re-reads canonical group truth before a shared-home mutation', async () => {
+    const harness = await buildGroupHomeOwnershipHarness();
+    const coordinatorInternals = harness.coordinator as unknown as {
+      resolveCanonicalGroupStateForRefresh(
+        input: Readonly<{ serviceId: 'claude-subscription'; groupId: string }>,
+        now: number,
+      ): Promise<unknown>;
+      rematerializeTargetsForBindingDetailed(binding: Readonly<{
+        serviceId: 'claude-subscription';
+        profileId: string;
+      }>): Promise<unknown>;
+    };
+
+    await coordinatorInternals.resolveCanonicalGroupStateForRefresh({
+      serviceId: 'claude-subscription',
+      groupId: 'pool',
+    }, harness.now);
+    harness.setCanonicalGroupState('workB', 5);
+    vi.mocked(harness.api.getConnectedServiceCredentialSealed).mockClear();
+
+    await coordinatorInternals.rematerializeTargetsForBindingDetailed({
+      serviceId: 'claude-subscription',
+      profileId: 'workA',
+    });
+
+    const credential = JSON.parse(await readFile(join(harness.groupConfigDir, '.credentials.json'), 'utf8'));
+    expect(credential.claudeAiOauth.accessToken).toBe('member-access');
+    expect(harness.api.getConnectedServiceCredentialSealed).toHaveBeenCalledWith({
+      serviceId: 'claude-subscription',
+      profileId: 'workB',
+    });
   });
 
   it('reports runtime-auth refresh as failed when the failing active Claude home cannot be rematerialized', async () => {

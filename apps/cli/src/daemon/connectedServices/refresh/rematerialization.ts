@@ -78,6 +78,7 @@ export async function canonicalizeTargetSelectionsForRematerialization(input: Re
 }>): Promise<SpawnTarget | null> {
   let changed = false;
   const canonicalSelections = new Map<ConnectedServiceId, ConnectedServiceChildSelection>();
+  const canonicalProfileIds = new Map<ConnectedServiceId, string>();
   for (const [serviceId, selection] of input.target.selectionsByServiceId) {
     if (selection.kind !== 'group') {
       canonicalSelections.set(serviceId, selection);
@@ -85,6 +86,7 @@ export async function canonicalizeTargetSelectionsForRematerialization(input: Re
     }
     const canonical = await input.resolveCanonicalGroupState({ serviceId, groupId: selection.groupId });
     if (!canonical?.activeProfileId) return null;
+    canonicalProfileIds.set(serviceId, canonical.activeProfileId);
     if (
       canonical.activeProfileId === selection.activeProfileId
       && canonical.generation === selection.generation
@@ -100,5 +102,15 @@ export async function canonicalizeTargetSelectionsForRematerialization(input: Re
     });
   }
   if (!changed) return input.target;
-  return { ...input.target, selectionsByServiceId: canonicalSelections };
+  const canonicalBindings = input.target.bindings.map((binding) => {
+    const canonicalProfileId = canonicalProfileIds.get(binding.serviceId);
+    return canonicalProfileId && canonicalProfileId !== binding.profileId
+      ? { ...binding, profileId: canonicalProfileId }
+      : binding;
+  });
+  return {
+    ...input.target,
+    bindings: canonicalBindings,
+    selectionsByServiceId: canonicalSelections,
+  };
 }
