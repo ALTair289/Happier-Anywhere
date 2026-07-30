@@ -51,6 +51,7 @@ import {
 } from '@/components/sessions/actions/sessionActionIds';
 import { buildSessionMetadataStabilitySignature } from '@/sync/domains/session/metadata/sessionMetadataStability';
 import { getSessionName } from '@/utils/sessions/sessionUtils';
+import { SESSION_HEADER_WIDE_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
 
 type SessionHeaderActionMenuProps = Readonly<{
   sessionId: string;
@@ -463,7 +464,7 @@ function SessionHeaderActionMenuInner(props: SessionHeaderActionMenuProps) {
           })}
         >
           <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-            <Ionicons name="ellipsis-horizontal" size={22} color={theme.colors.chrome.header.foreground} />
+            <Ionicons name="ellipsis-horizontal" size={SESSION_HEADER_WIDE_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
           </View>
         </Pressable>
       )}

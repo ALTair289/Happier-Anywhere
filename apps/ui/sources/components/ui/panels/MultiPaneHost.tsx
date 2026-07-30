@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Animated, Platform, Pressable, View } from 'react-native';
+import { Animated, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ResolvedPaneLayout } from './paneBreakpoints';
 import { ResizableDockedPane } from './ResizableDockedPane';
@@ -373,9 +373,31 @@ export const MultiPaneHost = React.memo((props: MultiPaneHostProps) => {
                             flex: 1,
                             minHeight: 0,
                             minWidth: 0,
-                            borderLeftWidth: 1,
-                            borderLeftColor: theme.colors.border.default,
                             backgroundColor: theme.colors.surface.base,
+                            // Seam, not a border. The docked pane sits ABOVE the main content, so
+                            // it casts onto it rather than being fenced off by a line — the same
+                            // treatment as the sidebar/content seam, mirrored. x-offset only, wide
+                            // blur, no spread: the cast hugs the edge and stays a gradient rather
+                            // than reading as a second divider. Web-only; native keeps a hairline
+                            // because this cast is not expressible in the native shadow API.
+                            // Hairline AND cast, deliberately. This is the one place the
+                            // border-XOR-shadow rule bends: the pane is a sibling column rather
+                            // than a floating surface, so the cast alone reads as a smudge without
+                            // a defined edge. The hairline gives the edge, the cast gives the depth.
+                            borderLeftWidth: StyleSheet.hairlineWidth,
+                            // Half the weight of border.default on purpose. The cast already
+                            // carries the separation, so this line only has to define the edge —
+                            // at full token strength it competes with the shadow and reads as a
+                            // divider again. Expressed as alpha, not a flat hex, so it composites
+                            // over whatever the pane is sitting on.
+                            borderLeftColor: theme.colors.border.subtle,
+                            ...(Platform.OS === 'web'
+                                ? {
+                                    boxShadow: theme.dark
+                                        ? '-5px 0 22px rgba(0, 0, 0, 0.13)'
+                                        : '-5px 0 22px rgba(0, 0, 0, 0.035)',
+                                }
+                                : {}),
                         }}
                     >
                         {detailsPresence.node}
@@ -412,9 +434,31 @@ export const MultiPaneHost = React.memo((props: MultiPaneHostProps) => {
                             flex: 1,
                             minHeight: 0,
                             minWidth: 0,
-                            borderLeftWidth: 1,
-                            borderLeftColor: theme.colors.border.default,
                             backgroundColor: theme.colors.surface.base,
+                            // Seam, not a border. The docked pane sits ABOVE the main content, so
+                            // it casts onto it rather than being fenced off by a line — the same
+                            // treatment as the sidebar/content seam, mirrored. x-offset only, wide
+                            // blur, no spread: the cast hugs the edge and stays a gradient rather
+                            // than reading as a second divider. Web-only; native keeps a hairline
+                            // because this cast is not expressible in the native shadow API.
+                            // Hairline AND cast, deliberately. This is the one place the
+                            // border-XOR-shadow rule bends: the pane is a sibling column rather
+                            // than a floating surface, so the cast alone reads as a smudge without
+                            // a defined edge. The hairline gives the edge, the cast gives the depth.
+                            borderLeftWidth: StyleSheet.hairlineWidth,
+                            // Half the weight of border.default on purpose. The cast already
+                            // carries the separation, so this line only has to define the edge —
+                            // at full token strength it competes with the shadow and reads as a
+                            // divider again. Expressed as alpha, not a flat hex, so it composites
+                            // over whatever the pane is sitting on.
+                            borderLeftColor: theme.colors.border.subtle,
+                            ...(Platform.OS === 'web'
+                                ? {
+                                    boxShadow: theme.dark
+                                        ? '-5px 0 22px rgba(0, 0, 0, 0.13)'
+                                        : '-5px 0 22px rgba(0, 0, 0, 0.035)',
+                                }
+                                : {}),
                         }}
                     >
                         {rightPresence.node}

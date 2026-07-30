@@ -34,6 +34,7 @@ export default React.memo(function SessionSettingsScreen() {
     const router = useRouter();
     const popoverBoundaryRef = React.useRef<any>(null);
     const [codingPromptBehavior, setCodingPromptBehavior] = useSettingMutable('codingPromptBehaviorV1');
+    const [sessionHeaderIdentityDisplay, setSessionHeaderIdentityDisplay] = useSettingMutable('sessionHeaderIdentityDisplay');
     const [rememberLastProjectSessionSelections, setRememberLastProjectSessionSelections] = useSettingMutable('rememberLastProjectSessionSelections');
     const [rememberLastEngineSelections, setRememberLastEngineSelections] = useSettingMutable('rememberLastEngineSelectionsV1');
     const [useEnhancedSessionWizard, setUseEnhancedSessionWizard] = useSettingMutable('useEnhancedSessionWizard');
@@ -66,6 +67,7 @@ export default React.memo(function SessionSettingsScreen() {
     const [openGroupingMenu, setOpenGroupingMenu] = React.useState<null | 'active' | 'inactive'>(null);
     const [openSessionListDensityMenu, setOpenSessionListDensityMenu] = React.useState(false);
     const [openSessionListIdentityDisplayMenu, setOpenSessionListIdentityDisplayMenu] = React.useState(false);
+    const [openSessionHeaderIdentityDisplayMenu, setOpenSessionHeaderIdentityDisplayMenu] = React.useState(false);
     const [openSessionListActiveColorModeMenu, setOpenSessionListActiveColorModeMenu] = React.useState(false);
     const [openSessionListAttentionPromotionModeMenu, setOpenSessionListAttentionPromotionModeMenu] = React.useState(false);
     const [openSessionListWorkingPlacementModeMenu, setOpenSessionListWorkingPlacementModeMenu] = React.useState(false);
@@ -200,6 +202,33 @@ export default React.memo(function SessionSettingsScreen() {
         if (itemId !== 'avatar' && itemId !== 'agentLogo' && itemId !== 'none') return;
         setSessionListIdentityDisplay(itemId);
     }, [setSessionListIdentityDisplay]);
+
+    const sessionHeaderIdentityDisplayItems = React.useMemo(() => [
+        {
+            id: 'avatar',
+            title: t('settingsSession.sessionList.headerIdentityDisplayAvatarTitle'),
+            subtitle: t('settingsSession.sessionList.headerIdentityDisplayAvatarSubtitle'),
+        },
+        {
+            id: 'agentLogo',
+            title: t('settingsSession.sessionList.headerIdentityDisplayAgentLogoTitle'),
+            subtitle: t('settingsSession.sessionList.headerIdentityDisplayAgentLogoSubtitle'),
+        },
+        {
+            id: 'none',
+            title: t('settingsSession.sessionList.headerIdentityDisplayNoneTitle'),
+            subtitle: t('settingsSession.sessionList.headerIdentityDisplayNoneSubtitle'),
+        },
+    ], []);
+
+    const normalizedSessionHeaderIdentityDisplay =
+        sessionHeaderIdentityDisplay === 'agentLogo' || sessionHeaderIdentityDisplay === 'none'
+            ? sessionHeaderIdentityDisplay
+            : 'avatar';
+    const handleSessionHeaderIdentityDisplaySelect = React.useCallback((itemId: string) => {
+        if (itemId !== 'avatar' && itemId !== 'agentLogo' && itemId !== 'none') return;
+        setSessionHeaderIdentityDisplay(itemId);
+    }, [setSessionHeaderIdentityDisplay]);
 
     const sessionListActiveColorModeItems = React.useMemo(() => [
         {
@@ -655,6 +684,27 @@ export default React.memo(function SessionSettingsScreen() {
                     }}
                     items={sessionListIdentityDisplayItems}
                     onSelect={handleSessionListIdentityDisplaySelect}
+                />
+                <DropdownMenu
+                    open={openSessionHeaderIdentityDisplayMenu}
+                    onOpenChange={setOpenSessionHeaderIdentityDisplayMenu}
+                    variant="selectable"
+                    search={false}
+                    selectedId={normalizedSessionHeaderIdentityDisplay}
+                    showCategoryTitles={false}
+                    matchTriggerWidth={true}
+                    connectToTrigger={true}
+                    rowKind="item"
+                    popoverBoundaryRef={popoverBoundaryRef}
+                    itemTrigger={{
+                        title: t('settingsSession.sessionList.headerIdentityDisplayTitle'),
+                        subtitle: t('settingsSession.sessionList.headerIdentityDisplaySubtitle'),
+                        icon: <Ionicons name="reader-outline" size={29} color={theme.colors.accent.blue} />,
+                        showSelectedSubtitle: false,
+                        itemProps: { testID: 'settings-session-sessionHeaderIdentityDisplay-trigger' },
+                    }}
+                    items={sessionHeaderIdentityDisplayItems}
+                    onSelect={handleSessionHeaderIdentityDisplaySelect}
                 />
                 <DropdownMenu
                     open={openSessionListActiveColorModeMenu}

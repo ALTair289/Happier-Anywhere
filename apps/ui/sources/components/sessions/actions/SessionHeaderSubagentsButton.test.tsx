@@ -6,6 +6,7 @@ import {
     renderScreen,
 } from '@/dev/testkit';
 import { createTextModuleMock } from '@/dev/testkit/mocks/text';
+import { SESSION_HEADER_ICON_SIZE_PX } from './sessionHeaderIconMetrics';
 import {
     installSessionActionsCommonModuleMocks,
     resetSessionActionsCommonModuleMockState,
@@ -69,11 +70,7 @@ describe('SessionHeaderSubagentsButton', () => {
         const { SessionHeaderSubagentsButton } = await modulePromise;
 
         const screen = await renderScreen(
-            <SessionHeaderSubagentsButton
-                scopeId="session:s1"
-                activeCount={2}
-                hasAnySubagents={true}
-            />
+            <SessionHeaderSubagentsButton scopeId="session:s1" activeCount={2} />
         );
 
         const pressable = screen.findByProps({ accessibilityLabel: 'session.openSubagents:2' });
@@ -82,6 +79,23 @@ describe('SessionHeaderSubagentsButton', () => {
         expect(openRightSpy).toHaveBeenCalledWith({ tabId: 'agents' });
         expect(setRightTabSpy).toHaveBeenCalledWith('agents');
         expect(findTestInstanceByTypeContainingText(screen, 'Text', '2')).toBeTruthy();
-        expect(findTestInstanceByTypeWithProps(screen, 'DependabotIcon', { size: 21 })).toBeTruthy();
+        expect(
+            findTestInstanceByTypeWithProps(screen, 'DependabotIcon', {
+                size: SESSION_HEADER_ICON_SIZE_PX,
+            }),
+        ).toBeTruthy();
+    });
+
+    // The header slot reports what is happening now. It used to appear for any session that had
+    // ever run a subagent — permanently lit, and so carrying no information.
+    it('renders nothing when no agent is currently active', async () => {
+        const { SessionHeaderSubagentsButton } = await import('./SessionHeaderSubagentsButton');
+
+        const screen = await renderScreen(
+            <SessionHeaderSubagentsButton scopeId="session:s1" activeCount={0} />
+        );
+
+        expect(screen.root.findAllByProps({ accessibilityRole: 'button' })).toHaveLength(0);
+        expect(screen.root.findAllByType('DependabotIcon' as never)).toHaveLength(0);
     });
 });

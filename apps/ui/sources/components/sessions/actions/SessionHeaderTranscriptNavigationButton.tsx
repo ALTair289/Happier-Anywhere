@@ -7,6 +7,7 @@ import { useAppPaneScope } from '@/components/appShell/panes/hooks/useAppPaneSco
 import { useSessionCockpitChromeRegistration } from '@/components/workspaceCockpit/session/SessionCockpitChromeRegistry';
 import { t } from '@/text';
 import { useOptionalSessionScreenTestId } from '../shell/sessionScreenTestIds';
+import { SESSION_HEADER_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
 
 export function useOpenTranscriptNavigationSurface(params: Readonly<{
     scopeId: string;
@@ -48,7 +49,7 @@ export const SessionHeaderTranscriptNavigationButton = React.memo((props: Readon
             accessibilityRole="button"
             accessibilityLabel={t('session.openTranscriptNavigation')}
         >
-            <Ionicons name="list-outline" size={22} color={theme.colors.chrome.header.foreground} />
+            <Ionicons name="list-outline" size={SESSION_HEADER_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
         </Pressable>
     );
 });

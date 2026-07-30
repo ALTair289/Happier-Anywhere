@@ -6,6 +6,7 @@ import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
+import { IconAction } from '@/components/ui/buttons/IconAction';
 import { SegmentedTabBar, type SegmentedTab } from '@/components/ui/navigation/SegmentedTabBar';
 import { useAppPaneScope } from '@/components/appShell/panes/hooks/useAppPaneScope';
 import { SessionRightPanelAgentsView } from '@/components/sessions/panes/agents/SessionRightPanelAgentsView';
@@ -38,8 +39,8 @@ const stylesheet = StyleSheet.create((theme) => ({
         backgroundColor: theme.colors.surface.base,
         minHeight: 0,
         minWidth: 0,
-        borderTopWidth: Platform.select({ ios: 0.33, default: 1 }),
-        borderTopColor: theme.colors.border.default,
+        // No top border. The dock already separates this pane from the main content with its own
+        // seam, so this line only ran along the window's top edge and doubled the chrome.
     },
     header: {
         paddingHorizontal: 12,
@@ -54,16 +55,6 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
     segmentedContainer: {
         flex: 1,
-    },
-    closeButton: {
-        width: 34,
-        height: 34,
-        borderRadius: 10,
-        alignItems: 'center',
-        justifyContent: 'center',
-        borderWidth: 1,
-        borderColor: theme.colors.border.default,
-        backgroundColor: theme.colors.surface.base,
     },
     body: {
         flex: 1,
@@ -108,28 +99,31 @@ export const SessionRightPanel = React.memo((props: SessionRightPanelProps) => {
     }, [pane, scopeState?.right.activeTabId, scopeState?.right.isOpen, terminalTabAvailable]);
 
     const rightPanelTabs = React.useMemo((): ReadonlyArray<SegmentedTab<RightTabId>> => {
+        // Icons, not words. Four labels cost a full text row in a pane this narrow, and the
+        // labels survive as the accessible name and the hover tooltip.
+        const glyph = (name: React.ComponentProps<typeof Octicons>['name']) => (
+            <Octicons name={name} size={15} color={theme.colors.text.secondary} />
+        );
         const base: SegmentedTab<RightTabId>[] = [
-            { id: 'git', label: t('session.rightPanel.tabs.git') },
-            { id: 'files', label: t('common.files') },
-            { id: 'navigation', label: t('session.transcriptNavigation.title') },
-            { id: 'agents', label: t('session.subagents.panel.title') },
+            { id: 'git', label: t('session.rightPanel.tabs.git'), icon: glyph('git-branch') },
+            { id: 'files', label: t('common.files'), icon: glyph('file-directory') },
+            { id: 'navigation', label: t('session.transcriptNavigation.title'), icon: glyph('list-unordered') },
+            { id: 'agents', label: t('session.subagents.panel.title'), icon: glyph('dependabot') },
         ];
         if (terminalTabAvailable) {
-            base.push({ id: 'terminal', label: t('settings.terminal') });
+            base.push({ id: 'terminal', label: t('settings.terminal'), icon: glyph('terminal') });
         }
         return base;
-    }, [terminalTabAvailable]);
+    }, [terminalTabAvailable, theme.colors.text.secondary]);
 
     const closeButton = (
-        <Pressable
+        <IconAction
             testID={resolveOptionalSessionScreenTestId(sessionScreenTestIdsEnabled, 'session-rightpanel-close')}
             onPress={props.onRequestClose ?? pane.closeRight}
-            style={styles.closeButton}
-            accessibilityRole="button"
             accessibilityLabel={closeButtonAtStart ? t('common.back') : t('common.close')}
         >
             <Octicons name={closeButtonAtStart ? 'chevron-left' : 'x'} size={18} color={theme.colors.text.secondary} />
-        </Pressable>
+        </IconAction>
     );
 
     return (

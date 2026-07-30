@@ -20,6 +20,8 @@ import { toTestIdSafeValue } from '@/utils/ui/toTestIdSafeValue';
 import { useWebScrollLockBypass } from '@/components/ui/scroll/useWebScrollLockBypass';
 import { resolveWebScrollableElementWithin } from '@/components/ui/scroll/resolveWebScrollableElement';
 import { deferOnWeb } from '@/utils/platform/deferOnWeb';
+import { IconAction } from '@/components/ui/buttons/IconAction';
+import { SidebarCollapseIcon, SidebarExpandIcon } from '@/components/navigation/shell/SidebarIcons';
 import { resolveOptionalSessionScreenTestId, useSessionScreenTestIdsEnabled } from '../shell/sessionScreenTestIds';
 import { usePaneFocusMode } from '@/components/appShell/panes/focusMode/usePaneFocusMode';
 import {
@@ -116,16 +118,6 @@ const stylesheet = StyleSheet.create((theme) => ({
         flexDirection: 'row',
         alignItems: 'center',
         gap: 6,
-    },
-    iconButton: {
-        width: 34,
-        height: 34,
-        borderRadius: 10,
-        alignItems: 'center',
-        justifyContent: 'center',
-        borderWidth: 1,
-        borderColor: theme.colors.border.default,
-        backgroundColor: theme.colors.surface.base,
     },
     empty: {
         flex: 1,
@@ -419,15 +411,13 @@ export const SessionDetailsPanel = React.memo((props: SessionDetailsPanelProps) 
     }, [openFileTab, pane, props.scopeId, props.sessionId, renderLoadingFallback, requestClose, resolveFileEditStartCallback, styles.empty, styles.emptyText]);
 
     const closeButton = (
-        <Pressable
+        <IconAction
             onPress={requestClose}
             testID={resolveOptionalSessionScreenTestId(sessionScreenTestIdsEnabled, 'session-details-close')}
-            style={styles.iconButton}
-            accessibilityRole="button"
             accessibilityLabel={closeButtonAtStart ? t('common.back') : t('session.detailsPanel.closeA11y')}
         >
             <Octicons name={closeButtonAtStart ? 'chevron-left' : 'chevron-right'} size={18} color={theme.colors.text.secondary} />
-        </Pressable>
+        </IconAction>
     );
 
     return (
@@ -561,11 +551,10 @@ export const SessionDetailsPanel = React.memo((props: SessionDetailsPanelProps) 
                     })}
                 </ScrollView>
                 {showHeaderActions && Platform.OS === 'web' ? (
-                    <Pressable
+                    <IconAction
                         onPress={focusMode.toggle}
                         testID={resolveOptionalSessionScreenTestId(sessionScreenTestIdsEnabled, 'session-details-focus-toggle')}
-                        style={styles.iconButton}
-                        accessibilityRole="button"
+                        active={focusMode.active}
                         accessibilityLabel={
                             focusMode.active
                                 ? t('session.detailsPanel.exitFocusModeA11y')
@@ -577,26 +566,24 @@ export const SessionDetailsPanel = React.memo((props: SessionDetailsPanelProps) 
                             size={18}
                             color={theme.colors.text.secondary}
                         />
-                    </Pressable>
+                    </IconAction>
                 ) : null}
                 {showRightPaneToggle ? (
-                    <Pressable
+                    <IconAction
                         onPress={toggleRightPane}
                         testID={resolveOptionalSessionScreenTestId(sessionScreenTestIdsEnabled, 'session-details-right-pane-toggle')}
-                        style={styles.iconButton}
-                        accessibilityRole="button"
                         accessibilityLabel={
                             rightPaneOpen
                                 ? t('session.detailsPanel.closeRightSidebarA11y')
                                 : t('session.detailsPanel.openRightSidebarA11y')
                         }
                     >
-                        <Octicons
-                            name={rightPaneOpen ? 'sidebar-collapse' : 'sidebar-expand'}
-                            size={18}
-                            color={theme.colors.text.secondary}
-                        />
-                    </Pressable>
+                        {rightPaneOpen ? (
+                            <SidebarCollapseIcon size={18} color={theme.colors.text.secondary} />
+                        ) : (
+                            <SidebarExpandIcon size={18} color={theme.colors.text.secondary} />
+                        )}
+                    </IconAction>
                 ) : null}
                 {showHeaderActions && !closeButtonAtStart ? closeButton : null}
             </View>

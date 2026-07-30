@@ -193,6 +193,15 @@ export const ACCOUNT_CORE_SETTING_DEFINITIONS = defineSettingDefinitions({
         storageScope: 'account',
         analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'enum', privacy: 'safe', identityScope: 'person' },
     },
+    sessionHeaderIdentityDisplay: {
+        // Same three choices, same schema as the session list's marker: the in-session header asks
+        // the user the identical question, so it must not invent a second vocabulary for it.
+        schema: SessionListIdentityDisplaySchema,
+        default: 'avatar',
+        description: 'In-session header identity marker: generated avatar, agent logo, or none',
+        storageScope: 'account',
+        analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'enum', privacy: 'safe', identityScope: 'person' },
+    },
     sessionFolderViewModeV1: {
         schema: SessionFolderViewModeV1Schema,
         default: 'off',

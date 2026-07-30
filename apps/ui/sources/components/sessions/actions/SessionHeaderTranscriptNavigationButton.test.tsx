@@ -3,6 +3,7 @@ import {
     findTestInstanceByTypeWithProps,
     renderScreen,
 } from '@/dev/testkit';
+import { SESSION_HEADER_ICON_SIZE_PX } from './sessionHeaderIconMetrics';
 import {
     installSessionActionsCommonModuleMocks,
     resetSessionActionsCommonModuleMockState,
@@ -71,7 +72,7 @@ describe('SessionHeaderTranscriptNavigationButton', () => {
         expect(setRightTabSpy).toHaveBeenCalledWith('navigation');
         expect(findTestInstanceByTypeWithProps(screen, 'Ionicons', {
             name: 'list-outline',
-            size: 22,
+            size: SESSION_HEADER_ICON_SIZE_PX,
         })).toBeTruthy();
     });
 

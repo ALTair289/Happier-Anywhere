@@ -32,8 +32,6 @@ function isTerminalConnectWebPathname(pathname: string | null | undefined): bool
  */
 const CONTENT_SHEET_SEAM_RADIUS_PX = 16;
 
-/** Width of the seam shadow strip. Kept narrow and butted against the seam so the cast hugs it. */
-const CONTENT_SHEET_SEAM_SHADOW_WIDTH_PX = 2;
 
 const stylesheet = StyleSheet.create((theme) => ({
     desktopDrawerRoot: {
@@ -44,29 +42,33 @@ const stylesheet = StyleSheet.create((theme) => ({
         backgroundColor: theme.colors.background.canvas,
     },
     /**
-     * The seam. A zero-width overlay sitting exactly on the sidebar/content boundary, above
-     * both, casting the sheet's lift shadow leftward onto the sidebar.
+     * The seam shadow. An inert overlay tracing the content sheet's exact footprint — same left
+     * corners, transparent fill — whose only job is to cast the sheet's lift shadow leftward onto
+     * the sidebar.
      *
-     * It exists because the shadow cannot be declared on the scene itself: react-navigation
-     * wraps the scene in an overflow:hidden container, which clips any shadow before it
-     * reaches the sidebar. This overlay is outside that container, so it is the only place
-     * the cast can come from.
+     * It has to be a separate element: react-navigation wraps the scene in an overflow:hidden
+     * container, so a shadow declared on the scene itself is clipped at the seam and never reaches
+     * the sidebar.
      *
-     * Geometry matters more than it looks. The strip's RIGHT edge sits on the seam and the cast
-     * is x-offset only with NO negative spread: a negative spread on a narrow strip either
-     * collapses the shadow to nothing (spread >= half the width) or pushes it clear of the seam,
-     * leaving a flat gap between the shadow and the edge it is supposed to describe. Blur alone
-     * gives the falloff. Dark needs roughly 3x the alpha to register over a dark canvas.
+     * It has to be sheet-SHAPED rather than a strip: a straight strip casts a straight-edged band
+     * that runs on past the rounded corners, so the shadow and the edge it describes disagree.
+     * Matching the radii makes the cast follow the curve.
+     *
+     * x-offset only with no spread — the offset keeps the cast on the sidebar side, and the top,
+     * right and bottom casts fall beyond the window edges where nothing can show them. Dark needs
+     * roughly 3x the alpha to register over a dark canvas.
      */
     contentSheetSeamShadow: {
         position: 'absolute',
         top: 0,
         bottom: 0,
-        width: CONTENT_SHEET_SEAM_SHADOW_WIDTH_PX,
+        right: 0,
+        borderTopLeftRadius: CONTENT_SHEET_SEAM_RADIUS_PX,
+        borderBottomLeftRadius: CONTENT_SHEET_SEAM_RADIUS_PX,
         zIndex: 2,
         boxShadow: theme.dark
-            ? '-5px 0 12px rgba(0, 0, 0, 0.42)'
-            : '-5px 0 12px rgba(0, 0, 0, 0.13)',
+            ? '-5px 0 22px rgba(0, 0, 0, 0.13)'
+            : '-5px 0 22px rgba(0, 0, 0, 0.035)',
     },
 }));
 
@@ -356,7 +358,7 @@ export const SidebarNavigator = React.memo((props: SidebarNavigatorProps) => {
             {Platform.OS === 'web' && showPermanentDrawer ? (
                 <View
                     pointerEvents="none"
-                    style={[styles.contentSheetSeamShadow, { left: drawerWidth - CONTENT_SHEET_SEAM_SHADOW_WIDTH_PX }]}
+                    style={[styles.contentSheetSeamShadow, { left: drawerWidth }]}
                 />
             ) : null}
         </DesktopMainContentDragSurface>

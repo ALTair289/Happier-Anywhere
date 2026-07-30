@@ -38,6 +38,8 @@ import {
 import { getSuggestions } from '@/components/autocomplete/suggestions';
 import { ChatHeaderView } from '@/components/sessions/transcript/ChatHeaderView';
 import { SessionHeaderActionMenu } from '@/components/sessions/actions/SessionHeaderActionMenu';
+import { SessionHeaderInfoButton } from '@/components/sessions/actions/SessionHeaderInfoButton';
+import { SessionHeaderRightSidebarButton } from '@/components/sessions/actions/SessionHeaderRightSidebarButton';
 import { SessionHeaderSubagentsButton } from '@/components/sessions/actions/SessionHeaderSubagentsButton';
 import { SessionHeaderTerminalButton } from '@/components/sessions/actions/SessionHeaderTerminalButton';
 import { useOpenAttachedSessionTerminal } from '@/components/sessions/terminal/openAttachedSessionTerminal';
@@ -791,6 +793,7 @@ type SessionHeaderRightElementProps = Readonly<{
     onToggleWorkspaceExperience: () => void;
     sessionAutomationsEnabledCount: number;
     shouldFoldHeaderIconActions: boolean;
+    onOpenSessionInfo: () => void;
     showAutomations: boolean;
     showWorkspaceExperienceToggle: boolean;
 }>;
@@ -821,7 +824,10 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
         directSessionRuntime,
     });
     const subagentCounts = React.useMemo(() => deriveSessionSubagentCounts(subagents), [subagents]);
-    const shouldShowSubagentsButton =
+    // The header icon is a live indicator driven by `subagentCounts.active` at its call site. The
+    // overflow menu is a destination, so it stays available whenever there is anything to look at,
+    // finished agents included.
+    const shouldOfferSubagentsMenuItem =
         subagentCounts.total > 0
         || sessionExecutionRunsSupported
         || hasSessionSubagentLaunchCards(props.session);
@@ -879,7 +885,7 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
             title: t('session.openTranscriptNavigation'),
             icon: <Ionicons name="list-outline" size={18} color={theme.colors.text.secondary} />,
         });
-        if (shouldShowSubagentsButton) {
+        if (shouldOfferSubagentsMenuItem) {
             items.push({
                 id: 'header.openSubagents',
                 title: t('session.openSubagents', { count: subagentCounts.active }),
@@ -909,7 +915,7 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
         props.showAutomations,
         props.showWorkspaceExperienceToggle,
         sessionExecutionRunsSupported,
-        shouldShowSubagentsButton,
+        shouldOfferSubagentsMenuItem,
         subagentCounts.active,
         theme.colors.text.secondary,
     ]);
@@ -975,7 +981,6 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
                 <SessionHeaderSubagentsButton
                     scopeId={props.paneScopeId}
                     activeCount={subagentCounts.active}
-                    hasAnySubagents={shouldShowSubagentsButton}
                 />
             ) : null}
             <SessionHeaderTerminalButton
@@ -983,24 +988,11 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
                 scopeId={props.paneScopeId}
                 serverId={props.currentSessionRouteServerId}
             />
-            {!props.shouldFoldHeaderIconActions && sessionExecutionRunsSupported ? (
-                <Pressable
-                    onPress={() => router.push(buildCurrentSessionHref('/runs') as any)}
-                    hitSlop={15}
-                    style={({ pressed }) => ({
-                        width: 44,
-                        height: 44,
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        opacity: pressed ? 0.7 : 1,
-                    })}
-                    accessibilityRole="button"
-                    accessibilityLabel={t('session.openRuns')}
-                >
-                    <Ionicons name="play-outline" size={22} color={theme.colors.chrome.header.foreground} />
-                </Pressable>
-            ) : null}
-            {!props.shouldFoldHeaderIconActions && props.showAutomations ? (
+{/* Never folded. Session details used to be reachable by pressing the avatar, which was
+                shown on every width; moving that navigation to an icon that folds below 520pt would
+                delete the only path to it on phones rather than tidy the row. */}
+            <SessionHeaderInfoButton onPress={props.onOpenSessionInfo} />
+            {!props.shouldFoldHeaderIconActions && props.showAutomations && props.sessionAutomationsEnabledCount > 0 ? (
                 <Pressable
                     onPress={() => navigateWithBlurOnWeb(() => router.push(buildCurrentSessionHref('/automations') as any))}
                     hitSlop={15}
@@ -1637,7 +1629,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                 title: '',
                 subtitle: undefined,
                 avatarId: undefined,
-                onAvatarPress: undefined,
+                agentId: undefined,
                 rightElement: undefined,
                 isConnected: false,
                 flavor: null
@@ -1650,7 +1642,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                 title: '',
                 subtitle: undefined,
                 avatarId: undefined,
-                onAvatarPress: undefined,
+                agentId: undefined,
                 rightElement: undefined,
                 isConnected: false,
                 flavor: null
@@ -1663,7 +1655,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                 title: t('errors.sessionDeleted'),
                 subtitle: undefined,
                 avatarId: undefined,
-                onAvatarPress: undefined,
+                agentId: undefined,
                 rightElement: undefined,
                 isConnected: false,
                 flavor: null
@@ -1677,7 +1669,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                 title: t('common.loading'),
                 subtitle: undefined,
                 avatarId: undefined,
-                onAvatarPress: undefined,
+                agentId: undefined,
                 rightElement: undefined,
                 isConnected: false,
                 flavor: null
@@ -1694,6 +1686,11 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                     : directSessionLink.machineId,
             ].join(' · ')
             : null;
+        const openSessionInfo = () => routerRef.current.navigate(buildCurrentSessionHref('/info') as any, {
+            dangerouslySingular() {
+                return 'session-info';
+            },
+        } as any);
         const rightElement = (
             <SessionHeaderRightElement
                 sessionId={sessionId}
@@ -1705,6 +1702,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                 onToggleWorkspaceExperience={handleToggleWorkspaceExperience}
                 sessionAutomationsEnabledCount={sessionAutomationsEnabledCount}
                 shouldFoldHeaderIconActions={shouldFoldHeaderIconActions}
+                onOpenSessionInfo={openSessionInfo}
                 showAutomations={showAutomations}
                 showWorkspaceExperienceToggle={mobileWorkspaceExperienceState.showWorkspaceExperienceToggle}
             />
@@ -1714,11 +1712,8 @@ export const SessionView = React.memo((props: SessionViewProps) => {
             subtitle: sessionWorkspacePresentation?.displayTitle || undefined,
             subtitleEllipsizeMode: sessionWorkspacePresentation?.displayPath && !sessionWorkspacePresentation.hasCustomLabel ? 'head' as const : undefined,
             avatarId: getSessionAvatarId(headerSession),
-            onAvatarPress: () => routerRef.current.navigate(buildCurrentSessionHref('/info') as any, {
-                dangerouslySingular() {
-                    return 'session-info';
-                },
-            } as any),
+            agentId: resolveAgentIdFromSessionMetadata(headerSession.metadata)
+                ?? resolveAgentIdFromFlavor(headerSession.metadata?.flavor ?? null),
 	            rightElement,
 	            badges: providerBadge ? [storageBadge, providerBadge] : [storageBadge],
 	            isConnected: isConnected,
@@ -1815,6 +1810,12 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                     <ChatHeaderView
                         {...headerProps}
                         onBackPress={handleBackPress}
+                        showBackButton={!isTablet}
+                        gutterElement={
+                            shouldFoldHeaderIconActions
+                                ? undefined
+                                : <SessionHeaderRightSidebarButton scopeId={paneScopeId} />
+                        }
                         constrainWidth={constrainHeaderWidth}
                         includeTopInset={headerSafeAreaTopMode !== 'external'}
                     />

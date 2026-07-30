@@ -1,4 +1,5 @@
 import React from 'react';
+import { act } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -11,8 +12,23 @@ import { installTranscriptCommonModuleMocks, resetTranscriptCommonModuleMockStat
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 let platformOs: 'ios' | 'android' | 'web' = 'ios';
+const headerMocks = vi.hoisted(() => ({
+    identityMode: 'avatar' as 'avatar' | 'agentLogo' | 'none',
+}));
 
 installTranscriptCommonModuleMocks({
+    // Only this one key is steered; every other setting still resolves through the real module, or
+    // the rest of the tree renders against undefined and the suite falls over.
+    storage: async (importOriginal: <T>() => Promise<T>) => {
+        const { createPartialStorageModuleMock } = await import('@/dev/testkit/mocks/storage');
+        const base = await createPartialStorageModuleMock(importOriginal, {});
+        return {
+            ...base,
+            useSetting: ((key: string) => (key === 'sessionHeaderIdentityDisplay'
+                ? headerMocks.identityMode
+                : (base.useSetting as (k: string) => unknown)(key))) as typeof base.useSetting,
+        };
+    },
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
         return createReactNativeWebMock({
@@ -62,6 +78,10 @@ vi.mock('@/components/ui/avatar/Avatar', () => ({
     Avatar: (props: any) => React.createElement('Avatar', props),
 }));
 
+vi.mock('@/agents/registry/AgentIcon', () => ({
+    AgentIcon: (props: any) => React.createElement('AgentIcon', props),
+}));
+
 vi.mock('@/constants/Typography', () => ({
     Typography: {
         default: () => ({}),
@@ -89,6 +109,7 @@ function flattenStyle(style: unknown): Record<string, unknown> {
 describe('ChatHeaderView', () => {
     afterEach(() => {
         platformOs = 'ios';
+        headerMocks.identityMode = 'avatar';
         standardCleanup();
         resetTranscriptCommonModuleMockState();
     });
@@ -168,6 +189,87 @@ describe('ChatHeaderView', () => {
         expect(screen.getTextContent()).toContain('Codex · happy-host');
     });
 
+    // The header's leading slot is a user preference. `agentLogo` with no resolvable agent renders
+    // nothing rather than quietly falling back to the avatar, which would override a choice the user
+    // already made.
+    async function renderWithIdentity(
+        mode: 'avatar' | 'agentLogo' | 'none',
+        props: { avatarId?: string; agentId?: string } = { avatarId: 'avatar-1', agentId: 'claude' },
+    ) {
+        headerMocks.identityMode = mode;
+        const { ChatHeaderView } = await import('./ChatHeaderView');
+        return renderScreen(<ChatHeaderView title="Title" {...(props as object)} />);
+    }
+
+    it('leads with the generated avatar by default', async () => {
+        const screen = await renderWithIdentity('avatar');
+        expect(screen.root.findAllByType('Avatar' as never)).toHaveLength(1);
+        expect(screen.root.findAllByType('AgentIcon' as never)).toHaveLength(0);
+    });
+
+    it('leads with the agent logo when the user picks it', async () => {
+        const screen = await renderWithIdentity('agentLogo');
+        expect(screen.root.findAllByType('Avatar' as never)).toHaveLength(0);
+        const icons = screen.root.findAllByType('AgentIcon' as never);
+        expect(icons).toHaveLength(1);
+        expect((icons[0] as unknown as { props: { agentId: string } }).props.agentId).toBe('claude');
+    });
+
+    it('leads with the title when the user picks none', async () => {
+        const screen = await renderWithIdentity('none');
+        expect(screen.root.findAllByType('Avatar' as never)).toHaveLength(0);
+        expect(screen.findAllByTestId('session-header-avatar')).toHaveLength(0);
+    });
+
+    it('shows nothing rather than the avatar when the agent logo is picked but no agent resolves', async () => {
+        const screen = await renderWithIdentity('agentLogo', { avatarId: 'avatar-1' });
+        expect(screen.root.findAllByType('Avatar' as never)).toHaveLength(0);
+        expect(screen.root.findAllByType('AgentIcon' as never)).toHaveLength(0);
+        expect(screen.findAllByTestId('session-header-avatar')).toHaveLength(0);
+    });
+
+    // The content column is capped at 1024 (mocked above) and centred, so a 1400pt window leaves a
+    // 188pt margin on each side and a 1100pt one leaves 38pt. The gutter control moves between the
+    // margin and the icon row on that measurement — the rule this pair of tests pins down.
+    async function renderWithWrapperWidth(width: number) {
+        const { ChatHeaderView } = await import('./ChatHeaderView');
+        const screen = await renderScreen(
+            <ChatHeaderView
+                title="Title"
+                gutterElement={React.createElement('GutterControl')}
+            />,
+        );
+        const wrapper = screen.root.findAll((node) => typeof node.props?.onLayout === 'function')[0];
+        await act(async () => {
+            wrapper.props.onLayout({ nativeEvent: { layout: { width, height: 44, x: 0, y: 0 } } });
+        });
+        return screen;
+    }
+
+    it('places the gutter control in the margin beside the content when the margin can hold it', async () => {
+        const screen = await renderWithWrapperWidth(1400);
+
+        const gutter = screen.root.findAll((node) => {
+            const style = flattenStyle(node.props?.style);
+            return style.position === 'absolute' && style.right === 0 && typeof style.width === 'number';
+        });
+        expect(gutter).toHaveLength(1);
+        expect(flattenStyle(gutter[0].props.style).width).toBe(188);
+        expect(gutter[0].findAllByType('GutterControl' as never)).toHaveLength(1);
+    });
+
+    it('falls back to the icon row when the margin is too narrow for the gutter control', async () => {
+        const screen = await renderWithWrapperWidth(1100);
+
+        const gutter = screen.root.findAll((node) => {
+            const style = flattenStyle(node.props?.style);
+            return style.position === 'absolute' && style.right === 0 && typeof style.width === 'number';
+        });
+        expect(gutter).toHaveLength(0);
+        // Still rendered — it moved, it did not disappear.
+        expect(screen.root.findAllByType('GutterControl' as never)).toHaveLength(1);
+    });
+
     it('suppresses session-scoped testIDs when the session screen is hidden', async () => {
         const { SessionScreenTestIdsProvider } = await import('../shell/sessionScreenTestIds');
         const { ChatHeaderView } = await import('./ChatHeaderView');
@@ -178,7 +280,6 @@ describe('ChatHeaderView', () => {
                     title="Title"
                     badges={['Direct']}
                     avatarId="avatar-1"
-                    onAvatarPress={() => {}}
                 />
             </SessionScreenTestIdsProvider>,
         );

@@ -263,6 +263,11 @@ vi.mock('@/sync/domains/session/activeViewingSession', () => ({
     clearActiveViewingSessionId: () => {},
     markSessionVisible: () => {},
     markSessionHidden: () => {},
+    // `useSessionSurfaceActivation` reads the reset version through `useSyncExternalStore`. Without
+    // these the whole suite throws on render, so every assertion below was unreachable.
+    subscribeActiveViewingSessionReset: () => () => {},
+    getActiveViewingSessionResetVersion: () => 0,
+    registerSessionVisibleSurface: () => () => {},
 }));
 vi.mock('@/sync/sync', () => ({
     sync: {
@@ -353,6 +358,17 @@ const AppPaneProviderWrapper = ({ children }: { children?: React.ReactNode }) =>
     <AppPaneProvider>{children ?? null}</AppPaneProvider>
 );
 
+/**
+ * The session-info navigation is reached through the header's info control, which the header
+ * receives inside `rightElement`. It used to hang off the avatar; the navigation contract asserted
+ * below is the same one, read through the control that now owns it.
+ */
+function readOpenSessionInfoHandler(): (() => void) | undefined {
+    const headerProps = chatHeaderPropsSpy.mock.calls.at(-1)?.[0];
+    return (headerProps?.rightElement as { props?: { onOpenSessionInfo?: () => void } } | undefined)
+        ?.props?.onOpenSessionInfo;
+}
+
 describe('SessionView info navigation', () => {
     beforeEach(() => {
         routerPushSpy.mockReset();
@@ -399,10 +415,10 @@ describe('SessionView info navigation', () => {
             { wrapper: AppPaneProviderWrapper },
         );
 
-        const headerProps = chatHeaderPropsSpy.mock.calls.at(-1)?.[0];
-        expect(typeof headerProps?.onAvatarPress).toBe('function');
+        const openSessionInfo = readOpenSessionInfoHandler();
+        expect(typeof openSessionInfo).toBe('function');
 
-        headerProps?.onAvatarPress?.();
+        openSessionInfo?.();
 
         expect(routerPushSpy).not.toHaveBeenCalled();
         expect(routerNavigateSpy).toHaveBeenCalledTimes(1);
@@ -424,10 +440,10 @@ describe('SessionView info navigation', () => {
             { wrapper: AppPaneProviderWrapper },
         );
 
-        const headerProps = chatHeaderPropsSpy.mock.calls.at(-1)?.[0];
-        expect(typeof headerProps?.onAvatarPress).toBe('function');
+        const openSessionInfo = readOpenSessionInfoHandler();
+        expect(typeof openSessionInfo).toBe('function');
 
-        headerProps?.onAvatarPress?.();
+        openSessionInfo?.();
 
         expect(routerPushSpy).not.toHaveBeenCalled();
         expect(routerNavigateSpy).toHaveBeenCalledTimes(1);
@@ -444,10 +460,10 @@ describe('SessionView info navigation', () => {
             { wrapper: AppPaneProviderWrapper },
         );
 
-        const headerProps = chatHeaderPropsSpy.mock.calls.at(-1)?.[0];
-        expect(typeof headerProps?.onAvatarPress).toBe('function');
+        const openSessionInfo = readOpenSessionInfoHandler();
+        expect(typeof openSessionInfo).toBe('function');
 
-        headerProps?.onAvatarPress?.();
+        openSessionInfo?.();
 
         expect(routerNavigateSpy).toHaveBeenCalledTimes(1);
         expect(routerNavigateSpy).toHaveBeenCalledWith('/session/s1/info?serverId=server-cache', expect.objectContaining({

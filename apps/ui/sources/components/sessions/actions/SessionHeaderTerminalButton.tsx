@@ -11,6 +11,7 @@ import { useLocalSetting } from '@/sync/domains/state/storage';
 import { t } from '@/text';
 import { useOptionalSessionScreenTestId } from '../shell/sessionScreenTestIds';
 import { readSessionTerminalMode, setSessionTerminalMode } from '@/components/sessions/terminal/sessionTerminalMode';
+import { SESSION_HEADER_WIDE_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
 
 export const SessionHeaderTerminalButton = React.memo((_props: Readonly<{ sessionId: string; scopeId: string; serverId?: string | null }>) => {
     const { theme } = useUnistyles();
@@ -90,7 +91,7 @@ export const SessionHeaderTerminalButton = React.memo((_props: Readonly<{ sessio
             accessibilityRole="button"
             accessibilityLabel={t('settings.terminal')}
         >
-            <Ionicons name="terminal-outline" size={22} color={theme.colors.chrome.header.foreground} />
+            <Ionicons name="terminal-outline" size={SESSION_HEADER_WIDE_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
         </Pressable>
     );
 });
