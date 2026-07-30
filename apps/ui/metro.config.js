@@ -263,6 +263,22 @@ function collectInternalWorkspacePackages(rootDir, maxDepth = 4) {
 const internalWorkspacePackages = collectInternalWorkspacePackages(path.resolve(__dirname, "../../packages"));
 const internalWorkspaceSourceRoots = [...internalWorkspacePackages.values()]
   .map((packageRoot) => path.resolve(packageRoot, "src"));
+const internalWorkspaceDistBlockList = [...internalWorkspacePackages.values()].map((packageRoot) => {
+  const normalizedDistPath = path.resolve(packageRoot, "dist").replace(/\\/g, "/");
+  const pattern = normalizedDistPath
+    .split("/")
+    .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[\\\\/]");
+  return new RegExp(`${pattern}(?:[\\\\/]|$)`);
+});
+config.resolver.blockList = [
+  ...(Array.isArray(config.resolver.blockList)
+    ? config.resolver.blockList
+    : config.resolver.blockList
+      ? [config.resolver.blockList]
+      : []),
+  ...internalWorkspaceDistBlockList,
+];
 
 function resolvePackageExportTarget(entry, platform) {
   if (typeof entry === "string" && entry.length > 0) return entry;

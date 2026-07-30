@@ -122,4 +122,20 @@ describe('apps/ui/metro.config.js (Expo resolution fallbacks)', () => {
             filePath: path.resolve(__dirname, '../../../../packages/agents/src/models.ts'),
         });
     });
+
+    it('ignores internal workspace dist publications while continuing to watch source', () => {
+        process.env.HAPPIER_STACK_STACK = 'qa-test';
+        delete process.env.CI;
+
+        const config = requireFreshMetroConfig();
+        const blockList = Array.isArray(config.resolver.blockList)
+            ? config.resolver.blockList
+            : [config.resolver.blockList];
+        const isBlocked = (filePath: string) => blockList.some(
+            (pattern: RegExp | undefined) => pattern instanceof RegExp && pattern.test(filePath),
+        );
+
+        expect(isBlocked(path.resolve(__dirname, '../../../../packages/agents/dist/models.js'))).toBe(true);
+        expect(isBlocked(path.resolve(__dirname, '../../../../packages/agents/src/models.ts'))).toBe(false);
+    });
 });
