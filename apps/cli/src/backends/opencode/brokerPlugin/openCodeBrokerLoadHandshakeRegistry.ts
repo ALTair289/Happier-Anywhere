@@ -90,14 +90,14 @@ export type OpenCodeBrokerLoadHandshakeKey = Readonly<{
   runtimeKind: OpenCodeBrokerLoadHandshakeRuntimeKind;
   selectionIdentity: string;
   loadNonce: string;
-  providers: readonly string[];
+  providers: readonly OpenCodeBrokerProvider[];
   pluginVersion: string;
 }>;
 export type OpenCodeBrokerLoadHandshakeObservation = Readonly<{
   runtimeKind: OpenCodeBrokerLoadHandshakeRuntimeKind;
   selectionIdentity: string;
   loadNonce: string;
-  providers: readonly string[];
+  providers: readonly OpenCodeBrokerProvider[];
   pluginVersion: string;
   processPid: number;
   observedAtMs: number;
@@ -105,7 +105,7 @@ export type OpenCodeBrokerLoadHandshakeObservation = Readonly<{
 
 type HandshakeRecord = Readonly<{
   observedAtMs: number;
-  providers: readonly string[];
+  providers: readonly OpenCodeBrokerProvider[];
   pluginVersion: string;
   processPid: number;
   runtimeKind: OpenCodeBrokerLoadHandshakeRuntimeKind;
@@ -134,11 +134,12 @@ function normalizeHandshakeKey(
   return `${identity}\0${nonce}`;
 }
 
-function normalizeProviders(providers: readonly string[]): readonly string[] {
+function normalizeProviders(providers: readonly string[]): readonly OpenCodeBrokerProvider[] {
   return [...new Set(
     providers
       .map((provider) => provider.trim())
-      .filter((provider) => OPEN_CODE_BROKER_PROVIDERS.some((candidate) => candidate === provider)),
+      .filter((provider): provider is OpenCodeBrokerProvider =>
+        OPEN_CODE_BROKER_PROVIDERS.some((candidate) => candidate === provider)),
   )].sort();
 }
 
