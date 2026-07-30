@@ -1424,9 +1424,15 @@ describe('startDaemon spawn resume wiring (integration)', () => {
         },
       });
 
-      await turnLifecycleHandler({
+      await expect(turnLifecycleHandler({
         sessionId: 'sess_metadata_bindings',
         event: 'task_started',
+      })).resolves.toEqual({
+        status: 'continue',
+        turnCustody: {
+          status: 'ignored_missing_exact_turn',
+          activeTurnId: null,
+        },
       });
 
       expect(providerActivityRecorderCapture.record).not.toHaveBeenCalled();

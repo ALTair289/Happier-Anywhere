@@ -1332,22 +1332,35 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     }
   });
 
-  it('retains Pending and makes no Provider call when daemon authorization requests source cutover', async () => {
+  it('retains Pending when prompt authorization blocks and never reuses terminal continue as authority', async () => {
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,
       emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'blocked-local' },
     });
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
-    notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValueOnce({
-      status: 'input_blocked',
-      reason: 'request_auth_source_cutover',
-    });
+    notifyDaemonConnectedServiceTurnLifecycleMock
+      .mockResolvedValueOnce({
+        status: 'continue',
+        turnCustody: {
+          status: 'recorded',
+          activeTurnId: null,
+        },
+      })
+      .mockResolvedValueOnce({
+        status: 'input_blocked',
+        reason: 'request_auth_source_cutover',
+      });
 
     const originalArgv = process.argv.slice();
     try {
       process.argv = [...originalArgv, '--started-by', 'daemon'];
       const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
       await waitForCurrentPendingInputContract(client);
+      await (client as any).notifyDaemonConnectedServiceTurnLifecycle(
+        'assistant_message_end',
+        'completed',
+        'session-turn:previous',
+      );
       (client as any).sessionTurnLifecycle.getActiveTurnId = () => 'session-turn:exact-active';
       const received: any[] = [];
       client.onUserMessage((message) => received.push(message));
@@ -1360,12 +1373,19 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       })).resolves.toEqual({ providerAcceptancePending: true });
 
       expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledTimes(1);
-      expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledExactlyOnceWith({
+      expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenNthCalledWith(1, {
+        sessionId: 's1',
+        event: 'assistant_message_end',
+        terminalStatus: 'completed',
+        turnId: 'session-turn:previous',
+      });
+      expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenNthCalledWith(2, {
         sessionId: 's1',
         event: 'prompt_or_steer',
         requestedAction: { v: 1, kind: 'steer_if_active' },
         activeTurnId: 'session-turn:exact-active',
       });
+      expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledTimes(2);
       expect(received).toHaveLength(0);
     } finally {
       process.argv = originalArgv;
