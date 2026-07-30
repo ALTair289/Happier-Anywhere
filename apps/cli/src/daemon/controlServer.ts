@@ -28,14 +28,9 @@ import {
   OPEN_CODE_BROKER_LOADED_HANDSHAKE_PATH,
   OpenCodeBrokerLoadHandshakeRequestSchema,
   OpenCodeBrokerLoadHandshakeStatusRequestSchema,
-  isOpenCodeBrokerLoadHandshakeConflicted,
-  readOpenCodeBrokerLoadHandshakeObservation,
   recordOpenCodeBrokerLoadHandshake,
+  resolveOpenCodeBrokerLoadHandshakeStatus as resolveOpenCodeBrokerLoadHandshakeStatusDefault,
 } from '@/backends/opencode/brokerPlugin';
-import {
-  persistCurrentManagedOpenCodeBrokerActivationProof as persistCurrentManagedOpenCodeBrokerActivationProofDefault,
-  rehydrateCurrentManagedOpenCodeBrokerActivationProof as rehydrateCurrentManagedOpenCodeBrokerActivationProofDefault,
-} from '@/backends/opencode/server/sharedManagedServer';
 import {
   isValidConnectedServiceBrokerRefreshToken,
   isValidConnectedServiceRunMaterializeToken,
@@ -405,10 +400,7 @@ export function createDaemonControlApp({
   handleClaudeSubscriptionAuthTokensRefresh,
   handleExecutionRunConnectedServiceMaterialize,
   handleExecutionRunConnectedServiceRelease,
-  persistCurrentManagedOpenCodeBrokerActivationProof =
-    persistCurrentManagedOpenCodeBrokerActivationProofDefault,
-  rehydrateCurrentManagedOpenCodeBrokerActivationProof =
-    rehydrateCurrentManagedOpenCodeBrokerActivationProofDefault,
+  resolveOpenCodeBrokerLoadHandshakeStatus = resolveOpenCodeBrokerLoadHandshakeStatusDefault,
   runtimeAuthRecoveryScheduler,
   isShuttingDown,
   requestSelfRestart,
@@ -440,8 +432,7 @@ export function createDaemonControlApp({
     pid: number;
     materializationKey: string;
   }>) => Promise<Readonly<{ released: boolean }>>;
-  persistCurrentManagedOpenCodeBrokerActivationProof?: typeof persistCurrentManagedOpenCodeBrokerActivationProofDefault;
-  rehydrateCurrentManagedOpenCodeBrokerActivationProof?: typeof rehydrateCurrentManagedOpenCodeBrokerActivationProofDefault;
+  resolveOpenCodeBrokerLoadHandshakeStatus?: typeof resolveOpenCodeBrokerLoadHandshakeStatusDefault;
   handleConnectedServiceRuntimeAuthFailure?: (input: Readonly<{
     sessionId: string;
     switchesThisTurn: number;
@@ -1761,21 +1752,10 @@ export function createDaemonControlApp({
       providers: request.body.providers,
       pluginVersion: request.body.pluginVersion,
     };
-    if (isOpenCodeBrokerLoadHandshakeConflicted(expectation)) {
-      return { ok: true as const, observed: false };
-    }
-
-    const currentObservation = readOpenCodeBrokerLoadHandshakeObservation(expectation);
-    if (request.body.runtimeKind === 'pi_rpc_process') {
-      // A Pi subprocess is owned by the surviving runner's PiRpcBackend rather than the shared
-      // OpenCode managed-server owner. Its preflight is cached for that exact process; every Pi
-      // respawn rotates the nonce, reloads the extension, and handshakes the current daemon.
-      return { ok: true as const, observed: currentObservation !== null };
-    }
-    const observed = currentObservation
-      ? await persistCurrentManagedOpenCodeBrokerActivationProof(currentObservation)
-      : await rehydrateCurrentManagedOpenCodeBrokerActivationProof(expectation);
-    return { ok: true as const, observed };
+    return {
+      ok: true as const,
+      observed: await resolveOpenCodeBrokerLoadHandshakeStatus(expectation),
+    };
   });
 
   // List all tracked sessions

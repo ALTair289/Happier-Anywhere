@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it, vi } from 'vitest';
 import { SPAWN_SESSION_ERROR_CODES } from '@happier-dev/protocol';
 
@@ -5,7 +7,12 @@ import { logger } from '@/ui/logger';
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
 import {
   resetOpenCodeBrokerLoadHandshakesForTests,
+  resolveOpenCodeBrokerLoadHandshakeStatus,
 } from '@/backends/opencode/brokerPlugin';
+import type {
+  ManagedOpenCodeBrokerActivationStateDeps,
+  SharedManagedOpenCodeServerState,
+} from '@/backends/opencode/server/sharedManagedServer';
 import { deriveConnectedServiceBrokerRefreshToken } from './connectedServices/broker/brokerRefreshCapabilityToken';
 import {
   resetBrokerBridgeEffectiveSelectionsForTests,
@@ -3895,9 +3902,47 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
 
   it('records the broker load handshake under the SCOPED token and exposes it via the loaded-status query (F4)', async () => {
     resetOpenCodeBrokerLoadHandshakesForTests();
-    const persistActivationProof = vi.fn(async () => true);
-    const rehydrateActivationProof = vi.fn(async () => false);
-    const app = createDaemonControlApp({
+    const identity = 'opencode|connected|broker:1|openai-codex:p:';
+    const loadNonce = 'spawn-control-server-test';
+    const statusPayload = {
+      runtimeKind: 'opencode_managed_server' as const,
+      selectionIdentity: identity,
+      loadNonce,
+      providers: ['openai'] as const,
+      pluginVersion: '1',
+    };
+    const processCommand = 'opencode serve --hostname=127.0.0.1 --port=64275';
+    const states = new Map<string, SharedManagedOpenCodeServerState>([
+      ['managed-child', {
+        v: 2,
+        baseUrl: 'http://127.0.0.1:64275',
+        pid: 4242,
+        startedAtMs: 1_000,
+        status: 'ready',
+        launchEnvFingerprint: 'launch-fingerprint',
+        ownerToken: 'managed-child-owner',
+        startTimeMs: 2_500,
+        expectedCmdlineHash: createHash('sha256').update(processCommand).digest('hex'),
+        activeServerDir: '/tmp/happier/servers/cloud',
+        daemonInstanceId: 'daemon-a',
+        brokerLoadNonce: loadNonce,
+      }],
+    ]);
+    let brokerStateUsable = true;
+    const activationDeps: ManagedOpenCodeBrokerActivationStateDeps = {
+      listStateKeys: async () => [...states.keys()],
+      withStateLock: async <T>(_stateKey: string, fn: () => Promise<T>) => await fn(),
+      readState: async (stateKey) => states.get(stateKey) ?? null,
+      writeState: async (stateKey, state) => {
+        states.set(stateKey, state);
+      },
+      isPidAlive: () => true,
+      getProcessInfo: async () => ({ name: 'opencode', cmd: processCommand }),
+      readProcessStartTimeMs: async () => 2_501,
+      currentActiveServerDir: '/tmp/happier/servers/cloud',
+      isCurrentBrokerStateUsable: async () => brokerStateUsable,
+    };
+    const createApp = (controlToken: string) => createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine',
       stopSession: async () => ({ status: 'not_found' as const }),
@@ -3908,24 +3953,16 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       }),
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
-      controlToken: 'token',
-      persistCurrentManagedOpenCodeBrokerActivationProof: persistActivationProof,
-      rehydrateCurrentManagedOpenCodeBrokerActivationProof: rehydrateActivationProof,
+      controlToken,
+      resolveOpenCodeBrokerLoadHandshakeStatus: async (expectation) =>
+        await resolveOpenCodeBrokerLoadHandshakeStatus(expectation, {
+          managedOpenCodeActivationStateDeps: activationDeps,
+        }),
     });
-
+    const appA = createApp('token');
     try {
-      const identity = 'opencode|connected|broker:1|openai-codex:p:';
-      const loadNonce = 'spawn-control-server-test';
-      const statusPayload = {
-        runtimeKind: 'opencode_managed_server',
-        selectionIdentity: identity,
-        loadNonce,
-        providers: ['openai'],
-        pluginVersion: '1',
-      };
-
       // Before any handshake, loaded-status (master-token query) reports not-observed.
-      const before = await app.inject({
+      const before = await appA.inject({
         method: 'POST',
         url: '/connected-service-auth/opencode-broker/loaded-status',
         headers: { 'x-happier-daemon-token': 'token' },
@@ -3935,7 +3972,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       expect(before.json()).toEqual({ ok: true, observed: false });
 
       // The broker registers its handshake using the SCOPED token (master token is rejected here).
-      const masterRejected = await app.inject({
+      const masterRejected = await appA.inject({
         method: 'POST',
         url: '/connected-service-auth/broker/loaded',
         headers: { 'x-happier-daemon-token': 'token' },
@@ -3943,7 +3980,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       });
       expect(masterRejected.statusCode).toBe(401);
 
-      const registered = await app.inject({
+      const registered = await appA.inject({
         method: 'POST',
         url: '/connected-service-auth/broker/loaded',
         headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
@@ -3952,10 +3989,9 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       expect(registered.statusCode).toBe(200);
       expect(registered.json()).toEqual({ ok: true, result: { acknowledged: true } });
 
-      // An OpenCode Map hit is not enough: if the exact managed-child owner cannot persist the
-      // activation fact, readiness stays fail-closed rather than losing the only continuity proof.
-      persistActivationProof.mockResolvedValueOnce(false);
-      const persistenceFailed = await app.inject({
+      // A Map hit is not enough while the current atomic broker descriptor is unusable.
+      brokerStateUsable = false;
+      const persistenceFailed = await appA.inject({
         method: 'POST',
         url: '/connected-service-auth/opencode-broker/loaded-status',
         headers: { 'x-happier-daemon-token': 'token' },
@@ -3964,10 +4000,10 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       expect(persistenceFailed.statusCode).toBe(200);
       expect(persistenceFailed.json()).toEqual({ ok: true, observed: false });
 
-      // Once the existing managed-child owner commits the bounded proof, loaded-status is ready.
-      persistActivationProof.mockReset();
-      persistActivationProof.mockResolvedValue(true);
-      const after = await app.inject({
+      // Once the exact process and current broker descriptor are proven, the real managed-child
+      // owner commits the bounded activation fact.
+      brokerStateUsable = true;
+      const after = await appA.inject({
         method: 'POST',
         url: '/connected-service-auth/opencode-broker/loaded-status',
         headers: { 'x-happier-daemon-token': 'token' },
@@ -3975,24 +4011,30 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       });
       expect(after.statusCode).toBe(200);
       expect(after.json()).toEqual({ ok: true, observed: true });
-      expect(persistActivationProof).toHaveBeenCalledWith(expect.objectContaining({
-        ...statusPayload,
+      expect(states.get('managed-child')?.brokerActivationProof).toEqual(expect.objectContaining({
+        loadNonce,
         processPid: 4242,
+        pluginVersion: '1',
+        providers: ['openai'],
       }));
+    } finally {
+      await appA.close();
+    }
 
-      // Daemon B has an empty process-local map. It delegates to the one exact managed-child proof
-      // owner instead of restarting the child or accepting file/nonce presence alone.
-      resetOpenCodeBrokerLoadHandshakesForTests();
-      rehydrateActivationProof.mockResolvedValueOnce(true);
-      const afterReplacement = await app.inject({
+    // Daemon B starts with an empty process-local Map and a different master control token. The same
+    // exact child is accepted from its real managed-state proof; no child restart or provider call
+    // participates in the decision.
+    resetOpenCodeBrokerLoadHandshakesForTests();
+    const appB = createApp('token-b');
+    try {
+      const afterReplacement = await appB.inject({
         method: 'POST',
         url: '/connected-service-auth/opencode-broker/loaded-status',
-        headers: { 'x-happier-daemon-token': 'token' },
+        headers: { 'x-happier-daemon-token': 'token-b' },
         payload: statusPayload,
       });
       expect(afterReplacement.statusCode).toBe(200);
       expect(afterReplacement.json()).toEqual({ ok: true, observed: true });
-      expect(rehydrateActivationProof).toHaveBeenCalledWith(statusPayload);
 
       // Pi has no independently reattachable managed child. Its surviving PiRpcBackend owns and
       // caches readiness for the exact stdio child; a respawn rotates nonce and handshakes anew.
@@ -4000,44 +4042,40 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       // never consume OpenCode's durable proof.
       const piIdentity = 'pi|connected|broker:1|anthropic:p:';
       const piStatusPayload = {
-        runtimeKind: 'pi_rpc_process',
+        runtimeKind: 'pi_rpc_process' as const,
         selectionIdentity: piIdentity,
         loadNonce: 'pi-child-nonce',
         providers: ['anthropic'],
         pluginVersion: '1',
       };
-      const piRegistered = await app.inject({
+      const piRegistered = await appB.inject({
         method: 'POST',
         url: '/connected-service-auth/broker/loaded',
-        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        headers: {
+          'x-happier-daemon-token': deriveConnectedServiceBrokerRefreshToken('token-b'),
+        },
         payload: { ...piStatusPayload, processPid: 5252 },
       });
       expect(piRegistered.statusCode).toBe(200);
-      const persistCallsBeforePi = persistActivationProof.mock.calls.length;
-      const rehydrateCallsBeforePi = rehydrateActivationProof.mock.calls.length;
-      const piObserved = await app.inject({
+      const piObserved = await appB.inject({
         method: 'POST',
         url: '/connected-service-auth/opencode-broker/loaded-status',
-        headers: { 'x-happier-daemon-token': 'token' },
+        headers: { 'x-happier-daemon-token': 'token-b' },
         payload: piStatusPayload,
       });
       expect(piObserved.json()).toEqual({ ok: true, observed: true });
-      expect(persistActivationProof).toHaveBeenCalledTimes(persistCallsBeforePi);
-      expect(rehydrateActivationProof).toHaveBeenCalledTimes(rehydrateCallsBeforePi);
 
       resetOpenCodeBrokerLoadHandshakesForTests();
-      rehydrateActivationProof.mockResolvedValueOnce(true);
-      const piWithoutCurrentHandshake = await app.inject({
+      const piWithoutCurrentHandshake = await appB.inject({
         method: 'POST',
         url: '/connected-service-auth/opencode-broker/loaded-status',
-        headers: { 'x-happier-daemon-token': 'token' },
+        headers: { 'x-happier-daemon-token': 'token-b' },
         payload: piStatusPayload,
       });
       expect(piWithoutCurrentHandshake.json()).toEqual({ ok: true, observed: false });
-      expect(rehydrateActivationProof).toHaveBeenCalledTimes(rehydrateCallsBeforePi);
     } finally {
       resetOpenCodeBrokerLoadHandshakesForTests();
-      await app.close();
+      await appB.close();
     }
   });
 });

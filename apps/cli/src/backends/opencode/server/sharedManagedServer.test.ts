@@ -77,7 +77,7 @@ describe('managed OpenCode broker activation proof continuity', () => {
       isPidAlive: (pid: number) => boolean;
       processCommand: string;
       observedStartTimeMs: number;
-      brokerStateUsable: boolean;
+      brokerStateUsable: boolean | (() => boolean);
     }>> = {},
   ) {
     const states = new Map(Object.entries(initialStates));
@@ -97,31 +97,41 @@ describe('managed OpenCode broker activation proof continuity', () => {
         }),
         readProcessStartTimeMs: async () => overrides.observedStartTimeMs ?? 2_501,
         currentActiveServerDir: '/tmp/happy/servers/cloud',
-        isCurrentBrokerStateUsable: async () => overrides.brokerStateUsable ?? true,
+        isCurrentBrokerStateUsable: async () => typeof overrides.brokerStateUsable === 'function'
+          ? overrides.brokerStateUsable()
+          : overrides.brokerStateUsable ?? true,
       },
     };
   }
 
-  it('persists one exact current-daemon observation and rehydrates it after the daemon map is lost', async () => {
-    const harness = createProofDeps({ state: createState() });
-    const observation = {
+  async function activate(
+    harness: ReturnType<typeof createProofDeps>,
+  ): Promise<SharedManagedOpenCodeServerState> {
+    await expect(persistManagedOpenCodeBrokerActivationProof({
       ...expectation,
       processPid: 4242,
       observedAtMs: 3_000,
-    };
+    }, harness.deps)).resolves.toBe(true);
+    const state = harness.states.get('state');
+    expect(state?.brokerActivationProof).toBeDefined();
+    return state as SharedManagedOpenCodeServerState;
+  }
 
-    await expect(
-      persistManagedOpenCodeBrokerActivationProof(observation, harness.deps),
-    ).resolves.toBe(true);
+  it('persists one exact current-daemon observation and rehydrates it after the daemon map is lost', async () => {
+    const harness = createProofDeps({ state: createState() });
+    await activate(harness);
     expect(harness.states.get('state')).toEqual(expect.objectContaining({
       brokerActivationProof: expect.objectContaining({
         v: 1,
+        selectionIdentityFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
         loadNonce: expectation.loadNonce,
         providers: ['openai'],
         pluginVersion: '1',
         processPid: 4242,
+        managedChildGenerationFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
     }));
+    expect(harness.states.get('state')?.brokerActivationProof).not.toHaveProperty('selectionIdentity');
 
     // Daemon B has no process-local handshake map. Exact proof consumption is driven entirely by
     // the existing managed-child state plus final process/current-broker revalidation.
@@ -130,80 +140,49 @@ describe('managed OpenCode broker activation proof continuity', () => {
     ).resolves.toBe(true);
   });
 
+  it('does not treat plugin-file or nonce presence as activation proof', async () => {
+    const harness = createProofDeps({ state: createState() });
+    await expect(
+      rehydrateManagedOpenCodeBrokerActivationProof(expectation, harness.deps),
+    ).resolves.toBe(false);
+  });
+
   it.each([
-    {
-      label: 'plugin file and nonce without activation proof',
-      state: createState(),
-    },
-    {
-      label: 'changed child nonce',
-      state: createState({
-        brokerActivationProof: {
-          v: 1,
-          ...expectation,
-          loadNonce: 'other-nonce',
-          processPid: 4242,
-        },
-      }),
-    },
-    {
-      label: 'changed process pid',
-      state: createState({
-        brokerActivationProof: {
-          v: 1,
-          ...expectation,
-          processPid: 4343,
-        },
-      }),
-    },
-    {
-      label: 'provider mismatch',
-      state: createState({
-        brokerActivationProof: {
-          v: 1,
-          ...expectation,
-          providers: ['anthropic'],
-          processPid: 4242,
-        },
-      }),
-    },
-    {
-      label: 'plugin version mismatch',
-      state: createState({
-        brokerActivationProof: {
-          v: 1,
-          ...expectation,
-          pluginVersion: '2',
-          processPid: 4242,
-        },
-      }),
-    },
-    {
-      label: 'missing owner token',
-      state: createState({
-        ownerToken: undefined,
-        brokerActivationProof: {
-          v: 1,
-          ...expectation,
-          processPid: 4242,
-        },
-      }),
-    },
-  ])('fails closed for $label', async ({ state }) => {
-    const harness = createProofDeps({ state });
+    ['loadNonce', 'other-nonce'],
+    ['processPid', 4343],
+    ['providers', ['anthropic']],
+    ['pluginVersion', '2'],
+  ] as const)('rejects a proof with changed %s', async (field, value) => {
+    const harness = createProofDeps({ state: createState() });
+    const activatedState = await activate(harness);
+    harness.states.set('state', {
+      ...activatedState,
+      brokerActivationProof: {
+        ...(activatedState.brokerActivationProof as NonNullable<typeof activatedState.brokerActivationProof>),
+        [field]: value,
+      },
+    });
+    await expect(
+      rehydrateManagedOpenCodeBrokerActivationProof(expectation, harness.deps),
+    ).resolves.toBe(false);
+  });
+
+  it.each([
+    ['missing owner token', { ownerToken: undefined }],
+    ['changed nonempty owner token', { ownerToken: 'owner-token-b' }],
+    ['changed launch fingerprint', { launchEnvFingerprint: 'other-launch' }],
+  ] as const)('rejects a generation whose %s no longer matches the activation fact', async (_label, change) => {
+    const harness = createProofDeps({ state: createState() });
+    const activatedState = await activate(harness);
+    harness.states.set('state', { ...activatedState, ...change });
     await expect(
       rehydrateManagedOpenCodeBrokerActivationProof(expectation, harness.deps),
     ).resolves.toBe(false);
   });
 
   it('rejects dead/reused processes, changed start/command, unusable broker state, and duplicate owners', async () => {
-    const activatedState = createState({
-      brokerActivationProof: {
-        v: 1,
-        ...expectation,
-        processPid: 4242,
-      },
-    });
+    const seed = createProofDeps({ state: createState() });
+    const activatedState = await activate(seed);
 
     await expect(rehydrateManagedOpenCodeBrokerActivationProof(
       expectation,
@@ -240,6 +219,35 @@ describe('managed OpenCode broker activation proof continuity', () => {
         b: activatedState,
       }).deps,
     )).resolves.toBe(false);
+  });
+
+  it('rechecks broker currentness after proof persistence and after every uniqueness scan await', async () => {
+    let persistChecks = 0;
+    const persistHarness = createProofDeps(
+      { state: createState() },
+      { brokerStateUsable: () => ++persistChecks < 3 },
+    );
+    await expect(persistManagedOpenCodeBrokerActivationProof({
+      ...expectation,
+      processPid: 4242,
+      observedAtMs: 3_000,
+    }, persistHarness.deps)).resolves.toBe(false);
+
+    const seed = createProofDeps({ state: createState() });
+    const activatedState = await activate(seed);
+    let rehydrateChecks = 0;
+    const rehydrateHarness = createProofDeps({
+      matching: activatedState,
+      laterUnmatched: createState({
+        pid: 5252,
+        brokerLoadNonce: 'other-generation',
+      }),
+    }, {
+      brokerStateUsable: () => ++rehydrateChecks < 3,
+    });
+    await expect(
+      rehydrateManagedOpenCodeBrokerActivationProof(expectation, rehydrateHarness.deps),
+    ).resolves.toBe(false);
   });
 });
 

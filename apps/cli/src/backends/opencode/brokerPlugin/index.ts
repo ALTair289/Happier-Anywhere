@@ -43,6 +43,7 @@ export {
   type OpenCodeBrokerLoadHandshakeRequest,
   type OpenCodeBrokerLoadHandshakeObservation,
 } from './openCodeBrokerLoadHandshakeRegistry';
+export { resolveOpenCodeBrokerLoadHandshakeStatus } from './resolveOpenCodeBrokerLoadHandshakeStatus';
 export {
   verifyOpenCodeBrokerReadyForConnectedSession,
   type OpenCodeBrokerReadiness,
