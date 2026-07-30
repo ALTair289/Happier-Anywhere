@@ -80,16 +80,21 @@ export function performWebDomViewportCommand(
     }
 
     if (command.kind === 'preserve-live-tail-distance') {
+        // NAMING TRAP - read this before trusting the command name. Despite "preserve ...
+        // distance" this writes the ABSOLUTE BOTTOM. `previousDistanceFromLiveTailPx` is the
+        // follow DECISION input consumed by the resolver
+        // (`createTranscriptViewportController#resolveFollowLiveTailOnContentGrowth`), never a
+        // restore target. Consequence to keep in mind: when this fires without the reader's
+        // authority it moves them by exactly how far they had scrolled up, which is why its
+        // authorization (`wantsPinned` + `recentUserIntent` from the ONE user-scroll-intent owner)
+        // is the load-bearing part, not the target maths.
         const metrics = deps.resolveWebScrollMetrics();
         if (!metrics) return false;
         if (rendererOwnsLiveWebTail(deps)) return true;
         const maxScrollTop = resolveWebTranscriptMaxScrollTop(metrics);
-        // The command's captured distance is the follow DECISION input (resolver
-        // authorizes only when it is within the pin threshold); it must not be
-        // re-applied as the restore target. Under per-frame streaming growth the
-        // capture is stale by write time, and restoring `max - distance` ratchets
-        // a pinned viewport progressively off the tail (live capture 2026-07-21:
-        // 46→296px drift). A follow-bottom preserve lands on the live tail.
+        // Under per-frame streaming growth the captured distance is stale by write time, and
+        // restoring `max - distance` ratchets a pinned viewport progressively off the tail (live
+        // capture 2026-07-21: 46→296px drift). An authorized follow lands on the live tail.
         const targetScrollTop = Math.max(0, maxScrollTop);
         if (Math.abs(targetScrollTop - metrics.scrollTop) < 0.5) return false;
 

@@ -86,6 +86,10 @@ import { resolveSessionEntryViewportState } from '@/components/sessions/transcri
 import type { LastNativeRestoreIndexCommand, ScrollableChatListRef } from '@/components/sessions/transcript/viewport/transcriptScrollableListTypes';
 import { createWebDomScrollObservation, type WebDomScrollObservation } from '@/components/sessions/transcript/viewport/driver/webDomObservation';
 import {
+    createTranscriptUserScrollIntentOwner,
+    type TranscriptUserScrollIntentOwner,
+} from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
+import {
     canAutoFollowTranscriptBottom,
     isExplicitTranscriptBottomFollowCommand,
     resolveTranscriptAutoFollowPinWaitMs,
@@ -505,7 +509,6 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     const observeCommittedProjectionLayoutRef = React.useRef<() => void>(() => {});
     const wantsPinnedRef = React.useRef(true);
     const pinThresholdPxRef = React.useRef(72);
-    const lastUserScrollIntentAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
     const lastExplicitWebScrollIntentAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
     const nativeTranscriptTouchStartYRef = React.useRef<number | null>(null);
     const resolveJumpToSeqIndexForCommandRef = React.useRef<(
@@ -514,9 +517,20 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         transcriptBlockIndex?: number | null,
         role?: TranscriptJumpTargetRole | null,
     ) => number | null>(() => null);
+    // ONE owner of "is the reader scrolling / does the reader still want the live tail", shared
+    // with the renderer through the same observation object. `timestampRef` IS the ref every host
+    // consumer below reads — the renderer no longer keeps a same-named second copy, and the
+    // renderer's drag/momentum liveness is now visible to the host's pin guards (a web scrollbar
+    // drag used to be invisible to them entirely).
+    const userScrollIntentRef = React.useRef<TranscriptUserScrollIntentOwner | null>(null);
+    if (userScrollIntentRef.current === null) {
+        userScrollIntentRef.current = createTranscriptUserScrollIntentOwner();
+    }
+    const userScrollIntent = userScrollIntentRef.current;
+    const lastUserScrollIntentAtMsRef = userScrollIntent.timestampRef;
     const webDomObservationRef = React.useRef<WebDomScrollObservation | null>(null);
     if (webDomObservationRef.current === null) {
-        webDomObservationRef.current = createWebDomScrollObservation();
+        webDomObservationRef.current = createWebDomScrollObservation({ userScrollIntent });
     }
     const webDomObservation = webDomObservationRef.current;
     const applyWebPassiveLiveTailCorrectionEffectRef = React.useRef<(
@@ -1669,42 +1683,10 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         nativeFirstPaintReleasedWithoutListLoad,
         onEntryPlacementEvent,
         recordEntryOwnerOutcome,
-        recordInitialPlacementSettled,
         resetFirstPaintRevealRecordForSessionEntry,
         showFirstPaintPlaceholder,
         showRouteHydrationFirstPaintPlaceholder,
     } = firstPaintState;
-    // First-paint cover release for a web bottom-entry open. Legend's `onLoad` fires inside
-    // `finishInitialScroll`, one animation frame BEFORE the deferred at-end maintenance write it
-    // flushes in the same call, so `onLoad` is not the presentable frame. The renderer's own
-    // landing observation is; this subscribes the placeholder to it. Nothing else joins here —
-    // no producer readiness participates in the reveal.
-    const initialPlacementObservationActive =
-        Platform.OS === 'web'
-        && mainTranscriptRendererBinding.renderer.kind === 'legendList'
-        && entryAnchorForRender == null
-        && props.isLoaded
-        && listData.length > 0;
-    React.useEffect(() => {
-        if (!initialPlacementObservationActive) return;
-        const sessionId = props.sessionId;
-        const observe = listRef.current?.observeInitialPresentationSettlement;
-        if (!observe) {
-            // No renderer produces the fact here: the cover must not wait for it.
-            recordInitialPlacementSettled({ sessionId });
-            return;
-        }
-        return observe({
-            dataKey: sessionId,
-            revision: 0,
-            onSettled: () => recordInitialPlacementSettled({ sessionId }),
-        });
-    }, [
-        initialPlacementObservationActive,
-        listRef,
-        props.sessionId,
-        recordInitialPlacementSettled,
-    ]);
     useTranscriptPaintTelemetryEffects({
         firstListPaintObserved,
         isWarmKeepAliveInstance,
@@ -1996,6 +1978,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         updateNativeInitialViewportPendingObservation,
         usesNativeFlashListBottomMaintenance:
             mainTranscriptRendererOwnerPolicy.usesNativeFlashListBottomMaintenance,
+        userScrollIntent,
         wantsPinnedRef,
     });
     const {

@@ -749,6 +749,7 @@ export function useTranscriptJumpHost(deps: TranscriptJumpHostDeps): TranscriptJ
         minNewActivityCount: jumpMinNewCount,
         newActivityCount: scrollPin.newActivityCount,
         revealThresholdPx: jumpRevealOffsetThresholdPx,
+        viewportHeightPx: listLayoutHeight,
     });
 
     const transcriptNavigationRuntimeAnchors = React.useMemo(

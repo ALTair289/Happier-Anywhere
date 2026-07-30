@@ -128,7 +128,7 @@ export function createTranscriptViewportController(): TranscriptViewportControll
                         ...(typeof input.animated === 'boolean' ? { animated: input.animated } : {}),
                     };
                 case 'preserve-live-tail-distance':
-                    return resolvePreserveLiveTailDistance(input);
+                    return resolveFollowLiveTailOnContentGrowth(input);
                 case 'restore-web-prepend-anchor':
                     mode = 'restore-anchor';
                     return {
@@ -266,7 +266,13 @@ export function createTranscriptViewportController(): TranscriptViewportControll
         };
     }
 
-    function resolvePreserveLiveTailDistance(
+    /**
+     * Authorizes the web content-growth follow write. `previousDistanceFromLiveTailPx` is a
+     * DECISION input (was the reader within the pin threshold before this growth?), NOT a restore
+     * target - the driver writes the absolute bottom. Named for what it decides, because
+     * "preserve ... distance" reads like a distance-preserving restore and is not one.
+     */
+    function resolveFollowLiveTailOnContentGrowth(
         input: Extract<TranscriptViewportControllerInput, { type: 'preserve-live-tail-distance' }>,
     ): TranscriptViewportCommand {
         const previousDistanceFromLiveTailPx = normalizeNonNegative(input.previousDistanceFromLiveTailPx);

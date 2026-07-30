@@ -28,7 +28,6 @@ import type { WebScrollMovementFact } from '@/components/sessions/transcript/scr
 import { useReducedMotionPreference } from '@/hooks/ui/useReducedMotionPreference';
 
 import type {
-    TranscriptInitialPresentationSettlementRequest,
     TranscriptRendererAtEndState,
     TranscriptRendererEntryAnchorHold,
     TranscriptRendererNativePhysicalViewportCapture,
@@ -270,11 +269,6 @@ function settleLegendScroll(
     );
 }
 
-type PendingInitialPresentationSettlement = Readonly<{
-    deadlineAtMs: number;
-    request: TranscriptInitialPresentationSettlementRequest;
-}>;
-
 function toLegendData<TItem>(data: readonly TItem[], dataOrder: TranscriptListRendererProps<TItem>['frame']['dataOrder']): readonly TItem[] {
     if (dataOrder === 'newest-first') {
         return [...data].reverse();
@@ -431,12 +425,13 @@ function LegendListTranscriptRendererInner<TItem>(
     // offset movement as a user detach: an expansion commit keeps moving the offset for
     // seconds after the toggling tap, and detach-releasing there strands the armed hold
     // (live native S-C re-run 2026-07-11 09:03).
-    const lastUserScrollIntentAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
-    // S-D user-scroll-live evidence: an active drag, user fling momentum (chained off a drag
-    // release or a previous user momentum phase), or wheel/touch/keyboard input within the
-    // suppression margin. While live, verifyLanding never writes residual corrections.
-    const userDragActiveRef = React.useRef(false);
-    const userMomentumActiveRef = React.useRef(false);
+    //
+    // The scroll-intent timestamp AND the S-D drag/momentum liveness bits both live in the ONE
+    // owner the host also reads (`viewport/driver/userScrollIntentOwner`). They used to be a
+    // renderer-private ref with the same name as the host's plus two private booleans, so the
+    // host's auto-pin guard could not see a web scrollbar drag at all and the renderer could not
+    // see host-side keyboard/pointer intent. While live, verifyLanding never writes residuals.
+    const userScrollIntent = props.webDomObservation.userScrollIntent;
     const lastDragEndAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
     const lastUserMomentumEndAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
     const webTouchVerticalCoordinateRef = React.useRef<TouchVerticalCoordinate | null>(null);
@@ -484,8 +479,8 @@ function LegendListTranscriptRendererInner<TItem>(
         // drag/momentum suppression itself: an explicit command issued mid-fling must not let
         // the held corrector fight the still-active native gesture.
         advanceMovementEpoch();
-        lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
-    }, [advanceMovementEpoch]);
+        userScrollIntent.revokeInputEvidence();
+    }, [advanceMovementEpoch, userScrollIntent]);
     const pendingLargeResidualConfirmationRef = React.useRef<Readonly<{
         intent: LegendHeldScrollIntent;
         targetOffset: number;
@@ -501,10 +496,6 @@ function LegendListTranscriptRendererInner<TItem>(
     const lastPublishedAtEndStateRef = React.useRef<TranscriptRendererAtEndState | null>(null);
     const lastPublishedAtEndCauseRef = React.useRef<TranscriptViewportMutationCause | null>(null);
     const lastEmittedContentHeightRef = React.useRef<number | null>(null);
-    const pendingInitialPresentationSettlementRef =
-        React.useRef<PendingInitialPresentationSettlement | null>(null);
-    const tryAcknowledgeInitialPresentationSettlementRef =
-        React.useRef<() => boolean>(() => false);
     // While true, physically-at-end observations must NOT auto-latch a held-'end' intent:
     // a detached-anchor entry mounts over the previous session's still-at-end geometry, and an
     // auto-latch there drags the entry-anchor restore back to the tail. Cleared by real scroll
@@ -975,8 +966,8 @@ function LegendListTranscriptRendererInner<TItem>(
         if (params.pendingCause === 'command') return 'command';
         if (!params.offsetMoved) return 'layout';
         const nowMs = Date.now();
-        const dragOrMomentumLive = userDragActiveRef.current || userMomentumActiveRef.current;
-        const scrollIntentAgeMs = nowMs - lastUserScrollIntentAtMsRef.current;
+        const dragOrMomentumLive = userScrollIntent.isGestureActive();
+        const scrollIntentAgeMs = nowMs - userScrollIntent.lastInputAtMs();
         const evidenceLive = dragOrMomentumLive || scrollIntentAgeMs <= LEGEND_USER_INPUT_DETACH_WINDOW_MS;
         if (!evidenceLive) return 'layout';
         if (params.isFollowing) return 'user';
@@ -985,9 +976,9 @@ function LegendListTranscriptRendererInner<TItem>(
     }, []);
 
     const isUserScrollInputLive = React.useCallback((): boolean => {
-        if (userDragActiveRef.current || userMomentumActiveRef.current) return true;
+        if (userScrollIntent.isGestureActive()) return true;
         return Date.now() - lastUserInteractionAtMsRef.current <= LEGEND_USER_SCROLL_WRITE_SUPPRESSION_MS;
-    }, []);
+    }, [userScrollIntent]);
 
     const emitRendererAtEndState = React.useCallback((
         context?: Readonly<{
@@ -1113,7 +1104,6 @@ function LegendListTranscriptRendererInner<TItem>(
         pendingLargeResidualConfirmationRef.current = null;
         pendingWebTailMaterializationKeyRef.current = null;
         cancelScheduledHeldIntentSettle();
-        tryAcknowledgeInitialPresentationSettlementRef.current();
     }, [
         cancelScheduledHeldIntentSettle,
         finishEntryPlacement,
@@ -1316,63 +1306,6 @@ function LegendListTranscriptRendererInner<TItem>(
             maxOffset: Math.max(0, metrics.scrollHeight - metrics.clientHeight),
         };
     }, [readWebScrollMetrics, resolveAnchorHoldDataIndex, resolveHeldIntentIndex]);
-
-    const tryAcknowledgeInitialPresentationSettlement = React.useCallback((): boolean => {
-        const pending = pendingInitialPresentationSettlementRef.current;
-        const request = pending?.request;
-        if (!request || request.dataKey !== props.dataKey || !isWebFrame) return false;
-        const heldIntent = heldScrollIntentRef.current;
-        if (heldIntent?.kind === 'end') {
-            const state = legendListRef.current?.getState();
-            const metrics = readWebScrollMetrics();
-            if (!state || !metrics || dataLength <= 0) return false;
-            const lastIndex = dataLength - 1;
-            const startBuffered = Number.isFinite(state.startBuffered) ? state.startBuffered : state.start;
-            const endBuffered = Number.isFinite(state.endBuffered) ? state.endBuffered : state.end;
-            const tailMaterialized =
-                Number.isFinite(startBuffered) &&
-                Number.isFinite(endBuffered) &&
-                lastIndex >= startBuffered &&
-                lastIndex <= endBuffered;
-            const distanceFromBottom = Math.max(
-                0,
-                metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop,
-            );
-            if (
-                !tailMaterialized
-                || pendingWebTailMaterializationKeyRef.current !== null
-                || (
-                    distanceFromBottom > 1
-                    && Date.now() < pending.deadlineAtMs
-                )
-            ) return false;
-        } else if (heldIntent) {
-            const landing = readHeldIntentLanding(heldIntent);
-            const residual = landing?.basis === 'native-physical'
-                ? landing.rawResidual ?? landing.residual
-                : landing?.rawResidual ?? landing?.residual;
-            if (
-                !landing
-                || landing.estimateBasis === true
-                || typeof residual !== 'number'
-                || Math.abs(residual) >= LEGEND_HELD_INTENT_ALIGNMENT_EPSILON_PX
-            ) return false;
-        }
-        // Held targets are confirmed against their physical landing above. With no held
-        // positioning intent, no renderer alignment predicate remains to observe.
-        if (pendingInitialPresentationSettlementRef.current !== pending) return false;
-        pendingInitialPresentationSettlementRef.current = null;
-        request.onSettled();
-        return true;
-    }, [
-        dataLength,
-        isWebFrame,
-        props.dataKey,
-        readHeldIntentLanding,
-        readWebScrollMetrics,
-    ]);
-    tryAcknowledgeInitialPresentationSettlementRef.current =
-        tryAcknowledgeInitialPresentationSettlement;
 
     const requestNativePhysicalEntryLanding = React.useCallback((
         intent: LegendHeldScrollIntent,
@@ -1604,7 +1537,6 @@ function LegendListTranscriptRendererInner<TItem>(
             finishEntryPlacement(intent, outcome);
             if (clearHeldIntent) setHeldScrollIntent(null);
             cancelScheduledHeldIntentSettle();
-            tryAcknowledgeInitialPresentationSettlement();
         };
         if (entryPlacementActive) {
             lastEntryPlacementExactAlignmentRef.current = false;
@@ -1774,7 +1706,6 @@ function LegendListTranscriptRendererInner<TItem>(
                 return;
             }
             verifyLanding();
-            tryAcknowledgeInitialPresentationSettlement();
             const requestAnimationFrame = globalThis.requestAnimationFrame;
             if (typeof requestAnimationFrame !== 'function') {
                 finishHeldIntentSettle('unavailable');
@@ -1820,7 +1751,7 @@ function LegendListTranscriptRendererInner<TItem>(
         }
 
         resumeHeldIntentSettle(options?.deferFirstVerification === true);
-    }, [cancelScheduledHeldIntentSettle, finishEntryPlacement, isUserScrollInputLive, isWebFrame, readHeldIntentLanding, requestNativePhysicalEntryLanding, requestWebHeldEndMaterialization, requestWebKeyedIdentityMaterialization, setHeldScrollIntent, tryAcknowledgeInitialPresentationSettlement, writeHeldIntentResidual]);
+    }, [cancelScheduledHeldIntentSettle, finishEntryPlacement, isUserScrollInputLive, isWebFrame, readHeldIntentLanding, requestNativePhysicalEntryLanding, requestWebHeldEndMaterialization, requestWebKeyedIdentityMaterialization, setHeldScrollIntent, writeHeldIntentResidual]);
 
     const installWebEntryAnchor = React.useCallback((anchor: TranscriptRendererEntryAnchorHold) => {
         if (!isWebFrame) return;
@@ -2163,7 +2094,11 @@ function LegendListTranscriptRendererInner<TItem>(
                     metrics.clientHeight * props.frame.rendererOptions.continuousFollow.endThresholdRatio,
                 semanticContext: {
                     atEndNonUserCause: cause === 'command' ? 'command' : 'layout',
-                    isUserInputActive: userDragActiveRef.current || userMomentumActiveRef.current,
+                    // Per-frame ATTRIBUTION takes the unrevocable physical fact only (an open
+                    // drag/momentum phase). The bounded post-input continuation is owned below by
+                    // `pendingUserInput`, which a committed geometry/command boundary revokes —
+                    // attribution must stay revocable, liveness must not.
+                    isUserInputActive: userScrollIntent.isGestureActive(),
                     nowMs: Date.now(),
                 },
                 sustainFrames: 2,
@@ -2252,11 +2187,33 @@ function LegendListTranscriptRendererInner<TItem>(
                 armWebVisibleAnchorHold();
             }
         }
+        // Does live user input EXPLAIN this movement? Liveness alone is not enough: at the top
+        // clamp an upward wheel produces no movement while estimate churn pushes the offset DOWN,
+        // and treating that as the reader's abandons the anchor they are reading (live S-D). So it
+        // takes an open drag/momentum phase (a thumb drag has no direction until it moves) or raw
+        // input asking for THIS direction. When it does hold, it outranks classification for the
+        // release decision on every platform: a frame the movement classifier could not attribute
+        // is still the reader's while their gesture is live, and re-asserting a hold there is the
+        // corrector fighting live input — the mechanism behind the late (>1s post-gesture)
+        // unbounded-magnitude write measured on 2026-07-30.
+        const userScrollInputExplainsMovement =
+            (globalThis as any).__U1_OFF !== true && userScrollIntent.isLive(Date.now())
+            && (
+                userScrollIntent.isGestureActive()
+                || (movementDirection !== null && userScrollIntent.lastInputDirection() === movementDirection)
+            );
         const keyedLandingDisplacedByRenderer = isWebFrame
             && offsetMoved
             && !isClassifiedUserMovement
+            && !userScrollInputExplainsMovement
             && hasLiveKeyedHeldIntent();
-        if (keyedLandingDisplacedByRenderer) {
+        if (movedAwayFromTail && !webUserMovedAwayFromTail && userScrollInputExplainsMovement) {
+            // Web could NEVER reach a release branch before this (`!isWebFrame &&` guarded the
+            // only one), so every unattributed frame re-asserted the hold and re-opened the
+            // 1500ms settle window. Web now has a better liveness fact than native had when that
+            // fork was written, so both platforms release from the same fact.
+            releaseHeldScrollIntent();
+        } else if (keyedLandingDisplacedByRenderer) {
             // A keyed target can be displaced to the physical end of a target-window slice
             // after its active settle cadence goes quiet. In that state the tail-derived facts
             // below are all true, so "moved away from tail" cannot wake the still-live keyed
@@ -2274,11 +2231,13 @@ function LegendListTranscriptRendererInner<TItem>(
             && movedAwayFromTail
             && !heldIntentSettleInFlight
         ) {
-            // Native has no WebDom movement fact and retains its evidence window. Web
-            // non-user movement is an external rollback and must reassert the live hold.
+            // Live input already released above. What remains is STALE evidence, and only native
+            // keeps a loose window for it: it has no per-frame movement fact, so a fling whose
+            // momentum phase RN never reported still has to count as the reader's. Web has the
+            // movement fact plus the liveness fact and needs no stale fallback.
             if (
                 !isWebFrame
-                && Date.now() - lastUserScrollIntentAtMsRef.current <= LEGEND_USER_INPUT_DETACH_WINDOW_MS
+                && Date.now() - userScrollIntent.lastInputAtMs() <= LEGEND_USER_INPUT_DETACH_WINDOW_MS
             ) {
                 releaseHeldScrollIntent();
             } else {
@@ -2308,19 +2267,18 @@ function LegendListTranscriptRendererInner<TItem>(
             latchHeldEndIntent();
         }
         emitRendererAtEndState({ offsetMoved, pendingCause: cause, webMovementFact });
-        tryAcknowledgeInitialPresentationSettlement();
         if (webMovementFact) {
             props.onScroll?.(event, webMovementFact);
         } else {
             props.onScroll?.(event);
         }
         if (pendingViewportCauseRef.current === cause) pendingViewportCauseRef.current = 'layout';
-    }, [armWebVisibleAnchorHold, emitRendererAtEndState, hasLiveKeyedHeldIntent, invalidateNativePhysicalViewportCapture, isWebFrame, latchHeldEndIntent, props.frame.rendererOptions.continuousFollow.endThresholdRatio, props.onScroll, props.onStartReachedThreshold, props.webDomObservation, readRendererAtEndState, readWebScrollMetrics, releaseHeldScrollIntent, requestHeldIntentSettle, tryAcknowledgeInitialPresentationSettlement]);
+    }, [armWebVisibleAnchorHold, emitRendererAtEndState, hasLiveKeyedHeldIntent, invalidateNativePhysicalViewportCapture, isWebFrame, latchHeldEndIntent, props.frame.rendererOptions.continuousFollow.endThresholdRatio, props.onScroll, props.onStartReachedThreshold, props.webDomObservation, readRendererAtEndState, readWebScrollMetrics, releaseHeldScrollIntent, requestHeldIntentSettle, userScrollIntent]);
 
     const handleLegendWheel = React.useCallback((event: unknown) => {
         invalidateNativePhysicalViewportCapture();
         lastUserInteractionAtMsRef.current = Date.now();
-        lastUserScrollIntentAtMsRef.current = Date.now();
+        if (!isWebFrame) userScrollIntent.recordInput({ atMs: Date.now() });
         if (isWebFrame) {
             pendingViewportCauseRef.current = 'user';
             // A bottomward wheel while holding the tail is follow-affirming input, not a
@@ -2330,11 +2288,11 @@ function LegendListTranscriptRendererInner<TItem>(
             // threshold with no corrector (live S-K, 2026-07-11). Upward wheels and wheels
             // over a keyed hold release exactly as before.
             const deltaY = readWheelDeltaY(event);
+            const wheelDirection: -1 | 1 | null =
+                typeof deltaY !== 'number' || deltaY === 0 ? null : deltaY > 0 ? 1 : -1;
+            userScrollIntent.recordInput({ atMs: Date.now(), direction: wheelDirection });
             props.webDomObservation.recordUserScrollInput({
-                direction:
-                    typeof deltaY !== 'number' || deltaY === 0
-                        ? null
-                        : deltaY > 0 ? 1 : -1,
+                direction: wheelDirection,
                 nowMs: Date.now(),
             });
             const followAffirming =
@@ -2347,14 +2305,13 @@ function LegendListTranscriptRendererInner<TItem>(
             }
         }
         props.platformInteractionProps?.onWheel?.(event);
-    }, [affirmWebHeldEndFromTowardEndInput, cancelLegendInitialScrollPreservation, invalidateNativePhysicalViewportCapture, isWebFrame, props.platformInteractionProps, props.webDomObservation, releaseHeldScrollIntent]);
+    }, [affirmWebHeldEndFromTowardEndInput, cancelLegendInitialScrollPreservation, invalidateNativePhysicalViewportCapture, isWebFrame, props.platformInteractionProps, props.webDomObservation, releaseHeldScrollIntent, userScrollIntent]);
 
     const handleLegendScrollBeginDrag = React.useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
         invalidateNativePhysicalViewportCapture();
         lastUserInteractionAtMsRef.current = Date.now();
-        lastUserScrollIntentAtMsRef.current = Date.now();
         pendingViewportCauseRef.current = 'user';
-        userDragActiveRef.current = true;
+        userScrollIntent.setGestureActive({ active: true, atMs: Date.now(), gesture: 'drag' });
         if (isWebFrame) {
             props.webDomObservation.recordUserScrollInput({
                 direction: null,
@@ -2370,17 +2327,16 @@ function LegendListTranscriptRendererInner<TItem>(
             releaseHeldScrollIntent();
         }
         props.onScrollBeginDrag?.(event);
-    }, [cancelLegendInitialScrollPreservation, invalidateNativePhysicalViewportCapture, isWebFrame, props.onScrollBeginDrag, props.webDomObservation, releaseHeldScrollIntent]);
+    }, [cancelLegendInitialScrollPreservation, invalidateNativePhysicalViewportCapture, isWebFrame, props.onScrollBeginDrag, props.webDomObservation, releaseHeldScrollIntent, userScrollIntent]);
 
     const handleLegendScrollEndDrag = React.useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        if (userDragActiveRef.current) {
-            userDragActiveRef.current = false;
+        if (userScrollIntent.isGestureActive()) {
             lastDragEndAtMsRef.current = Date.now();
             lastUserInteractionAtMsRef.current = Date.now();
-            lastUserScrollIntentAtMsRef.current = Date.now();
+            userScrollIntent.setGestureActive({ active: false, atMs: Date.now(), gesture: 'drag' });
         }
         props.onScrollEndDrag?.(event);
-    }, [props.onScrollEndDrag]);
+    }, [props.onScrollEndDrag, userScrollIntent]);
 
     const handleLegendMomentumScrollBegin = React.useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
         const nowMs = Date.now();
@@ -2388,20 +2344,19 @@ function LegendListTranscriptRendererInner<TItem>(
             nowMs - lastDragEndAtMsRef.current <= LEGEND_USER_MOMENTUM_CHAIN_WINDOW_MS
             || nowMs - lastUserMomentumEndAtMsRef.current <= LEGEND_USER_MOMENTUM_CHAIN_WINDOW_MS
         ) {
-            userMomentumActiveRef.current = true;
+            userScrollIntent.setGestureActive({ active: true, atMs: nowMs, gesture: 'momentum' });
         }
         props.onMomentumScrollBegin?.(event);
-    }, [props.onMomentumScrollBegin]);
+    }, [props.onMomentumScrollBegin, userScrollIntent]);
 
     const handleLegendMomentumScrollEnd = React.useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        if (userMomentumActiveRef.current) {
-            userMomentumActiveRef.current = false;
+        if (userScrollIntent.isGestureActive()) {
             lastUserMomentumEndAtMsRef.current = Date.now();
             lastUserInteractionAtMsRef.current = Date.now();
-            lastUserScrollIntentAtMsRef.current = Date.now();
+            userScrollIntent.setGestureActive({ active: false, atMs: Date.now(), gesture: 'momentum' });
         }
         props.onMomentumScrollEnd?.(event);
-    }, [props.onMomentumScrollEnd]);
+    }, [props.onMomentumScrollEnd, userScrollIntent]);
 
     const handleLegendTouchStart = React.useCallback((event: unknown) => {
         if (isWebFrame) {
@@ -2432,18 +2387,19 @@ function LegendListTranscriptRendererInner<TItem>(
     const notifyViewportInput = React.useCallback((input: TranscriptViewportInputEvidence) => {
         invalidateNativePhysicalViewportCapture();
         lastUserInteractionAtMsRef.current = Date.now();
-        lastUserScrollIntentAtMsRef.current = Date.now();
         pendingViewportCauseRef.current = 'user';
+        const verticalDirection =
+            input.kind === 'keyboard' || input.kind === 'touch'
+                ? input.verticalDirection
+                : undefined;
+        const inputDirection: -1 | 1 | null =
+            verticalDirection === 'toward-end'
+                ? 1
+                : verticalDirection === 'toward-start' ? -1 : null;
+        userScrollIntent.recordInput({ atMs: Date.now(), direction: inputDirection });
         if (isWebFrame) {
-            const verticalDirection =
-                input.kind === 'keyboard' || input.kind === 'touch'
-                    ? input.verticalDirection
-                    : undefined;
             props.webDomObservation.recordUserScrollInput({
-                direction:
-                    verticalDirection === 'toward-end'
-                        ? 1
-                        : verticalDirection === 'toward-start' ? -1 : null,
+                direction: inputDirection,
                 nowMs: Date.now(),
             });
         }
@@ -2461,7 +2417,7 @@ function LegendListTranscriptRendererInner<TItem>(
             cancelLegendInitialScrollPreservation();
             releaseHeldScrollIntent();
         }
-    }, [affirmWebHeldEndFromTowardEndInput, cancelLegendInitialScrollPreservation, invalidateNativePhysicalViewportCapture, isWebFrame, props.webDomObservation, releaseHeldScrollIntent]);
+    }, [affirmWebHeldEndFromTowardEndInput, cancelLegendInitialScrollPreservation, invalidateNativePhysicalViewportCapture, isWebFrame, props.webDomObservation, releaseHeldScrollIntent, userScrollIntent]);
     const handleLegendTouchMove = React.useCallback((event: unknown) => {
         const previousCoordinate = webTouchVerticalCoordinateRef.current;
         const currentCoordinate = readTouchVerticalCoordinate(event);
@@ -2501,37 +2457,6 @@ function LegendListTranscriptRendererInner<TItem>(
         if (!hadHeldEndOwnership) renderPositioningPhase();
         return releaseOperation;
     }, [cancelLegendInitialScrollPreservation, invalidateUserInertiaContinuation, releaseHeldScrollIntent]);
-
-    const observeInitialPresentationSettlement = React.useCallback((
-        request: TranscriptInitialPresentationSettlementRequest,
-    ): (() => void) => {
-        if (!isWebFrame || request.dataKey !== props.dataKey) return () => {};
-        const pending: PendingInitialPresentationSettlement = {
-            deadlineAtMs: Date.now() + LEGEND_HELD_INTENT_SETTLE_MS,
-            request,
-        };
-        pendingInitialPresentationSettlementRef.current = pending;
-        if (heldScrollIntentRef.current) {
-            // Reuse the renderer's existing post-layout settle frame. Legend 3.3.3
-            // reports onItemSizeChanged before it schedules maintain-at-end, so the
-            // callback itself is not release-grade evidence.
-            requestHeldIntentSettle({ deferFirstVerification: true });
-        } else {
-            cancelScheduledHeldIntentSettle();
-            tryAcknowledgeInitialPresentationSettlement();
-        }
-        return () => {
-            if (pendingInitialPresentationSettlementRef.current === pending) {
-                pendingInitialPresentationSettlementRef.current = null;
-            }
-        };
-    }, [
-        cancelScheduledHeldIntentSettle,
-        isWebFrame,
-        props.dataKey,
-        requestHeldIntentSettle,
-        tryAcknowledgeInitialPresentationSettlement,
-    ]);
 
     /**
      * Legend answers its mounted window from list state. Before that state exists
@@ -2589,7 +2514,6 @@ function LegendListTranscriptRendererInner<TItem>(
             requestHeldIntentSettle();
         },
         observeNativePhysicalViewport,
-        observeInitialPresentationSettlement,
         revalidateViewportAfterReveal,
         notifyViewportInput,
         computeVisibleIndices: () => readVisibleSourceIndexRange() ?? { startIndex: 0, endIndex: 0 },
@@ -2696,7 +2620,7 @@ function LegendListTranscriptRendererInner<TItem>(
             pendingViewportCauseRef.current = 'command';
             settleLegendScroll(legendListRef.current?.scrollToOffset(params));
         },
-    }), [advanceMovementEpoch, armVisibleAnchorHold, beginExplicitJumpTakeover, cancelScheduledHeldIntentSettle, data, dataLength, holdWebEntryAnchor, invalidateNativePhysicalViewportCapture, invalidateUserInertiaContinuation, notifyViewportInput, observeInitialPresentationSettlement, observeNativePhysicalViewport, projectChronologicalIndex, props.keyExtractor, readVisibleSourceIndexRange, readWebScrollMetrics, releaseHeldScrollIntent, requestHeldIntentSettle, revalidateViewportAfterReveal, scrollRendererToEnd, setHeldScrollIntent]);
+    }), [advanceMovementEpoch, armVisibleAnchorHold, beginExplicitJumpTakeover, cancelScheduledHeldIntentSettle, data, dataLength, holdWebEntryAnchor, invalidateNativePhysicalViewportCapture, invalidateUserInertiaContinuation, notifyViewportInput, observeNativePhysicalViewport, projectChronologicalIndex, props.keyExtractor, readVisibleSourceIndexRange, readWebScrollMetrics, releaseHeldScrollIntent, requestHeldIntentSettle, revalidateViewportAfterReveal, scrollRendererToEnd, setHeldScrollIntent]);
 
     const renderItem: LegendListProps<TItem>['renderItem'] = (info) => props.renderItem({
         item: info.item,
@@ -2808,21 +2732,19 @@ function LegendListTranscriptRendererInner<TItem>(
         const cleanup = webScrollbarDragCleanupRef.current;
         webScrollbarDragCleanupRef.current = null;
         cleanup?.();
-        if (!userDragActiveRef.current) return;
-        userDragActiveRef.current = false;
+        if (!userScrollIntent.isGestureActive()) return;
         lastDragEndAtMsRef.current = Date.now();
         lastUserInteractionAtMsRef.current = Date.now();
-        lastUserScrollIntentAtMsRef.current = Date.now();
-    }, []);
+        userScrollIntent.setGestureActive({ active: false, atMs: Date.now(), gesture: 'drag' });
+    }, [userScrollIntent]);
     const beginWebScrollbarDrag = React.useCallback(() => {
         lastUserInteractionAtMsRef.current = Date.now();
-        lastUserScrollIntentAtMsRef.current = Date.now();
         pendingViewportCauseRef.current = 'user';
         props.webDomObservation.recordUserScrollInput({
             direction: null,
             nowMs: Date.now(),
         });
-        userDragActiveRef.current = true;
+        userScrollIntent.setGestureActive({ active: true, atMs: Date.now(), gesture: 'drag' });
         cancelLegendInitialScrollPreservation();
         if (webScrollbarDragCleanupRef.current) return;
         const listenerHost = globalThis.window ?? globalThis;
@@ -2836,7 +2758,7 @@ function LegendListTranscriptRendererInner<TItem>(
             listenerHost.removeEventListener('pointercancel', onRelease);
             listenerHost.removeEventListener('mouseup', onRelease);
         };
-    }, [cancelLegendInitialScrollPreservation, endWebScrollbarDrag, props.webDomObservation]);
+    }, [cancelLegendInitialScrollPreservation, endWebScrollbarDrag, props.webDomObservation, userScrollIntent]);
     React.useEffect(() => () => {
         webScrollbarDragCleanupRef.current?.();
         webScrollbarDragCleanupRef.current = null;

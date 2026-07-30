@@ -2387,6 +2387,38 @@ describe('Legend transcript renderer adapter', () => {
         expect(root.scrollTop).toBe(5_000);
     });
 
+    it('releases a held reading anchor on web when live user input explains an unclassified frame', async () => {
+        // Web could NEVER reach a release branch here: the only one was guarded by `!isWebFrame`,
+        // so every frame the movement classifier failed to attribute re-asserted the hold and
+        // re-opened the 1500ms settle window — the corrector then wrote against the reader more
+        // than a second after their gesture ended (measured -397px, 2026-07-30). A committed
+        // geometry change revokes movement-attribution evidence by design, but it does not end the
+        // reader's gesture, and the ONE intent owner still attests it.
+        const scenario = await mountWebInertiaScenario();
+
+        scenario.setNowMs(3_000);
+        capturedLegendListProps.onWheel({ deltaY: -120 });
+        scenario.root.setObservedUserPosition(7_000);
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 7_000 } } });
+        expect(getShellRef(scenario.listRef).hasLiveWebHold?.({ kind: 'item', itemId: 'row-1' })).toBe(true);
+
+        // A committed row-geometry change advances the movement epoch, which correctly revokes
+        // per-frame attribution evidence (pending input + inertia chain + streak).
+        scenario.setNowMs(3_050);
+        capturedLegendListProps.onItemSizeChanged({ index: 0, previous: 240, size: 300 });
+
+        // The SAME wheel gesture continues in the SAME direction. The frame is unclassified, yet
+        // it is unmistakably the reader's.
+        scenario.setNowMs(3_100);
+        scenario.root.setObservedUserPosition(6_500);
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 6_500 } } });
+
+        expect(scenario.webMovementFacts.at(-1)).toMatchObject({ isGenuineUserMovement: false });
+        expect(getShellRef(scenario.listRef).hasLiveWebHold?.({ kind: 'item', itemId: 'row-1' })).toBe(false);
+        act(() => scenario.animationFrames.splice(0).forEach((callback) => callback(32)));
+        expect(scenario.root.scrollTop).toBe(6_500);
+    });
+
     it('does not let a stale at-end observation overwrite keyboard takeover before the default scroll lands (AUD-002)', async () => {
         // Live AUD-002 (2026-07-12): from exact tail, trusted PageUp detached the viewport
         // 277px, then the held-tail machinery returned it to ~11px from the tail ~118ms

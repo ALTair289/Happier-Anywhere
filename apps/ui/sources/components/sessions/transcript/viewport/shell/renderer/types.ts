@@ -135,14 +135,6 @@ export type TranscriptListShellRef<TItem = unknown> = Readonly<{
      * is actually looking. No-op on web and for renderers without Legend-owned state.
      */
     revalidateViewportAfterReveal?: () => void;
-    /**
-     * Legend/web only: acknowledges that the renderer has physically consumed the
-     * initially mounted rich-content geometry. This surface is read-only and must
-     * not introduce a second positioning owner.
-     */
-    observeInitialPresentationSettlement?: (
-        request: TranscriptInitialPresentationSettlementRequest,
-    ) => () => void;
 }>;
 
 export type TranscriptRendererEntryAnchorHold = Readonly<{
@@ -191,12 +183,6 @@ export type TranscriptRendererEntryPlacementEvent =
 export type TranscriptRendererWebHoldTarget =
     | Readonly<{ kind: 'end' }>
     | Readonly<{ kind: 'item'; itemId: string }>;
-
-export type TranscriptInitialPresentationSettlementRequest = Readonly<{
-    dataKey: string;
-    revision: number;
-    onSettled: () => void;
-}>;
 
 export type TranscriptRendererAtEndState = Readonly<{
     isAtEnd: boolean;

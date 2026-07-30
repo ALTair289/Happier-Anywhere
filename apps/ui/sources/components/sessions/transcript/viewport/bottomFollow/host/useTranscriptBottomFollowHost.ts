@@ -46,6 +46,7 @@ import {
     type BottomFollowWriteSchedulerState,
 } from '@/components/sessions/transcript/viewport/bottomFollow/writeScheduler';
 import { useExplicitJumpWriteBarrier } from '@/components/sessions/transcript/viewport/bottomFollow/explicitJumpWriteBarrier';
+import type { TranscriptUserScrollIntentOwner } from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
 import {
     resolveNativeBottomFollowPreviousFollow,
     resolveNativeContentMaterializationAutoPin,
@@ -126,6 +127,10 @@ export type TranscriptBottomFollowHostDeps = Readonly<{
     invalidateViewportAnchorCapture(): void;
     isPinnedRef: MutableRef<boolean>;
     jumpToSeq: number | null | undefined;
+    /**
+     * Alias of `userScrollIntent.timestampRef` — the ONE storage location. Kept as a named dep
+     * because the native policies below consume it as a plain timestamp.
+     */
     lastUserScrollIntentAtMsRef: MutableRef<number>;
     lastNativePinOffsetRef: MutableRef<number | null>;
     latestCommittedActivityKey: string | null | undefined;
@@ -167,6 +172,12 @@ export type TranscriptBottomFollowHostDeps = Readonly<{
     sessionId: string;
     tryPinToBottomDom(reason?: TranscriptViewportTelemetryScrollReason): boolean;
     updateNativeInitialViewportPendingObservation(pending: boolean): void;
+    /**
+     * The ONE owner of "is the reader scrolling / does the reader still want the live tail".
+     * Web pin suppression MUST read its STATE-shaped liveness, not only the event timestamp: a
+     * scrollbar thumb drag emits one pointerdown and then silence until release.
+     */
+    userScrollIntent: TranscriptUserScrollIntentOwner;
     usesNativeFlashListBottomMaintenance: boolean;
     wantsPinnedRef: MutableRef<boolean>;
 }>;
@@ -283,8 +294,22 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         tryPinToBottomDom,
         updateNativeInitialViewportPendingObservation,
         usesNativeFlashListBottomMaintenance,
+        userScrollIntent,
         wantsPinnedRef,
     } = deps;
+
+    /**
+     * The ONE pin-suppression predicate. `isLive` is the state-shaped half (an open drag/momentum
+     * phase or raw input inside its continuation window) and covers what a timestamp cannot: a
+     * scrollbar thumb drag, a held key, and browser smooth-scroll continuation that outlives the
+     * last wheel event. The timestamp half keeps the settled-recently grace the auto-pin delay was
+     * written for. Both consumers below — the scheduler's wait and the command's
+     * `recentUserIntent` — read this, so "is the reader driving right now" has one answer.
+     */
+    const hasRecentUserScrollIntent = React.useCallback((nowMs: number): boolean => (
+        ((globalThis as any).__U1_OFF !== true && userScrollIntent.isLive(nowMs))
+        || nowMs - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS
+    ), [lastUserScrollIntentAtMsRef, userScrollIntent]);
 
     const lastNativeBottomFollowPinCommandRef = React.useRef<{
         sessionId: string;
@@ -400,7 +425,7 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
             sessionId,
             previousDistanceFromLiveTailPx: getWebTranscriptDistanceFromBottom(previousMetrics),
             pinThresholdPx,
-            recentUserIntent: Date.now() - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
+            recentUserIntent: hasRecentUserScrollIntent(Date.now()),
             wantsPinned: wantsPinnedRef.current,
             reason,
             schedulerAuthorityReason: authority?.reason,
@@ -408,7 +433,7 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         }));
     }, [
         executeViewportCommand,
-        lastUserScrollIntentAtMsRef,
+        hasRecentUserScrollIntent,
         pinThresholdPx,
         resolveViewportCommand,
         sessionId,
@@ -1192,6 +1217,11 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
     ]);
 
     const resolveAutoPinWaitMs = React.useCallback((reason: TranscriptViewportTelemetryScrollReason): number | null => {
+        // While the reader is physically driving the scroller there is no correct wait: the gesture
+        // has no known end. Drop the automatic write; the next content growth re-requests it, and
+        // the renderer keeps maintaining the tail if the reader ends up back at it. This is a
+        // decision NOT to write — never a window that hides movement.
+        if ((globalThis as any).__U1_OFF !== true && userScrollIntent.isLive(Date.now())) return null;
         return resolveTranscriptAutoFollowPinWaitMs({
             autoPinDelayMs: TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
             canAutoFollow: canAutoFollowForReason(reason),
@@ -1203,6 +1233,7 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         canAutoFollowForReason,
         hasRearmedNativeBottomFollow,
         lastUserScrollIntentAtMsRef,
+        userScrollIntent,
     ]);
 
     const applyScheduledPinToBottomFire = React.useCallback((handle: ScheduledPinToBottom): void => {

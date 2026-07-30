@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createTranscriptUserScrollIntentOwner } from './userScrollIntentOwner';
 
 import { performNativeStandardListViewportCommand } from './nativeStandardList';
 import type { TranscriptViewportDriverDeps } from './types';
@@ -40,6 +41,7 @@ function buildDeps(): Readonly<{
                 streak: null,
             }),
             invalidateUserMovementAuthority: vi.fn(),
+            userScrollIntent: createTranscriptUserScrollIntentOwner(),
             observeGenuineScrollMovement: vi.fn<
                 TranscriptViewportDriverDeps['webDomObservation']['observeGenuineScrollMovement']
             >(() => ({
