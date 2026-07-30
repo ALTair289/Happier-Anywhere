@@ -55,24 +55,17 @@ export type TranscriptFirstPaintPresentation =
 /**
  * Owner-local terminal facts. Each one is produced by the owner that can also end it:
  * data availability (`isLoaded`/`itemCount`/`routeHydrationPending`), first list paint,
- * the Markdown runtime (ready or failed both end it), keyed placement, native placement,
- * the web bottom-entry landing.
+ * the Markdown runtime (ready or failed both end it), keyed placement, native placement.
  *
  * `paintedContentRevealed` is the one fact this policy produces itself: the consumer records,
  * per session entry, that a committed frame revealed painted rows. It adds no new owner and no
  * new lifecycle — it is this policy's own history, scoped to the entry the facts describe.
- *
- * `entryPlacementPending` (keyed entry join) and `initialPlacementPending` (web bottom-entry
- * landing) are two placements by two owners with different readiness, and they are mutually
- * exclusive by construction at the consumer. They share one cover reason because the reader
- * cannot tell them apart; only their terminals differ.
  */
 export type TranscriptFirstPaintFacts = Readonly<{
     deadlineElapsed: boolean;
     entryPlacementPending: boolean;
     firstListPaintObserved: boolean;
     firstListPaintPending: boolean;
-    initialPlacementPending: boolean;
     isLoaded: boolean;
     itemCount: number;
     markdownRuntimePending: boolean;
@@ -113,15 +106,12 @@ export function resolveTranscriptFirstPaintPresentation(
     if (facts.firstListPaintObserved && facts.itemCount > 0) {
         return { covered: false, outcome: 'content-presentable' };
     }
-    // The web bottom-entry landing, below the paint it cannot outrank. Legend paints the tail
-    // entry from inside `finishInitialScroll`, so by the time the rows exist they are already at
-    // the position this landing refines and its remaining deferred write only settles them; the
-    // hold would otherwise keep presentable rows behind the placeholder for the whole web initial
-    // pin stabilization window, because its affirmative terminal is a renderer confirmation the
-    // renderer cannot always produce. Before that paint it still covers the empty viewport.
-    if (facts.initialPlacementPending) {
-        return { covered: true, reason: 'entry-placement' };
-    }
+    // The web bottom-entry landing has NO fact of its own here. Legend paints the tail entry from
+    // inside `finishInitialScroll`, so by the time the rows exist they are already at the position
+    // that landing refines and its remaining deferred write only settles them — which is why the
+    // rule above reveals on the paint regardless. Before that paint the viewport is empty and
+    // `firstListPaintPending` below already covers it, for exactly the same frames: a separate
+    // landing hold could only re-label that same cover, never extend or shorten it.
     if (facts.routeHydrationPending) {
         return { covered: true, reason: 'route-hydration' };
     }

@@ -54,6 +54,20 @@ export const TranscriptEnterWrapper = React.memo(function TranscriptEnterWrapper
     );
 });
 
+/**
+ * A fresh row enters by FADE ONLY, on every platform.
+ *
+ * J/D4 (2026-07-30) — deliberate decision, recorded because the previous code hid the opposite one
+ * behind a misnamed flag: `const animateTranslateOnWeb = Platform.OS !== 'web'` is TRUE on native,
+ * so native rows faded AND slid 6px while web rows only faded. The 6px slide is removed rather than
+ * renamed. Reasons: (1) the reason web opted out — a row translated toward its neighbour briefly
+ * overlaps it and intercepts touches — is a platform-neutral hazard, not a web one; (2) a send
+ * creates two fresh rows (the pending row, then its committed twin), so it was two native-only 6px
+ * movements inside exactly the window whose movement the user is objecting to, on top of the
+ * measured MVCP excursion at that handover; (3) it removes a native/web asymmetry that no product
+ * decision asked for. Whether new rows animate at all remains owned by the motion preset /
+ * `animateNewItemsEnabled`, not by a platform check here.
+ */
 const AnimatedTranscriptEnterWrapper = React.memo(function AnimatedTranscriptEnterWrapper(props: {
     id: string;
     createdAt: number;
@@ -62,8 +76,6 @@ const AnimatedTranscriptEnterWrapper = React.memo(function AnimatedTranscriptEnt
 }) {
     const runtime = props.runtime;
     const opacity = React.useRef(new Animated.Value(0)).current;
-    const animateTranslateOnWeb = Platform.OS !== 'web';
-    const translateY = React.useRef(new Animated.Value(animateTranslateOnWeb ? 6 : 0)).current;
     const animationStartedRef = React.useRef(false);
     const cancelScheduledStartRef = React.useRef<(() => void) | null>(null);
     const shouldAnimateRef = React.useRef<boolean | null>(null);
@@ -78,9 +90,8 @@ const AnimatedTranscriptEnterWrapper = React.memo(function AnimatedTranscriptEnt
 
         if (shouldAnimateRef.current !== true) {
             opacity.setValue(1);
-            translateY.setValue(0);
         }
-    }, [opacity, props.createdAt, props.id, runtime.gate, translateY]);
+    }, [opacity, props.createdAt, props.id, runtime.gate]);
 
     const startEnterAnimation = React.useCallback(() => {
         if (animationStartedRef.current) return;
@@ -91,24 +102,13 @@ const AnimatedTranscriptEnterWrapper = React.memo(function AnimatedTranscriptEnt
                 ? motionTokens.durationMs.base
                 : motionTokens.durationMs.fast;
         const useNativeDriver = Platform.OS !== 'web';
-        const anims = [
-            Animated.timing(opacity, {
-                toValue: 1,
-                duration,
-                easing: motionTokens.easing.standard,
-                useNativeDriver,
-            }),
-        ];
-        if (animateTranslateOnWeb) {
-            anims.push(Animated.timing(translateY, {
-                toValue: 0,
-                duration,
-                easing: motionTokens.easing.standard,
-                useNativeDriver,
-            }));
-        }
-        Animated.parallel(anims).start();
-    }, [animateTranslateOnWeb, opacity, runtime?.config.preset, translateY]);
+        Animated.timing(opacity, {
+            toValue: 1,
+            duration,
+            easing: motionTokens.easing.standard,
+            useNativeDriver,
+        }).start();
+    }, [opacity, runtime?.config.preset]);
 
     const handleLayout = React.useCallback(() => {
         if (shouldAnimateRef.current !== true) return;
@@ -129,7 +129,7 @@ const AnimatedTranscriptEnterWrapper = React.memo(function AnimatedTranscriptEnt
     }, []);
 
     return (
-        <Animated.View onLayout={handleLayout} style={{ opacity, transform: animateTranslateOnWeb ? [{ translateY }] : undefined }}>
+        <Animated.View onLayout={handleLayout} style={{ opacity }}>
             {props.children}
         </Animated.View>
     );

@@ -13,7 +13,6 @@ function facts(overrides: Partial<TranscriptFirstPaintFacts> = {}): TranscriptFi
         entryPlacementPending: false,
         firstListPaintObserved: true,
         firstListPaintPending: false,
-        initialPlacementPending: false,
         isLoaded: false,
         itemCount: 10,
         markdownRuntimePending: false,
@@ -30,10 +29,6 @@ const coveringFactsByReason: ReadonlyArray<Readonly<{
 }>> = [
     { facts: facts({ nativePlacementPending: true }), reason: 'native-placement' },
     { facts: facts({ entryPlacementPending: true }), reason: 'entry-placement' },
-    {
-        facts: facts({ firstListPaintObserved: false, initialPlacementPending: true }),
-        reason: 'entry-placement',
-    },
     { facts: facts({ markdownRuntimePending: true }), reason: 'markdown-runtime' },
     {
         facts: facts({ firstListPaintObserved: false, routeHydrationPending: true }),
@@ -127,10 +122,9 @@ describe('transcript first-paint presentation policy', () => {
         expect(presentation).toEqual({ covered: false, outcome: 'deadline-fallback' });
     });
 
-    it('releases the web bottom-entry landing hold on this entry\'s own painted rows', () => {
+    it('reveals a web bottom entry on this entry\'s own painted rows', () => {
         expect(resolveTranscriptFirstPaintPresentation(facts({
             firstListPaintObserved: true,
-            initialPlacementPending: true,
             isLoaded: true,
             itemCount: 10,
         }))).toEqual({ covered: false, outcome: 'content-presentable' });
@@ -140,17 +134,15 @@ describe('transcript first-paint presentation policy', () => {
         expect(resolveTranscriptFirstPaintPresentation(facts({
             firstListPaintObserved: false,
             firstListPaintPending: true,
-            initialPlacementPending: true,
             isLoaded: true,
             itemCount: 10,
-        }))).toEqual({ covered: true, reason: 'entry-placement' });
+        }))).toEqual({ covered: true, reason: 'first-list-paint' });
     });
 
     it('never reveals painted rows before a keyed anchor restore has placed them', () => {
         expect(resolveTranscriptFirstPaintPresentation(facts({
             entryPlacementPending: true,
             firstListPaintObserved: true,
-            initialPlacementPending: false,
             isLoaded: true,
             itemCount: 10,
         }))).toEqual({ covered: true, reason: 'entry-placement' });

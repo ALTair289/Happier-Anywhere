@@ -910,34 +910,11 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
         });
     const [firstPaintDeadlineElapsedSessionId, setFirstPaintDeadlineElapsedSessionId] =
         React.useState<string | null>(null);
-    // Web Legend owns the whole initial placement of a bottom-entry open, and it finishes AFTER
-    // the fact this policy used to release on. `finishInitialScroll` sets `readyToRender` and
-    // calls `onLoad` in one block, and only then flushes the deferred at-end maintenance whose
-    // physical write lands one animation frame later (`@legendapp/list` react-native.web
-    // `setInitialRenderState` / `doMaintainScrollAtEnd`). Releasing on `onLoad` therefore reveals
-    // the transcript at the bootstrap-dispatched offset and lets the next library write move it
-    // under the reader — the web open flicker. The renderer already confirms the physical landing
-    // (`observeInitialPresentationSettlement` -> held-'end' bottom check); this is its consumer.
-    const [initialPlacementSettledSessionId, setInitialPlacementSettledSessionId] =
-        React.useState<string | null>(null);
-    const recordInitialPlacementSettled = React.useCallback((params: Readonly<{
-        sessionId: string;
-    }>) => {
-        setInitialPlacementSettledSessionId((previous) => (
-            previous === params.sessionId ? previous : params.sessionId
-        ));
-    }, []);
-    // Only the web Legend renderer produces the landing fact, and only for an unkeyed (bottom)
-    // entry — a keyed entry keeps its existing entry join, which already spans the same window.
-    // Every other configuration must never acquire this hold, or it would wait for a fact that is
-    // never produced and burn the bound instead of releasing at the first presentable frame.
-    const initialPlacementPending =
-        entryPresentationKey == null &&
-        platformOS === 'web' &&
-        rendererKind === 'legendList' &&
-        isLoaded &&
-        itemCount > 0 &&
-        initialPlacementSettledSessionId !== sessionId;
+    // The web bottom-entry landing has no cover fact of its own. It could only hold the frames
+    // `firstListPaintPending` already holds: the policy reveals on this entry's own painted rows
+    // (`firstListPaintObserved && itemCount > 0`) ahead of any landing hold, and before that paint
+    // the same web+Legend configuration that would arm the hold has `firstListPaintPending` true,
+    // so the cover is identical frame for frame and only its reason label could differ.
     // Whether this entry has already had painted rows revealed on screen. Every remaining cover
     // fact needs `isLoaded`, so on a warm/SWR open they all arm one or more renders AFTER the
     // cached rows painted and this policy uncovered them; without this record they would put the
@@ -987,7 +964,6 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
             platformOS === 'web' &&
             rendererKind === 'legendList' &&
             !firstListPaintObserved,
-        initialPlacementPending,
         isLoaded,
         itemCount,
         // Both remaining data-availability facts only describe rows the transcript already
@@ -1085,7 +1061,6 @@ export function useTranscriptFirstPaintState(deps: TranscriptFirstPaintStateDeps
         nativeFirstPaintReleasedWithoutListLoad,
         onEntryPlacementEvent,
         recordEntryOwnerOutcome,
-        recordInitialPlacementSettled,
         resetFirstPaintRevealRecordForSessionEntry,
         showFirstPaintPlaceholder,
         showRouteHydrationFirstPaintPlaceholder,

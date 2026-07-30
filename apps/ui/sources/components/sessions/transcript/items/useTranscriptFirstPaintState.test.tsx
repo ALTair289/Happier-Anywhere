@@ -140,9 +140,6 @@ describe('bounded first-paint presentation', () => {
 
         // The first cover clears on its own well inside the bound.
         await hook.rerender({ ...coveredDeps, firstListPaintObserved: true });
-        act(() => {
-            hook.getCurrent().recordInitialPlacementSettled({ sessionId: 'session-a' });
-        });
         expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
         await act(async () => {
             await vi.advanceTimersByTimeAsync(deadlineMs);
@@ -183,11 +180,8 @@ describe('bounded first-paint presentation', () => {
             },
         );
 
-        // The rows are painted AND the renderer has confirmed their placement: this is a refresh
-        // of presented content, which INV-5 forbids re-covering.
-        act(() => {
-            hook.getCurrent().recordInitialPlacementSettled({ sessionId: 'session-a' });
-        });
+        // The rows are painted: this is a refresh of presented content, which INV-5 forbids
+        // re-covering.
         expect(hook.getCurrent().showFirstPaintPlaceholder).toBe(false);
         expect(hook.getCurrent().showRouteHydrationFirstPaintPlaceholder).toBe(false);
 
