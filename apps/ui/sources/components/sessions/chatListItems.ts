@@ -5,9 +5,9 @@ import { isToolCallMessageGroupableInTranscript } from '@/components/sessions/tr
 import { filterVisibleContextCompactionLifecycleMessageIds } from '@/components/sessions/transcript/events/contextCompactionLifecycleProjection';
 import type { PendingPermissionRequest } from '@/utils/sessions/sessionUtils';
 import {
-    collectServerOwnedPendingLocalIds,
-    shouldShowCommittedTranscriptMessage,
-    shouldShowPendingTranscriptMessage,
+    isCommittedTranscriptMessageHiddenByCrossover,
+    isPendingTranscriptMessageHiddenByCrossover,
+    resolvePendingTranscriptCrossover,
 } from '@/sync/domains/pending/pendingTranscriptProjection';
 
 export type ChatListItem =
@@ -218,8 +218,14 @@ export function buildChatListItems(opts: {
         }
     }
 
-    const serverOwnedPendingLocalIds = collectServerOwnedPendingLocalIds(opts.pendingMessages, opts.discardedMessages);
-    const pending = opts.pendingMessages.filter((p) => shouldShowPendingTranscriptMessage(p, localIdsInTranscript));
+    // One crossover decision for both sides of the pending → committed handover; see
+    // `pendingTranscriptProjection` for the exactly-one-visible-row invariant.
+    const crossover = resolvePendingTranscriptCrossover({
+        committedLocalIds: localIdsInTranscript,
+        pendingMessages: opts.pendingMessages,
+        discardedMessages: opts.discardedMessages,
+    });
+    const pending = opts.pendingMessages.filter((p) => !isPendingTranscriptMessageHiddenByCrossover(p, crossover));
     const discarded = Array.isArray(opts.discardedMessages) ? opts.discardedMessages : [];
     const items: ChatListItem[] = [];
     const visibleMessageIds = new Set(filterVisibleContextCompactionLifecycleMessageIds(opts.messageIdsOldestFirst, opts.messagesById));
@@ -233,7 +239,7 @@ export function buildChatListItems(opts: {
             const m = opts.messagesById[messageId];
             if (!m) continue;
             if (!visibleMessageIds.has(messageId)) continue;
-            if (!shouldShowCommittedTranscriptMessage(m, serverOwnedPendingLocalIds)) continue;
+            if (isCommittedTranscriptMessageHiddenByCrossover(m, crossover)) continue;
 
             if (groupConsecutiveToolCalls && canGroupToolCallMessage(m)) {
                 const prev = items[items.length - 1];
@@ -406,8 +412,12 @@ export function buildChatListItemsCached(opts: {
 
     const visibleMessageIdsOldestFirst = filterVisibleContextCompactionLifecycleMessageIds(opts.messageIdsOldestFirst, opts.messagesById);
     const visibleMessageIds = new Set(visibleMessageIdsOldestFirst);
-    const serverOwnedPendingLocalIds = collectServerOwnedPendingLocalIds(opts.pendingMessages, opts.discardedMessages);
-    const pending = opts.pendingMessages.filter((p) => shouldShowPendingTranscriptMessage(p, localIdsInTranscript));
+    const crossover = resolvePendingTranscriptCrossover({
+        committedLocalIds: localIdsInTranscript,
+        pendingMessages: opts.pendingMessages,
+        discardedMessages: opts.discardedMessages,
+    });
+    const pending = opts.pendingMessages.filter((p) => !isPendingTranscriptMessageHiddenByCrossover(p, crossover));
     const discarded = Array.isArray(opts.discardedMessages) ? opts.discardedMessages : [];
     const pendingUserActionItems = buildPendingUserActionItems(
         opts.pendingUserActionRequests,
@@ -434,7 +444,7 @@ export function buildChatListItemsCached(opts: {
         ...filterCommittedItemsForEventLifecycle(committedItems, visibleMessageIds).filter((item) => {
             if (item.kind === 'tool-calls-group') return true;
             const message = opts.messagesById[item.messageId];
-            return !message || shouldShowCommittedTranscriptMessage(message, serverOwnedPendingLocalIds);
+            return !message || !isCommittedTranscriptMessageHiddenByCrossover(message, crossover);
         }),
     ];
 
