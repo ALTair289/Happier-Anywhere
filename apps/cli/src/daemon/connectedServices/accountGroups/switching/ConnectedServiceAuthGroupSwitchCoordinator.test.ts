@@ -6,6 +6,7 @@ import {
   InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry,
   type ConnectedServiceAuthGroupSwitchState,
 } from './ConnectedServiceAuthGroupSwitchCoordinator';
+import { createConnectedServiceAuthGenerationApplyFailureError } from '../../runtimeAuth/connectedServiceAuthGenerationApplyFailure';
 
 function state(activeProfileId: string, generation: number): ConnectedServiceAuthGroupSwitchState {
   return {
@@ -1391,6 +1392,79 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
       adoptedGeneration: 2,
       adoptedCredentialRevision: adoptedRevision,
       reconciliationDisposition: 'superseded_after_apply',
+    });
+  });
+
+  it('hands a materialization-time credential revision supersession to the authoritative generation consumer', async () => {
+    const attemptedRevision = 'csr_aaaaaaaaaaaaaaaaaaaaaa';
+    const authoritativeRevision = 'csr_bbbbbbbbbbbbbbbbbbbbbb';
+    const current = {
+      ...state('backup', 2),
+      credentialRevision: authoritativeRevision,
+    };
+    const coordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
+      leases: new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry(),
+      nowMs: () => 1_000,
+      quotaFreshnessMs: 60_000,
+      loadState: async () => current,
+      commitSwitch: vi.fn(),
+      applyGeneration: async () => {
+        throw createConnectedServiceAuthGenerationApplyFailureError({
+          errorCode: 'credential_revision_superseded',
+        });
+      },
+    });
+
+    await expect(coordinator.applyCommittedGeneration({
+      sessionId: 'revision-recipient',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      activeProfileId: 'backup',
+      generation: 2,
+      credentialRevision: attemptedRevision,
+      reason: 'credential_revision_changed',
+    })).resolves.toMatchObject({
+      status: 'superseded_after_apply',
+      activeProfileId: 'backup',
+      generation: 2,
+      credentialRevision: authoritativeRevision,
+      adoptedProfileId: 'backup',
+      adoptedGeneration: 2,
+      adoptedCredentialRevision: attemptedRevision,
+      reconciliationDisposition: 'superseded_after_apply',
+    });
+  });
+
+  it('keeps an unverified materialization-time revision fence as an apply failure', async () => {
+    const attemptedRevision = 'csr_aaaaaaaaaaaaaaaaaaaaaa';
+    const current = {
+      ...state('backup', 2),
+      credentialRevision: attemptedRevision,
+    };
+    const coordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
+      leases: new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry(),
+      nowMs: () => 1_000,
+      quotaFreshnessMs: 60_000,
+      loadState: async () => current,
+      commitSwitch: vi.fn(),
+      applyGeneration: async () => {
+        throw createConnectedServiceAuthGenerationApplyFailureError({
+          errorCode: 'credential_revision_superseded',
+        });
+      },
+    });
+
+    await expect(coordinator.applyCommittedGeneration({
+      sessionId: 'revision-recipient',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      activeProfileId: 'backup',
+      generation: 2,
+      credentialRevision: attemptedRevision,
+      reason: 'credential_revision_changed',
+    })).resolves.toMatchObject({
+      status: 'generation_apply_failed',
+      errorCode: 'credential_revision_superseded',
     });
   });
 

@@ -1832,6 +1832,7 @@ afterEach(() => {
     coordinator.registerSpawnTarget({
       pid: 127,
       agentId: 'claude',
+      sessionId: 'session-group-owner-a',
       sessionDirectory,
       connectedServicesBindingsRaw: {
         v: 1,
@@ -1862,6 +1863,7 @@ afterEach(() => {
     coordinator.registerSpawnTarget({
       pid: 128,
       agentId: 'claude',
+      sessionId: 'session-group-owner-b',
       sessionDirectory,
       connectedServicesBindingsRaw: {
         v: 1,
@@ -1938,6 +1940,29 @@ afterEach(() => {
     const credential = JSON.parse(await readFile(join(harness.groupConfigDir, '.credentials.json'), 'utf8'));
     expect(credential.claudeAiOauth.accessToken).toBe('rotated-access');
     expect(harness.onAuthUpdated).toHaveBeenCalled();
+  });
+
+  it('reports a successful old-member refresh as superseded when the session materializes current group truth', async () => {
+    const harness = await buildGroupHomeOwnershipHarness();
+    harness.setCanonicalGroupState('workB', 5);
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        access_token: 'rotated-old-member-access',
+        refresh_token: 'rotated-old-member-refresh',
+        expires_in: 3600,
+      }),
+    })) as unknown as typeof fetch);
+
+    const result = await harness.coordinator.refreshConnectedServiceCredentialForRuntimeAuthFailure({
+      serviceId: 'claude-subscription',
+      profileId: 'workA',
+      sessionId: 'session-group-owner-a',
+    });
+    expect(result).toMatchObject({
+      status: 'refreshed',
+      runtimeAuthDisposition: 'superseded_by_current_group',
+    });
   });
 
   it('keeps a shared group home stable across divergent-snapshot member sessions (no clobber, no restart loop)', async () => {

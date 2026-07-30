@@ -139,6 +139,48 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     };
   }
 
+  private async resolveAuthoritativeRevisionSupersession(input: Readonly<{
+    completion: ConnectedServiceAuthGroupSwitchApplyGenerationInput;
+    failure: ConnectedServiceAuthGenerationApplyFailure;
+    trigger?: ConnectedServiceAuthGroupSwitchPipelineTrigger;
+    decisionTrace?: ConnectedServiceAuthGroupCandidateDecisionTrace;
+  }>): Promise<Extract<ConnectedServiceAuthGroupSwitchResult, { status: 'superseded_after_apply' }> | null> {
+    if (input.failure.errorCode !== 'credential_revision_superseded') return null;
+    const observed = await this.loadStateAfterApply({
+      serviceId: input.completion.serviceId,
+      groupId: input.completion.groupId,
+      ...(input.trigger === undefined ? {} : { trigger: input.trigger }),
+    });
+    const attemptedRevision = input.completion.credentialRevision ?? null;
+    const observedRevision = observed.credentialRevision ?? null;
+    const isAuthoritativeSupersession = observed.generation > input.completion.generation
+      || (
+        observed.generation === input.completion.generation
+        && observed.activeProfileId === input.completion.activeProfileId
+        && attemptedRevision !== null
+        && observedRevision !== null
+        && observedRevision !== attemptedRevision
+      );
+    if (!isAuthoritativeSupersession) return null;
+    const diagnostics = input.decisionTrace === undefined
+      ? input.failure.diagnostics
+      : mergeSwitchDecisionDiagnostics({
+          diagnostics: input.failure.diagnostics,
+          decisionTrace: input.decisionTrace,
+        });
+    return {
+      status: 'superseded_after_apply',
+      activeProfileId: observed.activeProfileId,
+      generation: observed.generation,
+      credentialRevision: observedRevision,
+      adoptedProfileId: input.completion.activeProfileId,
+      adoptedGeneration: input.completion.generation,
+      adoptedCredentialRevision: attemptedRevision,
+      reconciliationDisposition: 'superseded_after_apply',
+      ...(diagnostics === undefined ? {} : { diagnostics }),
+    };
+  }
+
   private async preflightPredictiveSessionApply(
     input: ConnectedServiceAuthGroupSwitchApplyGenerationInput,
   ): Promise<ConnectedServiceAuthGenerationApplyFailure | null> {
@@ -371,6 +413,12 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     } catch (error) {
       const applyFailure = readConnectedServiceAuthGenerationApplyFailure(error);
       if (!applyFailure) throw error;
+      const superseded = await this.resolveAuthoritativeRevisionSupersession({
+        completion,
+        failure: applyFailure,
+        ...(decisionTrace === undefined ? {} : { decisionTrace }),
+      });
+      if (superseded) return superseded;
       return buildGenerationApplyResult({
         activeProfileId: completion.activeProfileId,
         generation: completion.generation,
@@ -1246,6 +1294,27 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
         } catch (error) {
           const applyFailure = readConnectedServiceAuthGenerationApplyFailure(error);
           if (!applyFailure) throw error;
+          const superseded = await this.resolveAuthoritativeRevisionSupersession({
+            completion,
+            failure: applyFailure,
+            trigger,
+            decisionTrace: selectedDecisionTrace,
+          });
+          if (superseded) {
+            this.maybeEmitSwitchPipelineResult({
+              trigger,
+              phase: 'apply_failed',
+              request: input,
+              loaded: trigger === 'classified_failure' ? loaded : commitLoaded,
+              resultStatus: 'superseded_after_apply',
+              toProfileId: superseded.activeProfileId,
+              toGeneration: superseded.generation,
+              success: false,
+              startedAtMs,
+              decisionTrace: selectedDecisionTrace,
+            });
+            return superseded;
+          }
           const unavailableResult = isTransientPredictiveApplyUnavailable({
             reason: input.reason,
             failure: applyFailure,

@@ -51,6 +51,16 @@ export type ConnectedServiceCredentialRefreshResult = Readonly<{
   credentialRevision?: string;
 }>;
 
+export type ConnectedServiceRuntimeAuthCredentialRefreshResult =
+  ConnectedServiceCredentialRefreshResult & Readonly<{
+    /**
+     * The requested member credential rotated successfully, but the affected runtime now belongs
+     * to a different authoritative group member. Runtime recovery must consume that group truth
+     * instead of declaring the obsolete member refresh sufficient or falsely reporting it failed.
+     */
+    runtimeAuthDisposition?: 'superseded_by_current_group';
+  }>;
+
 /**
  * Outcome of a quota-probe credential refresh. `reauthRequired` is the refresh coordinator's
  * canonical verdict that the credential cannot be recovered by retrying (permanent provider auth

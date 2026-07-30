@@ -1,6 +1,9 @@
 import type { TrackedSession } from '@/daemon/types';
 import { ConnectedServiceIdSchema, type ConnectedServiceBindingsV1, type ConnectedServiceId } from '@happier-dev/protocol';
-import type { ConnectedServiceCredentialRefreshResult } from '../refresh/ConnectedServiceRefreshCoordinator';
+import type {
+  ConnectedServiceCredentialRefreshResult,
+  ConnectedServiceRuntimeAuthCredentialRefreshResult,
+} from '../refresh/ConnectedServiceRefreshCoordinator';
 import type { AcceptedConnectedServiceAccountVerificationByServiceId } from '../accountTransitions/acceptedConnectedServiceAccountVerification';
 
 import {
@@ -47,7 +50,7 @@ type RuntimeCredentialRefreshService = Readonly<{
     serviceId: ConnectedServiceId;
     profileId: string;
     sessionId: string;
-  }>): Promise<ConnectedServiceCredentialRefreshResult>;
+  }>): Promise<ConnectedServiceRuntimeAuthCredentialRefreshResult>;
 }>;
 
 type RuntimeAuthSwitchContinuation = (input: Readonly<{
@@ -874,6 +877,9 @@ async function maybeRefreshCredentialBeforeRuntimeRecovery(input: Readonly<{
     profileId,
     sessionId: input.sessionId,
   });
+  if (result.runtimeAuthDisposition === 'superseded_by_current_group') {
+    return null;
+  }
   if (result.status === 'refreshed') {
     input.switchAttemptTracker?.recordCredentialRefreshSuccess?.(attempt);
     await input.onRuntimeAuthRecoverySuccess?.({

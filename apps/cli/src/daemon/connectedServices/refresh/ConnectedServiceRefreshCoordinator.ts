@@ -88,6 +88,7 @@ import type {
   ConnectedServiceCredentialHealthNotificationTarget,
   ConnectedServiceCredentialRefreshDiagnostic,
   ConnectedServiceCredentialRefreshResult,
+  ConnectedServiceRuntimeAuthCredentialRefreshResult,
   ConnectedServiceCredentialSource,
   ConnectedServiceQuotaCredentialRefreshOutcome,
   RematerializedTargetsResult,
@@ -100,6 +101,7 @@ export type {
   ConnectedServiceCredentialHealthNotificationTarget,
   ConnectedServiceCredentialRefreshDiagnostic,
   ConnectedServiceCredentialRefreshResult,
+  ConnectedServiceRuntimeAuthCredentialRefreshResult,
   ConnectedServiceCredentialRefreshStatus,
 } from './refreshTypes';
 export {
@@ -162,6 +164,19 @@ function wasRuntimeAuthSessionRematerialized(input: Readonly<{
   return input.result.rematerializedTargets.some((target) => target.sessionId === input.sessionId);
 }
 
+function didRuntimeAuthSessionAdoptAnotherGroupMember(input: Readonly<{
+  result: RematerializedTargetsResult;
+  sessionId: string | null;
+  binding: BoundProfile;
+}>): boolean {
+  if (!input.sessionId) return false;
+  const target = input.result.rematerializedTargets.find((candidate) => candidate.sessionId === input.sessionId);
+  if (!target) return false;
+  const selection = target.selectionsByServiceId.get(input.binding.serviceId);
+  return selection?.kind === 'group'
+    && selection.activeProfileId !== input.binding.profileId;
+}
+
 export class ConnectedServiceCredentialRefreshError extends Error {
   readonly diagnostic: ConnectedServiceCredentialRefreshDiagnostic;
 
@@ -179,6 +194,8 @@ export class ConnectedServiceRefreshCoordinator {
   private readonly inFlightRefreshAuthUpdatedNotifications = new Map<string, Promise<void>>();
   /** RR-1 reentrancy guard: bindings currently mid-distribution on the 'refreshed' completion path. */
   private readonly distributingRefreshedBindings = new Set<string>();
+  /** Last by-construction distribution; runtime recovery consumes it instead of materializing twice. */
+  private readonly lastRefreshedDistributionByKey = new Map<string, RematerializedTargetsResult>();
   private readonly canonicalGroupStateCache = new Map<string, Readonly<{
     atMs: number;
     group: Readonly<{ activeProfileId: string | null; generation: number }> | null;
@@ -578,7 +595,7 @@ export class ConnectedServiceRefreshCoordinator {
     serviceId: ConnectedServiceId;
     profileId: string;
     sessionId?: string | null;
-  }>): Promise<ConnectedServiceCredentialRefreshResult> {
+  }>): Promise<ConnectedServiceRuntimeAuthCredentialRefreshResult> {
     const binding = { serviceId: input.serviceId, profileId: input.profileId } satisfies BoundProfile;
     const result = await this.refreshOauthBinding(
       binding,
@@ -587,7 +604,8 @@ export class ConnectedServiceRefreshCoordinator {
     );
     if (result.status !== 'refreshed') return result;
 
-    const rematerialization = await this.rematerializeTargetsForBindingAfterRefresh(binding);
+    const rematerialization = this.lastRefreshedDistributionByKey.get(bindingKey(binding))
+      ?? await this.rematerializeTargetsForBindingAfterRefresh(binding);
     const targetFailures = resolveRuntimeAuthRematerializationFailures({
       result: rematerialization,
       sessionId: input.sessionId ?? null,
@@ -601,6 +619,19 @@ export class ConnectedServiceRefreshCoordinator {
       });
     }
 
+    if (didRuntimeAuthSessionAdoptAnotherGroupMember({
+      result: rematerialization,
+      sessionId: input.sessionId ?? null,
+      binding,
+    }) || await this.didRegisteredRuntimeAuthSessionAdvanceToAnotherGroupMember({
+      sessionId: input.sessionId ?? null,
+      binding,
+    })) {
+      return {
+        ...result,
+        runtimeAuthDisposition: 'superseded_by_current_group',
+      };
+    }
     if (!wasRuntimeAuthSessionRematerialized({ result: rematerialization, sessionId: input.sessionId ?? null })) {
       return await this.finalizeRefreshResult(binding, buildMissingRuntimeAuthTargetRefreshResult({
         binding,
@@ -613,6 +644,25 @@ export class ConnectedServiceRefreshCoordinator {
       await this.notifyAuthUpdatedForRefreshedBinding(binding, rematerialization.rematerializedTargets);
     }
     return result;
+  }
+
+  private async didRegisteredRuntimeAuthSessionAdvanceToAnotherGroupMember(input: Readonly<{
+    sessionId: string | null;
+    binding: BoundProfile;
+  }>): Promise<boolean> {
+    if (!input.sessionId) return false;
+    const target = this.runtimeRegistry.getBySessionId(input.sessionId);
+    const selection = target?.connectedServiceSelections.find((candidate) => (
+      candidate.serviceId === input.binding.serviceId
+      && candidate.kind === 'group'
+    ));
+    if (!selection || selection.kind !== 'group') return false;
+    const canonical = await this.refreshCanonicalGroupStateForRefresh({
+      serviceId: selection.serviceId,
+      groupId: selection.groupId,
+    }, this.params.now());
+    return canonical?.activeProfileId != null
+      && canonical.activeProfileId !== input.binding.profileId;
   }
 
   async handleExternalCredentialUpdate(input: Readonly<{
@@ -865,6 +915,7 @@ export class ConnectedServiceRefreshCoordinator {
         this.distributingRefreshedBindings.add(distributionKey);
         try {
           const distribution = await this.distributeRefreshedBinding(binding);
+          this.lastRefreshedDistributionByKey.set(distributionKey, distribution);
           const appliedRuntimeIdentityKeys = new Set(
             distribution.rematerializedTargets.map((target) => target.runtimeIdentityKey),
           );
