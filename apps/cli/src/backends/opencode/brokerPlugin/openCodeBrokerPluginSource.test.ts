@@ -60,12 +60,20 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
     delete process.env.HAPPIER_OPENCODE_BROKER_LOAD_NONCE;
   });
 
-  it('engages only on the Happier broker marker, not on a real direct credential', async () => {
+  it('engages only on its exact provider/version marker', async () => {
     const { loader, provider } = await loadBrokerPlugin('openai');
     expect(provider).toBe('openai');
 
     const directKey = await loader(async () => ({ type: 'api', key: 'sk-real-openai-key' }));
     expect(directKey).toEqual({});
+    expect(await loader(async () => ({
+      type: 'api',
+      key: buildOpenCodeBrokerMarker('openai', '2'),
+    }))).toEqual({});
+    expect(await loader(async () => ({
+      type: 'api',
+      key: buildOpenCodeBrokerMarker('anthropic', OPEN_CODE_BROKER_PLUGIN_VERSION),
+    }))).toEqual({});
 
     const marker = buildOpenCodeBrokerMarker('openai', OPEN_CODE_BROKER_PLUGIN_VERSION);
     const brokered = await loader(async () => ({ type: 'api', key: marker }));

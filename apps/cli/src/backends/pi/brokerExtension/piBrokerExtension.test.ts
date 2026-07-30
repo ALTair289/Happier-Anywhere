@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -121,9 +121,19 @@ describe('ensurePiBrokerExtensionAsset (idempotent write)', () => {
   it('writes the extension into <agentDir>/extensions/ and is write-if-changed', async () => {
     const root = await mkdtemp(join(tmpdir(), 'happier-pi-broker-asset-'));
     const agentDir = join(root, 'pi-agent-dir');
-    await mkdir(agentDir, { recursive: true });
+    const extensionDir = join(agentDir, 'extensions');
+    await mkdir(extensionDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(extensionDir, 'happier-pi-broker-1.js'), 'stale v1', 'utf8'),
+      writeFile(join(extensionDir, 'happier-pi-broker-2.js'), 'stale v2', 'utf8'),
+      writeFile(join(extensionDir, 'unrelated-extension.js'), 'unrelated', 'utf8'),
+    ]);
     const path = await ensurePiBrokerExtensionAsset(agentDir);
     expect(path).toBe(resolvePiBrokerExtensionPath(agentDir));
+    expect((await readdir(extensionDir)).sort()).toEqual([
+      'happier-pi-broker.js',
+      'unrelated-extension.js',
+    ]);
     const content = await readFile(path, 'utf8');
     expect(content).toContain('HappierPiAuthBrokerExtension');
     expect(content).toContain('registerProvider');

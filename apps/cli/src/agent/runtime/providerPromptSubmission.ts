@@ -7,7 +7,8 @@ export class ProviderPromptSubmissionUnconfirmedError extends Error {
 
 export type ProviderPromptSubmissionRejectedBeforeEffectReason =
   | 'runtime_disposed_before_delivery'
-  | 'provider_rejected_before_acceptance';
+  | 'provider_rejected_before_acceptance'
+  | 'provider_unavailable_before_acceptance';
 
 export class ProviderPromptSubmissionRejectedBeforeEffectError extends Error {
   readonly reason: ProviderPromptSubmissionRejectedBeforeEffectReason;

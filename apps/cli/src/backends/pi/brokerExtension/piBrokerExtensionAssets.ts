@@ -1,7 +1,7 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { buildPiBrokerExtensionSource, PI_BROKER_EXTENSION_VERSION } from './piBrokerExtensionSource';
+import { buildPiBrokerExtensionSource } from './piBrokerExtensionSource';
 
 /**
  * On-disk layout for the Pi broker extension.
@@ -11,9 +11,8 @@ import { buildPiBrokerExtensionSource, PI_BROKER_EXTENSION_VERSION } from './piB
  * extension loader does not auto-load that directory; `createPiBackend` passes this deterministic path
  * through Pi's `--extension` CLI argument for brokered sessions.
  *
- * The file is named by version so an upgraded daemon's new extension co-exists with any stale one and
- * the active version is unambiguous. The extension is self-selecting (it registers only the brokered
- * providers present in the selections env), so a single file serves both provider lanes.
+ * The stable file path is passed explicitly to Pi. Older unreleased versioned assets are retired
+ * before writing it so local development homes do not accumulate competing implementations.
  */
 
 /** Broker extension dir relative to the Happier-controlled Pi agent dir. */
@@ -21,9 +20,24 @@ export function resolvePiBrokerExtensionDir(agentDir: string): string {
   return join(agentDir, 'extensions');
 }
 
-/** Deterministic, version-keyed extension file path. `.js` is discovered by Pi (`isExtensionFile`). */
+/** Deterministic extension file path. `.js` is discovered by Pi (`isExtensionFile`). */
 export function resolvePiBrokerExtensionPath(agentDir: string): string {
-  return join(resolvePiBrokerExtensionDir(agentDir), `happier-pi-broker-${PI_BROKER_EXTENSION_VERSION}.js`);
+  return join(resolvePiBrokerExtensionDir(agentDir), 'happier-pi-broker.js');
+}
+
+const VERSIONED_PI_BROKER_EXTENSION_PATTERN = /^happier-pi-broker-[^/]+\.js$/u;
+
+async function retireVersionedPiBrokerExtensionAssets(extensionDir: string): Promise<void> {
+  const entries = await readdir(extensionDir, { withFileTypes: true }).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  });
+  await Promise.all(entries
+    .filter((entry) => (
+      entry.isFile()
+      && VERSIONED_PI_BROKER_EXTENSION_PATTERN.test(entry.name)
+    ))
+    .map((entry) => rm(join(extensionDir, entry.name), { force: true })));
 }
 
 async function writeFileIfChanged(path: string, content: string): Promise<void> {
@@ -38,7 +52,9 @@ async function writeFileIfChanged(path: string, content: string): Promise<void> 
  * native Pi sessions never invoke it, so their agent dirs stay free of the extension.
  */
 export async function ensurePiBrokerExtensionAsset(agentDir: string): Promise<string> {
-  await mkdir(resolvePiBrokerExtensionDir(agentDir), { recursive: true });
+  const extensionDir = resolvePiBrokerExtensionDir(agentDir);
+  await mkdir(extensionDir, { recursive: true });
+  await retireVersionedPiBrokerExtensionAssets(extensionDir);
   const path = resolvePiBrokerExtensionPath(agentDir);
   await writeFileIfChanged(path, buildPiBrokerExtensionSource());
   return path;

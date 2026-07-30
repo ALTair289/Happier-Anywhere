@@ -22,12 +22,11 @@ import {
 } from './piBrokerExtensionEnv';
 
 /**
- * Version of the Happier Pi auth broker extension. Bump on any wire-shape change. Folded into the
- * broker marker (stored as the credential `refresh` value) + the selection identity (so a new version
- * yields a new managed fingerprint) and into the on-disk extension file name (so old + new co-exist
- * across upgrades).
+ * First publishable version of the Happier Pi auth broker extension. It is folded into the broker
+ * marker (stored as the credential `refresh` value) + selection identity so a future breaking
+ * revision yields a new managed fingerprint. The generated filename remains stable.
  */
-export const PI_BROKER_EXTENSION_VERSION = '2';
+export const PI_BROKER_EXTENSION_VERSION = '1';
 
 function jsString(value: string): string {
   return JSON.stringify(value);

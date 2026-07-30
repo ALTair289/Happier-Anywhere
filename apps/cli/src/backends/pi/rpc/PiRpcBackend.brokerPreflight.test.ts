@@ -50,6 +50,7 @@ describe('PiRpcBackend connected-service broker preflight (fail-closed)', () => 
     priv: PrivateBrokerGateBackend;
     startSession: () => Promise<{ sessionId: string }>;
     sendPrompt: (text: string) => Promise<void>;
+    sendPromptWithAdmission: (text: string) => ReturnType<PiRpcBackend['sendPromptWithAdmission']>;
     trackers: { sentPromptCount: number; ensureProcessReached: boolean; rpcCommandCount: number };
   } {
     const workDir = mkdtempSync(join(tmpdir(), 'happier-pi-broker-gate-'));
@@ -70,6 +71,7 @@ describe('PiRpcBackend connected-service broker preflight (fail-closed)', () => 
       trackers,
       startSession: () => backend.startSession(),
       sendPrompt: (text) => backend.sendPrompt(SESSION_ID, text),
+      sendPromptWithAdmission: (text) => backend.sendPromptWithAdmission(SESSION_ID, text),
     };
   }
 
@@ -87,7 +89,7 @@ describe('PiRpcBackend connected-service broker preflight (fail-closed)', () => 
   }
 
   it('throws and never sends a prompt when a brokered session is not ready (daemon bridge unreachable)', async () => {
-    const { priv, trackers, sendPrompt } = createGatedBackend({
+    const { priv, trackers, sendPromptWithAdmission } = createGatedBackend({
       [PI_BROKER_SELECTION_IDENTITY_ENV]: 'pi|connected|broker:1|anthropic:claude-pro:',
       [PI_BROKER_SELECTIONS_ENV]: serializePiBrokerSelections({
         anthropic: { serviceId: 'claude-subscription', profileId: 'claude-pro', accountId: null, planType: null },
@@ -103,7 +105,14 @@ describe('PiRpcBackend connected-service broker preflight (fail-closed)', () => 
       throw new Error('reached-ensure-process');
     };
 
-    await expect(sendPrompt('hello')).rejects.toThrow(/broker_daemon_bridge_unreachable/);
+    const submission = sendPromptWithAdmission('hello');
+    await expect(submission.admission).resolves.toMatchObject({
+      status: 'rejected_before_effect',
+      error: {
+        message: expect.stringMatching(/broker_daemon_bridge_unreachable/),
+      },
+    });
+    await expect(submission.completion).rejects.toThrow(/broker_daemon_bridge_unreachable/);
     // Fail-closed: the gate runs BEFORE the Pi process is touched or any prompt is written.
     expect(trackers.ensureProcessReached).toBe(false);
     expect(trackers.sentPromptCount).toBe(0);

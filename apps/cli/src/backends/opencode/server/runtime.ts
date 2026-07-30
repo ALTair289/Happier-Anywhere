@@ -19,6 +19,7 @@ import { emitCanonicalTurnDiffTool } from '@/agent/runtime/emitCanonicalTurnDiff
 import { isAbortLikeError } from '@/agent/executionRuns/runtime/turnDelivery';
 import { surfacePrimarySessionRuntimeIssue } from '@/agent/runtime/session/errors/surfacePrimarySessionRuntimeIssue';
 import {
+  ProviderPromptSubmissionRejectedBeforeEffectError,
   ProviderPromptSubmissionUnconfirmedError,
   type ProviderPromptWithMeta,
 } from '@/agent/runtime/providerPromptSubmission';
@@ -995,6 +996,97 @@ export function createOpenCodeServerRuntime(params: {
     return (await resolveModelOverride(rawModelId)) ?? undefined;
   };
 
+  const isPrePromptMessageId = (messageId: string): boolean => {
+    if (!messageId) return false;
+    return turnPrePromptMessageIdsAll?.has(messageId)
+      ?? turnPreexistingMessageIds?.has(messageId)
+      ?? false;
+  };
+
+  const isCurrentTurnObservationMessageId = (messageId: string): boolean => {
+    if (!turnPromptActive || !messageId) return false;
+    if (turnUserMessageId === messageId || turnUserMessageIds.has(messageId)) return false;
+    if (isPrePromptMessageId(messageId)) return false;
+    return turnLiveKnownAssistantMessageIds.has(messageId) || turnAssistantMessageIds.has(messageId);
+  };
+
+  const isExactCurrentTurnAssistantObservation = (info: Record<string, unknown>): boolean => {
+    if (!turnPromptActive || !sessionId || !turnUserMessageId) return false;
+    if (normalizeString(info.sessionID) !== sessionId) return false;
+    const projection = classifyOpenCodeMessageForProjection(info);
+    const messageId = projection.messageId || normalizeString(info.id);
+    if (projection.kind !== 'assistant_transcript' || !messageId || isPrePromptMessageId(messageId)) return false;
+    return readNonBlankOpaqueIdentifier(info.parentID) === turnUserMessageId;
+  };
+
+  let scheduleAuthoritativeRequestInventoryRefresh: () => void = () => {};
+
+  const handleUntrustedObservation = (evt: OpenCodeGlobalEvent): Promise<void> | void => {
+    const type = normalizeString(evt.payload.type);
+    const props = asRecord(evt.payload.properties);
+
+    if (type === 'message.updated') {
+      const info = asRecord(props?.info);
+      if (!info) return;
+      const observedSessionId = normalizeString(info.sessionID);
+      if (!turnPromptActive) {
+        if (sessionId && observedSessionId === sessionId) {
+          // The event is only a content-free invalidation. The inventory reader remains the
+          // authority for externally authored transcript rows.
+          scheduleExternalSessionTranscriptProjection();
+        }
+        return;
+      }
+      if (!isExactCurrentTurnAssistantObservation(info)) return;
+      return handleEvent(evt);
+    }
+
+    if (
+      type === 'message.part.updated'
+      || type === 'message.part.created'
+      || type === 'message.part.delta'
+    ) {
+      if (!turnPromptActive) return;
+      const part = type === 'message.part.delta' ? props : asRecord(props?.part);
+      if (!part) return;
+      const observedSessionId = normalizeString(part.sessionID);
+      const messageId = normalizeString(part.messageID);
+      if (!observedSessionId || !messageId) return;
+      if (observedSessionId === sessionId) {
+        if (!isCurrentTurnObservationMessageId(messageId)) return;
+        return handleEvent(evt);
+      }
+      // A child session is admitted only after the current parent turn's Task tool established the
+      // exact sidechain mapping. Old or unrelated global-bus frames therefore remain inert.
+      if (resolveSidechainIdForRemoteSession(observedSessionId)) {
+        return handleEvent(evt);
+      }
+      return;
+    }
+
+    if (type === 'todo.updated') {
+      const observedSessionId = normalizeString(props?.sessionID)
+        || normalizeString(asRecord(props?.session)?.id);
+      if (!observedSessionId || observedSessionId === sessionId) {
+        // The SSE frame is a wake-up only; the inventory reader remains authoritative.
+        publishNativeTodosWorkStateBestEffort();
+      }
+      return;
+    }
+
+    if (type === 'question.asked' || type === 'permission.asked') {
+      const observedSessionId = normalizeString(props?.sessionID);
+      if (
+        observedSessionId
+        && (observedSessionId === sessionId || sidechainIdByRemoteSessionId.has(observedSessionId))
+      ) {
+        // GlobalBus can replay the original event shape after reconnect. Treat it only as a wake:
+        // the provider's current pending-request lists are the authority for content and liveness.
+        scheduleAuthoritativeRequestInventoryRefresh();
+      }
+    }
+  };
+
   const attachSubscriptionIfNeeded = async (): Promise<void> => {
     if (subscriptionAbort) return;
     const c = await ensureClient();
@@ -1005,17 +1097,16 @@ export function createOpenCodeServerRuntime(params: {
       signal: controller.signal,
       onEvent: (evt, delivery: OpenCodeGlobalEventDelivery) => {
         const eventType = normalizeString(evt.payload.type);
-        if (
-          delivery.provenance === 'untrusted-observation'
-          || (delivery.provenance === 'connection-boundary' && eventType !== 'server.connected')
-        ) {
+        if (delivery.provenance === 'connection-boundary' && eventType !== 'server.connected') {
           return;
         }
         const eventSequence = nextProviderEventSequence + 1;
         nextProviderEventSequence = eventSequence;
         const processEvent = (): Promise<void> | void => {
           try {
-            return handleEvent(evt);
+            return delivery.provenance === 'untrusted-observation'
+              ? handleUntrustedObservation(evt)
+              : handleEvent(evt);
           } catch (error) {
             logger.debug('[OpenCodeServer] Failed handling event (non-fatal)', error);
           }
@@ -1713,7 +1804,7 @@ export function createOpenCodeServerRuntime(params: {
     if (turnAssistantMessageIds.has(messageID)) return true;
     if (turnUserMessageIds.has(messageID)) return false;
     if (turnUserMessageId && messageID === turnUserMessageId) return false;
-    if (turnPreexistingMessageIds && turnPreexistingMessageIds.has(messageID)) return false;
+    if (isPrePromptMessageId(messageID)) return false;
     return true;
   };
 
@@ -1742,7 +1833,7 @@ export function createOpenCodeServerRuntime(params: {
     if (!turnPromptActive) return;
     if (!messageID) return;
     if (turnStreamedAssistantMessageIds.has(messageID)) return;
-    if (turnPreexistingMessageIds?.has(messageID) && messageID !== turnUserMessageId) return;
+    if (isPrePromptMessageId(messageID) && messageID !== turnUserMessageId) return;
     turnAssistantMessageIds.add(messageID);
     turnLiveKnownAssistantMessageIds.add(messageID);
   };
@@ -1834,7 +1925,11 @@ export function createOpenCodeServerRuntime(params: {
       if (completedProviderEventSequence < nextProviderEventSequence) return;
       if (pendingTaskChildSessionDiscoveryCallKeys.size > 0) return;
 
-      if (!turnTerminalAssistantEvidenceSeen || turnRequiresPostToolAssistantCompletion) {
+      if (
+        !turnTerminalAssistantEvidenceSeen
+        || turnRequiresPostToolAssistantCompletion
+        || turnStreamedAssistantMessageIds.size === 0
+      ) {
         await reconcileCurrentTurnTerminalAssistantFromAuthoritativeInventoryBestEffort();
       }
 
@@ -2361,12 +2456,31 @@ export function createOpenCodeServerRuntime(params: {
   // reject the active turn promise. Only the issue (code + sanitizedPreview) differs, so it is the
   // sole input. Single-fire is structurally preserved: the guard short-circuits once `rejectTurn`
   // synchronously nulls `turnDeferred`. NONE of these paths replay the prompt or call sessionAbort.
-  const emitOpenCodeTurnFailure = (input: Readonly<{ issue: SessionRuntimeIssueV1 }>): void => {
+  const createProviderUnavailableBeforeAcceptanceError = (
+    issue: SessionRuntimeIssueV1,
+  ): ProviderPromptSubmissionRejectedBeforeEffectError & Readonly<{
+    code: string;
+    issue: SessionRuntimeIssueV1;
+  }> => Object.assign(
+    new ProviderPromptSubmissionRejectedBeforeEffectError(
+      'provider_unavailable_before_acceptance',
+      new Error(issue.sanitizedPreview ?? issue.code),
+    ),
+    {
+      code: issue.code,
+      issue,
+    },
+  );
+
+  const emitOpenCodeTurnFailure = (input: Readonly<{
+    issue: SessionRuntimeIssueV1;
+    error?: Error;
+  }>): void => {
     if (!turnDeferred || !turnPromptActive) return;
     const { issue } = input;
     const code = issue.code;
     const providerTurnId = issue.providerTurnId ?? ensureActiveLifecycleMarkerId();
-    const error = Object.assign(new Error(issue.sanitizedPreview ?? code), {
+    const error = input.error ?? Object.assign(new Error(issue.sanitizedPreview ?? code), {
       code,
       issue,
     });
@@ -2444,28 +2558,27 @@ export function createOpenCodeServerRuntime(params: {
   const failTurnDueToConnectedBrokerNotReady = (reason: string): void => {
     if (!turnDeferred || !turnPromptActive) return;
     const providerTurnId = ensureActiveLifecycleMarkerId();
+    const issue: SessionRuntimeIssueV1 = {
+      v: 1,
+      scope: 'primary_session',
+      status: 'failed',
+      code: OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE,
+      source: 'stream_error',
+      occurredAt: Date.now(),
+      provider,
+      providerTurnId,
+      sanitizedPreview:
+        'OpenCode connected-service authentication is not materialized for this session '
+        + `(${reason}). The session was stopped to avoid falling back to unmanaged OpenCode auth.`,
+    };
     // No prompt replay, no native/upstream fallback (the stored broker marker is non-functional).
     emitOpenCodeTurnFailure({
-      issue: {
-        v: 1,
-        scope: 'primary_session',
-        status: 'failed',
-        code: OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE,
-        source: 'stream_error',
-        occurredAt: Date.now(),
-        provider,
-        providerTurnId,
-        sanitizedPreview:
-          'OpenCode connected-service authentication is not materialized for this session '
-          + `(${reason}). The session was stopped to avoid falling back to unmanaged OpenCode auth.`,
-      },
+      issue,
+      error: createProviderUnavailableBeforeAcceptanceError(issue),
     });
   };
 
-  const createPromptNotDispatchedError = (reason: string): Error & {
-    code: typeof OPENCODE_PROMPT_NOT_DISPATCHED_CODE;
-    issue: SessionRuntimeIssueV1;
-  } => {
+  const createPromptNotDispatchedError = (reason: string) => {
     const providerTurnId = activeLifecycleMarkerId ?? ensureActiveLifecycleMarkerId();
     const issue: SessionRuntimeIssueV1 = {
       v: 1,
@@ -2480,19 +2593,13 @@ export function createOpenCodeServerRuntime(params: {
         'OpenCode prompt was not dispatched before provider dispatch '
         + `(${reason}). The turn was failed instead of confirming provider delivery.`,
     };
-    const error = new Error(issue.sanitizedPreview) as Error & {
-      code: typeof OPENCODE_PROMPT_NOT_DISPATCHED_CODE;
-      issue: SessionRuntimeIssueV1;
-    };
-    error.code = OPENCODE_PROMPT_NOT_DISPATCHED_CODE;
-    error.issue = issue;
-    return error;
+    return createProviderUnavailableBeforeAcceptanceError(issue);
   };
 
   const throwPromptNotDispatched = (reason: string): never => {
     const error = createPromptNotDispatchedError(reason);
     if (turnDeferred && turnPromptActive) {
-      emitOpenCodeTurnFailure({ issue: error.issue });
+      emitOpenCodeTurnFailure({ issue: error.issue, error });
     }
     throw error;
   };
@@ -3142,6 +3249,55 @@ export function createOpenCodeServerRuntime(params: {
       })
       .finally(() => {
         inFlight.delete(req.id);
+      });
+  };
+
+  let authoritativeRequestInventoryRefreshInFlight: Promise<void> | null = null;
+  scheduleAuthoritativeRequestInventoryRefresh = () => {
+    if (authoritativeRequestInventoryRefreshInFlight) return;
+    const work = (async () => {
+      const c = await ensureClient();
+      const [permissionsResult, questionsResult] = await Promise.allSettled([
+        c.permissionList(),
+        c.questionList(),
+      ]);
+
+      if (permissionsResult.status === 'fulfilled') {
+        for (const raw of permissionsResult.value) {
+          const request = parsePermissionRequest(raw);
+          if (request) handlePermissionAskedBestEffort(request);
+        }
+      } else {
+        logger.debug('[OpenCodeServer] failed to refresh active permission requests (non-fatal)', {
+          sessionId,
+          error: permissionsResult.reason,
+        });
+      }
+
+      if (questionsResult.status === 'fulfilled') {
+        for (const raw of questionsResult.value) {
+          const request = parseQuestionRequest(raw);
+          if (request) handleQuestionAskedBestEffort(request);
+        }
+      } else {
+        logger.debug('[OpenCodeServer] failed to refresh active question requests (non-fatal)', {
+          sessionId,
+          error: questionsResult.reason,
+        });
+      }
+    })();
+    authoritativeRequestInventoryRefreshInFlight = work;
+    void work
+      .catch((error) => {
+        logger.debug('[OpenCodeServer] active request inventory refresh failed (non-fatal)', {
+          sessionId,
+          error,
+        });
+      })
+      .finally(() => {
+        if (authoritativeRequestInventoryRefreshInFlight === work) {
+          authoritativeRequestInventoryRefreshInFlight = null;
+        }
       });
   };
 
@@ -3939,6 +4095,21 @@ export function createOpenCodeServerRuntime(params: {
       }
       await paramsWithMeta.onProviderPromptSubmitted?.();
       paramsWithMeta.onProviderPromptAccepted?.();
+      if (shouldOmitCustomMessageId && !turnUserMessageId) {
+        const vendorAssignedUserMessageId = await backfillVendorAssignedUserMessageIdBestEffort({
+          localIdRaw: paramsWithMeta.localId ?? null,
+          promptText: paramsWithMeta.text,
+          promptTextAlternates: [effectiveText],
+          prePromptMessageIds: prePromptMessageIdsForBackfill,
+        });
+        if (
+          vendorAssignedUserMessageId
+          && isActivePromptTurn(thisTurnDeferred, promptSessionId)
+        ) {
+          turnUserMessageId = vendorAssignedUserMessageId;
+          noteUserMessageIdForActiveTurn(vendorAssignedUserMessageId);
+        }
+      }
 
       const pollControlPlaneOnce = async () => {
         if (controlAbort.signal.aborted) return;

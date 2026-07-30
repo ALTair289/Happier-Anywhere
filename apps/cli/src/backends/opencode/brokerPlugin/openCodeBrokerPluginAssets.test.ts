@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,6 +29,26 @@ describe('openCodeBrokerPluginAssets', () => {
 
     // Idempotent: a second call with no change does not throw.
     await ensureOpenCodeBrokerPluginAssets({ providers: ['openai', 'anthropic'], happyHomeDir: home });
+  });
+
+  it('retires versioned Happier broker siblings while preserving unrelated plugins', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'happier-broker-assets-retire-'));
+    const pluginDir = join(resolveOpenCodeConnectedConfigHomeDir(home), 'opencode', 'plugin');
+    await mkdir(pluginDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(pluginDir, 'happier-broker-openai-1.js'), 'stale v1', 'utf8'),
+      writeFile(join(pluginDir, 'happier-broker-openai-2.js'), 'stale v2', 'utf8'),
+      writeFile(join(pluginDir, 'unrelated-plugin.js'), 'unrelated', 'utf8'),
+    ]);
+
+    await ensureOpenCodeBrokerPluginAssets({ providers: ['openai'], happyHomeDir: home });
+
+    expect((await readdir(pluginDir)).sort()).toEqual([
+      'happier-broker-openai.js',
+      'unrelated-plugin.js',
+    ]);
+    await expect(readFile(resolveOpenCodeBrokerPluginPath('openai', home), 'utf8'))
+      .resolves.toContain('HappierOpenCodeAuthBrokerPlugin');
   });
 
   it('places the broker plugin in the connected config home auto-load dir with a .js extension (OpenCode globs *.js only, not *.mjs)', () => {

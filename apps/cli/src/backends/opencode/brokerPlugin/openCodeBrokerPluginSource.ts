@@ -17,15 +17,17 @@ import {
   OPEN_CODE_BROKER_PLUGIN_VERSION_ENV,
   OPEN_CODE_BROKER_SELECTIONS_ENV,
   OPEN_CODE_BROKER_SELECTION_IDENTITY_ENV,
+  buildOpenCodeBrokerMarker,
   type OpenCodeBrokerProvider,
 } from './openCodeBrokerPluginEnv';
 
 /**
- * Version of the Happier OpenCode auth broker plugin. Bump on any wire-shape change. It is folded
- * into the broker marker + selection identity (so a new plugin version yields a new managed-server
- * fingerprint) and into the on-disk plugin file name (so old + new co-exist across upgrades).
+ * First publishable version of the Happier OpenCode auth broker plugin. It is folded into the
+ * broker marker + selection identity so a future breaking plugin revision yields a new
+ * managed-server fingerprint. The generated filename is deliberately stable: OpenCode auto-loads
+ * every plugin in its directory, so versioned sibling files must never coexist there.
  */
-export const OPEN_CODE_BROKER_PLUGIN_VERSION = '2';
+export const OPEN_CODE_BROKER_PLUGIN_VERSION = '1';
 
 /** Canonical Codex backend constants (replicated from the official Codex CLI request shape). */
 export const OPEN_CODE_BROKER_CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
@@ -116,7 +118,7 @@ ${sharedBridgeCallSource}
 const SELECTION_IDENTITY_ENV = ${jsString(OPEN_CODE_BROKER_SELECTION_IDENTITY_ENV)};
 const LOAD_NONCE_ENV = ${jsString(OPEN_CODE_BROKER_LOAD_NONCE_ENV)};
 const LOADED_HANDSHAKE_PATH = ${jsString(OPEN_CODE_BROKER_LOADED_HANDSHAKE_PATH)};
-const MARKER_PREFIX = "happier-broker";
+const MARKER = ${jsString(buildOpenCodeBrokerMarker(provider, OPEN_CODE_BROKER_PLUGIN_VERSION))};
 
 const CODEX_BASE_URL = ${jsString(OPEN_CODE_BROKER_CODEX_BASE_URL)};
 const CODEX_FROM = ${jsString(OPEN_CODE_BROKER_CODEX_RESPONSES_FROM)};
@@ -300,8 +302,9 @@ export const HappierOpenCodeAuthBrokerPlugin = async () => {
       loader: async (getAuth) => {
         const auth = await getAuth().catch(() => null);
         const key = auth && typeof auth.key === "string" ? auth.key : "";
-        // Engage ONLY on Happier's broker marker so we never shadow a real direct credential.
-        if (key.indexOf(MARKER_PREFIX + ":") !== 0) return {};
+        // Engage only for this exact provider/revision. A stale generated sibling must never
+        // shadow either the current broker or a real direct credential.
+        if (key !== MARKER) return {};
         const result = { apiKey: key, fetch: brokeredFetch };
         // Codex requests must target the ChatGPT backend; the AI SDK builds <baseURL>/responses
         // which brokeredFetch then rewrites to <baseURL>/codex/responses.

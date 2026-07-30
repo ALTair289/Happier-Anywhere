@@ -29,5 +29,12 @@ describe('provider prompt failure delivery ownership', () => {
       ),
       true,
     )).toBe('runtime_disposed_before_delivery');
+    expect(resolveProviderPromptFailureDeliveryReason(
+      new ProviderPromptSubmissionRejectedBeforeEffectError(
+        'provider_unavailable_before_acceptance',
+        new Error('OpenCode broker preflight failed before prompt_async'),
+      ),
+      true,
+    )).toBe('provider_unavailable_before_acceptance');
   });
 });

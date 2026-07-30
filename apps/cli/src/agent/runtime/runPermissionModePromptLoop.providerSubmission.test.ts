@@ -123,6 +123,18 @@ describe('runPermissionModePromptLoop provider submission phase ownership', () =
       },
     },
     {
+      title: 'proven provider-unavailable rejection before dispatch',
+      error: new ProviderPromptSubmissionRejectedBeforeEffectError(
+        'provider_unavailable_before_acceptance',
+        new Error('OpenCode broker preflight failed before prompt_async'),
+      ),
+      expectedOutcome: {
+        kind: 'rejected_before_effect',
+        localId: 'local-1',
+        reason: 'provider_unavailable_before_acceptance',
+      },
+    },
+    {
       title: 'effect-possible response loss',
       error: new Error('ACP prompt response was lost'),
       expectedOutcome: {

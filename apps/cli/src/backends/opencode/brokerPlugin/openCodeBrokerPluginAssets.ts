@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { configuration } from '@/configuration';
@@ -9,15 +9,17 @@ import {
 } from './openCodeBrokerPluginEnv';
 import {
   buildOpenCodeBrokerPluginSource,
-  OPEN_CODE_BROKER_PLUGIN_VERSION,
 } from './openCodeBrokerPluginSource';
 
 /**
- * Deterministic, version-keyed on-disk paths for the broker assets. They are derived purely from
- * `happyHomeDir` (a stable singleton) + the plugin version, so:
+ * Deterministic on-disk paths for the broker assets. They are derived purely from `happyHomeDir`
+ * (a stable singleton) + provider, so:
  *  - the materializer can REFERENCE the paths without any filesystem I/O (keeping it pure +
  *    overlay-safe for fingerprint computation), and
  *  - the server-launch path can WRITE the assets idempotently (live spawn only).
+ *
+ * The filename is intentionally not versioned. OpenCode auto-loads every `.js` file in this
+ * directory, so versioned siblings would be competing live plugins rather than compatibility.
  */
 
 /** Happier-owned, isolated OpenCode config home for connected sessions (no user 3rd-party plugins). */
@@ -42,7 +44,23 @@ export function resolveOpenCodeBrokerPluginPath(
 ): string {
   // MUST be `.js`: opencode v1.14.41's plugin auto-discovery globs `*.js` ONLY and ignores `*.mjs`
   // (live-verified head-to-head in the same dir). A `.mjs` broker file is silently never loaded.
-  return join(resolveOpenCodeBrokerPluginDir(happyHomeDir), `happier-broker-${provider}-${OPEN_CODE_BROKER_PLUGIN_VERSION}.js`);
+  return join(resolveOpenCodeBrokerPluginDir(happyHomeDir), `happier-broker-${provider}.js`);
+}
+
+const VERSIONED_OPEN_CODE_BROKER_PLUGIN_PATTERN =
+  /^happier-broker-(?:openai|anthropic)-[^/]+\.js$/u;
+
+async function retireVersionedOpenCodeBrokerPluginAssets(pluginDir: string): Promise<void> {
+  const entries = await readdir(pluginDir, { withFileTypes: true }).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  });
+  await Promise.all(entries
+    .filter((entry) => (
+      entry.isFile()
+      && VERSIONED_OPEN_CODE_BROKER_PLUGIN_PATTERN.test(entry.name)
+    ))
+    .map((entry) => rm(join(pluginDir, entry.name), { force: true })));
 }
 
 async function writeFileIfChanged(path: string, content: string): Promise<void> {
@@ -67,8 +85,10 @@ export async function ensureOpenCodeBrokerPluginAssets(params: Readonly<{
   const happyHomeDir = params.happyHomeDir ?? configuration.happyHomeDir;
   await mkdir(resolveOpenCodeConnectedConfigHomeDir(happyHomeDir), { recursive: true });
   const providers = params.providers.filter((provider) => OPEN_CODE_BROKER_PROVIDERS.includes(provider));
+  const pluginDir = resolveOpenCodeBrokerPluginDir(happyHomeDir);
+  await mkdir(pluginDir, { recursive: true });
+  await retireVersionedOpenCodeBrokerPluginAssets(pluginDir);
   if (providers.length === 0) return;
-  await mkdir(resolveOpenCodeBrokerPluginDir(happyHomeDir), { recursive: true });
   await Promise.all(providers.map(async (provider) => {
     await writeFileIfChanged(resolveOpenCodeBrokerPluginPath(provider, happyHomeDir), buildOpenCodeBrokerPluginSource(provider));
   }));

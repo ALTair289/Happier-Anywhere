@@ -5,7 +5,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
-import type { ProviderPromptWithMeta } from '@/agent/runtime/providerPromptSubmission';
+import {
+  ProviderPromptSubmissionRejectedBeforeEffectError,
+  type ProviderPromptWithMeta,
+} from '@/agent/runtime/providerPromptSubmission';
 import { buildChangeTitleInstruction } from '@/agent/runtime/changeTitleInstruction';
 import { logger } from '@/ui/logger';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
@@ -2758,14 +2761,46 @@ describe('createOpenCodeServerRuntime', () => {
     const firstCall = (client.sessionPromptAsync as any).mock.calls[0]?.[0] as any;
     expect(firstCall.messageId).toBeUndefined();
 
-    client.__emit({
+    await expect.poll(
+      () => session.__getMetadata()?.opencodeUserMessageIdMapV1?.byLocalId?.['resume-local-1'],
+    ).toBe('msg_vendor_user_1');
+
+    await client.__emitUntrusted({
       directory: '/tmp',
-      payload: { type: 'message.part.updated', properties: { part: { id: 'part_first', type: 'text', sessionID: 'ses_remote' } } },
+      payload: {
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'msg_asst_first',
+            role: 'assistant',
+            sessionID: 'ses_remote',
+            parentID: 'msg_vendor_user_1',
+            time: { created: 3 },
+          },
+        },
+      },
     });
-    client.__emit({
+    await client.__emitUntrusted({
       directory: '/tmp',
-      payload: { type: 'message.part.delta', properties: { sessionID: 'ses_remote', messageID: 'msg_asst_first', partID: 'part_first', delta: 'ok' } },
+      payload: {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: 'part_first',
+            type: 'text',
+            sessionID: 'ses_remote',
+            messageID: 'msg_asst_first',
+            text: 'resumed turn is visible live',
+          },
+        },
+      },
     });
+    await flushTranscriptCommitMicrotasks();
+    expect(
+      getCommittedTranscriptRows(session, { type: 'message', sidechainId: null })
+        .map((row) => row.body.message),
+    ).toEqual(['resumed turn is visible live']);
+
     await emitTerminalAssistantAndIdle(client, { sessionId: 'ses_remote', messageId: 'msg_asst_first' });
     await expect(promptPromise).resolves.toBeUndefined();
 
@@ -4250,6 +4285,95 @@ describe('createOpenCodeServerRuntime', () => {
     }
   });
 
+  it('uses replayable permission and question events only to read authoritative active-request inventories', async () => {
+    const client = createFakeClient();
+    client.sessionStatusList.mockResolvedValue({ ses_1: { type: 'busy' } });
+    client.permissionList.mockResolvedValue([{
+      id: 'perm_authoritative',
+      sessionID: 'ses_1',
+      permission: 'edit',
+      patterns: ['src/current.ts'],
+      always: [],
+      metadata: {},
+    }]);
+    client.questionList.mockResolvedValue([{
+      id: 'question_authoritative',
+      sessionID: 'ses_1',
+      questions: [{
+        question: 'Use the current provider request?',
+        header: 'Provider request',
+        options: [{ label: 'yes', description: 'Continue' }],
+        multiple: false,
+      }],
+    }]);
+    const permissionHandler = {
+      handleToolCall: vi.fn(async (_id: string, toolName: string) => (
+        toolName === 'AskUserQuestion'
+          ? { decision: 'approved' as const, answers: { 'Use the current provider request?': ['yes'] } }
+          : { decision: 'approved' as const }
+      )),
+    };
+    const started = await beginOpenCodePromptForTest({
+      client,
+      permissionHandler,
+      localId: 'local-authoritative-request-inventory',
+    });
+
+    try {
+      await client.__emitUntrusted({
+        directory: '/tmp',
+        payload: {
+          type: 'permission.asked',
+          properties: {
+            id: 'perm_replayed_payload_must_not_run',
+            sessionID: 'ses_1',
+            permission: 'bash',
+            patterns: ['rm -rf /'],
+            always: ['*'],
+            metadata: {},
+          },
+        },
+      });
+      await client.__emitUntrusted({
+        directory: '/tmp',
+        payload: {
+          type: 'question.asked',
+          properties: {
+            id: 'question_replayed_payload_must_not_run',
+            sessionID: 'ses_1',
+            questions: [{
+              question: 'Trust replayed content?',
+              header: 'Replay',
+              options: [{ label: 'yes', description: 'Unsafe replay' }],
+              multiple: false,
+            }],
+          },
+        },
+      });
+
+      await expect.poll(() => client.permissionReply.mock.calls.length).toBe(1);
+      await expect.poll(() => client.questionReply.mock.calls.length).toBe(1);
+      expect(client.permissionReply).toHaveBeenCalledWith({
+        requestId: 'perm_authoritative',
+        reply: 'once',
+      });
+      expect(client.questionReply).toHaveBeenCalledWith({
+        requestId: 'question_authoritative',
+        answers: [['yes']],
+      });
+      expect(client.permissionReply).not.toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: 'perm_replayed_payload_must_not_run' }),
+      );
+      expect(client.questionReply).not.toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: 'question_replayed_payload_must_not_run' }),
+      );
+    } finally {
+      await started.runtime.cancel().catch(() => {});
+      await started.promptPromise.catch(() => undefined);
+      await started.runtime.reset().catch(() => {});
+    }
+  });
+
   it('dedupes cumulative text deltas and streams transcript-vNext updates with a stable happierStreamKey per OpenCode message', async () => {
     vi.useFakeTimers();
     vi.stubEnv('HAPPIER_STREAM_CHECKPOINT_MS', '1000000');
@@ -5149,6 +5273,158 @@ describe('createOpenCodeServerRuntime', () => {
       expect(sentAgentMessagesOfType(started.session, 'task_complete')).toHaveLength(1);
       expect(sentAgentMessagesOfType(started.session, 'turn_failed')).toHaveLength(0);
       expect(started.session.sessionTurnLifecycle.failTurn).not.toHaveBeenCalled();
+    } finally {
+      await runtime?.cancel().catch(() => {});
+      await promptPromise?.catch(() => undefined);
+      await runtime?.reset().catch(() => {});
+      vi.useRealTimers();
+    }
+  });
+
+  it('projects only the exact current turn from replayable OpenCode observations before terminal inventory reconciliation', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000));
+    let runtime: ReturnType<typeof createOpenCodeServerRuntime> | null = null;
+    let promptPromise: Promise<void> | null = null;
+    try {
+      const client = createFakeClient();
+      let promptUserMessageId = '';
+      client.sessionMessagesList.mockResolvedValue([
+        {
+          info: {
+            id: 'msg_historical_assistant',
+            role: 'assistant',
+            sessionID: 'ses_1',
+            parentID: 'msg_historical_user',
+            time: { created: 900, completed: 950 },
+            finish: 'stop',
+          },
+          parts: [{
+            id: 'part_historical_text',
+            type: 'text',
+            sessionID: 'ses_1',
+            messageID: 'msg_historical_assistant',
+            text: 'REPLAYED_HISTORY_MUST_NOT_PROJECT',
+          }],
+        },
+      ]);
+      client.sessionPromptAsync = vi.fn(async (input) => {
+        promptUserMessageId = input.messageId ?? '';
+      });
+      client.sessionStatusList.mockResolvedValue({ ses_1: { type: 'busy' } });
+
+      const started = await beginOpenCodePromptForTest({
+        client,
+        localId: 'local-replay-safe-live-projection',
+        env: {
+          ...process.env,
+          HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS: '25',
+          HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS: '25',
+          HAPPIER_OPENCODE_SERVER_TURN_INACTIVITY_TIMEOUT_MS: '10000',
+        },
+      });
+      runtime = started.runtime;
+      promptPromise = started.promptPromise;
+      expect(promptUserMessageId).not.toBe('');
+
+      await client.__emitUntrusted({
+        directory: '/tmp',
+        payload: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'msg_historical_assistant',
+              role: 'assistant',
+              sessionID: 'ses_1',
+              parentID: 'msg_historical_user',
+              time: { created: 900, completed: 950 },
+              finish: 'stop',
+            },
+          },
+        },
+      });
+      await client.__emitUntrusted({
+        directory: '/tmp',
+        payload: {
+          type: 'message.part.updated',
+          properties: {
+            part: {
+              id: 'part_historical_text',
+              type: 'text',
+              sessionID: 'ses_1',
+              messageID: 'msg_historical_assistant',
+              text: 'REPLAYED_HISTORY_MUST_NOT_PROJECT',
+            },
+          },
+        },
+      });
+      await client.__emitUntrusted({
+        directory: '/tmp',
+        payload: {
+          type: 'message.part.updated',
+          properties: {
+            part: {
+              id: 'part_uncorrelated_new_tool',
+              type: 'tool',
+              sessionID: 'ses_1',
+              messageID: 'msg_uncorrelated_new_assistant',
+              callID: 'call_uncorrelated_new_tool',
+              tool: 'bash',
+              state: {
+                status: 'completed',
+                input: { command: 'echo MUST_NOT_PROJECT' },
+                output: 'MUST_NOT_PROJECT',
+              },
+            },
+          },
+        },
+      });
+
+      await client.__emitUntrusted({
+        directory: '/tmp',
+        payload: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'msg_current_assistant',
+              role: 'assistant',
+              sessionID: 'ses_1',
+              parentID: promptUserMessageId,
+              time: { created: 1_010 },
+            },
+          },
+        },
+      });
+      await client.__emitUntrusted({
+        directory: '/tmp',
+        payload: {
+          type: 'message.part.updated',
+          properties: {
+            part: {
+              id: 'part_current_text',
+              type: 'text',
+              sessionID: 'ses_1',
+              messageID: 'msg_current_assistant',
+              text: 'CURRENT_TURN_INTERMEDIATE',
+            },
+          },
+        },
+      });
+      await flushTranscriptCommitMicrotasks();
+
+      const committedRows = getCommittedTranscriptRows(started.session, { type: 'message', sidechainId: null });
+      expect(committedRows.map((row) => row.body.message)).toEqual(['CURRENT_TURN_INTERMEDIATE']);
+      expect(
+        sentAgentMessagesOfType(started.session, 'tool-call')
+          .filter((message) => (
+            typeof message === 'object'
+            && message !== null
+            && 'callId' in message
+            && message.callId === 'call_uncorrelated_new_tool'
+          )),
+      ).toHaveLength(0);
+      expect(sentAgentMessagesOfType(started.session, 'task_complete')).toHaveLength(0);
+      expect(sentAgentMessagesOfType(started.session, 'turn_failed')).toHaveLength(0);
     } finally {
       await runtime?.cancel().catch(() => {});
       await promptPromise?.catch(() => undefined);
@@ -11216,7 +11492,14 @@ describe('createOpenCodeServerRuntime — connected-service broker preflight (fa
       sendPromptWithMeta: (params: { text: string; localId: string }) => Promise<void>;
     }).sendPromptWithMeta({ text: 'hello', localId: 'local-broker-preflight-not-ready' });
 
-    await expect(promptPromise).rejects.toThrow();
+    const promptError = await promptPromise.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(promptError).toBeInstanceOf(ProviderPromptSubmissionRejectedBeforeEffectError);
+    expect(promptError).toMatchObject({
+      reason: 'provider_unavailable_before_acceptance',
+    });
 
     // Fail-closed: the prompt must NEVER be forwarded to OpenCode (no native/upstream fallback).
     expect(client.sessionPromptAsync).not.toHaveBeenCalled();
