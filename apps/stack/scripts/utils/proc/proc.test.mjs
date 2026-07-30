@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { WriteStream } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -283,6 +283,26 @@ test('spawnProc can tee output to an env-scoped tee dir when no explicit teeFile
   const raw = await readFile(join(teeDir, 'server.log'), 'utf-8');
   assert.match(raw, /\[server\] hello/);
   assert.match(raw, /\[server\] oops/);
+});
+
+test('spawnProc bounds long-lived tee logs with one rotated predecessor', async (t) => {
+  const root = await withTempRoot(t);
+  const teeFile = join(root, 'bounded.log');
+  const teeMaxBytes = 256;
+  await writeFile(teeFile, 'legacy-log-line\n'.repeat(80));
+
+  const child = spawnProc(
+    'bounded',
+    process.execPath,
+    ['-e', 'for (let i = 0; i < 4; i += 1) console.log(String(i).padStart(3, "0") + "-abcdefghij")'],
+    process.env,
+    { silent: true, teeFile, teeMaxBytes },
+  );
+  await child.completion;
+
+  assert.ok((await stat(teeFile)).size <= teeMaxBytes);
+  assert.ok((await stat(`${teeFile}.1`)).size <= teeMaxBytes);
+  assert.match(await readFile(teeFile, 'utf-8'), /\[bounded\] 003-abcdefghij/);
 });
 
 test('spawnProc completion waits for child close, pipe drainage, and delayed tee finish', async (t) => {

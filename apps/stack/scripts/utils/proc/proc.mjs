@@ -1,10 +1,22 @@
 import { spawn } from 'node:child_process';
-import { createWriteStream, mkdirSync } from 'node:fs';
+import {
+  closeSync,
+  createWriteStream,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 
 import { terminateProcessGroup } from './terminate.mjs';
 
 const plannedExitMarker = Symbol('happier.stack.plannedExit');
+const DEFAULT_TEE_MAX_BYTES = 16 * 1024 * 1024;
 
 export function resolveDefaultShellForCommand(cmd, { platform = process.platform } = {}) {
   if (platform !== 'win32') return false;
@@ -157,6 +169,90 @@ function createWritableFinishController(stream) {
   };
 }
 
+function createBoundedTeeStream(filePath, maxBytes) {
+  const normalizedMaxBytes = Number.isFinite(maxBytes) && maxBytes > 0
+    ? Math.trunc(maxBytes)
+    : DEFAULT_TEE_MAX_BYTES;
+  const rotatedPath = `${filePath}.1`;
+  let size = 0;
+  try {
+    size = statSync(filePath).size;
+  } catch {
+    size = 0;
+  }
+  if (size > normalizedMaxBytes) {
+    let descriptor = null;
+    try {
+      const tail = Buffer.allocUnsafe(normalizedMaxBytes);
+      descriptor = openSync(filePath, 'r');
+      const bytesRead = readSync(
+        descriptor,
+        tail,
+        0,
+        normalizedMaxBytes,
+        size - normalizedMaxBytes,
+      );
+      closeSync(descriptor);
+      descriptor = null;
+      rmSync(rotatedPath, { force: true });
+      writeFileSync(rotatedPath, tail.subarray(0, bytesRead));
+      writeFileSync(filePath, '');
+      size = 0;
+    } catch {
+      if (descriptor != null) {
+        try {
+          closeSync(descriptor);
+        } catch {
+          // Ignore cleanup failure; normal stream error handling remains authoritative.
+        }
+      }
+    }
+  }
+  let writer = null;
+  const openDestination = (flags) => {
+    const stream = createWriteStream(filePath, { flags });
+    stream.on('error', (error) => {
+      if (writer && !writer.destroyed) writer.destroy(error);
+    });
+    return stream;
+  };
+  let destination = openDestination('a');
+
+  writer = new Writable({
+    write(chunk, _encoding, callback) {
+      let bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (bytes.length > normalizedMaxBytes) {
+        bytes = bytes.subarray(bytes.length - normalizedMaxBytes);
+      }
+
+      const writeCurrent = () => {
+        size += bytes.length;
+        destination.write(bytes, callback);
+      };
+      if (size + bytes.length <= normalizedMaxBytes) {
+        writeCurrent();
+        return;
+      }
+
+      destination.end(() => {
+        try {
+          rmSync(rotatedPath, { force: true });
+          renameSync(filePath, rotatedPath);
+        } catch {
+          // Rotation is best-effort. Reopening with `w` below still bounds the active file.
+        }
+        destination = openDestination('w');
+        size = 0;
+        writeCurrent();
+      });
+    },
+    final(callback) {
+      destination.end(callback);
+    },
+  });
+  return writer;
+}
+
 function writeChildStdinBestEffort(child, input) {
   const stdin = child?.stdin;
   if (!stdin) return;
@@ -175,6 +271,7 @@ export function spawnProc(label, cmd, args, env, options = {}) {
     silent = false,
     teeFile,
     teeLabel,
+    teeMaxBytes = DEFAULT_TEE_MAX_BYTES,
     onLine,
     ...spawnOptions
   } = options ?? {};
@@ -199,7 +296,7 @@ export function spawnProc(label, cmd, args, env, options = {}) {
       teePath = join(teeDir, `${sanitizeLogFileToken(label)}.log`);
     }
   }
-  const teeStream = teePath ? createWriteStream(teePath, { flags: 'a' }) : null;
+  const teeStream = teePath ? createBoundedTeeStream(teePath, teeMaxBytes) : null;
   const teeFinish = createWritableFinishController(teeStream);
   const teePrefix = (() => {
     const t = typeof teeLabel === 'string' ? teeLabel.trim() : '';
