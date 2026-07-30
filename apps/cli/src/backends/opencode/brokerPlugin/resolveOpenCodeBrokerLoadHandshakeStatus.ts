@@ -12,6 +12,9 @@ import {
   readOpenCodeBrokerLoadHandshakeObservation,
   type OpenCodeBrokerLoadHandshakeKey,
 } from './openCodeBrokerLoadHandshakeRegistry';
+import {
+  OPEN_CODE_BROKER_PROVIDERS,
+} from './openCodeBrokerPluginEnv';
 
 /**
  * One readiness decision for both broker children.
@@ -33,11 +36,14 @@ export async function resolveOpenCodeBrokerLoadHandshakeStatus(
     return observation !== null;
   }
 
+  const providers = OPEN_CODE_BROKER_PROVIDERS.filter((provider) =>
+    expectation.providers.includes(provider));
+  if (providers.length !== expectation.providers.length) return false;
   const openCodeExpectation: ManagedOpenCodeBrokerActivationExpectation = {
     runtimeKind: 'opencode_managed_server',
     selectionIdentity: expectation.selectionIdentity,
     loadNonce: expectation.loadNonce,
-    providers: expectation.providers,
+    providers,
     pluginVersion: expectation.pluginVersion,
   };
   if (options.managedOpenCodeActivationStateDeps) {

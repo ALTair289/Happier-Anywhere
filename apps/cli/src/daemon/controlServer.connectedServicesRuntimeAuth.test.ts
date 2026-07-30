@@ -3922,6 +3922,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
         launchEnvFingerprint: 'launch-fingerprint',
         ownerToken: 'managed-child-owner',
         startTimeMs: 2_500,
+        processInstanceFingerprint: 'win32-cim:2026-07-30T10:00:00.0000000Z',
         expectedCmdlineHash: createHash('sha256').update(processCommand).digest('hex'),
         activeServerDir: '/tmp/happier/servers/cloud',
         daemonInstanceId: 'daemon-a',
@@ -3939,6 +3940,8 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       isPidAlive: () => true,
       getProcessInfo: async () => ({ name: 'opencode', cmd: processCommand }),
       readProcessStartTimeMs: async () => 2_501,
+      readProcessInstanceFingerprint: async () =>
+        'win32-cim:2026-07-30T10:00:00.0000000Z',
       currentActiveServerDir: '/tmp/happier/servers/cloud',
       isCurrentBrokerStateUsable: async () => brokerStateUsable,
     };
@@ -4035,6 +4038,23 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       });
       expect(afterReplacement.statusCode).toBe(200);
       expect(afterReplacement.json()).toEqual({ ok: true, observed: true });
+
+      const staleDaemonCapabilityRejected = await appB.inject({
+        method: 'POST',
+        url: '/connected-service-auth/broker/loaded',
+        headers: {
+          'x-happier-daemon-token': deriveConnectedServiceBrokerRefreshToken('token'),
+        },
+        payload: {
+          runtimeKind: 'pi_rpc_process',
+          selectionIdentity: 'pi|connected|broker:1|anthropic:p:',
+          loadNonce: 'stale-daemon-child',
+          providers: ['anthropic'],
+          pluginVersion: '1',
+          processPid: 5151,
+        },
+      });
+      expect(staleDaemonCapabilityRejected.statusCode).toBe(401);
 
       // Pi has no independently reattachable managed child. Its surviving PiRpcBackend owns and
       // caches readiness for the exact stdio child; a respawn rotates nonce and handshakes anew.
