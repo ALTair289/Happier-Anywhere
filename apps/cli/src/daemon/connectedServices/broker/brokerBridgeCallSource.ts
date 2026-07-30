@@ -90,11 +90,17 @@ function readCurrentBrokerEndpoint() {
   try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch (error) {
     throw new Error("happier_broker_state_unreadable");
   }
-  const httpPort = parsed && typeof parsed.httpPort === "number" ? parsed.httpPort : null;
+  const httpPort = parsed
+    && typeof parsed.httpPort === "number"
+    && Number.isInteger(parsed.httpPort)
+    && parsed.httpPort > 0
+    && parsed.httpPort <= 65535
+    ? parsed.httpPort
+    : null;
   const scopedToken = parsed && typeof parsed.connectedServiceBrokerRefreshToken === "string"
     ? parsed.connectedServiceBrokerRefreshToken.trim()
     : "";
-  if (!httpPort || !scopedToken) throw new Error("happier_broker_state_incomplete");
+  if (httpPort === null || !scopedToken) throw new Error("happier_broker_state_incomplete");
   return { httpPort: httpPort, scopedToken: scopedToken };
 }
 

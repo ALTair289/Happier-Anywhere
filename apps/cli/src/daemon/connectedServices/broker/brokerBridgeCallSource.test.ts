@@ -296,4 +296,31 @@ describe('brokerBridgeCallSource (shared bridge-call, exercised live)', () => {
     const fetchAccessTokenFromBridge = await loadBridgeCaller(fixture);
     await expect(fetchAccessTokenFromBridge(false)).rejects.toThrow(/broker_state_incomplete/);
   });
+
+  it.each([
+    { label: 'a whitespace-only scoped token', httpPort: 41999, brokerRefreshToken: '   ' },
+    { label: 'port zero', httpPort: 0, brokerRefreshToken: 'scoped' },
+    { label: 'an out-of-range port', httpPort: 65_536, brokerRefreshToken: 'scoped' },
+    { label: 'a fractional port', httpPort: 41_999.5, brokerRefreshToken: 'scoped' },
+  ])('rejects $label in the atomic broker descriptor', async ({ httpPort, brokerRefreshToken }) => {
+    process.env[BROKER_STATE_PATH_ENV] = await writeBrokerStateFile({
+      httpPort,
+      brokerRefreshToken,
+    });
+    const fixture = {
+      providerTag: 'provider-a',
+      bridgePath: '/connected-service-auth/service-a/access-token/refresh',
+      serviceId: 'service-a',
+    };
+    process.env[SELECTIONS_ENV] = JSON.stringify({
+      [fixture.providerTag]: {
+        serviceId: fixture.serviceId,
+        profileId: 'p',
+        accountId: null,
+        planType: null,
+      },
+    });
+    const fetchAccessTokenFromBridge = await loadBridgeCaller(fixture);
+    await expect(fetchAccessTokenFromBridge(false)).rejects.toThrow(/broker_state_incomplete/);
+  });
 });
