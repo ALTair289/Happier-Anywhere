@@ -116,6 +116,7 @@ _.env.pipeline.production.local
 
 # Local probe/debug scratch files
 /apps/cli/tmp-*
+/apps/cli/.tmp.hstack-cli-build-source.*/
 /*.trace/
 /.fallow/
 /.reviews/
