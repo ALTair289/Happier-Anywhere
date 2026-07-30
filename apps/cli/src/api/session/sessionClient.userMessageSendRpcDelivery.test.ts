@@ -1506,15 +1506,6 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
             id: 'm-blocked-replay-local',
             localId: 'blocked-replay-local',
           },
-        })
-        .mockResolvedValueOnce({
-          ...claimedSteer,
-          localId: 'blocked-replay-local',
-          message: {
-            ...claimedSteer.message,
-            id: 'm-blocked-replay-local',
-            localId: 'blocked-replay-local',
-          },
         });
       notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValueOnce({
         status: 'input_blocked',
@@ -1528,10 +1519,13 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
           reason: 'request_auth_source_cutover',
         },
       });
-      await expect((client as any).runMaterializeNextPendingMessageInner()).resolves.toEqual({
-        didMaterialize: false,
-        result: { type: 'no_pending' },
-      });
+      const materializeCallsBeforeNextPump = materializeNextPendingQueueV2MessageMock.mock.calls.length;
+      listPendingQueueV2DeliveryStatusesFromServerMock.mockResolvedValueOnce([
+        { localId: 'exact-steer-local', status: 'delivering' },
+        { localId: 'blocked-replay-local', status: 'delivering' },
+      ]);
+      await expect(client.materializeNextPendingMessageSafely()).resolves.toEqual({ type: 'no_pending' });
+      expect(materializeNextPendingQueueV2MessageMock).toHaveBeenCalledTimes(materializeCallsBeforeNextPump);
       expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledTimes(1);
       expect(received).toHaveLength(0);
       expect((client as any).canonicalPendingDeliveryByLocalId.has('blocked-replay-local')).toBe(true);
