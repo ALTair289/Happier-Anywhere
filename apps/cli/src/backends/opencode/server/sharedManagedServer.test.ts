@@ -63,6 +63,7 @@ describe('managed OpenCode broker activation proof continuity', () => {
       launchEnvFingerprint: 'connected-openai-primary',
       ownerToken: 'owner-token-a',
       startTimeMs: 2_500,
+      processInstanceFingerprint: 'win32-cim:2026-07-30T10:00:00.0000000Z',
       expectedCmdlineHash: hashCommandLine(commandLine),
       activeServerDir: '/tmp/happy/servers/cloud',
       daemonInstanceId: 'old-daemon',
@@ -77,6 +78,7 @@ describe('managed OpenCode broker activation proof continuity', () => {
       isPidAlive: (pid: number) => boolean;
       processCommand: string;
       observedStartTimeMs: number;
+      observedProcessInstanceFingerprint: string | null;
       brokerStateUsable: boolean | (() => boolean);
     }>> = {},
   ) {
@@ -96,6 +98,10 @@ describe('managed OpenCode broker activation proof continuity', () => {
           cmd: overrides.processCommand ?? commandLine,
         }),
         readProcessStartTimeMs: async () => overrides.observedStartTimeMs ?? 2_501,
+        readProcessInstanceFingerprint: async () =>
+          overrides.observedProcessInstanceFingerprint !== undefined
+            ? overrides.observedProcessInstanceFingerprint
+            : 'win32-cim:2026-07-30T10:00:00.0000000Z',
         currentActiveServerDir: '/tmp/happy/servers/cloud',
         isCurrentBrokerStateUsable: async () => typeof overrides.brokerStateUsable === 'function'
           ? overrides.brokerStateUsable()
@@ -180,7 +186,7 @@ describe('managed OpenCode broker activation proof continuity', () => {
     ).resolves.toBe(false);
   });
 
-  it('rejects dead/reused processes, changed start/command, unusable broker state, and duplicate owners', async () => {
+  it('rejects dead/reused processes, changed birth/command, unusable broker state, and duplicate owners', async () => {
     const seed = createProofDeps({ state: createState() });
     const activatedState = await activate(seed);
 
@@ -195,7 +201,7 @@ describe('managed OpenCode broker activation proof continuity', () => {
       expectation,
       createProofDeps(
         { state: activatedState },
-        { observedStartTimeMs: 9_999 },
+        { observedProcessInstanceFingerprint: 'win32-cim:2026-07-30T11:00:00.0000000Z' },
       ).deps,
     )).resolves.toBe(false);
     await expect(rehydrateManagedOpenCodeBrokerActivationProof(
@@ -218,6 +224,24 @@ describe('managed OpenCode broker activation proof continuity', () => {
         a: activatedState,
         b: activatedState,
       }).deps,
+    )).resolves.toBe(false);
+  });
+
+  it('retains start-time identity checks for legacy managed-child states', async () => {
+    const seed = createProofDeps({
+      state: createState({ processInstanceFingerprint: undefined }),
+    });
+    const activatedState = await activate(seed);
+
+    await expect(rehydrateManagedOpenCodeBrokerActivationProof(
+      expectation,
+      createProofDeps(
+        { state: activatedState },
+        {
+          observedStartTimeMs: 9_999,
+          observedProcessInstanceFingerprint: null,
+        },
+      ).deps,
     )).resolves.toBe(false);
   });
 

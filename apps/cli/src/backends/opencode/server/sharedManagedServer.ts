@@ -3,6 +3,10 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import {
+  processInstanceFingerprintMatches,
+  readProcessInstanceFingerprintSync,
+} from '@happier-dev/cli-common/processInstance';
 
 import { configuration } from '@/configuration';
 import { resolveOpenCodeCliLaunchSpec, type ProviderCliLaunchSpec } from '@/backends/opencode/utils/resolveOpenCodeCliCommand';
@@ -39,6 +43,8 @@ export type SharedManagedOpenCodeServerState = Readonly<{
   launchEnvFingerprint?: string;
   ownerToken?: string;
   startTimeMs?: number;
+  /** Cross-platform exact process-birth identity; legacy states may carry only startTimeMs. */
+  processInstanceFingerprint?: string;
   expectedCmdlineHash?: string;
   activeServerDir?: string;
   daemonInstanceId?: string;
@@ -87,6 +93,7 @@ type ResolveDeps = Readonly<{
   currentBrokerLoadNonceRequired?: boolean;
   generateOwnerToken?: () => string;
   readProcessStartTimeMs?: (pid: number) => Promise<number | null> | number | null;
+  readProcessInstanceFingerprint?: (pid: number) => Promise<string | null> | string | null;
   startServer: (params?: {
     onSpawned?: (started: Readonly<{
       baseUrl: string;
@@ -105,6 +112,7 @@ type ReleaseForAuthSwitchDeps = Readonly<{
   isPidAlive: (pid: number) => boolean;
   getProcessInfo: (pid: number) => Promise<ManagedServerProcessInfo | null>;
   readProcessStartTimeMs: (pid: number) => Promise<number | null> | number | null;
+  readProcessInstanceFingerprint?: (pid: number) => Promise<string | null> | string | null;
   killPid: (pid: number, drainMs: number) => Promise<boolean> | boolean;
   currentActiveServerDir: string;
   expectedOwnerToken: string;
@@ -187,7 +195,10 @@ function isTrustedManagedOpenCodeStateV2(state: SharedManagedOpenCodeServerState
     && Boolean(readNonEmptyString(state.expectedCmdlineHash))
     && Boolean(readNonEmptyString(state.activeServerDir))
     && Boolean(readNonEmptyString(state.daemonInstanceId))
-    && Boolean(readPositiveInt(state.startTimeMs));
+    && Boolean(
+      readNonEmptyString(state.processInstanceFingerprint)
+      || readPositiveInt(state.startTimeMs),
+    );
 }
 
 function isCompatibleProcessStartTime(stateStartTimeMs: number, observedStartTimeMs: number): boolean {
@@ -251,6 +262,7 @@ export function decideManagedOpenCodeStartupScanStateAction(input: Readonly<{
   isPidAlive: boolean;
   processInfo: ManagedServerProcessInfo | null;
   observedStartTimeMs: number | null;
+  observedProcessInstanceFingerprint?: string | null;
 }>): ManagedOpenCodeStartupScanStateDecision {
   if (!isTrustedManagedOpenCodeStateV2(input.state)) {
     return { action: 'drop', reason: 'state_untrusted' };
@@ -261,12 +273,21 @@ export function decideManagedOpenCodeStartupScanStateAction(input: Readonly<{
   if (!input.isPidAlive) {
     return { action: 'drop', reason: 'pid_dead' };
   }
+  const stateProcessInstanceFingerprint = readNonEmptyString(input.state.processInstanceFingerprint);
+  const processBirthMatches = stateProcessInstanceFingerprint
+    ? processInstanceFingerprintMatches(
+      stateProcessInstanceFingerprint,
+      input.observedProcessInstanceFingerprint,
+    )
+    : Boolean(
+      Number.isFinite(input.observedStartTimeMs)
+      && input.observedStartTimeMs !== null
+      && isCompatibleProcessStartTime(input.state.startTimeMs as number, input.observedStartTimeMs),
+    );
   const identityMatches = Boolean(
     input.processInfo?.cmd
     && input.state.expectedCmdlineHash === hashCommandLine(input.processInfo.cmd)
-    && Number.isFinite(input.observedStartTimeMs)
-    && input.observedStartTimeMs !== null
-    && isCompatibleProcessStartTime(input.state.startTimeMs as number, input.observedStartTimeMs),
+    && processBirthMatches,
   );
   if (!identityMatches) {
     return { action: 'drop', reason: 'process_identity_mismatch' };
@@ -290,6 +311,7 @@ export type ManagedOpenCodeBrokerActivationStateDeps = Readonly<{
   isPidAlive: (pid: number) => boolean;
   getProcessInfo: (pid: number) => Promise<ManagedServerProcessInfo | null>;
   readProcessStartTimeMs: (pid: number) => Promise<number | null>;
+  readProcessInstanceFingerprint: (pid: number) => Promise<string | null>;
   currentActiveServerDir: string;
   isCurrentBrokerStateUsable: () => Promise<boolean>;
 }>;
@@ -364,19 +386,22 @@ function resolveManagedOpenCodeChildGenerationFingerprint(
   const activeServerDir = readNonEmptyString(state.activeServerDir);
   const brokerLoadNonce = readNonEmptyString(state.brokerLoadNonce);
   const startTimeMs = readPositiveInt(state.startTimeMs);
+  const processInstanceFingerprint = readNonEmptyString(state.processInstanceFingerprint);
   if (
     !ownerToken
     || !expectedCmdlineHash
     || !launchEnvFingerprint
     || !activeServerDir
     || !brokerLoadNonce
-    || startTimeMs === null
+    || (!processInstanceFingerprint && startTimeMs === null)
   ) {
     return null;
   }
   return createHash('sha256').update(JSON.stringify({
     pid: state.pid,
-    startTimeMs,
+    ...(processInstanceFingerprint
+      ? { processInstanceFingerprint }
+      : { startTimeMs }),
     startedAtMs: state.startedAtMs,
     expectedCmdlineHash,
     ownerToken,
@@ -425,12 +450,16 @@ async function isExactManagedOpenCodeBrokerActivationState(
   const observedStartTimeMs = isPidAlive
     ? await deps.readProcessStartTimeMs(state.pid).catch(() => null)
     : null;
+  const observedProcessInstanceFingerprint = isPidAlive
+    ? await deps.readProcessInstanceFingerprint(state.pid).catch(() => null)
+    : null;
   return decideManagedOpenCodeStartupScanStateAction({
     state,
     currentActiveServerDir: deps.currentActiveServerDir,
     isPidAlive,
     processInfo,
     observedStartTimeMs,
+    observedProcessInstanceFingerprint,
   }).action === 'keep';
 }
 
@@ -563,7 +592,10 @@ export function decideManagedOpenCodeStartupScanOrphanReapAction(input: Readonly
 
 async function hasTrustedManagedOpenCodeStateIdentityForTermination(
   state: SharedManagedOpenCodeServerState,
-  deps: Pick<ResolveDeps, 'currentActiveServerDir' | 'readProcessStartTimeMs'>,
+  deps: Pick<
+    ResolveDeps,
+    'currentActiveServerDir' | 'readProcessStartTimeMs' | 'readProcessInstanceFingerprint'
+  >,
   processInfo: ManagedServerProcessInfo | null,
 ): Promise<boolean> {
   const currentActiveServerDir = readNonEmptyString(deps.currentActiveServerDir ?? null);
@@ -574,12 +606,18 @@ async function hasTrustedManagedOpenCodeStateIdentityForTermination(
       ? deps.readProcessStartTimeMs(state.pid)
       : readProcessStartTimeMsBestEffort(state.pid),
   ).catch(() => null);
+  const observedProcessInstanceFingerprint = readNonEmptyString(await Promise.resolve(
+    deps.readProcessInstanceFingerprint
+      ? deps.readProcessInstanceFingerprint(state.pid)
+      : readProcessInstanceFingerprintSync(state.pid),
+  ).catch(() => null));
   const decision = decideManagedOpenCodeStartupScanStateAction({
     state,
     currentActiveServerDir,
     isPidAlive: true,
     processInfo,
     observedStartTimeMs,
+    observedProcessInstanceFingerprint,
   });
   return decision.action === 'keep';
 }
@@ -739,6 +777,9 @@ function normalizeSharedManagedServerState(
     ...(typeof state.expectedCmdlineHash === 'string' && state.expectedCmdlineHash.trim()
       ? { expectedCmdlineHash: state.expectedCmdlineHash.trim() }
       : {}),
+    ...(typeof state.processInstanceFingerprint === 'string' && state.processInstanceFingerprint.trim()
+      ? { processInstanceFingerprint: state.processInstanceFingerprint.trim() }
+      : {}),
     ...(typeof state.activeServerDir === 'string' && state.activeServerDir.trim()
       ? { activeServerDir: state.activeServerDir.trim() }
       : {}),
@@ -837,12 +878,14 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
     let provisionalBaseUrl = '';
     let provisionalPid = -1;
     let provisionalStartTimeMs = nowMs;
+    let provisionalProcessInstanceFingerprint: string | undefined;
     let provisionalExpectedCmdlineHash = '';
     let provisionalLogPath: string | undefined;
     let provisionalBrokerLoadNonce: string | undefined;
 
     const resolveOwnershipProof = async (pid: number): Promise<Readonly<{
       startTimeMs: number;
+      processInstanceFingerprint?: string;
       expectedCmdlineHash: string;
     }>> => {
       const processInfo = deps.getProcessInfo
@@ -854,11 +897,17 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
           ? deps.readProcessStartTimeMs(pid)
           : readProcessStartTimeMsBestEffort(pid),
       ).catch(() => null);
+      const processInstanceFingerprint = readNonEmptyString(await Promise.resolve(
+        deps.readProcessInstanceFingerprint
+          ? deps.readProcessInstanceFingerprint(pid)
+          : readProcessInstanceFingerprintSync(pid),
+      ).catch(() => null));
       return {
         startTimeMs: Number.isFinite(observedStartTimeMs) && (observedStartTimeMs ?? 0) > 0
           ? Math.floor(observedStartTimeMs as number)
           : nowMs,
         expectedCmdlineHash,
+        ...(processInstanceFingerprint ? { processInstanceFingerprint } : {}),
       };
     };
 
@@ -869,6 +918,7 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
           provisionalBaseUrl = spawned.baseUrl;
           provisionalPid = spawned.pid;
           provisionalStartTimeMs = ownershipProof.startTimeMs;
+          provisionalProcessInstanceFingerprint = ownershipProof.processInstanceFingerprint;
           provisionalExpectedCmdlineHash = ownershipProof.expectedCmdlineHash;
           provisionalLogPath = readNonEmptyString(spawned.logPath) ?? undefined;
           provisionalBrokerLoadNonce = readNonEmptyString(spawned.brokerLoadNonce) ?? undefined;
@@ -885,6 +935,9 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
                   v: 2 as const,
                   ownerToken,
                   startTimeMs: ownershipProof.startTimeMs,
+                  ...(ownershipProof.processInstanceFingerprint
+                    ? { processInstanceFingerprint: ownershipProof.processInstanceFingerprint }
+                    : {}),
                   expectedCmdlineHash: ownershipProof.expectedCmdlineHash,
                   activeServerDir,
                   daemonInstanceId,
@@ -896,6 +949,9 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
       const ownershipProof = provisionalPid === started.pid
         ? {
             startTimeMs: provisionalStartTimeMs,
+            ...(provisionalProcessInstanceFingerprint
+              ? { processInstanceFingerprint: provisionalProcessInstanceFingerprint }
+              : {}),
             expectedCmdlineHash: provisionalExpectedCmdlineHash,
           }
         : await resolveOwnershipProof(started.pid);
@@ -914,6 +970,9 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
               v: 2 as const,
               ownerToken,
               startTimeMs: ownershipProof.startTimeMs,
+              ...(ownershipProof.processInstanceFingerprint
+                ? { processInstanceFingerprint: ownershipProof.processInstanceFingerprint }
+                : {}),
               expectedCmdlineHash: ownershipProof.expectedCmdlineHash,
               activeServerDir,
               daemonInstanceId,
@@ -941,6 +1000,9 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
                 v: 2 as const,
                 ownerToken,
                 startTimeMs: provisionalStartTimeMs,
+                ...(provisionalProcessInstanceFingerprint
+                  ? { processInstanceFingerprint: provisionalProcessInstanceFingerprint }
+                  : {}),
                 expectedCmdlineHash: provisionalExpectedCmdlineHash,
                 activeServerDir,
                 daemonInstanceId,
@@ -1002,6 +1064,7 @@ function readManagedOpenCodeServerStateFromUnknown(parsed: unknown): SharedManag
     : '';
   const ownerToken = readNonEmptyString(source.ownerToken);
   const startTimeMs = readPositiveInt(source.startTimeMs);
+  const processInstanceFingerprint = readNonEmptyString(source.processInstanceFingerprint);
   const expectedCmdlineHash = readNonEmptyString(source.expectedCmdlineHash);
   const activeServerDir = readNonEmptyString(source.activeServerDir);
   const daemonInstanceId = readNonEmptyString(source.daemonInstanceId);
@@ -1022,6 +1085,7 @@ function readManagedOpenCodeServerStateFromUnknown(parsed: unknown): SharedManag
     ...(launchEnvFingerprint ? { launchEnvFingerprint } : {}),
     ...(ownerToken ? { ownerToken } : {}),
     ...(startTimeMs ? { startTimeMs } : {}),
+    ...(processInstanceFingerprint ? { processInstanceFingerprint } : {}),
     ...(expectedCmdlineHash ? { expectedCmdlineHash } : {}),
     ...(activeServerDir ? { activeServerDir } : {}),
     ...(daemonInstanceId ? { daemonInstanceId } : {}),
@@ -1062,6 +1126,7 @@ function createManagedOpenCodeBrokerActivationStateDeps(): ManagedOpenCodeBroker
     isPidAlive: isOpenCodeServerPidAlive,
     getProcessInfo: async (pid) => await getProcessInfoBestEffort(pid),
     readProcessStartTimeMs: async (pid) => await readProcessStartTimeMsBestEffort(pid),
+    readProcessInstanceFingerprint: async (pid) => readProcessInstanceFingerprintSync(pid),
     currentActiveServerDir: configuration.activeServerDir,
     isCurrentBrokerStateUsable: async () =>
       await isConnectedServiceBrokerStateFileUsable(configuration.connectedServiceBrokerStateFile),
@@ -1128,14 +1193,19 @@ export async function releaseForAuthSwitchFromState(
 
     const info = await deps.getProcessInfo(state.pid).catch(() => null);
     const observedStartTimeMs = await Promise.resolve(deps.readProcessStartTimeMs(state.pid)).catch(() => null);
-    const identityMatches = Boolean(
-      info?.cmd
-      && state.expectedCmdlineHash === hashCommandLine(info.cmd)
-      && Number.isFinite(observedStartTimeMs)
-      && observedStartTimeMs !== null
-      && isCompatibleProcessStartTime(state.startTimeMs as number, observedStartTimeMs),
-    );
-    if (!identityMatches) {
+    const observedProcessInstanceFingerprint = readNonEmptyString(await Promise.resolve(
+      deps.readProcessInstanceFingerprint
+        ? deps.readProcessInstanceFingerprint(state.pid)
+        : readProcessInstanceFingerprintSync(state.pid),
+    ).catch(() => null));
+    if (decideManagedOpenCodeStartupScanStateAction({
+      state,
+      currentActiveServerDir: deps.currentActiveServerDir,
+      isPidAlive: true,
+      processInfo: info,
+      observedStartTimeMs,
+      observedProcessInstanceFingerprint,
+    }).action !== 'keep') {
       await deps.removeState().catch(() => {});
       return { released: false, reason: 'process_identity_mismatch' };
     }
@@ -1196,6 +1266,7 @@ export async function releaseForAuthSwitch(
     isPidAlive: isOpenCodeServerPidAlive,
     getProcessInfo: async (pid) => await getProcessInfoBestEffort(pid),
     readProcessStartTimeMs: async (pid) => await readProcessStartTimeMsBestEffort(pid),
+    readProcessInstanceFingerprint: async (pid) => readProcessInstanceFingerprintSync(pid),
     killPid: async (pid, drainTimeoutMs) => {
       const killGraceMs = Math.max(250, Math.floor(drainTimeoutMs));
       return await terminateManagedOpenCodeServerPidBestEffortWithOptions(pid, {
@@ -1257,12 +1328,16 @@ export async function ensureSharedManagedOpenCodeServerBaseUrl(params: Readonly<
         const observedStartTimeMs = pidAlive
           ? await readProcessStartTimeMsBestEffort(state.pid).catch(() => null)
           : null;
+        const observedProcessInstanceFingerprint = pidAlive
+          ? readProcessInstanceFingerprintSync(state.pid)
+          : null;
         const decision = decideManagedOpenCodeStartupScanStateAction({
           state,
           currentActiveServerDir: configuration.activeServerDir,
           isPidAlive: pidAlive,
           processInfo,
           observedStartTimeMs,
+          observedProcessInstanceFingerprint,
         });
         const reapDecision = decideManagedOpenCodeStartupScanOrphanReapAction({
           stateDecision: decision,
@@ -1312,6 +1387,7 @@ export async function ensureSharedManagedOpenCodeServerBaseUrl(params: Readonly<
     currentBrokerLoadNonceRequired: params.requireBrokerLoadNonce === true,
     generateOwnerToken: () => randomUUID(),
     readProcessStartTimeMs: async (pid) => await readProcessStartTimeMsBestEffort(pid),
+    readProcessInstanceFingerprint: async (pid) => readProcessInstanceFingerprintSync(pid),
     startServer: async (startParams) => {
       const started = await startManagedOpenCodeServer({
         ...(xdgRootDir ? { xdgRootDir } : {}),
