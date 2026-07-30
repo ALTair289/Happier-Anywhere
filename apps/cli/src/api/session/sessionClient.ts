@@ -617,6 +617,9 @@ export class ApiSessionClient extends EventEmitter {
     // A successfully blocked server row is no longer an executable claim predecessor. Its local
     // identity remains tracked only so exact late provider evidence can still settle that row.
     private readonly serverBlockedCanonicalPendingDeliveryLocalIds = new Set<string>();
+    // A source-cutover deferral has proven no Provider effect. Preserve the server's delivering
+    // claim through predecessor shutdown so the successor can rejoin its ordinary first delivery.
+    private readonly sourceCutoverDeferredPendingLocalIds = new Set<string>();
     private readonly agentQueueEchoSuppressedLocalIds = new Set<string>();
     private readonly agentQueueDeliveredLocalIds = new Set<string>();
     private readonly explicitUserRecoveryDecisionsByLocalId = new Map<string, Promise<ExplicitUserRecoveryDecision>>();
@@ -1391,6 +1394,7 @@ export class ApiSessionClient extends EventEmitter {
         let didClear = false;
         if (this.canonicalPendingDeliveryByLocalId.delete(localId)) didClear = true;
         if (this.serverBlockedCanonicalPendingDeliveryLocalIds.delete(localId)) didClear = true;
+        if (this.sourceCutoverDeferredPendingLocalIds.delete(localId)) didClear = true;
         if (this.providerInputTerminalOutcomeByLocalId.delete(localId)) didClear = true;
         if (this.providerInputUncertainLocalIds.delete(localId)) didClear = true;
         const hadMaterializedLocalId = this.hasMaterializedLocalId(localId);
@@ -5312,6 +5316,7 @@ export class ApiSessionClient extends EventEmitter {
         this.pendingQueueMaterializedLocalIds.clear();
         this.canonicalPendingDeliveryByLocalId.clear();
         this.serverBlockedCanonicalPendingDeliveryLocalIds.clear();
+        this.sourceCutoverDeferredPendingLocalIds.clear();
         this.committedUserMessageSeqTracker.clear();
         this.agentQueueEchoSuppressedLocalIds.clear();
         this.agentQueueDeliveredLocalIds.clear();
@@ -5362,6 +5367,13 @@ export class ApiSessionClient extends EventEmitter {
     private async blockUnresolvedCanonicalPendingDeliveriesBeforeClose(): Promise<void> {
         const localIds = [...this.canonicalPendingDeliveryByLocalId.keys()];
         for (const localId of localIds) {
+            if (this.sourceCutoverDeferredPendingLocalIds.has(localId)) {
+                logger.debug('[pendingQueue] preserving source-cutover delivery for successor custody during close', {
+                    sessionId: this.sessionId,
+                    localId,
+                });
+                continue;
+            }
             if (this.providerInputUncertainLocalIds.has(localId)) {
                 await this.blockPendingQueueDeliveryLocalId(localId, 'delivery_outcome_uncertain', {
                     canonicalOnly: true,
@@ -5409,6 +5421,13 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         for (const localId of localIds) {
+            if (this.sourceCutoverDeferredPendingLocalIds.has(localId)) {
+                logger.debug('[pendingQueue] preserving durable source-cutover delivery for successor custody during close', {
+                    sessionId: this.sessionId,
+                    localId,
+                });
+                continue;
+            }
             if (this.providerInputUncertainLocalIds.has(localId)) {
                 await this.blockPendingQueueDeliveryLocalId(localId, 'delivery_outcome_uncertain', {
                     canonicalOnly: false,
@@ -5870,6 +5889,9 @@ export class ApiSessionClient extends EventEmitter {
                     sessionId: this.sessionId,
                     localId: materializedLocalId,
                 });
+                if (materializedLocalId) {
+                    this.sourceCutoverDeferredPendingLocalIds.add(materializedLocalId);
+                }
                 return {
                     didMaterialize: false,
                     result: {
@@ -5909,6 +5931,9 @@ export class ApiSessionClient extends EventEmitter {
                     localId: materializedLocalId,
                     lifecycleStatus: lifecycleResult?.status ?? 'unavailable',
                 });
+                if (materializedLocalId) {
+                    this.sourceCutoverDeferredPendingLocalIds.add(materializedLocalId);
+                }
                 return {
                     didMaterialize: false,
                     result: {

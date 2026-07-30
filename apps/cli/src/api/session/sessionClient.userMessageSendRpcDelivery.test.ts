@@ -106,6 +106,7 @@ const {
   enqueuePendingQueueV2MessageViaHttpMock,
   materializeNextPendingQueueV2MessageMock,
   listPendingQueueV2DeliveryStatusesFromServerMock,
+  listPendingQueueV2ProviderDeliveryLocalIdsFromServerMock,
   notifyDaemonConnectedServiceTurnLifecycleMock,
   blockPendingQueueV2DeliveryMock,
   resolveAcceptedPendingQueueV2DeliveryMock,
@@ -113,6 +114,7 @@ const {
   enqueuePendingQueueV2MessageViaHttpMock: vi.fn(),
   materializeNextPendingQueueV2MessageMock: vi.fn(),
   listPendingQueueV2DeliveryStatusesFromServerMock: vi.fn(),
+  listPendingQueueV2ProviderDeliveryLocalIdsFromServerMock: vi.fn(),
   notifyDaemonConnectedServiceTurnLifecycleMock: vi.fn(),
   blockPendingQueueV2DeliveryMock: vi.fn(),
   resolveAcceptedPendingQueueV2DeliveryMock: vi.fn(),
@@ -134,6 +136,8 @@ vi.mock('./pendingQueueV2Transport', async (importOriginal) => {
     enqueuePendingQueueV2MessageViaHttp: (...args: unknown[]) => enqueuePendingQueueV2MessageViaHttpMock(...args),
     materializeNextPendingQueueV2Message: (...args: unknown[]) => materializeNextPendingQueueV2MessageMock(...args),
     listPendingQueueV2DeliveryStatusesFromServer: (...args: unknown[]) => listPendingQueueV2DeliveryStatusesFromServerMock(...args),
+    listPendingQueueV2ProviderDeliveryLocalIdsFromServer: (...args: unknown[]) =>
+      listPendingQueueV2ProviderDeliveryLocalIdsFromServerMock(...args),
     resolveAcceptedPendingQueueV2Delivery: (...args: unknown[]) => resolveAcceptedPendingQueueV2DeliveryMock(...args),
   };
 });
@@ -184,6 +188,8 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     materializeNextPendingQueueV2MessageMock.mockReset();
     listPendingQueueV2DeliveryStatusesFromServerMock.mockReset();
     listPendingQueueV2DeliveryStatusesFromServerMock.mockResolvedValue([]);
+    listPendingQueueV2ProviderDeliveryLocalIdsFromServerMock.mockReset();
+    listPendingQueueV2ProviderDeliveryLocalIdsFromServerMock.mockResolvedValue([]);
     blockPendingQueueV2DeliveryMock.mockReset();
     blockPendingQueueV2DeliveryMock.mockResolvedValue({
       pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 1, pendingVersion: 3 },
@@ -1387,6 +1393,13 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       });
       expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledTimes(2);
       expect(received).toHaveLength(0);
+      expect((client as any).canonicalPendingDeliveryByLocalId.has('blocked-local')).toBe(true);
+      expect((client as any).sourceCutoverDeferredPendingLocalIds.has('blocked-local')).toBe(true);
+
+      listPendingQueueV2ProviderDeliveryLocalIdsFromServerMock.mockResolvedValueOnce(['blocked-local']);
+      await (client as any).blockUnresolvedCanonicalPendingDeliveriesBeforeClose();
+      await (client as any).blockDurableProviderDeliveriesBeforeClose();
+      expect(blockPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
     } finally {
       process.argv = originalArgv;
     }
@@ -1584,6 +1597,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       expect(blockPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
       expect(received).toHaveLength(0);
       expect((client as any).canonicalPendingDeliveryByLocalId.has('missing-support-local')).toBe(true);
+      expect((client as any).sourceCutoverDeferredPendingLocalIds.has('missing-support-local')).toBe(true);
     } finally {
       process.argv = originalArgv;
     }
