@@ -139,9 +139,9 @@ describe('daemon control client (HTTP error responses)', () => {
     }
   });
 
-  it('posts connected-service turn lifecycle events to the daemon control route', async () => {
+  it('posts exact prompt authorization fields while preserving old-body terminal notifications', async () => {
     let observedUrl: string | undefined;
-    let observedBody: Record<string, unknown> | null = null;
+    const observedBodies: Array<Record<string, unknown>> = [];
 
     const server = http.createServer((req, res) => {
       observedUrl = req.url;
@@ -151,10 +151,19 @@ describe('daemon control client (HTTP error responses)', () => {
         rawBody += chunk;
       });
       req.on('end', () => {
-        observedBody = JSON.parse(rawBody) as Record<string, unknown>;
+        observedBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
         res.statusCode = 200;
         res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ ok: true, result: { ok: true } }));
+        res.end(JSON.stringify({
+          ok: true,
+          result: {
+            status: 'continue',
+            turnCustody: {
+              status: 'ignored_missing_exact_turn',
+              activeTurnId: null,
+            },
+          },
+        }));
       });
     });
 
@@ -175,16 +184,34 @@ describe('daemon control client (HTTP error responses)', () => {
       await expect(notifyDaemonConnectedServiceTurnLifecycle({
         sessionId: 'sess_1',
         event: 'prompt_or_steer',
-        turnId: 'session-turn:exact-1',
+        requestedAction: { v: 1, kind: 'steer_if_active' },
+        activeTurnId: 'session-turn:exact-1',
       })).resolves.toEqual({
-        ok: true,
-        result: { ok: true },
+        status: 'continue',
+        turnCustody: {
+          status: 'ignored_missing_exact_turn',
+          activeTurnId: null,
+        },
       });
 
       expect(observedUrl).toBe('/connected-service-turn-lifecycle');
-      expect(observedBody).toEqual({
+      expect(observedBodies[0]).toEqual({
         sessionId: 'sess_1',
         event: 'prompt_or_steer',
+        requestedAction: { v: 1, kind: 'steer_if_active' },
+        activeTurnId: 'session-turn:exact-1',
+      });
+
+      await expect(notifyDaemonConnectedServiceTurnLifecycle({
+        sessionId: 'sess_1',
+        event: 'assistant_message_end',
+        terminalStatus: 'completed',
+        turnId: 'session-turn:exact-1',
+      })).resolves.toMatchObject({ status: 'continue' });
+      expect(observedBodies[1]).toEqual({
+        sessionId: 'sess_1',
+        event: 'assistant_message_end',
+        terminalStatus: 'completed',
         turnId: 'session-turn:exact-1',
       });
     } finally {

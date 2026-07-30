@@ -1,6 +1,7 @@
-import { readFile, access } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 
 import { configuration } from '@/configuration';
+import { isConnectedServiceBrokerStateFileUsable } from '@/daemon/connectedServices/broker/connectedServiceBrokerStateFile';
 
 import { OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV } from '@/backends/opencode/server/openCodeManagedServerEnv';
 
@@ -13,6 +14,7 @@ import {
   type OpenCodeBrokerProvider,
 } from './openCodeBrokerPluginEnv';
 import { resolveOpenCodeBrokerPluginPath } from './openCodeBrokerPluginAssets';
+import { OPEN_CODE_BROKER_PLUGIN_VERSION } from './openCodeBrokerPluginSource';
 
 export type OpenCodeBrokerReadiness =
   | Readonly<{ ready: true }>
@@ -22,12 +24,24 @@ export type OpenCodeBrokerReadiness =
 const DEFAULT_HANDSHAKE_WAIT_MS = 4_000;
 const HANDSHAKE_POLL_INTERVAL_MS = 200;
 
-async function defaultVerifyLoadHandshake(selectionIdentity: string, loadNonce: string, deadlineMs: number): Promise<boolean> {
+async function defaultVerifyLoadHandshake(
+  selectionIdentity: string,
+  loadNonce: string,
+  providers: readonly OpenCodeBrokerProvider[],
+  pluginVersion: string,
+  deadlineMs: number,
+): Promise<boolean> {
   // Lazy import to avoid pulling daemon control-client wiring into modules that only need readiness types.
   const { queryDaemonOpenCodeBrokerLoadHandshake } = await import('@/daemon/controlClient');
   // Poll until the daemon has seen the handshake or the bounded deadline elapses (best-effort, cheap).
   for (;;) {
-    if (await queryDaemonOpenCodeBrokerLoadHandshake(selectionIdentity, loadNonce).catch(() => false)) return true;
+    if (await queryDaemonOpenCodeBrokerLoadHandshake(
+      selectionIdentity,
+      loadNonce,
+      providers,
+      pluginVersion,
+      'opencode_managed_server',
+    ).catch(() => false)) return true;
     if (Date.now() >= deadlineMs) return false;
     await new Promise((resolve) => setTimeout(resolve, HANDSHAKE_POLL_INTERVAL_MS));
   }
@@ -35,20 +49,6 @@ async function defaultVerifyLoadHandshake(selectionIdentity: string, loadNonce: 
 
 async function fileExists(path: string): Promise<boolean> {
   return access(path).then(() => true).catch(() => false);
-}
-
-async function brokerStateUsable(path: string | undefined): Promise<boolean> {
-  if (typeof path !== 'string' || path.trim().length === 0) return false;
-  const content = await readFile(path, 'utf8').catch(() => null);
-  if (content === null) return false;
-  try {
-    const parsed = JSON.parse(content) as Record<string, unknown>;
-    return typeof parsed.httpPort === 'number'
-      && typeof parsed.connectedServiceBrokerRefreshToken === 'string'
-      && parsed.connectedServiceBrokerRefreshToken.length > 0;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -74,7 +74,13 @@ export async function verifyOpenCodeBrokerReadyForConnectedSession(
      * Injectable load-handshake verifier (test seam). Defaults to a bounded poll of the daemon
      * control client. Receives the selection identity + an absolute deadline (epoch ms).
      */
-    verifyLoadHandshake?: (selectionIdentity: string, loadNonce: string, deadlineMs: number) => Promise<boolean>;
+    verifyLoadHandshake?: (
+      selectionIdentity: string,
+      loadNonce: string,
+      providers: readonly OpenCodeBrokerProvider[],
+      pluginVersion: string,
+      deadlineMs: number,
+    ) => Promise<boolean>;
   }>,
 ): Promise<OpenCodeBrokerReadiness> {
   const selectionIdentity = env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV];
@@ -86,7 +92,7 @@ export async function verifyOpenCodeBrokerReadyForConnectedSession(
   if (brokeredProviders.length === 0) {
     return { ready: true };
   }
-  if (!(await brokerStateUsable(env[OPEN_CODE_BROKER_STATE_PATH_ENV]))) {
+  if (!(await isConnectedServiceBrokerStateFileUsable(env[OPEN_CODE_BROKER_STATE_PATH_ENV]))) {
     return { ready: false, reason: 'broker_daemon_bridge_unreachable' };
   }
   const loadNonce = env[OPEN_CODE_BROKER_LOAD_NONCE_ENV];
@@ -109,7 +115,13 @@ export async function verifyOpenCodeBrokerReadyForConnectedSession(
     ? options.handshakeWaitMs
     : DEFAULT_HANDSHAKE_WAIT_MS;
   const verify = options?.verifyLoadHandshake ?? defaultVerifyLoadHandshake;
-  const observed = await verify(selectionIdentity, loadNonce.trim(), Date.now() + waitMs).catch(() => false);
+  const observed = await verify(
+    selectionIdentity,
+    loadNonce.trim(),
+    brokeredProviders,
+    OPEN_CODE_BROKER_PLUGIN_VERSION,
+    Date.now() + waitMs,
+  ).catch(() => false);
   if (!observed) {
     return { ready: false, reason: 'broker_plugin_not_loaded' };
   }

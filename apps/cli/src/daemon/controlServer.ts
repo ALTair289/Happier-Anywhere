@@ -27,9 +27,15 @@ import {
 import {
   OPEN_CODE_BROKER_LOADED_HANDSHAKE_PATH,
   OpenCodeBrokerLoadHandshakeRequestSchema,
+  OpenCodeBrokerLoadHandshakeStatusRequestSchema,
+  isOpenCodeBrokerLoadHandshakeConflicted,
+  readOpenCodeBrokerLoadHandshakeObservation,
   recordOpenCodeBrokerLoadHandshake,
-  wasOpenCodeBrokerLoadHandshakeObserved,
 } from '@/backends/opencode/brokerPlugin';
+import {
+  persistCurrentManagedOpenCodeBrokerActivationProof as persistCurrentManagedOpenCodeBrokerActivationProofDefault,
+  rehydrateCurrentManagedOpenCodeBrokerActivationProof as rehydrateCurrentManagedOpenCodeBrokerActivationProofDefault,
+} from '@/backends/opencode/server/sharedManagedServer';
 import {
   isValidConnectedServiceBrokerRefreshToken,
   isValidConnectedServiceRunMaterializeToken,
@@ -99,6 +105,12 @@ import {
   type RuntimeAuthRecoveryProofKind,
 } from './connectedServices/runtimeAuth/resolveRuntimeAuthRecoveryOutcome';
 import { buildConnectedServiceRuntimeAuthSwitchAttemptLogContext } from './connectedServices/runtimeAuth/buildConnectedServiceRuntimeAuthSwitchAttemptLogContext';
+import {
+  ConnectedServiceTurnLifecycleRequestBodySchema,
+  ConnectedServiceTurnLifecycleResultSchema,
+  type ConnectedServiceTurnLifecycleRequestBody,
+  type ConnectedServiceTurnLifecycleResult,
+} from './connectedServices/connectedServiceTurnLifecycleContract';
 import {
   applyAuthorizedRuntimeAuthFailureSourceBinding,
   type RuntimeAuthFailureSourceAuthorization,
@@ -393,6 +405,10 @@ export function createDaemonControlApp({
   handleClaudeSubscriptionAuthTokensRefresh,
   handleExecutionRunConnectedServiceMaterialize,
   handleExecutionRunConnectedServiceRelease,
+  persistCurrentManagedOpenCodeBrokerActivationProof =
+    persistCurrentManagedOpenCodeBrokerActivationProofDefault,
+  rehydrateCurrentManagedOpenCodeBrokerActivationProof =
+    rehydrateCurrentManagedOpenCodeBrokerActivationProofDefault,
   runtimeAuthRecoveryScheduler,
   isShuttingDown,
   requestSelfRestart,
@@ -424,6 +440,8 @@ export function createDaemonControlApp({
     pid: number;
     materializationKey: string;
   }>) => Promise<Readonly<{ released: boolean }>>;
+  persistCurrentManagedOpenCodeBrokerActivationProof?: typeof persistCurrentManagedOpenCodeBrokerActivationProofDefault;
+  rehydrateCurrentManagedOpenCodeBrokerActivationProof?: typeof rehydrateCurrentManagedOpenCodeBrokerActivationProofDefault;
   handleConnectedServiceRuntimeAuthFailure?: (input: Readonly<{
     sessionId: string;
     switchesThisTurn: number;
@@ -445,12 +463,9 @@ export function createDaemonControlApp({
   // stopping), runtime-auth recovery handlers MUST NOT run switch/restart/continuation:
   // post-shutdown work can never reach provider-outcome proof and races a dying endpoint.
   isShuttingDown?: () => boolean;
-  handleConnectedServiceTurnLifecycle?: (input: Readonly<{
-    sessionId: string;
-    event: 'prompt_or_steer' | 'task_started' | 'assistant_message_end' | 'turn_cancelled';
-    terminalStatus?: 'completed' | 'failed';
-    turnId?: string;
-  }>) => Promise<unknown>;
+  handleConnectedServiceTurnLifecycle?: (
+    input: ConnectedServiceTurnLifecycleRequestBody,
+  ) => Promise<ConnectedServiceTurnLifecycleResult>;
   // QAE-1: user "Stop waiting" propagation — cancels the daemon-side durable
   // recovery wait state (runtime-auth recovery + inactive usage-limit stores).
   handleConnectedServiceUsageLimitWaitResumeCancel?: (input: Readonly<{
@@ -1273,18 +1288,11 @@ export function createDaemonControlApp({
 
   typed.post('/connected-service-turn-lifecycle', {
     schema: {
-      body: z.object({
-        sessionId: z.string().min(1),
-        event: z.enum(['prompt_or_steer', 'task_started', 'assistant_message_end', 'turn_cancelled']),
-        // REV-1: failTurn emits assistant_message_end too; the status lets the daemon
-        // distinguish failed turns from genuinely completed ones.
-        terminalStatus: z.enum(['completed', 'failed']).optional(),
-        turnId: z.string().trim().min(1).max(512).optional(),
-      }),
+      body: ConnectedServiceTurnLifecycleRequestBodySchema,
       response: {
         200: z.object({
           ok: z.literal(true),
-          result: z.unknown(),
+          result: ConnectedServiceTurnLifecycleResultSchema,
         }),
         401: authSchema401,
         501: z.object({
@@ -1307,6 +1315,8 @@ export function createDaemonControlApp({
       event: request.body.event,
       ...(request.body.terminalStatus ? { terminalStatus: request.body.terminalStatus } : {}),
       ...(request.body.turnId ? { turnId: request.body.turnId } : {}),
+      ...(request.body.requestedAction ? { requestedAction: request.body.requestedAction } : {}),
+      ...(request.body.activeTurnId !== undefined ? { activeTurnId: request.body.activeTurnId } : {}),
     });
     return { ok: true as const, result };
   });
@@ -1722,10 +1732,12 @@ export function createDaemonControlApp({
     preHandler: requireBrokerRefreshAuth,
   }, async (request) => {
     recordOpenCodeBrokerLoadHandshake({
+      runtimeKind: request.body.runtimeKind,
       selectionIdentity: request.body.selectionIdentity,
       loadNonce: request.body.loadNonce,
       providers: request.body.providers,
-      ...(request.body.pluginVersion ? { pluginVersion: request.body.pluginVersion } : {}),
+      pluginVersion: request.body.pluginVersion,
+      processPid: request.body.processPid,
     });
     return { ok: true as const, result: { acknowledged: true as const } };
   });
@@ -1734,7 +1746,7 @@ export function createDaemonControlApp({
   // trusted query) over the broad control token — distinct from the broker's scoped registration above.
   typed.post('/connected-service-auth/opencode-broker/loaded-status', {
     schema: {
-      body: z.object({ selectionIdentity: z.string().min(1), loadNonce: z.string().min(1) }),
+      body: OpenCodeBrokerLoadHandshakeStatusRequestSchema,
       response: {
         200: z.object({ ok: z.literal(true), observed: z.boolean() }),
         401: authSchema401,
@@ -1742,10 +1754,28 @@ export function createDaemonControlApp({
     },
     preHandler: requireAuth,
   }, async (request) => {
-    return { ok: true as const, observed: wasOpenCodeBrokerLoadHandshakeObserved({
+    const expectation = {
+      runtimeKind: request.body.runtimeKind,
       selectionIdentity: request.body.selectionIdentity,
       loadNonce: request.body.loadNonce,
-    }) };
+      providers: request.body.providers,
+      pluginVersion: request.body.pluginVersion,
+    };
+    if (isOpenCodeBrokerLoadHandshakeConflicted(expectation)) {
+      return { ok: true as const, observed: false };
+    }
+
+    const currentObservation = readOpenCodeBrokerLoadHandshakeObservation(expectation);
+    if (request.body.runtimeKind === 'pi_rpc_process') {
+      // A Pi subprocess is owned by the surviving runner's PiRpcBackend rather than the shared
+      // OpenCode managed-server owner. Its preflight is cached for that exact process; every Pi
+      // respawn rotates the nonce, reloads the extension, and handshakes the current daemon.
+      return { ok: true as const, observed: currentObservation !== null };
+    }
+    const observed = currentObservation
+      ? await persistCurrentManagedOpenCodeBrokerActivationProof(currentObservation)
+      : await rehydrateCurrentManagedOpenCodeBrokerActivationProof(expectation);
+    return { ok: true as const, observed };
   });
 
   // List all tracked sessions
@@ -2353,12 +2383,9 @@ export function startDaemonControlServer({
   }>) => Promise<'standard' | 'off' | 'custom'>;
   runtimeAuthRecoveryScheduler?: RuntimeAuthRecoverySchedulerForControlServer;
   isShuttingDown?: () => boolean;
-  handleConnectedServiceTurnLifecycle?: (input: Readonly<{
-    sessionId: string;
-    event: 'prompt_or_steer' | 'task_started' | 'assistant_message_end' | 'turn_cancelled';
-    terminalStatus?: 'completed' | 'failed';
-    turnId?: string;
-  }>) => Promise<unknown>;
+  handleConnectedServiceTurnLifecycle?: (
+    input: ConnectedServiceTurnLifecycleRequestBody,
+  ) => Promise<ConnectedServiceTurnLifecycleResult>;
   // QAE-1: user "Stop waiting" propagation — cancels the daemon-side durable
   // recovery wait state (runtime-auth recovery + inactive usage-limit stores).
   handleConnectedServiceUsageLimitWaitResumeCancel?: (input: Readonly<{

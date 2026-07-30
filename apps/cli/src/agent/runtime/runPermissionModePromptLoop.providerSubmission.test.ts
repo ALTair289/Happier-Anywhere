@@ -213,6 +213,7 @@ describe('runPermissionModePromptLoop provider submission phase ownership', () =
     });
 
     expect(providerInputOutcomeObserver).toHaveBeenCalledWith(expectedOutcome);
+    expect(runtime.sendPromptWithMeta).toHaveBeenCalledTimes(1);
     expect(blockPendingMessageDelivery).not.toHaveBeenCalled();
   });
 });

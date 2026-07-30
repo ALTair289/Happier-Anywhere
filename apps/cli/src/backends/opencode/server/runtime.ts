@@ -2453,9 +2453,11 @@ export function createOpenCodeServerRuntime(params: {
   // managed-server-restart recovery (Lane E), and the connected-broker preflight (Lane C) all need
   // the identical terminal sequence: emit a `turn_failed` transcript marker, persist the failure via
   // `sessionTurnLifecycle.failTurn`, stop the thinking indicator, flush+clear the stream writers, and
-  // reject the active turn promise. Only the issue (code + sanitizedPreview) differs, so it is the
-  // sole input. Single-fire is structurally preserved: the guard short-circuits once `rejectTurn`
-  // synchronously nulls `turnDeferred`. NONE of these paths replay the prompt or call sessionAbort.
+  // reject the active turn promise. The issue remains the one failure projection; an exact leaf may
+  // additionally preserve proven provider-dispatch phase in the rejected Error without creating a
+  // second turn-failure path. Single-fire is structurally preserved: the guard short-circuits once
+  // `rejectTurn` synchronously nulls `turnDeferred`. NONE of these paths replay the prompt or call
+  // sessionAbort.
   const createProviderUnavailableBeforeAcceptanceError = (
     issue: SessionRuntimeIssueV1,
   ): ProviderPromptSubmissionRejectedBeforeEffectError & Readonly<{
@@ -2578,7 +2580,10 @@ export function createOpenCodeServerRuntime(params: {
     });
   };
 
-  const createPromptNotDispatchedError = (reason: string) => {
+  const createPromptNotDispatchedError = (reason: string): Error & {
+    code: typeof OPENCODE_PROMPT_NOT_DISPATCHED_CODE;
+    issue: SessionRuntimeIssueV1;
+  } => {
     const providerTurnId = activeLifecycleMarkerId ?? ensureActiveLifecycleMarkerId();
     const issue: SessionRuntimeIssueV1 = {
       v: 1,
@@ -2593,13 +2598,19 @@ export function createOpenCodeServerRuntime(params: {
         'OpenCode prompt was not dispatched before provider dispatch '
         + `(${reason}). The turn was failed instead of confirming provider delivery.`,
     };
-    return createProviderUnavailableBeforeAcceptanceError(issue);
+    const error = new Error(issue.sanitizedPreview) as Error & {
+      code: typeof OPENCODE_PROMPT_NOT_DISPATCHED_CODE;
+      issue: SessionRuntimeIssueV1;
+    };
+    error.code = OPENCODE_PROMPT_NOT_DISPATCHED_CODE;
+    error.issue = issue;
+    return error;
   };
 
   const throwPromptNotDispatched = (reason: string): never => {
     const error = createPromptNotDispatchedError(reason);
     if (turnDeferred && turnPromptActive) {
-      emitOpenCodeTurnFailure({ issue: error.issue, error });
+      emitOpenCodeTurnFailure({ issue: error.issue });
     }
     throw error;
   };

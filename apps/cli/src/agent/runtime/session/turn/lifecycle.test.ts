@@ -4,6 +4,20 @@ import type { SessionTurnMutationV1 } from '@/api/session/mutations/sessionMutat
 import { createSessionTurnLifecycle } from './lifecycle';
 
 describe('SessionTurnLifecycle', () => {
+    it('exposes the exact runner-local active turn witness only while that turn is active', async () => {
+        const lifecycle = createSessionTurnLifecycle({
+            sessionId: 's1',
+            createId: () => 'exact-witness',
+            enqueueSessionTurn: async () => {},
+        });
+
+        expect(lifecycle.getActiveTurnId()).toBeNull();
+        const handle = await lifecycle.beginTurn({ provider: 'codex' });
+        expect(lifecycle.getActiveTurnId()).toBe(handle.turnId);
+        await lifecycle.completeTurn({ provider: 'codex' });
+        expect(lifecycle.getActiveTurnId()).toBeNull();
+    });
+
     it('attaches a late provider turn id without replacing the session turn id', async () => {
         const mutations: SessionTurnMutationV1[] = [];
         const lifecycle = createSessionTurnLifecycle({

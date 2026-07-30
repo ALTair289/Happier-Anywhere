@@ -7,11 +7,15 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ProviderCliLaunchSpec } from '@/backends/opencode/utils/resolveOpenCodeCliCommand';
 
 import {
+  persistManagedOpenCodeBrokerActivationProof,
   readSharedManagedOpenCodeServerStateBestEffort,
+  rehydrateManagedOpenCodeBrokerActivationProof,
   resolveManagedOpenCodeDaemonOwnerIdFromState,
   resolveSharedManagedOpenCodeServerStatePathForEnv,
   resolveSharedManagedOpenCodeServerBaseUrl,
   stopSharedManagedOpenCodeServerFromState,
+  type ManagedOpenCodeBrokerActivationExpectation,
+  type SharedManagedOpenCodeServerState,
 } from './sharedManagedServer';
 import { resolveOpenCodeManagedServerLaunchFingerprint } from './openCodeManagedServerEnv';
 
@@ -34,6 +38,208 @@ describe('resolveManagedOpenCodeDaemonOwnerIdFromState', () => {
 
     expect(beforeRestart).toBe('runtime-a:111:1000');
     expect(afterRestart).toBe('runtime-a:222:2000');
+  });
+});
+
+describe('managed OpenCode broker activation proof continuity', () => {
+  const commandLine = 'opencode serve --hostname=127.0.0.1 --port=1234';
+  const expectation: ManagedOpenCodeBrokerActivationExpectation = {
+    runtimeKind: 'opencode_managed_server',
+    selectionIdentity: 'opencode|connected|broker:1|openai-codex:primary:',
+    loadNonce: 'exact-child-generation-nonce',
+    providers: ['openai'],
+    pluginVersion: '1',
+  };
+
+  function createState(
+    overrides: Partial<SharedManagedOpenCodeServerState> = {},
+  ): SharedManagedOpenCodeServerState {
+    return {
+      v: 2,
+      baseUrl: 'http://127.0.0.1:1234',
+      pid: 4242,
+      startedAtMs: 1_000,
+      status: 'ready',
+      launchEnvFingerprint: 'connected-openai-primary',
+      ownerToken: 'owner-token-a',
+      startTimeMs: 2_500,
+      expectedCmdlineHash: hashCommandLine(commandLine),
+      activeServerDir: '/tmp/happy/servers/cloud',
+      daemonInstanceId: 'old-daemon',
+      brokerLoadNonce: expectation.loadNonce,
+      ...overrides,
+    };
+  }
+
+  function createProofDeps(
+    initialStates: Readonly<Record<string, SharedManagedOpenCodeServerState>>,
+    overrides: Partial<Readonly<{
+      isPidAlive: (pid: number) => boolean;
+      processCommand: string;
+      observedStartTimeMs: number;
+      brokerStateUsable: boolean;
+    }>> = {},
+  ) {
+    const states = new Map(Object.entries(initialStates));
+    return {
+      states,
+      deps: {
+        listStateKeys: async () => [...states.keys()],
+        withStateLock: async <T>(_stateKey: string, fn: () => Promise<T>) => await fn(),
+        readState: async (stateKey: string) => states.get(stateKey) ?? null,
+        writeState: async (stateKey: string, state: SharedManagedOpenCodeServerState) => {
+          states.set(stateKey, state);
+        },
+        isPidAlive: overrides.isPidAlive ?? (() => true),
+        getProcessInfo: async () => ({
+          name: 'opencode',
+          cmd: overrides.processCommand ?? commandLine,
+        }),
+        readProcessStartTimeMs: async () => overrides.observedStartTimeMs ?? 2_501,
+        currentActiveServerDir: '/tmp/happy/servers/cloud',
+        isCurrentBrokerStateUsable: async () => overrides.brokerStateUsable ?? true,
+      },
+    };
+  }
+
+  it('persists one exact current-daemon observation and rehydrates it after the daemon map is lost', async () => {
+    const harness = createProofDeps({ state: createState() });
+    const observation = {
+      ...expectation,
+      processPid: 4242,
+      observedAtMs: 3_000,
+    };
+
+    await expect(
+      persistManagedOpenCodeBrokerActivationProof(observation, harness.deps),
+    ).resolves.toBe(true);
+    expect(harness.states.get('state')).toEqual(expect.objectContaining({
+      brokerActivationProof: expect.objectContaining({
+        v: 1,
+        loadNonce: expectation.loadNonce,
+        providers: ['openai'],
+        pluginVersion: '1',
+        processPid: 4242,
+      }),
+    }));
+
+    // Daemon B has no process-local handshake map. Exact proof consumption is driven entirely by
+    // the existing managed-child state plus final process/current-broker revalidation.
+    await expect(
+      rehydrateManagedOpenCodeBrokerActivationProof(expectation, harness.deps),
+    ).resolves.toBe(true);
+  });
+
+  it.each([
+    {
+      label: 'plugin file and nonce without activation proof',
+      state: createState(),
+    },
+    {
+      label: 'changed child nonce',
+      state: createState({
+        brokerActivationProof: {
+          v: 1,
+          ...expectation,
+          loadNonce: 'other-nonce',
+          processPid: 4242,
+        },
+      }),
+    },
+    {
+      label: 'changed process pid',
+      state: createState({
+        brokerActivationProof: {
+          v: 1,
+          ...expectation,
+          processPid: 4343,
+        },
+      }),
+    },
+    {
+      label: 'provider mismatch',
+      state: createState({
+        brokerActivationProof: {
+          v: 1,
+          ...expectation,
+          providers: ['anthropic'],
+          processPid: 4242,
+        },
+      }),
+    },
+    {
+      label: 'plugin version mismatch',
+      state: createState({
+        brokerActivationProof: {
+          v: 1,
+          ...expectation,
+          pluginVersion: '2',
+          processPid: 4242,
+        },
+      }),
+    },
+    {
+      label: 'missing owner token',
+      state: createState({
+        ownerToken: undefined,
+        brokerActivationProof: {
+          v: 1,
+          ...expectation,
+          processPid: 4242,
+        },
+      }),
+    },
+  ])('fails closed for $label', async ({ state }) => {
+    const harness = createProofDeps({ state });
+    await expect(
+      rehydrateManagedOpenCodeBrokerActivationProof(expectation, harness.deps),
+    ).resolves.toBe(false);
+  });
+
+  it('rejects dead/reused processes, changed start/command, unusable broker state, and duplicate owners', async () => {
+    const activatedState = createState({
+      brokerActivationProof: {
+        v: 1,
+        ...expectation,
+        processPid: 4242,
+      },
+    });
+
+    await expect(rehydrateManagedOpenCodeBrokerActivationProof(
+      expectation,
+      createProofDeps(
+        { state: activatedState },
+        { isPidAlive: () => false },
+      ).deps,
+    )).resolves.toBe(false);
+    await expect(rehydrateManagedOpenCodeBrokerActivationProof(
+      expectation,
+      createProofDeps(
+        { state: activatedState },
+        { observedStartTimeMs: 9_999 },
+      ).deps,
+    )).resolves.toBe(false);
+    await expect(rehydrateManagedOpenCodeBrokerActivationProof(
+      expectation,
+      createProofDeps(
+        { state: activatedState },
+        { processCommand: 'foreign serve --hostname=127.0.0.1 --port=1234' },
+      ).deps,
+    )).resolves.toBe(false);
+    await expect(rehydrateManagedOpenCodeBrokerActivationProof(
+      expectation,
+      createProofDeps(
+        { state: activatedState },
+        { brokerStateUsable: false },
+      ).deps,
+    )).resolves.toBe(false);
+    await expect(rehydrateManagedOpenCodeBrokerActivationProof(
+      expectation,
+      createProofDeps({
+        a: activatedState,
+        b: activatedState,
+      }).deps,
+    )).resolves.toBe(false);
   });
 });
 

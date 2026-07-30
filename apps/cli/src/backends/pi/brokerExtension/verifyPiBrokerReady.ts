@@ -1,5 +1,6 @@
-import { readFile, access } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 
+import { isConnectedServiceBrokerStateFileUsable } from '@/daemon/connectedServices/broker/connectedServiceBrokerStateFile';
 import {
   PI_BROKER_STATE_PATH_ENV,
   PI_BROKER_LOAD_NONCE_ENV,
@@ -9,6 +10,7 @@ import {
   parsePiBrokerSelections,
 } from './piBrokerExtensionEnv';
 import { resolvePiBrokerExtensionPath } from './piBrokerExtensionAssets';
+import { PI_BROKER_EXTENSION_VERSION } from './piBrokerExtensionSource';
 
 export type PiBrokerReadiness =
   | Readonly<{ ready: true }>
@@ -18,13 +20,25 @@ export type PiBrokerReadiness =
 const DEFAULT_HANDSHAKE_WAIT_MS = 4_000;
 const HANDSHAKE_POLL_INTERVAL_MS = 200;
 
-async function defaultVerifyLoadHandshake(selectionIdentity: string, loadNonce: string, deadlineMs: number): Promise<boolean> {
+async function defaultVerifyLoadHandshake(
+  selectionIdentity: string,
+  loadNonce: string,
+  providers: readonly string[],
+  pluginVersion: string,
+  deadlineMs: number,
+): Promise<boolean> {
   // The daemon load-handshake registry is provider-agnostic (keyed by selection identity plus load
   // nonce), so the existing loaded-status control-client query serves the Pi broker too — no new daemon
   // surface or stale-process readiness reuse.
   const { queryDaemonOpenCodeBrokerLoadHandshake } = await import('@/daemon/controlClient');
   for (;;) {
-    if (await queryDaemonOpenCodeBrokerLoadHandshake(selectionIdentity, loadNonce).catch(() => false)) return true;
+    if (await queryDaemonOpenCodeBrokerLoadHandshake(
+      selectionIdentity,
+      loadNonce,
+      providers,
+      pluginVersion,
+      'pi_rpc_process',
+    ).catch(() => false)) return true;
     if (Date.now() >= deadlineMs) return false;
     await new Promise((resolve) => setTimeout(resolve, HANDSHAKE_POLL_INTERVAL_MS));
   }
@@ -32,20 +46,6 @@ async function defaultVerifyLoadHandshake(selectionIdentity: string, loadNonce: 
 
 async function fileExists(path: string): Promise<boolean> {
   return access(path).then(() => true).catch(() => false);
-}
-
-async function brokerStateUsable(path: string | undefined): Promise<boolean> {
-  if (typeof path !== 'string' || path.trim().length === 0) return false;
-  const content = await readFile(path, 'utf8').catch(() => null);
-  if (content === null) return false;
-  try {
-    const parsed = JSON.parse(content) as Record<string, unknown>;
-    return typeof parsed.httpPort === 'number'
-      && typeof parsed.connectedServiceBrokerRefreshToken === 'string'
-      && parsed.connectedServiceBrokerRefreshToken.length > 0;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -69,7 +69,13 @@ export async function verifyPiBrokerReadyForConnectedSession(
     /** Bounded total wait for the load handshake. Defaults to {@link DEFAULT_HANDSHAKE_WAIT_MS}. */
     handshakeWaitMs?: number;
     /** Injectable load-handshake verifier (test seam). Defaults to a bounded poll of the daemon. */
-    verifyLoadHandshake?: (selectionIdentity: string, loadNonce: string, deadlineMs: number) => Promise<boolean>;
+    verifyLoadHandshake?: (
+      selectionIdentity: string,
+      loadNonce: string,
+      providers: readonly string[],
+      pluginVersion: string,
+      deadlineMs: number,
+    ) => Promise<boolean>;
   }>,
 ): Promise<PiBrokerReadiness> {
   const selectionIdentity = env[PI_BROKER_SELECTION_IDENTITY_ENV];
@@ -81,7 +87,7 @@ export async function verifyPiBrokerReadyForConnectedSession(
   if (brokeredProviders.length === 0) {
     return { ready: true };
   }
-  if (!(await brokerStateUsable(env[PI_BROKER_STATE_PATH_ENV]))) {
+  if (!(await isConnectedServiceBrokerStateFileUsable(env[PI_BROKER_STATE_PATH_ENV]))) {
     return { ready: false, reason: 'broker_daemon_bridge_unreachable' };
   }
   const loadNonce = env[PI_BROKER_LOAD_NONCE_ENV];
@@ -100,7 +106,13 @@ export async function verifyPiBrokerReadyForConnectedSession(
     ? options.handshakeWaitMs
     : DEFAULT_HANDSHAKE_WAIT_MS;
   const verify = options?.verifyLoadHandshake ?? defaultVerifyLoadHandshake;
-  const observed = await verify(selectionIdentity, loadNonce.trim(), Date.now() + waitMs).catch(() => false);
+  const observed = await verify(
+    selectionIdentity,
+    loadNonce.trim(),
+    brokeredProviders,
+    PI_BROKER_EXTENSION_VERSION,
+    Date.now() + waitMs,
+  ).catch(() => false);
   if (!observed) {
     return { ready: false, reason: 'broker_extension_not_loaded' };
   }

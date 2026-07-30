@@ -114,3 +114,8 @@ export type SessionTurnLifecycleController = SessionTurnLifecycle & Readonly<{
         body: ACPMessageData;
     }>): ObserveAcpLifecycleMarkerResult;
 }>;
+
+export type SessionTurnLifecycleControllerWithActiveTurnWitness =
+    SessionTurnLifecycleController & Readonly<{
+        getActiveTurnId(): string | null;
+    }>;

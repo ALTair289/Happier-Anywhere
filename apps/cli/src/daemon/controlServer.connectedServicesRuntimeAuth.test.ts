@@ -3300,8 +3300,14 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
     }
   });
 
-  it('dispatches session turn lifecycle events to the daemon handler', async () => {
-    const handleConnectedServiceTurnLifecycle = vi.fn(async () => ({ ok: true }));
+  it('dispatches the exact prompt authorization descriptor to the daemon handler', async () => {
+    const handleConnectedServiceTurnLifecycle = vi.fn(async () => ({
+      status: 'continue' as const,
+      turnCustody: {
+        status: 'recorded' as const,
+        activeTurnId: 'session-turn:exact-1',
+      },
+    }));
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine',
@@ -3324,20 +3330,28 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
         headers: { 'x-happier-daemon-token': 'token' },
         payload: {
           sessionId: 'sess_1',
-          event: 'task_started',
-          turnId: 'session-turn:exact-1',
+          event: 'prompt_or_steer',
+          requestedAction: { v: 1, kind: 'steer_if_active' },
+          activeTurnId: 'session-turn:exact-1',
         },
       });
 
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({
         ok: true,
-        result: { ok: true },
+        result: {
+          status: 'continue',
+          turnCustody: {
+            status: 'recorded',
+            activeTurnId: 'session-turn:exact-1',
+          },
+        },
       });
       expect(handleConnectedServiceTurnLifecycle).toHaveBeenCalledWith({
         sessionId: 'sess_1',
-        event: 'task_started',
-        turnId: 'session-turn:exact-1',
+        event: 'prompt_or_steer',
+        requestedAction: { v: 1, kind: 'steer_if_active' },
+        activeTurnId: 'session-turn:exact-1',
       });
     } finally {
       await app.close();
@@ -3881,6 +3895,8 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
 
   it('records the broker load handshake under the SCOPED token and exposes it via the loaded-status query (F4)', async () => {
     resetOpenCodeBrokerLoadHandshakesForTests();
+    const persistActivationProof = vi.fn(async () => true);
+    const rehydrateActivationProof = vi.fn(async () => false);
     const app = createDaemonControlApp({
       getChildren: () => [],
       machineId: 'machine',
@@ -3893,18 +3909,27 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
       controlToken: 'token',
+      persistCurrentManagedOpenCodeBrokerActivationProof: persistActivationProof,
+      rehydrateCurrentManagedOpenCodeBrokerActivationProof: rehydrateActivationProof,
     });
 
     try {
       const identity = 'opencode|connected|broker:1|openai-codex:p:';
       const loadNonce = 'spawn-control-server-test';
+      const statusPayload = {
+        runtimeKind: 'opencode_managed_server',
+        selectionIdentity: identity,
+        loadNonce,
+        providers: ['openai'],
+        pluginVersion: '1',
+      };
 
       // Before any handshake, loaded-status (master-token query) reports not-observed.
       const before = await app.inject({
         method: 'POST',
         url: '/connected-service-auth/opencode-broker/loaded-status',
         headers: { 'x-happier-daemon-token': 'token' },
-        payload: { selectionIdentity: identity, loadNonce },
+        payload: statusPayload,
       });
       expect(before.statusCode).toBe(200);
       expect(before.json()).toEqual({ ok: true, observed: false });
@@ -3914,7 +3939,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
         method: 'POST',
         url: '/connected-service-auth/broker/loaded',
         headers: { 'x-happier-daemon-token': 'token' },
-        payload: { selectionIdentity: identity, loadNonce, providers: ['openai'] },
+        payload: { ...statusPayload, processPid: 4242 },
       });
       expect(masterRejected.statusCode).toBe(401);
 
@@ -3922,20 +3947,94 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
         method: 'POST',
         url: '/connected-service-auth/broker/loaded',
         headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
-        payload: { selectionIdentity: identity, loadNonce, providers: ['openai'] },
+        payload: { ...statusPayload, processPid: 4242 },
       });
       expect(registered.statusCode).toBe(200);
       expect(registered.json()).toEqual({ ok: true, result: { acknowledged: true } });
 
-      // loaded-status now reports observed.
+      // An OpenCode Map hit is not enough: if the exact managed-child owner cannot persist the
+      // activation fact, readiness stays fail-closed rather than losing the only continuity proof.
+      persistActivationProof.mockResolvedValueOnce(false);
+      const persistenceFailed = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/opencode-broker/loaded-status',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: statusPayload,
+      });
+      expect(persistenceFailed.statusCode).toBe(200);
+      expect(persistenceFailed.json()).toEqual({ ok: true, observed: false });
+
+      // Once the existing managed-child owner commits the bounded proof, loaded-status is ready.
+      persistActivationProof.mockReset();
+      persistActivationProof.mockResolvedValue(true);
       const after = await app.inject({
         method: 'POST',
         url: '/connected-service-auth/opencode-broker/loaded-status',
         headers: { 'x-happier-daemon-token': 'token' },
-        payload: { selectionIdentity: identity, loadNonce },
+        payload: statusPayload,
       });
       expect(after.statusCode).toBe(200);
       expect(after.json()).toEqual({ ok: true, observed: true });
+      expect(persistActivationProof).toHaveBeenCalledWith(expect.objectContaining({
+        ...statusPayload,
+        processPid: 4242,
+      }));
+
+      // Daemon B has an empty process-local map. It delegates to the one exact managed-child proof
+      // owner instead of restarting the child or accepting file/nonce presence alone.
+      resetOpenCodeBrokerLoadHandshakesForTests();
+      rehydrateActivationProof.mockResolvedValueOnce(true);
+      const afterReplacement = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/opencode-broker/loaded-status',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: statusPayload,
+      });
+      expect(afterReplacement.statusCode).toBe(200);
+      expect(afterReplacement.json()).toEqual({ ok: true, observed: true });
+      expect(rehydrateActivationProof).toHaveBeenCalledWith(statusPayload);
+
+      // Pi has no independently reattachable managed child. Its surviving PiRpcBackend owns and
+      // caches readiness for the exact stdio child; a respawn rotates nonce and handshakes anew.
+      // Therefore a fresh Pi Map hit succeeds without OpenCode persistence, while an empty Map can
+      // never consume OpenCode's durable proof.
+      const piIdentity = 'pi|connected|broker:1|anthropic:p:';
+      const piStatusPayload = {
+        runtimeKind: 'pi_rpc_process',
+        selectionIdentity: piIdentity,
+        loadNonce: 'pi-child-nonce',
+        providers: ['anthropic'],
+        pluginVersion: '1',
+      };
+      const piRegistered = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/broker/loaded',
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        payload: { ...piStatusPayload, processPid: 5252 },
+      });
+      expect(piRegistered.statusCode).toBe(200);
+      const persistCallsBeforePi = persistActivationProof.mock.calls.length;
+      const rehydrateCallsBeforePi = rehydrateActivationProof.mock.calls.length;
+      const piObserved = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/opencode-broker/loaded-status',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: piStatusPayload,
+      });
+      expect(piObserved.json()).toEqual({ ok: true, observed: true });
+      expect(persistActivationProof).toHaveBeenCalledTimes(persistCallsBeforePi);
+      expect(rehydrateActivationProof).toHaveBeenCalledTimes(rehydrateCallsBeforePi);
+
+      resetOpenCodeBrokerLoadHandshakesForTests();
+      rehydrateActivationProof.mockResolvedValueOnce(true);
+      const piWithoutCurrentHandshake = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/opencode-broker/loaded-status',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: piStatusPayload,
+      });
+      expect(piWithoutCurrentHandshake.json()).toEqual({ ok: true, observed: false });
+      expect(rehydrateActivationProof).toHaveBeenCalledTimes(rehydrateCallsBeforePi);
     } finally {
       resetOpenCodeBrokerLoadHandshakesForTests();
       await app.close();
@@ -4090,7 +4189,11 @@ describe('startDaemonControlServer connected-service runtime wiring', () => {
 
   it('wires connected-service turn lifecycle events to the production control server handler', async () => {
     const handleConnectedServiceTurnLifecycle = vi.fn(async () => ({
-      status: 'recorded',
+      status: 'continue' as const,
+      turnCustody: {
+        status: 'recorded' as const,
+        activeTurnId: null,
+      },
     }));
     const server = await startDaemonControlServer({
       getChildren: () => [],
@@ -4125,7 +4228,11 @@ describe('startDaemonControlServer connected-service runtime wiring', () => {
       expect(payload).toEqual({
         ok: true,
         result: {
-          status: 'recorded',
+          status: 'continue',
+          turnCustody: {
+            status: 'recorded',
+            activeTurnId: null,
+          },
         },
       });
       expect(handleConnectedServiceTurnLifecycle).toHaveBeenCalledWith({

@@ -280,10 +280,12 @@ async function sendLoadHandshake() {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-happier-daemon-token": daemonEndpoint.scopedToken },
       body: JSON.stringify({
+        runtimeKind: "opencode_managed_server",
         selectionIdentity: selectionIdentity,
         loadNonce: loadNonce,
         providers: [PROVIDER],
         pluginVersion: process.env[PLUGIN_VERSION_ENV] || PLUGIN_VERSION,
+        processPid: process.pid,
       }),
       signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(2000) : undefined,
     }).catch(() => {});

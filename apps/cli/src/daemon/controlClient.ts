@@ -35,6 +35,10 @@ import {
   ExecutionRunConnectedServiceReleaseResponseSchema,
   type ExecutionRunConnectedServiceMaterializeResponseWire,
 } from '@/daemon/connectedServices/runsBridge/contract';
+import {
+  type ConnectedServiceTurnLifecycleRequestBody,
+  type ConnectedServiceTurnLifecycleResult,
+} from '@/daemon/connectedServices/connectedServiceTurnLifecycleContract';
 import { resolveComparableCliVersion } from './resolveComparableCliVersion';
 import {
   RestartAllSessionRunnersRequestV1Schema,
@@ -480,21 +484,26 @@ export async function notifyDaemonConnectedServiceRuntimeAuthFailure(
 }
 
 export async function notifyDaemonConnectedServiceTurnLifecycle(
-  body: Readonly<{
-    sessionId: string;
-    event: 'prompt_or_steer' | 'task_started' | 'assistant_message_end' | 'turn_cancelled';
-    // REV-1: distinguishes completed from failed turns on `assistant_message_end`.
-    terminalStatus?: 'completed' | 'failed';
-    turnId?: string;
-  }>,
+  body: ConnectedServiceTurnLifecycleRequestBody,
   options: DaemonControlRequestOptions = {},
-): Promise<{ error?: string } | any> {
-  return await daemonPost('/connected-service-turn-lifecycle', {
+): Promise<ConnectedServiceTurnLifecycleResult | { error?: string }> {
+  const response = await daemonPost('/connected-service-turn-lifecycle', {
     sessionId: body.sessionId,
     event: body.event,
     ...(body.terminalStatus ? { terminalStatus: body.terminalStatus } : {}),
     ...(body.turnId ? { turnId: body.turnId } : {}),
+    ...(body.requestedAction ? { requestedAction: body.requestedAction } : {}),
+    ...(body.activeTurnId !== undefined ? { activeTurnId: body.activeTurnId } : {}),
   }, options);
+  if (
+    response
+    && typeof response === 'object'
+    && response.ok === true
+    && Object.prototype.hasOwnProperty.call(response, 'result')
+  ) {
+    return response.result;
+  }
+  return response;
 }
 
 /**
@@ -711,9 +720,18 @@ export async function releaseDaemonConnectedServicesForExecutionRun(
 export async function queryDaemonOpenCodeBrokerLoadHandshake(
   selectionIdentity: string,
   loadNonce: string,
+  providers: readonly string[],
+  pluginVersion: string,
+  runtimeKind: 'opencode_managed_server' | 'pi_rpc_process',
   options: DaemonControlRequestOptions = {},
 ): Promise<boolean> {
-  const result = await daemonPost('/connected-service-auth/opencode-broker/loaded-status', { selectionIdentity, loadNonce }, options);
+  const result = await daemonPost('/connected-service-auth/opencode-broker/loaded-status', {
+    selectionIdentity,
+    loadNonce,
+    providers,
+    pluginVersion,
+    runtimeKind,
+  }, options);
   if (!result || typeof result !== 'object' || (result as { error?: unknown }).error) return false;
   return (result as { observed?: unknown }).observed === true;
 }

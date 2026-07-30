@@ -218,10 +218,12 @@ async function sendLoadHandshake(providers) {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-happier-daemon-token": daemonEndpoint.scopedToken },
       body: JSON.stringify({
+        runtimeKind: "pi_rpc_process",
         selectionIdentity: selectionIdentity,
         loadNonce: loadNonce,
         providers: providers,
         pluginVersion: process.env[EXTENSION_VERSION_ENV] || EXTENSION_VERSION,
+        processPid: process.pid,
       }),
       signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(2000) : undefined,
     }).catch(() => {});

@@ -11222,7 +11222,10 @@ describe('createOpenCodeServerRuntime origin-agnostic transcript projection (Lan
 
 describe('createOpenCodeServerRuntime — connected-service broker preflight (fail-closed)', () => {
   async function writeUsableDaemonState(path: string): Promise<void> {
-    await writeFile(path, JSON.stringify({ httpPort: 1234, controlToken: 'tok' }), 'utf8');
+    await writeFile(path, JSON.stringify({
+      httpPort: 1234,
+      connectedServiceBrokerRefreshToken: 'broker-refresh-token',
+    }), 'utf8');
   }
 
   function buildConnectedEnv(overrides: Readonly<{
@@ -11385,6 +11388,9 @@ describe('createOpenCodeServerRuntime — connected-service broker preflight (fa
       expect(mockQueryDaemonOpenCodeBrokerLoadHandshake).toHaveBeenCalledWith(
         'opencode|connected|openai-codex:primary:',
         actualSpawnNonce,
+        ['openai'],
+        '1',
+        'opencode_managed_server',
       );
 
       await runtime.cancel().catch(() => {});
@@ -11516,6 +11522,7 @@ describe('createOpenCodeServerRuntime — connected-service broker preflight (fa
     const failedMarkers = sentAgentMessagesOfType(session, 'turn_failed');
     expect(failedMarkers.length).toBe(1);
     expect((failedMarkers[0] as { code?: string }).code).toBe(OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE);
+    expect(sentAgentMessagesOfType(session, 'task_complete')).toHaveLength(0);
 
     await runtime.reset().catch(() => {});
   });

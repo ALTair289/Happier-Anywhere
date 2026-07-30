@@ -23,7 +23,7 @@ import type {
     MarkRolledBackInput,
     ObserveAcpLifecycleMarkerResult,
     SessionTurnHandle,
-    SessionTurnLifecycleController,
+    SessionTurnLifecycleControllerWithActiveTurnWitness,
     SessionTurnTerminalStatus,
     SessionTurnTranscriptAnchorsInput,
     TouchActiveTurnInput,
@@ -126,7 +126,9 @@ function withLifecycleMarkerId<T extends Extract<ACPMessageData, { id: string }>
     return { ...body, id } as T;
 }
 
-export function createSessionTurnLifecycle(params: CreateSessionTurnLifecycleParams): SessionTurnLifecycleController {
+export function createSessionTurnLifecycle(
+    params: CreateSessionTurnLifecycleParams,
+): SessionTurnLifecycleControllerWithActiveTurnWitness {
     const createId = params.createId ?? randomUUID;
     const now = params.now ?? Date.now;
     const activeTurnTouchIntervalMs = Math.max(
@@ -493,6 +495,10 @@ export function createSessionTurnLifecycle(params: CreateSessionTurnLifecyclePar
         return activeTurn !== null;
     }
 
+    function getActiveTurnId(): string | null {
+        return activeTurn?.turnId ?? null;
+    }
+
     function observeAcpLifecycleMarker(input: Readonly<{
         provider: ACPProvider;
         body: ACPMessageData;
@@ -564,6 +570,7 @@ export function createSessionTurnLifecycle(params: CreateSessionTurnLifecyclePar
         markRollbackEligible,
         markRolledBack,
         hasActiveTurn,
+        getActiveTurnId,
         observeAcpLifecycleMarker,
     };
 }

@@ -1,12 +1,23 @@
 import type { TrackedSession } from '../types';
 import { updateSessionMarkerActiveTurn } from '../sessionRegistry';
+import { z } from 'zod';
 
 type TurnLifecycleEvent = 'prompt_or_steer' | 'task_started' | 'assistant_message_end' | 'turn_cancelled';
 
-export type TrackedSessionTurnLifecycleResult = Readonly<{
-  status: 'recorded' | 'ignored_missing_exact_turn' | 'ignored_session_not_found' | 'ignored_session_ambiguous' | 'ignored_turn_mismatch' | 'ignored_marker_not_updated';
-  activeTurnId: string | null;
-}>;
+export const TrackedSessionTurnLifecycleResultSchema = z.object({
+  status: z.enum([
+    'recorded',
+    'ignored_missing_exact_turn',
+    'ignored_session_not_found',
+    'ignored_session_ambiguous',
+    'ignored_turn_mismatch',
+    'ignored_marker_not_updated',
+  ]),
+  activeTurnId: z.string().nullable(),
+}).strict();
+
+export type TrackedSessionTurnLifecycleResult =
+  z.infer<typeof TrackedSessionTurnLifecycleResultSchema>;
 
 export async function applyTrackedSessionTurnLifecycle(input: Readonly<{
   trackedSessions: Iterable<TrackedSession>;

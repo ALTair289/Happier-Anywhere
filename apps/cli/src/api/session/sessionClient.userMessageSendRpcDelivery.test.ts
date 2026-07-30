@@ -214,6 +214,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
           messageRole: 'user';
           content?: unknown;
           ciphertext?: string;
+          requestedAction?: { v: 1; kind: 'enqueue' | 'steer_if_active' | 'steer_now' | 'send_now' };
         }>;
       }>;
       return {
@@ -227,13 +228,21 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
           localId: request.body.localId,
           messageRole: request.body.messageRole,
           content: request.body.content ?? request.body.ciphertext,
+          requestedAction: request.body.requestedAction,
+          deliveryState: { mode: 'provider', unresolved: true },
           createdAt: 1_000,
           updatedAt: 1_000,
         },
       };
     });
     notifyDaemonConnectedServiceTurnLifecycleMock.mockReset();
-    notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValue({});
+    notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValue({
+      status: 'continue',
+      turnCustody: {
+        status: 'ignored_missing_exact_turn',
+        activeTurnId: null,
+      },
+    });
   });
 
   it('settles typed provider outcomes only for the exact claimed local input', async () => {
@@ -1247,7 +1256,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     expect(received[0]?.content?.text).toBe('hello');
   });
 
-  it('waits for daemon lifecycle notification before delivering the prompt when the session was started by the daemon', async () => {
+  it('persists Pending before one exact daemon authorization and waits for continue before provider delivery', async () => {
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,
       emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
@@ -1257,45 +1266,310 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     const originalArgv = process.argv.slice();
     try {
       process.argv = [...originalArgv, '--started-by', 'daemon'];
+      const order: string[] = [];
       const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+      await waitForCurrentPendingInputContract(client);
+      enqueuePendingQueueV2MessageViaHttpMock.mockImplementationOnce(async () => {
+        order.push('persist');
+        return undefined;
+      });
       const received: any[] = [];
-      let releaseLifecycleNotify: (() => void) | null = null;
-      const slowLifecycleNotify = vi.fn(() => new Promise<void>((resolve) => {
-        releaseLifecycleNotify = resolve;
-      }));
-
-      (client as any).notifyDaemonConnectedServiceTurnLifecycle = slowLifecycleNotify;
-      client.onUserMessage((msg) => received.push(msg));
+      let releaseLifecycleNotify: ((value: unknown) => void) | null = null;
+      notifyDaemonConnectedServiceTurnLifecycleMock.mockImplementationOnce(async () => {
+        order.push('authorize');
+        return await new Promise((resolve) => {
+          releaseLifecycleNotify = resolve;
+        });
+      });
+      client.onUserMessage((msg) => {
+        order.push('provider');
+        received.push(msg);
+      });
 
       const enqueuePromise = (client as any).enqueueSessionUserMessage({
         text: 'hello',
         localId: 'l1',
         meta: { source: 'ui', sentFrom: 'ios' },
+        requestedAction: { v: 1, kind: 'enqueue' },
       });
 
-      // Fresh prompts now cross the mandatory recovery-decision boundary before lifecycle
-      // notification. Let that decision's promise settle while keeping the notification blocked.
       await waitForCondition(
-        () => slowLifecycleNotify.mock.calls.length === 1,
+        () => notifyDaemonConnectedServiceTurnLifecycleMock.mock.calls.length === 1,
         {
           timeoutMs: 1_000,
-          label: 'fresh-prompt recovery decision to reach daemon lifecycle notification',
+          label: 'persisted prompt to reach daemon authorization',
         },
       );
-      expect(slowLifecycleNotify).toHaveBeenCalledWith('prompt_or_steer');
+      expect(order).toEqual(['persist', 'authorize']);
+      expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledExactlyOnceWith({
+        sessionId: 's1',
+        event: 'prompt_or_steer',
+        requestedAction: { v: 1, kind: 'enqueue' },
+        activeTurnId: null,
+      });
       expect(received).toHaveLength(0);
 
-      const release = ((value: (() => void) | null): (() => void) => {
+      const release = ((value: ((result: unknown) => void) | null): ((result: unknown) => void) => {
         if (typeof value !== 'function') {
-          throw new Error('expected daemon lifecycle notify to block prompt delivery');
+          throw new Error('expected daemon authorization to block prompt delivery');
         }
         return value;
       })(releaseLifecycleNotify);
-      release();
+      release({
+        status: 'continue',
+        turnCustody: {
+          status: 'ignored_missing_exact_turn',
+          activeTurnId: null,
+        },
+      });
       await enqueuePromise;
 
+      expect(order).toEqual(['persist', 'authorize', 'provider']);
       expect(received).toHaveLength(1);
       expect(received[0]?.content?.text).toBe('hello');
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it('retains Pending and makes no Provider call when daemon authorization requests source cutover', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'blocked-local' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValueOnce({
+      status: 'input_blocked',
+      reason: 'request_auth_source_cutover',
+    });
+
+    const originalArgv = process.argv.slice();
+    try {
+      process.argv = [...originalArgv, '--started-by', 'daemon'];
+      const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+      await waitForCurrentPendingInputContract(client);
+      (client as any).sessionTurnLifecycle.getActiveTurnId = () => 'session-turn:exact-active';
+      const received: any[] = [];
+      client.onUserMessage((message) => received.push(message));
+
+      await expect((client as any).enqueueSessionUserMessage({
+        text: 'steer this exact turn',
+        localId: 'blocked-local',
+        meta: { source: 'ui', sentFrom: 'ios' },
+        requestedAction: { v: 1, kind: 'steer_if_active' },
+      })).resolves.toEqual({ providerAcceptancePending: true });
+
+      expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledTimes(1);
+      expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledExactlyOnceWith({
+        sessionId: 's1',
+        event: 'prompt_or_steer',
+        requestedAction: { v: 1, kind: 'steer_if_active' },
+        activeTurnId: 'session-turn:exact-active',
+      });
+      expect(received).toHaveLength(0);
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it.each([
+    ['handler unavailable', { error: 'handler unavailable' }],
+    ['malformed continue', { status: 'continue' }],
+    ['transport loss', new Error('daemon transport lost')],
+  ] as const)('fails closed before Provider delivery on daemon authorization %s', async (_label, outcome) => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'fail-closed-local' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    if (outcome instanceof Error) {
+      notifyDaemonConnectedServiceTurnLifecycleMock.mockRejectedValueOnce(outcome);
+    } else {
+      notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValueOnce(outcome);
+    }
+
+    const originalArgv = process.argv.slice();
+    try {
+      process.argv = [...originalArgv, '--started-by', 'daemon'];
+      const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+      await waitForCurrentPendingInputContract(client);
+      const received: any[] = [];
+      client.onUserMessage((message) => received.push(message));
+
+      await (client as any).enqueueSessionUserMessage({
+        text: 'retain until one source owns authorization',
+        localId: 'fail-closed-local',
+        meta: { source: 'ui', sentFrom: 'ios' },
+        requestedAction: { v: 1, kind: 'enqueue' },
+      });
+
+      expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledTimes(1);
+      expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledTimes(1);
+      expect(received).toHaveLength(0);
+      expect((client as any).canonicalPendingDeliveryByLocalId.has('fail-closed-local')).toBe(true);
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it('admits an exact active steer on typed continue and never reauthorizes a blocked claimed row', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const claimedSteer = {
+      didMaterialize: true,
+      localId: 'exact-steer-local',
+      didWrite: true,
+      pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 2 },
+      message: {
+        id: 'm-exact-steer-local',
+        seq: 12,
+        localId: 'exact-steer-local',
+        messageRole: 'user',
+        content: {
+          t: 'plain',
+          v: {
+            role: 'user',
+            content: { type: 'text', text: 'exact steer' },
+            localId: 'exact-steer-local',
+          },
+        },
+        requestedAction: { v: 1, kind: 'steer_if_active' },
+        deliveryState: { mode: 'provider', unresolved: true },
+        createdAt: 1_000,
+        updatedAt: 1_000,
+      },
+    } as const;
+
+    const originalArgv = process.argv.slice();
+    try {
+      process.argv = [...originalArgv, '--started-by', 'daemon'];
+      const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+      await waitForCurrentPendingInputContract(client);
+      (client as any).sessionTurnLifecycle.getActiveTurnId = () => 'session-turn:live';
+      const received: any[] = [];
+      client.onUserMessage((message) => received.push(message));
+
+      materializeNextPendingQueueV2MessageMock.mockResolvedValueOnce(claimedSteer);
+      notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValueOnce({
+        status: 'continue',
+        turnCustody: {
+          status: 'recorded',
+          activeTurnId: 'session-turn:live',
+        },
+      });
+      await expect((client as any).runMaterializeNextPendingMessageInner()).resolves.toMatchObject({
+        didMaterialize: true,
+        result: {
+          type: 'materialized',
+          localId: 'exact-steer-local',
+        },
+      });
+      expect(received).toHaveLength(1);
+      expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledExactlyOnceWith({
+        sessionId: 's1',
+        event: 'prompt_or_steer',
+        requestedAction: { v: 1, kind: 'steer_if_active' },
+        activeTurnId: 'session-turn:live',
+      });
+
+      received.length = 0;
+      notifyDaemonConnectedServiceTurnLifecycleMock.mockClear();
+      materializeNextPendingQueueV2MessageMock
+        .mockResolvedValueOnce({
+          ...claimedSteer,
+          localId: 'blocked-replay-local',
+          message: {
+            ...claimedSteer.message,
+            id: 'm-blocked-replay-local',
+            localId: 'blocked-replay-local',
+          },
+        })
+        .mockResolvedValueOnce({
+          ...claimedSteer,
+          localId: 'blocked-replay-local',
+          message: {
+            ...claimedSteer.message,
+            id: 'm-blocked-replay-local',
+            localId: 'blocked-replay-local',
+          },
+        });
+      notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValueOnce({
+        status: 'input_blocked',
+        reason: 'request_auth_source_cutover',
+      });
+
+      await expect((client as any).runMaterializeNextPendingMessageInner()).resolves.toEqual({
+        didMaterialize: false,
+        result: {
+          type: 'deferred',
+          reason: 'request_auth_source_cutover',
+        },
+      });
+      await expect((client as any).runMaterializeNextPendingMessageInner()).resolves.toEqual({
+        didMaterialize: false,
+        result: { type: 'no_pending' },
+      });
+      expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledTimes(1);
+      expect(received).toHaveLength(0);
+      expect((client as any).canonicalPendingDeliveryByLocalId.has('blocked-replay-local')).toBe(true);
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it('returns typed pre-effect deferral and retains the claim when predecessor authorization support is missing', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    materializeNextPendingQueueV2MessageMock.mockResolvedValueOnce({
+      didMaterialize: true,
+      localId: 'missing-support-local',
+      didWrite: true,
+      providerDeliveryContractInvalid: true,
+      pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 2 },
+      message: {
+        id: 'm-missing-support-local',
+        seq: 15,
+        localId: 'missing-support-local',
+        messageRole: 'user',
+        content: {
+          t: 'plain',
+          v: {
+            role: 'user',
+            content: { type: 'text', text: 'must remain Pending' },
+            localId: 'missing-support-local',
+          },
+        },
+        deliveryState: { mode: 'provider', unresolved: true },
+        createdAt: 1_000,
+        updatedAt: 1_000,
+      },
+    });
+
+    const originalArgv = process.argv.slice();
+    try {
+      process.argv = [...originalArgv, '--started-by', 'daemon'];
+      const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+      await waitForCurrentPendingInputContract(client);
+      const received: any[] = [];
+      client.onUserMessage((message) => received.push(message));
+
+      await expect((client as any).runMaterializeNextPendingMessageInner()).resolves.toEqual({
+        didMaterialize: false,
+        result: {
+          type: 'deferred',
+          reason: 'request_auth_source_cutover',
+        },
+      });
+      expect(notifyDaemonConnectedServiceTurnLifecycleMock).not.toHaveBeenCalled();
+      expect(blockPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
+      expect(received).toHaveLength(0);
+      expect((client as any).canonicalPendingDeliveryByLocalId.has('missing-support-local')).toBe(true);
     } finally {
       process.argv = originalArgv;
     }

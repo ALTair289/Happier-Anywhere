@@ -46,7 +46,7 @@ export type MaterializeNextPendingResult =
   | { type: 'auth_failure'; statusCode: 401 | 403 }
   | {
     type: 'deferred';
-    reason: 'supervisor_offline' | 'supervisor_auth_failed' | 'waiting_for_runtime_activity' | 'runtime_activity_unknown' | 'pending_version_mismatch' | 'waiting_for_predecessor' | 'waiting_for_foreground_turn' | 'local_input_queued';
+    reason: 'supervisor_offline' | 'supervisor_auth_failed' | 'waiting_for_runtime_activity' | 'runtime_activity_unknown' | 'pending_version_mismatch' | 'waiting_for_predecessor' | 'waiting_for_foreground_turn' | 'local_input_queued' | 'request_auth_source_cutover';
     retryAfterMs?: number;
   };
 

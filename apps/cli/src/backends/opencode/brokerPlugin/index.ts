@@ -33,11 +33,15 @@ export {
   ensureOpenCodeBrokerPluginAssets,
 } from './openCodeBrokerPluginAssets';
 export {
+  isOpenCodeBrokerLoadHandshakeConflicted,
+  readOpenCodeBrokerLoadHandshakeObservation,
   recordOpenCodeBrokerLoadHandshake,
   wasOpenCodeBrokerLoadHandshakeObserved,
   resetOpenCodeBrokerLoadHandshakesForTests,
   OpenCodeBrokerLoadHandshakeRequestSchema,
+  OpenCodeBrokerLoadHandshakeStatusRequestSchema,
   type OpenCodeBrokerLoadHandshakeRequest,
+  type OpenCodeBrokerLoadHandshakeObservation,
 } from './openCodeBrokerLoadHandshakeRegistry';
 export {
   verifyOpenCodeBrokerReadyForConnectedSession,

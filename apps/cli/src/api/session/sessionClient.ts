@@ -282,9 +282,13 @@ import {
 } from './mutations/sessionMutationTypes';
 import { createSessionTurnLifecycle } from '@/agent/runtime/session/turn/lifecycle';
 import { observeAcpLifecycleMarker } from '@/agent/runtime/session/turn/lifecycleMarkerAdapter';
-import type { SessionTurnLifecycleController } from '@/agent/runtime/session/turn/types';
+import type { SessionTurnLifecycleControllerWithActiveTurnWitness } from '@/agent/runtime/session/turn/types';
 import { createSessionTurnMutationWriter } from '@/agent/runtime/session/turn/writer';
 import { notifyDaemonConnectedServiceTurnLifecycle, notifyDaemonConnectedServiceUsageLimitWaitResumeCancel } from '@/daemon/controlClient';
+import {
+    ConnectedServiceTurnLifecycleResultSchema,
+    type ConnectedServiceTurnLifecycleResult,
+} from '@/daemon/connectedServices/connectedServiceTurnLifecycleContract';
 import {
     applyKnownPendingQueueState,
     countMaterializablePendingRows,
@@ -705,7 +709,7 @@ export class ApiSessionClient extends EventEmitter {
     private readonly committedUserMessageSeqTracker = new CommittedUserMessageSeqTracker();
     private readonly sessionMutationOutbox: SessionMutationOutbox;
     private readonly runtimeActivitySnapshotPublisher: RuntimeActivitySnapshotSessionMutationPublisher;
-    readonly sessionTurnLifecycle: SessionTurnLifecycleController;
+    readonly sessionTurnLifecycle: SessionTurnLifecycleControllerWithActiveTurnWitness;
     private readonly sessionRuntimeControls: Partial<SessionRuntimeControls> = {};
     private readonly baseSessionRuntimeControls: Partial<SessionRuntimeControls> = {};
     private readonly sessionRuntimeControlRegistrations = new Set<Partial<SessionRuntimeControls>>();
@@ -4193,8 +4197,10 @@ export class ApiSessionClient extends EventEmitter {
         event: 'prompt_or_steer' | 'task_started' | 'assistant_message_end' | 'turn_cancelled',
         terminalStatus?: 'completed' | 'failed',
         turnId?: string,
-    ): Promise<void> {
-        if (!this.startedByDaemonProcess) return;
+        requestedAction?: PendingRequestedActionV1,
+    ): Promise<ConnectedServiceTurnLifecycleResult | null> {
+        if (!this.startedByDaemonProcess) return null;
+        let lifecycleResult: ConnectedServiceTurnLifecycleResult | null = null;
         const notify = async (): Promise<void> => {
             try {
                 const result = await notifyDaemonConnectedServiceTurnLifecycle({
@@ -4202,12 +4208,32 @@ export class ApiSessionClient extends EventEmitter {
                     event,
                     ...(terminalStatus ? { terminalStatus } : {}),
                     ...(turnId ? { turnId } : {}),
+                    ...(requestedAction
+                        ? {
+                            requestedAction,
+                            // Sample runner-local custody inside the serialized operation,
+                            // immediately before the predecessor daemon boundary.
+                            activeTurnId: this.sessionTurnLifecycle.getActiveTurnId(),
+                        }
+                        : {}),
                 });
-                if (result?.error) {
+                const parsedResult = ConnectedServiceTurnLifecycleResultSchema.safeParse(result);
+                if (parsedResult.success) {
+                    lifecycleResult = parsedResult.data;
+                    return;
+                }
+                const resultError =
+                    result
+                    && typeof result === 'object'
+                    && 'error' in result
+                    && typeof result.error === 'string'
+                        ? result.error
+                        : 'connected_service_turn_lifecycle_invalid_response';
+                if (resultError) {
                     logger.debug('[SESSION CLIENT] Failed to notify daemon connected-service turn lifecycle (non-fatal)', {
                         sessionId: this.sessionId,
                         event,
-                        error: result.error,
+                        error: resultError,
                     });
                 }
             } catch (error) {
@@ -4221,6 +4247,7 @@ export class ApiSessionClient extends EventEmitter {
         const pending = this.daemonTurnLifecycleNotifyTail.then(notify, notify);
         this.daemonTurnLifecycleNotifyTail = pending;
         await pending;
+        return lifecycleResult;
     }
 
     async enqueueSessionUserMessage(params: Readonly<{
@@ -4254,10 +4281,6 @@ export class ApiSessionClient extends EventEmitter {
         const recoveryDecision = await this.revalidateUsageLimitRecoveryForExplicitUserPrompt(localId);
         if (recoveryDecision.status !== 'ready') {
             return { recoveryBlocked: recoveryDecision };
-        }
-
-        if (this.startedByDaemonProcess) {
-            await this.notifyDaemonConnectedServiceTurnLifecycle('prompt_or_steer');
         }
 
         const providerAcceptancePending = this.isCurrentPendingInputServerContract();
@@ -5782,18 +5805,6 @@ export class ApiSessionClient extends EventEmitter {
         const materializedMessage = materializeResult.message && !materializeResult.message.localId && materializedLocalId
             ? { ...materializeResult.message, localId: materializedLocalId }
             : materializeResult.message ?? null;
-        if (materializeResult.providerDeliveryContractInvalid === true) {
-            logger.debug('[pendingQueue] blocking materialized delivery with an invalid provider contract', {
-                sessionId: this.sessionId,
-                localId: materializedLocalId,
-            });
-            if (materializedLocalId) {
-                await this.blockPendingQueueDeliveryLocalId(materializedLocalId, 'unsupported_action', {
-                    canonicalOnly: false,
-                });
-            }
-            return { didMaterialize: false, result: { type: 'no_pending' } };
-        }
         const materializedProviderClaimState =
             materializeResult.didWrite === false
             && materializedMessage
@@ -5848,6 +5859,66 @@ export class ApiSessionClient extends EventEmitter {
                 unresolvedProviderDeliveryState,
             );
         }
+
+        if (materializeResult.providerDeliveryContractInvalid === true) {
+            if (
+                this.startedByDaemonProcess
+                && materializedMessage?.messageRole === 'user'
+                && materializedMessage.requestedAction === undefined
+            ) {
+                logger.debug('[pendingQueue] retained materialized delivery without predecessor authorization support', {
+                    sessionId: this.sessionId,
+                    localId: materializedLocalId,
+                });
+                return {
+                    didMaterialize: false,
+                    result: {
+                        type: 'deferred',
+                        reason: 'request_auth_source_cutover',
+                    },
+                };
+            }
+            logger.debug('[pendingQueue] blocking materialized delivery with an invalid provider contract', {
+                sessionId: this.sessionId,
+                localId: materializedLocalId,
+            });
+            if (materializedLocalId) {
+                await this.blockPendingQueueDeliveryLocalId(materializedLocalId, 'unsupported_action', {
+                    canonicalOnly: false,
+                });
+            }
+            return { didMaterialize: false, result: { type: 'no_pending' } };
+        }
+
+        if (
+            this.startedByDaemonProcess
+            && materializedMessage?.messageRole === 'user'
+        ) {
+            const requestedAction = materializedMessage.requestedAction;
+            const lifecycleResult = requestedAction
+                ? await this.notifyDaemonConnectedServiceTurnLifecycle(
+                    'prompt_or_steer',
+                    undefined,
+                    undefined,
+                    requestedAction,
+                )
+                : null;
+            if (lifecycleResult?.status !== 'continue') {
+                logger.debug('[pendingQueue] retained materialized delivery for connected-service source cutover', {
+                    sessionId: this.sessionId,
+                    localId: materializedLocalId,
+                    lifecycleStatus: lifecycleResult?.status ?? 'unavailable',
+                });
+                return {
+                    didMaterialize: false,
+                    result: {
+                        type: 'deferred',
+                        reason: 'request_auth_source_cutover',
+                    },
+                };
+            }
+        }
+
         const shouldClearResolvedCanonicalDelivery = (
             !unresolvedProviderDeliveryState
             && materializedMessage

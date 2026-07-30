@@ -113,6 +113,7 @@ import {
 import { HAPPIER_CLAUDE_ENDPOINT_STATE_ENV_KEY } from '@/backends/claude/endpointRecovery/claudeEndpointArtifacts';
 import { createOnHappySessionWebhook } from './sessions/onHappySessionWebhook';
 import { applyTrackedSessionTurnLifecycle } from './sessions/applyTrackedSessionTurnLifecycle';
+import { connectedServiceTurnLifecycleContinue } from './connectedServices/connectedServiceTurnLifecycleContract';
 import { resolveSessionRuntimeSnapshot } from './sessions/runtimeSnapshot/resolveSessionRuntimeSnapshot';
 import { resolveRespawnSessionRuntimeSnapshot } from './sessions/runtimeSnapshot/resolveRespawnSessionRuntimeSnapshot';
 import { buildInactiveUsageLimitResumeSpawnOptions } from './sessions/runtimeSnapshot/buildInactiveUsageLimitResumeSpawnOptions';
@@ -6405,7 +6406,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             ...(input.terminalStatus ? { terminalStatus: input.terminalStatus } : {}),
           },
         });
-        return { status: 'recorded' as const, trackedTurn: trackedTurnResult };
+        return connectedServiceTurnLifecycleContinue(trackedTurnResult);
       },
       handleConnectedServiceQuotaSnapshot: async (input) => await recordConnectedServiceRuntimeQuotaSnapshotForSession({
         accountUsageRecorder: {
