@@ -22,11 +22,11 @@ import {
     type TranscriptToolRouteCommon,
 } from '@/components/sessions/transcript/transcriptSessionCommon';
 import { TRANSCRIPT_WEB_TOOL_CALL_PREPEND_ANCHOR_TEST_ID_PREFIX } from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
+import { renderGroupedToolCallRowContent } from '@/components/sessions/transcript/toolCalls/units/groupedToolCallRowContent';
 import {
-    renderGroupedToolCallRowContent,
     resolveGroupedPreviewSidechainIds,
     shouldRenderGroupedToolCallWithMessageView,
-} from '@/components/sessions/transcript/toolCalls/units/groupedToolCallRowContent';
+} from '@/components/sessions/transcript/toolCalls/units/groupedToolCallRowRenderDecision';
 import { resolveToolRowPinAction } from '@/components/sessions/transcript/toolCalls/ToolCallPinAction';
 import {
     ToolCallsGroupExpandMoreChrome,

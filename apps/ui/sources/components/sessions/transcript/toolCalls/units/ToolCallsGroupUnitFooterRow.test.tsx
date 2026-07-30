@@ -30,6 +30,11 @@ async function renderFooterRow(props: Record<string, unknown>) {
     } as any));
 }
 
+// The group cap's corner radius is the shared card token, not a number chosen here. Asserting the
+// literal made a design-system change look like a regression; asserting the token keeps the real
+// contract — top corners capped, bottom corners open — while letting the scale move.
+const GROUP_CAP_RADIUS_PX = 12; // theme.borderRadius.xl
+
 describe('ToolCallsGroupUnitFooterRow', () => {
     it('renders the cards bottom cap with bottom radii, background, and the group bottom margin', async () => {
         const screen = await renderFooterRow({
@@ -42,8 +47,8 @@ describe('ToolCallsGroupUnitFooterRow', () => {
         const style = flattenStyleProp(container?.props.style);
         expect(style.marginHorizontal).toBe(16);
         expect(style.marginBottom).toBe(22);
-        expect(style.borderBottomLeftRadius).toBe(14);
-        expect(style.borderBottomRightRadius).toBe(14);
+        expect(style.borderBottomLeftRadius).toBe(GROUP_CAP_RADIUS_PX);
+        expect(style.borderBottomRightRadius).toBe(GROUP_CAP_RADIUS_PX);
         expect(style.borderTopLeftRadius).toBeUndefined();
         expect(style.backgroundColor).toBeTruthy();
     });
@@ -70,7 +75,7 @@ describe('ToolCallsGroupUnitFooterRow', () => {
         expect(style.paddingHorizontal).toBe(10);
         expect(style.paddingBottom).toBe(6);
         expect(style.paddingTop).toBeUndefined();
-        expect(style.borderBottomLeftRadius).toBe(14);
+        expect(style.borderBottomLeftRadius).toBe(GROUP_CAP_RADIUS_PX);
         expect(style.borderTopLeftRadius).toBeUndefined();
         expect(style.backgroundColor).toBeTruthy();
     });

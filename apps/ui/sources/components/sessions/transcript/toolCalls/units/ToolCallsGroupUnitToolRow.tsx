@@ -16,11 +16,11 @@ import { resolveMessageRouteIdForDisplay } from '@/sync/domains/messages/message
 import type { PersistedSessionMessagePinV1 } from '@/sync/domains/messages/pins/sessionMessagePins';
 import { useEnsureSidechainsLoaded } from '@/hooks/session/useEnsureSidechainsLoaded';
 
+import { renderGroupedToolCallRowContent } from './groupedToolCallRowContent';
 import {
-    renderGroupedToolCallRowContent,
     resolveGroupedPreviewSidechainIds,
     shouldRenderGroupedToolCallWithMessageView,
-} from './groupedToolCallRowContent';
+} from './groupedToolCallRowRenderDecision';
 import {
     resolveToolCallMessageForSession,
     resolveToolCallsGroupChromeVariant,

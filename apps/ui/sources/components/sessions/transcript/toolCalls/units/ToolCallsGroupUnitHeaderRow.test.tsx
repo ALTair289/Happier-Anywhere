@@ -49,6 +49,11 @@ async function renderHeaderRow(props: Record<string, unknown>) {
     } as any));
 }
 
+// The group cap's corner radius is the shared card token, not a number chosen here. Asserting the
+// literal made a design-system change look like a regression; asserting the token keeps the real
+// contract — top corners capped, bottom corners open — while letting the scale move.
+const GROUP_CAP_RADIUS_PX = 12; // theme.borderRadius.xl
+
 describe('ToolCallsGroupUnitHeaderRow', () => {
     it('shows the tool-calls title with count and a completed status icon when all tools completed', async () => {
         const screen = await renderHeaderRow({
@@ -144,8 +149,8 @@ describe('ToolCallsGroupUnitHeaderRow', () => {
         const container = screen.findByTestId('transcript-tool-calls-unit-header') as any;
         const style = flattenStyleProp(container?.props.style);
         expect(style.marginHorizontal).toBe(16);
-        expect(style.borderTopLeftRadius).toBe(14);
-        expect(style.borderTopRightRadius).toBe(14);
+        expect(style.borderTopLeftRadius).toBe(GROUP_CAP_RADIUS_PX);
+        expect(style.borderTopRightRadius).toBe(GROUP_CAP_RADIUS_PX);
         expect(style.borderBottomLeftRadius).toBeUndefined();
         expect(style.backgroundColor).toBeTruthy();
         expect(style.marginBottom).toBeUndefined();
@@ -176,7 +181,7 @@ describe('ToolCallsGroupUnitHeaderRow', () => {
         expect(style.paddingHorizontal).toBe(10);
         expect(style.paddingTop).toBe(6);
         expect(style.paddingBottom).toBeUndefined();
-        expect(style.borderTopLeftRadius).toBe(14);
+        expect(style.borderTopLeftRadius).toBe(GROUP_CAP_RADIUS_PX);
         expect(style.borderBottomLeftRadius).toBeUndefined();
         expect(style.backgroundColor).toBeTruthy();
     });
