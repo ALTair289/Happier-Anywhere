@@ -10162,6 +10162,8 @@ settingsSession: {
       anthropic: "Anthropic (по умолчанию)",
       deepseek: "DeepSeek (Рассуждение)",
       zai: "Z.AI (GLM-4.6)",
+      minimax: "MiniMax (M3)",
+      minimaxCn: "MiniMax (M3, CN)",
       codex: "Codex (по умолчанию)",
       openai: "OpenAI (GPT-5)",
       azureOpenai: "Azure OpenAI",
