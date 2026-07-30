@@ -51,8 +51,12 @@ async function defaultWaitForProcess(child) {
   return await new Promise(() => {});
 }
 
-async function defaultWaitForRetry() {
-  await new Promise((resolve) => setTimeout(resolve, 5_000));
+function resolveRetryDelayMs(attempt) {
+  return Math.min(60_000, 5_000 * (2 ** Math.max(0, attempt - 1)));
+}
+
+async function defaultWaitForRetry({ delayMs }) {
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function requireSuccessful(result, description) {
@@ -237,9 +241,10 @@ export async function startStackDevTargets(
       env: mutagenEnv,
     });
 
-    const startTarget = async (target, index) => {
+    const startTarget = async (target, index, existingTunnel = null) => {
       let phase = 'prepare';
-      let tunnel = null;
+      let tunnel = existingTunnel;
+      let createdTunnel = false;
       try {
         if (target.limaInstance) {
           requireSuccessful(
@@ -349,17 +354,20 @@ export async function startStackDevTargets(
           stackName,
         });
         phase = 'tunnel';
-        tunnel = spawnProcess({
-          label: `remote:${target.name}`,
-          command: 'ssh',
-          args: buildSshTunnelArgs(target, {
-            localServerPort,
-            remoteServerPort,
-            sshArgs: openSsh.sshArgs,
-          }),
-          env,
-        });
-        tunnelsByTarget.set(target.name, tunnel);
+        if (!tunnel) {
+          tunnel = spawnProcess({
+            label: `remote:${target.name}`,
+            command: 'ssh',
+            args: buildSshTunnelArgs(target, {
+              localServerPort,
+              remoteServerPort,
+              sshArgs: openSsh.sshArgs,
+            }),
+            env,
+          });
+          createdTunnel = true;
+          tunnelsByTarget.set(target.name, tunnel);
+        }
         requireSuccessful(
           await runProcess({
             label: `remote:${target.name}`,
@@ -389,7 +397,7 @@ export async function startStackDevTargets(
         targetFailuresByTarget.delete(target.name);
         return worker;
       } catch (error) {
-        if (tunnel) {
+        if (tunnel && (createdTunnel || phase === 'tunnel')) {
           if (tunnelsByTarget.get(target.name) === tunnel) {
             tunnelsByTarget.delete(target.name);
           }
@@ -409,6 +417,7 @@ export async function startStackDevTargets(
       lifecycleTasks.push((async () => {
         let worker = initialWorker;
         let tunnel = initialTunnel;
+        let retryAttempt = 0;
         while (!closed) {
           if (worker && tunnel) {
             const outcome = await Promise.race([
@@ -421,13 +430,14 @@ export async function startStackDevTargets(
             if (workersByTarget.get(target.name) === worker) {
               workersByTarget.delete(target.name);
             }
-            if (tunnelsByTarget.get(target.name) === tunnel) {
+            const tunnelExited = outcome.kind === 'tunnel-exit';
+            if (tunnelExited && tunnelsByTarget.get(target.name) === tunnel) {
               tunnelsByTarget.delete(target.name);
             }
-            await Promise.allSettled([
-              stopProcess(worker),
-              stopProcess(tunnel),
-            ]);
+            await stopProcess(worker);
+            if (tunnelExited) {
+              await stopProcess(tunnel);
+            }
             const code = String(outcome.result?.code ?? 'unknown');
             targetFailuresByTarget.set(target.name, {
               name: target.name,
@@ -438,16 +448,24 @@ export async function startStackDevTargets(
               `[dev-targets] ${target.name} remote ${outcome.kind} (code=${code}); retrying target lifecycle`,
             );
             worker = null;
-            tunnel = null;
+            if (tunnelExited) {
+              tunnel = null;
+            }
           }
 
           while (!closed) {
+            retryAttempt += 1;
+            const retryDelayMs = resolveRetryDelayMs(retryAttempt);
             const retryOutcome = await Promise.race([
-              waitForRetry().then(() => 'retry'),
+              waitForRetry({
+                attempt: retryAttempt,
+                delayMs: retryDelayMs,
+                target,
+              }).then(() => 'retry'),
               closeRequested.then(() => 'close'),
             ]);
             if (retryOutcome === 'close' || closed) return;
-            worker = await startTarget(target, index);
+            worker = await startTarget(target, index, tunnel);
             tunnel = tunnelsByTarget.get(target.name) ?? null;
             if (worker && tunnel) break;
           }

@@ -440,6 +440,71 @@ test('supervisor retries when the only target bootstrap fails after its initial 
   }
 });
 
+test('supervisor increases retry delay across repeated target lifecycle failures', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-dev-target-retry-backoff-'));
+  const credentialPath = join(root, 'access.key');
+  const retryDelays = [];
+  let notifyThirdRetry;
+  let releaseThirdRetry;
+  const thirdRetryObserved = new Promise((resolve) => {
+    notifyThirdRetry = resolve;
+  });
+  const thirdRetryGate = new Promise((resolve) => {
+    releaseThirdRetry = resolve;
+  });
+  await writeFile(credentialPath, '{"token":"secret"}\n', { mode: 0o600 });
+
+  try {
+    const controller = await startStackDevTargets(
+      {
+        stackName: 'repo-test',
+        stackBaseDir: join(root, 'stack'),
+        sourceDir: '/source/happier',
+        localServerPort: 3005,
+        activeServerId: 'stack_repo-test__id_default',
+        credentialPath,
+        targets: [{
+          name: 'linux',
+          platform: 'posix',
+          ssh: 'linux-ssh',
+          repoDir: '/home/dev/happier',
+          cliHomeDir: '/home/dev/.happier/linux',
+        }],
+        env: {},
+      },
+      {
+        runProcess: async ({ command }) => {
+          if (command === 'mutagen') return { code: 0 };
+          return { code: 1 };
+        },
+        spawnProcess: ({ label }) => {
+          if (label === 'mutagen') return { label, exitCode: null };
+          throw new Error(`unexpected spawnProcess call: ${label}`);
+        },
+        stopProcess: async (worker) => {
+          worker.exitCode = 0;
+        },
+        waitForRetry: async ({ delayMs }) => {
+          retryDelays.push(delayMs);
+          if (retryDelays.length === 3) {
+            notifyThirdRetry();
+            await thirdRetryGate;
+          }
+        },
+        logger: { error() {} },
+      },
+    );
+
+    await thirdRetryObserved;
+    assert.deepEqual(retryDelays.slice(0, 3), [5_000, 10_000, 20_000]);
+
+    releaseThirdRetry();
+    await controller.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('remote worker exit restarts its configured target lifecycle without restarting the local Stack', async () => {
   const root = await mkdtemp(join(tmpdir(), 'hstack-dev-target-reconnect-'));
   const credentialPath = join(root, 'access.key');
@@ -514,7 +579,7 @@ test('remote worker exit restarts its configured target lifecycle without restar
   }
 });
 
-test('remote worker exit is observed while its independent reverse tunnel remains open', async () => {
+test('remote worker exit reuses its independent healthy reverse tunnel', async () => {
   const root = await mkdtemp(join(tmpdir(), 'hstack-dev-target-worker-tunnel-'));
   const credentialPath = join(root, 'access.key');
   const tunnels = [];
@@ -581,7 +646,7 @@ test('remote worker exit is observed while its independent reverse tunnel remain
     const retried = await Promise.race([
       new Promise((resolve) => {
         const poll = () => {
-          if (workers.length >= 2 && tunnels.length >= 2) resolve(true);
+          if (workers.length >= 2) resolve(true);
           else setTimeout(poll, 1);
         };
         poll();
@@ -589,6 +654,22 @@ test('remote worker exit is observed while its independent reverse tunnel remain
       new Promise((resolve) => setTimeout(() => resolve(false), 100)),
     ]);
     assert.equal(retried, true);
+    assert.equal(tunnels.length, 1, 'worker recovery should not replace a healthy reverse tunnel');
+    assert.equal(tunnels[0].exitCode, null, 'the healthy reverse tunnel should remain active');
+
+    tunnels[0].exitCode = 1;
+    tunnels[0].resolveCompletion({ code: 1, signal: null });
+    const tunnelReplaced = await Promise.race([
+      new Promise((resolve) => {
+        const poll = () => {
+          if (workers.length >= 3 && tunnels.length >= 2) resolve(true);
+          else setTimeout(poll, 1);
+        };
+        poll();
+      }),
+      new Promise((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    assert.equal(tunnelReplaced, true, 'a failed reverse tunnel should restart the full transport');
   } finally {
     await controller?.close?.();
     await rm(root, { recursive: true, force: true });
