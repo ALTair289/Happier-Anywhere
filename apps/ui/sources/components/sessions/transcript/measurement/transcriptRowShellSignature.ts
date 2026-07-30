@@ -305,6 +305,11 @@ export function buildTranscriptRowShellSignature(params: Readonly<{
         // authority. What matters is that the key still moves on every change of the queue's
         // COMPOSITION (ids, order, count) and of each message's text extent, which is what
         // `isStructuralSignatureDelta` needs to re-seed the floor when the queue drains.
+        // KNOWN RESIDUAL: if a runtime-derived wait notice DISAPPEARS while the same queue stays put,
+        // the reservation floor keeps that row's taller measured height (a forcing `minHeight`) until
+        // the next composition change, i.e. up to one notice of blank space. That is bounded and
+        // transient, and it is the deliberate trade against the previous behaviour, which destroyed
+        // the row's measurement on every server tick. Do not buy it back with a ticking field.
         const hasProviderDeliveryInFlight = item.pendingMessages.some(isPendingMessageProviderDeliveryInFlight);
         return {
             ...base,
@@ -390,7 +395,7 @@ function buildPendingMessagePresentationKey(
         message.id,
         message.localId ?? '',
         visualState.kind,
-        visualState.deliveryBlockedReason ?? '',
+        visualState.deliveryBlockedPresentation?.labelKey ?? '',
         buildPendingTextPresentationKey(message),
     ].join(':');
 }
