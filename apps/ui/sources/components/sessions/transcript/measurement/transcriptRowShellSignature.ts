@@ -2,8 +2,17 @@ import type { ChatListItem } from '@/components/sessions/chatListItems';
 import type { TranscriptTurn } from '@/components/sessions/transcript/turnGrouping/buildTranscriptTurns';
 import type { TranscriptToolGroupUnitItem } from '@/components/sessions/transcript/turnGrouping/buildTranscriptTurnUnits';
 import type { TranscriptWindowGapItem } from '@/components/sessions/transcript/viewport/window/transcriptTargetWindowTypes';
+import {
+    groupedToolCallRowPaintDependsOnGroupExpansion,
+} from '@/components/sessions/transcript/toolCalls/units/groupedToolCallRowRenderDecision';
+import {
+    getPendingMessageVisualState,
+    isPendingMessageProviderDeliveryInFlight,
+} from '@/components/sessions/pending/pendingMessageVisualState';
 import { resolveToolStatusIndicatorKind } from '@/components/tools/shell/presentation/resolveToolStatusIndicatorKind';
 import type { Message } from '@/sync/domains/messages/messageTypes';
+import type { SessionActionDraft } from '@/sync/domains/sessionActions/sessionActionDraftTypes';
+import type { DiscardedPendingMessage, PendingMessage } from '@/sync/domains/state/storageTypes';
 
 import type {
     TranscriptItemHeightRowState,
@@ -158,8 +167,14 @@ export function buildTranscriptRowShellSignature(params: Readonly<{
 
     // Per-unit tool-group rows (N2c): deliberately SMALL structural keys so the height
     // cache stays valid across sibling churn — caps key on group facts only, tool rows
-    // key on their OWN message revision plus group expansion.
+    // key on their OWN message revision (plus group expansion only where it can change
+    // what the row paints — see F-P1 below).
     if (item.kind === 'tool-group-header') {
+        // F-P1: expansion is NOT an input here. The header's only expansion-dependent output is a
+        // 16px chevron in a row whose height is set by its 13px title text, and the live per-variant
+        // header measurement behind `estimateTranscriptRowHeightFromCache` has no expanded/collapsed
+        // split for exactly that reason. Keying on it only discarded the header's measured height
+        // (Legend `validateItemSizeVersion` drops `sizesKnown` + `sizes`) on every tap.
         return {
             ...base,
             structuralKey: buildStableJsonSignature({
@@ -169,9 +184,8 @@ export function buildTranscriptRowShellSignature(params: Readonly<{
                     getMessageById: params.getMessageById,
                     toolMessageIds: item.toolMessageIds,
                 }),
-                expanded: item.expanded,
             }),
-            expansionKey: [item.expanded ? 'tools:expanded' : 'tools:collapsed', 'thinking:none'].join('|'),
+            expansionKey: 'tools:none|thinking:none',
             rowState: 'stable',
         };
     }
@@ -190,14 +204,27 @@ export function buildTranscriptRowShellSignature(params: Readonly<{
 
     if (item.kind === 'tool-group-tool') {
         const message = params.getMessageById(item.toolMessageId);
+        // F-P1: group expansion belongs in this row's size version ONLY when it can change what the
+        // row PAINTS. `ChatListInternal` wires Legend's vendored `getItemSizeVersion` to this
+        // signature and `validateItemSizeVersion` DELETES `sizesKnown` + `sizes` whenever the version
+        // moves, so keying every grouped tool row on expansion made one expand/collapse tap throw
+        // away the measured height of every tool row in the group and re-place them from estimates.
+        // The renderer module stays the single decision-maker; this only consumes its answer.
+        const expansionAffectsPaint = message?.kind === 'tool-call'
+            && groupedToolCallRowPaintDependsOnGroupExpansion(message);
         return {
             ...base,
             structuralKey: buildStableJsonSignature({
                 groupId: item.groupId,
-                groupExpanded: item.expanded,
+                groupExpanded: expansionAffectsPaint ? item.expanded : null,
                 messageRevision: buildMessageShellStructuralKey(item.toolMessageId, message, params.getMessageRevisionById(item.toolMessageId)),
             }),
-            expansionKey: [item.expanded ? 'tools:expanded' : 'tools:collapsed', 'thinking:none'].join('|'),
+            expansionKey: [
+                expansionAffectsPaint
+                    ? (item.expanded ? 'tools:expanded' : 'tools:collapsed')
+                    : 'tools:none',
+                'thinking:none',
+            ].join('|'),
             rowState: resolveMessageRowState({
                 activeThinkingMessageId: params.activeThinkingMessageId,
                 isLatestCommittedActivity: item.toolMessageId === params.latestCommittedActivityKey,
@@ -256,14 +283,148 @@ export function buildTranscriptRowShellSignature(params: Readonly<{
         };
     }
 
+    // J/D2 (2026-07-30): the remaining shapes are keyed on PRESENTATION facts, never on a
+    // serialization of the record. `ChatListInternal` wires the vendored Legend
+    // `getItemSizeVersion` to this signature and `validateItemSizeVersion` DELETES `sizesKnown` +
+    // `sizes` whenever the version moves, while `TranscriptRowShell` additionally calls
+    // `resetReservationForStructuralChange` (wiping `minHeight` AND `lastMeasuredHeight`) on an
+    // `isStructuralSignatureDelta`. Routing these five through `buildStableJsonSignature(item)`
+    // therefore destroyed the row's measured height on every field bump anywhere in the record —
+    // and a `PendingMessage` carries `updatedAt` plus the whole `rawRecord`, so every server touch
+    // of a queued message (delivery status, outbox operation, send state) re-sized the row from an
+    // estimate. Measured native consequence: a ±12.70px scroll oscillation with `contentLength`
+    // byte-identical while the pending row is on screen, each reversal re-virtualising the list.
+    // This is the same rule message rows already follow (`buildMessageShellStructuralKey`:
+    // "Never serialize the message itself"); these shapes never got it.
+    if (item.kind === 'pending-queue') {
+        // Height-bearing presentation only. `getPendingMessageVisualState` is the canonical owner of
+        // the chip/notice a row paints, so its answer is consumed rather than re-derived. Its
+        // session-runtime inputs (`sessionRuntime`, FIFO predecessor) and the block's own local
+        // `materializingLocalIds` are NOT available here — those flip `queued` ↔ `queued_behind_turn`
+        // without changing the record, and for that the row's own `onLayout` stays the measurement
+        // authority. What matters is that the key still moves on every change of the queue's
+        // COMPOSITION (ids, order, count) and of each message's text extent, which is what
+        // `isStructuralSignatureDelta` needs to re-seed the floor when the queue drains.
+        const hasProviderDeliveryInFlight = item.pendingMessages.some(isPendingMessageProviderDeliveryInFlight);
+        return {
+            ...base,
+            structuralKey: [
+                ...item.pendingMessages.map((message) => buildPendingMessagePresentationKey(message, hasProviderDeliveryInFlight)),
+                ...item.discardedMessages.map((message) => buildDiscardedPendingMessagePresentationKey(message)),
+            ].join('|'),
+            expansionKey: 'tools:none|thinking:none',
+            rowState: 'pending-action',
+        };
+    }
+
+    if (item.kind === 'pending-user-action') {
+        // `request.arguments` is arbitrary provider payload (unbounded) and is immutable for a given
+        // request id, so it is identity, not a signature input.
+        return {
+            ...base,
+            structuralKey: `${item.request.id}:${item.request.kind}:${item.request.tool}`,
+            expansionKey: 'tools:none|thinking:none',
+            rowState: 'pending-action',
+        };
+    }
+
+    if (item.kind === 'action-draft') {
+        return {
+            ...base,
+            structuralKey: buildActionDraftPresentationKey(item.draft),
+            expansionKey: 'tools:none|thinking:none',
+            rowState: 'pending-action',
+        };
+    }
+
+    if (item.kind === 'fork-divider') {
+        return {
+            ...base,
+            structuralKey: `${item.parentSessionId}:${item.childSessionId}:${item.parentCutoffSeqInclusive}`,
+            expansionKey: 'tools:none|thinking:none',
+            rowState: 'stable',
+        };
+    }
+
+    if (item.kind === 'transcript-window-gap') {
+        return {
+            ...base,
+            structuralKey: `${item.id}:${item.direction}`,
+            expansionKey: 'tools:none|thinking:none',
+            rowState: 'stable',
+        };
+    }
+
+    // Exhaustive: a NEW row shape must declare its own presentation-scoped key rather than silently
+    // inheriting a whole-record serialization in this per-row-per-render path.
+    const unhandled: never = item;
     return {
         ...base,
-        structuralKey: buildStableJsonSignature(item),
+        structuralKey: (unhandled as { id?: string }).id ?? 'unknown',
         expansionKey: 'tools:none|thinking:none',
-        rowState: item.kind === 'pending-queue' || item.kind === 'pending-user-action' || item.kind === 'action-draft'
-            ? 'pending-action'
-            : 'stable',
+        rowState: 'stable',
     };
+}
+
+/**
+ * Text extent, not text. A queued prompt can be very large (a pasted spec), and this runs per row
+ * per render, so the key carries the two facts that decide how many lines the block paints:
+ * rendered length and hard line breaks. It reads `displayText ?? text` — the same string
+ * `PendingMessagesTranscriptBlock` renders.
+ */
+function buildPendingTextPresentationKey(message: Pick<PendingMessage, 'text' | 'displayText'>): string {
+    const rendered = (message.displayText ?? message.text) ?? '';
+    let newlines = 0;
+    for (let i = 0; i < rendered.length; i += 1) {
+        if (rendered.charCodeAt(i) === 10) newlines += 1;
+    }
+    return `${rendered.length}n${newlines}`;
+}
+
+function buildPendingMessagePresentationKey(
+    message: PendingMessage,
+    hasProviderDeliveryInFlight: boolean,
+): string {
+    const visualState = getPendingMessageVisualState(message, { hasProviderDeliveryInFlight });
+    return [
+        message.id,
+        message.localId ?? '',
+        visualState.kind,
+        visualState.deliveryBlockedReason ?? '',
+        buildPendingTextPresentationKey(message),
+    ].join(':');
+}
+
+function buildDiscardedPendingMessagePresentationKey(message: DiscardedPendingMessage): string {
+    return [
+        'discarded',
+        message.id,
+        message.localId ?? '',
+        message.discardedReason ? 'reason' : '',
+        buildPendingTextPresentationKey(message),
+    ].join(':');
+}
+
+/**
+ * A draft row paints its action form, so the row's height moves with the draft's status and with
+ * how much text its inputs hold. The input VALUES are not serialized (arbitrary payload, and the
+ * form is actively typed into); their total extent is, so a shrink still re-seeds the floor.
+ */
+function buildActionDraftPresentationKey(draft: SessionActionDraft): string {
+    let inputKeyCount = 0;
+    let inputTextLength = 0;
+    for (const key of Object.keys(draft.input)) {
+        inputKeyCount += 1;
+        const value = draft.input[key];
+        if (typeof value === 'string') inputTextLength += value.length;
+    }
+    return [
+        draft.id,
+        draft.actionId,
+        draft.status,
+        draft.error ? 'error' : '',
+        `${inputKeyCount}k${inputTextLength}`,
+    ].join(':');
 }
 
 function resolveForkContextKeyForItem(

@@ -248,13 +248,6 @@ describe('estimateTranscriptRowHeightFromContent', () => {
     const MEASURED_TOOL_ROW_PX = 28;
     const MEASURED_TOOL_GROUP_FOOTER_PX = 34;
 
-    const toolCallsGroupItem = (toolCount: number): TranscriptRowShellItem => ({
-        kind: 'tool-calls-group',
-        id: 'g1',
-        toolMessageIds: Array.from({ length: toolCount }, (_, i) => `t${i}`),
-        createdAt: 1,
-    } as TranscriptRowShellItem);
-
     const toolGroupUnitItem = (kind: string): TranscriptRowShellItem => ({
         kind,
         id: `g1#${kind}`,
@@ -293,46 +286,6 @@ describe('estimateTranscriptRowHeightFromContent', () => {
         expect(giant).toBeGreaterThan(short as number);
     });
 
-    it('sums a turn estimate over its messages and counts tool messages compactly', () => {
-        const turnItem = {
-            kind: 'turn',
-            id: 't1',
-            turn: {
-                userMessageId: 'u1',
-                content: [
-                    { kind: 'message', messageId: 'a1' },
-                    { kind: 'tool_calls', toolMessageIds: ['tc1', 'tc2'] },
-                ],
-            },
-        } as unknown as TranscriptRowShellItem; // minimal turn fixture: only the fields the estimator walks
-        const estimate = estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            getMessageById: (messageId) => (
-                messageId === 'a1' ? agentText('a1', 'y'.repeat(720)) : null
-            ),
-            item: turnItem,
-        });
-        // 720 chars ≈ 10 lines of text + base, plus compact rows for the user
-        // message (unresolvable → compact) and two tool messages.
-        expect(estimate).toBeGreaterThan(250);
-        expect(estimate).toBeLessThan(1_000);
-    });
-
-    it('scales a tool-calls group estimate by its RENDERED tool rows, not its tool count', () => {
-        const estimateFor = (toolCount: number) => estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            getMessageById: () => null,
-            item: toolCallsGroupItem(toolCount),
-        }) as number;
-        // Below the collapsed-preview count the group really does render one row per tool.
-        expect(estimateFor(3)).toBeGreaterThan(estimateFor(2));
-        // Above it the group renders at most `collapsedPreviewCount` preview rows plus a single
-        // "show N more" row — `buildTranscriptTurnUnits.ts` `appendToolGroupUnits`. A 30-tool and
-        // a 300-tool group therefore lay out the SAME height, and both are a few hundred px.
-        expect(estimateFor(300)).toBe(estimateFor(30));
-        expect(estimateFor(300)).toBeLessThan(700);
-    });
-
     /**
      * T-3 · residual 1 — the cap rows are the gap.
      *
@@ -357,175 +310,11 @@ describe('estimateTranscriptRowHeightFromContent', () => {
         expect(estimateFor(toolGroupUnitItem('tool-group-expand'))).toBe(MEASURED_TOOL_ROW_PX);
     });
 
-    /**
-     * T-3 · residual 2 — the ceiling was the settings CLAMP, not the session's preview count.
-     *
-     * `ESTIMATE_MAX_COLLAPSED_TOOL_ROWS` resolved the preview-count setting with
-     * `Number.MAX_SAFE_INTEGER`, which returns the clamp maximum (15) rather than what the
-     * session renders. A default-config group therefore estimated `(15 + 1) * 32 = 512` against a
-     * painted `33 + 28 + 3*28 + 34 = 179` — a 333px per-group phantom that accumulation turns
-     * into blank space above the viewport.
-     */
-    it('sizes a collapsed tool group from the session preview count, not the settings clamp', () => {
-        const estimateFor = (collapsedPreviewCount: number) => estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            getMessageById: () => null,
-            item: toolCallsGroupItem(300),
-            toolGroupLayout: { collapsedPreviewCount, isExpanded: () => false },
-        }) as number;
-        // header 33 + "show 297 more" 28 + 3 preview rows 84 + footer 34.
-        expect(estimateFor(3)).toBe(179);
-        // The product default is 3, so the unthreaded estimate must land on the same 179.
-        expect(estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            getMessageById: () => null,
-            item: toolCallsGroupItem(300),
-        })).toBe(179);
-        // A session configured at the clamp maximum really does render 15 preview rows.
-        expect(estimateFor(15)).toBe(33 + 28 + 15 * MEASURED_TOOL_ROW_PX + 34);
-    });
-
-    /**
-     * T-3 · residual 3 — the ceiling ignored expansion, so it UNDER-estimated.
-     *
-     * An expanded group renders every tool row. Capping it at the collapsed preview tail turned a
-     * bounded over-estimate into a ~47x under-estimate for a 300-tool group, and an under-estimate
-     * is not the safe direction: the renderer lays the row out short and then corrects it on the
-     * frame the user is watching, dragging every row below it.
-     */
-    it('does not under-estimate an EXPANDED tool group', () => {
-        const expanded = estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            getMessageById: () => null,
-            item: toolCallsGroupItem(300),
-            toolGroupLayout: { collapsedPreviewCount: 3, isExpanded: () => true },
-        }) as number;
-        // header 33 + 300 tool rows + footer 34 — no "show N more" row while expanded.
-        expect(expanded).toBe(33 + 300 * MEASURED_TOOL_ROW_PX + 34);
-        // A turn carrying that same expanded group must not collapse to the preview-tail height.
-        const turnWithExpandedGroup = estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            getMessageById: () => null,
-            item: {
-                kind: 'turn',
-                id: 't1',
-                turn: {
-                    userMessageId: null,
-                    content: [{
-                        kind: 'tool_calls',
-                        id: 'tc',
-                        toolMessageIds: Array.from({ length: 300 }, (_, i) => `t${i}`),
-                    }],
-                },
-            } as unknown as TranscriptRowShellItem,
-            toolGroupLayout: { collapsedPreviewCount: 3, isExpanded: () => true },
-        }) as number;
-        expect(turnWithExpandedGroup).toBeGreaterThanOrEqual(expanded);
-    });
-
-    // P-1 live web capture 2026-07-28, session `cms3bvdv13hlutm9p19hw1n9s`: the scroller reported
-    // scrollHeight 18620 while the three rendered rows measured [0, 3874, 26] (3900 total) — a
-    // 14,724px phantom the viewport was parked inside (scrollTop 17848 => blank screen). The
-    // middle row is one turn holding a few hundred tool calls; counting a compact row for EVERY
-    // tool message inflated the app's `getEstimatedItemSize` (ChatListInternal.tsx:1368-1375) to
-    // the 20,000px cap, and Legend sized its content model from that estimate.
-    it('does not inflate a collapsed tool-heavy turn into a phantom content size', () => {
-        const REAL_MEASURED_ROW_PX = 3_874;
-        const turnItem = {
-            kind: 'turn',
-            id: 't1',
-            turn: {
-                userMessageId: 'u1',
-                content: [
-                    { kind: 'message', messageId: 'a1' },
-                    {
-                        kind: 'tool_calls',
-                        id: 'tc',
-                        toolMessageIds: Array.from({ length: 314 }, (_, i) => `t${i}`),
-                    },
-                ],
-            },
-        } as unknown as TranscriptRowShellItem;
-        const estimate = estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            // ~12k chars of markdown: the text really rendered by that row.
-            getMessageById: (messageId) => (messageId === 'a1' ? agentText('a1', 'y'.repeat(12_000)) : null),
-            item: turnItem,
-        }) as number;
-        // The estimate must still carry the giant markdown body...
-        expect(estimate).toBeGreaterThan(3_000);
-        // ...but the phantom (estimate - real measured height) must be a healthy tail, not 14,724.
-        expect(estimate - REAL_MEASURED_ROW_PX).toBeLessThan(1_000);
-    });
-
-    // E-28: the pending-queue row is the row a send creates. Estimating it flat means every send
-    // lays it out at the compact constant and then corrects to the real height one frame later.
-    it('scales a pending-queue estimate with the queued message text', () => {
-        const pendingQueue = (text: string): TranscriptRowShellItem => ({
-            kind: 'pending-queue',
-            id: 'pending-queue',
-            pendingMessages: [{ id: 'p1', localId: null, createdAt: 1, updatedAt: 1, text }],
-            discardedMessages: [],
-        } as unknown as TranscriptRowShellItem);
-        const short = estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            getMessageById: () => null,
-            item: pendingQueue('ok'),
-        });
-        const long = estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            getMessageById: () => null,
-            item: pendingQueue('x'.repeat(600)),
-        });
-        // 600 chars ≈ 9 wrapped lines: a real multi-line send is far taller than the compact constant.
-        expect(long).toBeGreaterThan(150);
-        expect(long).toBeGreaterThan(short as number);
-        expect(short).toBeGreaterThan(0);
-    });
-
-    it('sums a pending-queue estimate over every queued and discarded message', () => {
-        const estimate = estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            getMessageById: () => null,
-            item: {
-                kind: 'pending-queue',
-                id: 'pending-queue',
-                pendingMessages: [
-                    { id: 'p1', localId: null, createdAt: 1, updatedAt: 1, text: 'a'.repeat(300) },
-                    { id: 'p2', localId: null, createdAt: 2, updatedAt: 2, text: 'b'.repeat(300) },
-                ],
-                discardedMessages: [
-                    { id: 'd1', localId: null, createdAt: 3, updatedAt: 3, text: 'c'.repeat(300), discardedAt: 4, discardedReason: null },
-                ],
-            } as unknown as TranscriptRowShellItem,
-        });
-        // Three ~5-line entries; a flat compact constant undercounts this by roughly 5x.
-        expect(estimate).toBeGreaterThan(350);
-    });
-
-    it('estimates a pending message from the string the row actually renders (displayText)', () => {
-        // `PendingMessagesTranscriptBlock` renders `displayText ?? text`. A message whose stored
-        // text is a short command but whose display form is long (or vice versa) must be sized
-        // from the DISPLAYED string, or the estimate is wrong for exactly the rows it covers.
-        const estimate = estimateTranscriptRowHeightFromContent({
-            toolCallsGroupChromeVariant: 'feed_background',
-            getMessageById: () => null,
-            item: {
-                kind: 'pending-queue',
-                id: 'pending-queue',
-                pendingMessages: [{
-                    id: 'p1',
-                    localId: null,
-                    createdAt: 1,
-                    updatedAt: 1,
-                    text: 'hi',
-                    displayText: 'z'.repeat(600),
-                }],
-                discardedMessages: [],
-            } as unknown as TranscriptRowShellItem,
-        });
-        expect(estimate).toBeGreaterThan(150);
-    });
+    // The `pending-queue` estimate lives in
+    // `estimateTranscriptRowHeightFromCache.pendingChrome.test.ts`. The three E-28 cases that used
+    // to sit here asserted the SCROLL CONTENT height (`> 150`, `> 350`) for a row whose ScrollView
+    // is capped at `transcriptPendingQueueMaxHeightPx` (default 80), so they certified an
+    // unbounded overshoot; the measured painted heights replaced them (J/D2, 2026-07-30).
 
     it('returns undefined for unknown item shapes so the renderer fallback applies', () => {
         const estimate = estimateTranscriptRowHeightFromContent({
@@ -612,26 +401,48 @@ describe('P · a tool row is sized by the chrome it actually paints', () => {
 
     /**
      * The deletion this module carries: `cards` mode disables grouping, so no `tool-group-*` row
-     * and no `tool-calls-group`/`tool_calls` shape can ever be built while the variant is `cards`
-     * (`appendToolGroupUnits` is their only producer and it is only reached from a grouped item).
-     * A `cards` column in the cap table would be numbers no session can reach, so there is none —
-     * the group shapes hand the row back to the renderer's own estimate instead. Re-enabling
-     * grouping in `cards` mode therefore has to arrive with its own measurement; it cannot
-     * silently inherit a feed cap or a fabricated card height.
+     * can ever be built while the variant is `cards` (`appendToolGroupUnits` is their only
+     * producer and it is only reached from a grouped item). A `cards` column in the cap table
+     * would be numbers no session can reach, so there is none — those rows hand themselves back
+     * to the renderer's own estimate instead. Re-enabling grouping in `cards` mode therefore has
+     * to arrive with its own measurement; it cannot silently inherit a feed cap.
      */
     it('has no calibration for tool-group rows in cards mode, because none can be built', () => {
         for (const kind of ['tool-group-header', 'tool-group-expand', 'tool-group-tool', 'tool-group-footer'] as const) {
             expect(estimateFor(toolUnitItem(kind, false), 'cards')).toBeUndefined();
         }
+        // ...and the feed variants are untouched by that deletion.
+        for (const kind of ['tool-group-header', 'tool-group-expand', 'tool-group-tool', 'tool-group-footer'] as const) {
+            expect(estimateFor(toolUnitItem(kind, false), 'feed_background')).toBeGreaterThan(0);
+        }
+    });
+
+    /**
+     * The grouped shapes are not sized here at all: `useTranscriptItemsPipeline` runs
+     * `buildTranscriptTurnUnits` unconditionally, which consumes every `turn` and
+     * `tool-calls-group` item into per-unit rows before `listData` reaches
+     * `getEstimatedItemSize`. Sizing them would be a second, unreachable calibration of the same
+     * rows the unit caps above already own.
+     */
+    it('hands the pre-decomposition group shapes back to the renderer estimate', () => {
         const groupItem = {
             kind: 'tool-calls-group',
             id: 'g1',
             toolMessageIds: ['t0', 't1', 't2'],
             createdAt: 1,
         } as unknown as TranscriptRowShellItem;
-        expect(estimateFor(groupItem, 'cards')).toBeUndefined();
-        // ...and the feed variants are untouched by that deletion.
-        expect(estimateFor(groupItem, 'feed_background')).toBe(33 + 34 + 3 * 28);
+        const turnItem = {
+            kind: 'turn',
+            id: 't1',
+            turn: {
+                userMessageId: null,
+                content: [{ kind: 'tool_calls', id: 'tc', toolMessageIds: ['t0', 't1', 't2'] }],
+            },
+        } as unknown as TranscriptRowShellItem;
+        for (const variant of ['cards', 'feed', 'feed_background'] as const) {
+            expect(estimateFor(groupItem, variant)).toBeUndefined();
+            expect(estimateFor(turnItem, variant)).toBeUndefined();
+        }
     });
 
     /**

@@ -106,23 +106,35 @@ describe('C-1 · a giant row must position its successor at its TRUE bottom', ()
         expect(taller).toBe(32 + (tallerLines * 22));
     });
 
-    it('does not ceiling an expanded tool group past 20,000px either', () => {
-        // The same accumulation applies to the other unbounded shape: an EXPANDED group renders one
-        // row per tool, so a group past ~713 tools crossed the ceiling and under-placed its successor.
-        const toolCount = 1_200;
+    // The other formerly unbounded shape — a single row holding a whole EXPANDED tool group — no
+    // longer exists at this boundary: `buildTranscriptTurnUnits` runs unconditionally in the
+    // pipeline and decomposes every group into per-unit rows, each of which is one measured cap,
+    // so no group-shaped row can reach an accumulation ceiling here.
+    it('never sees a whole tool group as one row, so no group can reach a ceiling', () => {
         const estimate = estimateTranscriptRowHeightFromContent({
             toolCallsGroupChromeVariant: 'feed_background',
             getMessageById: () => null,
             item: {
                 kind: 'tool-calls-group',
                 id: 'g1',
-                toolMessageIds: Array.from({ length: toolCount }, (_value, index) => `t${index}`),
+                toolMessageIds: Array.from({ length: 1_200 }, (_value, index) => `t${index}`),
                 createdAt: 1,
             } as TranscriptRowShellItem,
-            toolGroupLayout: { collapsedPreviewCount: 3, isExpanded: () => true },
         });
-        // header 33 + one 28px row per tool + footer 34.
-        expect(estimate).toBe(33 + (toolCount * 28) + 34);
-        expect(estimate).toBeGreaterThan(CAPTURED_CEILING_PX);
+        expect(estimate).toBeUndefined();
+        // One decomposed unit row is a measured cap, orders of magnitude below the former ceiling.
+        const unitRowPx = estimateTranscriptRowHeightFromContent({
+            toolCallsGroupChromeVariant: 'feed_background',
+            getMessageById: () => null,
+            item: {
+                kind: 'tool-group-tool',
+                id: 'g1#t0',
+                groupId: 'g1',
+                toolMessageId: 't0',
+                createdAt: 1,
+            } as unknown as TranscriptRowShellItem,
+        });
+        expect(unitRowPx).toBe(28);
+        expect(unitRowPx).toBeLessThan(CAPTURED_CEILING_PX);
     });
 });

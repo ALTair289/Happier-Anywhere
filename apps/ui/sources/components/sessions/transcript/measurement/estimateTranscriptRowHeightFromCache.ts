@@ -1,5 +1,8 @@
-import { DEFAULT_TRANSCRIPT_TOOL_CALLS_COLLAPSED_PREVIEW_COUNT } from '@/sync/domains/settings/transcriptToolCallsCollapsedPreviewCount';
+import { getPendingMessageVisualState } from '@/components/sessions/pending/pendingMessageVisualState';
+import { transcriptMarkdownTextStyle } from '@/components/sessions/transcript/transcriptMarkdownTypography';
 import type { Message } from '@/sync/domains/messages/messageTypes';
+import { settingsDefaults } from '@/sync/domains/settings/settings';
+import type { PendingMessage } from '@/sync/domains/state/storageTypes';
 // Type-only: the chrome variant is DECIDED by `resolveToolCallsGroupChromeVariant` in that module
 // (the renderer's own owner) and threaded in by `ChatListInternal`. This estimate consumes the
 // decision; it never re-derives one from the underlying settings.
@@ -125,6 +128,107 @@ const ESTIMATE_TOOL_ROW_PX = 28;
  */
 const ESTIMATE_TOOL_CARD_ROW_PX = 328;
 
+/**
+ * The `pending-queue` row — the row a SEND creates — sized from the chrome it actually paints.
+ *
+ * J/D2 (2026-07-30). The previous model summed `estimateTextBlockPx` over every queued and
+ * discarded message and floored at the compact constant. That is the height of the SCROLL CONTENT,
+ * not of the row, and it was wrong in both directions at once:
+ *
+ *   - it undershot a single short send. NATIVE MEASUREMENT (iOS simulator, rAF sampler on the
+ *     mounted LegendList fiber, `.project/reviews/2026-07-30-send-jiggle-and-anchor/J-send-jiggle.md`):
+ *     one short queued message paints **68.625px**, and the old model returned the 56px floor —
+ *     a 12.6px UNDERSHOOT, i.e. a literal overlap, re-applied on every pending-record tick because
+ *     the row's measured size was being deleted each time (see `transcriptRowShellSignature`).
+ *   - it overshot everything else without bound. `PendingMessagesTranscriptBlock` renders its
+ *     messages inside a `ScrollView` whose box is `maxHeight: transcriptPendingQueueMaxHeightPx`
+ *     (account default **80**), so three 300-char messages paint ~94px while the old model returned
+ *     ~438 — a ~340px phantom gap under the tail row during exactly the send the user is watching.
+ *
+ * DERIVATION, cross-validated against that one measurement. The block paints
+ * `TranscriptSeparatorRow` (`padding="none"`, `chipChrome="minimal"`) + optionally the
+ * terminal-draft notice + the capped `ScrollView` (`contentContainerStyle.paddingTop: 6`). Each
+ * message row is `userMessageWrapper` (`paddingBottom: 8`) wrapping `userMessageBubble`
+ * (`paddingVertical: 8` ×2) around markdown at `transcriptMarkdownTextStyle.lineHeight`:
+ *
+ *   header 14.625 + [ paddingTop 6 + wrapper 8 + bubble 16 + one 24px line ] = 68.625  ✓ measured
+ *
+ * so `PENDING_QUEUE_HEADER_ROW_PX` is the measured total minus the source-derived content
+ * (68.625 − 54). Everything else here is read off those same styles and is therefore DERIVED, not
+ * measured: the two-line header (only when queued and discarded rows coexist), the per-message
+ * notices, and the discarded section. They sit INSIDE the capped scroll box, so for any queue big
+ * enough to reach the cap they cannot move the answer at all.
+ */
+const PENDING_QUEUE_HEADER_ROW_PX = 14.625;
+/** Header grows a second 12px line when the "Discarded (n)" subtitle is present (`gap: 2`). */
+const PENDING_QUEUE_HEADER_WITH_SUBTITLE_PX = 31;
+const PENDING_QUEUE_SCROLL_PADDING_TOP_PX = 6;
+/** `userMessageBubble` paddingVertical 8 ×2 + `userMessageWrapper` paddingBottom 8. */
+const PENDING_QUEUE_MESSAGE_CHROME_PX = 24;
+/** `blockedDeliveryNotice`: margins 4+2, paddingVertical 3 ×2, border 1 ×2, 14px text line. */
+const PENDING_QUEUE_MESSAGE_NOTICE_PX = 26;
+/** Same notice with the inline retry `Pressable` (`minHeight: 24`) instead of a text line. */
+const PENDING_QUEUE_MESSAGE_RETRY_NOTICE_PX = 36;
+/** `nonSteerableNotice` — the one notice rendered OUTSIDE (above) the capped scroll box. */
+const PENDING_QUEUE_TERMINAL_DRAFT_NOTICE_PX = 40;
+/** Discarded section: container margin 4, title 6+14.3, subtitle 4+14.3, list margin 10. */
+const PENDING_QUEUE_DISCARDED_SECTION_PX = 53;
+/** "Discarded" label (marginTop 6 + 14.3px line) under a discarded bubble. */
+const PENDING_QUEUE_DISCARDED_LABEL_PX = 20;
+/** `discardedReason` line (marginTop 3 + 14.3px line). */
+const PENDING_QUEUE_DISCARDED_REASON_PX = 17;
+const PENDING_QUEUE_SCROLL_MAX_HEIGHT_PX = settingsDefaults.transcriptPendingQueueMaxHeightPx;
+
+function estimatePendingQueueTextPx(message: Pick<PendingMessage, 'text' | 'displayText'>): number {
+    // `displayText ?? text` is the string the block renders (`PendingMessagesTranscriptBlock`); a
+    // message with a distinct display form is otherwise sized from text it never paints.
+    const rendered = (message.displayText ?? message.text) ?? '';
+    let newlines = 0;
+    for (let i = 0; i < rendered.length; i += 1) {
+        if (rendered.charCodeAt(i) === 10) newlines += 1;
+    }
+    const lines = Math.max(1, newlines + Math.ceil(rendered.length / ESTIMATE_CHARS_PER_LINE));
+    return lines * transcriptMarkdownTextStyle.lineHeight;
+}
+
+function estimatePendingQueueRowPx(item: Extract<TranscriptRowShellItem, { kind: 'pending-queue' }>): number {
+    let scrollContentPx = PENDING_QUEUE_SCROLL_PADDING_TOP_PX;
+    let hasTerminalDraftNotice = false;
+    for (const pendingMessage of item.pendingMessages) {
+        scrollContentPx += PENDING_QUEUE_MESSAGE_CHROME_PX + estimatePendingQueueTextPx(pendingMessage);
+        // The canonical owner of what chrome a pending row paints. Its session-runtime inputs are
+        // not reachable from a pure size estimate, so a `queued_behind_turn` wait notice is NOT
+        // modelled — it is absorbed by the cap for any queue that reaches it, and superseded by the
+        // row's own onLayout otherwise.
+        const visualState = getPendingMessageVisualState(pendingMessage);
+        if (visualState.kind === 'send_failed') {
+            scrollContentPx += PENDING_QUEUE_MESSAGE_RETRY_NOTICE_PX;
+        } else if (visualState.kind === 'blocked' || visualState.kind === 'delivery_uncertain') {
+            scrollContentPx += PENDING_QUEUE_MESSAGE_NOTICE_PX;
+            if (visualState.deliveryBlockedReason === 'terminal_composer_draft') hasTerminalDraftNotice = true;
+        }
+    }
+    if (item.discardedMessages.length > 0) {
+        scrollContentPx += PENDING_QUEUE_DISCARDED_SECTION_PX;
+        for (const discardedMessage of item.discardedMessages) {
+            scrollContentPx += PENDING_QUEUE_MESSAGE_CHROME_PX
+                + estimatePendingQueueTextPx(discardedMessage)
+                + PENDING_QUEUE_DISCARDED_LABEL_PX
+                + (discardedMessage.discardedReason ? PENDING_QUEUE_DISCARDED_REASON_PX : 0);
+        }
+    }
+    const headerPx = item.pendingMessages.length > 0 && item.discardedMessages.length > 0
+        ? PENDING_QUEUE_HEADER_WITH_SUBTITLE_PX
+        : PENDING_QUEUE_HEADER_ROW_PX;
+    // NOT a ceiling on a position-bearing value (see C-1 above): this is the block's OWN painted
+    // bound. The `ScrollView` carries `maxHeight`, so content past it is scrolled, never painted.
+    // The account default is modelled because a pure estimate cannot read the setting; a user who
+    // raises `transcriptPendingQueueMaxHeightPx` (or expands the queue, which is a post-measurement
+    // interaction) undershoots until that row's next onLayout, instead of overshooting without end.
+    const scrollBoxPx = Math.min(scrollContentPx, PENDING_QUEUE_SCROLL_MAX_HEIGHT_PX);
+    return headerPx + (hasTerminalDraftNotice ? PENDING_QUEUE_TERMINAL_DRAFT_NOTICE_PX : 0) + scrollBoxPx;
+}
+
 type ToolGroupUnitRowHeights = Readonly<{
     header: number;
     expand: number;
@@ -145,64 +249,6 @@ function resolveToolGroupUnitRowHeights(
 ): ToolGroupUnitRowHeights | undefined {
     if (chromeVariant === 'cards') return undefined;
     return TOOL_GROUP_UNIT_ROW_PX_BY_CHROME_VARIANT[chromeVariant];
-}
-
-/**
- * What a tool group actually renders for THIS session: how many preview tools a collapsed group
- * keeps, and whether the user expanded this particular group. Both are decided upstream — the
- * settings owner resolves the count and the transcript pipeline owns the expansion set — so the
- * estimate consumes them instead of re-deciding either.
- */
-export type TranscriptToolGroupLayoutFacts = Readonly<{
-    collapsedPreviewCount: number;
-    isExpanded: (toolMessageIds: readonly string[]) => boolean;
-}>;
-
-/**
- * Used when the caller has not threaded the session's real facts. It is the settings owner's own
- * DEFAULT preview count, not a second opinion about it.
- *
- * T-3: the previous ceiling resolved the setting with `Number.MAX_SAFE_INTEGER`, which returns
- * the owner's CLAMP MAXIMUM (15) rather than anything a session renders. A default-config group
- * therefore estimated `(15 + 1) * 32 = 512` against a painted `33 + 28 + 3*28 + 34 = 179`.
- */
-const DEFAULT_TOOL_GROUP_LAYOUT: TranscriptToolGroupLayoutFacts = {
-    collapsedPreviewCount: DEFAULT_TRANSCRIPT_TOOL_CALLS_COLLAPSED_PREVIEW_COUNT,
-    isExpanded: () => false,
-};
-
-/**
- * Height of one whole tool group rendered inside a single row (the non-unit shapes: a `turn`
- * carrying a `tool_calls` block, or a standalone `tool-calls-group`). It mirrors what
- * `appendToolGroupUnits` emits: a header cap, an optional "show N more" row while collapsed, one
- * row per VISIBLE tool, and a footer cap.
- *
- * P-1: sizing this by the group's tool COUNT is what produced the phantom. Live web capture
- * 2026-07-28: one turn holding a few hundred tool calls estimated at the 20,000px cap while the
- * row measured 3,874px, and the scroller reported scrollHeight 18,620 against 3,900px of real
- * rows — a 14,724px phantom the viewport was parked inside (scrollTop 17,848), which is what read
- * as "the transcript is empty". Expansion is read here for the opposite failure: capping an
- * EXPANDED group at the collapsed preview tail under-estimates it ~47x for a 300-tool group, and
- * an under-estimate is not the safe direction — the renderer lays the row out short and then
- * corrects it on the frame the user is watching.
- */
-function estimateToolGroupPx(
-    toolMessageIds: readonly string[],
-    layout: TranscriptToolGroupLayoutFacts,
-    rowHeights: ToolGroupUnitRowHeights,
-): number {
-    const toolCount = toolMessageIds.length;
-    if (toolCount <= 0) return 0;
-    const expanded = layout.isExpanded(toolMessageIds);
-    const previewCount = Number.isFinite(layout.collapsedPreviewCount)
-        ? Math.max(0, Math.trunc(layout.collapsedPreviewCount))
-        : DEFAULT_TRANSCRIPT_TOOL_CALLS_COLLAPSED_PREVIEW_COUNT;
-    const visibleRows = expanded ? toolCount : Math.min(toolCount, previewCount);
-    const expandRow = !expanded && toolCount > visibleRows ? 1 : 0;
-    return rowHeights.header
-        + rowHeights.footer
-        + visibleRows * rowHeights.tool
-        + expandRow * rowHeights.expand;
 }
 
 function estimateTextBlockPx(text: string): number {
@@ -257,67 +303,21 @@ export function estimateTranscriptRowHeightFromContent(params: Readonly<{
      * default-when-omitted parameter on this function ended up exercised only by tests.
      */
     toolCallsGroupChromeVariant: ToolCallsGroupChromeVariant;
-    /**
-     * The session's real tool-group layout. Omitting it falls back to the settings owner's
-     * default preview count and a collapsed group — correct for the default configuration, and
-     * self-correcting for any other, since the row's first onLayout replaces this estimate.
-     */
-    toolGroupLayout?: TranscriptToolGroupLayoutFacts;
 }>): number | undefined {
     const { item, toolCallsGroupChromeVariant } = params;
-    const toolGroupLayout = params.toolGroupLayout ?? DEFAULT_TOOL_GROUP_LAYOUT;
     const unitRowHeights = resolveToolGroupUnitRowHeights(toolCallsGroupChromeVariant);
     if (item.kind === 'message') {
         return estimateMessagePx(params.getMessageById(item.messageId), toolCallsGroupChromeVariant);
     }
-    if (item.kind === 'turn') {
-        // Walk the turn's own content shape rather than the flattened message-id list: a
-        // `tool_calls` block is ONE collapsed group whose rendered height is bounded by the
-        // preview ceiling, so summing a row per tool message id sized the turn by data volume
-        // instead of by what it paints (see `estimateToolGroupPx`).
-        let total = estimateMessagePx(
-            item.turn.userMessageId ? params.getMessageById(item.turn.userMessageId) : null,
-            toolCallsGroupChromeVariant,
-        );
-        for (const content of item.turn.content) {
-            if (content.kind === 'message') {
-                total += estimateMessagePx(params.getMessageById(content.messageId), toolCallsGroupChromeVariant);
-                continue;
-            }
-            // A `tool_calls` block in `cards` mode is the unbuildable state above: rather than
-            // invent a card-sized group, hand the whole turn back to the renderer's own estimate.
-            if (!unitRowHeights) return undefined;
-            total += estimateToolGroupPx(content.toolMessageIds, toolGroupLayout, unitRowHeights);
-        }
-        return Math.max(ESTIMATE_COMPACT_ROW_PX, total);
-    }
-    if (item.kind === 'tool-calls-group') {
-        // A collapsed tool group renders one tool row per PREVIEWED tool, and estimating it flat
-        // was the residual ±1.9k px landing error in the live reopen re-test (2026-07-23).
-        if (!unitRowHeights) return undefined;
-        return Math.max(
-            ESTIMATE_COMPACT_ROW_PX,
-            estimateToolGroupPx(item.toolMessageIds, toolGroupLayout, unitRowHeights),
-        );
-    }
     if (item.kind === 'pending-queue') {
-        // The row a SEND creates. It renders one text block per queued and per discarded message,
-        // reading `displayText ?? text` (`PendingMessagesTranscriptBlock.tsx:46`) — estimate from
-        // the SAME string the row renders, or a message with a distinct display form is mis-sized.
-        // Iterate both arrays directly: `getEstimatedItemSize` runs per row per render, so the
-        // concatenated copy would be a per-row allocation in a hot path.
-        let total = 0;
-        for (const pendingMessage of item.pendingMessages) {
-            total += estimateTextBlockPx(pendingMessage.displayText ?? pendingMessage.text);
-        }
-        for (const discardedMessage of item.discardedMessages) {
-            total += estimateTextBlockPx(discardedMessage.displayText ?? discardedMessage.text);
-        }
-        return Math.max(ESTIMATE_COMPACT_ROW_PX, total);
+        return estimatePendingQueueRowPx(item);
     }
-    // Per-unit rows are the same caps the grouped estimate above sizes, one row each. They are
-    // the live decomposed shape (`buildTranscriptTurnUnits` always splits a group into
-    // header/expand/tools/footer), so their calibration is what accumulation gaps are made of.
+    // Per-unit rows, one cap each. They are the ONLY tool-group shape this estimate can be asked
+    // about: `useTranscriptItemsPipeline` runs `buildTranscriptTurnUnits` unconditionally over
+    // every projection item, and that function consumes every `turn` and `tool-calls-group` item
+    // into header/expand/tools/footer units, so neither shape survives into `listData` — the array
+    // `getEstimatedItemSize` is called against. Their calibration is what accumulation gaps are
+    // made of.
     if (item.kind === 'tool-group-tool') return unitRowHeights?.tool;
     if (item.kind === 'tool-group-expand') return unitRowHeights?.expand;
     if (item.kind === 'tool-group-header') return unitRowHeights?.header;
