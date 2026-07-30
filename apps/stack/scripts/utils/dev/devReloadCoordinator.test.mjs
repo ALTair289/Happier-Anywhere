@@ -1306,6 +1306,45 @@ test('an unexpected active-server exit re-enters the existing coordinator and cl
   assert.equal(unexpectedExitHandler, null);
 });
 
+test('an active-server exit remains forced when a no-delta observation supersedes its first cycle', async () => {
+  const calls = [];
+  const server = createDescriptor({ id: 'server:app', target: 'server' });
+  let unexpectedExitHandler = null;
+  let notifyBuildStarted;
+  const buildStarted = new Promise((resolve) => { notifyBuildStarted = resolve; });
+  let releaseBuild;
+  const buildBlocked = new Promise((resolve) => { releaseBuild = resolve; });
+  const { watcher, onChange } = startCoordinator({
+    descriptors: [server],
+    executors: [createExecutor('server', calls, {
+      setUnexpectedExitHandler(handler) {
+        unexpectedExitHandler = handler;
+      },
+      async build(context) {
+        if (context.generation === 1) {
+          notifyBuildStarted();
+          await buildBlocked;
+        }
+      },
+    })],
+    calls,
+  });
+
+  const recovery = unexpectedExitHandler({ code: 1, signal: null });
+  await buildStarted;
+  onChange({ eventType: 'change', filename: 'unrelated-observation.tmp' });
+  releaseBuild();
+  await recovery;
+
+  assert.deepEqual(calls.slice(1), [
+    'server:build:1',
+    'server:build:2',
+    'server:restart:2',
+  ]);
+
+  await watcher.close();
+});
+
 test('retry remains authoritative when retry lifecycle projection fails', async () => {
   const calls = [];
   const scheduled = [];

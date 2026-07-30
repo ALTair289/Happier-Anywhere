@@ -923,11 +923,12 @@ test('maintenance lifecycle publication failure restores the incumbent before an
   });
 });
 
-test('a generation that becomes stale after readiness never reaches proxy activation', async (t) => {
+test('a ready replacement is activated after incumbent shutdown even when a newer generation is pending', async (t) => {
   await withTempServerDir(t, async (serverDir) => {
     const options = createExecutorOptions(serverDir);
     const flips = [];
     const activations = [];
+    const replacement = { pid: 202, exitCode: null };
     let revalidations = 0;
     options.proxyController = {
       pid: process.pid,
@@ -942,7 +943,7 @@ test('a generation that becomes stale after readiness never reaches proxy activa
       killProcessGroupOwnedByStackImpl: async () => ({ killed: true }),
       waitForTcpPortFreeImpl: async () => ({ status: 'free' }),
       pickNextFreeTcpPortImpl: async () => 5102,
-      pmSpawnScriptImpl: async () => ({ pid: 202, exitCode: null }),
+      pmSpawnScriptImpl: async () => replacement,
       waitForServerReadyImpl: async () => {},
       terminateSpawnedChildImpl: async () => true,
       recordStackRuntimeServerActivationImpl: async (_path, activation) => activations.push(activation),
@@ -955,9 +956,47 @@ test('a generation that becomes stale after readiness never reaches proxy activa
       revalidateGeneration: async () => ++revalidations < 3,
     });
 
-    assert.deepEqual(result, { restarted: false });
-    assert.deepEqual(flips, [], 'a stale ready child must not become the proxy upstream');
-    assert.deepEqual(activations, []);
+    assert.deepEqual(result, { restarted: true });
+    assert.deepEqual(flips, [5102], 'the ready replacement restores service before the trailing reload');
+    assert.equal(options.serverProcRef.current, replacement);
+    assert.equal(activations.length, 1);
+  });
+});
+
+test('a ready direct replacement remains active after incumbent shutdown when a newer generation is pending', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    const replacement = { pid: 202, exitCode: null };
+    const options = createExecutorOptions(serverDir, {
+      proxyController: null,
+      serverBindPort: 4101,
+      internalServerUrl: 'http://127.0.0.1:4101',
+    });
+    let revalidations = 0;
+    let listenerObservation = 0;
+    const activations = [];
+    const executor = createDevServerReloadExecutor(options, {
+      preflightDevServerRestartImpl: async () => {},
+      isTcpPortFreeImpl: async () => true,
+      listListenPidsImpl: async () => (++listenerObservation === 1 ? [101] : [202]),
+      getProcessGroupIdImpl: async (pid) => Number(pid),
+      killProcessGroupOwnedByStackImpl: async () => ({ killed: true }),
+      waitForTcpPortFreeImpl: async () => ({ status: 'free' }),
+      pmSpawnScriptImpl: async () => replacement,
+      waitForServerReadyImpl: async () => {},
+      terminateSpawnedChildImpl: async () => true,
+      recordStackRuntimeUpdateImpl: async (_path, activation) => activations.push(activation),
+      logger: { log() {}, warn() {}, error() {} },
+    });
+
+    const result = await executor.restart({
+      generation: 32,
+      changedDescriptors: ['server:app'],
+      revalidateGeneration: async () => ++revalidations < 2,
+    });
+
+    assert.deepEqual(result, { restarted: true });
+    assert.equal(options.serverProcRef.current, replacement);
+    assert.equal(activations.length, 1);
   });
 });
 

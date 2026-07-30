@@ -261,6 +261,13 @@ export function startDevReloadCoordinator({
     if (closed || isShuttingDown?.()) return;
     const forcedTargetsForCycle = new Set(forcedTargets);
     forcedTargets.clear();
+    const preserveForcedTargetsForTrailingCycle = (targetsToPreserve) => {
+      for (const target of targetsToPreserve) {
+        if (forcedTargetsForCycle.has(target) && executorsByTarget.has(target)) {
+          forcedTargets.add(target);
+        }
+      }
+    };
     let { targets, changedDescriptors, descriptorEvidenceConclusive } = classifyChangedTargets({
       descriptors: normalizedDescriptors,
       previous: lastSignatures,
@@ -401,6 +408,7 @@ export function startDevReloadCoordinator({
           logger.error?.(formatError(projectionError));
         }
       }
+      preserveForcedTargetsForTrailingCycle(canceledTargets);
       context.restartTargets = (context.restartTargets ?? []).filter((target) => (
         supersededActivationTargets.has(target)
       ));

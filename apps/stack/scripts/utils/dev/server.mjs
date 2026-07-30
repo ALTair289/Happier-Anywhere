@@ -1604,21 +1604,6 @@ export function createDevServerReloadExecutor({
         reloadPlan,
         purpose: 'replacement',
       });
-      if (typeof context.revalidateGeneration === 'function' && !await context.revalidateGeneration()) {
-        const staleChild = replacement.child;
-        replacement = null;
-        if (!await cleanupProvisionalChild(staleChild)) {
-          retainUnresolvedChild(staleChild, { oldServerStopped });
-          const cleanupError = new Error(
-            `[local] stale ready server termination was not confirmed (pid=${staleChild?.pid ?? 'unknown'}); ` +
-              'no stale generation was activated.',
-          );
-          cleanupError.code = 'ESERVERPROVISIONALCLEANUPINCOMPLETE';
-          cleanupError.provisionalChild = staleChild;
-          throw cleanupError;
-        }
-        return false;
-      }
       emitTransitionEvent('backend_activation_requested', {
         generation: reloadPlan.generation,
         pid: replacement.child.pid,
@@ -2167,21 +2152,6 @@ export function createDevServerReloadExecutor({
         );
       }
       emitTransitionEvent('replacement_ready', { ...spawnTransition, pid: next.pid, listenerPid });
-      if (typeof context.revalidateGeneration === 'function' && !await context.revalidateGeneration()) {
-        const staleChild = next;
-        next = null;
-        if (!await cleanupProvisionalChild(staleChild)) {
-          retainUnresolvedChild(staleChild, { oldServerStopped });
-          const cleanupError = new Error(
-            `[local] stale ready server termination was not confirmed (pid=${staleChild?.pid ?? 'unknown'}); ` +
-              'no stale generation was activated.',
-          );
-          cleanupError.code = 'ESERVERPROVISIONALCLEANUPINCOMPLETE';
-          cleanupError.provisionalChild = staleChild;
-          throw cleanupError;
-        }
-        return false;
-      }
     } catch (error) {
       if (migrationStarted && !migrationCompleted) {
         emitTransitionEvent('migration_completed', { ...spawnTransition, pid: next?.pid, disposition: 'failed' });
