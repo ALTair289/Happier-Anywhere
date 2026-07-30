@@ -2,7 +2,8 @@ import * as React from 'react';
 import { Pressable } from 'react-native';
 import { Octicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
-import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
+import { ActivitySpinner, iconMatchedSpinnerSize } from '@/components/ui/feedback/ActivitySpinner';
+import { IconAction } from '@/components/ui/buttons/IconAction';
 
 import type { ScmWorkingSnapshot } from '@/sync/domains/state/storageTypes';
 import type { ScmFileStatus } from '@/scm/scmStatusFiles';
@@ -24,6 +25,8 @@ export type ScmCommitSelectionToggleButtonProps = Readonly<{
     onAfterToggle?: () => void | Promise<void>;
 }>;
 
+const COMMIT_TOGGLE_ICON_SIZE_PX = 14;
+
 export const ScmCommitSelectionToggleButton = React.memo((props: ScmCommitSelectionToggleButtonProps) => {
     const { theme } = useUnistyles();
     const [busy, setBusy] = React.useState(false);
@@ -32,12 +35,14 @@ export const ScmCommitSelectionToggleButton = React.memo((props: ScmCommitSelect
     const iconColor = props.selectedForCommit ? theme.colors.state.success.foreground : theme.colors.text.secondary;
 
     return (
-        <Pressable
+        <IconAction
+            size="sm"
             testID={`scm-commit-selection-toggle-${toTestIdSafeValue(props.file.fullPath)}`}
-            accessibilityRole="button"
             accessibilityLabel={
                 props.selectedForCommit ? t('files.commitSelection.removeFromCommit') : t('files.commitSelection.addToCommit')
             }
+            // A file already staged is a control that is ON, which is what the resting fill means.
+            active={props.selectedForCommit}
             disabled={busy || !props.scmWriteEnabled}
             onPress={(e: any) => {
                 e?.stopPropagation?.();
@@ -60,23 +65,12 @@ export const ScmCommitSelectionToggleButton = React.memo((props: ScmCommitSelect
                     }
                 })(), { tag: 'ScmCommitSelectionToggleButton.onPress' });
             }}
-            style={{
-                width: 28,
-                height: 28,
-                borderRadius: 10,
-                borderWidth: 1,
-                borderColor: theme.colors.border.default,
-                backgroundColor: theme.colors.surface.base,
-                alignItems: 'center',
-                justifyContent: 'center',
-                opacity: (!props.scmWriteEnabled || busy) ? 0.55 : 1,
-            }}
         >
             {busy ? (
-                <ActivitySpinner size="small" color={theme.colors.text.secondary} />
+                <ActivitySpinner size={iconMatchedSpinnerSize(COMMIT_TOGGLE_ICON_SIZE_PX)} color={theme.colors.text.secondary} />
             ) : (
-                <Octicons name={iconName as any} size={14} color={iconColor} />
+                <Octicons name={iconName as any} size={COMMIT_TOGGLE_ICON_SIZE_PX} color={iconColor} />
             )}
-        </Pressable>
+        </IconAction>
     );
 });

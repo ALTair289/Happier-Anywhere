@@ -10,6 +10,7 @@ import {
     type ChangedFilesViewMode,
 } from '@/scm/scmAttribution';
 import { ChangedFilesViewModeMenu } from './ChangedFilesViewModeMenu';
+import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
 
 type FilesToolbarProps = {
     theme: any;
@@ -52,34 +53,22 @@ export function FilesToolbar(props: FilesToolbarProps) {
         showScmToggle = true,
     } = props;
 
-    const chipStyle = (active: boolean) => ({
-        paddingVertical: 8,
-        paddingHorizontal: 10,
-        borderRadius: 12,
-        backgroundColor: active ? theme.colors.surface.inset : theme.colors.surface.base,
-        borderWidth: 1,
-        borderColor: theme.colors.border.default,
-    }) as const;
-
     const Chip = (p: {
         active: boolean;
         label: string;
         icon: React.ReactNode;
         badge?: React.ReactNode;
         onPress: () => void;
-    }) => {
-        return (
-            <Pressable onPress={p.onPress} style={chipStyle(p.active)}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
-                    {p.icon}
-                    <Text style={{ fontSize: 12, color: theme.colors.text.primary, ...Typography.default('semiBold') }}>
-                        {p.label}
-                    </Text>
-                    {p.badge}
-                </View>
-            </Pressable>
-        );
-    };
+    }) => (
+        <ToolbarButton
+            onPress={p.onPress}
+            active={p.active}
+            label={p.label}
+            icon={p.icon}
+            trailing={p.badge}
+            size="md"
+        />
+    );
 
     const CountBadge = ({ count }: { count: number }) => {
         if (count <= 0) return null;
@@ -89,10 +78,10 @@ export function FilesToolbar(props: FilesToolbarProps) {
                     minWidth: 20,
                     paddingHorizontal: 6,
                     paddingVertical: 2,
-                    borderRadius: 999,
-                    borderWidth: 1,
-                    borderColor: theme.colors.border.default,
-                    backgroundColor: theme.colors.surface.inset,
+                    // The canonical badge shape: background-only, 8px radius.
+                    borderRadius: 8,
+                    borderWidth: 0,
+                    backgroundColor: theme.colors.state.neutral.background,
                 }}
             >
                 <Text style={{ fontSize: 11, color: theme.colors.text.secondary, ...Typography.mono('semiBold') }}>

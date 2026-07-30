@@ -9,6 +9,13 @@ import { GradientSurface } from '@/components/ui/surfaces/GradientSurface';
 export type SegmentedTab<T extends string = string> = Readonly<{
     id: T;
     label: string;
+    /**
+     * Optional glyph. When every tab in a bar supplies one, the bar renders icons alone and the
+     * label becomes the accessible name — a four-word row of text costs more vertical space than
+     * the tabs are worth in a narrow docked panel. Mixed bars keep their labels, so this stays
+     * opt-in and the other consumers are unaffected.
+     */
+    icon?: React.ReactNode;
 }>;
 
 export type SegmentedTabBarProps<T extends string = string> = Readonly<{
@@ -59,12 +66,20 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.text.primary,
         fontWeight: '600',
     },
+    // Matches the label's optical height so an iconic bar is the same height as a textual one.
+    tabIcon: {
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: 16,
+    },
 }));
 
 function SegmentedTabBarInner<T extends string>(props: SegmentedTabBarProps<T>) {
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const compact = props.compact;
+    // Icons replace labels only when the whole bar is iconic; a half-iconic row reads as broken.
+    const iconOnly = props.tabs.length > 0 && props.tabs.every((tab) => tab.icon != null);
 
     return (
         <View style={styles.container}>
@@ -83,6 +98,10 @@ function SegmentedTabBarInner<T extends string>(props: SegmentedTabBarProps<T>) 
                             accessibilityRole="tab"
                             accessibilityState={{ selected: active }}
                             aria-selected={active}
+                            // The label is still the accessible name when the glyph replaces it,
+                            // and it doubles as the native tooltip on web.
+                            accessibilityLabel={iconOnly ? tab.label : undefined}
+                            {...(iconOnly ? ({ title: tab.label } as object) : {})}
                         >
                             {active ? (
                                 <GradientSurface
@@ -92,7 +111,11 @@ function SegmentedTabBarInner<T extends string>(props: SegmentedTabBarProps<T>) 
                                     style={StyleSheet.absoluteFillObject}
                                 />
                             ) : null}
-                            <Text style={[styles.tabLabel, compact ? styles.tabLabelCompact : null, active ? styles.tabLabelActive : null]}>{tab.label}</Text>
+                            {iconOnly ? (
+                                <View style={styles.tabIcon}>{tab.icon}</View>
+                            ) : (
+                                <Text style={[styles.tabLabel, compact ? styles.tabLabelCompact : null, active ? styles.tabLabelActive : null]}>{tab.label}</Text>
+                            )}
                         </Pressable>
                     );
                 })}

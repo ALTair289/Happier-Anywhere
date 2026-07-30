@@ -48,6 +48,24 @@ function resolveSpinnerBorderWidth(size: number): number {
     return Math.max(1.5, Math.min(3, size / 8));
 }
 
+/**
+ * A vector icon draws its circle INSET in its em box, but a spinner's diameter IS its box. So a
+ * spinner and an Ionicons `checkmark-circle` given the same number render at visibly different
+ * sizes, and a status slot that swaps one for the other appears to change size as it settles.
+ *
+ * Measured from a rendered transcript at matched scale: a filled circle glyph declared at 16 draws
+ * ~12.8px of ink, next to a `size="small"` spinner's full 20px ring — the running state read 1.55x
+ * the size of the success state it turns into.
+ *
+ * Every status slot that pairs a spinner with a glyph derives the spinner from the glyph size here.
+ * Before this existed, four of them each guessed separately and all four disagreed.
+ */
+const ICON_CIRCLE_INK_RATIO = 0.8;
+
+export function iconMatchedSpinnerSize(iconSize: number): number {
+    return Math.round(iconSize * ICON_CIRCLE_INK_RATIO);
+}
+
 export function ActivitySpinner(props: ActivitySpinnerProps) {
     const { theme } = useUnistyles();
     const resolvedColor = props.color ?? theme.colors.text.secondary;

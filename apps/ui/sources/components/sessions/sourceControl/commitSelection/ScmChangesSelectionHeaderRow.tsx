@@ -4,6 +4,7 @@ import { Platform, Pressable, View } from 'react-native';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
+import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
 
 export type ScmChangesSelectionHeaderRowProps = Readonly<{
     theme: any;
@@ -18,31 +19,6 @@ export type ScmChangesSelectionHeaderRowProps = Readonly<{
 export const ScmChangesSelectionHeaderRow = React.memo((props: ScmChangesSelectionHeaderRowProps) => {
     const canSelectAll = Boolean(props.onSelectAll) && !props.disableSelectAll;
     const canSelectNone = Boolean(props.onSelectNone) && !props.disableSelectNone;
-
-    const Action = (p: {
-        label: string;
-        disabled: boolean;
-        onPress?: () => void;
-    }) => (
-        <Pressable
-            accessibilityRole="button"
-            disabled={p.disabled}
-            onPress={p.onPress}
-            style={({ pressed }) => ({
-                paddingHorizontal: 10,
-                paddingVertical: 6,
-                borderRadius: 999,
-                borderWidth: 1,
-                borderColor: props.theme.colors.border.default,
-                backgroundColor: props.theme.colors.surface.inset,
-                opacity: p.disabled ? 0.45 : pressed ? 0.78 : 1,
-            })}
-        >
-            <Text style={{ fontSize: 12, color: props.theme.colors.text.link, ...Typography.default('semiBold') }}>
-                {p.label}
-            </Text>
-        </Pressable>
-    );
 
     return (
         <View
@@ -73,10 +49,20 @@ export const ScmChangesSelectionHeaderRow = React.memo((props: ScmChangesSelecti
             {(props.onSelectAll || props.onSelectNone) ? (
                 <View style={{ flexDirection: 'row', gap: 8 }}>
                     {props.onSelectAll ? (
-                        <Action label={t('common.all')} disabled={!canSelectAll} onPress={props.onSelectAll} />
+                        <ToolbarButton
+                            label={t('common.all')}
+                            disabled={!canSelectAll}
+                            onPress={props.onSelectAll}
+                            labelColor={props.theme.colors.text.link}
+                        />
                     ) : null}
                     {props.onSelectNone ? (
-                        <Action label={t('files.sourceControlOperations.clear')} disabled={!canSelectNone} onPress={props.onSelectNone} />
+                        <ToolbarButton
+                            label={t('files.sourceControlOperations.clear')}
+                            disabled={!canSelectNone}
+                            onPress={props.onSelectNone}
+                            labelColor={props.theme.colors.text.link}
+                        />
                     ) : null}
                 </View>
             ) : null}

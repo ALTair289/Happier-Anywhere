@@ -20,7 +20,7 @@ const theme = {
                 tint: 'button-primary-tint',
             },
         },
-        border: { default: 'divider' },
+        border: { default: 'divider', subtle: 'divider' },
         surface: { inset: 'surface-high' },
         text: {
             primary: 'text',

@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Pressable, View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
+import { Pressable, StyleSheet, View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
 import { Octicons } from '@expo/vector-icons';
 
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
@@ -88,15 +88,17 @@ export const ChangedFilesViewModeMenu = React.memo((props: ChangedFilesViewModeM
                     accessibilityLabel={props.accessibilityLabel ?? t('files.toolbar.view')}
                     onPress={toggle}
                     style={({ pressed }) => [
+                        // Matches `ToolbarButton`, which this trigger cannot simply be: it is the
+                        // anchor the popover measures against, so it stays a Pressable here.
                         {
                             flexDirection: 'row',
                             alignItems: 'center',
                             justifyContent: 'center',
                             paddingHorizontal: 10,
                             height: 30,
-                            borderRadius: 10,
-                            borderWidth: 1,
-                            borderColor: props.theme.colors.border.default,
+                            borderRadius: 8,
+                            borderWidth: StyleSheet.hairlineWidth,
+                            borderColor: props.theme.colors.border.subtle,
                             backgroundColor: props.theme.colors.surface.base,
                             gap: 6,
                         },

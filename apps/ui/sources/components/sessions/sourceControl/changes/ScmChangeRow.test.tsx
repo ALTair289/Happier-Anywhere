@@ -35,7 +35,7 @@ function flattenStyle(style: unknown): Record<string, unknown> {
 function createScmChangeRowTheme() {
     return {
         colors: {
-            border: { default: '#ddd' },
+            border: { default: '#ddd', subtle: '#ddd' },
             surface: { base: '#fff', inset: '#f8f8f8' },
             text: { primary: '#111', secondary: '#666', link: '#09f' },
             state: {

@@ -37,6 +37,7 @@ describe('SourceControlOperationsHistorySection', () => {
             },
             divider: '#333',
             border: { default: '#333' },
+            state: { neutral: { background: '#2a2a2a', foreground: '#aaa' } },
             surface: { inset: '#222' },
             surfaceHigh: '#222',
             input: { background: '#111' },

@@ -3,12 +3,15 @@ import { Pressable, View } from 'react-native';
 
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
+import { StyleSheet as RNStyleSheet } from 'react-native';
+import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
 
 export type SourceControlUpdateTheme = Readonly<{
     colors: Readonly<{
         background?: string | Readonly<{ canvas?: string }>;
         border: Readonly<{
             default: string;
+            subtle: string;
         }>;
         primary?: string;
         surface: Readonly<{
@@ -111,6 +114,12 @@ export function SourceControlUpdateInput(props: Readonly<{
     );
 }
 
+/**
+ * Kept as a named export because ten call sites in the update tab pass the narrowed `theme` prop,
+ * but it is no longer a second implementation: the same small labelled button as every other
+ * toolbar, through the canonical owner. `theme` is now unused for styling — `ToolbarButton` reads
+ * the live theme itself — and stays only so those callers do not all have to change at once.
+ */
 export function SourceControlUpdateButton(props: Readonly<{
     theme: SourceControlUpdateTheme;
     label: string;
@@ -120,46 +129,30 @@ export function SourceControlUpdateButton(props: Readonly<{
     kind?: 'primary' | 'secondary' | 'danger';
 }>) {
     const kind = props.kind ?? 'secondary';
-    const foreground =
-        kind === 'primary'
-            ? props.theme.colors.button?.primary?.tint ?? resolveCanvasBackgroundColor(props.theme.colors.background) ?? props.theme.colors.surface.base ?? props.theme.colors.text.primary
-            : kind === 'danger'
-                ? props.theme.colors.state.danger.foreground ?? props.theme.colors.text.primary
-                : props.theme.colors.text.primary;
-    const background =
-        kind === 'primary'
-            ? props.theme.colors.button?.primary?.background ?? props.theme.colors.primary ?? props.theme.colors.surface.inset
-            : props.theme.colors.surface.inset;
+    // The shared button reads the live theme, but this one is handed a theme explicitly by every
+    // call site in the update tab, so the injected values win where they differ.
+    const injectedPrimary = kind === 'primary'
+        ? {
+            backgroundColor: props.theme.colors.button?.primary?.background ?? props.theme.colors.primary,
+            borderWidth: 0,
+        }
+        : undefined;
+    const injectedLabelColor = kind === 'primary'
+        ? props.theme.colors.button?.primary?.tint
+        : kind === 'danger'
+            ? props.theme.colors.state.danger.foreground
+            : props.theme.colors.text.primary;
 
     return (
-        <Pressable
+        <ToolbarButton
+            size="md"
             testID={props.testID}
-            accessibilityRole="button"
-            accessibilityLabel={props.label}
-            disabled={props.disabled}
+            label={props.label}
             onPress={props.onPress}
-            hitSlop={8}
-            style={({ pressed }) => ({
-                minHeight: 34,
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: props.theme.colors.border.default,
-                backgroundColor: background,
-                paddingHorizontal: 10,
-                alignItems: 'center',
-                justifyContent: 'center',
-                opacity: props.disabled ? 0.45 : pressed ? 0.78 : 1,
-            })}
-        >
-            <Text
-                style={{
-                    fontSize: 12,
-                    color: foreground,
-                    ...Typography.default('semiBold'),
-                }}
-            >
-                {props.label}
-            </Text>
-        </Pressable>
+            disabled={props.disabled}
+            tone={kind === 'primary' ? 'primary' : kind === 'danger' ? 'danger' : 'default'}
+            labelColor={injectedLabelColor}
+            style={injectedPrimary}
+        />
     );
 }

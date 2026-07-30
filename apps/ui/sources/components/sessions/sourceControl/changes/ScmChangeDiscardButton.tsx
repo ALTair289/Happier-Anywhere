@@ -2,7 +2,8 @@ import * as React from 'react';
 import { Pressable } from 'react-native';
 import { Octicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
-import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
+import { ActivitySpinner, iconMatchedSpinnerSize } from '@/components/ui/feedback/ActivitySpinner';
+import { IconAction } from '@/components/ui/buttons/IconAction';
 
 import type { ScmWorkingSnapshot } from '@/sync/domains/state/storageTypes';
 import type { ScmFileStatus } from '@/scm/scmStatusFiles';
@@ -23,6 +24,8 @@ export type ScmChangeDiscardButtonProps = Readonly<{
     onAfterDiscard?: () => void | Promise<void>;
 }>;
 
+const DISCARD_ICON_SIZE_PX = 14;
+
 export const ScmChangeDiscardButton = React.memo((props: ScmChangeDiscardButtonProps) => {
     const { theme } = useUnistyles();
     const [busy, setBusy] = React.useState(false);
@@ -31,12 +34,10 @@ export const ScmChangeDiscardButton = React.memo((props: ScmChangeDiscardButtonP
     const disabled = busy || !props.scmWriteEnabled || !supported;
 
     return (
-        <Pressable
+        <IconAction
+            size="sm"
             testID={`scm-discard-${toTestIdSafeValue(props.file.fullPath)}`}
-            accessibilityRole="button"
             accessibilityLabel={t('files.discardChangesFor', { path: props.file.fullPath })}
-            // @ts-expect-error - react-native types do not model the web-only `title` attribute; RN Web forwards it.
-            title={t('files.discardChangesFor', { path: props.file.fullPath })}
             disabled={disabled}
             onPress={(e: any) => {
                 e?.stopPropagation?.();
@@ -58,23 +59,12 @@ export const ScmChangeDiscardButton = React.memo((props: ScmChangeDiscardButtonP
                     }
                 })(), { tag: 'ScmChangeDiscardButton.onPress' });
             }}
-            style={{
-                width: 28,
-                height: 28,
-                borderRadius: 10,
-                borderWidth: 1,
-                borderColor: theme.colors.border.default,
-                backgroundColor: theme.colors.surface.base,
-                alignItems: 'center',
-                justifyContent: 'center',
-                opacity: disabled ? 0.55 : 1,
-            }}
         >
             {busy ? (
-                <ActivitySpinner size="small" color={theme.colors.text.secondary} />
+                <ActivitySpinner size={iconMatchedSpinnerSize(DISCARD_ICON_SIZE_PX)} color={theme.colors.text.secondary} />
             ) : (
-                <Octicons name="history" size={14} color={theme.colors.text.secondary} />
+                <Octicons name="history" size={DISCARD_ICON_SIZE_PX} color={theme.colors.text.secondary} />
             )}
-        </Pressable>
+        </IconAction>
     );
 });

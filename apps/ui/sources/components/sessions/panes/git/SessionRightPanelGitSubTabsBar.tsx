@@ -1,10 +1,8 @@
 import * as React from 'react';
-import { Platform, Pressable, View } from 'react-native';
-import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { Platform, View } from 'react-native';
+import { StyleSheet } from 'react-native-unistyles';
 
-import { Text } from '@/components/ui/text/Text';
-import { Typography } from '@/constants/Typography';
-import { t } from '@/text';
+import { SegmentedTabBar, type SegmentedTab } from '@/components/ui/navigation/SegmentedTabBar';
 
 export type GitSubTabId = 'commit' | 'update' | 'history';
 
@@ -13,6 +11,20 @@ export type SessionRightPanelGitSubTabsBarProps = Readonly<{
     activeSubTabId: GitSubTabId;
     onSelectSubTab: (subTabId: GitSubTabId) => void;
 }>;
+
+/**
+ * This used to be a bespoke segmented control: its own bordered track, its own typography, and an
+ * active state that was the INVERSE of the canonical one (active tab = inset fill on a base track,
+ * where SegmentedTabBar uses a raised thumb on an inset track). Two controls that look like the same
+ * thing but invert their own selection semantics is the kind of split-brain that makes a product
+ * feel inconsistent without any single screen looking wrong.
+ *
+ * It is now a thin arrangement over the canonical `SegmentedTabBar`. The testID contract is
+ * unchanged — SegmentedTabBar emits `${testIDPrefix}:${tab.id}`, which is exactly the format the
+ * previous implementation built by hand.
+ */
+
+const SUB_TAB_TEST_ID_PREFIX = 'session-rightpanel-git-subtab';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -23,57 +35,25 @@ const stylesheet = StyleSheet.create((theme) => ({
         borderBottomColor: theme.colors.border.default,
         backgroundColor: theme.colors.surface.inset,
     },
-    inner: {
-        flexDirection: 'row',
-        backgroundColor: theme.colors.surface.base,
-        borderWidth: 1,
-        borderColor: theme.colors.border.default,
-        borderRadius: 10,
-        overflow: 'hidden',
-    },
-    tab: {
-        flex: 1,
-        paddingVertical: 7,
-        alignItems: 'center',
-        justifyContent: 'center',
-    },
-    tabActive: {
-        backgroundColor: theme.colors.surface.inset,
-    },
-    tabLabel: {
-        fontSize: 12,
-        color: theme.colors.text.secondary,
-        ...Typography.default('semiBold'),
-    },
-    tabLabelActive: {
-        color: theme.colors.text.primary,
-    },
 }));
 
 export const SessionRightPanelGitSubTabsBar = React.memo((props: SessionRightPanelGitSubTabsBarProps) => {
     const styles = stylesheet;
-    useUnistyles();
 
-    const Tab = (p: { id: GitSubTabId; label: string }) => (
-        <Pressable
-            testID={`session-rightpanel-git-subtab:${p.id}`}
-            onPress={() => props.onSelectSubTab(p.id)}
-            style={[styles.tab, props.activeSubTabId === p.id ? styles.tabActive : null]}
-            accessibilityRole="button"
-        >
-            <Text style={[styles.tabLabel, props.activeSubTabId === p.id ? styles.tabLabelActive : null]}>
-                {p.label}
-            </Text>
-        </Pressable>
+    const tabs = React.useMemo(
+        (): ReadonlyArray<SegmentedTab<GitSubTabId>> =>
+            props.tabs.map((tab) => ({ id: tab.id, label: tab.label })),
+        [props.tabs],
     );
 
     return (
         <View style={styles.container}>
-            <View style={styles.inner}>
-                {props.tabs.map((tab) => (
-                    <Tab key={tab.id} id={tab.id} label={tab.label} />
-                ))}
-            </View>
+            <SegmentedTabBar
+                tabs={tabs}
+                activeTabId={props.activeSubTabId}
+                onSelectTab={props.onSelectSubTab}
+                testIDPrefix={SUB_TAB_TEST_ID_PREFIX}
+            />
         </View>
     );
 });

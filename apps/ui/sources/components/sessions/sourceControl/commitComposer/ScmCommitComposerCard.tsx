@@ -1,12 +1,17 @@
 import * as React from 'react';
 import { Platform, Pressable, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
+import { ActivitySpinner, iconMatchedSpinnerSize } from '@/components/ui/feedback/ActivitySpinner';
+import { IconAction } from '@/components/ui/buttons/IconAction';
+import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
 
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';
 import { t } from '@/text';
+
+// One glyph size for the composer's action row, so its spinner and icons agree.
+const COMPOSER_GLYPH_SIZE_PX = 16;
 
 export type ScmCommitAdjacentPushAction = Readonly<{
     visible: boolean;
@@ -194,31 +199,13 @@ export const ScmCommitComposerCard = React.memo((props: ScmCommitComposerCardPro
                         </View>
                     </View>
                 ) : (
-                    <Pressable
+                    <ToolbarButton
                         testID="scm-commit-enter-selection"
-                        accessibilityRole="button"
-                        accessibilityLabel={t('files.fileActions.selectFilesToCommit')}
+                        label={t('files.fileActions.selectFilesToCommit')}
+                        icon={<Ionicons name="checkmark-circle-outline" size={14} color={props.theme.colors.text.secondary} />}
                         onPress={props.onEnterSelectionMode}
-                        style={({ pressed }) => ({
-                            flexDirection: 'row',
-                            alignItems: 'center',
-                            alignSelf: 'flex-start',
-                            gap: 6,
-                            marginBottom: 10,
-                            paddingHorizontal: 10,
-                            paddingVertical: 6,
-                            borderRadius: 999,
-                            borderWidth: 1,
-                            borderColor: props.theme.colors.border.default,
-                            backgroundColor: props.theme.colors.surface.inset ?? props.theme.colors.surface.base,
-                            opacity: pressed ? 0.78 : 1,
-                        })}
-                    >
-                        <Ionicons name="checkmark-circle-outline" size={14} color={props.theme.colors.text.secondary} />
-                        <Text style={{ fontSize: 12, color: props.theme.colors.text.secondary, ...Typography.default('semiBold') }}>
-                            {t('files.fileActions.selectFilesToCommit')}
-                        </Text>
-                    </Pressable>
+                        style={{ alignSelf: 'flex-start', marginBottom: 10 }}
+                    />
                 )
             ) : null}
             {props.status && !props.busy ? (
@@ -267,33 +254,25 @@ export const ScmCommitComposerCard = React.memo((props: ScmCommitComposerCardPro
 
             <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
                 {generatorEnabled ? (
-                    <Pressable
-                        accessibilityRole="button"
+                    <IconAction
+                        size="lg"
                         accessibilityLabel={t('files.commitMessageEditor.generate')}
                         disabled={props.busy || generating}
                         onPress={onGenerate}
-                        style={({ pressed }) => ({
-                            width: 38,
-                            height: 38,
-                            borderRadius: 12,
-                            borderWidth: 1,
-                            borderColor: props.theme.colors.border.default,
-                            backgroundColor: props.theme.colors.surface.inset ?? props.theme.colors.surface.base,
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            opacity: props.busy || generating ? 0.5 : pressed ? 0.85 : 1,
-                        })}
                     >
                         {generating ? (
-                            <ActivitySpinner color={props.theme.colors.text.secondary} />
+                            <ActivitySpinner
+                                size={iconMatchedSpinnerSize(COMPOSER_GLYPH_SIZE_PX)}
+                                color={props.theme.colors.text.secondary}
+                            />
                         ) : (
                             <Ionicons
                                 name="sparkles-outline"
-                                size={16}
+                                size={COMPOSER_GLYPH_SIZE_PX}
                                 color={props.theme.colors.text.secondary}
                             />
                         )}
-                    </Pressable>
+                    </IconAction>
                 ) : null}
                 <Pressable
                     accessibilityRole="button"
@@ -306,8 +285,11 @@ export const ScmCommitComposerCard = React.memo((props: ScmCommitComposerCardPro
                         flex: 1,
                         height: 38,
                         borderRadius: 12,
-                        borderWidth: 1,
-                        borderColor: commitDisabled ? props.theme.colors.border.default : props.theme.colors.state.success.foreground,
+                        // Enabled, the fill carries the button; an outline in the same colour on top
+                        // of it is the same statement twice. Disabled, the fill drops away, so the
+                        // hairline is what keeps it readable as a control.
+                        borderWidth: commitDisabled ? 1 : 0,
+                        borderColor: props.theme.colors.border.subtle,
                         backgroundColor: commitDisabled ? (props.theme.colors.surface.inset ?? props.theme.colors.surface.base) : props.theme.colors.state.success.foreground,
                         alignItems: 'center',
                         justifyContent: 'center',
@@ -315,7 +297,7 @@ export const ScmCommitComposerCard = React.memo((props: ScmCommitComposerCardPro
                     })}
                 >
                     {props.busy ? (
-                        <ActivitySpinner color={commitButtonContentColor} />
+                        <ActivitySpinner size={iconMatchedSpinnerSize(COMPOSER_GLYPH_SIZE_PX)} color={commitButtonContentColor} />
                     ) : (
                         <Text style={{ fontSize: 12, color: commitButtonContentColor, ...Typography.default('semiBold') }}>
                             {props.commitActionLabel}
@@ -323,35 +305,26 @@ export const ScmCommitComposerCard = React.memo((props: ScmCommitComposerCardPro
                     )}
                 </Pressable>
                 {pushAction ? (
-                    <Pressable
-                        accessibilityRole="button"
+                    <IconAction
+                        size="lg"
                         accessibilityLabel={pushAction.accessibilityLabel}
-                        accessibilityState={{ busy: pushAction.busy, disabled: pushDisabled }}
                         disabled={pushDisabled}
                         onPress={pushAction.onPress}
                         testID="scm-commit-adjacent-push"
-                        style={({ pressed }) => ({
-                            width: 38,
-                            height: 38,
-                            borderRadius: 12,
-                            borderWidth: 1,
-                            borderColor: props.theme.colors.border.default,
-                            backgroundColor: props.theme.colors.surface.inset ?? props.theme.colors.surface.base,
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            opacity: pushDisabled ? 0.5 : pressed ? 0.85 : 1,
-                        })}
                     >
                         {pushAction.busy ? (
-                            <ActivitySpinner color={props.theme.colors.text.secondary} />
+                            <ActivitySpinner
+                                size={iconMatchedSpinnerSize(COMPOSER_GLYPH_SIZE_PX)}
+                                color={props.theme.colors.text.secondary}
+                            />
                         ) : (
                             <Ionicons
                                 name="arrow-up-circle-outline"
-                                size={17}
+                                size={COMPOSER_GLYPH_SIZE_PX}
                                 color={props.theme.colors.text.secondary}
                             />
                         )}
-                    </Pressable>
+                    </IconAction>
                 ) : null}
             </View>
         </View>

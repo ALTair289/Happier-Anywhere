@@ -76,10 +76,11 @@ export function SourceControlOperationsHistorySection(props: SourceControlOperat
                             style={{
                                 paddingHorizontal: 8,
                                 paddingVertical: 6,
-                                borderRadius: 10,
-                                borderWidth: 1,
-                                borderColor: theme.colors.border.default,
-                                backgroundColor: theme.colors.surface.inset ?? theme.colors.input.background,
+                                // A sha tag is a label, not a control: the canonical badge shape,
+                                // background-only.
+                                borderRadius: 8,
+                                borderWidth: 0,
+                                backgroundColor: theme.colors.state.neutral.background,
                             }}
                         >
                             <Text style={{ color: theme.colors.text.secondary, fontSize: 11, ...Typography.mono('semiBold') }}>

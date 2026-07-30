@@ -19,7 +19,7 @@ const theme = {
                 tint: 'button-primary-tint',
             },
         },
-        border: { default: 'divider' },
+        border: { default: 'divider', subtle: 'divider' },
         surface: { inset: 'surface-high' },
         text: {
             primary: 'text',
@@ -44,7 +44,8 @@ describe('SourceControlUpdateControls', () => {
         );
 
         const button = screen.findByTestId('source-control-update-primary');
-        const buttonStyle = button?.props.style({ pressed: false });
+        // The shared button composes its style as an array; flatten rather than assume a single object.
+        const buttonStyle = flattenTestStyle(button?.props.style({ pressed: false }));
         const text = findTestInstanceByTypeWithProps(screen.tree, 'Text' as any, {
             children: 'Primary',
         });

@@ -11,6 +11,9 @@ import type { ScmProjectInFlightOperation } from '@/sync/runtime/orchestration/p
 import type { MarkdownEditMode } from '@/components/ui/markdown/editor/markdownEditorTypes';
 import type { MarkdownRichIneligibleReason } from '@/components/ui/markdown/editor/core/eligibility/markdownRichEligibility';
 import { resolveMarkdownRichDisabledReasonCopy } from '@/components/ui/markdown/editor/core/eligibility/markdownRichDisabledReasonCopy';
+import { StyleSheet as RNStyleSheet } from 'react-native';
+import { IconAction } from '@/components/ui/buttons/IconAction';
+import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
 
 export type FileDisplayMode = 'file' | 'diff' | 'markdown';
 export type FileDiffMode = 'included' | 'pending' | 'both';
@@ -189,14 +192,16 @@ export function FileActionToolbar(props: FileActionToolbarProps) {
         setToolbarWidth((current) => current === width ? current : width);
     }, []);
 
+    // Matches `ToolbarButton`, which the remaining callers cannot simply be: one anchors a popover
+    // and the other switches between a compact glyph and a labelled state mid-render.
     const chipStyle = (active: boolean) => ({
-        minHeight: 32,
+        minHeight: 34,
         paddingVertical: 5,
         paddingHorizontal: 10,
-        borderRadius: 10,
-        backgroundColor: active ? theme.colors.surface.inset : theme.colors.surface.base,
-        borderWidth: 1,
-        borderColor: theme.colors.border.default,
+        borderRadius: 8,
+        backgroundColor: active ? theme.colors.surface.pressed : theme.colors.surface.base,
+        borderWidth: RNStyleSheet.hairlineWidth,
+        borderColor: theme.colors.border.subtle,
         alignItems: 'center',
         justifyContent: 'center',
     }) as const;
@@ -414,26 +419,23 @@ export function FileActionToolbar(props: FileActionToolbarProps) {
             ) : null}
 
             {showFileEditorActions && !isEditingFile && onStartEditingFile ? (
-                <Pressable
+                <IconAction
                     onPress={() => {
                         onDisplayMode('file');
                         onStartEditingFile();
                     }}
                     testID="file-details-edit"
-                    style={[chipStyle(false), { width: 32, height: 32, paddingHorizontal: 0, paddingVertical: 0 }]}
-                    accessibilityRole="button"
                     accessibilityLabel={t('common.edit')}
                 >
                     <Octicons name="pencil" size={commandIconSize} color={theme.colors.text.primary} />
-                </Pressable>
+                </IconAction>
             ) : null}
 
             {reviewCommentsEnabled === true && onToggleCommentMode ? (
-                <Pressable
+                <IconAction
                     onPress={() => onToggleCommentMode(!isCommentModeActive)}
                     testID="file-details-comment-mode"
-                    style={[chipStyle(isCommentModeActive), { width: 32, height: 32, paddingHorizontal: 0, paddingVertical: 0 }]}
-                    accessibilityRole="button"
+                    active={isCommentModeActive}
                     accessibilityLabel={t('files.reviewComments.addCommentA11y')}
                 >
                     <Octicons
@@ -441,7 +443,7 @@ export function FileActionToolbar(props: FileActionToolbarProps) {
                         size={commandIconSize}
                         color={isCommentModeActive ? theme.colors.text.primary : theme.colors.text.secondary}
                     />
-                </Pressable>
+                </IconAction>
             ) : null}
 
             {showFileEditorActions && displayMode === 'file' && isEditingFile ? (
@@ -462,11 +464,12 @@ export function FileActionToolbar(props: FileActionToolbarProps) {
                             {t('common.save')}
                         </Text>
                     </Pressable>
-                    <Pressable onPress={onCancelEditingFile} testID="file-details-cancel" style={chipStyle(false)}>
-                        <Text style={{ color: theme.colors.text.primary, fontSize: 13, ...Typography.default('semiBold') }}>
-                            {t('common.cancel')}
-                        </Text>
-                    </Pressable>
+                    <ToolbarButton
+                        onPress={onCancelEditingFile}
+                        testID="file-details-cancel"
+                        size="md"
+                        label={t('common.cancel')}
+                    />
                     {/* Raw<->Rich selection now lives in the repurposed view-mode dropdown
                         above (see `isMarkdownEditModeMenu`); no separate toggle here. */}
                 </>
@@ -520,14 +523,14 @@ export function FileActionToolbar(props: FileActionToolbarProps) {
                     accessibilityRole="button"
                     accessibilityLabel={stageLabel}
                     style={showCompactCommitSelectionEntry
-                        ? [chipStyle(false), { width: 32, height: 32, paddingHorizontal: 0, paddingVertical: 0, opacity: actionBusy ? 0.6 : 1 }]
+                        ? [chipStyle(false), { width: 34, height: 34, minHeight: 34, paddingHorizontal: 0, paddingVertical: 0, opacity: actionBusy ? 0.6 : 1 }]
                         : {
                             paddingHorizontal: 12,
                             paddingVertical: 6,
                             minHeight: 32,
-                            borderRadius: 10,
+                            borderRadius: 8,
                             backgroundColor: theme.colors.surface.base,
-                            borderWidth: 1,
+                            borderWidth: RNStyleSheet.hairlineWidth,
                             borderColor: theme.colors.state.success.foreground,
                             opacity: actionBusy ? 0.6 : 1,
                         }}
@@ -601,15 +604,14 @@ export function FileActionToolbar(props: FileActionToolbarProps) {
                             {selectedLineActionLabel}
                         </Text>
                     </Pressable>
-                    <Pressable
+                    <IconAction
                         onPress={onClearSelection}
                         testID="file-details-clear-selection"
-                        style={[chipStyle(false), { width: 32, height: 32, paddingHorizontal: 0, paddingVertical: 0, flexShrink: 0 }]}
-                        accessibilityRole="button"
+                        style={{ flexShrink: 0 }}
                         accessibilityLabel={t('files.fileActions.clearSelection')}
                     >
                         <Octicons name="x" size={commandIconSize} color={theme.colors.text.secondary} />
-                    </Pressable>
+                    </IconAction>
                 </>
             )}
             {rightElement ? (

@@ -96,6 +96,7 @@ describe('FileActionToolbar', () => {
             surfaceHigh: '#f6f6f6',
             border: {
                 default: '#ddd',
+                subtle: '#f0f0f0',
             },
             input: { background: '#f2f2f2' },
             text: {
@@ -386,9 +387,9 @@ describe('FileActionToolbar', () => {
 
         const stageButton = screen.findByTestId('file-details-stage-file');
         expect(flattenStyle(stageButton?.props.style)).toMatchObject({
-            width: 32,
-            height: 32,
-            borderColor: theme.colors.border.default,
+            width: 34,
+            height: 34,
+            borderColor: theme.colors.border.subtle,
         });
         expect(screen.getTextContent()).not.toContain('files.fileActions.selectForCommit');
     });
@@ -424,9 +425,9 @@ describe('FileActionToolbar', () => {
 
         const stageButton = screen.findByTestId('file-details-stage-file');
         expect(flattenStyle(stageButton?.props.style)).toMatchObject({
-            width: 32,
-            height: 32,
-            borderColor: theme.colors.border.default,
+            width: 34,
+            height: 34,
+            borderColor: theme.colors.border.subtle,
         });
         expect(stageButton?.props.accessibilityLabel).toBe('files.fileActions.selectForCommit');
         expect(screen.getTextContent()).not.toContain('files.fileActions.selectForCommit');

@@ -1,7 +1,8 @@
 import * as React from 'react';
-import { Platform, Pressable, View } from 'react-native';
+import { Platform, View } from 'react-native';
 import { Octicons } from '@expo/vector-icons';
 
+import { IconAction } from '@/components/ui/buttons/IconAction';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
@@ -21,33 +22,29 @@ export type SourceControlRemoteActionsRailProps = Readonly<{
     hint?: string | null;
 }>;
 
+/**
+ * Four glyph-only buttons sat in a row, each in its own bordered box, so the chrome outweighed the
+ * icons and the rail read as heavier than the file list it sits above. They use the canonical
+ * `IconAction` now: no border at rest, affordance on hover.
+ */
+const RemoteActionButton = React.memo((props: Readonly<{
+    action: SourceControlRemoteAction;
+    iconColor: string;
+}>) => (
+    <IconAction
+        testID={props.action.testID}
+        accessibilityLabel={props.action.label}
+        disabled={props.action.disabled}
+        onPress={props.action.onPress}
+    >
+        <Octicons name={props.action.iconName} size={16} color={props.iconColor} />
+    </IconAction>
+));
+
+RemoteActionButton.displayName = 'RemoteActionButton';
+
 export const SourceControlRemoteActionsRail = React.memo((props: SourceControlRemoteActionsRailProps) => {
     if (props.actions.length === 0) return null;
-
-    const IconButton = (p: SourceControlRemoteAction) => (
-        <Pressable
-            key={p.key}
-            testID={p.testID}
-            accessibilityRole="button"
-            accessibilityLabel={p.label}
-            disabled={p.disabled}
-            onPress={p.onPress}
-            hitSlop={10}
-            style={({ pressed }) => ({
-                width: 34,
-                height: 34,
-                borderRadius: 10,
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderWidth: 1,
-                borderColor: props.theme.colors.border.default,
-                backgroundColor: props.theme.colors.surface.inset,
-                opacity: p.disabled ? 0.45 : pressed ? 0.78 : 1,
-            })}
-        >
-            <Octicons name={p.iconName} size={16} color={props.theme.colors.text.secondary} />
-        </Pressable>
-    );
 
     return (
         <View
@@ -65,8 +62,14 @@ export const SourceControlRemoteActionsRail = React.memo((props: SourceControlRe
                 <Text style={{ fontSize: 12, color: props.theme.colors.text.secondary, ...Typography.default('semiBold') }}>
                     {t('files.sourceControlOperations.title')}
                 </Text>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                    {props.actions.map(IconButton)}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+                    {props.actions.map((action) => (
+                        <RemoteActionButton
+                            key={action.key}
+                            action={action}
+                            iconColor={props.theme.colors.text.secondary}
+                        />
+                    ))}
                 </View>
             </View>
             {props.hint ? (
