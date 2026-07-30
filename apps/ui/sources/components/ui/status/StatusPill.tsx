@@ -57,7 +57,9 @@ const stylesheet = StyleSheet.create(() => ({
         gap: 6,
         paddingHorizontal: 8,
         paddingVertical: 2,
-        borderRadius: 999,
+        // 8px, not a full pill. A badge is a small rounded rect that sits in a row of
+        // rectangular surfaces; a capsule reads as a separate species next to them.
+        borderRadius: 8,
         // Badges are background-only: no border chrome on any pill app-wide.
         borderWidth: 0,
     },

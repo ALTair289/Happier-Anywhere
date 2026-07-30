@@ -55,7 +55,7 @@ export const lightTheme = {
         //
 
         text: {
-            primary: '#000000',
+            primary: '#222222',
             secondary: '#6c6c70',
             tertiary: '#99999d',
             link: '#2BACCC',
@@ -125,6 +125,10 @@ export const lightTheme = {
             surface: 'transparent',
             strong: Platform.select({ ios: '#d6d6d6', default: '#d6d6d6' }),
             modal: 'rgba(0, 0, 0, 0.1)',
+            // Half the weight of `default`, for seams and for controls whose border should imply an
+            // edge without competing with the content inside it. Introduced for the sidebar/content
+            // seam and shared by the quiet toolbar buttons rather than re-typed as a literal.
+            subtle: 'rgba(0, 0, 0, 0.041)',
         },
         effect: {
             surfaceHighlight: 'transparent',
@@ -230,7 +234,7 @@ export const lightTheme = {
         },
         input: {
             background: '#F5F5F5',
-            text: '#000000',
+            text: '#222222',
             placeholder: '#999999',
         },
         composer: {
@@ -329,10 +333,10 @@ export const lightTheme = {
         message: {
             user: {
                 background: '#f0eee6',
-                foreground: '#000000',
+                foreground: '#222222',
             },
             agent: {
-                foreground: '#000000',
+                foreground: '#222222',
             },
             event: {
                 foreground: '#666666',
@@ -447,6 +451,7 @@ export const darkTheme = {
             surface: 'rgba(255,255,255,0.056)',
             strong: 'rgba(255,255,255,0.090)',
             modal: 'rgba(255,255,255,0.064)',
+            subtle: 'rgba(255,255,255,0.025)',
         },
         effect: {
             surfaceHighlight: 'transparent',

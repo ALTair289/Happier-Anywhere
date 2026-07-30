@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as React from 'react';
 import { useUnistyles } from 'react-native-unistyles';
 
-import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
+import { ActivitySpinner, iconMatchedSpinnerSize } from '@/components/ui/feedback/ActivitySpinner';
 import type {
     SessionWorkflowAgentStatusV1,
     SessionWorkflowRunStatusV1,
@@ -21,7 +21,7 @@ export const WorkflowStatusIcon = React.memo<{ status: WorkflowEntityStatus; siz
     const stateColors = theme.colors.state;
     switch (status) {
         case 'active':
-            return <ActivitySpinner size={size <= 14 ? 14 : 'small'} color={stateColors.active.foreground} />;
+            return <ActivitySpinner size={iconMatchedSpinnerSize(size)} color={stateColors.active.foreground} />;
         case 'complete':
             return <Ionicons name="checkmark-circle" size={size} color={stateColors.success.foreground} />;
         case 'failed':

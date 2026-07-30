@@ -28,12 +28,15 @@ describe('StatusPill', () => {
         expect(flat.fontVariant).toEqual(['tabular-nums']);
     });
 
-    it('uses pill shape (999 borderRadius)', async () => {
+    // A badge is a small rounded rect sitting in a row of rectangular surfaces, not a capsule — a
+    // full pill reads as a different species next to them. Background-only, no border chrome.
+    it('uses the rounded-rect badge shape without border chrome', async () => {
         const { StatusPill } = await import('../..');
         const screen = await renderScreen(<StatusPill variant="stale" label="stale" testID="pill-stale" />);
         const node = screen.findByTestId('pill-stale');
         const flat = flatten(node?.props.style);
-        expect(flat.borderRadius).toBe(999);
+        expect(flat.borderRadius).toBe(8);
+        expect(flat.borderWidth).toBe(0);
     });
 
     it('renders a stable testID suffix per variant', async () => {
