@@ -148,6 +148,153 @@ export Z_AI_OPUS_MODEL="GLM-4.6"
 export Z_AI_SONNET_MODEL="GLM-4.6"
 export Z_AI_HAIKU_MODEL="GLM-4.5-Air"`,
             };
+        case 'minimax':
+            return {
+                setupGuideUrl: 'https://platform.minimax.io/docs/api-reference/api-overview',
+                description: 'MiniMax M3 through the Anthropic-compatible endpoint (global). Use a key issued on api.minimax.io — China keys are not valid here.',
+                environmentVariables: [
+                    {
+                        name: 'MINIMAX_BASE_URL',
+                        expectedValue: 'https://api.minimax.io/anthropic',
+                        description: 'MiniMax Anthropic-compatible API endpoint (global)',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_AUTH_TOKEN',
+                        expectedValue: '',
+                        description: 'Your MiniMax API key (global account)',
+                        isSecret: true,
+                    },
+                    {
+                        name: 'MINIMAX_API_TIMEOUT_MS',
+                        expectedValue: '600000',
+                        description: 'API timeout (10 minutes)',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_AUTO_COMPACT_WINDOW',
+                        expectedValue: '1000000',
+                        description: 'Context capacity used for auto-compaction. Required alongside the [1m] model id to get M3\'s full 1M window.',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_MODEL',
+                        expectedValue: 'MiniMax-M3[1m]',
+                        description: 'Default model. The [1m] suffix selects M3\'s 1M-context variant, as MiniMax\'s Claude Code guide specifies.',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_OPUS_MODEL',
+                        expectedValue: 'MiniMax-M3[1m]',
+                        description: 'Model used when the session selects the Opus tier',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_SONNET_MODEL',
+                        expectedValue: 'MiniMax-M3[1m]',
+                        description: 'Model used when the session selects the Sonnet tier',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_HAIKU_MODEL',
+                        expectedValue: 'MiniMax-M2.7',
+                        description: 'Fast model used for background tasks and the Haiku tier',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+                        expectedValue: '1',
+                        description: 'Disable non-essential network traffic',
+                        isSecret: false,
+                    },
+                ],
+                shellConfigExample: `# Add to ~/.zshrc or ~/.bashrc:
+export MINIMAX_BASE_URL="https://api.minimax.io/anthropic"
+export MINIMAX_AUTH_TOKEN="YOUR_MINIMAX_API_KEY"
+export MINIMAX_API_TIMEOUT_MS="600000"
+export MINIMAX_AUTO_COMPACT_WINDOW="1000000"
+export MINIMAX_MODEL="MiniMax-M3[1m]"
+export MINIMAX_OPUS_MODEL="MiniMax-M3[1m]"
+export MINIMAX_SONNET_MODEL="MiniMax-M3[1m]"
+export MINIMAX_HAIKU_MODEL="MiniMax-M2.7"
+export MINIMAX_CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+
+# Model selection guide:
+# - MiniMax-M3[1m]: Default. M3 with its 1M-context variant selected.
+# - MiniMax-M3: Same model without the extended-context suffix (200K).
+# - MiniMax-M2.7: Faster, lighter model for background work.`,
+            };
+        case 'minimax-cn':
+            return {
+                setupGuideUrl: 'https://platform.minimaxi.com/docs/api-reference/api-overview',
+                description: 'MiniMax M3 through the Anthropic-compatible endpoint (China). Use a key issued on api.minimaxi.com — global keys are not valid here.',
+                environmentVariables: [
+                    {
+                        name: 'MINIMAX_CN_BASE_URL',
+                        expectedValue: 'https://api.minimaxi.com/anthropic',
+                        description: 'MiniMax Anthropic-compatible API endpoint (China)',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_CN_AUTH_TOKEN',
+                        expectedValue: '',
+                        description: 'Your MiniMax API key (China account)',
+                        isSecret: true,
+                    },
+                    {
+                        name: 'MINIMAX_CN_API_TIMEOUT_MS',
+                        expectedValue: '600000',
+                        description: 'API timeout (10 minutes)',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_CN_AUTO_COMPACT_WINDOW',
+                        expectedValue: '1000000',
+                        description: 'Context capacity used for auto-compaction. Required alongside the [1m] model id to get M3\'s full 1M window.',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_CN_MODEL',
+                        expectedValue: 'MiniMax-M3[1m]',
+                        description: 'Default model. The [1m] suffix selects M3\'s 1M-context variant, as MiniMax\'s Claude Code guide specifies.',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_CN_OPUS_MODEL',
+                        expectedValue: 'MiniMax-M3[1m]',
+                        description: 'Model used when the session selects the Opus tier',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_CN_SONNET_MODEL',
+                        expectedValue: 'MiniMax-M3[1m]',
+                        description: 'Model used when the session selects the Sonnet tier',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_CN_HAIKU_MODEL',
+                        expectedValue: 'MiniMax-M2.7',
+                        description: 'Fast model used for background tasks and the Haiku tier',
+                        isSecret: false,
+                    },
+                    {
+                        name: 'MINIMAX_CN_CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+                        expectedValue: '1',
+                        description: 'Disable non-essential network traffic',
+                        isSecret: false,
+                    },
+                ],
+                shellConfigExample: `# Add to ~/.zshrc or ~/.bashrc:
+export MINIMAX_CN_BASE_URL="https://api.minimaxi.com/anthropic"
+export MINIMAX_CN_AUTH_TOKEN="YOUR_MINIMAX_API_KEY"
+export MINIMAX_CN_API_TIMEOUT_MS="600000"
+export MINIMAX_CN_AUTO_COMPACT_WINDOW="1000000"
+export MINIMAX_CN_MODEL="MiniMax-M3[1m]"
+export MINIMAX_CN_OPUS_MODEL="MiniMax-M3[1m]"
+export MINIMAX_CN_SONNET_MODEL="MiniMax-M3[1m]"
+export MINIMAX_CN_HAIKU_MODEL="MiniMax-M2.7"
+export MINIMAX_CN_CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"`,
+            };
         case 'openai':
             return {
                 setupGuideUrl: 'https://platform.openai.com/docs/api-reference',
