@@ -3939,7 +3939,8 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       },
       isPidAlive: () => true,
       getProcessInfo: async () => ({ name: 'opencode', cmd: processCommand }),
-      readProcessStartTimeMs: async () => 2_501,
+      // Windows has no POSIX `ps` start time; exact process-birth proof comes from CIM.
+      readProcessStartTimeMs: async () => null,
       readProcessInstanceFingerprint: async () =>
         'win32-cim:2026-07-30T10:00:00.0000000Z',
       currentActiveServerDir: '/tmp/happier/servers/cloud',

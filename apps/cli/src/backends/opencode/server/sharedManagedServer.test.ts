@@ -77,7 +77,7 @@ describe('managed OpenCode broker activation proof continuity', () => {
     overrides: Partial<Readonly<{
       isPidAlive: (pid: number) => boolean;
       processCommand: string;
-      observedStartTimeMs: number;
+      observedStartTimeMs: number | null;
       observedProcessInstanceFingerprint: string | null;
       brokerStateUsable: boolean | (() => boolean);
     }>> = {},
@@ -97,7 +97,10 @@ describe('managed OpenCode broker activation proof continuity', () => {
           name: 'opencode',
           cmd: overrides.processCommand ?? commandLine,
         }),
-        readProcessStartTimeMs: async () => overrides.observedStartTimeMs ?? 2_501,
+        readProcessStartTimeMs: async () =>
+          Object.prototype.hasOwnProperty.call(overrides, 'observedStartTimeMs')
+            ? overrides.observedStartTimeMs ?? null
+            : 2_501,
         readProcessInstanceFingerprint: async () =>
           overrides.observedProcessInstanceFingerprint !== undefined
             ? overrides.observedProcessInstanceFingerprint
@@ -144,6 +147,28 @@ describe('managed OpenCode broker activation proof continuity', () => {
     await expect(
       rehydrateManagedOpenCodeBrokerActivationProof(expectation, harness.deps),
     ).resolves.toBe(true);
+  });
+
+  it('uses the Windows CIM process-birth fingerprint when POSIX start-time evidence is unavailable', async () => {
+    const matching = createProofDeps(
+      { state: createState() },
+      { observedStartTimeMs: null },
+    );
+    await activate(matching);
+    await expect(
+      rehydrateManagedOpenCodeBrokerActivationProof(expectation, matching.deps),
+    ).resolves.toBe(true);
+
+    const mismatched = createProofDeps(
+      { state: matching.states.get('state') as SharedManagedOpenCodeServerState },
+      {
+        observedStartTimeMs: null,
+        observedProcessInstanceFingerprint: 'win32-cim:2026-07-30T10:00:01.0000000Z',
+      },
+    );
+    await expect(
+      rehydrateManagedOpenCodeBrokerActivationProof(expectation, mismatched.deps),
+    ).resolves.toBe(false);
   });
 
   it('does not treat plugin-file or nonce presence as activation proof', async () => {
