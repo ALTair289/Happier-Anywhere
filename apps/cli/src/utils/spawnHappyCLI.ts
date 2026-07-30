@@ -580,6 +580,24 @@ function prunePinnedRunnerSnapshots(
   }
 }
 
+/**
+ * Apply pinned-runner retention once the daemon has completed its authoritative startup reattach
+ * scan. This closes the no-session growth gap: machines that only run the daemon still prune dead
+ * historical closures without weakening the fail-closed live-runner invariant.
+ */
+export function pruneHappyCliRunnerSnapshots(
+  live: LiveRunnerSnapshotFingerprints,
+  environment: NodeJS.ProcessEnv = process.env,
+): void {
+  const daemonFingerprint = readNonEmptyEnv(DAEMON_DIST_CLOSURE_FINGERPRINT_ENV, environment);
+  if (!daemonFingerprint) return;
+
+  const distEntrypoint = resolveStackDistEntrypoint(resolveSubprocessEntrypoint(), environment);
+  const location = resolvePinnedSnapshotLocation(distEntrypoint, daemonFingerprint);
+  if (!location) return;
+  prunePinnedRunnerSnapshots(location.snapshotsDir, daemonFingerprint, live);
+}
+
 function copyCliDistToPinnedSnapshot(
   entrypoint: string,
   fingerprint: string,

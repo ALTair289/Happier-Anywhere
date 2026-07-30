@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -558,6 +558,41 @@ describe('spawnHappyCLI fallback invocation', () => {
     } finally {
       process.execArgv = originalExecArgv;
     }
+  });
+
+  it('prunes dead pinned runner snapshots from authoritative daemon startup liveness', async () => {
+    await withTempDir('happier-pinned-dist-startup-prune-', async (root) => {
+      const entrypoint = writeTinyDist(root);
+      const fingerprint = 'abc123def4567890';
+      const liveFingerprint = '1111111111111111';
+      const runtimeStatePath = join(root, 'stack.runtime.json');
+      writeDistBuildManifest(entrypoint, fingerprint);
+      writeStackRuntimeFingerprint(runtimeStatePath, fingerprint);
+      patchFreshDistEnv(entrypoint, runtimeStatePath, fingerprint);
+
+      const snapshotsDir = join(root, '.runner-snapshots');
+      for (const [index, name] of [
+        fingerprint,
+        liveFingerprint,
+        ...Array.from({ length: 10 }, (_, deadIndex) => `dead${String(deadIndex).padStart(12, '0')}`),
+      ].entries()) {
+        const snapshotDir = join(snapshotsDir, name);
+        mkdirSync(snapshotDir, { recursive: true });
+        utimesSync(snapshotDir, index + 1, index + 1);
+      }
+
+      const mod = (await import('@/utils/spawnHappyCLI')) as typeof import('@/utils/spawnHappyCLI');
+      mod.pruneHappyCliRunnerSnapshots({
+        reliable: true,
+        fingerprints: new Set([liveFingerprint]),
+      });
+
+      expect(existsSync(join(snapshotsDir, fingerprint))).toBe(true);
+      expect(existsSync(join(snapshotsDir, liveFingerprint))).toBe(true);
+      expect(existsSync(join(snapshotsDir, 'dead000000000000'))).toBe(false);
+      expect(existsSync(join(snapshotsDir, 'dead000000000001'))).toBe(false);
+      expect(existsSync(join(snapshotsDir, 'dead000000000009'))).toBe(true);
+    });
   });
 
   it.each(['maybe', '2', 'enabled', 'yup'])('does not treat unknown HAPPIER_CLI_SUBPROCESS_PREFER_TSX=%s as enabled', async (rawValue) => {

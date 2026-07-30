@@ -404,6 +404,7 @@ vi.mock('@/ui/doctor', () => ({
 vi.mock('@/utils/spawnHappyCLI', () => ({
   buildHappyCliSubprocessInvocation: vi.fn(),
   buildHappyCliSubprocessLaunchSpec: vi.fn<BuildHappyCliSubprocessLaunchSpec>(),
+  pruneHappyCliRunnerSnapshots: vi.fn(),
   resolveHappyCliSubprocessRuntimeDecision: vi.fn(() => null),
   spawnHappyCLI: vi.fn(() => ({
     pid: 4242,

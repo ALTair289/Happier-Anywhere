@@ -502,6 +502,7 @@ const applySpawnedChildOomScoreAdjustmentMock = vi.hoisted(() => vi.fn(async () 
 
 vi.mock('@/utils/spawnHappyCLI', () => ({
   buildHappyCliSubprocessLaunchSpec: vi.fn<BuildHappyCliSubprocessLaunchSpec>(),
+  pruneHappyCliRunnerSnapshots: vi.fn(),
   resolveHappyCliSubprocessRuntimeDecision,
   spawnHappyCLI,
 }));

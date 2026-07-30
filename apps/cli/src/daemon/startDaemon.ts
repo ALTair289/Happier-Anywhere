@@ -39,6 +39,7 @@ import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import {
   buildHappyCliSubprocessLaunchSpec,
+  pruneHappyCliRunnerSnapshots,
   resolveHappyCliSubprocessRuntimeDecision,
   spawnHappyCLI,
   type HappyCliSubprocessLaunchOptions,
@@ -2546,6 +2547,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           trackedSessionCount: pidToTrackedSession.size,
           orphanedDeadDaemonSessionCount: orphanedDeadDaemonSessions.length,
         });
+        pruneHappyCliRunnerSnapshots(resolveLiveRunnerSnapshotFingerprints(getCurrentChildren()));
         registerCurrentConnectedServiceTrackedSessionTargets();
         void connectedServiceGroupHomeCleanupScheduler.reconcileDeletedGroupHomes({
           resolveGroupDeletionAuthority: resolveConnectedServiceGroupDeletionAuthority,
