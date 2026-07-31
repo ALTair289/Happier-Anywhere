@@ -1971,8 +1971,12 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
             ? (parsed.data as any).modelOverride
             : undefined;
           const permissionOverrideRaw = (parsed.data as any).permissionModeOverride;
-          const permissionDecision = typeof permissionOverrideRaw === 'string' && permissionOverrideRaw.trim().length > 0
-            ? assertSessionAgentPermission(ctx, permissionOverrideRaw)
+          const permissionModeForAgent = isSessionAgentCaller(ctx)
+            && !(typeof permissionOverrideRaw === 'string' && permissionOverrideRaw.trim().length > 0)
+              ? ctx.callerPermissionMode ?? 'default'
+              : permissionOverrideRaw;
+          const permissionDecision = typeof permissionModeForAgent === 'string' && permissionModeForAgent.trim().length > 0
+            ? assertSessionAgentPermission(ctx, permissionModeForAgent)
             : null;
           if (permissionDecision?.ok === false) {
             return createPermissionPolicyResult(ctx, permissionDecision);

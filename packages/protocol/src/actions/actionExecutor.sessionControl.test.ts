@@ -862,6 +862,27 @@ describe('createActionExecutor (session control)', () => {
     expect(sessionSendMessage).not.toHaveBeenCalled();
   });
 
+  it('clamps a session-agent message without an explicit override to the caller permission', async () => {
+    const sessionSendMessage = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ sessionSendMessage });
+
+    const res = await executor.execute(
+      'session.message.send' as any,
+      {
+        sessionId: 'higher-privilege-session',
+        message: 'Continue',
+      },
+      { surface: 'session_agent', defaultSessionId: 'caller', callerPermissionMode: 'read-only' } as any,
+    );
+
+    expect(res).toEqual({ ok: true, result: { ok: true } });
+    expect(sessionSendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      permissionModeOverride: 'read-only',
+      callerSurface: 'session_agent',
+      callerPermissionMode: 'read-only',
+    }));
+  });
+
   it('rejects session-agent permission mode changes above the caller before deps.sessionPermissionModeSet runs', async () => {
     const sessionPermissionModeSet = vi.fn(async () => ({ ok: true }));
     const executor = createExecutor({ sessionPermissionModeSet });
