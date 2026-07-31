@@ -26,6 +26,64 @@ afterEach(() => {
 });
 
 describe('buildHappierToolsShellBridgeCommand', () => {
+  it('recognizes only the exact locally generated bridge launcher as trusted', async () => {
+    const {
+      buildHappierToolsShellBridgeCommand,
+      parseTrustedHappierToolsShellBridgeCommand,
+    } = await import('./buildHappierToolsShellBridgeCommand');
+    const command = buildHappierToolsShellBridgeCommand([
+      'call',
+      '--source',
+      'happier',
+      '--tool',
+      'save_memory',
+      '--args-json',
+      '{"memory":"remember this"}',
+      '--json',
+    ]);
+
+    expect(parseTrustedHappierToolsShellBridgeCommand(command)).toMatchObject({
+      kind: 'call',
+      source: 'happier',
+      tool: 'save_memory',
+      args: { memory: 'remember this' },
+    });
+    expect(
+      parseTrustedHappierToolsShellBridgeCommand(
+        `happier tools call --source happier --tool save_memory --args-json '{"memory":"remember this"}' --json`,
+      ),
+    ).toBeNull();
+    expect(
+      parseTrustedHappierToolsShellBridgeCommand(
+        `node ./happier-helper.js tools call --source happier --tool save_memory --args-json '{"memory":"remember this"}' --json`,
+      ),
+    ).toBeNull();
+    expect(parseTrustedHappierToolsShellBridgeCommand(`${command} && touch /tmp/happier-pwn`)).toBeNull();
+  });
+
+  it('rejects a modified environment prelude even when the bridge suffix is canonical', async () => {
+    const happierHome = createTempDirSync('happier-tools-shell-bridge-home-');
+    tempDirs.add(happierHome);
+    envScope.patch({
+      HAPPIER_SHELL_BRIDGE_CONTEXT_ENV: 'home',
+      HAPPIER_HOME_DIR: happierHome,
+    });
+    vi.resetModules();
+
+    const {
+      buildHappierToolsShellBridgeCommand,
+      parseTrustedHappierToolsShellBridgeCommand,
+    } = await import('./buildHappierToolsShellBridgeCommand');
+    const command = buildHappierToolsShellBridgeCommand(['list', '--json']);
+
+    expect(parseTrustedHappierToolsShellBridgeCommand(command)).toMatchObject({ kind: 'list' });
+    expect(
+      parseTrustedHappierToolsShellBridgeCommand(
+        command.replace(`HAPPIER_HOME_DIR='${happierHome}'`, `HAPPIER_HOME_DIR='/tmp/attacker'`),
+      ),
+    ).toBeNull();
+  });
+
   it('does not inline Happier runtime context by default', async () => {
     const happierHome = createTempDirSync('happier-tools-shell-bridge-home-');
     tempDirs.add(happierHome);

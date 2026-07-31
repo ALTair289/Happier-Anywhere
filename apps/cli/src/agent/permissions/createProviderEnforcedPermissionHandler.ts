@@ -14,7 +14,6 @@ export function createProviderEnforcedPermissionHandler(params: {
   onAbortRequested?: (() => void | Promise<void>) | null;
   toolTrace?: { protocol: ToolTraceProtocol; provider: string } | null;
   alwaysAutoApproveToolNameIncludes?: ReadonlyArray<string>;
-  alwaysAutoApproveToolCallIdIncludes?: ReadonlyArray<string>;
 }): ProviderEnforcedPermissionHandler {
   return new ProviderEnforcedPermissionHandler(params.session, {
     logPrefix: params.logPrefix,
@@ -24,6 +23,5 @@ export function createProviderEnforcedPermissionHandler(params: {
     onAbortRequested: params.onAbortRequested ?? null,
     toolTrace: params.toolTrace ?? null,
     alwaysAutoApproveToolNameIncludes: params.alwaysAutoApproveToolNameIncludes,
-    alwaysAutoApproveToolCallIdIncludes: params.alwaysAutoApproveToolCallIdIncludes,
   });
 }

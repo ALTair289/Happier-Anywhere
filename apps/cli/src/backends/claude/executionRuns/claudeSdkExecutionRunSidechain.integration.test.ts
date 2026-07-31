@@ -8,6 +8,7 @@ import type { ACPMessageData } from '@/api/session/sessionMessageTypes';
 import type { SessionId } from '@/agent/core/AgentBackend';
 import { ExecutionRunManager } from '@/agent/executionRuns/runtime/ExecutionRunManager';
 import { ClaudeSdkAgentBackend } from '@/backends/claude/sdkAgentBackend/ClaudeSdkAgentBackend';
+import { createExecutionRunPermissionHandler } from '@/agent/executionRuns/policy/executionRunPermissionDecision';
 
 function createFakeClaudeReviewEntrypointSource(): string {
   // Mimics `claude --output-format stream-json --input-format stream-json`.
@@ -121,7 +122,10 @@ rl.on('close', () => process.exit(0));
           new ClaudeSdkAgentBackend({
             cwd,
             modelId: 'default',
-            permissionPolicy: opts.permissionMode as any,
+            permissionHandler: createExecutionRunPermissionHandler({
+              backendId: 'claude',
+              permissionMode: opts.permissionMode,
+            }),
           }),
         sendAcp: (provider: string, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => {
           sent.push({ provider, body, meta: opts?.meta });
@@ -196,7 +200,10 @@ rl.on('close', () => process.exit(0));
 	          new ClaudeSdkAgentBackend({
 	            cwd,
             modelId: 'default',
-            permissionPolicy: opts.permissionMode as any,
+            permissionHandler: createExecutionRunPermissionHandler({
+              backendId: 'claude',
+              permissionMode: opts.permissionMode,
+            }),
           }),
         sendAcp: (provider: string, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => {
           sent.push({ provider, body, meta: opts?.meta });

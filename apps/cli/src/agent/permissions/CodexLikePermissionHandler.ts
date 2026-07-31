@@ -21,17 +21,16 @@ import { resolvePermissionIntentFromMetadataSnapshot } from '@/agent/runtime/per
 import { shouldSuppressProviderPermissionForHappierApproval } from '@/agent/tools/happierTools/resolveHappierActionForMcpToolName';
 import type { ToolTraceProtocol } from '@/agent/tools/trace/toolTrace';
 import type { AccountSettings } from '@happier-dev/protocol';
-import { parseHappierToolsShellBridgeCommand } from '@happier-dev/protocol';
-import { isChangeTitleToolLikeName } from '@happier-dev/protocol/tools/v2';
 import { isDefaultWriteLikeToolName } from './writeLikeToolNameHeuristics';
+import { isTrustedAlwaysAutoApproveToolName } from './alwaysAutoApproveToolName';
 import { extractShellCommand } from './permissionToolIdentifier';
 import { resolveAgentRequestKind } from './requestKind';
 import { shouldDenyAgentSessionTitleToolCall } from './codingPromptTitlePermission';
+import { parseTrustedHappierToolsShellBridgeCommand } from '@/agent/tools/happierTools/runtime/buildHappierToolsShellBridgeCommand';
 
 export type { PermissionResult, PendingRequest };
 
-const ALWAYS_AUTO_APPROVE_TOKENS = ['change_title', 'session_title_set', 'save_memory', 'think'] as const;
-const AUTO_APPROVE_HAPPIER_SHELL_BRIDGE_TOOLS = new Set<string>(ALWAYS_AUTO_APPROVE_TOKENS);
+const AUTO_APPROVE_HAPPIER_SHELL_BRIDGE_TOOLS = new Set(['change_title', 'session_title_set', 'save_memory', 'think']);
 export { isDefaultWriteLikeToolName };
 
 export class CodexLikePermissionHandler extends BasePermissionHandler {
@@ -107,7 +106,7 @@ export class CodexLikePermissionHandler extends BasePermissionHandler {
     }
 
     const isAlwaysAutoApprove =
-      this.isAlwaysAutoApproveTool(toolName, toolCallId) || this.isHappierToolsShellBridgeToolCall(toolName, input);
+      this.isAlwaysAutoApproveTool(toolName) || this.isHappierToolsShellBridgeToolCall(toolName, input);
 
     if ((this.currentPermissionMode === 'read-only' || this.currentPermissionMode === 'plan') && !isAlwaysAutoApprove && this.isWriteLikeToolName(toolName)) {
       logger.debug(`${this.getLogPrefix()} Denying tool ${toolName} (${toolCallId}) in ${this.currentPermissionMode} mode`);
@@ -142,14 +141,8 @@ export class CodexLikePermissionHandler extends BasePermissionHandler {
     this.setPermissionMode(resolved.intent, resolved.updatedAt);
   }
 
-  private isAlwaysAutoApproveTool(toolName: string, toolCallId: string): boolean {
-    if (isChangeTitleToolLikeName(toolName)) return true;
-    const lowerToolName = toolName.toLowerCase();
-    const lowerToolCallId = toolCallId.toLowerCase();
-    return (
-      ALWAYS_AUTO_APPROVE_TOKENS.some((token) => lowerToolName.includes(token)) ||
-      ALWAYS_AUTO_APPROVE_TOKENS.some((token) => lowerToolCallId.includes(token))
-    );
+  private isAlwaysAutoApproveTool(toolName: string): boolean {
+    return isTrustedAlwaysAutoApproveToolName(toolName);
   }
 
   private isHappierToolsShellBridgeToolCall(toolName: string, input: unknown): boolean {
@@ -161,7 +154,7 @@ export class CodexLikePermissionHandler extends BasePermissionHandler {
     const command = extractShellCommand(input);
     if (!command) return false;
 
-    const parsed = parseHappierToolsShellBridgeCommand(command);
+    const parsed = parseTrustedHappierToolsShellBridgeCommand(command);
     if (!parsed) return false;
     if (parsed.kind === 'list') return true;
     return parsed.source === 'happier' && AUTO_APPROVE_HAPPIER_SHELL_BRIDGE_TOOLS.has(parsed.tool);
@@ -181,7 +174,7 @@ export class CodexLikePermissionHandler extends BasePermissionHandler {
   }
 
   private shouldAutoApprove(toolName: string, toolCallId: string, input: unknown): boolean {
-    if (this.isAlwaysAutoApproveTool(toolName, toolCallId)) return true;
+    if (this.isAlwaysAutoApproveTool(toolName)) return true;
     if (this.isHappierToolsShellBridgeToolCall(toolName, input)) return true;
 
     switch (this.currentPermissionMode) {
@@ -234,7 +227,7 @@ export class CodexLikePermissionHandler extends BasePermissionHandler {
     }
 
     const isAlwaysAutoApprove =
-      this.isAlwaysAutoApproveTool(toolName, toolCallId) || this.isHappierToolsShellBridgeToolCall(toolName, input);
+      this.isAlwaysAutoApproveTool(toolName) || this.isHappierToolsShellBridgeToolCall(toolName, input);
 
     if ((this.currentPermissionMode === 'read-only' || this.currentPermissionMode === 'plan') && !isAlwaysAutoApprove && this.isWriteLikeToolName(toolName)) {
       logger.debug(`${this.getLogPrefix()} Denying tool ${toolName} (${toolCallId}) in ${this.currentPermissionMode} mode`);

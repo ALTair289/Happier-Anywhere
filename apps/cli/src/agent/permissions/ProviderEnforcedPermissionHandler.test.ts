@@ -63,7 +63,14 @@ describe('ProviderEnforcedPermissionHandler always-auto-approve matching', () =>
     await expect(handler.handleToolCall('safe-3', 'happier_change_title', {})).resolves.toEqual({ decision: 'approved' });
     await expect(handler.handleToolCall('safe-4', 'mcp__happier__session_title_set', {})).resolves.toEqual({ decision: 'approved' });
     await expect(handler.handleToolCall('safe-5', 'happier_action_execute', { actionId: 'session.title.set' })).resolves.toEqual({ decision: 'approved' });
-    await expect(handler.handleToolCall('mcp__happier__change_title-1', 'other', {})).resolves.toEqual({ decision: 'approved' });
+    const misleadingIdPending = handler.handleToolCall('mcp__happier__change_title-1', 'other', {});
+    expect(session.agentState.requests['mcp__happier__change_title-1']).toBeTruthy();
+    await session.rpcHandlerManager.handlers.get('permission')?.({
+      id: 'mcp__happier__change_title-1',
+      approved: false,
+      decision: 'denied',
+    });
+    await expect(misleadingIdPending).resolves.toEqual({ decision: 'denied' });
 
     const executionRunPending = handler.handleToolCall('execution-run-1', 'mcp__happier__execution_run_start', {
       intent: 'delegate',

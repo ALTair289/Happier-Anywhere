@@ -9,13 +9,11 @@ import { emitCanonicalTurnDiffTool } from '@/agent/runtime/emitCanonicalTurnDiff
 import { ensureClaudeJsRuntimeExecutable } from '@/backends/claude/utils/ensureClaudeJsRuntimeExecutable';
 import { ClaudeTurnChangeTracker } from '../utils/ClaudeTurnChangeTracker';
 import { isClaudeExplicitDiffToolInput } from '../utils/isClaudeExplicitDiffToolInput';
-import { isReadOnlyClaudeSdkToolAllowed } from './isReadOnlyClaudeSdkToolAllowed';
+import type { AcpPermissionHandler } from '@/agent/acp/AcpBackend';
 import {
   createClaudeProviderActivityLedger,
   normalizeClaudeProviderTaskEvent,
 } from '@/backends/claude/providerActivity/createClaudeProviderActivityLedger';
-
-export type ClaudeSdkPermissionPolicy = 'no_tools' | 'read_only' | 'workspace_write';
 
 export class ClaudeSdkAgentBackend implements AgentBackend {
   private readonly listeners: AgentMessageHandler[] = [];
@@ -54,7 +52,7 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
     private readonly opts: Readonly<{
       cwd: string;
       modelId: string;
-      permissionPolicy: ClaudeSdkPermissionPolicy;
+      permissionHandler: AcpPermissionHandler;
       settingsPath?: string;
       env?: NodeJS.ProcessEnv;
     }>,
@@ -316,20 +314,14 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
   }
 
   private buildCanCallTool() {
-    if (this.opts.permissionPolicy === 'no_tools') {
-      return async () => ({ behavior: 'deny', message: 'Tools are disabled for voice agent.', interrupt: true } as const);
-    }
-
-    if (this.opts.permissionPolicy === 'workspace_write') {
-      return async (_toolName: string, input: unknown) => {
-        const updatedInput = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
-        return { behavior: 'allow', updatedInput } as const;
-      };
-    }
-
     return async (toolName: string, input: unknown) => {
-      if (!isReadOnlyClaudeSdkToolAllowed(toolName, input)) {
-        return { behavior: 'deny', message: `Tool denied by voice agent policy: ${toolName}`, interrupt: true } as const;
+      const result = await this.opts.permissionHandler.handleToolCall(
+        'claude-sdk-execution-run',
+        toolName,
+        input,
+      );
+      if (result.decision === 'denied' || result.decision === 'abort') {
+        return { behavior: 'deny', message: `Tool denied by execution-run policy: ${toolName}`, interrupt: true } as const;
       }
       const updatedInput = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
       return { behavior: 'allow', updatedInput } as const;

@@ -24,9 +24,9 @@ import {
   shouldSuppressProviderPermissionForHappierApproval,
 } from '@/agent/tools/happierTools/resolveHappierActionForMcpToolName';
 import type { AccountSettings, ActionId } from '@happier-dev/protocol';
-import { isChangeTitleToolLikeName } from '@happier-dev/protocol/tools/v2';
 import { shouldDenyAgentSessionTitleToolCall } from './codingPromptTitlePermission';
 import { resolveAgentRequestKind } from './requestKind';
+import { isTrustedAlwaysAutoApproveToolName } from './alwaysAutoApproveToolName';
 
 export type { PermissionResult, PendingRequest };
 
@@ -37,7 +37,6 @@ type HandlerOpts = Readonly<{
   onAbortRequested?: (() => void | Promise<void>) | null;
   toolTrace?: { protocol: ToolTraceProtocol; provider: string } | null;
   alwaysAutoApproveToolNameIncludes?: ReadonlyArray<string>;
-  alwaysAutoApproveToolCallIdIncludes?: ReadonlyArray<string>;
 }>;
 
 const DEFAULT_ALWAYS_AUTO_APPROVE_TOOL_NAME_INCLUDES = [
@@ -58,12 +57,6 @@ const DEFAULT_ALWAYS_AUTO_APPROVE_TOOL_NAME_INCLUDES = [
   'write_text_file',
 ] as const;
 
-const DEFAULT_ALWAYS_AUTO_APPROVE_TOOL_CALL_ID_INCLUDES = [
-  'change_title',
-  'session_title_set',
-  'save_memory',
-] as const;
-
 const ALWAYS_AUTO_APPROVE_HAPPIER_ACTION_IDS = new Set<ActionId>([
   'session.title.set',
   'action.spec.search',
@@ -78,7 +71,6 @@ function isFullAccessPermissionMode(mode: PermissionMode): boolean {
 export class ProviderEnforcedPermissionHandler extends BasePermissionHandler {
   private readonly logPrefix: string;
   private readonly alwaysAutoApproveToolNameIncludes: ReadonlyArray<string>;
-  private readonly alwaysAutoApproveToolCallIdIncludes: ReadonlyArray<string>;
   private currentPermissionMode: PermissionMode = 'default';
 
   constructor(
@@ -96,10 +88,6 @@ export class ProviderEnforcedPermissionHandler extends BasePermissionHandler {
     this.alwaysAutoApproveToolNameIncludes = [
       ...DEFAULT_ALWAYS_AUTO_APPROVE_TOOL_NAME_INCLUDES,
       ...(params.alwaysAutoApproveToolNameIncludes ?? []),
-    ];
-    this.alwaysAutoApproveToolCallIdIncludes = [
-      ...DEFAULT_ALWAYS_AUTO_APPROVE_TOOL_CALL_ID_INCLUDES,
-      ...(params.alwaysAutoApproveToolCallIdIncludes ?? []),
     ];
   }
 
@@ -127,32 +115,10 @@ export class ProviderEnforcedPermissionHandler extends BasePermissionHandler {
     }
   }
 
-  private splitNameTokens(value: string): string[] {
-    return value
-      .toLowerCase()
-      .split(/__|[\\/.:\\s-]+/g)
-      .map((t) => t.trim())
-      .filter(Boolean);
-  }
-
-  private matchesSafeToolSegment(value: string, candidate: string): boolean {
-    const lowerValue = value.toLowerCase();
-    const lowerCandidate = candidate.toLowerCase();
-    return lowerValue === lowerCandidate || lowerValue.endsWith(`_${lowerCandidate}`);
-  }
-
-  private isAlwaysAutoApprove(toolName: string, toolCallId: string, input: unknown): boolean {
-    if (isChangeTitleToolLikeName(toolName)) return true;
+  private isAlwaysAutoApprove(toolName: string, input: unknown): boolean {
     const happierActionId = resolveHappierActionForMcpToolName({ toolName, input });
     if (happierActionId && ALWAYS_AUTO_APPROVE_HAPPIER_ACTION_IDS.has(happierActionId)) return true;
-    const toolNameTokens = this.splitNameTokens(toolName);
-    const toolCallIdTokens = this.splitNameTokens(toolCallId);
-    if (this.alwaysAutoApproveToolCallIdIncludes.some((n) => toolCallId.toLowerCase().includes(n.toLowerCase()))) return true;
-    if (this.alwaysAutoApproveToolNameIncludes.some((n) => toolNameTokens.includes(n.toLowerCase()))) return true;
-    if (this.alwaysAutoApproveToolCallIdIncludes.some((n) => toolCallIdTokens.includes(n.toLowerCase()))) return true;
-    if (this.alwaysAutoApproveToolNameIncludes.some((n) => this.matchesSafeToolSegment(toolName, n))) return true;
-    if (this.alwaysAutoApproveToolCallIdIncludes.some((n) => this.matchesSafeToolSegment(toolCallId, n))) return true;
-    return false;
+    return isTrustedAlwaysAutoApproveToolName(toolName, this.alwaysAutoApproveToolNameIncludes);
   }
 
   getImmediateDecision(toolCallId: string, toolName: string, input: unknown): PermissionResult | null {
@@ -166,7 +132,7 @@ export class ProviderEnforcedPermissionHandler extends BasePermissionHandler {
     if (isFullAccessPermissionMode(this.currentPermissionMode) && resolveAgentRequestKind(toolName) === 'permission') {
       return { decision: 'approved' };
     }
-    if (this.isAlwaysAutoApprove(toolName, toolCallId, input)) {
+    if (this.isAlwaysAutoApprove(toolName, input)) {
       return { decision: 'approved' };
     }
     const approvalSuppression = shouldSuppressProviderPermissionForHappierApproval({

@@ -16,7 +16,6 @@ export type { PermissionResult, PendingRequest };
 
 export class GeminiPermissionHandler extends CodexLikePermissionHandler {
   private readonly alwaysAutoApproveToolNameIncludes: ReadonlyArray<string>;
-  private readonly alwaysAutoApproveToolCallIdIncludes: ReadonlyArray<string>;
 
   constructor(session: ApiSessionClient, opts?: { onAbortRequested?: (() => void | Promise<void>) | null }) {
     super({ session, logPrefix: '[Gemini]', onAbortRequested: opts?.onAbortRequested ?? null });
@@ -25,19 +24,13 @@ export class GeminiPermissionHandler extends CodexLikePermissionHandler {
       'geminireasoning',
       'codexreasoning',
     ];
-    this.alwaysAutoApproveToolCallIdIncludes = [
-      'change_title',
-      'save_memory',
-    ];
   }
 
   async handleToolCall(toolCallId: string, toolName: string, input: unknown): Promise<PermissionResult> {
     const lowerName = toolName.toLowerCase();
-    const lowerId = toolCallId.toLowerCase();
     const isAlwaysAutoApprove =
       isChangeTitleToolNameAlias(toolName) ||
-      this.alwaysAutoApproveToolNameIncludes.some((t) => lowerName.includes(t)) ||
-      this.alwaysAutoApproveToolCallIdIncludes.some((t) => lowerId.includes(t));
+      this.alwaysAutoApproveToolNameIncludes.some((t) => lowerName === t);
     if (isAlwaysAutoApprove) {
       this.recordAutoDecision(toolCallId, toolName, input, 'approved');
       return { decision: 'approved' };

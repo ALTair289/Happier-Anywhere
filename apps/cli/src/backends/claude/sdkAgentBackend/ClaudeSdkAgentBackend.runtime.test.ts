@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createExecutionRunPermissionHandler } from '@/agent/executionRuns/policy/executionRunPermissionDecision';
+
+function noToolsPermissionHandler() {
+  return createExecutionRunPermissionHandler({ backendId: 'claude', permissionMode: 'no_tools' });
+}
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -46,7 +51,7 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
     const backend = new ClaudeSdkAgentBackend({
       cwd: '/tmp',
       modelId: 'default',
-      permissionPolicy: 'no_tools',
+      permissionHandler: noToolsPermissionHandler(),
     });
 
     try {
@@ -96,7 +101,7 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
     const backend = new ClaudeSdkAgentBackend({
       cwd: '/tmp',
       modelId: 'default',
-      permissionPolicy: 'no_tools',
+      permissionHandler: noToolsPermissionHandler(),
     });
 
     try {
@@ -142,7 +147,7 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
     const backend = new ClaudeSdkAgentBackend({
       cwd: '/tmp',
       modelId: 'default',
-      permissionPolicy: 'no_tools',
+      permissionHandler: noToolsPermissionHandler(),
     });
 
     try {
@@ -193,7 +198,7 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
     const backend = new ClaudeSdkAgentBackend({
       cwd: '/tmp',
       modelId: 'default',
-      permissionPolicy: 'no_tools',
+      permissionHandler: noToolsPermissionHandler(),
     });
 
     try {
@@ -258,7 +263,7 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
     const backend = new ClaudeSdkAgentBackend({
       cwd: '/tmp',
       modelId: 'default',
-      permissionPolicy: 'no_tools',
+      permissionHandler: noToolsPermissionHandler(),
     });
 
     try {
@@ -314,7 +319,7 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
     const backend = new ClaudeSdkAgentBackend({
       cwd: '/tmp',
       modelId: 'default',
-      permissionPolicy: 'no_tools',
+      permissionHandler: noToolsPermissionHandler(),
     });
 
     try {
@@ -370,7 +375,7 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
     const backend = new ClaudeSdkAgentBackend({
       cwd: '/tmp',
       modelId: 'default',
-      permissionPolicy: 'no_tools',
+      permissionHandler: noToolsPermissionHandler(),
     });
 
     try {
@@ -458,7 +463,7 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
     const backend = new ClaudeSdkAgentBackend({
       cwd: '/tmp',
       modelId: 'default',
-      permissionPolicy: 'no_tools',
+      permissionHandler: noToolsPermissionHandler(),
     });
     const statuses: string[] = [];
     backend.onMessage((message: any) => {

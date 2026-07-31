@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 import { reloadConfiguration, configuration } from '@/configuration';
-import { resolveIsolation } from './executionRunBackendFactory';
+import { executionRunBackendFactory, resolveIsolation } from './executionRunBackendFactory';
 
 describe('claude execution run isolation', () => {
   let prevHomeDir: string | undefined;
@@ -44,5 +44,19 @@ describe('claude execution run isolation', () => {
     expect(bundle.env.XDG_DATA_HOME).toContain(join(configuration.activeServerDir, 'isolation'));
     expect(bundle.env.XDG_STATE_HOME).toContain(join(configuration.activeServerDir, 'isolation'));
     expect(bundle.env.XDG_CACHE_HOME).toContain(join(configuration.activeServerDir, 'isolation'));
+  });
+
+  it('uses the canonical execution-run permission handler', () => {
+    const permissionHandler = {
+      handleToolCall: async () => ({ decision: 'denied' as const }),
+    };
+    const backend = executionRunBackendFactory({
+      cwd: '/tmp',
+      backendId: 'claude',
+      permissionMode: 'read_only',
+      permissionHandler,
+    });
+
+    expect((backend as any).opts.permissionHandler).toBe(permissionHandler);
   });
 });

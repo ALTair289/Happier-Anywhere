@@ -233,6 +233,19 @@ describe('CodexLikePermissionHandler', () => {
     );
   });
 
+  it('does not use the tool call id or a tool-name substring as authority', async () => {
+    const session = new FakeSession();
+    const handler = new CodexLikePermissionHandler({ session: session as any, logPrefix: '[Test]' });
+    handler.setPermissionMode('read-only');
+
+    await expect(
+      handler.handleToolCall('call_think_9f2', 'bash', { command: 'touch /tmp/happier-pwn' }),
+    ).resolves.toEqual({ decision: 'denied' });
+    await expect(
+      handler.handleToolCall('ordinary-id', 'rethinking_write', {}),
+    ).resolves.toEqual({ decision: 'denied' });
+  });
+
   it('auto-approves first-party Happier MCP tools when Happier action approval is required', async () => {
     const session = new FakeSession();
     const handler = new CodexLikePermissionHandler({
@@ -408,18 +421,28 @@ describe('CodexLikePermissionHandler', () => {
     }
   });
 
-  it('auto-approves Happier tools shell-bridge bash commands in default mode', async () => {
+  it('auto-approves a locally generated Happier tools shell-bridge command in default mode', async () => {
     const session = new FakeSession();
     const handler = new CodexLikePermissionHandler({ session: session as any, logPrefix: '[Test]' });
+    const { buildHappierToolsShellBridgeCommand } = await import(
+      '@/agent/tools/happierTools/runtime/buildHappierToolsShellBridgeCommand'
+    );
 
     const result = await handler.handleToolCall('tool-1', 'Bash', {
-      command:
-        `TSX_TSCONFIG_PATH='/Users/leeroy/Documents/Development/happier/dev/apps/cli/tsconfig.json' ` +
-        `'/Users/leeroy/.nvm/versions/node/v22.14.0/bin/node' --import ` +
-        `'/Users/leeroy/Documents/Development/happier/dev/node_modules/tsx/dist/esm/index.mjs' ` +
-        `'/Users/leeroy/Documents/Development/happier/dev/apps/cli/src/index.ts' tools call ` +
-        `--session-id cmmfivqgm002d8o1ug15b02o1 --directory /tmp/workspace --source happier ` +
-        `--tool change_title --args-json '{"title":"Kimi Fresh QA Title"}' --json`,
+      command: buildHappierToolsShellBridgeCommand([
+        'call',
+        '--session-id',
+        'cmmfivqgm002d8o1ug15b02o1',
+        '--directory',
+        '/tmp/workspace',
+        '--source',
+        'happier',
+        '--tool',
+        'change_title',
+        '--args-json',
+        '{"title":"Kimi Fresh QA Title"}',
+        '--json',
+      ]),
     });
 
     expect(result.decision).toBe('approved');
@@ -433,18 +456,23 @@ describe('CodexLikePermissionHandler', () => {
     );
   });
 
-  it('auto-approves Happier tools shell-bridge bash commands even in read-only mode', async () => {
+  it('auto-approves a locally generated Happier tools shell-bridge command even in read-only mode', async () => {
     const session = new FakeSession();
     const handler = new CodexLikePermissionHandler({ session: session as any, logPrefix: '[Test]' });
     handler.setPermissionMode('read-only');
+    const { buildHappierToolsShellBridgeCommand } = await import(
+      '@/agent/tools/happierTools/runtime/buildHappierToolsShellBridgeCommand'
+    );
 
     const result = await handler.handleToolCall('tool-1', 'bash', {
-      command:
-        `TSX_TSCONFIG_PATH='/Users/leeroy/Documents/Development/happier/dev/apps/cli/tsconfig.json' ` +
-        `'/Users/leeroy/.nvm/versions/node/v22.14.0/bin/node' --import ` +
-        `'/Users/leeroy/Documents/Development/happier/dev/node_modules/tsx/dist/esm/index.mjs' ` +
-        `'/Users/leeroy/Documents/Development/happier/dev/apps/cli/src/index.ts' tools list ` +
-        `--session-id cmmfivqgm002d8o1ug15b02o1 --directory /tmp/workspace --json`,
+      command: buildHappierToolsShellBridgeCommand([
+        'list',
+        '--session-id',
+        'cmmfivqgm002d8o1ug15b02o1',
+        '--directory',
+        '/tmp/workspace',
+        '--json',
+      ]),
     });
 
     expect(result.decision).toBe('approved');
@@ -456,6 +484,23 @@ describe('CodexLikePermissionHandler', () => {
         decision: 'approved',
       }),
     );
+  });
+
+  it('does not auto-approve an attacker-selected bridge launcher or compound command', async () => {
+    const session = new FakeSession();
+    const handler = new CodexLikePermissionHandler({ session: session as any, logPrefix: '[Test]' });
+    handler.setPermissionMode('read-only');
+
+    await expect(
+      handler.handleToolCall('tool-untrusted-launcher', 'bash', {
+        command: `node ./happier-helper.js tools call --source happier --tool save_memory --args-json '{}' --json`,
+      }),
+    ).resolves.toEqual({ decision: 'denied' });
+    await expect(
+      handler.handleToolCall('tool-compound', 'bash', {
+        command: `happier tools list --json; touch /tmp/happier-pwn`,
+      }),
+    ).resolves.toEqual({ decision: 'denied' });
   });
 
   it('prompts for Happier shell-bridge calls with non-vetted custom sources in default mode', async () => {

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CHANGE_TITLE_INSTRUCTION } from '@/agent/runtime/changeTitleInstruction';
+import { createExecutionRunPermissionHandler } from '@/agent/executionRuns/policy/executionRunPermissionDecision';
 
 function createFakeClaudeEntrypointSource(): string {
   return `
@@ -196,7 +197,10 @@ async function withFakeClaudeBackend(
     backend = new ClaudeSdkAgentBackend({
       cwd: dir,
       modelId: params.modelId ?? 'chat-model',
-      permissionPolicy: params.permissionPolicy,
+      permissionHandler: createExecutionRunPermissionHandler({
+        backendId: 'claude',
+        permissionMode: params.permissionPolicy,
+      }),
       env: params.env,
     });
 
@@ -252,7 +256,10 @@ describe('ClaudeSdkAgentBackend', () => {
     const backend = new ClaudeSdkAgentBackend({
       cwd: process.cwd(),
       modelId: 'chat-model',
-      permissionPolicy: 'no_tools',
+      permissionHandler: createExecutionRunPermissionHandler({
+        backendId: 'claude',
+        permissionMode: 'no_tools',
+      }),
     });
     const statuses: string[] = [];
     backend.onMessage((message) => {
@@ -475,7 +482,7 @@ describe('ClaudeSdkAgentBackend', () => {
     );
   });
 
-  it('allows read-only bash inspection commands in read_only policy', async () => {
+  it('denies ad-hoc bash inspection commands in read_only policy', async () => {
     delete process.env.DEBUG;
 
     await withFakeClaudeBackend(
@@ -496,12 +503,12 @@ describe('ClaudeSdkAgentBackend', () => {
         const { sessionId } = await backend.startSession();
         await backend.sendPrompt(sessionId, 'hi');
         await (backend as any).waitForResponseComplete?.();
-        expect(seen.join(' ')).toContain('TOOL_ALLOWED');
+        expect(seen.join(' ')).toContain('TOOL_DENIED');
       },
     );
   });
 
-  it('allows read-only bash loop inspection commands in read_only policy', async () => {
+  it('denies bash loop inspection commands in read_only policy', async () => {
     delete process.env.DEBUG;
 
     await withFakeClaudeBackend(
@@ -525,12 +532,12 @@ describe('ClaudeSdkAgentBackend', () => {
         const { sessionId } = await backend.startSession();
         await backend.sendPrompt(sessionId, 'hi');
         await (backend as any).waitForResponseComplete?.();
-        expect(seen.join(' ')).toContain('TOOL_ALLOWED');
+        expect(seen.join(' ')).toContain('TOOL_DENIED');
       },
     );
   });
 
-  it('allows read-only bash loop inspection commands with safe command substitutions in read_only policy', async () => {
+  it('denies bash loop inspection commands with substitutions in read_only policy', async () => {
     delete process.env.DEBUG;
 
     await withFakeClaudeBackend(
@@ -553,12 +560,12 @@ describe('ClaudeSdkAgentBackend', () => {
         const { sessionId } = await backend.startSession();
         await backend.sendPrompt(sessionId, 'hi');
         await (backend as any).waitForResponseComplete?.();
-        expect(seen.join(' ')).toContain('TOOL_ALLOWED');
+        expect(seen.join(' ')).toContain('TOOL_DENIED');
       },
     );
   });
 
-  it('allows multiline read-only bash inspection commands with comments, elif branches, and safe command substitutions in read_only policy', async () => {
+  it('denies multiline bash inspection commands in read_only policy', async () => {
     delete process.env.DEBUG;
 
     await withFakeClaudeBackend(
@@ -581,7 +588,7 @@ describe('ClaudeSdkAgentBackend', () => {
         const { sessionId } = await backend.startSession();
         await backend.sendPrompt(sessionId, 'hi');
         await (backend as any).waitForResponseComplete?.();
-        expect(seen.join(' ')).toContain('TOOL_ALLOWED');
+        expect(seen.join(' ')).toContain('TOOL_DENIED');
       },
     );
   });
