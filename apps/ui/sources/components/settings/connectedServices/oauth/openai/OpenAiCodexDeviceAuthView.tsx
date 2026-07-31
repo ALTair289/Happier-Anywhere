@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Linking, Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import tweetnacl from 'tweetnacl';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
@@ -34,6 +33,7 @@ import { buildOauthRecordFromProxyPayload, parseConnectedServiceOauthProxyBundle
 import { resolveConnectedServiceOauthErrorMessage } from '../resolveConnectedServiceOauthErrorMessage';
 import { storeConnectedServiceCredentialWithIdentityConfirmation } from '../../storeConnectedServiceCredentialWithIdentityConfirmation';
 import { runConnectedServiceCredentialStoredEffects } from '../../runConnectedServiceCredentialStoredEffects';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function asStringParam(value: unknown): string {
   if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : '';
@@ -248,8 +248,8 @@ export const OpenAiCodexDeviceAuthView = React.memo(function OpenAiCodexDeviceAu
                 { borderColor: theme.colors.border.default, backgroundColor: theme.colors.surface.elevated },
               ]}
             >
-              <Ionicons
-                name={copied ? 'checkmark-outline' : 'copy-outline'}
+              <Icon
+                name={copied ? 'check' : 'copy'}
                 size={14}
                 color={copied ? (theme.colors.state.success.foreground ?? theme.colors.text.secondary) : theme.colors.text.secondary}
               />
@@ -318,7 +318,7 @@ export const OpenAiCodexDeviceAuthView = React.memo(function OpenAiCodexDeviceAu
             testID="connectedServices.deviceAuth.switchMethodItem"
             title={props.fallbackAction.title}
             subtitle={props.fallbackAction.subtitle}
-            icon={<Ionicons name="swap-horizontal-outline" size={22} color={theme.colors.accent.blue} />}
+            icon={<Icon name="arrows-left-right" size={20} color={theme.colors.accent.blue} />}
             onPress={props.fallbackAction.onPress}
           />
         </ItemGroup>

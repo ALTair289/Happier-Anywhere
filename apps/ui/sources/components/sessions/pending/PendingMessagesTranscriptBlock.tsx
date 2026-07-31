@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Platform, Pressable, ScrollView, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import type { DiscardedPendingMessage, PendingMessage } from '@/sync/domains/state/storageTypes';
@@ -37,6 +36,7 @@ import {
 import { useServerFeaturesSnapshotForServerId } from '@/sync/domains/features/featureDecisionRuntime';
 import { resolvePendingInputServerWireMode } from '@/sync/engine/pending/pendingInputServerWireContract';
 import { resolvePreferredServerIdForSessionId } from '@/sync/runtime/orchestration/serverScopedRpc/resolvePreferredServerIdForSessionId';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 import {
     isPendingDeliveryProviderEffectPossibleV1,
     parsePendingDeliveryStatusV1,
@@ -729,12 +729,12 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         const menuItems = (() => {
             const items: DropdownMenuItem[] = [];
             if (isCancellationState) {
-                items.push({ id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+                items.push({ id: 'remove', title: t('common.remove'), icon: <Icon name="trash" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
             } else if (isSendFailed) {
-                items.push({ id: 'retrySend', title: t('session.pendingMessages.actions.retrySend'), icon: <Ionicons name="refresh-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
-                items.push({ id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+                items.push({ id: 'retrySend', title: t('session.pendingMessages.actions.retrySend'), icon: <Icon name="arrow-clockwise" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+                items.push({ id: 'remove', title: t('common.remove'), icon: <Icon name="trash" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
             } else if (hasDurableOutboxOperation) {
-                items.push({ id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+                items.push({ id: 'remove', title: t('common.remove'), icon: <Icon name="trash" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
             }
             if (!isCancellationState && usesDeliveryResolutionActions) {
                 if (transientAction?.id === 'interrupt_and_run') {
@@ -742,7 +742,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                         id: 'interruptAndRun',
                         testID: `pendingMessages.interruptAndRun:${message.id}`,
                         title: t('session.pendingMessages.actions.interruptAndRunNow'),
-                        icon: <Ionicons name="flash-outline" size={16} color={theme.colors.text.secondary} />,
+                        icon: <Icon name="lightning" size={16} color={theme.colors.text.secondary} />,
                         disabled: deliveryActionBusy || pendingInputInterruptAndRun.busy,
                     });
                 }
@@ -751,39 +751,39 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                         id: 'continueWaiting',
                         testID: `pendingMessages.continueWaiting:${message.id}`,
                         title: t('session.pendingMessages.actions.continueWaiting'),
-                        icon: <Ionicons name="time-outline" size={16} color={theme.colors.text.secondary} />,
+                        icon: <Icon name="clock" size={16} color={theme.colors.text.secondary} />,
                     });
                     items.push({
                         id: 'dismissDelivery',
                         testID: `pendingMessages.dismissDelivery:${message.id}`,
                         title: t('session.pendingMessages.actions.dismiss'),
-                        icon: <Ionicons name="archive-outline" size={16} color={theme.colors.text.secondary} />,
+                        icon: <Icon name="archive" size={16} color={theme.colors.text.secondary} />,
                         disabled: deliveryActionBusy,
                     });
                     items.push({
                         id: 'sendDeliveryAsNew',
                         testID: `pendingMessages.sendDeliveryAsNew:${message.id}`,
                         title: t('session.pendingMessages.actions.sendAsNew'),
-                        icon: <Ionicons name="paper-plane-outline" size={16} color={theme.colors.text.secondary} />,
+                        icon: <Icon name="paper-plane" size={16} color={theme.colors.text.secondary} />,
                         disabled: deliveryActionBusy,
                     });
                 }
-                items.push({ id: 'markDeliveryHandled', title: t('session.pendingMessages.actions.markHandled'), icon: <Ionicons name="checkmark-done-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+                items.push({ id: 'markDeliveryHandled', title: t('session.pendingMessages.actions.markHandled'), icon: <Icon name="checks" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
                 if (canRemoveDelivery) {
-                    items.push({ id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
+                    items.push({ id: 'remove', title: t('common.remove'), icon: <Icon name="trash" size={16} color={theme.colors.text.secondary} />, disabled: deliveryActionBusy });
                 }
             } else if (!isCancellationState && canUsePendingQueueActions) {
-                items.push({ id: 'edit', title: t('session.pendingMessages.actions.edit'), icon: <Ionicons name="pencil-outline" size={16} color={theme.colors.text.secondary} /> });
-                items.push({ id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} /> });
+                items.push({ id: 'edit', title: t('session.pendingMessages.actions.edit'), icon: <Icon name="pencil" size={16} color={theme.colors.text.secondary} /> });
+                items.push({ id: 'remove', title: t('common.remove'), icon: <Icon name="trash" size={16} color={theme.colors.text.secondary} /> });
             }
             if (canSteerNow && canUseDirectDeliveryActions) {
-                items.push({ id: 'steerNow', title: t('session.pendingMessages.actions.steerNow'), icon: <Ionicons name="navigate-outline" size={16} color={theme.colors.text.secondary} /> });
+                items.push({ id: 'steerNow', title: t('session.pendingMessages.actions.steerNow'), icon: <Icon name="navigation-arrow" size={16} color={theme.colors.text.secondary} /> });
             }
             if (canUseDirectDeliveryActions) {
                 items.push({
                     id: 'sendNow',
                     title: sendNowActionLabel,
-                    icon: <Ionicons name="paper-plane-outline" size={16} color={theme.colors.text.secondary} />,
+                    icon: <Icon name="paper-plane" size={16} color={theme.colors.text.secondary} />,
                 });
             }
             return items;
@@ -890,7 +890,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     color={theme.colors.text.secondary}
                                 />
                             ) : (
-                                <Ionicons name={visualState.iconName} size={8} color={theme.colors.text.secondary} />
+                                <Icon name={visualState.iconName} size={8} color={theme.colors.text.secondary} />
                             )}
                             <Text
                                 testID={`pendingMessages.pendingAffordanceLabel:${message.id}`}
@@ -911,7 +911,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     },
                                 ]}
                             >
-                                <Ionicons name="alert-circle-outline" size={12} color={theme.colors.text.secondary} />
+                                <Icon name="warning-circle" size={14} color={theme.colors.text.secondary} />
                                 <Text
                                     testID={deliveryBlockedPresentation?.isUnknown ? `pendingMessages.unknownDeliveryStatus:${message.id}` : `pendingMessages.blockedDeliveryReason:${message.id}`}
                                     style={[styles.blockedDeliveryNoticeText, { color: theme.colors.text.secondary }]}
@@ -932,7 +932,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     },
                                 ]}
                             >
-                                <Ionicons name="alert-circle-outline" size={12} color={theme.colors.state.danger.foreground} />
+                                <Icon name="warning-circle" size={14} color={theme.colors.state.danger.foreground} />
                                 <Text style={[styles.blockedDeliveryNoticeText, { color: theme.colors.text.secondary }]}>
                                     {t('session.pendingMessages.sendFailedNotice')}
                                 </Text>
@@ -952,7 +952,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                         },
                                     ])}
                                 >
-                                    <Ionicons name="refresh-outline" size={12} color={theme.colors.text.secondary} />
+                                    <Icon name="arrow-clockwise" size={14} color={theme.colors.text.secondary} />
                                     <Text style={[styles.nonSteerableNoticeActionText, { color: theme.colors.text.secondary }]}>
                                         {t('session.pendingMessages.actions.retrySend')}
                                     </Text>
@@ -971,7 +971,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     },
                                 ]}
                             >
-                                <Ionicons name="time-outline" size={12} color={theme.colors.text.secondary} />
+                                <Icon name="clock" size={14} color={theme.colors.text.secondary} />
                                 <Text style={[styles.blockedDeliveryNoticeText, { color: theme.colors.text.secondary }]}>
                                     {getPendingQueuedReasonNotice(deliveryVisualState, queuedBehindTurnMinutes)}
                                 </Text>
@@ -1002,7 +1002,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     <IconAction
                                         testID={`pendingMessages.retrySend:${message.id}`}
                                         accessibilityLabel={t('session.pendingMessages.actions.retrySend')}
-                                        icon="refresh-outline"
+                                        icon="arrow-clockwise"
                                         onPress={() => handleRetrySend(message)}
                                         disabled={deliveryActionBusy}
                                     />
@@ -1011,7 +1011,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     <IconAction
                                         testID={`pendingMessages.markDeliveryHandled:${message.id}`}
                                         accessibilityLabel={t('session.pendingMessages.actions.markHandled')}
-                                        icon="checkmark-done-outline"
+                                        icon="checks"
                                         onPress={() => handleMarkDeliveryHandled(message)}
                                         disabled={deliveryActionBusy}
                                     />
@@ -1020,7 +1020,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     <IconAction
                                         testID={`pendingMessages.remove:${message.id}`}
                                         accessibilityLabel={t('common.remove')}
-                                        icon="trash-outline"
+                                        icon="trash"
                                         onPress={() => handleRemoveDelivery(message)}
                                         tone="destructive"
                                         disabled={deliveryActionBusy}
@@ -1030,7 +1030,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     <IconAction
                                         testID={`pendingMessages.remove:${message.id}`}
                                         accessibilityLabel={t('common.remove')}
-                                        icon="trash-outline"
+                                        icon="trash"
                                         onPress={() => handleRemove(message.id)}
                                         tone="destructive"
                                         disabled={deliveryActionBusy}
@@ -1040,7 +1040,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     <IconAction
                                         testID={`pendingMessages.edit:${message.id}`}
                                         accessibilityLabel={t('session.pendingMessages.actions.edit')}
-                                        icon="pencil-outline"
+                                        icon="pencil"
                                         onPress={() => handleEdit(message)}
                                     />
                                 ) : null}
@@ -1048,7 +1048,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     <IconAction
                                         testID={`pendingMessages.remove:${message.id}`}
                                         accessibilityLabel={t('common.remove')}
-                                        icon="trash-outline"
+                                        icon="trash"
                                         onPress={() => handleRemove(message.id)}
                                         tone="destructive"
                                     />
@@ -1057,7 +1057,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     <IconAction
                                         testID={`pendingMessages.steerNow:${message.id}`}
                                         accessibilityLabel={t('session.pendingMessages.actions.steerNow')}
-                                        icon="navigate-outline"
+                                        icon="navigation-arrow"
                                         onPress={() => handleSteerNow(message)}
                                     />
                                 ) : null}
@@ -1065,7 +1065,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     <IconAction
                                         testID={`pendingMessages.sendNow:${message.id}`}
                                         accessibilityLabel={sendNowActionLabel}
-                                        icon="paper-plane-outline"
+                                        icon="paper-plane"
                                         onPress={() => handleSendNow(message)}
                                     />
                                 ) : null}
@@ -1130,13 +1130,13 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         const menuOpen = openMenuKey === menuKey;
 
         const menuItems: DropdownMenuItem[] = [
-            { id: 'requeue', title: t('session.pendingMessages.actions.requeue'), icon: <Ionicons name="return-up-back-outline" size={16} color={theme.colors.text.secondary} /> },
-            { id: 'remove', title: t('common.remove'), icon: <Ionicons name="trash-outline" size={16} color={theme.colors.text.secondary} /> },
-            ...(canSteerNow ? [{ id: 'steerNow', title: t('session.pendingMessages.actions.steerNow'), icon: <Ionicons name="navigate-outline" size={16} color={theme.colors.text.secondary} /> } as const] : []),
+            { id: 'requeue', title: t('session.pendingMessages.actions.requeue'), icon: <Icon name="arrow-elbow-up-left" size={16} color={theme.colors.text.secondary} /> },
+            { id: 'remove', title: t('common.remove'), icon: <Icon name="trash" size={16} color={theme.colors.text.secondary} /> },
+            ...(canSteerNow ? [{ id: 'steerNow', title: t('session.pendingMessages.actions.steerNow'), icon: <Icon name="navigation-arrow" size={16} color={theme.colors.text.secondary} /> } as const] : []),
             {
                 id: 'sendNow',
                 title: sendNowActionLabel,
-                icon: <Ionicons name="paper-plane-outline" size={16} color={theme.colors.text.secondary} />,
+                icon: <Icon name="paper-plane" size={16} color={theme.colors.text.secondary} />,
             } as const,
         ];
 
@@ -1205,13 +1205,13 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                 <IconAction
                                     testID={`pendingMessages.discarded.requeue:${message.id}`}
                                     accessibilityLabel={t('session.pendingMessages.actions.requeue')}
-                                    icon="return-up-back-outline"
+                                    icon="arrow-elbow-up-left"
                                     onPress={() => handleRequeueDiscarded(message.id)}
                                 />
                                 <IconAction
                                     testID={`pendingMessages.discarded.remove:${message.id}`}
                                     accessibilityLabel={t('common.remove')}
-                                    icon="trash-outline"
+                                    icon="trash"
                                     onPress={() => handleRemoveDiscarded(message.id)}
                                     tone="destructive"
                                 />
@@ -1219,14 +1219,14 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     <IconAction
                                         testID={`pendingMessages.discarded.steerNow:${message.id}`}
                                         accessibilityLabel={t('session.pendingMessages.actions.steerNow')}
-                                        icon="navigate-outline"
+                                        icon="navigation-arrow"
                                         onPress={() => handleSteerDiscardedNow(message)}
                                     />
                                 ) : null}
                                 <IconAction
                                     testID={`pendingMessages.discarded.sendNow:${message.id}`}
                                     accessibilityLabel={sendNowActionLabel}
-                                    icon="paper-plane-outline"
+                                    icon="paper-plane"
                                     onPress={() => handleSendDiscardedNow(message)}
                                 />
                             </View>
@@ -1291,7 +1291,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                     <View style={{ width: '100%', maxWidth: layout.maxWidth }}>
                         <View style={styles.sectionHeader}>
                             <TranscriptSeparatorRow
-                                iconName="time-outline"
+                                iconName="clock"
                                 title={headerLabel}
                                 titleTestID="pendingMessages.headerLabel"
                                 chipTestID={canExpandPendingQueue ? 'pendingMessages.headerToggle' : undefined}
@@ -1299,9 +1299,9 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                 accessibilityLabel={isQueueExpanded ? t('session.pendingMessages.actions.viewLess') : t('session.pendingMessages.actions.viewMore')}
                                 subtitle={discardedCount > 0 && pendingCount > 0 ? `${t('session.pendingMessages.discarded.label')} (${discardedCount})` : null}
                                 rightAccessory={canExpandPendingQueue ? (
-                                    <Ionicons
-                                        name={isQueueExpanded ? 'chevron-down' : 'chevron-up'}
-                                        size={13}
+                                    <Icon
+                                        name={isQueueExpanded ? 'caret-down' : 'caret-up'}
+                                        size={14}
                                         color={theme.colors.text.secondary}
                                     />
                                 ) : null}
@@ -1321,7 +1321,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                     },
                                 ]}
                             >
-                                <Ionicons name="pause-circle-outline" size={13} color={theme.colors.text.secondary} />
+                                <Icon name="pause-circle" size={14} color={theme.colors.text.secondary} />
                                 <Text
                                     testID={terminalDraftBlocksPendingDelivery ? 'pendingMessages.steerBlockedTerminalDraftNotice' : undefined}
                                     style={[styles.nonSteerableNoticeText, { color: theme.colors.text.secondary }]}
@@ -1358,7 +1358,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                                 color={theme.colors.text.secondary}
                                             />
                                         ) : (
-                                            <Ionicons name="backspace-outline" size={12} color={theme.colors.text.secondary} />
+                                            <Icon name="backspace" size={14} color={theme.colors.text.secondary} />
                                         )}
                                         <Text style={[styles.nonSteerableNoticeActionText, { color: theme.colors.text.secondary }]}>
                                             {t('session.pendingMessages.clearTerminalComposer.action')}
@@ -1432,7 +1432,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
 }
 
 function IconAction(props: {
-    icon: React.ComponentProps<typeof Ionicons>['name'];
+    icon: IconName;
     onPress: () => void;
     accessibilityLabel: string;
     testID?: string;
@@ -1461,7 +1461,7 @@ function IconAction(props: {
                 ...(Platform.OS === 'web' ? { cursor: 'pointer' as const } : null),
             })}
         >
-            <Ionicons name={props.icon} size={12} color={tint} />
+            <Icon name={props.icon} size={14} color={tint} />
         </Pressable>
     );
 }
@@ -1484,7 +1484,7 @@ function ReorderDragHandleAffordance(props: {
                 opacity: 0.65,
             }}
         >
-            <Ionicons name="reorder-three-outline" size={12} color={theme.colors.text.secondary} />
+            <Icon name="list" size={14} color={theme.colors.text.secondary} />
         </View>
     );
 }

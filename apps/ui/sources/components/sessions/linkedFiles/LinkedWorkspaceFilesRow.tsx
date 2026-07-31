@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View, useWindowDimensions } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 
@@ -12,6 +11,7 @@ import { PANE_SIZING_DEFAULTS } from '@/components/appShell/panes/layout/paneSiz
 import { useDeviceType } from '@/utils/platform/responsive';
 import { useLocalSetting } from '@/sync/domains/state/storage';
 import * as FlashListCompat from '@/components/ui/lists/flashListCompat/FlashListCompat';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const LINKED_FILE_PREFIX = '@';
 
@@ -116,7 +116,7 @@ export const LinkedWorkspaceFilesRow = React.memo((props: LinkedWorkspaceFilesRo
             {props.paths.map((path, index) => {
                 const content = (
                     <>
-                    <Ionicons name="document-text-outline" size={14} color={theme.colors.text.secondary} />
+                    <Icon name="file-text" size={14} color={theme.colors.text.secondary} />
                     <Text style={styles.chipSubtle}>{LINKED_FILE_PREFIX}</Text>
                     <Text style={styles.chipText} numberOfLines={1}>
                         {getBasename(path)}

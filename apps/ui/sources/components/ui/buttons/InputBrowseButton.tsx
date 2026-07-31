@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { Platform, Pressable, type StyleProp, type ViewStyle } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 const styles = StyleSheet.create((theme) => ({
     button: {
@@ -38,7 +38,7 @@ export function InputBrowseButton(props: Readonly<{
     disabled?: boolean;
     testID?: string;
     accessibilityLabel?: string;
-    iconName?: React.ComponentProps<typeof Ionicons>['name'];
+    iconName?: IconName;
 }>): React.ReactElement {
     const { theme } = useUnistyles();
     const isDisabled = props.disabled === true;
@@ -61,9 +61,9 @@ export function InputBrowseButton(props: Readonly<{
                 isDisabled ? DISABLED_WEB_CURSOR_STYLE : undefined,
             ]}
         >
-            <Ionicons
-                name={props.iconName ?? 'folder-open-outline'}
-                size={18}
+            <Icon
+                name={props.iconName ?? 'folder-open'}
+                size={16}
                 color={theme.colors.text.secondary}
             />
         </Pressable>

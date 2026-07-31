@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import type { McpServerBindingV1, McpServerCatalogEntryV1 } from '@happier-dev/protocol';
@@ -18,6 +17,7 @@ import { useHappyAction } from '@/hooks/ui/useHappyAction';
 import { machineMcpServersTest } from '@/sync/ops/machineMcpServers';
 import { t } from '@/text';
 import { resolveMachineServerId } from './resolveMachineServerId';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const styles = StyleSheet.create((theme) => ({
     directoryInputRow: {
@@ -75,7 +75,7 @@ export const McpServerTestPanel = React.memo(function McpServerTestPanel(props: 
             id: m.id,
             title: m.metadata?.displayName || m.metadata?.host || m.id,
             subtitle: m.id,
-            icon: <Ionicons name="laptop-outline" size={22} color={theme.colors.text.secondary} />,
+            icon: <Icon name="laptop" size={20} color={theme.colors.text.secondary} />,
         }));
     }, [props.machines, theme.colors.text.secondary]);
 
@@ -85,7 +85,7 @@ export const McpServerTestPanel = React.memo(function McpServerTestPanel(props: 
                 id: '',
                 title: t('settings.mcpServersTestNoBinding'),
                 subtitle: t('settings.mcpServersTestNoBindingSubtitle'),
-                icon: <Ionicons name="remove-circle-outline" size={22} color={theme.colors.text.secondary} />,
+                icon: <Icon name="minus-circle" size={20} color={theme.colors.text.secondary} />,
             },
         ];
 
@@ -94,7 +94,7 @@ export const McpServerTestPanel = React.memo(function McpServerTestPanel(props: 
                 id: binding.id,
                 title: describeBinding(binding, props.machines),
                 subtitle: binding.enabled ? t('common.enabled') : t('common.disabled'),
-                icon: <Ionicons name="pin-outline" size={22} color={theme.colors.text.secondary} />,
+                icon: <Icon name="push-pin" size={20} color={theme.colors.text.secondary} />,
             });
         }
 
@@ -175,7 +175,7 @@ export const McpServerTestPanel = React.memo(function McpServerTestPanel(props: 
                 itemTrigger={{
                     title: t('settings.mcpServersTestMachineTitle'),
                     subtitle: machineId ? describeMachine(machineId, props.machines) : t('settings.mcpServersNoMachineSelected'),
-                    icon: <Ionicons name="laptop-outline" size={29} color={theme.colors.accent.indigo} />,
+                    icon: <Icon name="laptop" size={29} color={theme.colors.accent.indigo} />,
                 }}
                 rowKind="item"
                 connectToTrigger
@@ -194,7 +194,7 @@ export const McpServerTestPanel = React.memo(function McpServerTestPanel(props: 
                 itemTrigger={{
                     title: t('settings.mcpServersTestBindingTitle'),
                     subtitle: selectedBinding ? describeBinding(selectedBinding, props.machines) : t('settings.mcpServersTestNoBinding'),
-                    icon: <Ionicons name="pin-outline" size={29} color={theme.colors.accent.purple} />,
+                    icon: <Icon name="push-pin" size={29} color={theme.colors.accent.purple} />,
                 }}
                 rowKind="item"
                 connectToTrigger
@@ -205,7 +205,7 @@ export const McpServerTestPanel = React.memo(function McpServerTestPanel(props: 
                 testID="mcp.server.test.directory"
                 title={t('settings.mcpServersTestDirectoryTitle')}
                 subtitle={t('settings.mcpServersTestDirectorySubtitle')}
-                icon={<Ionicons name="folder-outline" size={29} color={theme.colors.accent.blue} />}
+                icon={<Icon name="folder" size={29} color={theme.colors.accent.blue} />}
                 showChevron={false}
                 rightElement={(
                     <View style={styles.directoryInputRow}>
@@ -231,7 +231,7 @@ export const McpServerTestPanel = React.memo(function McpServerTestPanel(props: 
                 testID="mcp.server.test.run"
                 title={t('settings.mcpServersTestRunTitle')}
                 subtitle={isTesting ? t('common.loading') : t('settings.mcpServersTestRunSubtitle')}
-                icon={<Ionicons name="flask-outline" size={29} color={theme.colors.state.success.foreground} />}
+                icon={<Icon name="flask" size={29} color={theme.colors.state.success.foreground} />}
                 onPress={runTest}
                 disabled={!machineId || !canTestServer || !canTestBinding || isTesting}
                 showChevron={false}
@@ -243,7 +243,7 @@ export const McpServerTestPanel = React.memo(function McpServerTestPanel(props: 
                         testID="mcp.server.test.result.ok"
                         title={t('settings.mcpServersTestResultOkTitle')}
                         subtitle={t('settings.mcpServersTestResultOkSubtitle', { toolCount: lastResult.toolCount, durationMs: lastResult.durationMs })}
-                        icon={<Ionicons name="checkmark-circle-outline" size={29} color={theme.colors.state.success.foreground} />}
+                        icon={<Icon name="check-circle" size={29} color={theme.colors.state.success.foreground} />}
                         showChevron={false}
                     />
                 ) : (
@@ -251,7 +251,7 @@ export const McpServerTestPanel = React.memo(function McpServerTestPanel(props: 
                         testID="mcp.server.test.result.error"
                         title={t('settings.mcpServersTestResultErrorTitle')}
                         subtitle={`${lastResult.errorCode} · ${lastResult.error}`}
-                        icon={<Ionicons name="alert-circle-outline" size={29} color={theme.colors.status.error} />}
+                        icon={<Icon name="warning-circle" size={29} color={theme.colors.status.error} />}
                         showChevron={false}
                     />
                 )

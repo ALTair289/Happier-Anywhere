@@ -1,6 +1,5 @@
 import * as React from 'react';
 
-import { Ionicons } from '@expo/vector-icons';
 import { Pressable, View } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -20,6 +19,7 @@ import { speakKokoroText } from '@/voice/output/KokoroTtsController';
 import { primeWebAudioPlayback } from '@/voice/output/webAudioContext';
 import { createVoicePlaybackController } from '@/voice/runtime/VoicePlaybackController';
 import { fireAndForget } from '@/utils/system/fireAndForget';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type KokoroVoiceSummary = {
   id: string;
@@ -274,7 +274,7 @@ export function LocalNeuralTtsSettings(props: {
                 }}
                 style={{ paddingHorizontal: 4, paddingVertical: 2 }}
               >
-                <Ionicons name="stop-circle-outline" size={22} color={theme.colors.text.secondary} />
+                <Icon name="stop-circle" size={20} color={theme.colors.text.secondary} />
               </Pressable>
             )
             : undefined
@@ -329,9 +329,9 @@ export function LocalNeuralTtsSettings(props: {
               }}
               style={{ paddingHorizontal: 4, paddingVertical: 2 }}
             >
-              <Ionicons
-                name={previewingVoiceId === v.id ? 'stop-circle-outline' : 'play-circle-outline'}
-                size={22}
+              <Icon
+                name={previewingVoiceId === v.id ? 'stop-circle' : 'play-circle'}
+                size={20}
                 color={theme.colors.text.secondary}
               />
             </Pressable>
@@ -364,7 +364,7 @@ export function LocalNeuralTtsSettings(props: {
           title: String(speed),
           icon: (
             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-              <Ionicons name="speedometer-outline" size={20} color={theme.colors.text.secondary} />
+              <Icon name="speedometer" size={20} color={theme.colors.text.secondary} />
             </View>
           ),
         }))}

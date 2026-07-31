@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Platform, Pressable, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Octicons } from '@expo/vector-icons';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
 import { Text } from '@/components/ui/text/Text';
@@ -18,6 +17,7 @@ import { useSessionFileDetailsOpener } from '@/components/sessions/panes/useSess
 import { useSessionTerminalAvailability } from '@/components/sessions/terminal/useSessionTerminalAvailability';
 import { t } from '@/text';
 import { resolveOptionalSessionScreenTestId, useSessionScreenTestIdsEnabled } from '../shell/sessionScreenTestIds';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 export type SessionRightPanelProps = Readonly<{
     sessionId: string;
@@ -101,14 +101,14 @@ export const SessionRightPanel = React.memo((props: SessionRightPanelProps) => {
     const rightPanelTabs = React.useMemo((): ReadonlyArray<SegmentedTab<RightTabId>> => {
         // Icons, not words. Four labels cost a full text row in a pane this narrow, and the
         // labels survive as the accessible name and the hover tooltip.
-        const glyph = (name: React.ComponentProps<typeof Octicons>['name']) => (
-            <Octicons name={name} size={15} color={theme.colors.text.secondary} />
+        const glyph = (name: IconName) => (
+            <Icon name={name} size={14} color={theme.colors.text.secondary} />
         );
         const base: SegmentedTab<RightTabId>[] = [
             { id: 'git', label: t('session.rightPanel.tabs.git'), icon: glyph('git-branch') },
-            { id: 'files', label: t('common.files'), icon: glyph('file-directory') },
-            { id: 'navigation', label: t('session.transcriptNavigation.title'), icon: glyph('list-unordered') },
-            { id: 'agents', label: t('session.subagents.panel.title'), icon: glyph('dependabot') },
+            { id: 'files', label: t('common.files'), icon: glyph('folder') },
+            { id: 'navigation', label: t('session.transcriptNavigation.title'), icon: glyph('list-bullets') },
+            { id: 'agents', label: t('session.subagents.panel.title'), icon: glyph('robot') },
         ];
         if (terminalTabAvailable) {
             base.push({ id: 'terminal', label: t('settings.terminal'), icon: glyph('terminal') });
@@ -122,7 +122,7 @@ export const SessionRightPanel = React.memo((props: SessionRightPanelProps) => {
             onPress={props.onRequestClose ?? pane.closeRight}
             accessibilityLabel={closeButtonAtStart ? t('common.back') : t('common.close')}
         >
-            <Octicons name={closeButtonAtStart ? 'chevron-left' : 'x'} size={18} color={theme.colors.text.secondary} />
+            <Icon name={closeButtonAtStart ? 'caret-left' : 'x'} size={16} color={theme.colors.text.secondary} />
         </IconAction>
     );
 

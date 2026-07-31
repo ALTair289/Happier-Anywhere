@@ -1,6 +1,5 @@
 import React from "react";
 import { Platform, Pressable, View } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 
 import { Typography } from "@/constants/Typography";
@@ -13,6 +12,7 @@ import {
   type AgentInputChipPickerOptionTransientStyles,
 } from "./agentInputChipPickerOptionStyles";
 import { normalizeAgentInputChipPickerOptionIcon } from "./agentInputChipPickerOptionIcon";
+import { Icon } from '@/components/ui/icons/Icon';
 
 import type {
   AgentInputChipPickerOption,
@@ -213,8 +213,8 @@ function AgentInputChipPickerOptionButton(
             {normalizeNodeForView(props.option.railAction.icon)}
           </Pressable>
         ) : null}
-        <Ionicons
-          name="checkmark-outline"
+        <Icon
+          name="check"
           size={14}
           color={props.checkColor}
           style={props.selected ? null : { opacity: 0 }}

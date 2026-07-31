@@ -14,13 +14,13 @@ import { DEFAULT_PROFILES, getBuiltInProfile, getBuiltInProfileNameKey, resolveP
 import { convertBuiltInProfileToCustom, createEmptyCustomProfile, duplicateProfileForEdit } from '@/sync/domains/profiles/profileMutations';
 import { Modal } from '@/modal';
 import { promptUnsavedChangesAlert } from '@/utils/ui/promptUnsavedChangesAlert';
-import { Ionicons } from '@expo/vector-icons';
 import { PopoverScope } from '@/components/ui/popover';
 import { KeyboardAwareScreen } from '@/components/ui/keyboardAvoidance';
 import { fireAndForget } from '@/utils/system/fireAndForget';
 import { safeRouterBack } from '@/utils/navigation/safeRouterBack';
 import { useUnsavedChangesBeforeRemoveGuard } from '@/utils/navigation/useUnsavedChangesBeforeRemoveGuard';
 import { setNewSessionPickerReturnParams } from '@/components/sessions/new/navigation/setNewSessionPickerReturnParams';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export default React.memo(function ProfileEditScreen() {
     const { theme } = useUnistyles();
@@ -240,7 +240,7 @@ export default React.memo(function ProfileEditScreen() {
                     padding: 4,
                 })}
             >
-                <Ionicons name="close" size={24} color={theme.colors.chrome.header.foreground} />
+                <Icon name="x" size={24} color={theme.colors.chrome.header.foreground} />
             </Pressable>
         );
     }, [handleCancel, theme.colors.chrome.header.foreground]);
@@ -262,7 +262,7 @@ export default React.memo(function ProfileEditScreen() {
                     padding: 4,
                 })}
             >
-                <Ionicons name="checkmark" size={24} color={theme.colors.chrome.header.foreground} />
+                <Icon name="check" size={24} color={theme.colors.chrome.header.foreground} />
             </Pressable>
         );
     }, [handleSavePress, isDirty, theme.colors.chrome.header.foreground]);

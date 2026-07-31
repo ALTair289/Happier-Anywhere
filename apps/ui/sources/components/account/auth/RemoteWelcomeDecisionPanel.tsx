@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Platform, Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import Animated, {
     Easing,
     interpolate,
@@ -20,6 +19,7 @@ import { t } from '@/text';
 
 import type { RemoteAuthEntryOptions } from './useRemoteAuthEntryOptions';
 import { useReturningGreeting } from './useReturningGreeting';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 // Premium-feel hover affordances on the welcome buttons. The whole button
 // lifts 1px on hover and its content shifts:
@@ -73,7 +73,7 @@ type DecisionActionRowProps = Readonly<{
     title: string;
     subtitle?: string;
     primary?: boolean;
-    iconName?: keyof typeof Ionicons.glyphMap;
+    iconName?: IconName;
     onPress: () => AuthActionResult;
 }>;
 
@@ -187,7 +187,7 @@ function DecisionActionRow(props: DecisionActionRowProps): React.ReactElement {
             {props.iconName ? (
                 supportsHoverAnimation ? (
                     <Animated.View style={iconAnimatedStyle}>
-                        <Ionicons
+                        <Icon
                             testID={`${props.testID}-icon`}
                             name={props.iconName}
                             size={20}
@@ -196,7 +196,7 @@ function DecisionActionRow(props: DecisionActionRowProps): React.ReactElement {
                     </Animated.View>
                 ) : (
                     <View>
-                        <Ionicons
+                        <Icon
                             testID={`${props.testID}-icon`}
                             name={props.iconName}
                             size={20}
@@ -305,13 +305,13 @@ export function RemoteWelcomeDecisionPanel(props: RemoteWelcomeDecisionPanelProp
                     <DecisionActionRow
                         testID="welcome-change-relay"
                         title={t('setupOnboarding.changeRelayAction')}
-                        iconName="git-network-outline"
+                        iconName="graph"
                         onPress={props.onChangeRelay}
                     />
                     <DecisionActionRow
                         testID="welcome-retry-server"
                         title={t('common.retry')}
-                        iconName="refresh"
+                        iconName="arrow-clockwise"
                         onPress={options.retryServerCheck}
                     />
                 </View>
@@ -376,7 +376,7 @@ export function RemoteWelcomeDecisionPanel(props: RemoteWelcomeDecisionPanelProp
                                 primary={!isReturningUser}
                                 title={isReturningUser ? t('welcome.welcomeReturningStartFreshButton') : t('welcome.welcomePrimaryButton')}
                                 subtitle={isReturningUser ? t('welcome.welcomeReturningStartFreshSubtitle') : t('welcome.welcomePrimarySubtitle')}
-                                iconName="arrow-forward"
+                                iconName="arrow-right"
                                 onPress={props.onAnonymousSignup}
                             />
                         ) : (
@@ -388,7 +388,7 @@ export function RemoteWelcomeDecisionPanel(props: RemoteWelcomeDecisionPanelProp
                                 }
                                 primary
                                 title={options.primarySignupTitle}
-                                iconName={options.primarySignupKind === 'mtls' ? 'shield-checkmark-outline' : 'arrow-forward'}
+                                iconName={options.primarySignupKind === 'mtls' ? 'shield-check' : 'arrow-right'}
                                 onPress={primarySignupAction}
                             />
                         );
@@ -400,7 +400,7 @@ export function RemoteWelcomeDecisionPanel(props: RemoteWelcomeDecisionPanelProp
                                     ? t('welcome.welcomeReturningLoginButton')
                                     : t('welcome.welcomeSecondaryButton')}
                                 subtitle={t('welcome.welcomeSecondarySubtitle')}
-                                iconName="qr-code-outline"
+                                iconName="qr-code"
                                 onPress={props.onRestore}
                             />
                         );
@@ -410,7 +410,7 @@ export function RemoteWelcomeDecisionPanel(props: RemoteWelcomeDecisionPanelProp
                                     <DecisionActionRow
                                         testID="welcome-mtls-login"
                                         title={options.mtlsTitle}
-                                        iconName="shield-checkmark-outline"
+                                        iconName="shield-check"
                                         onPress={props.onMtlsLogin}
                                     />
                                 ) : null}
@@ -418,7 +418,7 @@ export function RemoteWelcomeDecisionPanel(props: RemoteWelcomeDecisionPanelProp
                                     <DecisionActionRow
                                         testID="welcome-signup-provider"
                                         title={options.providerSignupTitle}
-                                        iconName="arrow-forward"
+                                        iconName="arrow-right"
                                         onPress={() => props.onProviderSignup(options.providerId!)}
                                     />
                                 ) : null}
@@ -426,7 +426,7 @@ export function RemoteWelcomeDecisionPanel(props: RemoteWelcomeDecisionPanelProp
                                     <DecisionActionRow
                                         testID="welcome-login-provider"
                                         title={options.providerKeylessTitle}
-                                        iconName="arrow-forward"
+                                        iconName="arrow-right"
                                         onPress={() => props.onKeylessProviderLogin(options.keylessProviderId!)}
                                     />
                                 ) : null}

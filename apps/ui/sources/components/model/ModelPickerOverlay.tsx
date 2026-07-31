@@ -1,7 +1,6 @@
 import React from 'react';
 import { Pressable, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { Switch } from '@/components/ui/forms/Switch';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
@@ -16,6 +15,7 @@ import {
 } from '@/sync/domains/sessionControl/configOptionsControl';
 import { t } from '@/text';
 import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 export type ModelPickerOption = Readonly<{
@@ -227,7 +227,7 @@ export function ModelPickerOverlay(props: {
                                 hitSlop={6}
                             >
                                 {probe.phase === 'idle' ? (
-                                    <Ionicons name="refresh-outline" size={18} color={theme.colors.text.secondary} />
+                                    <Icon name="arrow-clockwise" size={16} color={theme.colors.text.secondary} />
                                 ) : (
                                     <ActivitySpinner
                                         size="small"
@@ -299,9 +299,9 @@ export function ModelPickerOverlay(props: {
                                                 style={styles.optionCardIndicator}
                                             >
                                                 {isSelected ? (
-                                                    <Ionicons
-                                                        name="checkmark-circle"
-                                                        size={18}
+                                                    <Icon
+                                                        name="check-circle"
+                                                        size={16}
                                                         color={selectedIndicatorColor}
                                                     />
                                                 ) : null}
@@ -350,9 +350,9 @@ export function ModelPickerOverlay(props: {
                                 </View>
                                 <View style={styles.customEntryIconSlot}>
                                     {customEditorVisible ? (
-                                        <Ionicons
-                                            name="checkmark-circle"
-                                            size={18}
+                                        <Icon
+                                            name="check-circle"
+                                            size={16}
                                             color={selectedIndicatorColor}
                                         />
                                     ) : null}

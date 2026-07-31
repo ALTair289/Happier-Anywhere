@@ -1,10 +1,10 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { Item } from '@/components/ui/lists/Item';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const ConnectedServiceDetailActionsGroup = React.memo(function ConnectedServiceDetailActionsGroup(props: Readonly<{
   supportsOauth: boolean;
@@ -41,7 +41,7 @@ export const ConnectedServiceDetailActionsGroup = React.memo(function ConnectedS
                 ? t('connectedServices.detail.connectAccessTokenSubtitle')
                 : t('connectedServices.detail.connectApiKeySubtitle')
           }
-          icon={<Ionicons name="key-outline" size={22} color={theme.colors.accent.blue} />}
+          icon={<Icon name="key" size={20} color={theme.colors.accent.blue} />}
           onPress={props.onConnectToken}
         />
       ) : null}
@@ -50,7 +50,7 @@ export const ConnectedServiceDetailActionsGroup = React.memo(function ConnectedS
           testID="connected-services-action:open-github-token-template"
           title={t('connectedServices.detail.openGithubTokenTemplateTitle')}
           subtitle={t('connectedServices.detail.openGithubTokenTemplateSubtitle')}
-          icon={<Ionicons name="open-outline" size={22} color={theme.colors.accent.blue} />}
+          icon={<Icon name="arrow-square-out" size={20} color={theme.colors.accent.blue} />}
           onPress={() => props.onOpenTokenSetupUrl(tokenSetupUrl)}
         />
       ) : null}
@@ -76,7 +76,7 @@ export const ConnectedServiceDetailActionsGroup = React.memo(function ConnectedS
                   testID={`connected-services-action:add-oauth-profile-${mode}`}
                   title={titleKey}
                   subtitle={subtitleKey}
-                  icon={<Ionicons name="add-circle-outline" size={22} color={theme.colors.accent.blue} />}
+                  icon={<Icon name="plus-circle" size={20} color={theme.colors.accent.blue} />}
                   onPress={() => props.onAddOauthProfile(mode)}
                 />
               );
@@ -86,7 +86,7 @@ export const ConnectedServiceDetailActionsGroup = React.memo(function ConnectedS
               testID="connected-services-action:add-oauth-profile"
               title={t('connectedServices.detail.addOauthProfileTitle')}
               subtitle={t('connectedServices.detail.addOauthProfileSubtitle')}
-              icon={<Ionicons name="add-circle-outline" size={22} color={theme.colors.accent.blue} />}
+              icon={<Icon name="plus-circle" size={20} color={theme.colors.accent.blue} />}
               onPress={() => props.onAddOauthProfile(singleOauthMode)}
             />
           )}

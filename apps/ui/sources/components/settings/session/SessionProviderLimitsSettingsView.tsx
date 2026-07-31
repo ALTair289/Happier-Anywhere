@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { DropdownMenu } from '@/components/ui/forms/dropdown/DropdownMenu';
@@ -11,6 +10,7 @@ import { TextInput } from '@/components/ui/text/Text';
 import { t } from '@/text';
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { useSettingMutable } from '@/sync/domains/state/storage';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const SessionProviderLimitsSettingsView = React.memo(function SessionProviderLimitsSettingsView() {
     const { theme } = useUnistyles();
@@ -107,7 +107,7 @@ export const SessionProviderLimitsSettingsView = React.memo(function SessionProv
                             subtitle: usageLimitRecoveryMode === 'auto_wait'
                                 ? t('settingsSession.usageLimitRecovery.autoWaitSelectedSubtitle')
                                 : t('settingsSession.usageLimitRecovery.askSelectedSubtitle'),
-                            icon: <Ionicons name="timer-outline" size={29} color={theme.colors.accent.indigo} />,
+                            icon: <Icon name="timer" size={29} color={theme.colors.accent.indigo} />,
                             showSelectedSubtitle: false,
                             itemProps: { testID: 'settings-session-usageLimitRecovery-trigger' },
                         }}
@@ -141,7 +141,7 @@ export const SessionProviderLimitsSettingsView = React.memo(function SessionProv
                                 : usageLimitRecoveryResumePromptMode === 'custom'
                                     ? t('settingsSession.usageLimitRecovery.resumePromptCustomSelectedSubtitle')
                                     : t('settingsSession.usageLimitRecovery.resumePromptStandardSelectedSubtitle'),
-                            icon: <Ionicons name="chatbubble-ellipses-outline" size={29} color={theme.colors.accent.indigo} />,
+                            icon: <Icon name="chat-circle-dots" size={29} color={theme.colors.accent.indigo} />,
                             showSelectedSubtitle: false,
                             itemProps: { testID: 'settings-session-usageLimitRecovery-resumePrompt-trigger' },
                         }}
@@ -175,7 +175,7 @@ export const SessionProviderLimitsSettingsView = React.memo(function SessionProv
                                 />
                             )}
                             subtitleLines={0}
-                            icon={<Ionicons name="create-outline" size={29} color={theme.colors.accent.indigo} />}
+                            icon={<Icon name="pencil-simple" size={29} color={theme.colors.accent.indigo} />}
                             mode="info"
                             showChevron={false}
                         />
@@ -191,7 +191,7 @@ export const SessionProviderLimitsSettingsView = React.memo(function SessionProv
                         subtitle={providerUsageGaugeVisible
                             ? t('settingsSession.providerUsageGauge.visibilityEnabledSubtitle')
                             : t('settingsSession.providerUsageGauge.visibilityHiddenSubtitle')}
-                        icon={<Ionicons name="speedometer-outline" size={29} color={theme.colors.accent.indigo} />}
+                        icon={<Icon name="speedometer" size={29} color={theme.colors.accent.indigo} />}
                         rightElement={<Switch testID="settings-session-providerUsageGauge-visibility-toggle" value={providerUsageGaugeVisible} onValueChange={(next) => setSessionProviderUsageGaugeMode(next ? 'auto' : 'hidden')} />}
                         showChevron={false}
                         onPress={() => setSessionProviderUsageGaugeMode(providerUsageGaugeVisible ? 'hidden' : 'auto')}
@@ -210,7 +210,7 @@ export const SessionProviderLimitsSettingsView = React.memo(function SessionProv
                         itemTrigger={{
                             title: t('settingsSession.providerUsageGauge.windowTitle'),
                             subtitle: providerUsageGaugeWindowOptions.find((option) => option.id === providerUsageGaugeWindowMode)?.title ?? t('settingsSession.providerUsageGauge.windowMostConstrainedTitle'),
-                            icon: <Ionicons name="analytics-outline" size={29} color={theme.colors.accent.blue} />,
+                            icon: <Icon name="chart-line" size={29} color={theme.colors.accent.blue} />,
                             showSelectedSubtitle: false,
                             itemProps: { testID: 'settings-session-providerUsageGauge-window-trigger' },
                         }}

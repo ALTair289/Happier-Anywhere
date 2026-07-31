@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable } from 'react-native';
-import { Octicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 import { ActivitySpinner, iconMatchedSpinnerSize } from '@/components/ui/feedback/ActivitySpinner';
 import { IconAction } from '@/components/ui/buttons/IconAction';
@@ -12,6 +11,7 @@ import { applyFileDiscardAction } from '@/scm/operations/applyFileDiscardAction'
 import { fireAndForget } from '@/utils/system/fireAndForget';
 import { t } from '@/text';
 import { toTestIdSafeValue } from '@/utils/ui/toTestIdSafeValue';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type ScmChangeDiscardButtonProps = Readonly<{
     sessionId: string;
@@ -63,7 +63,7 @@ export const ScmChangeDiscardButton = React.memo((props: ScmChangeDiscardButtonP
             {busy ? (
                 <ActivitySpinner size={iconMatchedSpinnerSize(DISCARD_ICON_SIZE_PX)} color={theme.colors.text.secondary} />
             ) : (
-                <Octicons name="history" size={DISCARD_ICON_SIZE_PX} color={theme.colors.text.secondary} />
+                <Icon name="clock-counter-clockwise" size={DISCARD_ICON_SIZE_PX} color={theme.colors.text.secondary} />
             )}
         </IconAction>
     );

@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Linking, Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Text } from '@/components/ui/text/Text';
@@ -9,6 +8,7 @@ import { useActiveServerSnapshot } from '@/hooks/server/useActiveServerSnapshot'
 import { HAPPIER_CLOUD_SERVER_URL } from '@/sync/domains/server/serverProfiles';
 import { createServerUrlComparableKey } from '@/sync/domains/server/url/serverUrlCanonical';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const DOCS_URL = 'https://docs.happier.dev';
 const GITHUB_URL = 'https://github.com/happier-dev/happier';
@@ -104,9 +104,9 @@ export const WelcomeFooterLinks = React.memo(function WelcomeFooterLinks(props: 
                                 >
                                     {customRelayHost}
                                 </Text>
-                                <Ionicons
-                                    name="pencil-outline"
-                                    size={13}
+                                <Icon
+                                    name="pencil"
+                                    size={14}
                                     color={iconColor}
                                     style={pressed ? actionPressedStyle : undefined}
                                 />
@@ -133,7 +133,7 @@ export const WelcomeFooterLinks = React.memo(function WelcomeFooterLinks(props: 
                         hitSlop={6}
                         style={({ pressed }) => [styles.iconButton, pressed ? actionPressedStyle : null]}
                     >
-                        <Ionicons name="logo-github" size={18} color={iconColor} />
+                        <Icon name="github-logo" size={16} color={iconColor} />
                     </Pressable>
                     <Pressable
                         onPress={openDiscord}
@@ -143,7 +143,7 @@ export const WelcomeFooterLinks = React.memo(function WelcomeFooterLinks(props: 
                         hitSlop={6}
                         style={({ pressed }) => [styles.iconButton, pressed ? actionPressedStyle : null]}
                     >
-                        <Ionicons name="logo-discord" size={18} color={iconColor} />
+                        <Icon name="discord-logo" size={16} color={iconColor} />
                     </Pressable>
                     <Pressable
                         onPress={openDocs}

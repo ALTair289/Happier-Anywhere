@@ -1,6 +1,5 @@
 import * as React from 'react';
 
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { Item } from '@/components/ui/lists/Item';
@@ -13,6 +12,7 @@ import { fireAndForget } from '@/utils/system/fireAndForget';
 
 import type { VoiceLocalTtsSettings } from '@/sync/domains/settings/voiceLocalTtsSettings';
 import type { LocalTtsProviderSpec } from '../_types';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function normalizeSecretStringPromptInput(value: string | null): VoiceLocalTtsSettings['openaiCompat']['apiKey'] {
   if (value === null) return null;
@@ -101,13 +101,13 @@ const OpenAiCompatTtsSettings: LocalTtsProviderSpec['Settings'] = (props) => {
             id: 'mp3',
             title: MP3_FORMAT_TITLE,
             subtitle: t('settingsVoice.local.ttsFormatOptions.mp3Subtitle'),
-            icon: <Ionicons name="musical-notes-outline" size={22} color={theme.colors.text.secondary} />,
+            icon: <Icon name="music-notes" size={20} color={theme.colors.text.secondary} />,
           },
           {
             id: 'wav',
             title: WAV_FORMAT_TITLE,
             subtitle: t('settingsVoice.local.ttsFormatOptions.wavSubtitle'),
-            icon: <Ionicons name="pulse-outline" size={22} color={theme.colors.text.secondary} />,
+            icon: <Icon name="pulse" size={20} color={theme.colors.text.secondary} />,
           },
         ]}
         onSelect={(id) => {
@@ -137,7 +137,7 @@ export const openaiCompatTtsProviderSpec: LocalTtsProviderSpec = {
   id: 'openai_compat',
   title: 'OpenAI-compatible endpoint',
   subtitle: 'Use your own local/remote OpenAI-compatible TTS server.',
-  iconName: 'cloud-outline',
+  iconName: 'cloud',
   detail: 'Endpoint',
   Settings: OpenAiCompatTtsSettings,
   test: async ({ cfgTts, networkTimeoutMs, sample }) => {

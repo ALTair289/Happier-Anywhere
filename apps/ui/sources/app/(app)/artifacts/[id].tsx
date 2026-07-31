@@ -6,13 +6,13 @@ import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { StyleSheet } from 'react-native-unistyles';
 import { t } from '@/text';
 import { layout } from '@/components/ui/layout/layout';
-import { Ionicons } from '@expo/vector-icons';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { deleteArtifact } from '@/sync/api/artifacts/apiArtifacts';
 import { storage } from '@/sync/domains/state/storage';
 import { MarkdownView } from '@/components/markdown/MarkdownView';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -200,16 +200,16 @@ export default function ArtifactDetailScreen() {
                     style={{ padding: 8, marginRight: 8 }}
                     disabled={isDeleting}
                 >
-                    <Ionicons name="create-outline" size={22} color={styles.title.color} />
+                    <Icon name="pencil-simple" size={20} color={styles.title.color} />
                 </Pressable>
                 <Pressable
                     onPress={handleDelete}
                     style={{ padding: 8 }}
                     disabled={isDeleting}
                 >
-                    <Ionicons
-                        name="trash-outline"
-                        size={22}
+                    <Icon
+                        name="trash"
+                        size={20}
                         color={isDeleting ? styles.meta.color : styles.errorIcon.color}
                     />
                 </Pressable>
@@ -245,8 +245,8 @@ export default function ArtifactDetailScreen() {
                     options={errorScreenOptions}
                 />
                 <View style={styles.errorContainer}>
-                        <Ionicons 
-                            name="alert-circle-outline" 
+                        <Icon
+                            name="warning-circle"
                             size={64} 
                             style={styles.errorIcon}
                         />

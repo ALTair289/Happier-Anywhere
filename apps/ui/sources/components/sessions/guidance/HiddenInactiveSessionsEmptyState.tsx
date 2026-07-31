@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -8,6 +7,7 @@ import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { ItemList } from '@/components/ui/lists/ItemList';
 import { CenteredInfoTile } from '@/components/ui/lists/CenteredInfoTile';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export function HiddenInactiveSessionsEmptyState(): React.ReactElement {
     const { theme } = useUnistyles();
@@ -21,9 +21,9 @@ export function HiddenInactiveSessionsEmptyState(): React.ReactElement {
                 title={t('settingsFeatures.hiddenInactiveSessionsEmptyStateTitle')}
                 description={t('settingsFeatures.hiddenInactiveSessionsEmptyStateSubtitle')}
                 icon={(
-                    <Ionicons
+                    <Icon
                         testID="session-empty-state-icon"
-                        name="chatbubbles-outline"
+                        name="chats-circle"
                         size={48}
                         color={theme.colors.text.secondary}
                         style={{ marginBottom: 12 }}
@@ -35,7 +35,7 @@ export function HiddenInactiveSessionsEmptyState(): React.ReactElement {
                 <Item
                     testID="sessions-hidden-inactive-empty-state-open-archived"
                     title={t('sessionInfo.inactiveAndArchivedSessions')}
-                    icon={<Ionicons name="archive-outline" size={22} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="archive" size={20} color={theme.colors.text.secondary} />}
                     onPress={() => router.push('/session/archived' as any)}
                 />
             </ItemGroup>

@@ -1,8 +1,8 @@
-import { Ionicons } from '@expo/vector-icons';
 import * as React from 'react';
 import { Pressable } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const HEADER_CLOSE_BUTTON_HIT_SLOP = { top: 12, bottom: 12, left: 12, right: 12 } as const;
 
@@ -26,7 +26,7 @@ export const AppHeaderCloseButton = React.memo(function AppHeaderCloseButton(pro
             accessibilityRole="button"
             accessibilityLabel={t('common.cancel')}
         >
-            <Ionicons name="close" size={22} color={theme.colors.chrome.header.foreground} />
+            <Icon name="x" size={20} color={theme.colors.chrome.header.foreground} />
         </Pressable>
     );
 });

@@ -1,6 +1,5 @@
 import React from 'react';
 import { View, ViewStyle, Linking, Platform, Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet } from 'react-native-unistyles';
 import { useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
@@ -41,6 +40,7 @@ import {
     stripLegacyProviderSentinelTargetKeys,
 } from './profileBackendEntryStorage';
 import { Text, TextInput } from '@/components/ui/text/Text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function stripUndefinedRecordValues<TValue>(
     record: Readonly<Record<string, TValue | undefined>>,
@@ -708,7 +708,7 @@ export function ProfileEditForm({
                 <ItemGroup title={t('profiles.setupInstructions.title')} footer={profileDocs.description}>
                     <Item
                         title={t('profiles.setupInstructions.viewCloudGuide')}
-                        icon={<Ionicons name="book-outline" size={29} color={theme.colors.button.secondary.tint} />}
+                        icon={<Icon name="book" size={29} color={theme.colors.button.secondary.tint} />}
                         onPress={() => void openSetupGuide()}
                     />
                 </ItemGroup>
@@ -718,7 +718,7 @@ export function ProfileEditForm({
                 <Item
                     title={t('profiles.machineLogin.title')}
                     subtitle={t('profiles.machineLogin.subtitle')}
-                    leftElement={<Ionicons name="terminal-outline" size={24} color={theme.colors.text.secondary} />}
+                    leftElement={<Icon name="terminal" size={24} color={theme.colors.text.secondary} />}
                     rightElement={(
                         <Switch
                             value={effectiveAuthMode === 'machineLogin'}
@@ -832,13 +832,13 @@ export function ProfileEditForm({
                                         icon={<AgentIcon agentId={entry.iconAgentId} size={29} color={theme.colors.text.secondary} />}
                                         rightElement={(
                                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                                                <Ionicons
+                                                <Icon
                                                     name={getPermissionIconNameForAgent(permissionAgentId, effectiveMode) as any}
-                                                    size={22}
+                                                    size={20}
                                                     color={theme.colors.text.secondary}
                                                 />
-                                                <Ionicons
-                                                    name={open ? 'chevron-up' : 'chevron-down'}
+                                                <Icon
+                                                    name={open ? 'caret-up' : 'caret-down'}
                                                     size={20}
                                                     color={theme.colors.text.secondary}
                                                 />
@@ -856,7 +856,7 @@ export function ProfileEditForm({
                                         subtitle: t('profiles.defaultPermissions.currently', { label: getPermissionModeLabelForAgentType(permissionAgentId, accountDefault) }),
                                         icon: (
                                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                                <Ionicons name="settings-outline" size={22} color={theme.colors.text.secondary} />
+                                                <Icon name="sliders-horizontal" size={20} color={theme.colors.text.secondary} />
                                             </View>
                                         ),
                                     },
@@ -866,7 +866,7 @@ export function ProfileEditForm({
                                         subtitle: opt.description,
                                         icon: (
                                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                                <Ionicons name={opt.icon as any} size={22} color={theme.colors.text.secondary} />
+                                                <Icon name={opt.icon as any} size={20} color={theme.colors.text.secondary} />
                                             </View>
                                         ),
                                     })),
@@ -925,13 +925,13 @@ export function ProfileEditForm({
                                             icon={<AgentIcon agentId={entry.iconAgentId} size={29} color={theme.colors.text.secondary} />}
                                             rightElement={(
                                                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                                                    <Ionicons
-                                                        name={effectiveMode === 'direct' ? 'radio-outline' : 'save-outline'}
-                                                        size={22}
+                                                    <Icon
+                                                        name={effectiveMode === 'direct' ? 'radio' : 'floppy-disk'}
+                                                        size={20}
                                                         color={theme.colors.text.secondary}
                                                     />
-                                                    <Ionicons
-                                                        name={open ? 'chevron-up' : 'chevron-down'}
+                                                    <Icon
+                                                        name={open ? 'caret-up' : 'caret-down'}
                                                         size={20}
                                                         color={theme.colors.text.secondary}
                                                     />
@@ -951,7 +951,7 @@ export function ProfileEditForm({
                                             }),
                                             icon: (
                                                 <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                                    <Ionicons name="settings-outline" size={22} color={theme.colors.text.secondary} />
+                                                    <Icon name="sliders-horizontal" size={20} color={theme.colors.text.secondary} />
                                                 </View>
                                             ),
                                         },
@@ -961,7 +961,7 @@ export function ProfileEditForm({
                                             subtitle: t('settingsSession.defaultStorage.persistedSubtitle'),
                                             icon: (
                                                 <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                                    <Ionicons name="save-outline" size={22} color={theme.colors.text.secondary} />
+                                                    <Icon name="floppy-disk" size={20} color={theme.colors.text.secondary} />
                                                 </View>
                                             ),
                                         },
@@ -971,7 +971,7 @@ export function ProfileEditForm({
                                             subtitle: t('settingsSession.defaultStorage.directSubtitle'),
                                             icon: (
                                                 <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                                    <Ionicons name="radio-outline" size={22} color={theme.colors.text.secondary} />
+                                                    <Icon name="radio" size={20} color={theme.colors.text.secondary} />
                                                 </View>
                                             ),
                                         },
@@ -999,7 +999,7 @@ export function ProfileEditForm({
                         detailStyle={resolvedMachine
                             ? { color: isMachineOnline(resolvedMachine) ? theme.colors.status.connected : theme.colors.status.disconnected }
                             : undefined}
-                        icon={<Ionicons name="desktop-outline" size={29} color={theme.colors.button.secondary.tint} />}
+                        icon={<Icon name="desktop" size={29} color={theme.colors.button.secondary.tint} />}
                         onPress={showMachinePreviewPicker}
                     />
                 </ItemGroup>

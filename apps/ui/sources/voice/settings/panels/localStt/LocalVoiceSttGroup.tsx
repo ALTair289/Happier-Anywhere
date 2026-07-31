@@ -1,6 +1,5 @@
 import * as React from 'react';
 
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { DropdownMenu } from '@/components/ui/forms/dropdown/DropdownMenu';
@@ -9,6 +8,7 @@ import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { VoiceLocalSttSchema, type VoiceLocalSttSettings } from '@/sync/domains/settings/voiceLocalSttSettings';
 import { t } from '@/text';
 import { getLocalSttProviderSpec, localSttProviderSpecs } from '@/voice/settings/panels/localStt/providers/registry';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export function LocalVoiceSttGroup(props: {
   cfgStt: VoiceLocalSttSettings | any;
@@ -48,7 +48,7 @@ export function LocalVoiceSttGroup(props: {
           id: spec.id,
           title: spec.title,
           subtitle: spec.subtitle,
-          icon: <Ionicons name={spec.iconName as any} size={22} color={theme.colors.text.secondary} />,
+          icon: <Icon name={spec.iconName as any} size={20} color={theme.colors.text.secondary} />,
         }))}
         onSelect={(id) => {
           props.setStt({ ...normalized, provider: id as any });

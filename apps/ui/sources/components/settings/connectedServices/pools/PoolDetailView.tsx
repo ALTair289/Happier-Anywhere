@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams } from 'expo-router';
 import Animated, { useSharedValue } from 'react-native-reanimated';
 import { useUnistyles } from 'react-native-unistyles';
@@ -72,6 +71,7 @@ import { commitPoolMemberReorder, computePoolMemberPriorities, type ReorderableG
 import { commitPoolMembershipBatch } from './commitPoolMembershipBatch';
 import { PoolMembersDropOverlay } from './PoolMembersDropOverlay';
 import { PoolMembershipEditorModal, type PoolMembershipCandidate } from './PoolMembershipEditorModal';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type GroupStrategy = ConnectedServiceAuthGroupPolicyV1['strategy'];
 type GroupRecoveryMode = ConnectedServiceAuthGroupPolicyV1['recoveryMode'];
@@ -138,7 +138,7 @@ function resolveSwitchOnLabel(key: SwitchOnKey): string {
 
 function StrategyCheckmark() {
     const { theme } = useUnistyles();
-    return <Ionicons name="checkmark" size={18} color={theme.colors.accent.blue} />;
+    return <Icon name="check" size={16} color={theme.colors.accent.blue} />;
 }
 
 function buildStrategyItems(currentStrategy: GroupStrategy): DropdownMenuItem[] {
@@ -899,7 +899,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                     testID="connected-services-pool-detail:name"
                     title={t('connectedServices.detail.groupDetail.nameTitle')}
                     subtitle={label}
-                    icon={<Ionicons name="pencil-outline" size={22} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="pencil" size={20} color={theme.colors.accent.blue} />}
                     onPress={() => void handleEditName()}
                 />
                 <Item
@@ -916,7 +916,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                         testID="connected-services-pool-detail:server-active-status"
                         title={t('connectedServices.pools.detail.serverActiveStatusTitle')}
                         subtitle={t('connectedServices.pools.detail.serverActiveStatusSubtitle')}
-                        icon={<Ionicons name="cloud-done-outline" size={22} color={theme.colors.accent.blue} />}
+                        icon={<Icon name="cloud-check" size={20} color={theme.colors.accent.blue} />}
                         showChevron={false}
                     />
                 ) : null}
@@ -970,14 +970,14 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                             {
                                 id: `connected-services-pool:${group.groupId}:member:${memberModel.profileId}:action:move-up`,
                                 title: t('connectedServices.pools.detail.moveUp'),
-                                icon: 'arrow-up-outline',
+                                icon: 'arrow-up',
                                 disabled: index === 0,
                                 onPress: index === 0 ? undefined : () => handleMoveMember(memberModel.profileId, -1),
                             },
                             {
                                 id: `connected-services-pool:${group.groupId}:member:${memberModel.profileId}:action:move-down`,
                                 title: t('connectedServices.pools.detail.moveDown'),
-                                icon: 'arrow-down-outline',
+                                icon: 'arrow-down',
                                 disabled: index === memberCount - 1,
                                 onPress: index === memberCount - 1 ? undefined : () => handleMoveMember(memberModel.profileId, 1),
                             },
@@ -991,7 +991,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                                         ? fallbackDisabledSubtitle ?? t('connectedServices.detail.groupActions.accountFallbackDisabled')
                                         : undefined
                                     : undefined,
-                                icon: isActive ? 'radio-button-on-outline' : 'radio-button-off-outline',
+                                icon: isActive ? 'radio-button' : 'circle',
                                 disabled: !canSetActiveMember,
                                 onPress: canSetActiveMember
                                     ? () => void handleSetActiveMember(memberModel.profileId)
@@ -1000,7 +1000,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                             {
                                 id: `connected-services-pool:${group.groupId}:member:${memberModel.profileId}:action:remove`,
                                 title: t('connectedServices.detail.groupActions.removeMember'),
-                                icon: 'remove-circle-outline',
+                                icon: 'minus-circle',
                                 destructive: true,
                                 onPress: () => void handleRemoveMember(memberModel.profileId),
                             },
@@ -1054,7 +1054,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                     subtitle={canAddMember
                         ? t('connectedServices.detail.groupActions.addMemberSubtitle')
                         : t('connectedServices.detail.groupActions.noProfilesAvailable')}
-                    icon={<Ionicons name="add-circle-outline" size={22} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="plus-circle" size={20} color={theme.colors.accent.blue} />}
                     disabled={!canAddMember}
                     onPress={canAddMember ? handleAddMember : undefined}
                 />
@@ -1062,7 +1062,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                     testID="connected-services-pool-detail:edit-members"
                     title={t('connectedServices.detail.groupActions.membersTitle')}
                     subtitle={t('connectedServices.detail.groupActions.membersSubtitle')}
-                    icon={<Ionicons name="people-outline" size={22} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="users" size={20} color={theme.colors.accent.blue} />}
                     disabled={membershipCandidates.length === 0}
                     onPress={membershipCandidates.length === 0 ? undefined : handleEditMembers}
                 />
@@ -1073,7 +1073,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                     testID="connected-services-pool-detail:auto-switch"
                     title={t('connectedServices.detail.groupDetail.autoSwitchTitle')}
                     subtitle={autoSwitchSubtitle}
-                    icon={<Ionicons name="swap-horizontal-outline" size={22} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="arrows-left-right" size={20} color={theme.colors.accent.blue} />}
                     disabled={!fallbackControlsEnabled}
                     rightElement={(
                         <Switch
@@ -1096,7 +1096,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                     itemTrigger={{
                         title: t('connectedServices.detail.groupDetail.strategyTitle'),
                         subtitle: resolveStrategyTitle(group.policy.strategy),
-                        icon: <Ionicons name="options-outline" size={22} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="sliders-horizontal" size={20} color={theme.colors.accent.blue} />,
                         showSelectedDetail: false,
                         showSelectedSubtitle: false,
                         itemProps: {
@@ -1111,7 +1111,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                     testID="connected-services-pool-detail:soft-switch-threshold"
                     title={t('connectedServices.detail.groupDetail.softSwitchThresholdTitle')}
                     subtitle={fallbackDisabledSubtitle ?? t('connectedServices.detail.groupDetail.softSwitchThresholdSubtitle', { percent: String(softSwitchRemainingPercent) })}
-                    icon={<Ionicons name="speedometer-outline" size={22} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="speedometer" size={20} color={theme.colors.accent.indigo} />}
                     disabled={!fallbackControlsEnabled}
                     onPress={fallbackControlsEnabled ? () => void handleEditSoftSwitchRemainingPercent() : undefined}
                 />
@@ -1128,10 +1128,10 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                             {...state.headerProps}
                             title={t('connectedServices.pools.detail.advancedTitle')}
                             subtitle={t('connectedServices.pools.detail.advancedSubtitle')}
-                            icon={<Ionicons name="construct-outline" size={22} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="wrench" size={20} color={theme.colors.text.secondary} />}
                             rightElement={(
-                                <Ionicons
-                                    name={state.expanded ? 'chevron-down' : 'chevron-forward'}
+                                <Icon
+                                    name={state.expanded ? 'caret-down' : 'caret-right'}
                                     size={16}
                                     color={theme.colors.text.secondary}
                                 />
@@ -1145,7 +1145,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                             testID="connected-services-pool-detail:auto-restore-primary"
                             title={t('connectedServices.pools.behavior.autoRestorePrimaryTitle')}
                             subtitle={t('connectedServices.pools.behavior.autoRestorePrimarySubtitle')}
-                            icon={<Ionicons name="refresh-outline" size={22} color={theme.colors.accent.indigo} />}
+                            icon={<Icon name="arrow-clockwise" size={20} color={theme.colors.accent.indigo} />}
                             disabled={!fallbackControlsEnabled}
                             rightElement={(
                                 <Switch
@@ -1165,7 +1165,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                                 testID={`connected-services-pool-detail:switch-on:${key}`}
                                 title={resolveSwitchOnLabel(key)}
                                 subtitle={t('connectedServices.pools.behavior.switchOnGroupSubtitle')}
-                                icon={<Ionicons name="git-branch-outline" size={22} color={theme.colors.text.secondary} />}
+                                icon={<Icon name="git-branch" size={20} color={theme.colors.text.secondary} />}
                                 disabled={!fallbackControlsEnabled}
                                 rightElement={(
                                     <Switch
@@ -1184,7 +1184,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                             testID="connected-services-pool-detail:stale-probe-after"
                             title={t('connectedServices.detail.groupDetail.staleProbeTitle')}
                             subtitle={fallbackDisabledSubtitle ?? t('connectedServices.detail.groupDetail.staleProbeSubtitle', { minutes: staleProbeMinutes })}
-                            icon={<Ionicons name="refresh-circle-outline" size={22} color={theme.colors.accent.indigo} />}
+                            icon={<Icon name="arrows-clockwise" size={20} color={theme.colors.accent.indigo} />}
                             disabled={!fallbackControlsEnabled}
                             onPress={fallbackControlsEnabled ? () => void handleEditProbeIfSnapshotOlderThan() : undefined}
                         />
@@ -1195,7 +1195,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                                 perTurn: String(switchBudget.perTurn),
                                 perHour: String(switchBudget.perSessionHour),
                             })}
-                            icon={<Ionicons name="repeat-outline" size={22} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="repeat" size={20} color={theme.colors.text.secondary} />}
                             showChevron={false}
                         />
                         <DropdownMenu
@@ -1207,7 +1207,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                             itemTrigger={{
                                 title: t('connectedServices.detail.groupDetail.recoveryModeTitle'),
                                 subtitle: resolveRecoveryModeSubtitle(recoveryMode),
-                                icon: <Ionicons name="medkit-outline" size={22} color={theme.colors.text.secondary} />,
+                                icon: <Icon name="first-aid-kit" size={20} color={theme.colors.text.secondary} />,
                                 showSelectedDetail: false,
                                 showSelectedSubtitle: false,
                                 itemProps: {
@@ -1222,7 +1222,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                             testID="connected-services-pool-detail:recovery-prompt"
                             title={t('connectedServices.detail.groupDetail.recoveryPromptTitle')}
                             subtitle={t('connectedServices.detail.groupDetail.recoveryPromptSubtitle')}
-                            icon={<Ionicons name="chatbubble-ellipses-outline" size={22} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="chat-circle-dots" size={20} color={theme.colors.text.secondary} />}
                             showChevron={false}
                         />
                     </ItemGroup>
@@ -1234,7 +1234,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                     testID="connected-services-pool-detail:delete"
                     title={t('connectedServices.pools.delete.title')}
                     subtitle={t('connectedServices.pools.delete.subtitle')}
-                    icon={<Ionicons name="trash-outline" size={22} color={theme.colors.state.danger.foreground} />}
+                    icon={<Icon name="trash" size={20} color={theme.colors.state.danger.foreground} />}
                     destructive
                     onPress={() => void handleDeletePool()}
                 />

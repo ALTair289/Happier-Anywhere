@@ -1,6 +1,5 @@
 import React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
@@ -25,6 +24,7 @@ import { AutomationListGroup } from '@/components/automations/list/AutomationLis
 import { AutomationsEmptyState } from '@/components/automations/shared/AutomationsEmptyState';
 import { t } from '@/text';
 import { navigateWithBlurOnWeb } from '@/utils/platform/deferOnWeb';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -113,7 +113,7 @@ export function SessionAutomationsScreen(props: { sessionId: string; hydrationOp
                         <Item
                             title={t('automations.session.addAutomation')}
                             subtitle={addAutomationUnavailableReason ?? undefined}
-                            icon={<Ionicons name="add-outline" size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="plus" size={29} color={theme.colors.accent.blue} />}
                             onPress={() => navigateWithBlurOnWeb(() => router.push(`/session/${props.sessionId}/automations/new` as any))}
                             disabled={availability.kind !== 'ready'}
                         />

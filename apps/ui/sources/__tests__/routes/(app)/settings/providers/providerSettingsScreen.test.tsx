@@ -408,8 +408,8 @@ vi.mock('@/agents/providers/registry/providerLocalAuthRegistry', () => ({
 vi.mock('@/sync/domains/permissions/permissionModeOptions', () => ({
     getPermissionModeLabelForAgentType: () => 'Ask',
     getPermissionModeOptionsForAgentType: () => [
-        { value: 'default', label: 'Default', description: 'Use the global default', icon: 'list-outline' },
-        { value: 'ask', label: 'Ask', description: 'Ask each time', icon: 'help-circle-outline' },
+        { value: 'default', label: 'Default', description: 'Use the global default', icon: 'list' },
+        { value: 'ask', label: 'Ask', description: 'Ask each time', icon: 'question' },
     ],
 }));
 

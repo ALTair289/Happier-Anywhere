@@ -1,6 +1,5 @@
 import React from 'react';
 import { Platform, Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
@@ -35,6 +34,7 @@ import { storeTempData } from '@/utils/sessions/tempDataStore';
 import { resolveExistingSessionAutomationAvailability } from '@/sync/domains/automations/existingSessionAutomationAvailability';
 import { isAutomationSettingsDraftValid } from '@/sync/domains/automations/isAutomationSettingsDraftValid';
 import { readMachineControlTargetForSession } from '@/sync/ops/sessionMachineTarget';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function isExistingSessionAutomationEditDraftValid(params: Readonly<{
     draft: SessionAuthoringDraft | null;
@@ -231,7 +231,7 @@ export default React.memo(function AutomationEditScreen() {
             accessibilityRole="button"
             accessibilityLabel={t('common.back')}
         >
-            <Ionicons name="chevron-back" size={22} color={theme.colors.chrome.header.foreground} />
+            <Icon name="caret-left" size={20} color={theme.colors.chrome.header.foreground} />
         </Pressable>
     ), [automationId, router, theme.colors.chrome.header.foreground]);
 

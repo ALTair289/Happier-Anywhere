@@ -24,7 +24,7 @@ describe('ItemGroupTitleWithAction', () => {
                 titleStyle: { color: '#000' },
                 action: {
                     accessibilityLabel: 'Refresh',
-                    iconName: 'refresh',
+                    iconName: 'arrow-clockwise',
                     iconColor: '#666',
                     onPress: vi.fn(),
                 },
@@ -62,7 +62,7 @@ describe('ItemGroupTitleWithAction', () => {
                 title: 'Detected CLIs',
                 action: {
                     accessibilityLabel: 'Refresh',
-                    iconName: 'refresh',
+                    iconName: 'arrow-clockwise',
                     iconColor: '#666',
                     loading: true,
                     onPress: vi.fn(),
@@ -70,6 +70,6 @@ describe('ItemGroupTitleWithAction', () => {
             }))).tree;
 
         expect(tree!.findAll((node) => node.props.accessibilityRole === 'progressbar')).toHaveLength(1);
-        expect(tree!.findAllByType('Ionicons' as any).length).toBe(0);
+        expect(tree!.findAllByType('Icon' as any).length).toBe(0);
     });
 });

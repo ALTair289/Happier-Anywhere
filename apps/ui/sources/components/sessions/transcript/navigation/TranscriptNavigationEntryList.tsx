@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { ActivityIndicator, Animated, FlatList, Pressable, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Octicons } from '@expo/vector-icons';
 
 import { Text } from '@/components/ui/text/Text';
 import { RelativeTimeText } from '@/components/ui/selectionList/accessories/RelativeTimeText';
@@ -9,6 +8,7 @@ import { Typography } from '@/constants/Typography';
 import { useNowMs } from '@/hooks/time/useNowMs';
 import { useReducedMotionPreference } from '@/hooks/ui/useReducedMotionPreference';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     buildTranscriptNavigationTimelineRows,
     type TranscriptNavigationTimelineRow,
@@ -428,7 +428,7 @@ const TimelineEntryRow = React.memo((props: TimelineEntryRowProps) => {
                                 color={theme.colors.text.secondary}
                             />
                         ) : entry.pinned ? (
-                            <Octicons name="pin" size={13} color={theme.colors.state.info.foreground} />
+                            <Icon name="push-pin" size={14} color={theme.colors.state.info.foreground} />
                         ) : null}
                     </View>
                 </Pressable>

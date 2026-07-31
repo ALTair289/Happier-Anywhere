@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -10,6 +9,7 @@ import { TabBadge } from '@/components/ui/navigation/tabBadge/TabBadge';
 import { resolveTabBarMetrics } from '@/components/ui/navigation/tabBarMetrics';
 import { useSetting } from '@/sync/domains/state/storage';
 import { Typography } from '@/constants/Typography';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 const styles = StyleSheet.create((theme) => ({
     innerContainer: {
@@ -61,7 +61,7 @@ export type CockpitTabBadge =
 export type CockpitTabBarTabDefinition<TSurface extends string> = Readonly<{
     id: TSurface;
     label: string;
-    icon: keyof typeof Ionicons.glyphMap | Readonly<{
+    icon: IconName | Readonly<{
         render: (params: Readonly<{ size: number; tintColor: string; active: boolean }>) => React.ReactNode;
     }>;
     badge?: CockpitTabBadge;
@@ -87,7 +87,7 @@ export function CockpitTabBar<TSurface extends string>(props: CockpitTabBarProps
                     const active = tab.id === props.activeSurface;
                     const tintColor = active ? theme.colors.text.primary : theme.colors.text.secondary;
                     const icon = typeof tab.icon === 'string'
-                        ? <Ionicons name={tab.icon} size={metrics.iconSize} color={tintColor} />
+                        ? <Icon name={tab.icon} size={metrics.iconSize} color={tintColor} />
                         : tab.icon.render({ size: metrics.iconSize, tintColor, active });
                     return (
                         <Pressable

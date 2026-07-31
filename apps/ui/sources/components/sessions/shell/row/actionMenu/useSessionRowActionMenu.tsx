@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 
 import { Modal } from '@/modal';
 import { t } from '@/text';
@@ -24,6 +23,7 @@ import type { SessionActionTarget } from '@/components/sessions/actions/sessionA
 
 import { buildSessionRowMoreMenuItems } from './buildSessionRowActionMenuItems';
 import type { SessionRowActionMenuState } from './sessionRowActionMenuTypes';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function showActionError(error: unknown) {
     if (error instanceof HappyError) {
@@ -94,7 +94,7 @@ export function useSessionRowActionMenu(params: Readonly<{
             id: tag,
             title: tag,
             rightElement: params.activeTags.includes(tag) ? (
-                <Ionicons name="checkmark" size={16} color={params.iconColor} />
+                <Icon name="check" size={16} color={params.iconColor} />
             ) : undefined,
         }));
     }, [params.activeTags, params.iconColor, params.knownTags]);
@@ -224,7 +224,7 @@ export function useSessionRowActionMenu(params: Readonly<{
                 {
                     id: 'selection.select',
                     title: t('sessionsList.selectionSelectAction'),
-                    icon: <Ionicons name="checkmark-circle-outline" size={16} color={params.iconColor} />,
+                    icon: <Icon name="check-circle" size={16} color={params.iconColor} />,
                 },
                 ...items,
             ];
@@ -302,7 +302,7 @@ export function useSessionRowActionMenu(params: Readonly<{
             items.push({
                 id: 'selection.select',
                 title: t('sessionsList.selectionSelectAction'),
-                icon: <Ionicons name="checkmark-circle-outline" size={14} color={params.iconColor} />,
+                icon: <Icon name="check-circle" size={14} color={params.iconColor} />,
             });
         }
         if (params.tagsEnabled && typeof params.onSetTags === 'function') {

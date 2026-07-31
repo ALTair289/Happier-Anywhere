@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { View } from 'react-native';
 import * as ReactNavigation from '@react-navigation/native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { EmptyState } from '@/components/ui/empty/EmptyState';
@@ -21,6 +20,7 @@ import type { ConnectedServiceId } from '@happier-dev/protocol';
 import { t } from '@/text';
 
 import { ConnectedServiceCapacityAvatar, CONNECTED_SERVICE_GAUGE_BOX } from '../ConnectedServiceCapacityAvatar';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     resolveAccountCapacityRings,
     resolveAccountUsageRows,
@@ -254,9 +254,9 @@ const PoolRow = React.memo(function PoolRow(props: Readonly<{
                     style={[styles.warningChip, { backgroundColor: theme.colors.state[warningVariant].background }]}
                     accessibilityLabel={t('connectedServices.pools.memberWarningsA11y', { count: warningCount })}
                 >
-                    <Ionicons
+                    <Icon
                         name="warning"
-                        size={12}
+                        size={14}
                         color={theme.colors.state[warningVariant].foreground}
                     />
                     <Text
@@ -354,7 +354,7 @@ export const PoolsList = React.memo(function PoolsList(props: PoolsListProps) {
                 subtitle={props.groupConfigurationSupported
                     ? t('connectedServices.pools.create.subtitle')
                     : t('connectedServices.detail.groupActions.runtimeFallbackUnsupported')}
-                icon={<Ionicons name="add-circle-outline" size={22} color={theme.colors.accent.blue} />}
+                icon={<Icon name="plus-circle" size={20} color={theme.colors.accent.blue} />}
                 disabled={!props.groupConfigurationSupported}
                 onPress={props.groupConfigurationSupported ? props.onCreatePool : undefined}
             />
@@ -365,7 +365,7 @@ export const PoolsList = React.memo(function PoolsList(props: PoolsListProps) {
         <Item
             testID="connected-services-pools:load-error:retry"
             title={t('connectedServices.pools.loadError.retry')}
-            icon={<Ionicons name="refresh-outline" size={22} color={theme.colors.accent.blue} />}
+            icon={<Icon name="arrow-clockwise" size={20} color={theme.colors.accent.blue} />}
             onPress={props.onRetryLoad}
         />
     ) : null;
@@ -380,7 +380,7 @@ export const PoolsList = React.memo(function PoolsList(props: PoolsListProps) {
                         testID="connected-services-pools:load-error"
                         title={t('connectedServices.pools.loadError.title')}
                         subtitle={t('connectedServices.pools.loadError.subtitle')}
-                        icon={<Ionicons name="warning-outline" size={22} color={theme.colors.state.danger.foreground} />}
+                        icon={<Icon name="warning" size={20} color={theme.colors.state.danger.foreground} />}
                         showChevron={false}
                     />
                     {retryCard}
@@ -400,7 +400,7 @@ export const PoolsList = React.memo(function PoolsList(props: PoolsListProps) {
                 <EmptyState
                     testID="connected-services-pools:empty"
                     titleTestID="connected-services-pools:empty:title"
-                    icon={<Ionicons name="layers-outline" size={28} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="stack-simple" size={29} color={theme.colors.text.secondary} />}
                     title={t('connectedServices.pools.empty.title')}
                     subtitle={t('connectedServices.pools.empty.subtitle')}
                 />
@@ -417,13 +417,13 @@ export const PoolsList = React.memo(function PoolsList(props: PoolsListProps) {
                 testID="connected-services-pools:stale-error"
                 title={t('connectedServices.pools.loadError.staleTitle')}
                 subtitle={t('connectedServices.pools.loadError.staleSubtitle')}
-                icon={<Ionicons name="warning-outline" size={22} color={theme.colors.state.warning.foreground} />}
+                icon={<Icon name="warning" size={20} color={theme.colors.state.warning.foreground} />}
                 showChevron={false}
             />
             <Item
                 testID="connected-services-pools:stale-error:retry"
                 title={t('connectedServices.pools.loadError.retry')}
-                icon={<Ionicons name="refresh-outline" size={22} color={theme.colors.accent.blue} />}
+                icon={<Icon name="arrow-clockwise" size={20} color={theme.colors.accent.blue} />}
                 onPress={props.onRetryLoad}
             />
         </ItemGroup>

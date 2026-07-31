@@ -1,6 +1,5 @@
 import * as React from 'react';
 
-import { Ionicons } from '@expo/vector-icons';
 import { Pressable } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -18,6 +17,7 @@ import { fireAndForget } from '@/utils/system/fireAndForget';
 
 import type { VoiceLocalTtsSettings } from '@/sync/domains/settings/voiceLocalTtsSettings';
 import type { LocalTtsProviderSpec } from '../_types';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function normalizeSecretStringPromptInput(value: string | null): VoiceLocalTtsSettings['googleCloud']['apiKey'] {
   if (value === null) return null;
@@ -209,7 +209,7 @@ const GoogleCloudTtsSettings: LocalTtsProviderSpec['Settings'] = (props) => {
             id: '',
             title: t('settingsVoice.local.googleCloudTts.language.allTitle'),
             subtitle: t('settingsVoice.local.googleCloudTts.language.allSubtitle'),
-            icon: <Ionicons name="sparkles-outline" size={22} color={theme.colors.text.secondary} />,
+            icon: <Icon name="sparkle" size={20} color={theme.colors.text.secondary} />,
           },
           ...availableLanguageCodes.map((code) => {
             const lang = findLanguageByCode(code);
@@ -217,7 +217,7 @@ const GoogleCloudTtsSettings: LocalTtsProviderSpec['Settings'] = (props) => {
               id: code,
               title: lang ? getLanguageDisplayName(lang) : code,
               subtitle: code,
-              icon: <Ionicons name="language-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="translate" size={20} color={theme.colors.text.secondary} />,
             };
           }),
           ...LANGUAGES.flatMap((lang) => {
@@ -229,7 +229,7 @@ const GoogleCloudTtsSettings: LocalTtsProviderSpec['Settings'] = (props) => {
                 id: code,
                 title: getLanguageDisplayName(lang),
                 subtitle: code,
-                icon: <Ionicons name="language-outline" size={22} color={theme.colors.text.secondary} />,
+                icon: <Icon name="translate" size={20} color={theme.colors.text.secondary} />,
               },
             ];
           }),
@@ -325,9 +325,9 @@ const GoogleCloudTtsSettings: LocalTtsProviderSpec['Settings'] = (props) => {
               }}
               style={{ paddingHorizontal: 4, paddingVertical: 2 }}
             >
-              <Ionicons
-                name={previewingGoogleVoiceName === v.name ? 'stop-circle-outline' : 'play-circle-outline'}
-                size={22}
+              <Icon
+                name={previewingGoogleVoiceName === v.name ? 'stop-circle' : 'play-circle'}
+                size={20}
                 color={theme.colors.text.secondary}
               />
             </Pressable>
@@ -360,13 +360,13 @@ const GoogleCloudTtsSettings: LocalTtsProviderSpec['Settings'] = (props) => {
             id: 'mp3',
             title: AUDIO_FORMAT_TITLES.mp3,
             subtitle: t('settingsVoice.local.googleCloudTts.format.mp3Subtitle'),
-            icon: <Ionicons name="musical-notes-outline" size={22} color={theme.colors.text.secondary} />,
+            icon: <Icon name="music-notes" size={20} color={theme.colors.text.secondary} />,
           },
           {
             id: 'wav',
             title: AUDIO_FORMAT_TITLES.wav,
             subtitle: t('settingsVoice.local.googleCloudTts.format.wavSubtitle'),
-            icon: <Ionicons name="pulse-outline" size={22} color={theme.colors.text.secondary} />,
+            icon: <Icon name="pulse" size={20} color={theme.colors.text.secondary} />,
           },
         ]}
         onSelect={(id) => {
@@ -382,7 +382,7 @@ export const googleCloudTtsProviderSpec: LocalTtsProviderSpec = {
   id: 'google_cloud',
   title: t('settingsVoice.local.googleCloudTts.provider.title'),
   subtitle: t('settingsVoice.local.googleCloudTts.provider.subtitle'),
-  iconName: 'logo-google',
+  iconName: 'google-logo',
   detail: t('settingsVoice.local.googleCloudTts.provider.detail'),
   Settings: GoogleCloudTtsSettings,
   test: async ({ cfgTts, networkTimeoutMs, sample }) => {

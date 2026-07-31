@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, Platform } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 
 import { useAllMachines, useSessions, useSetting, useSettingMutable } from '@/sync/domains/state/storage';
@@ -25,6 +24,7 @@ import { safeRouterBack } from '@/utils/navigation/safeRouterBack';
 import { setNewSessionPickerReturnParams } from '@/components/sessions/new/navigation/setNewSessionPickerReturnParams';
 import { NewSessionMachineSelectionContent } from '@/components/sessions/new/components/NewSessionMachineSelectionContent';
 import type { Machine } from '@/sync/domains/state/storageTypes';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function useMachinePickerScreenOptions(params: Readonly<{
     title: string;
@@ -41,7 +41,7 @@ function useMachinePickerScreenOptions(params: Readonly<{
             accessibilityRole="button"
             accessibilityLabel={t('common.back')}
         >
-            <Ionicons name="chevron-back" size={22} color={params.theme.colors.chrome.header.foreground} />
+            <Icon name="caret-left" size={20} color={params.theme.colors.chrome.header.foreground} />
         </Pressable>
     ), [params.onBack, params.theme.colors.chrome.header.foreground]);
 
@@ -50,7 +50,7 @@ function useMachinePickerScreenOptions(params: Readonly<{
             title={params.title}
             tintColor={tintColor ?? params.theme.colors.chrome.header.foreground}
             actionLabel={t('common.refresh')}
-            actionIconName="refresh-outline"
+            actionIconName="arrow-clockwise"
             actionColor={params.theme.colors.text.secondary}
             actionDisabled={params.isRefreshing}
             actionLoading={params.isRefreshing}

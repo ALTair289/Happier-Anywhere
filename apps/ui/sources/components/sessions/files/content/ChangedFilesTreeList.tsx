@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { FlatList, Platform, View, type ScrollViewProps } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 
 import { Item } from '@/components/ui/lists/Item';
 import { FileIcon } from '@/components/ui/media/FileIcon';
@@ -10,6 +9,7 @@ import type { ScmWorkingSnapshot } from '@/sync/domains/state/storageTypes';
 import type { ScmFileStatus } from '@/scm/scmStatusFiles';
 import { buildChangedFilesOutlineTree, type ChangedFilesOutlineNode } from '@/components/sessions/files/repositoryTree/buildChangedFilesOutlineTree';
 import { useScmTreeBadgeIndex } from '@/components/sessions/files/repositoryTree/useScmTreeBadgeIndex';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type ChangedFilesTreeListProps = Readonly<{
     theme: any;
@@ -141,7 +141,7 @@ export const ChangedFilesTreeList = React.memo((props: ChangedFilesTreeListProps
                     return (
                         <Item
                             title={`${node.name}/`}
-                            icon={<Ionicons name={isExpanded ? 'folder-open-outline' : 'folder-outline'} size={16} color={props.theme.colors.text.link} />}
+                            icon={<Icon name={isExpanded ? 'folder-open' : 'folder'} size={16} color={props.theme.colors.text.link} />}
                             density="tight"
                             rightElement={rightElement}
                             showChevron={false}

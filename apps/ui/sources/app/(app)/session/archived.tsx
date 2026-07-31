@@ -1,6 +1,5 @@
 import React from 'react';
 import { Pressable, View, SectionList, Platform } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -17,6 +16,7 @@ import type { SessionListRenderableSession } from '@/sync/domains/session/listin
 import { getSessionAvatarId, getSessionName, getSessionSubtitle } from '@/utils/sessions/sessionUtils';
 import { sessionUnarchiveWithServerScope } from '@/sync/ops';
 import { sync } from '@/sync/sync';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type ArchivedScreenSession = Session | (SessionListRenderableSession & { serverId?: string });
 
@@ -302,7 +302,7 @@ export default function ArchivedSessionsScreen() {
                             accessibilityLabel={t('sessionInfo.unarchiveSession')}
                             hitSlop={8}
                         >
-                            <Ionicons name="arrow-undo-outline" size={18} color={theme.colors.text.secondary} />
+                            <Icon name="arrow-arc-left" size={16} color={theme.colors.text.secondary} />
                         </Pressable>
                     ) : null}
                 </Pressable>

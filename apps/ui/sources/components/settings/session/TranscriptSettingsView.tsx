@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -15,6 +14,7 @@ import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { useSettingMutable } from '@/sync/domains/state/storage';
 import type { TranscriptMessageTimestampDisplayMode } from '@/sync/domains/settings/registry/account/accountTranscriptToolSettingDefinitions';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     resolveToolViewDetailLevelDefaultForChromeMode,
     resolveToolViewExpandedDetailLevelDefaultForChromeMode,
@@ -332,7 +332,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                     popoverBoundaryRef={popoverBoundaryRef}
                     itemTrigger={{
                         title: t('settingsSession.transcript.layoutPickerTitle'),
-                        icon: <Ionicons name="chatbubble-ellipses-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="chat-circle-dots" size={29} color={theme.colors.accent.blue} />,
                         itemProps: { testID: 'settings-session-transcript-layout-picker' },
                     }}
                     items={groupingOptions.map((opt) => ({
@@ -341,7 +341,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         subtitle: opt.subtitle,
                         icon: (
                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                <Ionicons name="chatbubble-ellipses-outline" size={22} color={theme.colors.text.secondary} />
+                                <Icon name="chat-circle-dots" size={20} color={theme.colors.text.secondary} />
                             </View>
                         ),
                     }))}
@@ -364,7 +364,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                     itemTrigger={{
                         title: t('settingsSession.transcript.messageTimestampsTitle'),
                         subtitle: t('settingsSession.transcript.messageTimestampsSubtitle'),
-                        icon: <Ionicons name="time-outline" size={29} color={theme.colors.text.secondary} />,
+                        icon: <Icon name="clock" size={29} color={theme.colors.text.secondary} />,
                         itemProps: { testID: 'settings-session-transcript-message-timestamps' },
                     }}
                     items={timestampDisplayOptions.map((opt) => ({
@@ -373,7 +373,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         subtitle: opt.subtitle,
                         icon: (
                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                <Ionicons name="time-outline" size={22} color={theme.colors.text.secondary} />
+                                <Icon name="clock" size={20} color={theme.colors.text.secondary} />
                             </View>
                         ),
                     }))}
@@ -449,7 +449,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                     itemTrigger={{
                         title: t('settingsSession.transcript.messageActions.bulkCopyFormat.title'),
                         subtitle: t('settingsSession.transcript.messageActions.bulkCopyFormat.subtitle'),
-                        icon: <Ionicons name="copy-outline" size={29} color={theme.colors.text.secondary} />,
+                        icon: <Icon name="copy" size={29} color={theme.colors.text.secondary} />,
                         itemProps: { testID: 'settings-session-transcript-bulk-copy-format' },
                     }}
                     items={bulkCopyFormatOptions.map((opt) => ({
@@ -458,7 +458,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         subtitle: opt.subtitle,
                         icon: (
                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                <Ionicons name="copy-outline" size={22} color={theme.colors.text.secondary} />
+                                <Icon name="copy" size={20} color={theme.colors.text.secondary} />
                             </View>
                         ),
                     }))}
@@ -483,7 +483,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                     popoverBoundaryRef={popoverBoundaryRef}
                     itemTrigger={{
                         title: t('settingsSession.thinking.displayModeTitle'),
-                        icon: <Ionicons name="bulb-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="lightbulb" size={29} color={theme.colors.accent.blue} />,
                     }}
                     items={thinkingDisplayOptions.map((opt) => ({
                         id: opt.id,
@@ -491,7 +491,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         subtitle: opt.subtitle,
                         icon: (
                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                <Ionicons name="bulb-outline" size={22} color={theme.colors.text.secondary} />
+                                <Icon name="lightbulb" size={20} color={theme.colors.text.secondary} />
                             </View>
                         ),
                     }))}
@@ -521,7 +521,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                     <Item
                         title={t('settingsSession.thinking.inlineChromeTitle')}
                         subtitle={t('settingsSession.thinking.inlineChromeSubtitle')}
-                        icon={<Ionicons name="albums-outline" size={29} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="stack" size={29} color={theme.colors.text.secondary} />}
                         testID="settings-session-thinking-inline-chrome"
                         rightElement={
                             <Switch
@@ -549,7 +549,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                     popoverBoundaryRef={popoverBoundaryRef}
                     itemTrigger={{
                         title: t('settingsSession.toolRendering.timelineChrome.title'),
-                        icon: <Ionicons name="construct-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="wrench" size={29} color={theme.colors.accent.blue} />,
                     }}
                     items={chromeModeOptions.map((opt) => ({
                         id: opt.key,
@@ -557,7 +557,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         subtitle: opt.subtitle,
                         icon: (
                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                <Ionicons name="construct-outline" size={22} color={theme.colors.text.secondary} />
+                                <Icon name="wrench" size={20} color={theme.colors.text.secondary} />
                             </View>
                         ),
                     }))}
@@ -572,7 +572,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         <Item
                             title={t('settingsSession.transcript.toolCallsGroupTitle')}
                             subtitle={t('settingsSession.transcript.toolCallsGroupSubtitle')}
-                            icon={<Ionicons name="layers-outline" size={29} color={theme.colors.accent.indigo} />}
+                            icon={<Icon name="stack-simple" size={29} color={theme.colors.accent.indigo} />}
                             testID="settings-session-transcript-tool-calls-group"
                             rightElement={
                                 <Switch
@@ -600,7 +600,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                                         popoverBoundaryRef={popoverBoundaryRef}
                                         itemTrigger={{
                                             title: t('settingsSession.transcript.advanced.toolCallsStrategyTitle'),
-                                            icon: <Ionicons name="git-branch-outline" size={29} color={theme.colors.text.secondary} />,
+                                            icon: <Icon name="git-branch" size={29} color={theme.colors.text.secondary} />,
                                         }}
                                         items={strategyOptions.map((opt) => ({
                                             id: opt.key,
@@ -608,7 +608,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                                             subtitle: opt.subtitle,
                                             icon: (
                                                 <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                                    <Ionicons name="git-branch-outline" size={22} color={theme.colors.text.secondary} />
+                                                    <Icon name="git-branch" size={20} color={theme.colors.text.secondary} />
                                                 </View>
                                             ),
                                         }))}
@@ -632,7 +632,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                                     popoverBoundaryRef={popoverBoundaryRef}
                                     itemTrigger={{
                                         title: t('settingsSession.transcript.advanced.toolCallsCollapsedPreviewCountTitle'),
-                                        icon: <Ionicons name="eye-outline" size={29} color={theme.colors.text.secondary} />,
+                                        icon: <Icon name="eye" size={29} color={theme.colors.text.secondary} />,
                                     }}
                                     items={collapsedPreviewOptions.map((opt) => ({
                                         id: String(opt.key),
@@ -640,7 +640,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                                         subtitle: opt.subtitle,
                                         icon: (
                                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                                <Ionicons name="eye-outline" size={22} color={theme.colors.text.secondary} />
+                                                <Icon name="eye" size={20} color={theme.colors.text.secondary} />
                                             </View>
                                         ),
                                     }))}
@@ -655,7 +655,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                                 <Item
                                     title={t('settingsSession.transcript.toolCallsGroupBackgroundTitle')}
                                     subtitle={t('settingsSession.transcript.toolCallsGroupBackgroundSubtitle')}
-                                    icon={<Ionicons name="albums-outline" size={29} color={theme.colors.text.secondary} />}
+                                    icon={<Icon name="stack" size={29} color={theme.colors.text.secondary} />}
                                     testID="settings-session-transcript-tool-calls-group-background"
                                     rightElement={
                                         <Switch
@@ -684,7 +684,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                     popoverBoundaryRef={popoverBoundaryRef}
                     itemTrigger={{
                         title: t('settingsSession.toolRendering.defaultToolDetailLevelTitle'),
-                        icon: <Ionicons name="list-outline" size={29} color={theme.colors.text.secondary} />,
+                        icon: <Icon name="list" size={29} color={theme.colors.text.secondary} />,
                         subtitle: (() => {
                             const key = TOOL_DETAIL_LEVEL_WITH_STYLE_DEFAULT_OPTIONS.find((opt) => opt.key === normalizedToolViewDetailLevelDefaultSetting)?.titleKey;
                             return key ? tToolDetail(key) : String(resolvedDetailLevelDefaultLabel);
@@ -696,7 +696,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         subtitle: tToolDetail(opt.subtitleKey),
                         icon: (
                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                <Ionicons name="list-outline" size={22} color={theme.colors.text.secondary} />
+                                <Icon name="list" size={20} color={theme.colors.text.secondary} />
                             </View>
                         ),
                     }))}
@@ -719,7 +719,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                     popoverBoundaryRef={popoverBoundaryRef}
                     itemTrigger={{
                         title: t('settingsSession.toolRendering.expandedToolDetailLevelTitle'),
-                        icon: <Ionicons name="expand-outline" size={29} color={theme.colors.text.secondary} />,
+                        icon: <Icon name="arrows-out" size={29} color={theme.colors.text.secondary} />,
                         subtitle: (() => {
                             const key = TOOL_EXPANDED_DETAIL_LEVEL_WITH_STYLE_DEFAULT_OPTIONS.find((opt) => opt.key === normalizedToolViewExpandedDetailLevelDefaultSetting)?.titleKey;
                             return key ? tToolDetail(key as any) : String(resolvedExpandedDetailLevelDefaultLabel);
@@ -731,7 +731,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         subtitle: tToolDetail(opt.subtitleKey),
                         icon: (
                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                <Ionicons name="expand-outline" size={22} color={theme.colors.text.secondary} />
+                                <Icon name="arrows-out" size={20} color={theme.colors.text.secondary} />
                             </View>
                         ),
                     }))}
@@ -754,7 +754,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                     popoverBoundaryRef={popoverBoundaryRef}
                     itemTrigger={{
                         title: t('settingsSession.toolRendering.cardTapActionTitle'),
-                        icon: <Ionicons name="hand-left-outline" size={29} color={theme.colors.text.secondary} />,
+                        icon: <Icon name="hand" size={29} color={theme.colors.text.secondary} />,
                     }}
                     items={tapActionOptions.map((opt) => ({
                         id: opt.key,
@@ -762,7 +762,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         subtitle: opt.subtitle,
                         icon: (
                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                <Ionicons name="hand-left-outline" size={22} color={theme.colors.text.secondary} />
+                                <Icon name="hand" size={20} color={theme.colors.text.secondary} />
                             </View>
                         ),
                     }))}
@@ -777,7 +777,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         <Item
                             title={t('settingsSession.toolRendering.activityFeed.defaultExpandedTitle')}
                             subtitle={t('settingsSession.toolRendering.activityFeed.defaultExpandedSubtitle')}
-                            icon={<Ionicons name="chevron-down-outline" size={29} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="caret-down" size={29} color={theme.colors.text.secondary} />}
                             rightElement={
                                 <Switch
                                     value={toolViewTimelineFeedDefaultExpanded === true}
@@ -793,7 +793,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                 <Item
                     title={t('settingsSession.toolRendering.showDebugByDefaultTitle')}
                     subtitle={t('settingsSession.toolRendering.showDebugByDefaultSubtitle')}
-                    icon={<Ionicons name="code-slash-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="code" size={29} color={theme.colors.accent.indigo} />}
                     rightElement={<Switch value={toolViewShowDebugByDefault} onValueChange={setToolViewShowDebugByDefault} />}
                     showChevron={false}
                     onPress={() => setToolViewShowDebugByDefault(!toolViewShowDebugByDefault)}
@@ -802,7 +802,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                 <Item
                     title={t('settingsSession.toolDetailOverrides.title')}
                     subtitle={t('settingsSession.toolDetailOverrides.entrySubtitle')}
-                    icon={<Ionicons name="options-outline" size={29} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="sliders-horizontal" size={29} color={theme.colors.text.secondary} />}
                     onPress={() => router.push(toolOverridesRoute)}
                 />
             </ItemGroup>
@@ -821,7 +821,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                     popoverBoundaryRef={popoverBoundaryRef}
                     itemTrigger={{
                         title: t('settingsSession.transcript.motionPickerTitle'),
-                        icon: <Ionicons name="sparkles-outline" size={29} color={theme.colors.accent.orange} />,
+                        icon: <Icon name="sparkle" size={29} color={theme.colors.accent.orange} />,
                     }}
                     items={motionOptions.map((opt) => ({
                         id: opt.key,
@@ -829,7 +829,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         subtitle: opt.subtitle,
                         icon: (
                             <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                                <Ionicons name="sparkles-outline" size={22} color={theme.colors.text.secondary} />
+                                <Icon name="sparkle" size={20} color={theme.colors.text.secondary} />
                             </View>
                         ),
                     }))}
@@ -842,7 +842,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                 <Item
                     title={t('settingsSession.transcript.advancedMotionTitle')}
                     subtitle={t('settingsSession.transcript.advancedMotionSubtitle')}
-                    icon={<Ionicons name="options-outline" size={29} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="sliders-horizontal" size={29} color={theme.colors.text.secondary} />}
                     onPress={() => router.push(advancedRoute)}
                 />
             </ItemGroup>
@@ -851,7 +851,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                 <Item
                     title={t('settingsSession.transcript.scrollPinTitle')}
                     subtitle={t('settingsSession.transcript.scrollPinSubtitle')}
-                    icon={<Ionicons name="arrow-down-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="arrow-down" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             value={transcriptScrollPinEnabled === true}
@@ -865,7 +865,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                 <Item
                     title={t('settingsSession.transcript.jumpToBottomTitle')}
                     subtitle={t('settingsSession.transcript.jumpToBottomSubtitle')}
-                    icon={<Ionicons name="chevron-down-outline" size={29} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="caret-down" size={29} color={theme.colors.text.secondary} />}
                     rightElement={
                         <Switch
                             value={transcriptScrollJumpToBottomEnabled === true}
@@ -883,7 +883,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                 <Item
                     title={t('settingsSession.transcript.advancedScrollTitle')}
                     subtitle={t('settingsSession.transcript.advancedScrollSubtitle')}
-                    icon={<Ionicons name="options-outline" size={29} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="sliders-horizontal" size={29} color={theme.colors.text.secondary} />}
                     onPress={() => router.push(advancedRoute)}
                 />
             </ItemGroup>
@@ -893,21 +893,21 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                 <Item
                     title={t('settingsAppearance.showLineNumbersInDiffs')}
                     subtitle={t('settingsAppearance.showLineNumbersInDiffsDescription')}
-                    icon={<Ionicons name="list-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="list" size={29} color={theme.colors.accent.blue} />}
                     rightElement={<Switch value={showLineNumbers} onValueChange={setShowLineNumbers} />}
                     showChevron={false}
                 />
                 <Item
                     title={t('settingsAppearance.showLineNumbersInToolViews')}
                     subtitle={t('settingsAppearance.showLineNumbersInToolViewsDescription')}
-                    icon={<Ionicons name="code-working-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="code" size={29} color={theme.colors.accent.blue} />}
                     rightElement={<Switch value={showLineNumbersInToolViews} onValueChange={setShowLineNumbersInToolViews} />}
                     showChevron={false}
                 />
                 <Item
                     title={t('settingsAppearance.wrapLinesInDiffs')}
                     subtitle={t('settingsAppearance.wrapLinesInDiffsDescription')}
-                    icon={<Ionicons name="return-down-forward-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="arrow-elbow-down-right" size={29} color={theme.colors.accent.blue} />}
                     rightElement={<Switch value={wrapLinesInDiffs} onValueChange={setWrapLinesInDiffs} />}
                     showChevron={false}
                 />
@@ -917,7 +917,7 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                 <Item
                     title={t('settingsSession.transcript.advancedTitle')}
                     subtitle={t('settingsSession.transcript.advancedSubtitle')}
-                    icon={<Ionicons name="speedometer-outline" size={29} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="speedometer" size={29} color={theme.colors.text.secondary} />}
                     onPress={() => router.push(advancedRoute)}
                 />
             </ItemGroup>

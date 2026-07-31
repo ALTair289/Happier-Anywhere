@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Platform, Pressable, View } from 'react-native';
-import { Octicons } from '@expo/vector-icons';
 
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
@@ -11,6 +10,7 @@ import {
 } from '@/scm/scmAttribution';
 import { ChangedFilesViewModeMenu } from './ChangedFilesViewModeMenu';
 import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type FilesToolbarProps = {
     theme: any;
@@ -111,7 +111,7 @@ export function FilesToolbar(props: FilesToolbarProps) {
                     borderColor: theme.colors.border.default,
                 }}
             >
-                <Octicons name="search" size={16} color={theme.colors.text.secondary} style={{ marginRight: 8 }} />
+                <Icon name="magnifying-glass" size={16} color={theme.colors.text.secondary} style={{ marginRight: 8 }} />
                 <TextInput
                     value={searchQuery}
                     onChangeText={onSearchQueryChange}
@@ -131,14 +131,14 @@ export function FilesToolbar(props: FilesToolbarProps) {
                 <Chip
                     active={!showAllRepositoryFiles}
                     label={t('files.toolbar.changedFiles')}
-                    icon={<Octicons name="diff" size={14} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="git-diff" size={14} color={theme.colors.text.secondary} />}
                     badge={!showAllRepositoryFiles ? <CountBadge count={changedFilesCount} /> : undefined}
                     onPress={onShowChangedFiles}
                 />
                 <Chip
                     active={showAllRepositoryFiles}
                     label={t('files.toolbar.allRepositoryFiles')}
-                    icon={<Octicons name="repo" size={14} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="book-bookmark" size={14} color={theme.colors.text.secondary} />}
                     onPress={onShowAllRepositoryFiles}
                 />
 
@@ -155,13 +155,13 @@ export function FilesToolbar(props: FilesToolbarProps) {
                         <Chip
                             active={changedFilesPresentation === 'review'}
                             label={t('files.toolbar.review')}
-                            icon={<Octicons name="diff" size={14} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="git-diff" size={14} color={theme.colors.text.secondary} />}
                             onPress={() => onChangedFilesPresentationChange('review')}
                         />
                         <Chip
                             active={changedFilesPresentation === 'list'}
                             label={t('files.toolbar.list')}
-                            icon={<Octicons name="list-unordered" size={14} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="list-bullets" size={14} color={theme.colors.text.secondary} />}
                             onPress={() => onChangedFilesPresentationChange('list')}
                         />
                     </>
@@ -171,7 +171,7 @@ export function FilesToolbar(props: FilesToolbarProps) {
                     <Chip
                         active={scmPanelExpanded}
                         label={t('files.toolbar.scm')}
-                        icon={<Octicons name="git-branch" size={14} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="git-branch" size={14} color={theme.colors.text.secondary} />}
                         onPress={onToggleScmPanel}
                     />
                 ) : null}
@@ -180,7 +180,7 @@ export function FilesToolbar(props: FilesToolbarProps) {
                     <Chip
                         active={false}
                         label={t('common.refresh')}
-                        icon={<Octicons name="sync" size={14} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="arrows-clockwise" size={14} color={theme.colors.text.secondary} />}
                         onPress={onRefresh}
                     />
                 ) : null}

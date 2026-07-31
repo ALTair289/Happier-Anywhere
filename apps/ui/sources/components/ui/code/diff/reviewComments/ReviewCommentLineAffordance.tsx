@@ -6,14 +6,14 @@ import {
     type StyleProp,
     type ViewStyle,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet } from 'react-native-unistyles';
 
 import { t } from '@/text';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 export const REVIEW_COMMENT_LINE_AFFORDANCE_TEST_ID = 'review-comment-line-affordance';
 export const REVIEW_COMMENT_LINE_AFFORDANCE_ICON_TEST_ID = 'review-comment-line-affordance-icon';
-export const REVIEW_COMMENT_LINE_AFFORDANCE_ICON_NAME = 'chatbox-ellipses-outline';
+export const REVIEW_COMMENT_LINE_AFFORDANCE_ICON_NAME: IconName = 'chat-dots';
 
 const webCursorStyle = Platform.OS === 'web'
     ? ({
@@ -59,10 +59,10 @@ export function ReviewCommentLineAffordance(props: {
             style={[styles.button, webCursorStyle, props.visible === false ? styles.hidden : null, props.style]}
             testID={props.testID ?? REVIEW_COMMENT_LINE_AFFORDANCE_TEST_ID}
         >
-            <Ionicons
+            <Icon
                 color={props.color}
-                name={active ? 'close-circle-outline' : REVIEW_COMMENT_LINE_AFFORDANCE_ICON_NAME}
-                size={15}
+                name={active ? 'x-circle' : REVIEW_COMMENT_LINE_AFFORDANCE_ICON_NAME}
+                size={14}
                 testID={REVIEW_COMMENT_LINE_AFFORDANCE_ICON_TEST_ID}
             />
         </Pressable>

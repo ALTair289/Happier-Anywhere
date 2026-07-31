@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
@@ -22,6 +21,7 @@ import { machineStopSession } from '@/sync/ops/machines';
 import { isMachineOnline } from '@/utils/sessions/machineUtils';
 import { Text } from '@/components/ui/text/Text';
 import { useMountedShouldContinue } from '@/hooks/ui/useMountedShouldContinue';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 type MachineRunsState =
@@ -113,10 +113,10 @@ export default function RunsScreen() {
           hitSlop={10}
           style={({ pressed }) => ({ padding: 4, opacity: pressed ? 0.7 : 1 })}
         >
-          <Ionicons
-            name={showFinished ? 'filter' : 'filter-outline'}
+          <Icon
+            name="funnel-simple"
             size={20}
-            color={headerTint}
+            color={showFinished ? theme.colors.text.link : headerTint}
           />
         </Pressable>
         <Pressable
@@ -126,7 +126,7 @@ export default function RunsScreen() {
           hitSlop={10}
           style={({ pressed }) => ({ padding: 4, opacity: pressed ? 0.7 : 1 })}
         >
-          <Ionicons name="refresh" size={20} color={headerTint} />
+          <Icon name="arrow-clockwise" size={20} color={headerTint} />
         </Pressable>
       </View>
     );
@@ -184,7 +184,7 @@ export default function RunsScreen() {
                       title={machineId}
                       subtitle={t('runs.openMachine')}
                       subtitleStyle={{ color: theme.colors.text.secondary, fontFamily: 'Menlo' as any, fontSize: 12 }}
-                      rightElement={<Ionicons name="chevron-forward" size={18} color={theme.colors.text.secondary} />}
+                      rightElement={<Icon name="caret-right" size={16} color={theme.colors.text.secondary} />}
                       onPress={() => {
                         const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : '';
                         router.push(`/machine/${machineId}${query}` as any);
@@ -263,7 +263,7 @@ export default function RunsScreen() {
                                 {stoppingRunId === run.runId ? (
                                   <ActivitySpinner size="small" color={theme.colors.text.secondary} />
                                 ) : (
-                                  <Ionicons name="stop-circle-outline" size={20} color={theme.colors.accent.orange} />
+                                  <Icon name="stop-circle" size={20} color={theme.colors.accent.orange} />
                                 )}
                               </Pressable>
                             ) : null}

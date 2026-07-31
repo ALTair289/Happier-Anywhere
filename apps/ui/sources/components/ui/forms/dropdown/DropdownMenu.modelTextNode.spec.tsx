@@ -67,18 +67,18 @@ describe('DropdownMenu model-style text node guard', () => {
                 id: '__refresh_models__',
                 title: 'Refresh models',
                 subtitle: 'Fetch the latest model list.',
-                icon: renderDropdownItemIcon({ name: 'refresh-outline', color: '#999' }),
+                icon: renderDropdownItemIcon({ name: 'arrow-clockwise', color: '#999' }),
             },
             {
                 id: 'default',
                 title: 'Use CLI settings',
-                icon: renderDropdownItemIcon({ name: 'layers-outline', color: '#999' }),
+                icon: renderDropdownItemIcon({ name: 'stack-simple', color: '#999' }),
             },
             {
                 id: '__custom__',
                 title: 'Custom…',
                 subtitle: 'Enter a model id',
-                icon: renderDropdownItemIcon({ name: 'create-outline', color: '#999' }),
+                icon: renderDropdownItemIcon({ name: 'pencil-simple', color: '#999' }),
             },
         ];
 

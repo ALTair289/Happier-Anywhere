@@ -5,7 +5,6 @@ import {
     type StyleProp,
     type ViewStyle,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import {
@@ -25,6 +24,7 @@ import {
     DEVICE_PET_PREVIEW_WIDTH,
 } from './constants';
 import type { DevicePetTile } from './types';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export function resolveFallbackTileWidthStyle(columns: number): StyleProp<ViewStyle> {
     if (columns <= 1) return styles.tileFallbackSingle;
@@ -83,8 +83,8 @@ export function DevicePetTileCard(props: Readonly<{
                                 accessibilityState={{ checked: tile.selected }}
                                 style={styles.selectionControl}
                             >
-                                <Ionicons
-                                    name={tile.selected ? 'checkbox-outline' : 'square-outline'}
+                                <Icon
+                                    name={tile.selected ? 'check-square' : 'square'}
                                     size={24}
                                     color={tile.selected ? theme.colors.text.primary : theme.colors.text.secondary}
                                 />

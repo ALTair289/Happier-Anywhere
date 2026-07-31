@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { View, Switch } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 
 import {
@@ -23,6 +22,7 @@ import { useArtifacts, useSettingMutable } from '@/sync/domains/state/storage';
 import { t } from '@/text';
 import { PromptDocSelectionGroup } from '@/components/settings/prompts/shared/PromptDocSelectionGroup';
 import { usePromptEditorDraftField } from '@/components/settings/prompts/shared/usePromptEditorDraftField';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const styles = StyleSheet.create((theme) => ({
   container: {
@@ -276,21 +276,21 @@ export const PromptTemplateEditorScreen = React.memo((props: Readonly<{ invocati
             testID="promptTemplate.behavior.insert"
             title={t('promptLibrary.templateBehaviorInsert')}
             selected={behavior === 'insert'}
-            rightElement={behavior === 'insert' ? <Ionicons name="checkmark" size={18} color={theme.colors.accent.blue} /> : undefined}
+            rightElement={behavior === 'insert' ? <Icon name="check" size={16} color={theme.colors.accent.blue} /> : undefined}
             onPress={() => setBehavior('insert')}
           />
           <Item
             testID="promptTemplate.behavior.insert_on_send"
             title={t('promptLibrary.templateBehaviorInsertOnSend')}
             selected={behavior === 'insert_on_send'}
-            rightElement={behavior === 'insert_on_send' ? <Ionicons name="checkmark" size={18} color={theme.colors.accent.blue} /> : undefined}
+            rightElement={behavior === 'insert_on_send' ? <Icon name="check" size={16} color={theme.colors.accent.blue} /> : undefined}
             onPress={() => setBehavior('insert_on_send')}
           />
           <Item
             testID="promptTemplate.behavior.insert_and_send"
             title={t('promptLibrary.templateBehaviorInsertAndSend')}
             selected={behavior === 'insert_and_send'}
-            rightElement={behavior === 'insert_and_send' ? <Ionicons name="checkmark" size={18} color={theme.colors.accent.blue} /> : undefined}
+            rightElement={behavior === 'insert_and_send' ? <Icon name="check" size={16} color={theme.colors.accent.blue} /> : undefined}
             onPress={() => setBehavior('insert_and_send')}
           />
           <Item
@@ -308,7 +308,7 @@ export const PromptTemplateEditorScreen = React.memo((props: Readonly<{ invocati
               testID="promptTemplate.delete"
               title={t('common.delete')}
               destructive
-              icon={<Ionicons name="trash-outline" size={22} color={theme.colors.state.danger.foreground} />}
+              icon={<Icon name="trash" size={20} color={theme.colors.state.danger.foreground} />}
               onPress={remove}
             />
           </ItemGroup>

@@ -1,7 +1,6 @@
 import React from 'react';
 import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { Platform, Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 
 import { useSettingMutable } from '@/sync/domains/state/storage';
 import { t } from '@/text';
@@ -9,6 +8,7 @@ import { SecretsList } from '@/components/secrets/SecretsList';
 import { useUnistyles } from 'react-native-unistyles';
 import { safeRouterBack } from '@/utils/navigation/safeRouterBack';
 import { setNewSessionPickerReturnParams } from '@/components/sessions/new/navigation/setNewSessionPickerReturnParams';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export default React.memo(function SecretPickerScreen() {
     const { theme } = useUnistyles();
@@ -46,7 +46,7 @@ export default React.memo(function SecretPickerScreen() {
                 accessibilityRole="button"
                 accessibilityLabel={t('common.back')}
             >
-                <Ionicons name="chevron-back" size={22} color={theme.colors.chrome.header.foreground} />
+                <Icon name="caret-left" size={20} color={theme.colors.chrome.header.foreground} />
             </Pressable>
         );
     }, [handleBackPress, theme.colors.chrome.header.foreground]);

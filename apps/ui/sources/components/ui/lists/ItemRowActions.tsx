@@ -1,6 +1,5 @@
 import React from 'react';
 import { View, Pressable, useWindowDimensions, type GestureResponderEvent, InteractionManager, Platform } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { type ItemAction } from '@/components/ui/lists/itemActions';
 import { Popover } from '@/components/ui/popover';
@@ -9,6 +8,7 @@ import { resolveWebBlurTintColor } from '@/components/ui/overlays/resolveWebBlur
 import { ActionListSection, type ActionListItem } from '@/components/ui/lists/ActionListSection';
 import { t } from '@/text';
 import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeForView';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export interface ItemRowActionsProps {
     title: string;
@@ -122,7 +122,7 @@ export function ItemRowActions(props: ItemRowActionsProps) {
             const color = action.color ?? (action.destructive ? theme.colors.state.danger.foreground : theme.colors.button.secondary.tint);
             const iconNode =
                 typeof action.icon === 'string'
-                    ? <Ionicons name={action.icon} size={18} color={color} />
+                    ? <Icon name={action.icon} size={16} color={color} />
                     : action.icon;
             const onPress = action.onPress;
             return {
@@ -145,7 +145,7 @@ export function ItemRowActions(props: ItemRowActionsProps) {
         const iconNode =
             typeof action.icon === 'string'
                 ? (
-                    <Ionicons
+                    <Icon
                         name={action.icon}
                         size={iconSize}
                         color={color}
@@ -207,8 +207,8 @@ export function ItemRowActions(props: ItemRowActionsProps) {
                                 title={accessibilityLabel}
                             >
                                 {normalizeNodeForView(
-                                    <Ionicons
-                                        name="ellipsis-horizontal"
+                                    <Icon
+                                        name="dots-three"
                                         size={iconSize + 2}
                                         color={theme.colors.button.secondary.tint}
                                     />,
@@ -239,8 +239,8 @@ export function ItemRowActions(props: ItemRowActionsProps) {
                             effect: 'blur',
                             blurOnWeb: Platform.OS === 'web' ? { px: 3, tintColor: blurTintOnWeb } : undefined,
                             anchorOverlay: () => normalizeNodeForView(
-                                <Ionicons
-                                    name="ellipsis-horizontal"
+                                <Icon
+                                    name="dots-three"
                                     size={iconSize + 2}
                                     color={theme.colors.button.secondary.tint}
                                 />,

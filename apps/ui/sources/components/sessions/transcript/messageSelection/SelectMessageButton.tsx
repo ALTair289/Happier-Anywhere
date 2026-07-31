@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { Platform, Pressable } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -8,6 +7,7 @@ import { t } from '@/text';
 import type { TranscriptSelectableMessageRole } from './_types';
 import { formatMessageSelectionRowAccessibilityLabel } from './messageSelectionAccessibility';
 import { useOptionalTranscriptSelectionActions, useOptionalTranscriptSelectionRow } from './TranscriptMessageSelectionContext';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const TRANSCRIPT_SELECT_ACTION_HIT_SLOP = 15;
 const TRANSCRIPT_SELECT_MODE_HIT_SLOP = 22;
@@ -37,8 +37,8 @@ export function SelectMessageButton(props: Readonly<{
         ? undefined
         : (isSelectionToggle ? TRANSCRIPT_SELECT_MODE_HIT_SLOP : TRANSCRIPT_SELECT_ACTION_HIT_SLOP);
     const iconName = isSelectionToggle
-        ? (row.isSelected ? 'checkbox-outline' : 'square-outline')
-        : 'checkmark-circle-outline';
+        ? (row.isSelected ? 'check-square' : 'square')
+        : 'check-circle';
     const iconColor = row.isSelected ? theme.colors.state.active.foreground : theme.colors.text.secondary;
     const accessibilityLabel = isSelectionToggle && props.role && props.previewText != null
         ? formatMessageSelectionRowAccessibilityLabel({ role: props.role, previewText: props.previewText })
@@ -63,7 +63,7 @@ export function SelectMessageButton(props: Readonly<{
                 pressed ? styles.buttonPressed : null,
             ]}
         >
-            <Ionicons
+            <Icon
                 name={iconName}
                 size={isSelectionToggle ? TRANSCRIPT_SELECT_MODE_ICON_SIZE : TRANSCRIPT_SELECT_ACTION_ICON_SIZE}
                 color={iconColor}

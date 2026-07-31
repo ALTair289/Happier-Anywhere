@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Platform, Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { ActivitySpinner, iconMatchedSpinnerSize } from '@/components/ui/feedback/ActivitySpinner';
 import { IconAction } from '@/components/ui/buttons/IconAction';
 import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
@@ -9,6 +8,7 @@ import { Text, TextInput } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 // One glyph size for the composer's action row, so its spinner and icons agree.
 const COMPOSER_GLYPH_SIZE_PX = 16;
@@ -202,7 +202,7 @@ export const ScmCommitComposerCard = React.memo((props: ScmCommitComposerCardPro
                     <ToolbarButton
                         testID="scm-commit-enter-selection"
                         label={t('files.fileActions.selectFilesToCommit')}
-                        icon={<Ionicons name="checkmark-circle-outline" size={14} color={props.theme.colors.text.secondary} />}
+                        icon={<Icon name="check-circle" size={14} color={props.theme.colors.text.secondary} />}
                         onPress={props.onEnterSelectionMode}
                         style={{ alignSelf: 'flex-start', marginBottom: 10 }}
                     />
@@ -266,8 +266,8 @@ export const ScmCommitComposerCard = React.memo((props: ScmCommitComposerCardPro
                                 color={props.theme.colors.text.secondary}
                             />
                         ) : (
-                            <Ionicons
-                                name="sparkles-outline"
+                            <Icon
+                                name="sparkle"
                                 size={COMPOSER_GLYPH_SIZE_PX}
                                 color={props.theme.colors.text.secondary}
                             />
@@ -318,8 +318,8 @@ export const ScmCommitComposerCard = React.memo((props: ScmCommitComposerCardPro
                                 color={props.theme.colors.text.secondary}
                             />
                         ) : (
-                            <Ionicons
-                                name="arrow-up-circle-outline"
+                            <Icon
+                                name="arrow-circle-up"
                                 size={COMPOSER_GLYPH_SIZE_PX}
                                 color={props.theme.colors.text.secondary}
                             />

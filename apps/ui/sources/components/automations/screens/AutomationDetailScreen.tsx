@@ -1,7 +1,6 @@
 import React from 'react';
 import { Pressable, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
@@ -20,6 +19,7 @@ import { layout } from '@/components/ui/layout/layout';
 import { t } from '@/text';
 import { navigateWithBlurOnWeb } from '@/utils/platform/deferOnWeb';
 import { getMachineDisplayName, isMachineOnline } from '@/utils/sessions/machineUtils';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create((theme) => ({
     loading: {
@@ -218,7 +218,7 @@ export function AutomationDetailScreen() {
             <ItemList>
                 <View style={{ maxWidth: layout.maxWidth, alignSelf: 'center', width: '100%' }}>
                     <View style={styles.emptyRuns}>
-                        <Ionicons name="alert-circle-outline" size={32} color={theme.colors.text.secondary} />
+                        <Icon name="warning-circle" size={32} color={theme.colors.text.secondary} />
                         <Text style={styles.emptyRunsText}>{t('automations.detail.notFound')}</Text>
                     </View>
                 </View>

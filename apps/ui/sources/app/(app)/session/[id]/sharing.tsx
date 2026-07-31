@@ -1,7 +1,6 @@
 import React, { memo, useState, useCallback, useEffect, useRef } from 'react';
 import { View } from 'react-native';
 import { Stack, useLocalSearchParams } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/ui/lists/Item';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { ItemList } from '@/components/ui/lists/ItemList';
@@ -39,6 +38,7 @@ import { buildCreateSessionShareRequest } from '@/sync/domains/social/sharingReq
 import { Text } from '@/components/ui/text/Text';
 import { mergePublicShareWithCachedToken } from '@/sync/domains/social/mergePublicShareWithCachedToken';
 import { createPublicShareWithClientToken } from '@/sync/domains/social/createPublicShareWithClientToken';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 function SharingManagementContent({ sessionId }: { sessionId: string }) {
@@ -231,7 +231,7 @@ function SharingManagementContent({ sessionId }: { sessionId: string }) {
     if (!session) {
         return (
             <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-                <Ionicons name="trash-outline" size={48} color={theme.colors.text.secondary} />
+                <Icon name="trash" size={48} color={theme.colors.text.secondary} />
                 <Text style={{
                     color: theme.colors.text.primary,
                     fontSize: 20,
@@ -289,7 +289,7 @@ function SharingManagementContent({ sessionId }: { sessionId: string }) {
     if (!canManage) {
         return (
             <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-                <Ionicons name="lock-closed-outline" size={48} color={theme.colors.text.secondary} />
+                <Icon name="lock" size={48} color={theme.colors.text.secondary} />
                 <Text style={{
                     color: theme.colors.text.primary,
                     fontSize: 20,
@@ -323,21 +323,21 @@ function SharingManagementContent({ sessionId }: { sessionId: string }) {
                                 key={share.id}
                                 title={share.sharedWithUser.username || [share.sharedWithUser.firstName, share.sharedWithUser.lastName].filter(Boolean).join(' ')}
                                 subtitle={`@${share.sharedWithUser.username} • ${t(`session.sharing.${share.accessLevel === 'view' ? 'viewOnly' : share.accessLevel === 'edit' ? 'canEdit' : 'canManage'}`)}`}
-                                icon={<Ionicons name="person-outline" size={29} color={theme.colors.accent.blue} />}
+                                icon={<Icon name="person" size={29} color={theme.colors.accent.blue} />}
                                 onPress={openShareDialog}
                             />
                         ))
                     ) : (
                         <Item
                             title={t('session.sharing.noShares')}
-                            icon={<Ionicons name="people-outline" size={29} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="users" size={29} color={theme.colors.text.secondary} />}
                             showChevron={false}
                         />
                     )}
                     {canManage && (
                         <Item
                             title={t('session.sharing.addShare')}
-                            icon={<Ionicons name="person-add-outline" size={29} color={theme.colors.state.success.foreground} />}
+                            icon={<Icon name="user-plus" size={29} color={theme.colors.state.success.foreground} />}
                             onPress={openFriendSelector}
                         />
                     )}
@@ -352,14 +352,14 @@ function SharingManagementContent({ sessionId }: { sessionId: string }) {
                                 ? t('session.sharing.expiresOn') + ': ' + new Date(publicShare.expiresAt).toLocaleDateString()
                                 : t('session.sharing.never')
                             }
-                            icon={<Ionicons name="link-outline" size={29} color={theme.colors.state.success.foreground} />}
+                            icon={<Icon name="link" size={29} color={theme.colors.state.success.foreground} />}
                             onPress={openPublicLink}
                         />
                     ) : (
                         <Item
                             title={t('session.sharing.createPublicLink')}
                             subtitle={t('session.sharing.publicLinkDescription')}
-                            icon={<Ionicons name="link-outline" size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="link" size={29} color={theme.colors.accent.blue} />}
                             onPress={openPublicLink}
                         />
                     )}

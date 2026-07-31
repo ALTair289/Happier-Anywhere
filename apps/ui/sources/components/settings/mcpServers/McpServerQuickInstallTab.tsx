@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import type { ImportedMcpInputResolutionV1 } from '@/sync/domains/settings/mcpServers/materializeImportedMcpServerDrafts';
@@ -13,6 +12,7 @@ import { SettingsActionFooter } from '@/components/ui/settingsSurface/SettingsAc
 import { t } from '@/text';
 
 import { McpInputMappingEditor } from './McpInputMappingEditor';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const McpServerQuickInstallTab = React.memo(function McpServerQuickInstallTab(props: Readonly<{
     machineItems: readonly DropdownMenuItem[];
@@ -52,7 +52,7 @@ export const McpServerQuickInstallTab = React.memo(function McpServerQuickInstal
                     itemTrigger={{
                         title: t('settings.mcpServersDetectedMachineTitle'),
                         subtitle: props.selectedMachineId ?? t('settings.mcpServersNoMachineSelected'),
-                        icon: <Ionicons name="laptop-outline" size={29} color={theme.colors.accent.indigo} />,
+                        icon: <Icon name="laptop" size={29} color={theme.colors.accent.indigo} />,
                     }}
                     rowKind="item"
                     connectToTrigger
@@ -67,12 +67,12 @@ export const McpServerQuickInstallTab = React.memo(function McpServerQuickInstal
                             testID={`mcp.server.quickInstall.preset.${preset.id}`}
                             title={preset.title}
                             subtitle={preset.description}
-                            icon={<Ionicons name="flash-outline" size={29} color={theme.colors.state.success.foreground} />}
+                            icon={<Icon name="lightning" size={29} color={theme.colors.state.success.foreground} />}
                             selected={selected}
                             rightElement={(
-                                <Ionicons
-                                    name="checkmark-circle"
-                                    size={22}
+                                <Icon
+                                    name="check-circle"
+                                    size={20}
                                     color={theme.colors.text.primary}
                                     style={{ opacity: selected ? 1 : 0 }}
                                 />
@@ -89,7 +89,7 @@ export const McpServerQuickInstallTab = React.memo(function McpServerQuickInstal
                         testID="mcp.server.quickInstall.empty"
                         title={t('settings.mcpServersQuickInstallEmptyTitle')}
                         subtitle={t('settings.mcpServersQuickInstallEmptySubtitle')}
-                        icon={<Ionicons name="flash-outline" size={29} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="lightning" size={29} color={theme.colors.text.secondary} />}
                         showChevron={false}
                         mode="info"
                     />
@@ -112,7 +112,7 @@ export const McpServerQuickInstallTab = React.memo(function McpServerQuickInstal
                                             key={`${draft.preset.id}:${warning}`}
                                             title={draft.preset.title}
                                             subtitle={warning}
-                                            icon={<Ionicons name="alert-circle-outline" size={29} color={theme.colors.text.secondary} />}
+                                            icon={<Icon name="warning-circle" size={29} color={theme.colors.text.secondary} />}
                                             showChevron={false}
                                             mode="info"
                                         />

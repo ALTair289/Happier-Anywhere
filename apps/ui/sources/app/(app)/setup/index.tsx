@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Animated, Platform, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { useAuth } from '@/auth/context/AuthContext';
@@ -26,6 +25,7 @@ import { validateServerUrl } from '@/sync/domains/server/serverConfig';
 import { t } from '@/text';
 import { toServerUrlDisplay } from '@/sync/domains/server/url/serverUrlDisplay';
 import { isTauriDesktop } from '@/utils/platform/tauri';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const ignoreBrandHeroGetStarted = () => undefined;
 
@@ -288,8 +288,8 @@ function PreAuthSetupRoute() {
                             }}
                             showChevron={false}
                             rightElement={(
-                                <Ionicons
-                                    name={showInlineRelayForm ? 'chevron-down' : 'chevron-forward'}
+                                <Icon
+                                    name={showInlineRelayForm ? 'caret-down' : 'caret-right'}
                                     size={20}
                                     color={theme.colors.text.secondary}
                                 />

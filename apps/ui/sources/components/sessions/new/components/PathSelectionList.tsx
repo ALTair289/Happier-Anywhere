@@ -42,11 +42,11 @@ import { InputBrowseButton } from '@/components/ui/buttons/InputBrowseButton';
 import { useModalPortalTarget } from '@/modal/portal/ModalPortalTarget';
 import { listMachineFileBrowserDirectoryEntries } from '@/sync/domains/input/machineFileBrowser';
 import { t } from '@/text';
-import { Ionicons } from '@expo/vector-icons';
 import { Pressable, type GestureResponderEvent } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { PathFavoriteToggleButton } from './PathFavoriteToggleButton';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     createPathSelectionInputBehavior,
     resolvePathSelectionEmptyInputPath,
@@ -81,7 +81,7 @@ function PathDrillDownButton(props: Readonly<{
             hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
             onPress={handlePress}
         >
-            <Ionicons name="chevron-forward" size={16} color={theme.colors.text.tertiary} />
+            <Icon name="caret-right" size={16} color={theme.colors.text.tertiary} />
         </Pressable>
     );
 }

@@ -1,7 +1,6 @@
 import * as React from 'react';
 import type { ScrollView } from 'react-native';
 import type { DirectSessionsProviderId, DirectSessionsSource } from '@happier-dev/protocol';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -28,6 +27,7 @@ import {
 import { DirectBrowseCandidatesList } from './DirectBrowseCandidatesList';
 import { shouldUseCandidateSource } from './shouldUseCandidateSource';
 import { useDirectBrowseCandidates, type DirectBrowseCandidate } from './useDirectBrowseCandidates';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type DirectBrowseProviderId = DirectSessionsProviderId;
 type AppTheme = Theme;
@@ -187,18 +187,18 @@ export const DirectSessionsBrowseScreen = React.memo((props: Readonly<{
         id: machine.id,
         title: machine.metadata?.displayName || machine.metadata?.host || machine.id,
         subtitle: machine.active ? t('status.activeNow') : t('status.offline'),
-        icon: <Ionicons name="desktop-outline" size={18} color={theme.colors.text.secondary} />,
+        icon: <Icon name="desktop" size={16} color={theme.colors.text.secondary} />,
     })), [machines, theme.colors.text.secondary]);
     const providerMenuItems = React.useMemo(() => providers.map((provider) => ({
         id: provider.id,
         title: provider.label,
-        icon: <Ionicons name="hardware-chip-outline" size={18} color={theme.colors.text.secondary} />,
+        icon: <Icon name="cpu" size={16} color={theme.colors.text.secondary} />,
     })), [providers, theme.colors.text.secondary]);
     const sourceMenuItems = React.useMemo(() => sourceOptions.map((sourceOption) => ({
         id: sourceOption.key,
         title: sourceOption.label,
         subtitle: sourceOption.detail,
-        icon: <Ionicons name="folder-open-outline" size={18} color={theme.colors.text.secondary} />,
+        icon: <Icon name="folder-open" size={16} color={theme.colors.text.secondary} />,
     })), [sourceOptions, theme.colors.text.secondary]);
     const formatMachineTriggerSubtitle = React.useCallback((selectedItem: Readonly<{ title: string; subtitle?: React.ReactNode }> | null) => {
         if (!selectedItem) return null;
@@ -301,7 +301,7 @@ export const DirectSessionsBrowseScreen = React.memo((props: Readonly<{
                                     popoverBoundaryRef={popoverBoundaryRef}
                                     itemTrigger={{
                                         title: t('directSessions.browseMachines'),
-                                        icon: <Ionicons name="desktop-outline" size={18} color={theme.colors.text.secondary} />,
+                                        icon: <Icon name="desktop" size={16} color={theme.colors.text.secondary} />,
                                         subtitleFormatter: formatMachineTriggerSubtitle,
                                         showSelectedDetail: false,
                                         itemProps: {
@@ -326,7 +326,7 @@ export const DirectSessionsBrowseScreen = React.memo((props: Readonly<{
                                     popoverBoundaryRef={popoverBoundaryRef}
                                     itemTrigger={{
                                         title: t('directSessions.browseProviders'),
-                                        icon: <Ionicons name="hardware-chip-outline" size={18} color={theme.colors.text.secondary} />,
+                                        icon: <Icon name="cpu" size={16} color={theme.colors.text.secondary} />,
                                         subtitleFormatter: formatSelectedTitleSubtitle,
                                         showSelectedDetail: false,
                                         itemProps: {
@@ -351,7 +351,7 @@ export const DirectSessionsBrowseScreen = React.memo((props: Readonly<{
                                     popoverBoundaryRef={popoverBoundaryRef}
                                     itemTrigger={{
                                         title: t('directSessions.browseSources'),
-                                        icon: <Ionicons name="folder-open-outline" size={18} color={theme.colors.text.secondary} />,
+                                        icon: <Icon name="folder-open" size={16} color={theme.colors.text.secondary} />,
                                         subtitleFormatter: formatSelectedTitleSubtitle,
                                         showSelectedDetail: false,
                                         itemProps: {

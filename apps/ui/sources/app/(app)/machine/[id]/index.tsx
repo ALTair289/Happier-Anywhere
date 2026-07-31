@@ -7,7 +7,6 @@ import { ItemGroupTitleWithAction } from '@/components/ui/lists/ItemGroupTitleWi
 import { ItemList } from '@/components/ui/lists/ItemList';
 import { Typography } from '@/constants/Typography';
 import { useSessions, useAllMachines, useMachine, storage, useSetting, useSettingMutable, useSettings } from '@/sync/domains/state/storage';
-import { Ionicons, Octicons } from '@expo/vector-icons';
 import type { Machine, MachineMetadata, Session } from '@/sync/domains/state/storageTypes';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import {
@@ -54,6 +53,7 @@ import { DropdownMenu } from '@/components/ui/forms/dropdown/DropdownMenu';
 import { WINDOWS_REMOTE_SESSION_LAUNCH_MODE_OPTIONS } from '@/sync/domains/session/spawn/windowsRemoteSessionLaunchModeOptions';
 import { readDisplayMachineTargetForSession } from '@/sync/ops/sessionMachineTarget';
 import { resolveMachineSpawnReadiness } from '@/sync/domains/machines/identity/resolveMachineSpawnReadiness';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     MachineReplacementPickerModal,
     type MachineReplacementPickerCandidate,
@@ -641,7 +641,7 @@ export default function MachineDetailScreen() {
                 titleStyle={headerTextStyle as any}
                 action={{
                     accessibilityLabel: t('common.refresh'),
-                    iconName: 'refresh',
+                    iconName: 'arrow-clockwise',
                     iconColor: isOnline ? theme.colors.text.secondary : theme.colors.border.default,
                     disabled: !canRefresh,
                     loading: detectedCapabilities.status === 'loading',
@@ -859,9 +859,9 @@ export default function MachineDetailScreen() {
         return (
             <View>
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <Ionicons
-                        name="desktop-outline"
-                        size={18}
+                    <Icon
+                        name="desktop"
+                        size={16}
                         color={theme.colors.chrome.header.foreground}
                         style={{ marginRight: 6 }}
                     />
@@ -899,7 +899,7 @@ export default function MachineDetailScreen() {
                 }}
                 disabled={isRenamingMachine}
             >
-                <Octicons
+                <Icon
                     name="pencil"
                     size={20}
                     color={theme.colors.text.primary}
@@ -987,7 +987,7 @@ export default function MachineDetailScreen() {
                                             spawnButtonDisabled ? styles.inlineSendInactive : styles.inlineSendActive
                                         ]}
                                     >
-                                        <Ionicons
+                                        <Icon
                                             name="play"
                                             size={16}
                                             color={spawnButtonDisabled ? theme.colors.text.secondary : theme.colors.button.primary.tint}
@@ -1006,7 +1006,7 @@ export default function MachineDetailScreen() {
                                     <Item
                                         key={path}
                                         title={display}
-                                        leftElement={<Ionicons name="folder-outline" size={18} color={theme.colors.text.secondary} />}
+                                        leftElement={<Icon name="folder" size={16} color={theme.colors.text.secondary} />}
                                         onPress={machineCanLaunchSession ? () => {
                                             setCustomPath(display);
                                             setTimeout(() => inputRef.current?.focus(), 50);
@@ -1158,7 +1158,7 @@ export default function MachineDetailScreen() {
                                             option.value === (machineWindowsRemoteSessionLaunchMode ?? effectiveWindowsRemoteSessionLaunchMode ?? windowsRemoteSessionLaunchModeDefault)
                                         )?.subtitleKey ?? 'windowsRemoteSessionLaunchMode.hiddenSubtitle',
                                     ),
-                                    icon: <Ionicons name="logo-windows" size={29} color={theme.colors.accent.blue} />,
+                                    icon: <Icon name="windows-logo" size={29} color={theme.colors.accent.blue} />,
                                 }}
                                 rowKind="item"
                                 connectToTrigger
@@ -1206,7 +1206,7 @@ export default function MachineDetailScreen() {
                                 isStoppingDaemon ? (
                                     <ActivitySpinner size="small" color={theme.colors.text.secondary} />
                                 ) : (
-                                    <Ionicons 
+                                    <Icon
                                         name="stop-circle" 
                                         size={20} 
                                         color={daemonStatus === 'stopped' ? '#999' : '#FF9500'} 
@@ -1311,7 +1311,7 @@ export default function MachineDetailScreen() {
                                             subtitle={t('runs.openSession')}
                                             subtitleStyle={{ color: theme.colors.text.secondary }}
                                             onPress={() => navigateToSession(sessionId)}
-                                            rightElement={<Ionicons name="chevron-forward" size={20} color={theme.colors.text.secondary} />}
+                                            rightElement={<Icon name="caret-right" size={20} color={theme.colors.text.secondary} />}
                                         />
                                     );
 
@@ -1408,7 +1408,7 @@ export default function MachineDetailScreen() {
                                                         {stoppingRunId === run.runId ? (
                                                             <ActivitySpinner size="small" color={theme.colors.text.secondary} />
                                                         ) : (
-                                                            <Ionicons name="stop-circle-outline" size={20} color={theme.colors.accent.orange} />
+                                                            <Icon name="stop-circle" size={20} color={theme.colors.accent.orange} />
                                                         )}
                                                     </Pressable>
                                                 ) : null}
@@ -1432,7 +1432,7 @@ export default function MachineDetailScreen() {
                                 title={getSessionName(session)}
                                 subtitle={getSessionSubtitle(session)}
                                 onPress={() => navigateToSession(session.id)}
-                                rightElement={<Ionicons name="chevron-forward" size={20} color={theme.colors.text.secondary} />}
+                                rightElement={<Icon name="caret-right" size={20} color={theme.colors.text.secondary} />}
                             />
                         ))}
                     </ItemGroup>

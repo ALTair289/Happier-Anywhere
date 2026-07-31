@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Platform, Pressable, useWindowDimensions, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
@@ -12,6 +11,7 @@ import { Typography } from '@/constants/Typography';
 import type { CustomModalInjectedProps } from '@/modal';
 import { useModalCardChrome } from '@/modal/components/card/useModalCardChrome';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type AttachmentImagePreviewModalImage =
     | Readonly<{
@@ -125,7 +125,7 @@ function AttachmentImagePreviewCurrentImage(props: Readonly<{
     if (preview.status === 'error') {
         return (
             <View style={styles.centeredState}>
-                <Ionicons name="alert-circle-outline" size={28} color={theme.colors.text.secondary} />
+                <Icon name="warning-circle" size={29} color={theme.colors.text.secondary} />
                 <Text style={styles.centeredStateText}>{t('common.error')}</Text>
             </View>
         );
@@ -211,7 +211,7 @@ export const AttachmentImagePreviewModal = React.memo(function AttachmentImagePr
                             ]}
                             testID="attachment-image-preview-previous"
                         >
-                            <Ionicons name="chevron-back" size={24} color={theme.colors.overlay.foreground} />
+                            <Icon name="caret-left" size={24} color={theme.colors.overlay.foreground} />
                         </Pressable>
 
                         <Pressable
@@ -231,7 +231,7 @@ export const AttachmentImagePreviewModal = React.memo(function AttachmentImagePr
                             ]}
                             testID="attachment-image-preview-next"
                         >
-                            <Ionicons name="chevron-forward" size={24} color={theme.colors.overlay.foreground} />
+                            <Icon name="caret-right" size={24} color={theme.colors.overlay.foreground} />
                         </Pressable>
                     </>
                 ) : null}

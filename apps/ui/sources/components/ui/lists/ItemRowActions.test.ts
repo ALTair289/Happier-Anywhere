@@ -91,7 +91,7 @@ describe('ItemRowActions', () => {
             title: 'Profile',
             overflowTriggerTestID: 'row-actions-trigger',
             actions: [
-                { id: 'edit', title: 'Edit profile', icon: 'create-outline', onPress: onEdit },
+                { id: 'edit', title: 'Edit profile', icon: 'pencil-simple', onPress: onEdit },
             ],
         }));
 
@@ -134,7 +134,7 @@ describe('ItemRowActions', () => {
             title: 'Profile',
             overflowTriggerTestID: 'custom-trigger',
             actions: [
-                { id: 'edit', title: 'Edit profile', icon: 'create-outline', onPress: onEdit },
+                { id: 'edit', title: 'Edit profile', icon: 'pencil-simple', onPress: onEdit },
             ],
             renderOverflowTrigger: ({ open, toggle, testID, accessibilityLabel, accessibilityHint }) => React.createElement(
                 'Pressable',
@@ -174,7 +174,7 @@ describe('ItemRowActions', () => {
                 title: 'Profile',
                 overflowTriggerTestID: 'row-actions-trigger',
                 actions: [
-                    { id: 'edit', title: 'Edit profile', icon: 'create-outline', onPress: vi.fn() },
+                    { id: 'edit', title: 'Edit profile', icon: 'pencil-simple', onPress: vi.fn() },
                 ],
             }));
 
@@ -199,7 +199,7 @@ describe('ItemRowActions', () => {
                 title: 'Profile',
                 compactThreshold: 200,
                 actions: [
-                    { id: 'favorite', title: 'Favorite', icon: 'star-outline', onPress: vi.fn() },
+                    { id: 'favorite', title: 'Favorite', icon: 'star', onPress: vi.fn() },
                 ],
             }));
 

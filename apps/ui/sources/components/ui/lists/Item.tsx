@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View, Pressable, StyleProp, ViewStyle, TextStyle, Platform, type AccessibilityRole, type AccessibilityState, type TextProps } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';
 import { t } from '@/text';
@@ -21,11 +20,15 @@ import { useTemporaryCopyFeedback } from '@/components/ui/copy/useTemporaryCopyF
 import {
     ITEM_CHEVRON_SIZE,
     ITEM_ICON_BOX_SIZE,
+    ITEM_ICON_GLYPH_SIZE,
+    MENU_ROW_ICON_GLYPH_SIZE,
     ITEM_ICON_MARGIN_RIGHT,
     ITEM_SUBTITLE_TEXT_METRICS,
     ITEM_TITLE_TEXT_METRICS,
 } from '@/components/ui/lists/itemDensityMetrics';
 import { setClipboardStringSafe } from '@/utils/ui/clipboard';
+import { Icon } from '@/components/ui/icons/Icon';
+import { ICON_LABEL_OPTICAL_NUDGE_STYLE } from '@/components/ui/icons/iconOpticalAlignment';
 
 function resizeItemIconForDensity(icon: React.ReactNode, iconSize: number): React.ReactNode {
     if (!React.isValidElement(icon) || icon.type === React.Fragment) {
@@ -76,6 +79,11 @@ export interface ItemProps {
      * so the fixed slot doesn't clip its left edge or eat the title gap.
      */
     iconBoxSize?: number;
+    /**
+     * Which surface this row belongs to. A menu row is a dense list of choices and takes a smaller
+     * glyph than a settings row, even at the same density.
+     */
+    iconSizing?: 'item' | 'menu';
     rightElement?: React.ReactNode;
     onPress?: () => void;
     onDoublePress?: () => void;
@@ -176,6 +184,8 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         height: ITEM_ICON_BOX_SIZE.comfortable,
         alignItems: 'center',
         justifyContent: 'center',
+        // Optical, not geometric — see ICON_LABEL_OPTICAL_NUDGE_STYLE.
+        ...ICON_LABEL_OPTICAL_NUDGE_STYLE,
     },
     iconContainerCompact: {
         marginRight: 10,
@@ -288,6 +298,7 @@ export const Item = React.memo<ItemProps>((props) => {
         icon,
         leftElement,
         iconBoxSize,
+    iconSizing,
         rightElement,
         onPress,
         onDoublePress,
@@ -456,15 +467,22 @@ export const Item = React.memo<ItemProps>((props) => {
             : [styles.iconContainer, iconBoxSizeOverride];
     const resolvedIconDensity = isTight ? 'tight' : isCompact ? 'compact' : isCozy ? 'cozy' : 'comfortable';
     const chevronSize = ITEM_CHEVRON_SIZE[resolvedIconDensity];
-    const resolvedIconBoxSize = ITEM_ICON_BOX_SIZE[resolvedIconDensity];
+    // One glyph size for every row in a list, whether or not that row happens to carry a subtitle.
+    // Branching on the subtitle is tempting — it is what makes the icon span exactly two lines — but
+    // a settings list mixes one- and two-line rows freely, and sizing each row to its own content
+    // produces a column of icons that step up and down. Uniform beats locally-perfect here.
+    const resolvedIconGlyphSize = (iconSizing === 'menu' ? MENU_ROW_ICON_GLYPH_SIZE : ITEM_ICON_GLYPH_SIZE)[resolvedIconDensity];
+    // The container must not clip a glyph that is now taller than the nominal box.
+    const resolvedIconBoxSize = Math.max(ITEM_ICON_BOX_SIZE[resolvedIconDensity], resolvedIconGlyphSize);
+
     const resolvedIconMarginRight = ITEM_ICON_MARGIN_RIGHT[resolvedIconDensity];
-    const sizedIcon = React.useMemo(() => resizeItemIconForDensity(icon, resolvedIconBoxSize), [icon, resolvedIconBoxSize]);
+    const sizedIcon = React.useMemo(() => resizeItemIconForDensity(icon, resolvedIconGlyphSize), [icon, resolvedIconGlyphSize]);
     const titleSizeStyle = isTight ? styles.titleTight : isCompact ? styles.titleCompact : isCozy ? styles.titleCozy : null;
     const subtitleSizeStyle = isTight ? styles.subtitleTight : isCompact ? styles.subtitleCompact : isCozy ? styles.subtitleCozy : null;
     const detailSizeStyle = isTight ? styles.detailTight : isCompact ? styles.detailCompact : isCozy ? styles.detailCozy : null;
     const resizedLeftElement = React.useMemo(
-        () => resizeAccessoryIconForDensity(leftElement ?? null, resolvedIconBoxSize),
-        [leftElement, resolvedIconBoxSize],
+        () => resizeAccessoryIconForDensity(leftElement ?? null, resolvedIconGlyphSize),
+        [leftElement, resolvedIconGlyphSize],
     );
     const leftAccessory = React.useMemo(() => {
         const candidate = resizedLeftElement ?? sizedIcon ?? null;
@@ -475,8 +493,8 @@ export const Item = React.memo<ItemProps>((props) => {
     const chevronAccessory = React.useMemo(() => {
         if (!showAccessory) return null;
         return normalizeNodeForView(
-            <Ionicons
-                name="chevron-forward"
+            <Icon
+                name="caret-right"
                 size={chevronSize}
                 color={theme.colors.text.secondary}
                 style={{ marginLeft: 4 }}

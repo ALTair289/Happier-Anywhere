@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { View } from 'react-native';
 
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
@@ -18,6 +17,7 @@ import { VoiceUiSection } from '@/voice/settings/panels/VoiceUiSection';
 import { RealtimeElevenLabsSection } from '@/voice/settings/panels/RealtimeElevenLabsSection';
 import { LocalDirectSection } from '@/voice/settings/panels/LocalDirectSection';
 import { LocalConversationSection } from '@/voice/settings/panels/LocalConversationSection';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export default function VoiceSettingsScreen() {
   const { theme } = useUnistyles();
@@ -68,7 +68,7 @@ export default function VoiceSettingsScreen() {
                     subtitle: t('settingsVoice.language.autoDetectSubtitle'),
                     icon: (
                       <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                        <Ionicons name="sparkles-outline" size={20} color={theme.colors.text.secondary} />
+                        <Icon name="sparkle" size={20} color={theme.colors.text.secondary} />
                       </View>
                 ),
               },
@@ -82,7 +82,7 @@ export default function VoiceSettingsScreen() {
                     subtitle: code,
                     icon: (
                       <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                        <Ionicons name="language-outline" size={20} color={theme.colors.text.secondary} />
+                        <Icon name="translate" size={20} color={theme.colors.text.secondary} />
                       </View>
                     ),
                   },

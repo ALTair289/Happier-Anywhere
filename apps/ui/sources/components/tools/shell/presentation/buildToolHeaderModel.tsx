@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons, Octicons } from '@expo/vector-icons';
 
 import type { ToolCall } from '@/sync/domains/messages/messageTypes';
 import type { Metadata } from '@/sync/domains/state/storageTypes';
@@ -9,6 +8,7 @@ import { getToolViewComponent } from '@/components/tools/renderers/core/_registr
 import { normalizeToolCallForRendering } from '@/components/tools/normalization/core/normalizeToolCallForRendering';
 import { resolveToolHeaderTextPresentation } from '@/components/tools/shell/presentation/resolveToolHeaderTextPresentation';
 import { getAgentCore, resolveAgentIdFromFlavor } from '@/agents/catalog/catalog';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type ToolHeaderModel = Readonly<{
     toolForRendering: ToolCall;
@@ -87,7 +87,7 @@ function resolveToolHeaderIcon(params: {
     iconColorSecondary: string;
 }): React.ReactNode {
     if (params.tool.name.startsWith('mcp__')) {
-        return <Ionicons name="extension-puzzle-outline" size={params.iconSize} color={params.iconColorSecondary} />;
+        return <Icon name="puzzle-piece" size={params.iconSize} color={params.iconColorSecondary} />;
     }
 
     if (
@@ -98,17 +98,17 @@ function resolveToolHeaderIcon(params: {
     ) {
         const parsedCmd = (params.tool.input as any).parsed_cmd[0];
         if (parsedCmd?.type === 'read') {
-            return <Octicons name="eye" size={params.iconSize} color={params.iconColorPrimary} />;
+            return <Icon name="eye" size={params.iconSize} color={params.iconColorPrimary} />;
         }
         if (parsedCmd?.type === 'write') {
-            return <Octicons name="file-diff" size={params.iconSize} color={params.iconColorPrimary} />;
+            return <Icon name="git-diff" size={params.iconSize} color={params.iconColorPrimary} />;
         }
-        return <Octicons name="terminal" size={params.iconSize} color={params.iconColorPrimary} />;
+        return <Icon name="terminal" size={params.iconSize} color={params.iconColorPrimary} />;
     }
 
     if (params.knownTool && typeof params.knownTool.icon === 'function') {
         return params.knownTool.icon(params.iconSize, params.iconColorPrimary);
     }
 
-    return <Ionicons name="construct-outline" size={params.iconSize} color={params.iconColorSecondary} />;
+    return <Icon name="wrench" size={params.iconSize} color={params.iconColorSecondary} />;
 }

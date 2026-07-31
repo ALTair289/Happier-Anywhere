@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Platform, View, ViewStyle, StyleProp, TextStyle } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { Popover, type PopoverPlacement } from '@/components/ui/popover';
@@ -17,6 +16,7 @@ import { TextInput } from '@/components/ui/text/Text';
 import { renderDropdownItemTriggerRightElement } from '@/components/ui/forms/dropdown/renderDropdownItemTriggerRightElement';
 import { KeyHint } from '@/components/ui/keyboard/KeyHint';
 import { useScrollRectIntoViewRegistry } from '@/components/ui/scroll/useScrollRectIntoView';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 export type DropdownMenuItem = Readonly<{
@@ -247,7 +247,7 @@ export function DropdownMenu(props: DropdownMenuProps) {
                 right: item.rightElement
                     ? item.rightElement
                     : hasSubmenu
-                        ? <Ionicons name="chevron-forward" size={16} color={theme.colors.text.secondary} />
+                        ? <Icon name="caret-right" size={16} color={theme.colors.text.secondary} />
                         : item.shortcut
                             ? <KeyHint label={item.shortcut} />
                             : null,

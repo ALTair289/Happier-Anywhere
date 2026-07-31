@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { Pressable } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -16,6 +15,8 @@ import { t } from '@/text';
 import { generateWorktreeName } from '@/utils/worktree/generateWorktreeName';
 import type { NewSessionCheckoutCreationDraft } from '@/sync/domains/state/newSessionCheckoutDraft';
 import type { ScmWorkingSnapshot } from '@/sync/domains/state/storageTypes';
+import { Icon } from '@/components/ui/icons/Icon';
+import { AGENT_INPUT_CHIP_ICON_SIZE_PX, AGENT_INPUT_CHIP_ICON_STYLE } from '@/components/sessions/agentInput/definitions/agentInputChipIconMetrics';
 
 import {
     buildWorktreeSelectionListSteps,
@@ -206,7 +207,7 @@ export function useNewSessionCheckoutActionChip(params: Readonly<{
                     accessibilityRole="button"
                     accessibilityLabel={t('newSession.checkout.selectTitle')}
                 >
-                    {normalizeNodeForView(<Ionicons name="layers-outline" size={16} color={ctx.iconColor} />)}
+                    {normalizeNodeForView(<Icon name="stack-simple" size={AGENT_INPUT_CHIP_ICON_SIZE_PX} color={ctx.iconColor} style={AGENT_INPUT_CHIP_ICON_STYLE} />)}
                     {ctx.showLabel ? (
                         <Text numberOfLines={1} style={ctx.textStyle}>
                             {selectedLabel}
@@ -223,7 +224,7 @@ export function useNewSessionCheckoutActionChip(params: Readonly<{
                 presentation: 'list',
                 title: t('newSession.checkout.selectTitle'),
                 label: selectedLabel,
-                icon: (tint: string) => normalizeNodeForView(<Ionicons name="layers-outline" size={16} color={tint} />),
+                icon: (tint: string) => normalizeNodeForView(<Icon name="stack-simple" size={16} color={tint} />),
                 rootStep,
                 selectedOptionId: pendingWorktreeName
                     ? PENDING_GIT_WORKTREE_OPTION_ID

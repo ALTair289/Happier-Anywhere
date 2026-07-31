@@ -1,4 +1,5 @@
 import { SIDEBAR_DOCK_MIN_WIDTH_PX } from '../sidebarSizing';
+import { ICON_SIZE } from '@/components/ui/icons/Icon';
 
 export const DESKTOP_SIDEBAR_CHROME_ACTIONS_COMPACT_THRESHOLD_PX = SIDEBAR_DOCK_MIN_WIDTH_PX + 120;
 export const DESKTOP_SIDEBAR_CHROME_HORIZONTAL_PADDING_PX = 16;
@@ -11,9 +12,13 @@ export const DESKTOP_SIDEBAR_CHROME_COLLAPSED_VERTICAL_GAP_PX = 8;
 export const DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_BUTTON_SIZE_PX = 20;
 export const DESKTOP_SIDEBAR_CHROME_TOP_SETTINGS_ICON_BUTTON_SIZE_PX = 24;
 export const DESKTOP_SIDEBAR_CHROME_TOP_ICON_GAP_PX = 12;
-export const DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_GLYPH_SIZE_PX = 15;
-export const DESKTOP_SIDEBAR_CHROME_TOP_COLLAPSE_ICON_GLYPH_SIZE_PX = 13;
-export const DESKTOP_SIDEBAR_CHROME_TOP_SETTINGS_ICON_GLYPH_SIZE_PX = 18;
+// One glyph size for the whole top cluster. These were 15/13/18 -- three hand-measured corrections
+// from when this row mixed Ionicons and Octicons, which are drawn to different grids, so matching
+// their declared sizes did not match their ink. Behind a single-family seam the corrections are
+// noise: the row asks for one size and reads as one size.
+export const DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_GLYPH_SIZE_PX = ICON_SIZE.md;
+export const DESKTOP_SIDEBAR_CHROME_TOP_COLLAPSE_ICON_GLYPH_SIZE_PX = ICON_SIZE.md;
+export const DESKTOP_SIDEBAR_CHROME_TOP_SETTINGS_ICON_GLYPH_SIZE_PX = ICON_SIZE.md;
 export const DESKTOP_SIDEBAR_CHROME_TOP_NOTIFICATION_DOT_SIZE_PX = 8;
 export const DESKTOP_SIDEBAR_CHROME_TOP_NOTIFICATION_DOT_TOP_PX = -2;
 export const DESKTOP_SIDEBAR_CHROME_TOP_NOTIFICATION_DOT_RIGHT_PX = -2;

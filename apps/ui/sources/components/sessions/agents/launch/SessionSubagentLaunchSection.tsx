@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 
 import { Text } from '@/components/ui/text/Text';
 import { useSessionExecutionRunLaunchability } from '@/hooks/session/useSessionExecutionRunLaunchability';
@@ -11,6 +10,7 @@ import { getSessionSubagentLaunchCards } from '@/agents/registry/sessionSubagent
 import { ExecutionRunLaunchCard } from '@/components/sessions/agents/launch/ExecutionRunLaunchCard';
 import { t } from '@/text';
 import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -82,8 +82,8 @@ export const SessionSubagentLaunchSection = React.memo((props: Readonly<{
                     onPress={() => {
                         setExpanded((previous) => !previous);
                     }}
-                    icon={<Ionicons
-                        name={expanded ? 'chevron-up-outline' : 'chevron-down-outline'}
+                    icon={<Icon
+                        name={expanded ? 'caret-up' : 'caret-down'}
                         size={14}
                         color={styles.toggleText.color}
                     />}

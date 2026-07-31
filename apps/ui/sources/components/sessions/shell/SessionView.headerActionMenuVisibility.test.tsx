@@ -151,9 +151,6 @@ vi.mock('@/components/sessions/agentInput/hooks/useSessionConnectedServicesAuthS
     return { connectedServicesAuthChip: null, statusBadges: [] };
   },
 }));
-vi.mock('@/components/ui/icons/DependabotIcon', () => ({
-  DependabotIcon: 'DependabotIcon',
-}));
 vi.mock('@/components/voice/surface/VoiceSurface', () => ({
   VoiceSurface: () => null,
 }));

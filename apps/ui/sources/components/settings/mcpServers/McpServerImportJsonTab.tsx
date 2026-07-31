@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import type { ImportedMcpInputResolutionV1 } from '@/sync/domains/settings/mcpServers/materializeImportedMcpServerDrafts';
@@ -16,6 +15,7 @@ import { McpInputMappingEditor } from './McpInputMappingEditor';
 import { McpServerBadgePills } from './McpServerBadgePills';
 import { McpServerRowSummary } from './McpServerRowSummary';
 import { resolveTransportIconName, resolveTransportLabel } from './mcpServerUi';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const McpServerImportJsonTab = React.memo(function McpServerImportJsonTab(props: Readonly<{
     rawJson: string;
@@ -46,7 +46,7 @@ export const McpServerImportJsonTab = React.memo(function McpServerImportJsonTab
                     itemTrigger={{
                         title: t('settings.mcpServersDetectedMachineTitle'),
                         subtitle: props.selectedMachineId ?? t('settings.mcpServersNoMachineSelected'),
-                        icon: <Ionicons name="laptop-outline" size={29} color={theme.colors.accent.indigo} />,
+                        icon: <Icon name="laptop" size={29} color={theme.colors.accent.indigo} />,
                     }}
                     rowKind="item"
                     connectToTrigger
@@ -73,7 +73,7 @@ export const McpServerImportJsonTab = React.memo(function McpServerImportJsonTab
                             key={`error:${index}`}
                             title={t('settings.mcpServersImportJsonErrorTitle')}
                             subtitle={error}
-                            icon={<Ionicons name="alert-circle-outline" size={29} color={theme.colors.state.danger.foreground} />}
+                            icon={<Icon name="warning-circle" size={29} color={theme.colors.state.danger.foreground} />}
                             showChevron={false}
                             mode="info"
                         />
@@ -88,7 +88,7 @@ export const McpServerImportJsonTab = React.memo(function McpServerImportJsonTab
                             key={`warning:${index}`}
                             title={t('settings.mcpServersImportJsonWarningsTitle')}
                             subtitle={warning}
-                            icon={<Ionicons name="alert-circle-outline" size={29} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="warning-circle" size={29} color={theme.colors.text.secondary} />}
                             showChevron={false}
                             mode="info"
                         />
@@ -110,7 +110,7 @@ export const McpServerImportJsonTab = React.memo(function McpServerImportJsonTab
                                     secondary={server.enabled ? t('settings.mcpServersStatusActive') : t('settings.mcpServersStatusUnavailable')}
                                 />
                             )}
-                            icon={<Ionicons name={resolveTransportIconName(server.transport)} size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name={resolveTransportIconName(server.transport)} size={29} color={theme.colors.accent.blue} />}
                             detail={resolveTransportLabel(server.transport)}
                             rightElement={(
                                 <McpServerBadgePills
@@ -132,7 +132,7 @@ export const McpServerImportJsonTab = React.memo(function McpServerImportJsonTab
                         testID="mcp.server.importJson.empty"
                         title={t('settings.mcpServersImportJsonEmptyTitle')}
                         subtitle={t('settings.mcpServersImportJsonEmptySubtitle')}
-                        icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="file-text" size={29} color={theme.colors.text.secondary} />}
                         showChevron={false}
                         mode="info"
                     />

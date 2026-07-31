@@ -1,12 +1,12 @@
 import React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
 import { Session } from '@/sync/domains/state/storageTypes';
 import { useSessionStatus, formatPathRelativeToHome } from '@/utils/sessions/sessionUtils';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { Text } from '@/components/ui/text/Text';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 
 const stylesheet = StyleSheet.create((theme) => ({
@@ -53,18 +53,18 @@ interface EmptyMessagesProps {
     session: Session;
 }
 
-function getOSIcon(os?: string): keyof typeof Ionicons.glyphMap {
-    if (!os) return 'hardware-chip-outline';
+function getOSIcon(os?: string): IconName {
+    if (!os) return 'cpu';
     
     const osLower = os.toLowerCase();
     if (osLower.includes('darwin') || osLower.includes('mac')) {
-        return 'laptop-outline';
+        return 'laptop';
     } else if (osLower.includes('win')) {
-        return 'desktop-outline';
+        return 'desktop';
     } else if (osLower.includes('linux')) {
-        return 'terminal-outline';
+        return 'terminal';
     }
-    return 'hardware-chip-outline';
+    return 'cpu';
 }
 
 function formatRelativeTime(timestamp: number): string {
@@ -94,7 +94,7 @@ export function EmptyMessages({ session }: EmptyMessagesProps) {
     
     return (
         <View testID="session-empty-messages" style={styles.container}>
-            <Ionicons 
+            <Icon
                 name={osIcon}
                 size={72} 
                 color={theme.colors.text.secondary}

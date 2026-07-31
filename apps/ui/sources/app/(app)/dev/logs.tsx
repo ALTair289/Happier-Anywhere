@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View, Text, FlatList, Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { log } from '@/log';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { ItemList } from '@/components/ui/lists/ItemList';
@@ -9,6 +8,7 @@ import { CopiedPill } from '@/components/ui/copy/CopiedPill';
 import { useTemporaryCopyFeedback } from '@/components/ui/copy/useTemporaryCopyFeedback';
 import { Modal } from '@/modal';
 import { setClipboardStringSafe } from '@/utils/ui/clipboard';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export default function LogsScreen() {
     const [logs, setLogs] = React.useState<string[]>([]);
@@ -101,19 +101,19 @@ export default function LogsScreen() {
                     <Item 
                         title="Add Test Log"
                         subtitle="Add a test log entry with timestamp"
-                        icon={<Ionicons name="add-circle-outline" size={24} color="#34C759" />}
+                        icon={<Icon name="plus-circle" size={24} color="#34C759" />}
                         onPress={handleAddTestLog}
                     />
                     <Item 
                         title="Copy All Logs"
-                        icon={<Ionicons name="copy-outline" size={24} color="#007AFF" />}
+                        icon={<Icon name="copy" size={24} color="#007AFF" />}
                         rightElement={<CopiedPill visible={copyFeedback.isCopied('logs')} testID="dev-logs-copy-feedback" />}
                         onPress={handleCopyAll}
                         disabled={logs.length === 0}
                     />
                     <Item 
                         title="Clear All Logs"
-                        icon={<Ionicons name="trash-outline" size={24} color="#FF3B30" />}
+                        icon={<Icon name="trash" size={24} color="#FF3B30" />}
                         onPress={handleClear}
                         disabled={logs.length === 0}
                         destructive={true}
@@ -130,7 +130,7 @@ export default function LogsScreen() {
                         alignItems: 'center',
                         padding: 32
                     }}>
-                        <Ionicons name="document-text-outline" size={48} color="#C0C0C0" />
+                        <Icon name="file-text" size={48} color="#C0C0C0" />
                         <Text style={{
                             fontSize: 16,
                             color: '#999',

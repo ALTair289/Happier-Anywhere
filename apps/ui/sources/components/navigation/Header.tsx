@@ -2,7 +2,6 @@ import * as React from 'react';
 import { View, Platform, StatusBar, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { NativeStackHeaderProps } from '@react-navigation/native-stack';
-import { Ionicons } from '@expo/vector-icons';
 import { useLayoutMaxWidth } from '../ui/layout/layout';
 import { useHeaderHeight } from '@/utils/platform/responsive';
 import { Typography } from '@/constants/Typography';
@@ -10,6 +9,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { shadowLevelStyle } from '@/shadowElevation';
 import { Text } from '@/components/ui/text/Text';
 import { useDesktopWindowDragMouseProps } from '@/components/navigation/desktopWindowChrome/DesktopWindowDragRegion';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 interface HeaderProps {
@@ -115,8 +115,8 @@ interface ExtendedNavigationOptions extends Partial<NativeStackHeaderProps['opti
 const DefaultBackButton: React.FC<{ tintColor: string; onPress: () => void }> = ({ tintColor, onPress }) => {
     return (
         <Pressable onPress={onPress} hitSlop={15}>
-            <Ionicons
-                name={Platform.OS === 'ios' ? 'chevron-back' : 'arrow-back'}
+            <Icon
+                name={Platform.OS === 'ios' ? 'caret-left' : 'arrow-left'}
                 size={24}
                 color={tintColor}
             />

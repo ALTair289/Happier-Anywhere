@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { View, Platform, Pressable, type LayoutChangeEvent } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { Avatar } from '@/components/ui/avatar/Avatar';
 import { AgentIcon } from '@/agents/registry/AgentIcon';
@@ -14,6 +13,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Text } from '@/components/ui/text/Text';
 import { t } from '@/text';
 import { resolveOptionalSessionScreenTestId, useSessionScreenTestIdsEnabled } from '../shell/sessionScreenTestIds';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 /** The gutter control's tap target, matching every other header action. */
@@ -21,6 +21,9 @@ const GUTTER_TAP_TARGET_PX = 44;
 
 /** That tap target plus breathing room on both sides. */
 const GUTTER_MIN_WIDTH_PX = 60;
+
+/** The header's own horizontal inset — the margin every other control in it is measured from. */
+const HEADER_HORIZONTAL_PADDING_PX = Platform.OS === 'ios' ? 8 : 16;
 
 interface ChatHeaderViewProps {
     title: string;
@@ -90,8 +93,12 @@ export const ChatHeaderView = React.memo(function ChatHeaderView({
         ? Math.max(0, (wrapperWidth - Math.min(wrapperWidth, maxWidth)) / 2)
         : 0;
     const gutterHoldsElement = gutterElement != null && trailingGutterWidth >= GUTTER_MIN_WIDTH_PX;
+    // Half the leftover once the tap target is centred in `headerHeight` — which is also the gap the
+    // control leaves above itself. Using it horizontally makes the icon's distance to the window's
+    // top and right edges identical (this inset plus the icon's own centring inside the tap target),
+    // so the control reads as sitting in the corner rather than pinned to one side of it. Raising it
+    // to the header's content padding looks like more breathing room but breaks that symmetry.
     const cornerInset = Math.max(0, (headerHeight - GUTTER_TAP_TARGET_PX) / 2);
-
     // Which identity leads the header is the user's call. `agent` with no resolvable agent renders
     // nothing rather than silently falling back to the avatar — that would answer a question the
     // user already answered.
@@ -129,8 +136,8 @@ export const ChatHeaderView = React.memo(function ChatHeaderView({
                         style={styles.backButton}
                         hitSlop={15}
                     >
-                        <Ionicons
-                            name={Platform.OS === 'ios' ? 'chevron-back' : 'arrow-back'}
+                        <Icon
+                            name={Platform.OS === 'ios' ? 'caret-left' : 'arrow-left'}
                             size={Platform.select({ ios: 28, default: 24 })}
                             color={theme.colors.chrome.header.foreground}
                         />
@@ -253,7 +260,7 @@ const styles = StyleSheet.create(() => ({
     content: {
         flexDirection: 'row',
         alignItems: 'center',
-        paddingHorizontal: Platform.OS === 'ios' ? 8 : 16,
+        paddingHorizontal: HEADER_HORIZONTAL_PADDING_PX,
         width: '100%',
     },
     backButton: {

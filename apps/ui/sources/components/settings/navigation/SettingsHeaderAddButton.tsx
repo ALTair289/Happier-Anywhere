@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type SettingsHeaderAddButtonProps = Readonly<{
     onPress: () => void;
@@ -36,7 +36,7 @@ export const SettingsHeaderAddButton = React.memo(function SettingsHeaderAddButt
                 padding: 4,
             })}
         >
-            <Ionicons name="add" size={26} color={color} />
+            <Icon name="plus" size={24} color={color} />
         </Pressable>
     );
 });

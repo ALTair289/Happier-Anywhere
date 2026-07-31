@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Platform, Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import {
     GestureDetector,
     type ComposedGesture,
@@ -33,6 +32,7 @@ import { t } from '@/text';
 
 import { resolveAccountCapacityRings, type AccountUsageRow } from './accountBlockModel';
 import { ConnectedServiceCapacityAvatar, CONNECTED_SERVICE_GAUGE_BOX, CONNECTED_SERVICE_GAUGE_SIZE } from '../ConnectedServiceCapacityAvatar';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type AccountBlockVariant = 'detail' | 'poolMember';
 
@@ -333,10 +333,10 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
         <View style={styles.titleRow}>
             <Text style={styles.titleText} numberOfLines={1}>{props.title}</Text>
             {!isPoolMember && props.isDefault ? (
-                <Ionicons
+                <Icon
                     testID={`${testID}:default-star`}
                     name="star"
-                    size={13}
+                    size={14}
                     color={theme.colors.button.primary.background}
                 />
             ) : null}
@@ -364,7 +364,7 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
         <View style={styles.metaRow}>
             {quota && quota.resetAvailableCount > 0 ? (
                 <View testID={`${testID}:resets`} style={styles.metaCount}>
-                    <Ionicons name="refresh" size={11} color={theme.colors.text.tertiary} />
+                    <Icon name="arrow-clockwise" size={11} color={theme.colors.text.tertiary} />
                     <Text style={styles.metaCountText}>
                         {t('connectedServices.quota.recoveryCreditBadge', { count: quota.resetAvailableCount })}
                     </Text>
@@ -372,7 +372,7 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
             ) : null}
             {!isPoolMember && poolsCount > 0 ? (
                 <View testID={`${testID}:pools-count`} style={styles.metaCount}>
-                    <Ionicons name="git-branch-outline" size={11} color={theme.colors.text.tertiary} />
+                    <Icon name="git-branch" size={11} color={theme.colors.text.tertiary} />
                     <Text style={styles.metaCountText}>
                         {t('connectedServices.account.poolsCount', { count: poolsCount })}
                     </Text>
@@ -404,8 +404,8 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                         ? 'connectedServices.account.activeMemberA11y'
                         : 'connectedServices.account.setActiveA11y')}
                 >
-                    <Ionicons
-                        name={props.isActive ? 'radio-button-on' : 'radio-button-off'}
+                    <Icon
+                        name={props.isActive ? 'radio-button' : 'circle'}
                         size={20}
                         color={props.isActive ? theme.colors.button.primary.background : theme.colors.text.tertiary}
                     />
@@ -433,10 +433,11 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                         ? 'connectedServices.detail.actions.unsetDefault'
                         : 'connectedServices.detail.actions.setDefault')}
                 >
-                    <Ionicons
-                        name={props.isDefault ? 'star' : 'star-outline'}
-                        size={18}
+                    <Icon
+                        name="star"
+                        size={16}
                         color={props.isDefault ? theme.colors.button.primary.background : theme.colors.text.secondary}
+                        weight={props.isDefault ? 'fill' : 'regular'}
                     />
                 </Pressable>
             ) : null}
@@ -461,7 +462,7 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                     {quota.isRefreshing ? (
                         <ActivitySpinner size={16} />
                     ) : (
-                        <Ionicons name="reload" size={17} color={theme.colors.text.secondary} />
+                        <Icon name="arrow-clockwise" size={16} color={theme.colors.text.secondary} />
                     )}
                 </Pressable>
             ) : null}
@@ -496,16 +497,16 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                         onPointerCancel={isWeb ? suppressNextHeaderPress : undefined}
                         style={styles.reorderHandle}
                     >
-                        <Ionicons
-                            name="reorder-three-outline"
+                        <Icon
+                            name="list"
                             size={20}
                             color={theme.colors.text.tertiary}
                         />
                     </View>
                 </GestureDetector>
             ) : null}
-            <Ionicons
-                name={isExpanded ? 'chevron-down' : 'chevron-forward'}
+            <Icon
+                name={isExpanded ? 'caret-down' : 'caret-right'}
                 size={CHEVRON_SIZE}
                 color={theme.colors.text.secondary}
             />
@@ -577,13 +578,13 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                                         accessibilityRole="button"
                                         accessibilityLabel={row.label}
                                     >
-                                        <Ionicons
-                                            name={quota.pinnedMeterIds.includes(row.meterId) ? 'bookmark' : 'bookmark-outline'}
+                                        <Icon
+                                            name="bookmark"
                                             size={16}
                                             color={quota.pinnedMeterIds.includes(row.meterId)
                                                 ? theme.colors.text.primary
                                                 : theme.colors.text.secondary}
-                                        />
+                                            />
                                     </Pressable>
                                 </View>
                                 <MeterBar

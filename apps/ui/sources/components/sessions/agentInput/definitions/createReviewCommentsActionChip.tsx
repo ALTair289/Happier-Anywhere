@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { Pressable, View } from 'react-native';
 
 import type { AgentInputExtraActionChip, AgentInputExtraActionChipRenderContext } from '@/components/sessions/agentInput/agentInputContracts';
@@ -14,6 +13,8 @@ import type { WorkspaceScopeBase } from '@/sync/domains/workspaces/workspaceScop
 import { t } from '@/text';
 
 import { ReviewCommentsDraftsModal } from './ReviewCommentsDraftsModal';
+import { Icon } from '@/components/ui/icons/Icon';
+import { AGENT_INPUT_CHIP_ICON_SIZE_PX, AGENT_INPUT_CHIP_ICON_STYLE, AGENT_INPUT_CHIP_OPTION_ICON_SIZE_PX, AGENT_INPUT_MENU_ICON_SIZE_PX } from './agentInputChipIconMetrics';
 
 function detachReviewCommentsFromPrompt(params: Readonly<{
     reviewCommentDrafts: readonly ReviewCommentDraft[];
@@ -111,7 +112,7 @@ export function createReviewCommentsActionChip(params: Readonly<{
             label,
             testID: 'agent-input-review-comments-attachment-badge',
             accessibilityLabel: label,
-            icon: (tint) => <Ionicons name="chatbox-ellipses-outline" size={14} color={tint} />,
+            icon: (tint) => <Icon name="chat-dots" size={AGENT_INPUT_CHIP_OPTION_ICON_SIZE_PX} color={tint} />,
             onPress: openDraftsAlert,
             onRemove: () => openReviewCommentsRemovePrompt({
                 reviewCommentDrafts: params.reviewCommentDrafts,
@@ -123,7 +124,7 @@ export function createReviewCommentsActionChip(params: Readonly<{
         collapsedAction: ({ tint, dismiss }) => ({
             id: 'review-comments',
             label,
-            icon: <Ionicons name="chatbox-ellipses-outline" size={16} color={tint} />,
+            icon: <Icon name="chat-dots" size={AGENT_INPUT_MENU_ICON_SIZE_PX} color={tint} />,
             onPress: () => {
                 dismiss();
                 openDraftsAlert();
@@ -135,7 +136,7 @@ export function createReviewCommentsActionChip(params: Readonly<{
                 style={({ pressed }) => ctx.chipStyle(Boolean(pressed))}
             >
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Ionicons name="chatbox-ellipses-outline" size={14} color={ctx.iconColor} />
+                    <Icon name="chat-dots" size={AGENT_INPUT_CHIP_ICON_SIZE_PX} color={ctx.iconColor} style={AGENT_INPUT_CHIP_ICON_STYLE} />
                     {ctx.showLabel ? (
                         <Text style={ctx.textStyle}>{label}</Text>
                     ) : null}

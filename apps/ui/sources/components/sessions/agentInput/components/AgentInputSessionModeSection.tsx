@@ -1,10 +1,10 @@
 import * as React from "react";
 import { Pressable, View } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 
 import { Text } from "@/components/ui/text/Text";
 import { t } from "@/text";
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type AgentInputSessionModeOption = Readonly<{
   id: string;
@@ -85,9 +85,9 @@ export function AgentInputSessionModeSection(
                 </Text>
                 <View style={styles.optionCardIndicator}>
                   {selected ? (
-                    <Ionicons
-                      name="checkmark-circle"
-                      size={18}
+                    <Icon
+                      name="check-circle"
+                      size={16}
                       color={selectedIndicatorColor}
                     />
                   ) : null}

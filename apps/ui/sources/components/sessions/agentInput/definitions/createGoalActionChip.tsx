@@ -3,7 +3,6 @@ import { Pressable } from 'react-native';
 
 import type { AgentInputExtraActionChip } from '@/components/sessions/agentInput/agentInputContracts';
 import type { GoalActionCapabilities } from '@/components/sessions/workState/goalActionVisibility';
-import { GoalIcon } from '@/components/sessions/workState/goalIcon';
 import { SessionWorkStateContent } from '@/components/sessions/workState/SessionWorkStateContent';
 import type {
     SessionWorkStateGoalOperationResult,
@@ -13,6 +12,8 @@ import type { SessionWorkStateSnapshot } from '@/components/sessions/workState/s
 import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeForView';
 import { hapticsLight } from '@/components/ui/theme/haptics';
 import { t } from '@/text';
+import { Icon, ICON_SIZE } from '@/components/ui/icons/Icon';
+import { AGENT_INPUT_CHIP_ICON_SIZE_PX, AGENT_INPUT_CHIP_ICON_STYLE, AGENT_INPUT_MENU_ICON_SIZE_PX } from './agentInputChipIconMetrics';
 
 const GOAL_CHIP_KEY = 'session-goal';
 
@@ -48,7 +49,7 @@ export function createGoalActionChip(params: Readonly<{
         collapsedContentPopover: {
             title: t('session.workState.goal.title'),
             label,
-            icon: (tint: string) => normalizeNodeForView(<GoalIcon color={tint} size={16} />),
+            icon: (tint: string) => normalizeNodeForView(<Icon name="target" color={tint} size={AGENT_INPUT_MENU_ICON_SIZE_PX} />),
             maxWidthCap: 420,
             maxHeightCap: 520,
             // U-4: this popover hosts the goal objective textarea / budget input, so it opts in to the
@@ -79,7 +80,7 @@ export function createGoalActionChip(params: Readonly<{
                 hitSlop={{ top: 8, bottom: 10, left: 4, right: 4 }}
                 style={({ pressed }) => chipStyle(Boolean(pressed))}
             >
-                {normalizeNodeForView(<GoalIcon color={iconColor} />)}
+                {normalizeNodeForView(<Icon name="target" color={iconColor} size={AGENT_INPUT_CHIP_ICON_SIZE_PX} style={AGENT_INPUT_CHIP_ICON_STYLE} />)}
             </Pressable>
         ),
     };

@@ -1,12 +1,12 @@
 import React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import type { SessionFolderHeaderItem } from './sessionFolderShellTypes';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -90,7 +90,7 @@ export function SessionFolderScopeBreadcrumb(props: Readonly<{
                 onPress={props.onClear}
                 hitSlop={8}
             >
-                <Ionicons name="close" size={14} color={theme.colors.text.secondary} />
+                <Icon name="x" size={14} color={theme.colors.text.secondary} />
             </Pressable>
         </View>
     );

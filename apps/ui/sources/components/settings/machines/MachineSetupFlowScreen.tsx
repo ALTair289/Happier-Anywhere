@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Platform } from 'react-native';
 import { router } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 import type { SystemTaskResult } from '@happier-dev/protocol';
 
@@ -30,6 +29,7 @@ import { LocalDaemonControlSection } from './localControl/LocalDaemonControlSect
 import { buildLocalDaemonServiceSystemTaskSpec } from './localControl/buildLocalDaemonServiceSystemTaskSpec';
 import { RemoteSshMachineSetupSection } from './RemoteSshMachineSetupSection';
 import { upsertActivateAndSwitchServer } from '@/sync/domains/server/activeServerSwitch';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type MachineSetupFlowScreenProps = Readonly<{
     autoStartLocalTask?: boolean;
@@ -311,7 +311,7 @@ const DesktopMachineSetupFlowScreen = React.memo(function DesktopMachineSetupFlo
                         testID="settings.machineSetup.startLocalTask"
                         title={t('settings.machineSetupCurrentMachineTitle')}
                         subtitle={t('settings.machineSetupCurrentMachineSubtitle')}
-                        icon={<Ionicons name="laptop-outline" size={29} color={theme.colors.accent.blue} />}
+                        icon={<Icon name="laptop" size={29} color={theme.colors.accent.blue} />}
                         onPress={() => {
                             void handleStartLocalTask();
                         }}
@@ -320,7 +320,7 @@ const DesktopMachineSetupFlowScreen = React.memo(function DesktopMachineSetupFlo
                         testID="settings.machineSetup.adoptExisting"
                         title={t('settings.machineSetupAdoptExistingTitle')}
                         subtitle={t('settings.machineSetupAdoptExistingSubtitle')}
-                        icon={<Ionicons name="checkmark-done-outline" size={29} color={theme.colors.accent.indigo} />}
+                        icon={<Icon name="checks" size={29} color={theme.colors.accent.indigo} />}
                         onPress={() => {
                             void handleAdoptExistingInstallation();
                         }}
@@ -329,7 +329,7 @@ const DesktopMachineSetupFlowScreen = React.memo(function DesktopMachineSetupFlo
                         testID="settings.machineSetup.startRemoteTask"
                         title={t('settings.machineSetupSshMachineTitle')}
                         subtitle={t('settings.machineSetupSshMachineSubtitle')}
-                        icon={<Ionicons name="server-outline" size={29} color={theme.colors.accent.orange} />}
+                        icon={<Icon name="hard-drives" size={29} color={theme.colors.accent.orange} />}
                         onPress={() => {
                             setShowRemoteSetupState((current) => !current);
                         }}
@@ -340,19 +340,19 @@ const DesktopMachineSetupFlowScreen = React.memo(function DesktopMachineSetupFlo
             <ItemGroup title={t('settings.machineSetupStagesTitle')}>
                 <Item
                     title={t('settings.machineSetupStageConnect')}
-                    icon={<Ionicons name="link-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="link" size={29} color={theme.colors.accent.blue} />}
                     showChevron={false}
                     mode="info"
                 />
                 <Item
                     title={t('settings.machineSetupStageInstall')}
-                    icon={<Ionicons name="download-outline" size={29} color={theme.colors.accent.orange} />}
+                    icon={<Icon name="download" size={29} color={theme.colors.accent.orange} />}
                     showChevron={false}
                     mode="info"
                 />
                 <Item
                     title={t('settings.machineSetupStageFinish')}
-                    icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="terminal" size={29} color={theme.colors.accent.indigo} />}
                     showChevron={false}
                     mode="info"
                 />

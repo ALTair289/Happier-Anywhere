@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { View, ScrollView, Pressable } from 'react-native';
 import { useRouter } from 'expo-router';
-import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAuth } from '@/auth/context/AuthContext';
 import { RoundButton } from '@/components/ui/buttons/RoundButton';
 import { Typography } from '@/constants/Typography';
@@ -14,6 +13,7 @@ import { t } from '@/text';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { UnauthenticatedSplitShell } from '@/components/onboarding/unauthShell';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const ignoreBrandHeroGetStarted = () => undefined;
 
@@ -164,8 +164,8 @@ export default function Restore() {
                             style={styles.revealButton}
                             hitSlop={10}
                         >
-                            <Ionicons
-                                name={revealed ? 'eye-off-outline' : 'eye-outline'}
+                            <Icon
+                                name={revealed ? 'eye-slash' : 'eye'}
                                 size={20}
                                 color={theme.colors.text.secondary}
                             />

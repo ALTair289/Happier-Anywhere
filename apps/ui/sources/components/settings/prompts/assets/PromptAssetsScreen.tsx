@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -23,6 +22,7 @@ import { importPromptAssetToLibrary } from '@/sync/ops/promptLibrary/importPromp
 import { usePrimaryMachineFromActiveSelection } from '@/components/settings/server/hooks/usePrimaryMachineFromActiveSelection';
 import { t } from '@/text';
 import { buildPromptAssetExportHref } from '@/components/settings/prompts/shared/buildPromptAssetExportHref';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const styles = StyleSheet.create((theme) => ({
     container: {
@@ -82,7 +82,7 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
             id: machine.id,
             title: machine.metadata?.displayName || machine.metadata?.host || machine.id,
             subtitle: machine.id,
-            icon: <Ionicons name="laptop-outline" size={22} color={theme.colors.text.secondary} />,
+            icon: <Icon name="laptop" size={20} color={theme.colors.text.secondary} />,
         }));
     }, [machines, theme.colors.text.secondary]);
 
@@ -91,13 +91,13 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
             id: 'project',
             title: t('promptLibrary.externalAssetsProjectScope'),
             subtitle: t('promptLibrary.externalAssetsProjectScopeSubtitle'),
-            icon: <Ionicons name="folder-outline" size={22} color={theme.colors.accent.indigo} />,
+            icon: <Icon name="folder" size={20} color={theme.colors.accent.indigo} />,
         },
         {
             id: 'user',
             title: t('promptLibrary.externalAssetsUserScope'),
             subtitle: t('promptLibrary.externalAssetsUserScopeSubtitle'),
-            icon: <Ionicons name="person-outline" size={22} color={theme.colors.accent.blue} />,
+            icon: <Icon name="person" size={20} color={theme.colors.accent.blue} />,
         },
     ]), [theme.colors.accent.blue, theme.colors.accent.indigo]);
 
@@ -282,7 +282,7 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
                         itemTrigger={{
                             title: t('promptLibrary.externalAssetsScope'),
                             subtitle: scope === 'project' ? t('promptLibrary.externalAssetsProjectScope') : t('promptLibrary.externalAssetsUserScope'),
-                            icon: <Ionicons name="albums-outline" size={29} color={theme.colors.accent.indigo} />,
+                            icon: <Icon name="stack" size={29} color={theme.colors.accent.indigo} />,
                         }}
                         rowKind="item"
                         connectToTrigger
@@ -293,7 +293,7 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
                         testID="promptAssets.refresh"
                         title={t('promptLibrary.externalAssetsRefresh')}
                         subtitle={refreshing ? t('common.loading') : t('promptLibrary.externalAssetsRefreshSubtitle')}
-                        icon={<Ionicons name="refresh-outline" size={29} color={theme.colors.accent.purple} />}
+                        icon={<Icon name="arrow-clockwise" size={29} color={theme.colors.accent.purple} />}
                         disabled={refreshing || !machineId}
                         onPress={runRefresh}
                         showChevron={false}
@@ -306,7 +306,7 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
                             testID="promptAssets.loading"
                             title={t('common.loading')}
                             subtitle={t('promptLibrary.externalAssetsRefreshSubtitle')}
-                            icon={<Ionicons name="refresh-outline" size={29} color={theme.colors.accent.purple} />}
+                            icon={<Icon name="arrow-clockwise" size={29} color={theme.colors.accent.purple} />}
                             showChevron={false}
                         />
                     </ItemGroup>
@@ -344,7 +344,7 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
                                                     testID={`promptAssets.item.${scope}.${entry.id}.${index}`}
                                                     title={item.title}
                                                     subtitle={subtitle}
-                                                    icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.text.secondary} />}
+                                                    icon={<Icon name="sparkle" size={29} color={theme.colors.text.secondary} />}
                                                     onPress={() => {
                                                         if (linkedArtifact) {
                                                             router.push(item.libraryKind === 'bundle'
@@ -362,7 +362,7 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
                                                                 {
                                                                     id: 'open',
                                                                     title: t('common.open'),
-                                                                    icon: 'open-outline',
+                                                                    icon: 'arrow-square-out',
                                                                     onPress: () => router.push(item.libraryKind === 'bundle'
                                                                         ? `/settings/prompts/skills/${linkedArtifact.artifactId}`
                                                                         : `/settings/prompts/docs/${linkedArtifact.artifactId}`),
@@ -370,7 +370,7 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
                                                                 {
                                                                     id: 'manage',
                                                                     title: t('promptLibrary.manageExternalAssets'),
-                                                                    icon: 'cloud-upload-outline',
+                                                                    icon: 'cloud-arrow-up',
                                                                     onPress: () => router.push(buildPromptAssetExportHref({
                                                                         artifactId: linkedArtifact.artifactId,
                                                                         libraryKind: item.libraryKind,
@@ -380,7 +380,7 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
                                                                 {
                                                                     id: 'delete',
                                                                     title: t('common.delete'),
-                                                                    icon: 'trash-outline',
+                                                                    icon: 'trash',
                                                                     destructive: true,
                                                                     onPress: () => {
                                                                         if (!linkedLink) return;
@@ -391,7 +391,7 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
                                                                 {
                                                                     id: 'import',
                                                                     title: t('promptLibrary.externalAssetsImportAction'),
-                                                                    icon: 'download-outline',
+                                                                    icon: 'download',
                                                                     onPress: () => { void handleImport(item); },
                                                                 },
                                                             ]}
@@ -406,7 +406,7 @@ export const PromptAssetsScreen = React.memo(function PromptAssetsScreen() {
                                         testID={`promptAssets.empty.${scope}.${entry.id}`}
                                         title={t('promptLibrary.externalAssetsNoItems')}
                                         subtitle={t('promptLibrary.externalAssetsNoItemsSubtitle')}
-                                        icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.text.secondary} />}
+                                        icon={<Icon name="sparkle" size={29} color={theme.colors.text.secondary} />}
                                         showChevron={false}
                                     />
                                 )}

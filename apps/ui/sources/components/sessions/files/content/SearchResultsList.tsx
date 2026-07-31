@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { FlatList, Platform, View, type ScrollViewProps } from 'react-native';
-import { Ionicons, Octicons } from '@expo/vector-icons';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
 import { FlashList } from '@/components/ui/lists/flashListCompat/FlashListCompat';
@@ -12,6 +11,7 @@ import { Typography } from '@/constants/Typography';
 import type { FileItem } from '@/sync/domains/input/suggestionFile';
 import { t } from '@/text';
 import { normalizeRepoPathParts } from '@/utils/path/normalizeRepoPathParts';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type SearchResultsListProps = {
     theme: any;
@@ -36,7 +36,7 @@ const searchResultContentContainerStyle = { paddingBottom: 20 } as const;
 
 function renderFileIconForSearch(file: FileItem, theme: any) {
     if (file.fileType === 'folder') {
-        return <Ionicons name="folder-outline" size={18} color={theme.colors.text.secondary} />;
+        return <Icon name="folder" size={16} color={theme.colors.text.secondary} />;
     }
 
     const { name } = normalizeRepoPathParts({ fileName: file.fileName, filePath: file.filePath, fullPath: file.fullPath });
@@ -194,8 +194,8 @@ export const SearchResultsList = React.memo(({
                     paddingHorizontal: 20,
                 }}
             >
-                <Octicons
-                    name={searchQuery ? 'search' : 'file-directory'}
+                <Icon
+                    name={searchQuery ? 'magnifying-glass' : 'folder'}
                     size={48}
                     color={theme.colors.text.secondary}
                 />

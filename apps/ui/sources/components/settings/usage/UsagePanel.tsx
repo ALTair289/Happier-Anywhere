@@ -10,10 +10,10 @@ import { useSetting } from '@/sync/store/hooks';
 import { UsageChart } from './UsageChart';
 import { UsageBar } from './UsageBar';
 import { getUsageForPeriod, calculateTotals, UsageDataPoint } from '@/sync/api/account/apiUsage';
-import { Ionicons } from '@expo/vector-icons';
 import { HappyError } from '@/utils/errors/errors';
 import { t } from '@/text';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type TimePeriod = 'today' | '7days' | '30days';
 
@@ -194,7 +194,7 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
     if (error) {
         return (
             <View style={styles.errorContainer}>
-                <Ionicons name="alert-circle-outline" size={48} color={theme.colors.status.error} />
+                <Icon name="warning-circle" size={48} color={theme.colors.status.error} />
                 <Text style={styles.errorText}>{error}</Text>
             </View>
         );

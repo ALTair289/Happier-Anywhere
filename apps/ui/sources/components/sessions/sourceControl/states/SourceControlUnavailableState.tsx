@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Octicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { RoundButton } from '@/components/ui/buttons/RoundButton';
@@ -8,6 +7,7 @@ import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { RPC_ERROR_MESSAGES } from '@happier-dev/protocol/rpc';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function sanitizeDetails(details: string | null): string | null {
     if (!details) return null;
@@ -45,7 +45,7 @@ export function SourceControlUnavailableState(props: {
                 gap: 14,
             }}
         >
-            <Octicons name="alert" size={42} color={theme.colors.text.secondary} />
+            <Icon name="warning" size={42} color={theme.colors.text.secondary} />
 
             <Text
                 style={{

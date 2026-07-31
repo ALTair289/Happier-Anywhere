@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { View, useWindowDimensions } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -27,6 +26,7 @@ import {
     TRANSCRIPT_SEND_TO_SESSION_MODAL_WIDTH,
 } from './resolveTranscriptSendToSessionModalLayout';
 import type { SendTranscriptSelectionDestination } from './sendTranscriptSelectionToSession';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type TranscriptSendToSessionModalProps = CustomModalInjectedProps & Readonly<{
     sourceSessionId: string;
@@ -201,7 +201,7 @@ export const TranscriptSendToSessionModal = React.memo(function TranscriptSendTo
             subtitle: t('transcript.selection.sendTo.newSessionSubtitle'),
             icon: (
                 <View style={styles.newSessionIcon}>
-                    <Ionicons name="add-circle-outline" size={20} color={theme.colors.text.secondary} />
+                    <Icon name="plus-circle" size={20} color={theme.colors.text.secondary} />
                 </View>
             ),
         },

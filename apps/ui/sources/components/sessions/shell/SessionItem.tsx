@@ -1,7 +1,6 @@
 import React from 'react';
 import { Animated, Platform, Pressable, View, type GestureResponderEvent, type LayoutChangeEvent } from 'react-native';
 import { GestureDetector, Swipeable, type ComposedGesture, type GestureType } from 'react-native-gesture-handler';
-import { Ionicons, Octicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Text, Text as RNText } from '@/components/ui/text/Text';
@@ -69,6 +68,7 @@ import {
     resolveProviderSessionIdForDebug,
 } from '@/components/sessions/debug/sessionDebugInformation';
 import { copySessionDebugInformationToClipboard } from '@/components/sessions/debug/sessionDebugClipboard';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     createCopySessionDebugInformationMenuItem,
     SESSION_COPY_DEBUG_INFORMATION_MENU_ITEM_ID,
@@ -322,9 +322,6 @@ const stylesheet = StyleSheet.create((theme) => ({
         height: 16,
         alignItems: 'center',
         justifyContent: 'center',
-    },
-    draftIconOverlay: {
-        color: theme.colors.text.secondary,
     },
     draftIconContainerCompact: {
         width: 14,
@@ -587,9 +584,6 @@ const stylesheet = StyleSheet.create((theme) => ({
         alignItems: 'center',
         justifyContent: 'center',
         backgroundColor: theme.colors.status.error,
-    },
-    swipeActionIcon: {
-        color: theme.colors.button.primary.tint,
     },
     swipeActionText: {
         marginTop: 4,
@@ -1232,7 +1226,7 @@ const SessionItemContent = React.memo(
                         ) : null}
                         {!isMinimal && shouldRenderSessionListAvatar && 'draft' in resolvedSession && resolvedSession.draft ? (
                             <View style={[styles.draftIconContainer, compact ? styles.draftIconContainerCompact : null]}>
-                                <Ionicons name="create-outline" size={compact ? 10 : 11} style={styles.draftIconOverlay} />
+                                <Icon name="pencil-simple" size={compact ? 10 : 11} color={theme.colors.text.secondary} />
                             </View>
                         ) : null}
                     </View>
@@ -1357,7 +1351,7 @@ const SessionItemContent = React.memo(
                                         onPointerUp={isWeb ? suppressNextRowPressTemporarily : undefined}
                                         onPointerCancel={isWeb ? suppressNextRowPressTemporarily : undefined}
                                     >
-                                        <Ionicons name="reorder-three-outline" size={16} color={rowActionIconColor} />
+                                        <Icon name="list" size={16} color={rowActionIconColor} />
                                     </View>
                                 </GestureDetector>
                             ) : null}
@@ -1385,7 +1379,7 @@ const SessionItemContent = React.memo(
                                                     </RNText>
                                                 </>
                                             ),
-                                            icon: <Ionicons name="add" size={16} color={rowActionIconColor} />,
+                                            icon: <Icon name="plus" size={16} color={rowActionIconColor} />,
                                         })}
                                         placement="left"
                                         variant="slim"
@@ -1472,7 +1466,7 @@ const SessionItemContent = React.memo(
                                             accessibilityLabel={t('common.moreActions')}
                                             hitSlop={8}
                                         >
-                                            <Octicons name="kebab-horizontal" size={14} color={rowActionIconColor} />
+                                            <Icon name="dots-three" size={14} color={rowActionIconColor} />
                                         </Pressable>
                                     )}
                                 />
@@ -1562,7 +1556,7 @@ const SessionItemContent = React.memo(
                                     </RNText>
                                 </>
                             ),
-                            icon: <Ionicons name="add" size={16} color={rowActionIconColor} />,
+                            icon: <Icon name="plus" size={16} color={rowActionIconColor} />,
                         })}
                         placement="auto"
                         variant="slim"
@@ -1594,7 +1588,7 @@ const SessionItemContent = React.memo(
 
         const renderRightActions = () => (
             <Pressable style={styles.swipeAction} onPress={handleSwipeAction} disabled={mutatingSession}>
-                <Ionicons name="archive-outline" size={20} style={styles.swipeActionIcon} />
+                <Icon name="archive" size={20} color={theme.colors.button.primary.tint} />
                 <Text style={styles.swipeActionText} numberOfLines={2}>
                     {t('sessionInfo.archiveSession')}
                 </Text>

@@ -2,7 +2,6 @@ import * as React from 'react';
 import { View } from 'react-native';
 import tweetnacl from 'tweetnacl';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 
 import { RoundButton } from '@/components/ui/buttons/RoundButton';
 import { Item } from '@/components/ui/lists/Item';
@@ -29,6 +28,7 @@ import { resolveConnectedServiceOauthPasteCopy } from './oauth/resolveConnectedS
 import { resolveConnectedServiceOauthErrorMessage } from './oauth/resolveConnectedServiceOauthErrorMessage';
 import { storeConnectedServiceCredentialWithIdentityConfirmation } from './storeConnectedServiceCredentialWithIdentityConfirmation';
 import { runConnectedServiceCredentialStoredEffects } from './runConnectedServiceCredentialStoredEffects';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function asStringParam(value: unknown): string {
   if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : '';
@@ -255,7 +255,7 @@ export const ConnectedServiceOauthPasteView = React.memo(function ConnectedServi
           <Item
             testID="connectedServices.oauthPaste.switchMethodItem"
             title={props.fallbackAction.title}
-            icon={<Ionicons name="swap-horizontal-outline" size={22} color={theme.colors.accent.blue} />}
+            icon={<Icon name="arrows-left-right" size={20} color={theme.colors.accent.blue} />}
             onPress={props.fallbackAction.onPress}
           />
         </ItemGroup>

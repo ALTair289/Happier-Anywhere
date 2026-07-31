@@ -1,10 +1,10 @@
 import * as React from 'react';
-import { Octicons } from '@expo/vector-icons';
 
 import type { ScmBranchListEntry } from '@happier-dev/protocol';
 
 import type { DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type RepoWorktreeRow = Readonly<{
     path: string;
@@ -98,7 +98,7 @@ export function buildSourceControlBranchMenuItems(input: Readonly<{
                 category: t('files.branchMenu.category.worktrees'),
                 disabled: worktree.isCurrent === true,
                 rightElement: worktree.isCurrent ? (
-                    <Octicons name="check" size={14} color={checkIconColor} />
+                    <Icon name="check" size={14} color={checkIconColor} />
                 ) : null,
             });
 
@@ -144,7 +144,7 @@ export function buildSourceControlBranchMenuItems(input: Readonly<{
                 : t('files.branchMenu.category.local'),
             disabled: !canCheckout || isCurrent,
             rightElement: isCurrent ? (
-                <Octicons name="check" size={14} color={checkIconColor} />
+                <Icon name="check" size={14} color={checkIconColor} />
             ) : null,
         });
     }

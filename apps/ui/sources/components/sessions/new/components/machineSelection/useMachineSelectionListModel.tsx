@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import type {
@@ -21,6 +20,7 @@ import {
 } from './buildMachineSelectionBuckets';
 import { MachineSelectionRowAccessory } from './MachineSelectionRowAccessory';
 import { resolveMachinePickerPresence } from '../resolveMachinePickerPresence';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 type MachineSelectionListModel = Readonly<{
     rootStep: SelectionListStep;
@@ -75,8 +75,8 @@ function bucketTitle(bucketId: MachineSelectionBucketId): string {
     }
 }
 
-function bucketIconName(bucketId: MachineSelectionBucketId): React.ComponentProps<typeof Ionicons>['name'] {
-    return bucketId === 'recent' ? 'time-outline' : 'desktop-outline';
+function bucketIconName(bucketId: MachineSelectionBucketId): IconName {
+    return bucketId === 'recent' ? 'clock' : 'desktop';
 }
 
 export function useMachineSelectionListModel(
@@ -123,7 +123,7 @@ export function useMachineSelectionListModel(
                         testID: buildOptionTestID(params.testIdPrefix, machine),
                         label: machineLabel(machine),
                         icon: (
-                            <Ionicons
+                            <Icon
                                 name={bucketIconName(bucket.id)}
                                 size={24}
                                 color={theme.colors.text.secondary}
@@ -190,8 +190,8 @@ export function useMachineSelectionListModel(
                         label: machineLabel(machine),
                         subtitle: machineSubtitle(machine),
                         icon: (
-                            <Ionicons
-                                name="desktop-outline"
+                            <Icon
+                                name="desktop"
                                 size={20}
                                 color={theme.colors.text.secondary}
                             />

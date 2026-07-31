@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -27,6 +26,7 @@ import { useSettingMutable } from '@/sync/domains/state/storage';
 import { createDraftAcpBackend } from './createDraftAcpBackend';
 import { parseMultilineField, stringifyMultilineField } from './multilineFields';
 import { resolveAcpBackendTransportProfile } from './resolveAcpBackendTransportProfile';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const authSupportOptions: DropdownMenuItem[] = [
     { id: 'login_terminal', title: 'Login in terminal' },
@@ -189,7 +189,7 @@ export const AcpBackendEditorScreen = React.memo(function AcpBackendEditorScreen
                 <McpValueRefMapEditor
                     kind="env"
                     title={t('settings.acpCatalogEnv')}
-                    iconName="flask-outline"
+                    iconName="flask"
                     entries={draft.env}
                     secrets={Array.isArray(secrets) ? secrets : []}
                     onChangeSecrets={setSecrets as (next: any[]) => void}
@@ -212,7 +212,7 @@ export const AcpBackendEditorScreen = React.memo(function AcpBackendEditorScreen
                         matchTriggerWidth={true}
                         connectToTrigger={true}
                         rowKind="item"
-                        itemTrigger={{ title: t('settings.acpCatalogAuthSupport'), subtitle: draft.auth?.support ?? 'unsupported', icon: <Ionicons name="key-outline" size={29} color={theme.colors.accent.indigo} /> }}
+                        itemTrigger={{ title: t('settings.acpCatalogAuthSupport'), subtitle: draft.auth?.support ?? 'unsupported', icon: <Icon name="key" size={29} color={theme.colors.accent.indigo} /> }}
                         items={authSupportOptions}
                         onSelect={(id) => updateDraft((current) => withUpdatedAt({ ...current, auth: { ...(current.auth ?? { support: 'unsupported' }), support: id as AcpCatalogAuthSupportV1 } }))}
                     />
@@ -238,7 +238,7 @@ export const AcpBackendEditorScreen = React.memo(function AcpBackendEditorScreen
                         matchTriggerWidth={true}
                         connectToTrigger={true}
                         rowKind="item"
-                        itemTrigger={{ title: t('settings.acpCatalogAuthParser'), subtitle: draft.auth?.parser ?? 'unknown', icon: <Ionicons name="analytics-outline" size={29} color={theme.colors.accent.orange} /> }}
+                        itemTrigger={{ title: t('settings.acpCatalogAuthParser'), subtitle: draft.auth?.parser ?? 'unknown', icon: <Icon name="chart-line" size={29} color={theme.colors.accent.orange} /> }}
                         items={authParserOptions}
                         onSelect={(id) => updateDraft((current) => withUpdatedAt({ ...current, auth: { ...(current.auth ?? { support: 'unsupported' }), parser: id as AcpCatalogAuthParserV1 } }))}
                     />
@@ -255,7 +255,7 @@ export const AcpBackendEditorScreen = React.memo(function AcpBackendEditorScreen
                         matchTriggerWidth={true}
                         connectToTrigger={true}
                         rowKind="item"
-                        itemTrigger={{ title: t('settings.acpCatalogSupportsModes'), subtitle: draft.capabilities.supportsModes, icon: <Ionicons name="list-outline" size={29} color={theme.colors.accent.blue} /> }}
+                        itemTrigger={{ title: t('settings.acpCatalogSupportsModes'), subtitle: draft.capabilities.supportsModes, icon: <Icon name="list" size={29} color={theme.colors.accent.blue} /> }}
                         items={supportHintOptions}
                         onSelect={(id) => updateDraft((current) => withUpdatedAt({ ...current, capabilities: { ...current.capabilities, supportsModes: id as AcpCatalogSupportHintV1 } }))}
                     />
@@ -269,7 +269,7 @@ export const AcpBackendEditorScreen = React.memo(function AcpBackendEditorScreen
                         matchTriggerWidth={true}
                         connectToTrigger={true}
                         rowKind="item"
-                        itemTrigger={{ title: t('settings.acpCatalogSupportsModels'), subtitle: draft.capabilities.supportsModels, icon: <Ionicons name="layers-outline" size={29} color={theme.colors.accent.blue} /> }}
+                        itemTrigger={{ title: t('settings.acpCatalogSupportsModels'), subtitle: draft.capabilities.supportsModels, icon: <Icon name="stack-simple" size={29} color={theme.colors.accent.blue} /> }}
                         items={supportHintOptions}
                         onSelect={(id) => updateDraft((current) => withUpdatedAt({ ...current, capabilities: { ...current.capabilities, supportsModels: id as AcpCatalogSupportHintV1 } }))}
                     />
@@ -283,7 +283,7 @@ export const AcpBackendEditorScreen = React.memo(function AcpBackendEditorScreen
                         matchTriggerWidth={true}
                         connectToTrigger={true}
                         rowKind="item"
-                        itemTrigger={{ title: t('settings.acpCatalogSupportsConfigOptions'), subtitle: draft.capabilities.supportsConfigOptions, icon: <Ionicons name="options-outline" size={29} color={theme.colors.accent.blue} /> }}
+                        itemTrigger={{ title: t('settings.acpCatalogSupportsConfigOptions'), subtitle: draft.capabilities.supportsConfigOptions, icon: <Icon name="sliders-horizontal" size={29} color={theme.colors.accent.blue} /> }}
                         items={supportHintOptions}
                         onSelect={(id) => updateDraft((current) => withUpdatedAt({ ...current, capabilities: { ...current.capabilities, supportsConfigOptions: id as AcpCatalogSupportHintV1 } }))}
                     />
@@ -297,7 +297,7 @@ export const AcpBackendEditorScreen = React.memo(function AcpBackendEditorScreen
                         matchTriggerWidth={true}
                         connectToTrigger={true}
                         rowKind="item"
-                        itemTrigger={{ title: t('settings.acpCatalogPromptImageSupport'), subtitle: draft.capabilities.promptImageSupport, icon: <Ionicons name="image-outline" size={29} color={theme.colors.accent.blue} /> }}
+                        itemTrigger={{ title: t('settings.acpCatalogPromptImageSupport'), subtitle: draft.capabilities.promptImageSupport, icon: <Icon name="image" size={29} color={theme.colors.accent.blue} /> }}
                         items={supportHintOptions}
                         onSelect={(id) => updateDraft((current) => withUpdatedAt({ ...current, capabilities: { ...current.capabilities, promptImageSupport: id as AcpCatalogSupportHintV1 } }))}
                     />

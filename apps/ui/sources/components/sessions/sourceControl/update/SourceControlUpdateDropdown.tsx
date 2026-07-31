@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
-import { Octicons } from '@expo/vector-icons';
 
 import {
     DropdownMenu,
@@ -10,6 +9,7 @@ import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 
 import type { SourceControlUpdateTheme } from './SourceControlUpdateControls';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type SourceControlUpdateDropdownItem = DropdownMenuItem;
 
@@ -88,8 +88,8 @@ export function SourceControlUpdateDropdown(props: Readonly<{
                         >
                             {selectedItem?.title ?? ''}
                         </Text>
-                        <Octicons
-                            name={menuOpen ? 'chevron-up' : 'chevron-down'}
+                        <Icon
+                            name={menuOpen ? 'caret-up' : 'caret-down'}
                             size={14}
                             color={props.theme.colors.text.secondary}
                         />

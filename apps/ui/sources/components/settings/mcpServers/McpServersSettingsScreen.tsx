@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -32,6 +31,7 @@ import { deleteMcpServerCatalogEntryV1 } from '@/sync/domains/settings/mcpServer
 import { usePrimaryMachineFromActiveSelection } from '@/components/settings/server/hooks/usePrimaryMachineFromActiveSelection';
 import { t } from '@/text';
 import { getPreferredMcpPreviewAgentId, listDetectedMcpProviderIds, listMcpPreviewAgentIds } from './mcpServerScreenHelpers';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const McpServersSettingsScreen = React.memo(function McpServersSettingsScreen() {
     const { theme } = useUnistyles();
@@ -80,7 +80,7 @@ export const McpServersSettingsScreen = React.memo(function McpServersSettingsSc
             id: machine.id,
             title: machine.metadata?.displayName || machine.metadata?.host || machine.id,
             subtitle: machine.id,
-            icon: <Ionicons name="laptop-outline" size={22} color={theme.colors.text.secondary} />,
+            icon: <Icon name="laptop" size={20} color={theme.colors.text.secondary} />,
         }));
     }, [machines, theme.colors.text.secondary]);
 

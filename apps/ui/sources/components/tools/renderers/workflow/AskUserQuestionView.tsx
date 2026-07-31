@@ -8,7 +8,6 @@ import { sessionAllowWithAnswers } from '@/sync/ops';
 import { storage, useSession, useSettingMutable } from '@/sync/domains/state/storage';
 import { Modal } from '@/modal';
 import { t } from '@/text';
-import { Ionicons } from '@expo/vector-icons';
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { resolveAgentRequestKind } from '@/utils/sessions/permissions/permissionPromptPolicy';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
@@ -23,6 +22,7 @@ import {
 } from '@/components/sessions/terminal/openAttachedSessionTerminal';
 import { isClaudeUnifiedTerminalDialogChoiceAgentStateRequest } from '@happier-dev/agents';
 import { getStructuredQuestionAnswersV1Supported } from '@/sync/domains/state/agentStateCapabilities';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     buildAskUserQuestionAnswerPayload,
     tryBuildAskUserQuestionAnswerPayload,
@@ -330,7 +330,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                 onPress={attachedSessionTerminal.open}
                                 activeOpacity={0.7}
                             >
-                                <Ionicons name="terminal-outline" size={20} color={theme.colors.text.secondary} />
+                                <Icon name="terminal" size={20} color={theme.colors.text.secondary} />
                                 <View style={styles.optionContent}>
                                     <Text style={styles.optionLabel}>{t('tools.askUserQuestion.claudeDialogNotice.openTerminal')}</Text>
                                     <Text style={styles.optionDescription}>{t('tools.askUserQuestion.claudeDialogNotice.description')}</Text>
@@ -576,7 +576,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                         onPress={attachedSessionTerminal.open}
                         activeOpacity={0.7}
                     >
-                        <Ionicons name="terminal-outline" size={20} color={theme.colors.text.secondary} />
+                        <Icon name="terminal" size={20} color={theme.colors.text.secondary} />
                         <View style={styles.optionContent}>
                             <Text style={styles.optionLabel}>{t('tools.askUserQuestion.claudeDialogNotice.openTerminal')}</Text>
                             <Text style={styles.optionDescription}>{t('tools.askUserQuestion.claudeDialogNotice.description')}</Text>
@@ -660,7 +660,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                                     isSelected && styles.checkboxOuterSelected,
                                                 ]}>
                                                     {isSelected && (
-                                                        <Ionicons name="checkmark" size={14} color={theme.colors.button.primary.tint} />
+                                                        <Icon name="check" size={14} color={theme.colors.button.primary.tint} />
                                                     )}
                                                 </View>
                                             ) : (

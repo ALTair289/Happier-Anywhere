@@ -1,6 +1,5 @@
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { Item } from '@/components/ui/lists/Item';
@@ -9,6 +8,7 @@ import { useMachineCapabilityInvokeWithAlerts } from '@/hooks/machine/useMachine
 import { Modal } from '@/modal';
 import type { CapabilityId } from '@/sync/api/capabilities/capabilitiesProtocol';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type ProviderCliInstallItemProps = Readonly<{
     machineId: string | null;
@@ -40,7 +40,7 @@ export function ProviderCliInstallItem(props: ProviderCliInstallItemProps) {
         <Item
             title={title}
             subtitle={subtitle}
-            icon={<Ionicons name="download-outline" size={29} color={theme.colors.text.secondary} />}
+            icon={<Icon name="download" size={29} color={theme.colors.text.secondary} />}
             showChevron={false}
             disabled={isInstalling || !props.machineId || !autoInstallAvailable || installabilityKind === 'checking'}
             rightElement={isInstalling ? <ActivitySpinner size="small" color={theme.colors.text.secondary} /> : undefined}

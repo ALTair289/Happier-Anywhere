@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 import {
     DaemonPetDiscoverResponseV1Schema,
@@ -51,6 +50,7 @@ import {
     upsertByKey,
 } from './petsSettingsScreen/helpers';
 import { usePetSourceActionRows } from './petsSettingsScreen/usePetSourceActionRows';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     consumePendingCodexPetRefresh,
     subscribeCodexPetRefresh,
@@ -392,7 +392,7 @@ export function PetsSettingsScreen() {
                         subtitle={t(companionDisabledByServer
                             ? 'settingsPets.disabledByServerSubtitle'
                             : 'settingsPets.disabledSubtitle')}
-                        icon={<Ionicons name="paw-outline" size={25} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="paw-print" size={24} color={theme.colors.text.secondary} />}
                         mode="info"
                     />
                 </ItemGroup>

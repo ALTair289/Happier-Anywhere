@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import type { ConnectedServiceId } from '@happier-dev/protocol';
@@ -21,6 +20,7 @@ import type {
 import { isConnectedServiceProfileOptionSelectable } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
 import { buildNewSessionConnectedServicesSelectionListModel } from './buildNewSessionConnectedServicesSelectionListModel';
 import type { ConnectedServicesSelectionOptionAvailability } from './buildNewSessionConnectedServicesSelectionListModel';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type NewSessionConnectedServicesSelectionContentProps = Readonly<{
     supportedServiceIds: ReadonlyArray<ConnectedServiceId>;
@@ -47,8 +47,8 @@ function SelectionStateIcon(props: Readonly<{ selected: boolean; variant?: 'defa
         : theme.colors.accent.blue;
 
     return normalizeNodeForView(
-        <Ionicons
-            name={props.selected ? 'checkmark-circle' : 'ellipse-outline'}
+        <Icon
+            name={props.selected ? 'check-circle' : 'circle'}
             size={20}
             color={color}
         />,
@@ -58,7 +58,7 @@ function SelectionStateIcon(props: Readonly<{ selected: boolean; variant?: 'defa
 function SettingsActionIcon() {
     const { theme } = useUnistyles();
     return normalizeNodeForView(
-        <Ionicons name="settings-outline" size={20} color={theme.colors.text.tertiary} />,
+        <Icon name="sliders-horizontal" size={20} color={theme.colors.text.tertiary} />,
     );
 }
 

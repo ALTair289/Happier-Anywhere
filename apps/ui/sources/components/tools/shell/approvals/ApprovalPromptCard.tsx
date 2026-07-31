@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { getActionSpec, type ActionId, type ApprovalRequestV1 } from '@happier-dev/protocol';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
@@ -13,6 +12,7 @@ import { buildPermissionToolCallRoute, canOpenPermissionToolCallRoute } from '@/
 import { navigateWithBlurOnWeb } from '@/utils/platform/navigateWithBlurOnWeb';
 import { ApprovalDecisionFooter } from './ApprovalDecisionFooter';
 import { useApprovalDecisionHandler } from './useApprovalDecisionHandler';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const PROMPT_CARD_HORIZONTAL_PADDING = 12;
 const PROMPT_CARD_ICON_SIZE = 18;
@@ -72,7 +72,7 @@ export const ApprovalPromptCard = React.memo(function ApprovalPromptCard(props: 
         <View testID="approval-prompt-card" style={[styles.container, chrome === 'inline' ? styles.containerInline : null]}>
             <View style={styles.header}>
                 <View style={styles.icon}>
-                    <Ionicons name="shield-checkmark-outline" size={16} color={theme.colors.state.neutral.foreground} />
+                    <Icon name="shield-check" size={16} color={theme.colors.state.neutral.foreground} />
                 </View>
                 <View style={styles.headerText}>
                     <Text style={styles.title} numberOfLines={1}>{title}</Text>
@@ -86,7 +86,7 @@ export const ApprovalPromptCard = React.memo(function ApprovalPromptCard(props: 
                         accessibilityLabel={t('toolView.open')}
                         style={({ pressed }) => [styles.viewButton, pressed && styles.viewButtonPressed]}
                     >
-                        <Ionicons name="open-outline" size={18} color={theme.colors.text.secondary} />
+                        <Icon name="arrow-square-out" size={16} color={theme.colors.text.secondary} />
                     </Pressable>
                 ) : null}
             </View>

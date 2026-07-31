@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { FlatList, Platform, Pressable, View } from 'react-native';
-import { Octicons } from '@expo/vector-icons';
 
 import { SourceControlBranchSummary } from '@/components/sessions/files/SourceControlBranchSummary';
 import {
@@ -24,6 +23,7 @@ import { filterDirectoryLikeScmFileStatuses, isDirectoryLikeScmFileStatus } from
 import { sessionScmStashList } from '@/sync/ops';
 import { useKeyboardHeight } from '@/hooks/ui/useKeyboardHeight';
 import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type SessionRightPanelGitCommitTabProps = Readonly<{
     theme: any;
@@ -528,7 +528,7 @@ const CommitChangesSurface = React.memo((props: CommitChangesSurfaceProps) => {
                         })}
                     >
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
-                            <Octicons name="archive" size={14} color={themeTextSecondary} />
+                            <Icon name="archive" size={14} color={themeTextSecondary} />
                             <Text
                                 numberOfLines={1}
                                 style={{ fontSize: 12, color: themeTextPrimary, ...Typography.default('semiBold') }}
@@ -540,7 +540,7 @@ const CommitChangesSurface = React.memo((props: CommitChangesSurfaceProps) => {
                             <Text style={{ fontSize: 12, color: themeTextSecondary, ...Typography.mono('semiBold') }}>
                                 {String(managedStashCount)}
                             </Text>
-                            <Octicons name="chevron-right" size={14} color={themeTextSecondary} />
+                            <Icon name="caret-right" size={14} color={themeTextSecondary} />
                         </View>
                     </Pressable>
                 ) : null}
@@ -616,7 +616,7 @@ const CommitChangesSurface = React.memo((props: CommitChangesSurfaceProps) => {
                                 <ToolbarButton
                                     testID="session-rightpanel-git-open-review"
                                     label={t('files.toolbar.review')}
-                                    icon={<Octicons name="diff" size={14} color={themeTextSecondary} />}
+                                    icon={<Icon name="git-diff" size={14} color={themeTextSecondary} />}
                                     onPress={props.onOpenReviewAllChanges}
                                 />
                             ) : null}

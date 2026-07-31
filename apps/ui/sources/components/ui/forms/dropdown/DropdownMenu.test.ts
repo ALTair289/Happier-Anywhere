@@ -530,7 +530,7 @@ describe('DropdownMenu', () => {
         const rightElementScreen = await renderScreen(item?.props?.rightElement);
 
         expect(rightElementScreen.getTextContent()).toContain('Beta');
-        const chevronIcon = findTestInstanceByTypeWithProps(rightElementScreen.tree, 'Ionicons' as any, { name: 'chevron-down' });
+        const chevronIcon = findTestInstanceByTypeWithProps(rightElementScreen.tree, 'Icon' as any, { name: 'caret-down' });
         expect(chevronIcon?.props?.size).toBe(17);
     });
 

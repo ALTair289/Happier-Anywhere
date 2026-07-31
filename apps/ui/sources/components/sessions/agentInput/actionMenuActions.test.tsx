@@ -459,6 +459,6 @@ describe('buildAgentInputActionMenuActions', () => {
             'mode',
             'stop',
         ]);
-        expect((actions[1]?.icon as any)?.props?.name).toBe('rocket');
+        expect((actions[1]?.icon as any)?.props?.name).toBe('rocket-launch');
     });
 });

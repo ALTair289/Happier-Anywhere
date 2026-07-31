@@ -2,7 +2,6 @@ import * as React from 'react';
 import { View, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 import { t } from '@/text';
 import { Typography } from '@/constants/Typography';
 import { useInboxHasContent } from '@/hooks/inbox/useInboxHasContent';
@@ -15,6 +14,7 @@ import { resolveTabBarMetrics } from '@/components/ui/navigation/tabBarMetrics';
 import { useFriendRequests, useSetting } from '@/sync/domains/state/storage';
 import type { TabType } from './tabTypes';
 import { resolveTabBarTabs } from './resolveTabBarTabs';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 
 export type { TabType };
@@ -138,15 +138,15 @@ export const TabBar = React.memo(({ activeTab, onTabPress }: TabBarProps) => {
     );
 });
 
-// Match the app's cockpit-bar line icons (all Ionicons outline, same weight):
-// tray for Inbox, chat for Sessions, gear for Settings, people for Friends.
+// Match the app's cockpit-bar line icons (all Phosphor, same weight):
+// mailbox for Inbox, chat for Sessions, sliders for Settings, people for Friends.
 function renderMainTabIcon(key: TabType, size: number, color: string): React.ReactNode {
-    const name = key === 'inbox'
-        ? 'file-tray-outline'
+    const name: IconName = key === 'inbox'
+        ? 'mailbox'
         : key === 'settings'
-            ? 'cog-outline'
+            ? 'sliders-horizontal'
             : key === 'friends'
-                ? 'people-outline'
-                : 'chatbubbles-outline';
-    return <Ionicons name={name} size={size} color={color} />;
+                ? 'users'
+                : 'chats-circle';
+    return <Icon name={name} size={size} color={color} />;
 }

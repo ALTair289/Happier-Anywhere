@@ -515,9 +515,9 @@ describe('AccountBlock', () => {
 
         it('renders the inline reorder handle in the trailing cluster and collapses member actions into a single kebab', async () => {
             const actions: ItemAction[] = [
-                { id: 'act:move-up', title: 'Move up', icon: 'arrow-up-outline', onPress: () => {} },
-                { id: 'act:move-down', title: 'Move down', icon: 'arrow-down-outline', onPress: () => {} },
-                { id: 'act:set-active', title: 'Set active', icon: 'radio-button-off-outline', onPress: () => {} },
+                { id: 'act:move-up', title: 'Move up', icon: 'arrow-up', onPress: () => {} },
+                { id: 'act:move-down', title: 'Move down', icon: 'arrow-down', onPress: () => {} },
+                { id: 'act:set-active', title: 'Set active', icon: 'circle', onPress: () => {} },
             ];
             const screen = await renderAccountBlock({
                 variant: 'poolMember',

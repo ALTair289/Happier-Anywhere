@@ -1,11 +1,11 @@
 import * as React from 'react';
 import { Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
 import { t } from '@/text';
 import { useWorkspaceFileTransfers } from '@/hooks/session/files/useWorkspaceFileTransfers';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const FileDownloadButton = React.memo((props: Readonly<{
     sessionId: string;
@@ -57,7 +57,7 @@ export const FileDownloadButton = React.memo((props: Readonly<{
             {busy ? (
                 <ActivitySpinner size="small" color={theme.colors.text.secondary} />
             ) : (
-                <Ionicons name="download-outline" size={14} color={theme.colors.text.secondary} />
+                <Icon name="download" size={14} color={theme.colors.text.secondary} />
             )}
         </Pressable>
     );

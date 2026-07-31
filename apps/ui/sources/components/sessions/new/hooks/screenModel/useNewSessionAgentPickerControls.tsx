@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { NewSessionEngineOptionDetail } from '@/components/sessions/new/components/NewSessionEngineOptionDetail';
@@ -39,6 +38,7 @@ import {
 } from '@/sync/domains/models/favoriteModelSelections';
 import { resolveNewSessionConnectedServicesBindingsForAgent } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
 import { stableJsonStringify } from '@/utils/json/stableJsonStringify';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     readNonBlankSessionControlIdentifier,
     readSessionControlValueId,
@@ -116,10 +116,11 @@ const ENGINE_FAVORITE_RAIL_ICON_SIZE = 14;
 function FavoriteModelsPickerIcon(props: Readonly<{ size?: number }>) {
     const { theme } = useUnistyles();
     return (
-        <Ionicons
+        <Icon
             name="star"
             size={props.size ?? 12}
             color={theme.dark ? theme.colors.text.primary : theme.colors.button.primary.background}
+            weight={theme.dark ? 'fill' : 'regular'}
         />
     );
 }
@@ -128,10 +129,11 @@ function EngineFavoritePickerIcon(props: Readonly<{ favorite: boolean }>) {
     const { theme } = useUnistyles();
     const selectedColor = theme.dark ? theme.colors.text.primary : theme.colors.button.primary.background;
     return (
-        <Ionicons
-            name={props.favorite ? 'star' : 'star-outline'}
+        <Icon
+            name="star"
             size={ENGINE_FAVORITE_RAIL_ICON_SIZE}
             color={props.favorite ? selectedColor : theme.colors.text.secondary}
+            weight={props.favorite ? 'fill' : 'regular'}
         />
     );
 }

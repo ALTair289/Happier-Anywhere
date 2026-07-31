@@ -38,6 +38,8 @@ import {
 import { getSuggestions } from '@/components/autocomplete/suggestions';
 import { ChatHeaderView } from '@/components/sessions/transcript/ChatHeaderView';
 import { SessionHeaderActionMenu } from '@/components/sessions/actions/SessionHeaderActionMenu';
+import { SESSION_HEADER_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
+import { SessionHeaderIconWithCount } from '@/components/sessions/actions/SessionHeaderIconWithCount';
 import { SessionHeaderInfoButton } from '@/components/sessions/actions/SessionHeaderInfoButton';
 import { SessionHeaderRightSidebarButton } from '@/components/sessions/actions/SessionHeaderRightSidebarButton';
 import { SessionHeaderSubagentsButton } from '@/components/sessions/actions/SessionHeaderSubagentsButton';
@@ -56,7 +58,6 @@ import { sendTranscriptSelectionToSession } from '@/components/sessions/transcri
 import { useTranscriptSelectionEligibleMessageIds } from '@/components/sessions/transcript/messageSelection/useTranscriptSelectionEligibleMessageIds';
 import { Deferred } from '@/components/ui/forms/Deferred';
 import type { DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
-import { DependabotIcon } from '@/components/ui/icons/DependabotIcon';
 import { EmptyMessages } from '@/components/ui/empty/EmptyMessages';
 import { VoiceSurface } from '@/components/voice/surface/VoiceSurface';
 import { useDraft } from '@/hooks/session/useDraft';
@@ -198,7 +199,6 @@ import {
 } from '@/sync/domains/connectedServices/connectedServiceProfilePreferences';
 import { resolveConnectedServiceCredentialHealthStatus } from '@/sync/domains/connectedServices/resolveConnectedServiceCredentialHealthStatus';
 import { resolveConnectedServiceQuotaProfileRefForSession } from './resolveConnectedServiceQuotaProfileRefForSession';
-import { Ionicons } from '@expo/vector-icons';
 import { usePathname, useRouter } from 'expo-router';
 import * as React from 'react';
 import { useMemo } from 'react';
@@ -375,6 +375,7 @@ import {
     type SessionUsageLimitRecoveryOperationResult,
 } from '@/sync/ops/sessionUsageLimitRecovery';
 import { useCredentialScopedAccountModeResolver } from '@/hooks/server/connectedServices/useCredentialScopedAccountModeResolver';
+import { ICON_SIZE, Icon } from '@/components/ui/icons/Icon';
 import {
     buildQuotaSnapshotScopeKey,
     consumeQuotaRecoveryCredit,
@@ -868,14 +869,14 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
             items.push({
                 id: props.mobileWorkspaceExperienceToggleActionId,
                 title: t(props.mobileWorkspaceExperienceToggleLabelKey),
-                icon: <Ionicons name="phone-portrait-outline" size={18} color={theme.colors.text.secondary} />,
+                icon: <Icon name="device-mobile" size={16} color={theme.colors.text.secondary} />,
             });
         }
         if (attachedSessionTerminal.available) {
             items.push({
                 id: 'header.openAttachedClaudeTerminal',
                 title: t('tools.askUserQuestion.claudeDialogNotice.openTerminal'),
-                icon: <Ionicons name="terminal-outline" size={18} color={theme.colors.text.secondary} />,
+                icon: <Icon name="terminal" size={16} color={theme.colors.text.secondary} />,
             });
         }
         if (!props.shouldFoldHeaderIconActions) return items;
@@ -883,27 +884,27 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
         items.push({
             id: 'header.openTranscriptNavigation',
             title: t('session.openTranscriptNavigation'),
-            icon: <Ionicons name="list-outline" size={18} color={theme.colors.text.secondary} />,
+            icon: <Icon name="list" size={16} color={theme.colors.text.secondary} />,
         });
         if (shouldOfferSubagentsMenuItem) {
             items.push({
                 id: 'header.openSubagents',
                 title: t('session.openSubagents', { count: subagentCounts.active }),
-                icon: <DependabotIcon size={18} color={theme.colors.text.secondary} />,
+                icon: <Icon name="robot" size={ICON_SIZE.md} color={theme.colors.text.secondary} />,
             });
         }
         if (sessionExecutionRunsSupported) {
             items.push({
                 id: 'header.openRuns',
                 title: t('session.openRuns'),
-                icon: <Ionicons name="play-outline" size={18} color={theme.colors.text.secondary} />,
+                icon: <Icon name="play" size={16} color={theme.colors.text.secondary} />,
             });
         }
         if (props.showAutomations) {
             items.push({
                 id: 'header.openAutomations',
                 title: t('session.openAutomations'),
-                icon: <Ionicons name="timer-outline" size={18} color={theme.colors.text.secondary} />,
+                icon: <Icon name="timer" size={16} color={theme.colors.text.secondary} />,
             });
         }
         return items;
@@ -1006,31 +1007,16 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
                     accessibilityRole="button"
                     accessibilityLabel={t('session.openAutomations')}
                 >
-                    <View style={{ position: 'relative', width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                        <Ionicons name="timer-outline" size={22} color={theme.colors.chrome.header.foreground} />
-                        {props.sessionAutomationsEnabledCount > 0 ? (
-                            <View style={{
-                                position: 'absolute',
-                                top: -2,
-                                right: -6,
-                                backgroundColor: theme.colors.status.error,
-                                borderRadius: 8,
-                                minWidth: 16,
-                                height: 16,
-                                paddingHorizontal: 4,
-                                justifyContent: 'center',
-                                alignItems: 'center',
-                            }}>
-                                <Text style={{
-                                    color: theme.colors.overlay.foreground,
-                                    fontSize: 10,
-                                    fontWeight: '600',
-                                }}>
-                                    {badgeLabel}
-                                </Text>
-                            </View>
-                        ) : null}
-                    </View>
+                    <SessionHeaderIconWithCount
+                        count={props.sessionAutomationsEnabledCount}
+                        badgeColor={theme.colors.status.error}
+                    >
+                        <Icon
+                            name="timer"
+                            size={SESSION_HEADER_ICON_SIZE_PX}
+                            color={theme.colors.chrome.header.foreground}
+                        />
+                    </SessionHeaderIconWithCount>
                 </Pressable>
             ) : null}
         </View>
@@ -1843,7 +1829,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                 ) : !session && (routeHydrationTerminalMissing || !routeHydrationState) ? (
                     // Deleted state
                     <View testID="session-root-unavailable" style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-                        <Ionicons name="trash-outline" size={48} color={theme.colors.text.secondary} />
+                        <Icon name="trash" size={48} color={theme.colors.text.secondary} />
                         <Text style={{ color: theme.colors.text.primary, fontSize: 20, marginTop: 16, fontWeight: '600' }}>{t('errors.sessionDeleted')}</Text>
                         <Text style={{ color: theme.colors.text.secondary, fontSize: 15, marginTop: 8, textAlign: 'center', paddingHorizontal: 32 }}>{t('errors.sessionDeletedDescription')}</Text>
                     </View>
@@ -2558,12 +2544,12 @@ function SessionViewLoaded({
         });
         if (!presentation) return [];
         const iconName = presentation.iconKind === 'goal'
-            ? 'flag-outline'
+            ? 'crosshair'
             : presentation.iconKind === 'workflow'
-                ? 'git-network-outline'
+                ? 'graph'
                 : presentation.iconKind === 'permission'
-                    ? 'alert-circle-outline'
-                    : 'list-outline';
+                    ? 'warning-circle'
+                    : 'list';
         return [{
             key: SESSION_WORK_STATE_STATUS_BADGE_KEY,
             label: presentation.label,
@@ -2571,7 +2557,7 @@ function SessionViewLoaded({
             accessibilityLabel: t('session.workState.accessibilityLabel'),
             tone: presentation.tone,
             emphasis: presentation.emphasis,
-            icon: (tint) => <Ionicons name={iconName} size={12} color={tint} />,
+            icon: (tint) => <Icon name={iconName} size={14} color={tint} />,
             renderPopover: ({ open, anchorRef, onRequestClose }) => (
                 <SessionWorkStatePopover
                     open={open}
@@ -3222,7 +3208,7 @@ function SessionViewLoaded({
                     expandHint: t('session.usageLimitRecovery.showBannerAction'),
                     collapseHint: t('session.usageLimitRecovery.hideBannerAction'),
                 }),
-                icon: (tint: string) => <Ionicons name="timer-outline" size={12} color={tint} />,
+                icon: (tint: string) => <Icon name="timer" size={14} color={tint} />,
                 onPress: usageLimitRecoveryBanner.toggle,
             } satisfies AgentInputStatusBadge]
             : [];
@@ -3235,7 +3221,7 @@ function SessionViewLoaded({
                     expandHint: t('session.staleRunner.showBannerAction'),
                     collapseHint: t('session.staleRunner.hideBannerAction'),
                 }),
-                icon: (tint: string) => <Ionicons name="sync-circle-outline" size={12} color={tint} />,
+                icon: (tint: string) => <Icon name="arrows-clockwise" size={14} color={tint} />,
                 onPress: staleSessionRunnerBanner.toggle,
             } satisfies AgentInputStatusBadge]
             : [];
@@ -3251,7 +3237,7 @@ function SessionViewLoaded({
                     expandHint: t('session.composerBanners.showBannerAction'),
                     collapseHint: t('session.composerBanners.hideBannerAction'),
                 }),
-                icon: (tint: string) => <Ionicons name="key-outline" size={12} color={tint} />,
+                icon: (tint: string) => <Icon name="key" size={14} color={tint} />,
                 onPress: authRecoveryBanner.toggle,
             } satisfies AgentInputStatusBadge]
             : [];
@@ -3267,7 +3253,7 @@ function SessionViewLoaded({
                     expandHint: t('session.composerBanners.showBannerAction'),
                     collapseHint: t('session.composerBanners.hideBannerAction'),
                 }),
-                icon: (tint: string) => <Ionicons name="alert-circle-outline" size={12} color={tint} />,
+                icon: (tint: string) => <Icon name="warning-circle" size={14} color={tint} />,
                 onPress: pendingQueueResumeFailedBanner.toggle,
             } satisfies AgentInputStatusBadge]
             : [];
@@ -4426,7 +4412,7 @@ function SessionViewLoaded({
                     testID: 'session.pendingMessageEdit.badge',
                     tone: 'active',
                     emphasis: 'prominent',
-                    icon: (tint: string) => <Ionicons name="pencil-outline" size={12} color={tint} />,
+                    icon: (tint: string) => <Icon name="pencil" size={14} color={tint} />,
                     onPress: cancelPendingMessageEdit,
                 } satisfies AgentInputStatusBadge]
                 : []),
@@ -5324,7 +5310,7 @@ function SessionViewLoaded({
                         ...shadowLevelStyle(theme.colors.shadowLevels[3]),
                     }}
                 >
-                    <Ionicons name="warning-outline" size={14} color={theme.colors.state.warning.foreground} style={{ marginRight: 6 }} />
+                    <Icon name="warning" size={14} color={theme.colors.state.warning.foreground} style={{ marginRight: 6 }} />
                     <Text style={{
                         fontSize: 12,
                         color: theme.colors.state.warning.foreground,
@@ -5332,7 +5318,7 @@ function SessionViewLoaded({
                     }}>
                         {t('sessionInfo.cliVersionOutdated')}
                     </Text>
-                    <Ionicons name="close" size={14} color={theme.colors.state.warning.foreground} style={{ marginLeft: 8 }} />
+                    <Icon name="x" size={14} color={theme.colors.state.warning.foreground} style={{ marginLeft: 8 }} />
                 </Pressable>
             )}
 
@@ -5392,8 +5378,8 @@ function SessionViewLoaded({
                         }}
                         hitSlop={15}
                     >
-                        <Ionicons
-                            name={Platform.OS === 'ios' ? 'chevron-back' : 'arrow-back'}
+                        <Icon
+                            name={Platform.OS === 'ios' ? 'caret-left' : 'arrow-left'}
                             size={Platform.select({ ios: 28, default: 24 })}
                             color={theme.colors.text.primary}
                         />

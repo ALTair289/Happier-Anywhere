@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { InteractionManager, Platform, Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -11,6 +10,7 @@ import { type ModalPortalTarget, useModalPortalTarget } from '@/modal/portal/Mod
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { getClipboardStringTrimmedSafe } from '@/utils/ui/clipboard';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -276,7 +276,7 @@ export function NewSessionResumeSelectionContent(props: NewSessionResumeSelectio
                             ]}
                         >
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                                <Ionicons name="clipboard-outline" size={16} color={theme.colors.text.primary} />
+                                <Icon name="clipboard" size={16} color={theme.colors.text.primary} />
                                 <Text style={[styles.buttonText, styles.buttonTextSecondary]}>
                                     {t('newSession.resume.paste')}
                                 </Text>
@@ -305,7 +305,7 @@ export function NewSessionResumeSelectionContent(props: NewSessionResumeSelectio
                             ]}
                         >
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                                <Ionicons name="close-circle-outline" size={16} color={theme.colors.state.danger.foreground} />
+                                <Icon name="x-circle" size={16} color={theme.colors.state.danger.foreground} />
                                 <Text style={[styles.buttonText, styles.buttonTextDestructive]}>
                                     {t('newSession.resume.clearAndRemove')}
                                 </Text>

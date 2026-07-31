@@ -725,7 +725,7 @@ function flattenStyle(style: unknown): Record<string, unknown> {
 function findChevronOpacityForHeaderPressable(headerPressable: any): unknown {
     const chevronIcon = headerPressable.findAll((node: any) =>
         String(node.type) === 'Ionicons'
-        && (node.props?.name === 'chevron-down' || node.props?.name === 'chevron-forward')
+        && (node.props?.name === 'caret-down' || node.props?.name === 'caret-right')
     )[0];
     return flattenStyle(chevronIcon?.parent?.props?.style).opacity;
 }

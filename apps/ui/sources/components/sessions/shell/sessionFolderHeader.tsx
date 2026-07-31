@@ -1,6 +1,5 @@
 import React from 'react';
 import { Platform, Pressable, View } from 'react-native';
-import { Ionicons, Octicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
@@ -8,6 +7,7 @@ import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import type { SessionFolderHeaderItem } from './sessionFolderShellTypes';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const FOLDER_ROOT_INDENT = 20;
 const FOLDER_NESTED_INDENT_STEP = 12;
@@ -93,31 +93,31 @@ export function FolderGroupHeader(props: Readonly<{
         {
             id: 'new-session',
             title: t('sessionsList.newSessionInFolder'),
-            icon: <Ionicons name="add-circle-outline" size={16} color={iconColor} />,
+            icon: <Icon name="plus-circle" size={16} color={iconColor} />,
             disabled: props.disabled,
         },
         {
             id: 'add-subfolder',
             title: t('sessionsList.addSubfolder'),
-            icon: <Ionicons name="folder-open-outline" size={16} color={iconColor} />,
+            icon: <Icon name="folder-open" size={16} color={iconColor} />,
             disabled: props.disabled,
         },
         {
             id: 'rename',
             title: t('sessionsList.renameFolder'),
-            icon: <Ionicons name="pencil-outline" size={16} color={iconColor} />,
+            icon: <Icon name="pencil" size={16} color={iconColor} />,
             disabled: props.disabled,
         },
         {
             id: 'move',
             title: t('sessionsList.moveFolder'),
-            icon: <Ionicons name="arrow-forward-circle-outline" size={16} color={iconColor} />,
+            icon: <Icon name="arrow-circle-right" size={16} color={iconColor} />,
             disabled: props.disabled || !props.onMove,
         },
         {
             id: 'delete',
             title: t('sessionsList.deleteFolder'),
-            icon: <Ionicons name="trash-outline" size={16} color={iconColor} />,
+            icon: <Icon name="trash" size={16} color={iconColor} />,
             disabled: props.disabled,
         },
     ], [iconColor, props.disabled, props.onMove]);
@@ -180,9 +180,9 @@ export function FolderGroupHeader(props: Readonly<{
                     accessibilityLabel={props.collapsed ? t('common.expand') : t('common.collapse')}
                     hitSlop={8}
                 >
-                    <Ionicons
-                        name={props.collapsed ? 'chevron-forward' : 'chevron-down'}
-                        size={12}
+                    <Icon
+                        name={props.collapsed ? 'caret-right' : 'caret-down'}
+                        size={14}
                         color={iconColor}
                     />
                 </Pressable>
@@ -196,7 +196,7 @@ export function FolderGroupHeader(props: Readonly<{
                     disabled={props.disabled}
                     onPress={props.disabled ? undefined : props.onFocus}
                 >
-                    <Ionicons name="folder-outline" size={14} color={iconColor} />
+                    <Icon name="folder" size={14} color={iconColor} />
                     <Text style={styles.title} numberOfLines={1}>{props.item.title}</Text>
                 </Pressable>
                 <View
@@ -204,8 +204,8 @@ export function FolderGroupHeader(props: Readonly<{
                     testID={`session-folder-reorder-handle-${props.item.folderId}`}
                     pointerEvents="none"
                 >
-                    <Ionicons
-                        name="reorder-three-outline"
+                    <Icon
+                        name="list"
                         size={14}
                         color={iconColor}
                         style={[styles.dragHandle, showActions ? styles.dragHandleActive : null]}
@@ -240,7 +240,7 @@ export function FolderGroupHeader(props: Readonly<{
                                 accessibilityLabel={t('common.moreActions')}
                                 hitSlop={8}
                             >
-                                <Octicons name="kebab-horizontal" size={12} color={iconColor} />
+                                <Icon name="dots-three" size={14} color={iconColor} />
                             </Pressable>
                         )}
                     />

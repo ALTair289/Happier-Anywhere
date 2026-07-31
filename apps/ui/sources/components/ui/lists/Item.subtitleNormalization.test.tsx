@@ -7,6 +7,7 @@ import {
     renderScreen,
 } from '@/dev/testkit';
 import { installUiListsCommonModuleMocks } from './uiListsTestHelpers';
+import { ITEM_ICON_GLYPH_SIZE } from '@/components/ui/lists/itemDensityMetrics';
 
 type PlatformSelectValues = Readonly<{
     default?: string;
@@ -101,7 +102,7 @@ describe('Item', () => {
         // Non-interactive rows should not be pressable on web.
         expect(findTestInstanceByTypeWithProps(screen, 'Pressable' as any, { accessibilityRole: 'button' })).toBeUndefined();
 
-        expect(findTestInstanceByTypeWithProps(screen, 'Ionicons' as any, { name: 'chevron-forward' })).toBeUndefined();
+        expect(findTestInstanceByTypeWithProps(screen, 'Icon' as any, { name: 'caret-right' })).toBeUndefined();
     });
 
     it('renders a chevron only when onPress is provided', async () => {
@@ -112,7 +113,7 @@ describe('Item', () => {
         const pressable = findTestInstanceByTypeWithProps(screen, 'Pressable' as any, { accessibilityRole: 'button' });
         expect(pressable).toBeTruthy();
 
-        expect(findTestInstanceByTypeWithProps(screen, 'Ionicons' as any, { name: 'chevron-forward' })).toBeTruthy();
+        expect(findTestInstanceByTypeWithProps(screen, 'Icon' as any, { name: 'caret-right' })).toBeTruthy();
     });
 
     it('wires onContextMenu on web for interactive rows', async () => {
@@ -203,21 +204,21 @@ describe('Item', () => {
         const screen = await renderScreen(
             <Item
                 title="Title"
-                leftElement={React.createElement('Ionicons', { name: 'home-outline', size: 20, color: '#fff' })}
+                leftElement={React.createElement('Icon', { name: 'house', size: 20, color: '#fff' })}
                 density="comfortable"
                 showChevron={false}
             />,
         );
 
-        expect(findTestInstanceByTypeWithProps(screen, 'Ionicons' as any, {
-            name: 'home-outline',
-            size: 32,
+        expect(findTestInstanceByTypeWithProps(screen, 'Icon' as any, {
+            name: 'house',
+            size: ITEM_ICON_GLYPH_SIZE.comfortable,
         })).toBeTruthy();
         const textWrappers = screen.findAllByType('Text' as any).filter((node) => {
             const children = node.props?.children;
             return Array.isArray(children)
-                ? children.some((child) => React.isValidElement(child) && child.type === 'Ionicons')
-                : React.isValidElement(children) && children.type === 'Ionicons';
+                ? children.some((child) => React.isValidElement(child) && child.type === 'Icon')
+                : React.isValidElement(children) && children.type === 'Icon';
         });
         expect(textWrappers).toEqual([]);
     });

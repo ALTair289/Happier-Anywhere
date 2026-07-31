@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import {
@@ -37,6 +36,7 @@ import {
 } from '@/components/settings/prompts/shared/promptAssetInstallModeSelection';
 
 import { defaultPromptAssetTargetInput } from './promptAssetExportDefaults';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const styles = StyleSheet.create((theme) => ({
   container: {
@@ -213,7 +213,7 @@ export const PromptAssetExportScreen = React.memo((props: Readonly<{
       id: machine.id,
       title: machine.metadata?.displayName || machine.metadata?.host || machine.id,
       subtitle: machine.id,
-      icon: <Ionicons name="laptop-outline" size={22} color={theme.colors.text.secondary} />,
+      icon: <Icon name="laptop" size={20} color={theme.colors.text.secondary} />,
     }));
   }, [machines, theme.colors.text.secondary]);
 
@@ -222,13 +222,13 @@ export const PromptAssetExportScreen = React.memo((props: Readonly<{
       id: 'project',
       title: t('promptLibrary.externalAssetsProjectScope'),
       subtitle: t('promptLibrary.externalAssetsProjectScopeSubtitle'),
-      icon: <Ionicons name="folder-outline" size={22} color={theme.colors.accent.indigo} />,
+      icon: <Icon name="folder" size={20} color={theme.colors.accent.indigo} />,
     },
     {
       id: 'user',
       title: t('promptLibrary.externalAssetsUserScope'),
       subtitle: t('promptLibrary.externalAssetsUserScopeSubtitle'),
-      icon: <Ionicons name="person-outline" size={22} color={theme.colors.accent.blue} />,
+      icon: <Icon name="person" size={20} color={theme.colors.accent.blue} />,
     },
   ]), [theme.colors.accent.blue, theme.colors.accent.indigo]);
 
@@ -238,7 +238,7 @@ export const PromptAssetExportScreen = React.memo((props: Readonly<{
         id: entry.id,
         title: entry.title,
         subtitle: entry.description,
-        icon: <Ionicons name="layers-outline" size={22} color={theme.colors.text.secondary} />,
+        icon: <Icon name="stack-simple" size={20} color={theme.colors.text.secondary} />,
       }));
   }, [scopeCompatibleTypes, theme.colors.text.secondary]);
 
@@ -251,7 +251,7 @@ export const PromptAssetExportScreen = React.memo((props: Readonly<{
       subtitle: entry === 'symlink'
         ? t('promptLibrary.externalAssetsInstallMethodSymlinkSubtitle')
         : t('promptLibrary.externalAssetsInstallMethodCopySubtitle'),
-      icon: <Ionicons name={entry === 'symlink' ? 'git-branch-outline' : 'copy-outline'} size={22} color={theme.colors.text.secondary} />,
+      icon: <Icon name={entry === 'symlink' ? 'git-branch' : 'copy'} size={20} color={theme.colors.text.secondary} />,
     }));
   }, [availableInstallModes, theme.colors.text.secondary]);
 
@@ -389,7 +389,7 @@ export const PromptAssetExportScreen = React.memo((props: Readonly<{
             itemTrigger={{
               title: t('promptLibrary.externalAssetsScope'),
               subtitle: scope === 'project' ? t('promptLibrary.externalAssetsProjectScope') : t('promptLibrary.externalAssetsUserScope'),
-              icon: <Ionicons name="albums-outline" size={29} color={theme.colors.accent.indigo} />,
+              icon: <Icon name="stack" size={29} color={theme.colors.accent.indigo} />,
             }}
             rowKind="item"
             connectToTrigger
@@ -405,7 +405,7 @@ export const PromptAssetExportScreen = React.memo((props: Readonly<{
             itemTrigger={{
               title: t('promptLibrary.externalAssetsExportType'),
               subtitle: currentType?.title ?? t('promptLibrary.externalAssetsNoTypes'),
-              icon: <Ionicons name="layers-outline" size={29} color={theme.colors.text.secondary} />,
+              icon: <Icon name="stack-simple" size={29} color={theme.colors.text.secondary} />,
             }}
             rowKind="item"
             connectToTrigger
@@ -424,7 +424,7 @@ export const PromptAssetExportScreen = React.memo((props: Readonly<{
                 subtitle: selectedInstallMode === 'symlink'
                   ? t('promptLibrary.externalAssetsInstallMethodSymlink')
                   : t('promptLibrary.externalAssetsInstallMethodCopy'),
-                icon: <Ionicons name={selectedInstallMode === 'symlink' ? 'git-branch-outline' : 'copy-outline'} size={29} color={theme.colors.text.secondary} />,
+                icon: <Icon name={selectedInstallMode === 'symlink' ? 'git-branch' : 'copy'} size={29} color={theme.colors.text.secondary} />,
               }}
               rowKind="item"
               connectToTrigger
@@ -447,7 +447,7 @@ export const PromptAssetExportScreen = React.memo((props: Readonly<{
               />
             )}
             subtitleLines={0}
-            icon={<Ionicons name={artifactState?.libraryKind === 'bundle' ? 'sparkles-outline' : 'document-text-outline'} size={29} color={theme.colors.text.secondary} />}
+            icon={<Icon name={artifactState?.libraryKind === 'bundle' ? 'sparkle' : 'file-text'} size={29} color={theme.colors.text.secondary} />}
             mode="info"
             showChevron={false}
           />
@@ -463,7 +463,7 @@ export const PromptAssetExportScreen = React.memo((props: Readonly<{
                   ? t('promptLibrary.externalAssetsProjectScope')
                   : t('promptLibrary.externalAssetsUserScope'),
               })}
-              icon={<Ionicons name="link-outline" size={29} color={theme.colors.text.secondary} />}
+              icon={<Icon name="link" size={29} color={theme.colors.text.secondary} />}
               detail={describePromptExternalLinkTitle(currentLink)}
               showChevron={false}
             />

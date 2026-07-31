@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Item } from '@/components/ui/lists/Item';
@@ -8,6 +7,7 @@ import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import type { SessionStorageKind } from '@/sync/domains/session/sessionStorageKind';
 import { t } from '@/text';
 import { SessionListStorageTabsBar } from './SessionListStorageTabsBar';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create(() => ({
     browseActionContainer: {
@@ -52,7 +52,7 @@ export const SessionsListStorageChrome = React.memo((props: SessionsListStorageC
                         testID="direct-sessions-browse-button"
                         title={t('directSessions.browseOpenExisting')}
                         subtitle={t('directSessions.browseActionSubtitle')}
-                        icon={<Ionicons name="folder-open-outline" size={22} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="folder-open" size={20} color={theme.colors.text.secondary} />}
                         onPress={() => {
                             router.push('/direct/browse');
                         }}

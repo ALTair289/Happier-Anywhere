@@ -10,7 +10,6 @@ import type { VoiceSettings } from '@/sync/domains/settings/voiceSettings';
 import type { SecretString } from '@/sync/encryption/secretSettings';
 import { t } from '@/text';
 import { fireAndForget } from '@/utils/system/fireAndForget';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 import {
   createHappierElevenLabsAgent,
@@ -19,6 +18,7 @@ import {
 } from '@/realtime/elevenlabs/autoprovision';
 import { listElevenLabsVoices, type ElevenLabsVoiceSummary } from '@/realtime/elevenlabs/elevenLabsVoices';
 import { showElevenLabsAgentReuseDialog } from '@/voice/settings/modals/showElevenLabsAgentReuseDialog';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function normalizeSecretStringPromptInput(value: string | null): SecretString | null {
   if (value === null) return null;
@@ -327,9 +327,9 @@ export function RealtimeElevenLabsSection(props: {
                         disabled={!voice.previewUrl}
                         style={{ opacity: voice.previewUrl ? 1 : 0.3, paddingHorizontal: 4, paddingVertical: 2 }}
                       >
-                        <Ionicons
-                          name={previewingVoiceId === voice.voiceId ? 'stop-circle-outline' : 'play-circle-outline'}
-                          size={22}
+                        <Icon
+                          name={previewingVoiceId === voice.voiceId ? 'stop-circle' : 'play-circle'}
+                          size={20}
                           color={theme.colors.text.secondary}
                         />
                       </Pressable>

@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Octicons } from '@expo/vector-icons';
 import { Platform, Pressable } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -7,6 +6,8 @@ import { SourceControlStatusBadge, useHasMeaningfulScmStatus } from '@/component
 import { hapticsLight } from '@/components/ui/theme/haptics';
 import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeForView';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
+import { AGENT_INPUT_CHIP_ICON_SIZE_PX, AGENT_INPUT_CHIP_ICON_STYLE } from '@/components/sessions/agentInput/definitions/agentInputChipIconMetrics';
 
 const SOURCE_CONTROL_BUTTON_HIT_SLOP = { top: 5, bottom: 10, left: 0, right: 0 } as const;
 
@@ -51,11 +52,10 @@ export const AgentInputSourceControlStatusButton = React.memo(function AgentInpu
                 <SourceControlStatusBadge sessionId={props.sessionId} />
             ) : (
                 normalizeNodeForView(
-                    <Octicons
+                    <Icon
                         name="git-branch"
-                        size={16}
-                        color={theme.colors.composer.chipTint}
-                    />,
+                        size={AGENT_INPUT_CHIP_ICON_SIZE_PX}
+                        color={theme.colors.composer.chipTint} style={AGENT_INPUT_CHIP_ICON_STYLE} />,
                 )
             )}
         </Pressable>

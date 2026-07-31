@@ -6,7 +6,6 @@ import {
     View,
     type ImageLoadEvent,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Modal } from '@/modal';
@@ -21,6 +20,7 @@ import { SafeNativeSvgXml } from '@/components/ui/media/SafeNativeSvgXml';
 import type { SessionMediaInlineImageSummary } from '@/sync/domains/sessionMedia/sessionMediaMessageMeta';
 
 import { resolveSessionMediaImageMimeType } from './sessionMediaPresentation';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const FALLBACK_THUMBNAIL_SIZE = 84;
 const MAX_THUMBNAIL_WIDTH = 220;
@@ -181,9 +181,9 @@ function SessionMediaInlineImagePreviewTile(props: Readonly<{
                 )
             ) : (
                 <View style={styles.placeholder}>
-                    <Ionicons
-                        name={preview.status === 'error' ? 'alert-circle-outline' : 'image-outline'}
-                        size={22}
+                    <Icon
+                        name={preview.status === 'error' ? 'warning-circle' : 'image'}
+                        size={20}
                         color={theme.colors.text.secondary}
                     />
                 </View>
@@ -208,9 +208,9 @@ function SessionMediaInlineImageInertTile(props: Readonly<{
             style={[styles.tile, thumbnailSize]}
         >
             <View style={styles.placeholder}>
-                <Ionicons
-                    name="image-outline"
-                    size={22}
+                <Icon
+                    name="image"
+                    size={20}
                     color={theme.colors.text.secondary}
                 />
             </View>

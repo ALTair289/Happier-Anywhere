@@ -1,13 +1,13 @@
 import * as React from 'react';
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
 import { Text } from '@/components/ui/text/Text';
 import { FileIcon } from '@/components/ui/media/FileIcon';
 import { InlineRepoPathLabel } from '@/components/ui/path/InlineRepoPathLabel';
 import { normalizeRepoPathParts } from '@/utils/path/normalizeRepoPathParts';
 import { COMMAND_SUGGESTION_ROW_HEIGHT } from '@/components/autocomplete/commandSuggestionConstants';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 interface CommandSuggestionProps {
@@ -51,7 +51,7 @@ export const FileMentionSuggestion = React.memo(({ fileName, filePath, fileType 
     }, [fileName, filePath]);
 
     const icon = fileType === 'folder'
-        ? <Ionicons name="folder-outline" size={16} color={styles.iconColor.color} />
+        ? <Icon name="folder" size={16} color={styles.iconColor.color} />
         : <FileIcon fileName={name || fileName} size={16} />;
 
     return (
@@ -79,7 +79,7 @@ export const VendorPluginMentionSuggestion = React.memo((props: VendorPluginMent
     return (
         <View style={styles.suggestionContainer}>
             <View style={styles.leadingIcon}>
-                <Ionicons name="extension-puzzle-outline" size={16} color={styles.iconColor.color} />
+                <Icon name="puzzle-piece" size={16} color={styles.iconColor.color} />
             </View>
             <View style={styles.labelColumn}>
                 <Text style={styles.fileTitleText} numberOfLines={1}>
@@ -104,7 +104,7 @@ export const SkillMentionSuggestion = React.memo((props: SkillMentionSuggestionP
     return (
         <View style={styles.suggestionContainer}>
             <View style={styles.leadingIcon}>
-                <Ionicons name="sparkles-outline" size={16} color={styles.iconColor.color} />
+                <Icon name="sparkle" size={16} color={styles.iconColor.color} />
             </View>
             <View style={styles.labelColumn}>
                 <Text style={styles.fileTitleText} numberOfLines={1}>

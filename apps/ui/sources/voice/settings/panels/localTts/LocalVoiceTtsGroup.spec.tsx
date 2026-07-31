@@ -38,12 +38,12 @@ vi.mock('@/components/ui/forms/Switch', () => ({
 }));
 
 vi.mock('@/voice/settings/panels/localTts/providers/registry', () => ({
-  localTtsProviderSpecs: [{ id: 'local_neural', title: 'Local neural', subtitle: '', iconName: 'sparkles-outline' }],
+  localTtsProviderSpecs: [{ id: 'local_neural', title: 'Local neural', subtitle: '', iconName: 'sparkle' }],
   getLocalTtsProviderSpec: () => ({
     id: 'local_neural',
     title: 'Local neural',
     subtitle: '',
-    iconName: 'sparkles-outline',
+    iconName: 'sparkle',
     Settings: () => null,
     test: (...args: any[]) => providerTestSpy(...args),
   }),

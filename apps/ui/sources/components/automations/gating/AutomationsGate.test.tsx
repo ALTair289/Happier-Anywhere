@@ -112,7 +112,7 @@ describe('AutomationsGate', () => {
 
         expect(tree.root.findAllByProps({ testID: 'automations-allowed-child' })).toHaveLength(0);
         expect(tree.root.findAllByType('ItemList')).toHaveLength(1);
-        expect(tree.root.findAllByType('Ionicons')).toHaveLength(1);
+        expect(tree.root.findAllByType('Icon')).toHaveLength(1);
         expect(tree.root.findAllByProps({ accessibilityRole: 'progressbar' })).toHaveLength(0);
     });
 });

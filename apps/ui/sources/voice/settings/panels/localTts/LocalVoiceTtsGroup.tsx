@@ -1,6 +1,5 @@
 import * as React from 'react';
 
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { DropdownMenu } from '@/components/ui/forms/dropdown/DropdownMenu';
@@ -14,6 +13,7 @@ import { formatVoiceTestFailureMessage } from '@/voice/local/formatVoiceTestFail
 import { primeWebAudioPlayback } from '@/voice/output/webAudioContext';
 import { getLocalTtsProviderSpec, localTtsProviderSpecs } from '@/voice/settings/panels/localTts/providers/registry';
 import { fireAndForget } from '@/utils/system/fireAndForget';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export function LocalVoiceTtsGroup(props: {
   cfgTts: VoiceLocalTtsSettings;
@@ -49,7 +49,7 @@ export function LocalVoiceTtsGroup(props: {
           id: spec.id,
           title: spec.title,
           subtitle: spec.subtitle,
-          icon: <Ionicons name={spec.iconName as any} size={22} color={theme.colors.text.secondary} />,
+          icon: <Icon name={spec.iconName as any} size={20} color={theme.colors.text.secondary} />,
         }))}
         onSelect={(id) => {
           setCfg({ provider: id as any });

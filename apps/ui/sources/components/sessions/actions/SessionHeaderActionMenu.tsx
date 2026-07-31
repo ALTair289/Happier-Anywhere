@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { listActionSpecs } from '@happier-dev/protocol';
 import { useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
@@ -51,7 +50,8 @@ import {
 } from '@/components/sessions/actions/sessionActionIds';
 import { buildSessionMetadataStabilitySignature } from '@/sync/domains/session/metadata/sessionMetadataStability';
 import { getSessionName } from '@/utils/sessions/sessionUtils';
-import { SESSION_HEADER_WIDE_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
+import { SESSION_HEADER_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type SessionHeaderActionMenuProps = Readonly<{
   sessionId: string;
@@ -464,7 +464,7 @@ function SessionHeaderActionMenuInner(props: SessionHeaderActionMenuProps) {
           })}
         >
           <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-            <Ionicons name="ellipsis-horizontal" size={SESSION_HEADER_WIDE_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
+            <Icon name="dots-three" size={SESSION_HEADER_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
           </View>
         </Pressable>
       )}

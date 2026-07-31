@@ -1,6 +1,5 @@
 import React from 'react';
 import { View, Platform, useWindowDimensions } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { ItemList } from '@/components/ui/lists/ItemList';
@@ -26,6 +25,7 @@ import { getEnabledAgentIds } from '@/agents/catalog/enabled';
 import { getResolvedBackendCatalogEntries } from '@/agents/backendCatalog/getResolvedBackendCatalogEntries';
 import { Text } from '@/components/ui/text/Text';
 import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeForView';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 export interface ProfilesListProps {
@@ -261,7 +261,7 @@ export function ProfilesList(props: ProfilesListProps) {
             {
                 id: 'favorite',
                 title: isFavorite ? t('profiles.actions.removeFromFavorites') : t('profiles.actions.addToFavorites'),
-                icon: isFavorite ? 'star' : 'star-outline',
+                icon: 'star',
                 onPress: () => toggleFavorite(''),
                 color: isFavorite ? selectedIndicatorColor : theme.colors.text.secondary,
             },
@@ -271,7 +271,7 @@ export function ProfilesList(props: ProfilesListProps) {
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
                 <View style={{ width: 28, alignItems: 'center', justifyContent: 'center' }}>
                     {normalizeNodeForView(
-                        <Ionicons name="checkmark-circle" size={24} color={selectedIndicatorColor} style={{ opacity: isSelected ? 1 : 0 }} />,
+                        <Icon name="check-circle" size={24} color={selectedIndicatorColor} style={{ opacity: isSelected ? 1 : 0 }} />,
                     )}
                 </View>
                 <ItemRowActions
@@ -309,7 +309,7 @@ export function ProfilesList(props: ProfilesListProps) {
                 )}
                 <View style={{ width: 28, alignItems: 'center', justifyContent: 'center' }}>
                     {normalizeNodeForView(
-                        <Ionicons name="checkmark-circle" size={24} color={selectedIndicatorColor} style={{ opacity: isSelected ? 1 : 0 }} />,
+                        <Icon name="check-circle" size={24} color={selectedIndicatorColor} style={{ opacity: isSelected ? 1 : 0 }} />,
                     )}
                 </View>
                 <ItemRowActions
@@ -346,7 +346,7 @@ export function ProfilesList(props: ProfilesListProps) {
                             testID="profiles-list-row:default-environment"
                             title={t('profiles.noProfile')}
                             subtitle={t('profiles.noProfileDescription')}
-                            leftElement={<Ionicons name="home-outline" size={29} color={theme.colors.text.secondary} />}
+                            leftElement={<Icon name="house" size={29} color={theme.colors.text.secondary} />}
                             showChevron={false}
                             selected={!props.selectedProfileId}
                             onPress={() => {
@@ -461,7 +461,7 @@ export function ProfilesList(props: ProfilesListProps) {
                         testID="profiles-list-row:default-environment"
                         title={t('profiles.noProfile')}
                         subtitle={t('profiles.noProfileDescription')}
-                        leftElement={<Ionicons name="home-outline" size={29} color={theme.colors.text.secondary} />}
+                        leftElement={<Icon name="house" size={29} color={theme.colors.text.secondary} />}
                         showChevron={false}
                         selected={!props.selectedProfileId}
                         onPress={() => {
@@ -521,7 +521,7 @@ export function ProfilesList(props: ProfilesListProps) {
                         testID="profiles-list-add-profile"
                         title={t('profiles.addProfile')}
                         subtitle={t('profiles.subtitle')}
-                        leftElement={<Ionicons name="add-circle-outline" size={29} color={theme.colors.button.secondary.tint} />}
+                        leftElement={<Icon name="plus-circle" size={29} color={theme.colors.button.secondary.tint} />}
                         onPress={props.onAddProfilePress}
                         showChevron={false}
                         showDivider={false}

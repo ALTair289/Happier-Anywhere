@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Item } from '@/components/ui/lists/Item';
@@ -13,8 +12,9 @@ import { clampQuotaPct, deriveQuotaUtilizationPct } from '@/sync/domains/connect
 import { formatResetCountdown, isResetCountdownOutdated, type ResetCountdownFormatter } from '@/sync/domains/connectedServices/formatResetCountdown';
 import { resolveQuotaTone } from '@/sync/domains/connectedServices/resolveQuotaTone';
 import { t } from '@/text';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
-type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
+type IoniconName = IconName;
 
 const RESET_COUNTDOWN_FORMATTER: ResetCountdownFormatter = {
   durationNow: () => t('connectedServices.quota.duration.now'),
@@ -108,7 +108,7 @@ export const ConnectedServiceQuotaMeterRow = React.memo(function ConnectedServic
       showChevron={false}
       rightElement={(
         <Pressable onPress={props.onTogglePin} hitSlop={12} style={{ paddingLeft: 8, paddingVertical: 4 }}>
-          <Ionicons name={pinIcon as IoniconName} size={18} color={props.pinned ? theme.colors.text.primary : theme.colors.text.secondary} />
+          <Icon name={pinIcon as IoniconName} size={16} color={props.pinned ? theme.colors.text.primary : theme.colors.text.secondary} />
         </Pressable>
       )}
     />

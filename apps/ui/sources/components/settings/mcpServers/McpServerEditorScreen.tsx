@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { Pressable } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
@@ -34,6 +33,7 @@ import { t } from '@/text';
 import { promptUnsavedChangesAlert } from '@/utils/ui/promptUnsavedChangesAlert';
 import { useActiveUnsavedChangesGuard } from '@/utils/navigation/useActiveUnsavedChangesGuard';
 import { useUnsavedChangesBeforeRemoveGuard } from '@/utils/navigation/useUnsavedChangesBeforeRemoveGuard';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type NavigationLike = Readonly<{
     setOptions?: (options: Readonly<Record<string, unknown>>) => void;
@@ -232,7 +232,7 @@ export const McpServerEditorScreen = React.memo(function McpServerEditorScreen()
             id: machine.id,
             title: machine.metadata?.displayName || machine.metadata?.host || machine.id,
             subtitle: machine.id,
-            icon: <Ionicons name="laptop-outline" size={22} color={theme.colors.text.secondary} />,
+            icon: <Icon name="laptop" size={20} color={theme.colors.text.secondary} />,
         }));
     }, [machines, theme.colors.text.secondary]);
 
@@ -416,7 +416,7 @@ export const McpServerEditorScreen = React.memo(function McpServerEditorScreen()
                     padding: 4,
                 })}
             >
-                <Ionicons name="checkmark" size={24} color={theme.colors.chrome.header.foreground} />
+                <Icon name="check" size={24} color={theme.colors.chrome.header.foreground} />
             </Pressable>
         );
     }, [activeTab, isDirty, saveAndClose, saveDisabled, theme.colors.chrome.header.foreground]);
@@ -434,7 +434,7 @@ export const McpServerEditorScreen = React.memo(function McpServerEditorScreen()
                     <Item
                         title={t('common.error')}
                         subtitle={t('settings.mcpServersServerNotFound')}
-                        icon={<Ionicons name="alert-circle-outline" size={29} color={theme.colors.state.danger.foreground} />}
+                        icon={<Icon name="warning-circle" size={29} color={theme.colors.state.danger.foreground} />}
                         showChevron={false}
                     />
                 </ItemGroup>

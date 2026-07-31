@@ -1,6 +1,5 @@
 import React from 'react';
 import { Pressable, type View as RNView } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 import { SearchableListSelector } from '@/components/ui/forms/SearchableListSelector';
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
@@ -11,6 +10,7 @@ import { t } from '@/text';
 import { MachineCliGlyphs } from '@/components/sessions/new/components/MachineCliGlyphs';
 import { resolveMachinePickerPresence } from './resolveMachinePickerPresence';
 import { buildMachineSelectionBuckets } from './machineSelection/buildMachineSelectionBuckets';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 export interface MachineSelectorProps {
     machines: ReadonlyArray<Machine>;
@@ -146,16 +146,17 @@ export function MachineSelector({
                     onToggleFavorite(machine);
                 }}
             >
-                <Ionicons
-                    name={isFavorite ? 'star' : 'star-outline'}
-                    size={22}
+                <Icon
+                    name="star"
+                    size={20}
                     color={isFavorite ? selectedColor : theme.colors.text.secondary}
+                    weight={isFavorite ? 'fill' : 'regular'}
                 />
             </Pressable>
         );
     }, [onToggleFavorite, showFavorites, theme.colors.button.primary.background, theme.colors.text.primary, theme.colors.text.secondary, theme.dark]);
 
-    const toDropdownItem = React.useCallback((machine: Machine, category: string, isFavorite: boolean, iconName: React.ComponentProps<typeof Ionicons>['name']): DropdownMenuItem => {
+    const toDropdownItem = React.useCallback((machine: Machine, category: string, isFavorite: boolean, iconName: IconName): DropdownMenuItem => {
         const presence = resolveMachinePickerPresence(machine);
         const unavailable = !presence.selectable;
         return {
@@ -166,7 +167,7 @@ export function MachineSelector({
             category,
             disabled: disableOfflineMachines && unavailable,
             icon: (
-                <Ionicons
+                <Icon
                     name={iconName}
                     size={20}
                     color={theme.colors.text.secondary}
@@ -182,7 +183,7 @@ export function MachineSelector({
                 machine,
                 favoritesSectionTitle,
                 true,
-                'desktop-outline',
+                'desktop',
             ))
             : [];
         const recentItems = showRecent
@@ -190,14 +191,14 @@ export function MachineSelector({
                 machine,
                 recentSectionTitle,
                 favoriteMachineIdSet.has(machine.id),
-                'time-outline',
+                'clock',
             ))
             : [];
         const allItems = visibleAllMachines.map((machine) => toDropdownItem(
             machine,
             allSectionTitle,
             favoriteMachineIdSet.has(machine.id),
-            'desktop-outline',
+            'desktop',
         ));
 
         return favoriteGroupPlacement === 'beforeRecent'
@@ -245,8 +246,8 @@ export function MachineSelector({
                         showSelectedDetail: false,
                         showSelectedSubtitle: false,
                         icon: (
-                            <Ionicons
-                                name="desktop-outline"
+                            <Icon
+                                name="desktop"
                                 size={24}
                                 color={theme.colors.text.secondary}
                             />
@@ -265,15 +266,15 @@ export function MachineSelector({
                 getItemTitle: (machine) => machine.metadata?.displayName || machine.metadata?.host || machine.id,
                 getItemSubtitle: undefined,
                 getItemIcon: () => (
-                    <Ionicons
-                        name="desktop-outline"
+                    <Icon
+                        name="desktop"
                         size={24}
                         color={theme.colors.text.secondary}
                     />
                 ),
                 getRecentItemIcon: () => (
-                    <Ionicons
-                        name="time-outline"
+                    <Icon
+                        name="clock"
                         size={24}
                         color={theme.colors.text.secondary}
                     />

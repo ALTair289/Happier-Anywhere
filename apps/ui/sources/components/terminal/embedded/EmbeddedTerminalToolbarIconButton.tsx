@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 type WebHoverablePressableState = Readonly<{
     pressed: boolean;
@@ -9,7 +9,7 @@ type WebHoverablePressableState = Readonly<{
 }>;
 
 export type EmbeddedTerminalToolbarIconButtonProps = Readonly<{
-    icon: React.ComponentProps<typeof Ionicons>['name'];
+    icon: IconName;
     testID?: string;
     accessibilityLabel: string;
     onPress: () => void;
@@ -34,7 +34,7 @@ export const EmbeddedTerminalToolbarIconButton = React.memo((props: EmbeddedTerm
                 };
             }}
         >
-            <Ionicons name={props.icon} size={18} color={theme.colors.text.secondary} />
+            <Icon name={props.icon} size={16} color={theme.colors.text.secondary} />
         </Pressable>
     );
 });

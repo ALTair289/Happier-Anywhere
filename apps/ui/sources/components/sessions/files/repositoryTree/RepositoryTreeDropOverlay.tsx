@@ -1,12 +1,12 @@
 import * as React from 'react';
 import { Animated, Easing, Platform, View, type ViewStyle } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { useLocalSetting } from '@/sync/store/hooks';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create((theme) => ({
     overlay: {
@@ -69,7 +69,7 @@ export function RepositoryTreeDropOverlay(props: Readonly<{ visible: boolean; de
                         : null,
                 ]}
             >
-                <Ionicons name="cloud-upload-outline" size={18} color={theme.colors.text.secondary} />
+                <Icon name="cloud-arrow-up" size={16} color={theme.colors.text.secondary} />
                 <View style={{ gap: 2 }}>
                     <Text style={styles.text}>{t('files.repositoryTree.dropToUpload')}</Text>
                     {props.destinationLabel ? (

@@ -7,7 +7,6 @@ import {
     type ViewStyle,
     type TextStyle,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { TextInput } from '@/components/ui/text/Text';
@@ -15,6 +14,7 @@ import { t } from '@/text';
 
 import { SelectionListInputGhost } from './SelectionListInputGhost';
 import { selectionListTestId } from './_shared';
+import { Icon } from '@/components/ui/icons/Icon';
 
 /**
  * SelectionListInputController owns the input field plus its surrounding
@@ -242,7 +242,7 @@ export function SelectionListInputController(
                     accessibilityRole="button"
                     accessibilityLabel={t('selectionList.clearInput')}
                 >
-                    <Ionicons name="close" size={12} color={theme.colors.surface.base} />
+                    <Icon name="x" size={14} color={theme.colors.surface.base} />
                 </Pressable>
             ) : null}
             {props.inputSuffix != null ? (

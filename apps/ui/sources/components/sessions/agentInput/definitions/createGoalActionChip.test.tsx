@@ -98,7 +98,7 @@ describe('createGoalActionChip', () => {
         expect(content?.props.onClearGoal).toBe(onClearGoal);
     });
 
-    it('renders the Primer goal icon without a visible set-goal label when no objective is set', async () => {
+    it('renders the goal glyph without a visible set-goal label when no objective is set', async () => {
         const { createGoalActionChip } = await import('./createGoalActionChip');
         const chip = createGoalActionChip({
             snapshot: null,
@@ -121,9 +121,8 @@ describe('createGoalActionChip', () => {
             </React.Fragment>,
         );
 
-        expect(screen.findAllByType('Ionicons')).toHaveLength(0);
-        const path = screen.findAllByType('Path')[0];
-        expect(path?.props.d).toContain('M20.172 6.75');
+        // The bullseye stands in for the goal; the chip stays unlabelled until one is set.
+        expect(screen.findAllByType('Icon')[0]?.props.name).toBe('target');
         expect(screen.getTextContent()).not.toContain('session.workState.goal.set');
     });
 

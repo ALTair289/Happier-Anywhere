@@ -41,10 +41,13 @@ vi.mock('./ToolTimelineIconFrame', () => ({
     ToolTimelineIconFrame: ({ icon }: { icon: React.ReactNode }) => React.createElement('ToolTimelineIconFrame', { testID: 'tool-timeline-row-icon' }, icon),
 }));
 
-vi.mock('@expo/vector-icons', () => ({
-    Ionicons: (props: Record<string, unknown>) => {
+// The row renders through the icon seam now, so the local capture mock follows it there. The
+// testID shape is unchanged so the assertions below keep working.
+vi.mock('@/components/ui/icons/Icon', () => ({
+    ICON_SIZE: { xs: 14, sm: 16, md: 20, lg: 24, xl: 29 },
+    Icon: (props: Record<string, unknown>) => {
         ioniconPropsState.push(props);
-        return React.createElement('Ionicons', { ...props, testID: `tool-timeline-ionicon:${String(props.name)}` });
+        return React.createElement('Icon', { ...props, testID: `tool-timeline-ionicon:${String(props.name)}` });
     },
 }));
 
@@ -91,7 +94,7 @@ describe('ToolTimelineRowHeader', () => {
         ioniconPropsState.length = 0;
     });
 
-    it('shows an open action button with open-outline icon when canOpen is true', async () => {
+    it('shows an open action button with arrow-square-out icon when canOpen is true', async () => {
         const { ToolTimelineRowHeader } = await import('./ToolTimelineRowHeader');
         const callOrder: string[] = [];
         const onOpen = vi.fn(() => {
@@ -113,7 +116,7 @@ describe('ToolTimelineRowHeader', () => {
             />,
         );
 
-        expect(ioniconPropsState.some((i) => i.name === 'open-outline')).toBe(true);
+        expect(ioniconPropsState.some((i) => i.name === 'arrow-square-out')).toBe(true);
     });
 
     it('renders the open action outside the primary row pressable on web', async () => {
@@ -330,10 +333,10 @@ describe('ToolTimelineRowHeader', () => {
             />,
         );
 
-        expect(ioniconPropsState.some((i) => i.name === 'chevron-down')).toBe(true);
+        expect(ioniconPropsState.some((i) => i.name === 'caret-down')).toBe(true);
 
         const getChevronLayerOpacity = () => {
-            const chevronIcon = screen.findByTestId('tool-timeline-ionicon:chevron-down');
+            const chevronIcon = screen.findByTestId('tool-timeline-ionicon:caret-down');
             expect(chevronIcon).toBeTruthy();
             return readOpacity(chevronIcon!.parent?.parent?.props.style);
         };
@@ -362,7 +365,7 @@ describe('ToolTimelineRowHeader', () => {
             />,
         );
 
-        expect(ioniconPropsState.some((i) => i.name === 'chevron-up')).toBe(true);
-        expect(ioniconPropsState.some((i) => i.name === 'chevron-down')).toBe(false);
+        expect(ioniconPropsState.some((i) => i.name === 'caret-up')).toBe(true);
+        expect(ioniconPropsState.some((i) => i.name === 'caret-down')).toBe(false);
     });
 });

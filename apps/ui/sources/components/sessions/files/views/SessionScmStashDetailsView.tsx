@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Platform, Pressable, ScrollView, View } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
-import { Octicons } from '@expo/vector-icons';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
 import { Text } from '@/components/ui/text/Text';
@@ -24,6 +23,7 @@ import { toTestIdSafeValue } from '@/utils/ui/toTestIdSafeValue';
 import { useScmReviewViewabilityConfig } from '@/scm/review/useScmReviewViewabilityConfig';
 
 import type { ScmStashEntry } from '@happier-dev/protocol';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     isManagedStashTransientErrorCode,
     resolveManagedStashRetryDelayMs,
@@ -472,7 +472,7 @@ export const SessionScmStashDetailsView = React.memo((props: SessionScmStashDeta
                                 opacity: pressed || operationBusy ? 0.78 : 1,
                             })}
                         >
-                            <Octicons name="upload" size={14} color={theme.colors.text.secondary} />
+                            <Icon name="upload" size={14} color={theme.colors.text.secondary} />
                             <Text style={{ fontSize: 12, color: theme.colors.text.secondary, ...Typography.default('semiBold') }}>
                                 {t('files.stash.restore')}
                             </Text>
@@ -498,7 +498,7 @@ export const SessionScmStashDetailsView = React.memo((props: SessionScmStashDeta
                                 opacity: pressed || operationBusy ? 0.78 : 1,
                             })}
                         >
-                            <Octicons name="trash" size={14} color={theme.colors.text.secondary} />
+                            <Icon name="trash" size={14} color={theme.colors.text.secondary} />
                             <Text style={{ fontSize: 12, color: theme.colors.text.secondary, ...Typography.default('semiBold') }}>
                                 {t('files.stash.discard')}
                             </Text>
@@ -536,9 +536,9 @@ export const SessionScmStashDetailsView = React.memo((props: SessionScmStashDeta
                                         opacity: pressed ? 0.85 : 1,
                                     })}
                                 >
-                                    <Octicons
-                                        name={stash.kind === 'transient' ? 'zap' : 'archive'}
-                                        size={13}
+                                    <Icon
+                                        name={stash.kind === 'transient' ? 'lightning' : 'archive'}
+                                        size={14}
                                         color={theme.colors.text.secondary}
                                     />
                                     <Text

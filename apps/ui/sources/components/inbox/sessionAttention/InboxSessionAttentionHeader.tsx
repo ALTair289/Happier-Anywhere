@@ -1,11 +1,11 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Text } from '@/components/ui/text/Text';
 import { t } from '@/text';
 import { SessionContextChips } from '@/components/sessions/context/SessionContextChips';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const InboxSessionAttentionHeader = React.memo(function InboxSessionAttentionHeader(props: Readonly<{
     sessionTitle: string;
@@ -30,7 +30,7 @@ export const InboxSessionAttentionHeader = React.memo(function InboxSessionAtten
                 onPress={props.onOpenSession}
                 style={({ pressed }) => [styles.openButton, pressed && styles.openButtonPressed]}
             >
-                <Ionicons name="open-outline" size={16} color={theme.colors.text.primary} />
+                <Icon name="arrow-square-out" size={16} color={theme.colors.text.primary} />
             </Pressable>
         </View>
     );

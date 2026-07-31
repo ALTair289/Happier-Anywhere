@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View, type StyleProp, type ViewStyle } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import type { ToolCallMessage } from '@/sync/domains/messages/messageTypes';
@@ -16,6 +15,8 @@ import { resolveInactiveSessionToolCallFailure } from '@/components/tools/shell/
 import { resolveToolStatusIndicatorKind } from '@/components/tools/shell/presentation/resolveToolStatusIndicatorKind';
 
 import type { GroupedToolCallChromeMode } from './groupedToolCallRowRenderDecision';
+import { Icon } from '@/components/ui/icons/Icon';
+import { ICON_SIZE } from '@/components/ui/icons/Icon';
 
 export type ToolCallsGroupChromeVariant = 'cards' | 'feed' | 'feed_background';
 export type ToolCallsGroupUnitPosition = 'header' | 'middle' | 'footer';
@@ -154,7 +155,7 @@ export const ToolCallsGroupHeaderChrome = React.memo(function ToolCallsGroupHead
             ]}
         >
             <View style={chromeStyles.headerGutter}>
-                <Ionicons name="layers-outline" size={16} color={theme.colors.text.secondary} />
+                <Icon name="stack-simple" size={16} color={theme.colors.text.secondary} />
             </View>
             <Text style={chromeStyles.title}>
                 {t('session.toolCalls')}
@@ -165,14 +166,14 @@ export const ToolCallsGroupHeaderChrome = React.memo(function ToolCallsGroupHead
                     {props.status === 'running' ? (
                         <ActivitySpinner size={iconMatchedSpinnerSize(GROUP_STATUS_ICON_SIZE_PX)} color={theme.colors.text.secondary} />
                     ) : props.status === 'error' ? (
-                        <Ionicons name="alert-circle" size={GROUP_STATUS_ICON_SIZE_PX} color={theme.colors.state.danger.foreground} />
+                        <Icon name="warning-circle" size={GROUP_STATUS_ICON_SIZE_PX} color={theme.colors.state.danger.foreground} />
                     ) : (
-                        <Ionicons name="checkmark-circle" size={GROUP_STATUS_ICON_SIZE_PX} color={theme.colors.state.success.foreground} />
+                        <Icon name="check-circle" size={GROUP_STATUS_ICON_SIZE_PX} color={theme.colors.state.success.foreground} />
                     )}
                 </View>
                 {props.expanded ? (
-                    <Ionicons
-                        name="chevron-up-outline"
+                    <Icon
+                        name="caret-up"
                         size={16}
                         color={theme.colors.text.secondary}
                     />
@@ -203,7 +204,7 @@ export const ToolCallsGroupExpandMoreChrome = React.memo(function ToolCallsGroup
     );
 });
 
-const GROUP_STATUS_ICON_SIZE_PX = 16;
+const GROUP_STATUS_ICON_SIZE_PX = ICON_SIZE.sm;
 
 const chromeStyles = StyleSheet.create((theme) => ({
     header: {

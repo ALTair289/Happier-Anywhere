@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Octicons } from '@expo/vector-icons';
 import { evaluateSessionHandoffWorkspaceTransferSourcePathSafety, getActionSpec } from '@happier-dev/protocol';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -33,6 +32,7 @@ import { getRecentMachinesFromSessions } from '@/utils/sessions/recentMachines';
 import { resolveMachineExactSpawnReadiness } from '@/sync/domains/machines/identity/resolveMachineExactSpawnReadiness';
 
 import type { SessionHandoffPickerResult } from './openSessionHandoffPicker';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type Props = CustomModalInjectedProps & Readonly<{
     sessionId: string;
@@ -316,7 +316,7 @@ export function SessionHandoffPickerModal({ onClose, setChrome, onResolve, sessi
                                     ? t('settingsSession.handoff.workspaceTransfer.enabledSubtitle')
                                     : t('settingsSession.handoff.workspaceTransfer.disabledSubtitle')
                             }
-                            icon={<Octicons name="file-directory" size={18} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="folder" size={16} color={theme.colors.text.secondary} />}
                             rightElement={
                                 <Switch
                                     value={effectiveWorkspaceTransferEnabled}
@@ -343,7 +343,7 @@ export function SessionHandoffPickerModal({ onClose, setChrome, onResolve, sessi
                             itemTrigger={{
                                 title: t('settingsSession.handoff.workspaceTransfer.strategy.title'),
                                 subtitle: t('settingsSession.handoff.workspaceTransfer.strategy.subtitle'),
-                                icon: <Octicons name="git-branch" size={18} color={theme.colors.text.secondary} />,
+                                icon: <Icon name="git-branch" size={16} color={theme.colors.text.secondary} />,
                                 itemProps: {
                                     disabled: workspaceTransferControlsDisabled,
                                     testID: 'session-handoff-workspace-transfer-strategy-trigger',
@@ -378,7 +378,7 @@ export function SessionHandoffPickerModal({ onClose, setChrome, onResolve, sessi
                             itemTrigger={{
                                 title: t('settingsSession.handoff.conflictPolicy.title'),
                                 subtitle: t('settingsSession.handoff.conflictPolicy.subtitle'),
-                                icon: <Octicons name="copy" size={18} color={theme.colors.text.secondary} />,
+                                icon: <Icon name="copy" size={16} color={theme.colors.text.secondary} />,
                                 itemProps: {
                                     disabled: workspaceTransferControlsDisabled,
                                 },
@@ -409,7 +409,7 @@ export function SessionHandoffPickerModal({ onClose, setChrome, onResolve, sessi
                             itemTrigger={{
                                 title: t('settingsSession.handoff.includeIgnoredMode.title'),
                                 subtitle: t('settingsSession.handoff.includeIgnoredMode.subtitle'),
-                                icon: <Octicons name="filter" size={18} color={theme.colors.text.secondary} />,
+                                icon: <Icon name="funnel-simple" size={16} color={theme.colors.text.secondary} />,
                                 itemProps: {
                                     disabled: workspaceTransferControlsDisabled,
                                 },
@@ -471,7 +471,7 @@ export function SessionHandoffPickerModal({ onClose, setChrome, onResolve, sessi
                                 itemTrigger={{
                                     title: t('settingsSession.handoff.directTargetMode.title'),
                                     subtitle: t('settingsSession.handoff.directTargetMode.subtitle'),
-                                    icon: <Octicons name="arrow-switch" size={18} color={theme.colors.text.secondary} />,
+                                    icon: <Icon name="arrows-left-right" size={16} color={theme.colors.text.secondary} />,
                                 }}
                                 items={SESSION_HANDOFF_DIRECT_TARGET_MODE_OPTIONS.map((item) => ({
                                     id: item.id,

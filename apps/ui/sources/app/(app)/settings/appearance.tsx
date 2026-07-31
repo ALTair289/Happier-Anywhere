@@ -1,5 +1,4 @@
 import React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { Appearance, Platform, View } from 'react-native';
 import { setStatusBarStyle } from 'expo-status-bar';
 import { Item } from '@/components/ui/lists/Item';
@@ -32,6 +31,7 @@ import {
 } from '@/theme/profiles/themeProfilePersistence';
 import type { ThemeProfileMode, ThemeProfilesLocalStateV1 } from '@/theme/profiles/themeProfileTypes';
 import type { LocalSettings } from '@/sync/domains/settings/localSettings';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const UI_FONT_SCALE_PRESETS = {
     xxsmall: 0.8,
@@ -328,7 +328,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                     testID="settings-appearance-themeProfiles"
                     title={t('settingsAppearance.themeProfiles.title')}
                     subtitle={activeThemeProfilesSubtitle}
-                    icon={<Ionicons name="color-palette-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="palette" size={29} color={theme.colors.accent.indigo} />}
                     detail={activeLightThemeProfile || activeDarkThemeProfile
                         ? t('settingsAppearance.themeProfiles.active')
                         : t('settingsAppearance.themeProfiles.defaultTheme')}
@@ -340,7 +340,7 @@ export default React.memo(function AppearanceSettingsScreen() {
             <ItemGroup title={t('settingsLanguage.title')} footer={t('settingsLanguage.description')}>
                 <Item
                     title={t('settingsLanguage.currentLanguage')}
-                    icon={<Ionicons name="language-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="translate" size={29} color={theme.colors.accent.blue} />}
                     detail={getLanguageDisplayText()}
                     onPress={() => router.push('/settings/language')}
                 />
@@ -361,7 +361,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsAppearance.textSize'),
                         subtitle: t('settingsAppearance.textSizeDescription'),
-                        icon: <Ionicons name="text-outline" size={29} color={theme.colors.accent.orange} />,
+                        icon: <Icon name="text-aa" size={29} color={theme.colors.accent.orange} />,
                         showSelectedSubtitle: false,
                     }}
                     items={textSizeMenuItems}
@@ -380,7 +380,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsAppearance.itemDensity'),
                         subtitle: t('settingsAppearance.itemDensityDescription'),
-                        icon: <Ionicons name="list-outline" size={29} color={theme.colors.accent.orange} />,
+                        icon: <Icon name="list" size={29} color={theme.colors.accent.orange} />,
                         showSelectedSubtitle: false,
                     }}
                     items={itemDensityMenuItems}
@@ -406,7 +406,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsAppearance.contentWidth'),
                         subtitle: t('settingsAppearance.contentWidthDescription'),
-                        icon: <Ionicons name="resize-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="resize" size={29} color={theme.colors.accent.blue} />,
                         showSelectedSubtitle: false,
                     }}
                     items={contentWidthMenuItems}
@@ -418,7 +418,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                 <Item
                     title={t('settingsAppearance.multiPanePanels')}
                     subtitle={t('settingsAppearance.multiPanePanelsDescription')}
-                    icon={<Ionicons name="browsers-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="browsers" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             value={uiMultiPanePanelsEnabled}
@@ -432,7 +432,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                 <Item
                     title={t('settingsAppearance.backdropBlur')}
                     subtitle={t('settingsAppearance.backdropBlurDescription')}
-                    icon={<Ionicons name="layers-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="stack-simple" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             value={uiBackdropBlurEnabled !== false}
@@ -454,7 +454,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsAppearance.detailsPaneTabsBehavior'),
                         subtitle: t('settingsAppearance.detailsPaneTabsBehaviorDescription'),
-                        icon: <Ionicons name="albums-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="stack" size={29} color={theme.colors.accent.blue} />,
                         showSelectedSubtitle: false,
                         itemProps: { disabled: !panelsSupported },
                     }}
@@ -494,7 +494,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                 <Item
                     title={t('settingsAppearance.showFlavorIcons')}
                     subtitle={t('settingsAppearance.showFlavorIconsDescription')}
-                    icon={<Ionicons name="apps-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="squares-four" size={29} color={theme.colors.accent.indigo} />}
                     rightElement={
                         <Switch
                             value={showFlavorIcons}
@@ -518,7 +518,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                     rowKind="item"
                     itemTrigger={{
                         title: t('settingsAppearance.tabBarAppearance.size'),
-                        icon: <Ionicons name="resize-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="resize" size={29} color={theme.colors.accent.blue} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-appearance-tabBarSize-select' },
                     }}
@@ -530,7 +530,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                 />
                 <Item
                     title={t('settingsAppearance.tabBarAppearance.showLabels')}
-                    icon={<Ionicons name="text-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="text-aa" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             testID="settings-appearance-tabBarShowLabels-switch"
@@ -546,7 +546,7 @@ export default React.memo(function AppearanceSettingsScreen() {
             <ItemGroup title={t('settingsAppearance.glass.title')} footer={t('settingsAppearance.glass.footer')}>
                 <Item
                     title={t('settingsAppearance.glass.enable')}
-                    icon={<Ionicons name="contrast-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="circle-half" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             testID="settings-appearance-glassBlur-switch"
@@ -569,7 +569,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                         rowKind="item"
                         itemTrigger={{
                             title: t('settingsAppearance.glass.intensity'),
-                            icon: <Ionicons name="options-outline" size={29} color={theme.colors.accent.blue} />,
+                            icon: <Icon name="sliders-horizontal" size={29} color={theme.colors.accent.blue} />,
                             showSelectedSubtitle: false,
                             itemProps: { testID: 'settings-appearance-glassBlurIntensity-select' },
                         }}
@@ -596,7 +596,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                     rowKind="item"
                     itemTrigger={{
                         title: t('settingsAppearance.tabBarBadges.gitTitle'),
-                        icon: <Ionicons name="git-branch-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="git-branch" size={29} color={theme.colors.accent.blue} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-appearance-tabBarGitBadge-select' },
                     }}
@@ -608,7 +608,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                 />
                 <Item
                     title={t('tabs.friends')}
-                    icon={<Ionicons name="people-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="users" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             testID="settings-appearance-tabBarFriendsBadge-switch"
@@ -620,7 +620,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                 />
                 <Item
                     title={t('tabs.inbox')}
-                    icon={<Ionicons name="mail-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="envelope" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             testID="settings-appearance-tabBarInboxBadge-switch"
@@ -632,7 +632,7 @@ export default React.memo(function AppearanceSettingsScreen() {
                 />
                 <Item
                     title={t('workspaceCockpit.tabs')}
-                    icon={<Ionicons name="albums-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="stack" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             testID="settings-appearance-tabBarOpenTabsBadge-switch"

@@ -478,8 +478,8 @@ describe('VoiceSurface', () => {
 
     const openConversation = screen.findByProps({ accessibilityLabel: 'common.open' });
     const icon = screen.root
-      .findAllByType('Ionicons' as any)
-      .find((node: any) => node.props?.name === 'chatbubble-ellipses-outline');
+      .findAllByType('Icon' as any)
+      .find((node: any) => node.props?.name === 'chat-circle-dots');
 
     expect(openConversation).toBeTruthy();
     expect(icon).toBeTruthy();
@@ -632,8 +632,8 @@ describe('VoiceSurface', () => {
     expect(typeof bargeIn.props.onPress).toBe('function');
 
     const micIcon = screen.root
-      .findAllByType('Ionicons' as any)
-      .find((n: any) => n.props?.name === 'mic-off-outline');
+      .findAllByType('Icon' as any)
+      .find((n: any) => n.props?.name === 'microphone-slash');
     expect(micIcon).toBeTruthy();
 
     await pressTestInstanceAsync(bargeIn, 'voiceSurface.a11y.bargeIn');

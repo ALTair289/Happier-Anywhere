@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { Platform, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -13,6 +12,7 @@ import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { useSettingMutable } from '@/sync/domains/state/storage';
 import { WINDOWS_REMOTE_SESSION_LAUNCH_MODE_OPTIONS } from '@/sync/domains/session/spawn/windowsRemoteSessionLaunchModeOptions';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const SessionRuntimeSettingsView = React.memo(function SessionRuntimeSettingsView() {
     const { theme } = useUnistyles();
@@ -32,7 +32,7 @@ export const SessionRuntimeSettingsView = React.memo(function SessionRuntimeSett
                     testID="settings-session-tmux-enabled-item"
                     title={t('profiles.tmux.spawnSessionsTitle')}
                     subtitle={useTmux ? t('profiles.tmux.spawnSessionsEnabledSubtitle') : t('profiles.tmux.spawnSessionsDisabledSubtitle')}
-                    icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="terminal" size={29} color={theme.colors.accent.indigo} />}
                     rightElement={<Switch value={useTmux} onValueChange={setUseTmux} />}
                     showChevron={false}
                     onPress={() => setUseTmux(!useTmux)}
@@ -54,7 +54,7 @@ export const SessionRuntimeSettingsView = React.memo(function SessionRuntimeSett
                             testID="settings-session-tmux-isolated-item"
                             title={t('profiles.tmux.isolatedServerTitle')}
                             subtitle={tmuxIsolated ? t('profiles.tmux.isolatedServerEnabledSubtitle') : t('profiles.tmux.isolatedServerDisabledSubtitle')}
-                            icon={<Ionicons name="albums-outline" size={29} color={theme.colors.accent.indigo} />}
+                            icon={<Icon name="stack" size={29} color={theme.colors.accent.indigo} />}
                             rightElement={<Switch value={tmuxIsolated} onValueChange={setTmuxIsolated} />}
                             showChevron={false}
                             onPress={() => setTmuxIsolated(!tmuxIsolated)}
@@ -100,7 +100,7 @@ export const SessionRuntimeSettingsView = React.memo(function SessionRuntimeSett
                             WINDOWS_REMOTE_SESSION_LAUNCH_MODE_OPTIONS.find((option) => option.value === windowsRemoteSessionLaunchMode)?.subtitleKey
                                 ?? 'windowsRemoteSessionLaunchMode.hiddenSubtitle',
                         ),
-                        icon: <Ionicons name="logo-windows" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="windows-logo" size={29} color={theme.colors.accent.blue} />,
                     }}
                     rowKind="item"
                     connectToTrigger
@@ -128,7 +128,7 @@ export const SessionRuntimeSettingsView = React.memo(function SessionRuntimeSett
                     subtitle={terminalConnectLegacySecretExportEnabled
                         ? t('settingsSession.terminalConnect.legacySecretExportEnabledSubtitle')
                         : t('settingsSession.terminalConnect.legacySecretExportDisabledSubtitle')}
-                    icon={<Ionicons name="shield-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="shield" size={29} color={theme.colors.accent.indigo} />}
                     rightElement={<Switch value={terminalConnectLegacySecretExportEnabled} onValueChange={setTerminalConnectLegacySecretExportEnabled} />}
                     showChevron={false}
                     onPress={() => setTerminalConnectLegacySecretExportEnabled(!terminalConnectLegacySecretExportEnabled)}

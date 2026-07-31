@@ -1,6 +1,5 @@
 import * as React from 'react';
 
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { DEFAULT_AGENT_ID, getAgentCore, isAgentId } from '@/agents/catalog/catalog';
@@ -28,6 +27,7 @@ import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
 import { useAllMachines } from '@/sync/store/hooks';
 import { useSetting, useSettings } from '@/sync/domains/state/storage';
 import { resolvePreferredMachineId } from '@/components/settings/pickers/resolvePreferredMachineId';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function normalizeSecretStringPromptInput(value: string | null): SecretString | null {
   if (value === null) return null;
@@ -92,7 +92,7 @@ export function LocalConversationSection(props: {
         title: t('settingsVoice.local.modelCustomTitle'),
         subtitle: t('settingsVoice.local.conversation.customBackendIdSubtitle'),
         icon: renderDropdownItemIcon({
-          name: 'create-outline',
+          name: 'pencil-simple',
           color: theme.colors.text.secondary,
         }),
       },
@@ -144,7 +144,7 @@ export function LocalConversationSection(props: {
         title: t('settingsVoice.local.modelCustomTitle'),
         subtitle: t('settingsVoice.local.modelCustomSubtitle'),
         icon: renderDropdownItemIcon({
-          name: 'create-outline',
+          name: 'pencil-simple',
           color: theme.colors.text.secondary,
         }),
       },
@@ -178,13 +178,13 @@ export function LocalConversationSection(props: {
         id: 'single',
         title: t('settingsVoice.local.conversation.rootSessionPolicy.singleTitle'),
         subtitle: t('settingsVoice.local.conversation.rootSessionPolicy.singleSubtitle'),
-        icon: <Ionicons name="radio-button-on-outline" size={22} color={theme.colors.text.secondary} />,
+        icon: <Icon name="radio-button" size={20} color={theme.colors.text.secondary} />,
       },
       {
         id: 'keep_warm',
         title: t('settingsVoice.local.conversation.rootSessionPolicy.keepWarmTitle'),
         subtitle: t('settingsVoice.local.conversation.rootSessionPolicy.keepWarmSubtitle'),
-        icon: <Ionicons name="flame-outline" size={22} color={theme.colors.text.secondary} />,
+        icon: <Icon name="flame" size={20} color={theme.colors.text.secondary} />,
       },
     ] as const;
   }, [theme.colors.text.secondary]);
@@ -246,13 +246,13 @@ export function LocalConversationSection(props: {
               id: 'agent',
               title: t('settingsFeatures.expVoiceAgent'),
               subtitle: t('settingsVoice.local.conversation.mode.voiceAgentSubtitle'),
-              icon: <Ionicons name="chatbubble-ellipses-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="chat-circle-dots" size={20} color={theme.colors.text.secondary} />,
             },
             {
               id: 'direct_session',
               title: t('settingsVoice.local.conversation.mode.directTitle'),
               subtitle: t('settingsVoice.local.conversation.mode.directSubtitle'),
-              icon: <Ionicons name="paper-plane-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="paper-plane" size={20} color={theme.colors.text.secondary} />,
             },
           ]}
           onSelect={(id) => {
@@ -359,13 +359,13 @@ export function LocalConversationSection(props: {
                   id: 'ephemeral',
                   title: t('settingsVoice.local.conversation.persistence.ephemeralTitle'),
                   subtitle: t('settingsVoice.local.conversation.persistence.ephemeralSubtitle'),
-                  icon: <Ionicons name="flash-outline" size={22} color={theme.colors.text.secondary} />,
+                  icon: <Icon name="lightning" size={20} color={theme.colors.text.secondary} />,
                 },
                 {
                   id: 'persistent',
                   title: t('settingsVoice.local.conversation.persistence.persistentTitle'),
                   subtitle: t('settingsVoice.local.conversation.persistence.persistentSubtitle'),
-                  icon: <Ionicons name="infinite-outline" size={22} color={theme.colors.text.secondary} />,
+                  icon: <Icon name="infinity" size={20} color={theme.colors.text.secondary} />,
                 },
               ]}
               onSelect={(id) => {
@@ -406,7 +406,7 @@ export function LocalConversationSection(props: {
                       id: 'replay',
                       title: t('settingsVoice.local.conversation.resumability.replayTitle'),
                       subtitle: t('settingsVoice.local.conversation.resumability.replaySubtitle'),
-                      icon: <Ionicons name="time-outline" size={22} color={theme.colors.text.secondary} />,
+                      icon: <Icon name="clock" size={20} color={theme.colors.text.secondary} />,
                     },
                     {
                       id: 'provider_resume',
@@ -419,7 +419,7 @@ export function LocalConversationSection(props: {
                             ? t('settingsVoice.local.conversation.resumability.disabledAgentNoProviderResume')
                             : t('settingsVoice.local.conversation.resumability.providerResumeSubtitle'),
                       disabled: !voiceAgentEnabled || cfg.agent.backend !== 'daemon' || (cfg.agent.agentSource === 'agent' && !providerResumeSupportedByAgent),
-                      icon: <Ionicons name="refresh-outline" size={22} color={theme.colors.text.secondary} />,
+                      icon: <Icon name="arrow-clockwise" size={20} color={theme.colors.text.secondary} />,
                     },
                   ]}
                   onSelect={(id) => {
@@ -460,13 +460,13 @@ export function LocalConversationSection(props: {
                       id: 'recent_messages',
                       title: t('settingsSession.replayResume.strategy.recentTitle'),
                       subtitle: t('settingsSession.replayResume.strategy.recentSubtitle'),
-                      icon: <Ionicons name="chatbubbles-outline" size={22} color={theme.colors.text.secondary} />,
+                      icon: <Icon name="chats-circle" size={20} color={theme.colors.text.secondary} />,
                     },
                     {
                       id: 'summary_plus_recent',
                       title: t('settingsSession.replayResume.strategy.summaryRecentTitle'),
                       subtitle: t('settingsSession.replayResume.strategy.summaryRecentSubtitle'),
-                      icon: <Ionicons name="document-text-outline" size={22} color={theme.colors.text.secondary} />,
+                      icon: <Icon name="file-text" size={20} color={theme.colors.text.secondary} />,
                     },
                   ]}
                   onSelect={(id) => {
@@ -528,19 +528,19 @@ export function LocalConversationSection(props: {
                   id: 'off',
                   title: t('settingsVoice.local.conversation.welcome.offTitle'),
                   subtitle: t('settingsVoice.local.conversation.welcome.offSubtitle'),
-                  icon: <Ionicons name="close-outline" size={22} color={theme.colors.text.secondary} />,
+                  icon: <Icon name="x" size={20} color={theme.colors.text.secondary} />,
                 },
                 {
                   id: 'immediate',
                   title: t('settingsVoice.local.conversation.welcome.immediateTitle'),
                   subtitle: t('settingsVoice.local.conversation.welcome.immediateSubtitle'),
-                  icon: <Ionicons name="happy-outline" size={22} color={theme.colors.text.secondary} />,
+                  icon: <Icon name="smiley" size={20} color={theme.colors.text.secondary} />,
                 },
                 {
                   id: 'on_first_turn',
                   title: t('settingsVoice.local.conversation.welcome.onFirstTurnTitle'),
                   subtitle: t('settingsVoice.local.conversation.welcome.onFirstTurnSubtitle'),
-                  icon: <Ionicons name="chatbox-outline" size={22} color={theme.colors.text.secondary} />,
+                  icon: <Icon name="chat" size={20} color={theme.colors.text.secondary} />,
                 },
               ]}
               onSelect={(id) => {
@@ -604,14 +604,14 @@ export function LocalConversationSection(props: {
                     subtitle: voiceAgentEnabled
                       ? t('settingsVoice.local.conversation.backend.daemonSubtitle')
                       : t('settingsVoice.local.conversation.resumability.disabledVoiceAgent'),
-                    icon: <Ionicons name="server-outline" size={22} color={theme.colors.text.secondary} />,
+                    icon: <Icon name="hard-drives" size={20} color={theme.colors.text.secondary} />,
                     disabled: !voiceAgentEnabled,
                   },
                   {
                     id: 'openai_compat',
                     title: t('settingsVoice.local.mediatorBackendOpenAi'),
                     subtitle: t('settingsVoice.local.conversation.backend.openAiSubtitle'),
-                    icon: <Ionicons name="cloud-outline" size={22} color={theme.colors.text.secondary} />,
+                    icon: <Icon name="cloud" size={20} color={theme.colors.text.secondary} />,
                   },
                 ]}
                 onSelect={(id) => {
@@ -751,13 +751,13 @@ export function LocalConversationSection(props: {
               id: 'session',
               title: t('settingsVoice.local.conversation.agentSource.followSessionTitle'),
               subtitle: t('settingsVoice.local.conversation.agentSource.followSessionSubtitle'),
-              icon: <Ionicons name="swap-horizontal-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="arrows-left-right" size={20} color={theme.colors.text.secondary} />,
             },
             {
               id: 'agent',
               title: t('settingsVoice.local.conversation.agentSource.fixedAgentTitle'),
               subtitle: t('settingsVoice.local.conversation.agentSource.fixedAgentSubtitle'),
-              icon: <Ionicons name="person-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="person" size={20} color={theme.colors.text.secondary} />,
             },
           ]}
           onSelect={(id) => {
@@ -827,13 +827,13 @@ export function LocalConversationSection(props: {
               id: 'read_only',
               title: t('settingsVoice.local.mediatorPermissionReadOnly'),
               subtitle: t('settingsVoice.local.conversation.permissionPolicy.readOnlySubtitle'),
-              icon: <Ionicons name="eye-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="eye" size={20} color={theme.colors.text.secondary} />,
             },
             {
               id: 'no_tools',
               title: t('settingsVoice.local.mediatorPermissionNoTools'),
               subtitle: t('settingsVoice.local.conversation.permissionPolicy.noToolsSubtitle'),
-              icon: <Ionicons name="hand-left-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="hand" size={20} color={theme.colors.text.secondary} />,
             },
           ]}
           onSelect={(id) => {
@@ -861,13 +861,13 @@ export function LocalConversationSection(props: {
               id: 'session',
               title: t('settingsVoice.local.mediatorChatModelSourceSession'),
               subtitle: t('settingsVoice.local.conversation.chatModelSource.sessionSubtitle'),
-              icon: <Ionicons name="layers-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="stack-simple" size={20} color={theme.colors.text.secondary} />,
             },
             {
               id: 'custom',
               title: t('settingsVoice.local.mediatorChatModelSourceCustom'),
               subtitle: t('settingsVoice.local.conversation.chatModelSource.customSubtitle'),
-              icon: <Ionicons name="options-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="sliders-horizontal" size={20} color={theme.colors.text.secondary} />,
             },
           ]}
           onSelect={(id) => {
@@ -948,19 +948,19 @@ export function LocalConversationSection(props: {
               id: 'chat',
               title: t('settingsVoice.local.mediatorCommitModelSourceChat'),
               subtitle: t('settingsVoice.local.conversation.commitModelSource.chatSubtitle'),
-              icon: <Ionicons name="chatbubble-ellipses-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="chat-circle-dots" size={20} color={theme.colors.text.secondary} />,
             },
             {
               id: 'session',
               title: t('settingsVoice.local.mediatorCommitModelSourceSession'),
               subtitle: t('settingsVoice.local.conversation.commitModelSource.sessionSubtitle'),
-              icon: <Ionicons name="layers-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="stack-simple" size={20} color={theme.colors.text.secondary} />,
             },
             {
               id: 'custom',
               title: t('settingsVoice.local.mediatorCommitModelSourceCustom'),
               subtitle: t('settingsVoice.local.conversation.commitModelSource.customSubtitle'),
-              icon: <Ionicons name="options-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="sliders-horizontal" size={20} color={theme.colors.text.secondary} />,
             },
           ]}
           onSelect={(id) => {
@@ -1074,13 +1074,13 @@ export function LocalConversationSection(props: {
               id: 'short',
               title: t('settingsVoice.local.mediatorVerbosityShort'),
               subtitle: t('settingsVoice.local.conversation.verbosity.shortSubtitle'),
-              icon: <Ionicons name="remove-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="minus" size={20} color={theme.colors.text.secondary} />,
             },
             {
               id: 'balanced',
               title: t('settingsVoice.local.mediatorVerbosityBalanced'),
               subtitle: t('settingsVoice.local.conversation.verbosity.balancedSubtitle'),
-              icon: <Ionicons name="reorder-two-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="list" size={20} color={theme.colors.text.secondary} />,
             },
           ]}
           onSelect={(id) => {

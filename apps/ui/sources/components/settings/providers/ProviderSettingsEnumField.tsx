@@ -1,6 +1,5 @@
 import React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import type { ProviderSettingFieldDef } from '@/agents/providers/shared/providerSettingsPlugin';
@@ -9,6 +8,7 @@ import { Item } from '@/components/ui/lists/Item';
 import { t } from '@/text';
 
 import { resolveProviderSettingsText } from './providerSettingsText';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const ProviderSettingsEnumField = React.memo(function ProviderSettingsEnumField(props: Readonly<{
     field: ProviderSettingFieldDef;
@@ -28,7 +28,7 @@ export const ProviderSettingsEnumField = React.memo(function ProviderSettingsEnu
                 testID={`settings-provider-field-${props.field.key}`}
                 title={resolveProviderSettingsText(props.field.title) ?? ''}
                 subtitle={resolveProviderSettingsText(props.field.subtitle) ?? t('settingsProviders.noOptionsAvailable')}
-                icon={<Ionicons name="list-outline" size={29} color={theme.colors.text.secondary} />}
+                icon={<Icon name="list" size={29} color={theme.colors.text.secondary} />}
                 showChevron={false}
                 disabled={true}
             />
@@ -60,8 +60,8 @@ export const ProviderSettingsEnumField = React.memo(function ProviderSettingsEnu
                     title={resolveProviderSettingsText(props.field.title) ?? ''}
                     subtitle={fieldSubtitle ?? selectedSubtitle}
                     detail={selectedTitle ?? undefined}
-                    icon={<Ionicons name="list-outline" size={29} color={theme.colors.text.secondary} />}
-                    rightElement={<Ionicons name={open ? 'chevron-up' : 'chevron-down'} size={20} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="list" size={29} color={theme.colors.text.secondary} />}
+                    rightElement={<Icon name={open ? 'caret-up' : 'caret-down'} size={20} color={theme.colors.text.secondary} />}
                     onPress={toggle}
                     showChevron={false}
                     selected={false}
@@ -73,7 +73,7 @@ export const ProviderSettingsEnumField = React.memo(function ProviderSettingsEnu
                 subtitle: resolveProviderSettingsText(opt.subtitle),
                 icon: (
                     <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                        <Ionicons name="radio-button-on-outline" size={22} color={theme.colors.text.secondary} />
+                        <Icon name="radio-button" size={20} color={theme.colors.text.secondary} />
                     </View>
                 ),
             }))}
@@ -103,7 +103,7 @@ export const ProviderSettingsMultiEnumField = React.memo(function ProviderSettin
                 testID={`settings-provider-field-${props.field.key}`}
                 title={resolveProviderSettingsText(props.field.title) ?? ''}
                 subtitle={resolveProviderSettingsText(props.field.subtitle) ?? t('settingsProviders.noOptionsAvailable')}
-                icon={<Ionicons name="list-outline" size={29} color={theme.colors.text.secondary} />}
+                icon={<Icon name="list" size={29} color={theme.colors.text.secondary} />}
                 showChevron={false}
                 disabled={true}
             />
@@ -143,8 +143,8 @@ export const ProviderSettingsMultiEnumField = React.memo(function ProviderSettin
                     title={resolveProviderSettingsText(props.field.title) ?? ''}
                     subtitle={resolveProviderSettingsText(props.field.subtitle)}
                     detail={detail}
-                    icon={<Ionicons name="list-outline" size={29} color={theme.colors.text.secondary} />}
-                    rightElement={<Ionicons name={open ? 'chevron-up' : 'chevron-down'} size={20} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="list" size={29} color={theme.colors.text.secondary} />}
+                    rightElement={<Icon name={open ? 'caret-up' : 'caret-down'} size={20} color={theme.colors.text.secondary} />}
                     onPress={toggle}
                     showChevron={false}
                     selected={false}
@@ -158,9 +158,9 @@ export const ProviderSettingsMultiEnumField = React.memo(function ProviderSettin
                     subtitle: resolveProviderSettingsText(opt.subtitle),
                     icon: (
                         <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
-                            <Ionicons
-                                name={checked ? 'checkbox-outline' : 'square-outline'}
-                                size={22}
+                            <Icon
+                                name={checked ? 'check-square' : 'square'}
+                                size={20}
                                 color={theme.colors.text.secondary}
                             />
                         </View>

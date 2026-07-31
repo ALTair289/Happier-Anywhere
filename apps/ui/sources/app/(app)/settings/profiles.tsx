@@ -1,6 +1,5 @@
 import React from 'react';
 import { View, Pressable, Platform } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useRouter } from 'expo-router';
 import { useSettingMutable } from '@/sync/domains/state/storage';
 import { StyleSheet } from 'react-native-unistyles';
@@ -22,6 +21,7 @@ import { SecretRequirementModal, type SecretRequirementModalResult } from '@/com
 import { getSecretSatisfaction } from '@/utils/secrets/secretSatisfaction';
 import { getRequiredSecretEnvVarNames } from '@/sync/domains/profiles/profileSecrets';
 import { fireAndForget } from '@/utils/system/fireAndForget';
+import { Icon } from '@/components/ui/icons/Icon';
 
 interface ProfileManagerProps {
     onProfileSelect?: (profile: AIBackendProfile | null) => void;
@@ -238,7 +238,7 @@ const ProfileManager = React.memo(function ProfileManager({ onProfileSelect, sel
             {
                 id: 'profileEnabled',
                 title: enabled ? t('common.enabled') : t('common.disabled'),
-                icon: enabled ? 'eye-outline' : 'eye-off-outline',
+                icon: enabled ? 'eye' : 'eye-slash',
                 onPress: () => {
                     setProfileEnabledById(setProfileEnabledOverride(profileEnabledById, profile, !enabled));
                 },
@@ -325,7 +325,7 @@ const ProfileManager = React.memo(function ProfileManager({ onProfileSelect, sel
                     <Item
                         title={t('settingsFeatures.profiles')}
                         subtitle={t('settingsFeatures.profilesDisabled')}
-                        icon={<Ionicons name="person-outline" size={29} color={theme.colors.accent.purple} />}
+                        icon={<Icon name="person" size={29} color={theme.colors.accent.purple} />}
                         rightElement={
                             <Switch
                                 value={useProfiles}

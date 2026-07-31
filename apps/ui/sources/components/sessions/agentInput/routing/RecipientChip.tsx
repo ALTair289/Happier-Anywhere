@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 
 import type { ParticipantRecipientV1 } from '@happier-dev/protocol';
 
@@ -12,6 +11,8 @@ import { Text } from '@/components/ui/text/Text';
 import { t } from '@/text';
 import { StyleSheet } from 'react-native-unistyles';
 import { buildRecipientRootStep } from '../definitions/createRecipientActionChip';
+import { Icon } from '@/components/ui/icons/Icon';
+import { AGENT_INPUT_CHIP_ICON_SIZE_PX, AGENT_INPUT_CHIP_ICON_STYLE } from '@/components/sessions/agentInput/definitions/agentInputChipIconMetrics';
 import {
     resolveRecipientFromOptionId,
     resolveRecipientLabel,
@@ -73,7 +74,7 @@ export const RecipientChip = React.memo(function RecipientChip(props: RecipientC
                     accessibilityLabel={t('session.participants.sendToTitle')}
                 >
                     <View style={styles.chipRow}>
-                        <Ionicons name="navigate-outline" size={16} color={props.ctx.iconColor} />
+                        <Icon name="navigation-arrow" size={AGENT_INPUT_CHIP_ICON_SIZE_PX} color={props.ctx.iconColor} style={AGENT_INPUT_CHIP_ICON_STYLE} />
                         {props.ctx.showLabel ? (
                             <Text numberOfLines={1} style={props.ctx.textStyle}>
                                 {t('session.participants.cardTo', { label: selectedLabel })}

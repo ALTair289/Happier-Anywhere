@@ -1,7 +1,6 @@
 import React from 'react';
 import { Pressable, View, useWindowDimensions } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { Switch } from '@/components/ui/forms/Switch';
 import { SegmentedTabBar } from '@/components/ui/navigation/SegmentedTabBar';
@@ -20,6 +19,7 @@ import { shadowLevelStyle } from '@/shadowElevation';
 import { t } from '@/text';
 import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
 import { Typography } from '@/constants/Typography';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type WebHoverablePressableState = Readonly<{
     pressed: boolean;
@@ -330,7 +330,7 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
                                     hitSlop={6}
                                 >
                                     {probe.phase === 'idle' ? (
-                                        <Ionicons name="refresh-outline" size={18} color={theme.colors.text.secondary} />
+                                        <Icon name="arrow-clockwise" size={16} color={theme.colors.text.secondary} />
                                     ) : (
                                         <ActivitySpinner
                                             size="small"
@@ -338,7 +338,7 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
                                             accessibilityLabel={probe.phase === 'loading'
                                                 ? (probe.loadingAccessibilityLabel ?? t('modelPickerOverlay.loadingModelsA11y'))
                                                 : (probe.refreshingAccessibilityLabel ?? t('modelPickerOverlay.refreshingModelsA11y'))}
-                                        />
+                                            />
                                     )}
                                 </Pressable>
                             ) : probe.phase !== 'idle' ? (
@@ -349,7 +349,7 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
                                         accessibilityLabel={probe.phase === 'loading'
                                             ? (probe.loadingAccessibilityLabel ?? t('modelPickerOverlay.loadingModelsA11y'))
                                             : (probe.refreshingAccessibilityLabel ?? t('modelPickerOverlay.refreshingModelsA11y'))}
-                                    />
+                                        />
                                 </View>
                             ) : null
                         ) : null}
@@ -369,7 +369,7 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
                                     autoCorrect={false}
                                     autoCapitalize="none"
                                     style={styles.searchInput as any}
-                            />
+                                />
                         </View>
                     ) : null}
 
@@ -423,8 +423,8 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
                                                         >
                                                             {isSelected ? (
                                                                 <View style={styles.optionCardSelectionMark}>
-                                                                    <Ionicons
-                                                                        name="checkmark-outline"
+                                                                    <Icon
+                                                                        name="check"
                                                                         size={14}
                                                                         color={theme.colors.text.primary}
                                                                         style={styles.optionCardIndicatorIcon}
@@ -457,10 +457,11 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
                                                                     }}
                                                                     style={styles.optionFavoriteButton}
                                                                 >
-                                                                    <Ionicons
-                                                                        name={isFavorite ? 'star' : 'star-outline'}
-                                                                        size={15}
+                                                                    <Icon
+                                                                        name="star"
+                                                                        size={14}
                                                                         color={isFavorite ? selectedIndicatorColor : theme.colors.text.secondary}
+                                                                        weight={isFavorite ? 'fill' : 'regular'}
                                                                     />
                                                                 </Pressable>
                                                             ) : null}
@@ -537,8 +538,8 @@ export function OptionPickerOverlay(props: OptionPickerOverlayProps) {
                                 </View>
                                 <View style={styles.customEntryIconSlot}>
                                     {customEditorVisible ? (
-                                        <Ionicons
-                                            name="checkmark-outline"
+                                        <Icon
+                                            name="check"
                                             size={14}
                                             color={theme.colors.text.primary}
                                             style={styles.optionCardIndicatorIcon}

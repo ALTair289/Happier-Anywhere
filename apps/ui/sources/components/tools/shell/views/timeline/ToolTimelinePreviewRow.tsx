@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 
 import type { ToolCallMessage } from '@/sync/domains/messages/messageTypes';
 import type { Metadata } from '@/sync/domains/state/storageTypes';
@@ -11,6 +10,7 @@ import { deriveToolTimelineDensity } from '@/components/tools/normalization/poli
 import { useSetting } from '@/sync/domains/state/storage';
 import { ToolTimelineRowHeader } from '@/components/tools/shell/views/timeline/ToolTimelineRowHeader';
 import { resolveToolViewDetailLevel } from '@/components/tools/normalization/policy/resolveToolViewDetailLevel';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     resolveToolViewDetailLevelDefaultForChromeMode,
     type ToolViewDetailLevelSetting,
@@ -89,7 +89,7 @@ export const ToolTimelinePreviewRow = React.memo(function ToolTimelinePreviewRow
     const statusKind = resolveToolStatusIndicatorKind(model.toolForRendering);
     const rightElement =
         statusKind === 'error' ? (
-            <Ionicons testID="tool-timeline-preview-row-error" name="alert-circle" size={16} color={theme.colors.state.danger.foreground} />
+            <Icon testID="tool-timeline-preview-row-error" name="warning-circle" size={16} color={theme.colors.state.danger.foreground} />
         ) : null;
 
     return (

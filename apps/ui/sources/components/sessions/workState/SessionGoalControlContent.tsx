@@ -7,10 +7,10 @@ import { t } from '@/text';
 
 import { GoalBudgetDisclosure } from './GoalBudgetDisclosure';
 import { SessionGoalActionsMenu, type SessionGoalMenuAction } from './SessionGoalActionsMenu';
-import { GoalIcon } from './goalIcon';
 import { GoalUsageMetadata } from './GoalUsageMetadata';
 import { canPauseOrResumeGoal, resolveGoalActionCapabilities, resolveGoalStatusLabelKey, type GoalActionCapabilities } from './goalActionVisibility';
 import type { SessionWorkStateItem } from './sessionWorkStateTypes';
+import { Icon, ICON_SIZE } from '@/components/ui/icons/Icon';
 
 type GoalSaveBudgetDraft = Readonly<{
     tokenBudgetChanged: boolean;
@@ -199,7 +199,7 @@ export function SessionGoalControlContent(props: Readonly<{
                                                 id: 'session-goal-complete',
                                                 testID: 'session-goal-complete-button',
                                                 label: t('session.workState.goal.statusComplete'),
-                                                icon: 'checkmark-done' as const,
+                                                icon: 'checks' as const,
                                                 onPress: props.onComplete,
                                             }]
                                             : []),
@@ -208,7 +208,7 @@ export function SessionGoalControlContent(props: Readonly<{
                                                 id: 'session-goal-clear',
                                                 testID: 'session-goal-clear-button',
                                                 label: t('session.workState.goal.clear'),
-                                                icon: 'trash-outline' as const,
+                                                icon: 'trash' as const,
                                                 destructive: true,
                                                 onPress: props.onClear,
                                             }]
@@ -221,7 +221,7 @@ export function SessionGoalControlContent(props: Readonly<{
                 </View>
             ) : (
                 <View style={styles.setHeader}>
-                    <GoalIcon color={theme.colors.text.primary} size={22} />
+                    <Icon name="target" color={theme.colors.text.primary} size={ICON_SIZE.lg} />
                     <View style={styles.setHeadingText}>
                         <Text style={[styles.title, { color: theme.colors.text.primary }]}>
                             {t('session.workState.goal.setTitle')}
@@ -250,7 +250,7 @@ export function SessionGoalControlContent(props: Readonly<{
                 />
             ) : props.goal ? (
                 <View style={styles.objectiveRow}>
-                    <GoalIcon color={theme.colors.text.primary} size={16} />
+                    <Icon name="target" color={theme.colors.text.primary} size={ICON_SIZE.sm} />
                     <Text style={[styles.objectiveText, { color: theme.colors.text.primary }]} numberOfLines={4}>
                         {props.goal.title}
                     </Text>

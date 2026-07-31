@@ -7,19 +7,20 @@ import { createTranscriptSessionCommonPropsFixture, flattenStyleProp } from './t
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
+// Stamps a per-glyph testID so these assertions can name the glyph they expect, exactly as the
+// retired `@expo/vector-icons` mock did. The global setup mock renders `Icon` as a bare host
+// element, which carries props but no addressable id.
+vi.mock('@/components/ui/icons/Icon', () => ({
+    Icon: (props: any) => React.createElement('Icon', { ...props, testID: `icon:${props.name}` }),
+    ICON_SIZE: { xs: 14, sm: 16, md: 20, lg: 24, xl: 29 },
+}));
+
 installToolCallsGroupViewCommonModuleMocks({
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
         return createReactNativeWebMock({
             Platform: { OS: 'ios', select: (values: any) => values?.ios ?? values?.default ?? null },
         });
-    },
-    icons: async () => {
-        const { createExpoVectorIconsMock } = await import('@/dev/testkit/mocks/icons');
-        return {
-            ...createExpoVectorIconsMock(),
-            Ionicons: (props: any) => React.createElement('Ionicons', { ...props, testID: `ionicons:${props.name}` }),
-        };
     },
     text: async () => {
         const { createTextModuleMock } = await import('@/dev/testkit/mocks/text');
@@ -65,9 +66,9 @@ describe('ToolCallsGroupUnitHeaderRow', () => {
 
         expect(screen.getTextContent()).toContain('session.toolCalls');
         expect(screen.getTextContent()).toContain('2');
-        expect(screen.findByTestId('ionicons:checkmark-circle')).not.toBeNull();
-        expect(screen.findByTestId('ionicons:layers-outline')).not.toBeNull();
-        expect(screen.findByTestId('ionicons:chevron-up-outline')).toBeNull();
+        expect(screen.findByTestId('icon:check-circle')).not.toBeNull();
+        expect(screen.findByTestId('icon:stack-simple')).not.toBeNull();
+        expect(screen.findByTestId('icon:caret-up')).toBeNull();
     });
 
     it('derives a running status spinner when any tool is still running', async () => {
@@ -79,7 +80,7 @@ describe('ToolCallsGroupUnitHeaderRow', () => {
         });
 
         expect(screen.findAllByType('ActivityIndicator' as any).length).toBeGreaterThan(0);
-        expect(screen.findByTestId('ionicons:checkmark-circle')).toBeNull();
+        expect(screen.findByTestId('icon:check-circle')).toBeNull();
     });
 
     it('derives an error status when any tool errored and none are running', async () => {
@@ -90,7 +91,7 @@ describe('ToolCallsGroupUnitHeaderRow', () => {
             ],
         });
 
-        expect(screen.findByTestId('ionicons:alert-circle')).not.toBeNull();
+        expect(screen.findByTestId('icon:warning-circle')).not.toBeNull();
     });
 
     it('stops reporting running for pending-permission tools in inactive sessions, like the grouped row', async () => {
@@ -113,7 +114,7 @@ describe('ToolCallsGroupUnitHeaderRow', () => {
         // canceled permission resolves to 'permission_blocked' — not running, not error —
         // exactly as ToolCallsGroupRow derives the grouped status today.
         expect(screen.findAllByType('ActivityIndicator' as any)).toHaveLength(0);
-        expect(screen.findByTestId('ionicons:checkmark-circle')).not.toBeNull();
+        expect(screen.findByTestId('icon:check-circle')).not.toBeNull();
     });
 
     it('keeps the header non-pressable while collapsed and collapses via setExpanded(false) when expanded', async () => {
@@ -133,7 +134,7 @@ describe('ToolCallsGroupUnitHeaderRow', () => {
             setExpanded,
         });
 
-        expect(expanded.findByTestId('ionicons:chevron-up-outline')).not.toBeNull();
+        expect(expanded.findByTestId('icon:caret-up')).not.toBeNull();
         await expanded.pressByTestIdAsync('transcript-tool-calls-header');
         expect(setExpanded).toHaveBeenCalledWith(false);
     });

@@ -1,4 +1,3 @@
-import { Ionicons } from '@expo/vector-icons';
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -18,6 +17,7 @@ import {
     type FavoriteModelSelectionV1,
 } from '@/sync/domains/models/favoriteModelSelections';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type NewSessionModelOption = Readonly<{
     value: ModelMode;
@@ -132,10 +132,11 @@ function FavoriteToggle(props: Readonly<{
             }}
             style={styles.favoriteButton}
         >
-            <Ionicons
-                name={props.model.favorite ? 'star' : 'star-outline'}
+            <Icon
+                name="star"
                 size={20}
                 color={props.model.favorite ? props.selectedIndicatorColor : theme.colors.text.secondary}
+                weight={props.model.favorite ? 'fill' : 'regular'}
             />
         </Pressable>
     );
@@ -159,8 +160,8 @@ function ModelRightElement(props: Readonly<{
                     onPress={props.onToggleFavorite}
                 />
             ) : null}
-            <Ionicons
-                name="checkmark-circle"
+            <Icon
+                name="check-circle"
                 size={24}
                 color={props.selectedIndicatorColor}
                 style={{ opacity: props.selected ? 1 : 0 }}
@@ -220,7 +221,7 @@ export function NewSessionModelSelectionContent(props: NewSessionModelSelectionC
                 title={row.title}
                 subtitle={row.subtitle}
                 leftElement={normalizeNodeForView(
-                    <Ionicons name="sparkles-outline" size={24} color={theme.colors.text.secondary} />,
+                    <Icon name="sparkle" size={24} color={theme.colors.text.secondary} />,
                 )}
                 showChevron={false}
                 selected={selected}
@@ -260,7 +261,7 @@ export function NewSessionModelSelectionContent(props: NewSessionModelSelectionC
                 subtitle: row.subtitle,
                 category: t('profiles.groups.favorites'),
                 disabled: !row.available,
-                icon: normalizeNodeForView(<Ionicons name="sparkles-outline" size={20} color={theme.colors.text.secondary} />),
+                icon: normalizeNodeForView(<Icon name="sparkle" size={20} color={theme.colors.text.secondary} />),
                 rightElement: row.favoritable ? (
                     <FavoriteToggle
                         model={row}
@@ -276,7 +277,7 @@ export function NewSessionModelSelectionContent(props: NewSessionModelSelectionC
                 subtitle: row.subtitle,
                 category: t('common.all'),
                 disabled: !row.available,
-                icon: normalizeNodeForView(<Ionicons name="sparkles-outline" size={20} color={theme.colors.text.secondary} />),
+                icon: normalizeNodeForView(<Icon name="sparkle" size={20} color={theme.colors.text.secondary} />),
                 rightElement: row.favoritable ? (
                     <FavoriteToggle
                         model={row}
@@ -308,7 +309,7 @@ export function NewSessionModelSelectionContent(props: NewSessionModelSelectionC
                         subtitle: selectedRow?.title ?? t('newSession.selectModelDescription'),
                         showSelectedDetail: false,
                         showSelectedSubtitle: false,
-                        icon: normalizeNodeForView(<Ionicons name="sparkles-outline" size={24} color={theme.colors.text.secondary} />),
+                        icon: normalizeNodeForView(<Icon name="sparkle" size={24} color={theme.colors.text.secondary} />),
                         itemProps: {
                             testID: 'new-session-model-dropdown-trigger',
                         },

@@ -10,7 +10,6 @@
  */
 
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { Pressable, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -18,6 +17,7 @@ import { Item } from '@/components/ui/lists/Item';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { Text } from '@/components/ui/text/Text';
 import { Modal } from '@/modal';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     SlideTransitionSwitch,
     StoryDeckSlideTransition,
@@ -207,7 +207,7 @@ function MotionVariantsPreviewModal(props: Readonly<{ onClose: () => void }>): R
             <View style={styles.header}>
                 <Text style={styles.headerTitle}>Motion primitives — variants</Text>
                 <Pressable onPress={props.onClose} style={styles.closeButton}>
-                    <Ionicons name="close" size={20} color={theme.colors.text.primary} />
+                    <Icon name="x" size={20} color={theme.colors.text.primary} />
                 </Pressable>
             </View>
             <View style={styles.body}>
@@ -239,7 +239,7 @@ export function MotionPreviewDevSection(): React.ReactElement {
                 testID="dev-motion-preview-slide-variants"
                 title="Slide Transition Variants"
                 subtitle="Discrete switch + carousel drag/tap, with blur/preset/reduced-motion toggles"
-                icon={<Ionicons name="layers-outline" size={28} color={theme.colors.text.primary} />}
+                icon={<Icon name="stack-simple" size={29} color={theme.colors.text.primary} />}
                 onPress={showMotionVariantsPreview}
             />
         </ItemGroup>

@@ -1,6 +1,5 @@
 import * as React from "react";
 import { View, Pressable, Platform } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { Modal } from '@/modal';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { MarkdownView } from '@/components/markdown/MarkdownView';
@@ -94,6 +93,7 @@ import {
 } from '@/utils/sessions/deriveTranscriptInteraction';
 import { useSession } from '@/sync/domains/state/storage';
 import { isRecoveredHistoryTranscriptObservation } from '@/sync/domains/messages/transcriptObservationProvenance';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type StreamSegmentStateForRendering = 'streaming' | 'complete' | 'interrupted';
 const FAIL_CLOSED_TRANSCRIPT_INTERACTION = deriveTranscriptInteraction({ kind: 'public' });
@@ -1541,9 +1541,9 @@ function ForkMessageButton(props: {
       {isForking ? (
         <ActivitySpinner size="small" color={theme.colors.text.secondary} />
       ) : (
-        <Ionicons
-          name="git-branch-outline"
-          size={12}
+        <Icon
+          name="git-branch"
+          size={14}
           color={theme.colors.text.secondary}
         />
       )}
@@ -1610,9 +1610,9 @@ function CopyMessageButton(props: { markdown: string; testID?: string; invertedA
         pressed && styles.copyMessageButtonPressed,
       ]}
     >
-      <Ionicons
-        name={copied ? "checkmark-outline" : "copy-outline"}
-        size={12}
+      <Icon
+        name={copied ? "check" : "copy"}
+        size={14}
         color={copied ? theme.colors.state.success.foreground : theme.colors.text.secondary}
       />
     </Pressable>

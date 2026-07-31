@@ -1,6 +1,5 @@
 import * as React from 'react';
 
-import { Ionicons } from '@expo/vector-icons';
 import { Pressable } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -15,6 +14,7 @@ import { checkModelPackUpdateAvailable, ensureModelPackInstalled, getModelPackIn
 import { formatModelPackBuildLabel } from '@/voice/modelPacks/formatBuildLabel';
 import { resolveModelPackManifestUrl } from '@/voice/modelPacks/manifests';
 import { getSherpaStreamingSttPackOptions } from '@/voice/sherpa/stt/sherpaStreamingSttPacks';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type Progress = { loaded: number; total: number; file?: string };
 
@@ -285,10 +285,10 @@ export function LocalNeuralSttSettings(props: {
         rightElement={
           modelStatus === 'downloading' ? (
             <Pressable onPress={cancelPrepare} hitSlop={10}>
-              <Ionicons name="close" size={20} color={theme.colors.text.secondary} />
+              <Icon name="x" size={20} color={theme.colors.text.secondary} />
             </Pressable>
           ) : (
-            <Ionicons name="download-outline" size={20} color={theme.colors.text.secondary} />
+            <Icon name="download" size={20} color={theme.colors.text.secondary} />
           )
         }
         showChevron={false}

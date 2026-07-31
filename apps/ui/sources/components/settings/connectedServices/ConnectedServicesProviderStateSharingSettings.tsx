@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { Platform } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -20,6 +19,7 @@ import {
 } from '@happier-dev/protocol';
 
 import { ProviderStateSharingRows } from './ProviderStateSharingRow';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type ProviderConfigMode = ConnectedServicesProviderConfigSharingModeV1;
 
@@ -46,19 +46,19 @@ function buildProviderConfigModeOptions(params: Readonly<{
             id: 'linked',
             title: t('connectedServices.providerStateSharing.configLinkedTitle'),
             subtitle: t('connectedServices.providerStateSharing.configLinkedSubtitle'),
-            icon: <Ionicons name="link-outline" size={22} color={params.colors.blue} />,
+            icon: <Icon name="link" size={20} color={params.colors.blue} />,
         },
         {
             id: 'copied',
             title: t('connectedServices.providerStateSharing.configCopiedTitle'),
             subtitle: t('connectedServices.providerStateSharing.configCopiedSubtitle'),
-            icon: <Ionicons name="copy-outline" size={22} color={params.colors.indigo} />,
+            icon: <Icon name="copy" size={20} color={params.colors.indigo} />,
         },
         {
             id: 'isolated',
             title: t('connectedServices.providerStateSharing.configIsolatedTitle'),
             subtitle: t('connectedServices.providerStateSharing.configIsolatedSubtitle'),
-            icon: <Ionicons name="lock-closed-outline" size={22} color={params.colors.secondary} />,
+            icon: <Icon name="lock" size={20} color={params.colors.secondary} />,
         },
     ];
 }
@@ -167,7 +167,7 @@ export function ConnectedServicesProviderStateSharingDefaultsGroup(props: Readon
                 rowKind="item"
                 itemTrigger={{
                     title: t('connectedServices.providerStateSharing.configTitle'),
-                    icon: <Ionicons name="settings-outline" size={22} color={theme.colors.accent.blue} />,
+                    icon: <Icon name="sliders-horizontal" size={20} color={theme.colors.accent.blue} />,
                     showSelectedSubtitle: true,
                     itemProps: { testID: 'connected-services-provider-state-sharing-config-default' },
                 }}
@@ -183,7 +183,7 @@ export function ConnectedServicesProviderStateSharingDefaultsGroup(props: Readon
                         ? t('connectedServices.providerStateSharing.stateEnabledSubtitle')
                         : t('connectedServices.providerStateSharing.stateDisabledSubtitle')
                 }
-                icon={<Ionicons name="albums-outline" size={22} color={theme.colors.accent.blue} />}
+                icon={<Icon name="stack" size={20} color={theme.colors.accent.blue} />}
                 rightElement={(
                     <Switch
                         compact
@@ -200,7 +200,7 @@ export function ConnectedServicesProviderStateSharingDefaultsGroup(props: Readon
                     mode="info"
                     title={t('connectedServices.providerStateSharing.sharedStateActiveNoteTitle')}
                     subtitle={t('connectedServices.providerStateSharing.sharedStateActiveNoteBody')}
-                    icon={<Ionicons name="information-circle-outline" size={22} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="info" size={20} color={theme.colors.text.secondary} />}
                     showChevron={false}
                 />
             ) : null}
@@ -209,7 +209,7 @@ export function ConnectedServicesProviderStateSharingDefaultsGroup(props: Readon
                     testID="connected-services-provider-state-sharing-backend-overrides"
                     title={t('connectedServices.providerStateSharing.title')}
                     subtitle={t('connectedServices.providerStateSharing.footer')}
-                    icon={<Ionicons name="options-outline" size={22} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="sliders-horizontal" size={20} color={theme.colors.text.secondary} />}
                     onPress={props.onOpenBackendOverrides}
                 />
             ) : null}

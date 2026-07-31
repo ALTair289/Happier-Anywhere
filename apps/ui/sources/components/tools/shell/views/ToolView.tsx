@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { View, TouchableOpacity, Platform } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 import { getToolViewComponent } from '@/components/tools/renderers/core/_registry';
 import { Message, ToolCall } from '@/sync/domains/messages/messageTypes';
 import { useElapsedTime } from '@/hooks/ui/useElapsedTime';
@@ -47,6 +46,7 @@ import { RowActionRevealSlot } from '@/components/sessions/transcript/messageAct
 import { readCoarsePrimaryPointer, useRowActionHoverHost } from '@/components/sessions/transcript/messageActions/rowActionRevealHost';
 import { shouldShowTranscriptRowPinAction } from '@/components/sessions/transcript/messageCopyVisibility';
 import type { ToolRowPinAction } from '@/components/sessions/transcript/toolCalls/ToolCallPinAction';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const TOOL_VIEW_HIGHLIGHT_RADIUS = 12;
 
@@ -257,11 +257,11 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
 
     const statusKind = resolveToolStatusIndicatorKind(toolForRendering);
     if (statusKind === 'permission_blocked') {
-        statusIcon = <Ionicons name="remove-circle-outline" size={20} color={theme.colors.text.secondary} />;
+        statusIcon = <Icon name="minus-circle" size={20} color={theme.colors.text.secondary} />;
     } else if (statusKind === 'permission_pending') {
-        statusIcon = <Ionicons name="lock-closed-outline" size={20} color={theme.colors.state.neutral.foreground} />;
+        statusIcon = <Icon name="lock" size={20} color={theme.colors.state.neutral.foreground} />;
     } else if (isToolUseError) {
-        statusIcon = <Ionicons name="remove-circle-outline" size={20} color={theme.colors.text.secondary} />;
+        statusIcon = <Icon name="minus-circle" size={20} color={theme.colors.text.secondary} />;
         hideDefaultError = true;
         minimal = true;
     } else {
@@ -272,7 +272,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                 }
                 break;
             case 'error':
-                statusIcon = <Ionicons name="alert-circle" size={20} color={theme.colors.state.danger.foreground} />;
+                statusIcon = <Icon name="warning-circle" size={20} color={theme.colors.state.danger.foreground} />;
                 break;
             case 'completed':
             case 'none':
@@ -384,7 +384,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                 <View style={styles.headerRight}>
                     {errorSummary ? (
                         <View style={styles.headerError}>
-                            <Ionicons name="alert-circle" size={18} color={theme.colors.state.danger.foreground} />
+                            <Icon name="warning-circle" size={16} color={theme.colors.state.danger.foreground} />
                             <Text style={styles.headerErrorText} numberOfLines={1}>
                                 {errorSummary}
                             </Text>
@@ -422,11 +422,11 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                             accessibilityLabel={secondaryTapAction === 'open' ? t('toolView.open') : t('toolView.expand')}
                         >
                             {secondaryTapAction === 'open' ? (
-                                <Ionicons name="open-outline" size={18} color={theme.colors.text.secondary} />
+                                <Icon name="arrow-square-out" size={16} color={theme.colors.text.secondary} />
                             ) : (
-                                <Ionicons
-                                    name={isExpanded ? 'chevron-up-outline' : 'chevron-down-outline'}
-                                    size={18}
+                                <Icon
+                                    name={isExpanded ? 'caret-up' : 'caret-down'}
+                                    size={16}
                                     color={theme.colors.text.secondary}
                                 />
                             )}

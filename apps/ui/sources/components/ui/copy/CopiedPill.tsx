@@ -1,4 +1,3 @@
-import { Ionicons } from '@expo/vector-icons';
 import * as React from 'react';
 import type { StyleProp, ViewStyle } from 'react-native';
 import { View } from 'react-native';
@@ -6,6 +5,7 @@ import { StyleSheet } from 'react-native-unistyles';
 
 import { t } from '@/text';
 import { Text } from '@/components/ui/text/Text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type CopiedPillProps = Readonly<{
     visible: boolean;
@@ -27,7 +27,7 @@ export function CopiedPill(props: CopiedPillProps) {
             accessibilityLiveRegion="polite"
             style={[styles.container, props.style]}
         >
-            <Ionicons name="checkmark-outline" size={14} color={styles.icon.color} />
+            <Icon name="check" size={14} color={styles.icon.color} />
             <Text style={styles.label}>{label}</Text>
         </View>
     );

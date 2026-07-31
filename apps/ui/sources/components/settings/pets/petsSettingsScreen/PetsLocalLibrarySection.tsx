@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import type { BuiltInPetPackage } from '@/components/pets/builtIns/builtInPetRegistry';
@@ -11,6 +10,7 @@ import { openExternalUrl } from '@/utils/url/openExternalUrl';
 
 import { DevicePetSelector, type DetectedDevicePetSelectorItem, type LocalDevicePetSelectorItem } from '../DevicePetSelector';
 import type { CodexDetectionState, LocalPetImportDiagnostic, LocalPetRemovalDiagnostic } from './types';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const PETS_HELP_URL = 'https://docs.happier.dev';
 
@@ -52,7 +52,7 @@ export function PetsLocalLibrarySection(props: PetsLocalLibrarySectionProps): Re
                                 subtitle={t('settingsPets.removeFromDeviceDaemonErrorSubtitle', {
                                     code: props.removalDiagnostic.code,
                                 })}
-                                icon={<Ionicons name="warning-outline" size={25} color={theme.colors.state.danger.foreground} />}
+                                icon={<Icon name="warning" size={24} color={theme.colors.state.danger.foreground} />}
                                 detail={props.removalDiagnostic.code}
                                 mode="info"
                             />
@@ -64,7 +64,7 @@ export function PetsLocalLibrarySection(props: PetsLocalLibrarySectionProps): Re
                         testID="settings-pets-help-docs"
                         title={t('settingsPets.helpDocsTitle')}
                         subtitle={t('settingsPets.helpDocsSubtitle')}
-                        icon={<Ionicons name="help-circle-outline" size={25} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="question" size={24} color={theme.colors.text.secondary} />}
                         onPress={() => void openExternalUrl(PETS_HELP_URL)}
                     />
                 </ItemGroup>
@@ -75,7 +75,7 @@ export function PetsLocalLibrarySection(props: PetsLocalLibrarySectionProps): Re
                                 testID="settings-pets-detect-codex-pets"
                                 title={t('settingsPets.detectCodexPetsTitle')}
                                 subtitle={t('settingsPets.detectCodexPetsSubtitle')}
-                                icon={<Ionicons name="search-outline" size={25} color={theme.colors.accent.blue} />}
+                                icon={<Icon name="magnifying-glass" size={24} color={theme.colors.accent.blue} />}
                                 detail={props.codexDetectionState === 'loading' ? t('common.scanning') : undefined}
                                 loading={props.codexDetectionState === 'loading'}
                                 onPress={props.onDiscoverPets}
@@ -128,7 +128,7 @@ function PetsDetectedCodexState(props: Readonly<{
                             subtitle={t('settingsPets.importToDeviceDaemonErrorSubtitle', {
                                 code: props.importDiagnostic.code,
                             })}
-                            icon={<Ionicons name="warning-outline" size={25} color={theme.colors.state.danger.foreground} />}
+                            icon={<Icon name="warning" size={24} color={theme.colors.state.danger.foreground} />}
                             detail={props.importDiagnostic.code}
                             mode="info"
                         />
@@ -145,7 +145,7 @@ function PetsDetectedCodexState(props: Readonly<{
                     <Item
                         title={t('settingsPets.detectedCodexPetsEmptyTitle')}
                         subtitle={t('settingsPets.detectedCodexPetsEmptySubtitle')}
-                        icon={<Ionicons name="file-tray-outline" size={25} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="tray" size={24} color={theme.colors.text.secondary} />}
                         mode="info"
                     />
                 </ItemGroup>
@@ -160,7 +160,7 @@ function PetsDetectedCodexState(props: Readonly<{
                     <Item
                         title={t('settingsPets.detectedCodexPetsNoTargetTitle')}
                         subtitle={t('settingsPets.detectedCodexPetsNoTargetSubtitle')}
-                        icon={<Ionicons name="cloud-offline-outline" size={25} color={theme.colors.state.danger.foreground} />}
+                        icon={<Icon name="cloud-slash" size={24} color={theme.colors.state.danger.foreground} />}
                         mode="info"
                     />
                 </ItemGroup>
@@ -175,7 +175,7 @@ function PetsDetectedCodexState(props: Readonly<{
                     <Item
                         title={t('settingsPets.detectedCodexPetsErrorTitle')}
                         subtitle={t('settingsPets.detectedCodexPetsErrorSubtitle')}
-                        icon={<Ionicons name="warning-outline" size={25} color={theme.colors.state.danger.foreground} />}
+                        icon={<Icon name="warning" size={24} color={theme.colors.state.danger.foreground} />}
                         mode="info"
                     />
                 </ItemGroup>
@@ -190,7 +190,7 @@ function PetsDetectedCodexState(props: Readonly<{
                     <Item
                         title={t('settingsPets.detectedCodexPetsDaemonMismatchTitle')}
                         subtitle={t('settingsPets.detectedCodexPetsDaemonMismatchSubtitle')}
-                        icon={<Ionicons name="refresh-outline" size={25} color={theme.colors.state.danger.foreground} />}
+                        icon={<Icon name="arrow-clockwise" size={24} color={theme.colors.state.danger.foreground} />}
                         mode="info"
                     />
                 </ItemGroup>

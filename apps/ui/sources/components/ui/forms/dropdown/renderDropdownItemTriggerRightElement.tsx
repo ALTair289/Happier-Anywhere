@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { View } from 'react-native';
 
-import { Ionicons } from '@expo/vector-icons';
 
 import {
     ITEM_CHEVRON_SIZE,
@@ -9,6 +8,7 @@ import {
 } from '@/components/ui/lists/itemDensityMetrics';
 import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeForView';
 import { Text } from '@/components/ui/text/Text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export function renderDropdownItemTriggerRightElement(params: Readonly<{
     detail: string | null;
@@ -19,8 +19,8 @@ export function renderDropdownItemTriggerRightElement(params: Readonly<{
 }>) {
     const resolvedDensity = params.detailDensity ?? 'comfortable';
     const chevron = normalizeNodeForView(
-        <Ionicons
-            name={params.open ? 'chevron-up' : 'chevron-down'}
+        <Icon
+            name={params.open ? 'caret-up' : 'caret-down'}
             size={ITEM_CHEVRON_SIZE[resolvedDensity]}
             color={params.chevronColor}
         />,

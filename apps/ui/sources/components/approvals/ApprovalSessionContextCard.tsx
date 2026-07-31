@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -11,6 +10,7 @@ import type { Machine, Session } from '@/sync/domains/state/storageTypes';
 import { t } from '@/text';
 import { SessionContextChips } from '@/components/sessions/context/SessionContextChips';
 import { readDisplayPathForSession } from '@/sync/ops/sessionMachineTarget';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const ApprovalSessionContextCard = React.memo(function ApprovalSessionContextCard(props: Readonly<{
     session: Session | null;
@@ -54,7 +54,7 @@ export const ApprovalSessionContextCard = React.memo(function ApprovalSessionCon
                         onPress={() => router.push(`/session/${props.session!.id}`)}
                         style={({ pressed }) => [styles.openButton, pressed && styles.openButtonPressed]}
                     >
-                        <Ionicons name="open-outline" size={16} color={theme.colors.text.primary} />
+                        <Icon name="arrow-square-out" size={16} color={theme.colors.text.primary} />
                     </Pressable>
                 ) : null}
             </View>
@@ -62,12 +62,12 @@ export const ApprovalSessionContextCard = React.memo(function ApprovalSessionCon
             <View style={styles.requesterRow}>
                 {props.requesterAgentId ? (
                     <View style={styles.requesterChip}>
-                        <Ionicons name="sparkles-outline" size={12} color={theme.colors.text.secondary} />
+                        <Icon name="sparkle" size={14} color={theme.colors.text.secondary} />
                         <Text style={styles.metaText}>{props.requesterAgentId}</Text>
                     </View>
                 ) : null}
                 <View style={styles.requesterChip}>
-                    <Ionicons name="git-branch-outline" size={12} color={theme.colors.text.secondary} />
+                    <Icon name="git-branch" size={14} color={theme.colors.text.secondary} />
                     <Text style={styles.metaText}>{props.requesterSurface}</Text>
                 </View>
             </View>

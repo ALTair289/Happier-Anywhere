@@ -1,4 +1,3 @@
-import { Ionicons } from '@expo/vector-icons';
 import * as React from 'react';
 import { Platform, Pressable, StyleSheet, useWindowDimensions, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
@@ -6,6 +5,7 @@ import { useUnistyles } from 'react-native-unistyles';
 import { COMPOSER_SURFACE_RADIUS } from '@/components/sessions/agentInput/composerContentInset';
 import { ITEM_SUBTITLE_TEXT_METRICS, ITEM_TITLE_TEXT_METRICS } from '@/components/ui/lists/itemDensityMetrics';
 import { Text } from '@/components/ui/text/Text';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 export type SessionBannerTone = 'warning' | 'neutral';
 
@@ -21,7 +21,7 @@ type SessionBannerAction = Readonly<{
 type SessionWarningActionBannerProps = Readonly<{
     /** `neutral` covers informational notices; `warning` (default) covers actionable problems. */
     tone?: SessionBannerTone;
-    iconName?: React.ComponentProps<typeof Ionicons>['name'] | null;
+    iconName?: IconName | null;
     title?: string;
     body?: string;
     /** Primary action. Omitted for notice-style banners that carry no action. */
@@ -102,7 +102,7 @@ export function SessionWarningActionBanner(props: SessionWarningActionBannerProp
         };
     const iconName = props.iconName === null
         ? null
-        : props.iconName ?? (tone === 'neutral' ? 'information-circle-outline' : 'warning-outline');
+        : props.iconName ?? (tone === 'neutral' ? 'info' : 'warning');
 
     const hasPrimaryAction = typeof props.onActionPress === 'function'
         && typeof props.actionLabel === 'string'
@@ -148,7 +148,7 @@ export function SessionWarningActionBanner(props: SessionWarningActionBannerProp
             >
                 {iconName ? (
                     // Optical nudge: the glyph's ink sits above its box centre next to the title.
-                    <Ionicons name={iconName} size={16} color={toneTokens.icon} style={{ marginTop: 1 }} />
+                    <Icon name={iconName} size={16} color={toneTokens.icon} style={{ marginTop: 1 }} />
                 ) : null}
                 {/* Title/body separation matches `Item`: iOS needs a hair of space under the
                     title, elsewhere the subtitle line-height already provides it. */}

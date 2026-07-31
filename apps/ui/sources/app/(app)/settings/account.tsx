@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { View, Pressable, Platform, useWindowDimensions } from 'react-native';
 import { useAuth } from '@/auth/context/AuthContext';
-import { Ionicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
 import { formatSecretKeyForBackup } from '@/auth/recovery/secretKeyBackup';
 import { CopiedPill } from '@/components/ui/copy/CopiedPill';
@@ -45,6 +44,7 @@ import { getConnectedServiceCredentialPlain } from '@/sync/api/account/apiConnec
 import { isWebMobileLikeQrScannerHost } from '@/utils/platform/webMobileHeuristics';
 import { AccountEncryptionMigrateInvalidParamsReasonSchema } from '@happier-dev/protocol';
 import { setClipboardStringSafe } from '@/utils/ui/clipboard';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 export default React.memo(() => {
@@ -200,7 +200,7 @@ export default React.memo(() => {
                                 testID="settings-account-add-your-phone"
                                 title={t('settings.addYourPhone')}
                                 subtitle={t('settings.addYourPhoneSubtitle')}
-                                icon={<Ionicons name="phone-portrait-outline" size={29} color={theme.colors.accent.blue} />}
+                                icon={<Icon name="device-mobile" size={29} color={theme.colors.accent.blue} />}
                                 onPress={() => router.push('/settings/add-phone')}
                                 showChevron={false}
                             />
@@ -209,7 +209,7 @@ export default React.memo(() => {
                             <Item
                                 title={t('settingsAccount.linkNewDevice')}
                                 subtitle={isConnecting ? t('common.scanning') : t('settingsAccount.linkNewDeviceSubtitle')}
-                                icon={<Ionicons name="qr-code-outline" size={29} color={theme.colors.accent.blue} />}
+                                icon={<Icon name="qr-code" size={29} color={theme.colors.accent.blue} />}
                                 onPress={connectAccount}
                                 disabled={isConnecting}
                                 showChevron={false}
@@ -238,7 +238,7 @@ export default React.memo(() => {
                                 disabled={savingUsername}
                                 loading={savingUsername}
                                 showChevron={false}
-                                icon={<Ionicons name="at-outline" size={29} color={theme.colors.text.secondary} />}
+                                icon={<Icon name="at" size={29} color={theme.colors.text.secondary} />}
                             />
                         )}
                         <ProviderIdentityItems
@@ -297,8 +297,8 @@ export default React.memo(() => {
                             title={t('settingsAccount.secretKey')}
                             subtitle={showSecret ? t('settingsAccount.tapToHide') : t('settingsAccount.tapToReveal')}
                             icon={
-                                <Ionicons
-                                    name={showSecret ? 'eye-off-outline' : 'eye-outline'}
+                                <Icon
+                                    name={showSecret ? 'eye-slash' : 'eye'}
                                     size={29}
                                     color={theme.colors.accent.orange}
                                 />
@@ -312,9 +312,9 @@ export default React.memo(() => {
                                             testID="settings-account-secret-key-copy-copied"
                                         />
                                     ) : (
-                                        <Ionicons
-                                            name="copy-outline"
-                                            size={18}
+                                        <Icon
+                                            name="copy"
+                                            size={16}
                                             color={theme.colors.text.secondary}
                                         />
                                     )}
@@ -347,9 +347,9 @@ export default React.memo(() => {
                                     }}>
                                         {t('settingsAccount.secretKeyLabel')}
                                     </Text>
-                                    <Ionicons
-                                        name={copyFeedback.isCopied('secretKey') ? "checkmark-circle" : "copy-outline"}
-                                        size={18}
+                                    <Icon
+                                        name={copyFeedback.isCopied('secretKey') ? "check-circle" : "copy"}
+                                        size={16}
                                         color={copyFeedback.isCopied('secretKey') ? theme.colors.state.success.foreground : theme.colors.text.secondary}
                                     />
                                 </View>
@@ -569,7 +569,7 @@ export default React.memo(() => {
                         testID="settings-account-logout"
                         title={t('settingsAccount.logout')}
                         subtitle={t('settingsAccount.logoutSubtitle')}
-                        icon={<Ionicons name="log-out-outline" size={29} color={theme.colors.state.danger.foreground} />}
+                        icon={<Icon name="sign-out" size={29} color={theme.colors.state.danger.foreground} />}
                         destructive
                         onPress={handleLogout}
                     />

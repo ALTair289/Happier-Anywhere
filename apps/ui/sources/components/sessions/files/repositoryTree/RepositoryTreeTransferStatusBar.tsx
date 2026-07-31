@@ -1,13 +1,13 @@
 import * as React from 'react';
 import { Animated, Easing, Platform, Pressable, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { formatByteSize } from '@/utils/files/formatByteSize';
 import type { WorkspaceDownloadState, WorkspaceUploadState } from '@/hooks/session/files/useWorkspaceFileTransfers';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const BAR_HEIGHT = 4;
 
@@ -112,7 +112,7 @@ function UploadRow(props: Readonly<{ state: Extract<WorkspaceUploadState, { stat
     return (
         <View testID="repository-tree-upload-status" style={{ gap: 8 }}>
             <View style={styles.row}>
-                <Ionicons name="cloud-upload-outline" size={16} color={theme.colors.text.secondary} />
+                <Icon name="cloud-arrow-up" size={16} color={theme.colors.text.secondary} />
                 <Text numberOfLines={1} style={styles.label}>{label}</Text>
                 <Pressable
                     testID="repository-tree-upload-cancel"
@@ -122,7 +122,7 @@ function UploadRow(props: Readonly<{ state: Extract<WorkspaceUploadState, { stat
                     style={styles.cancelButton}
                     hitSlop={10}
                 >
-                    <Ionicons name="close" size={16} color={theme.colors.text.secondary} />
+                    <Icon name="x" size={16} color={theme.colors.text.secondary} />
                 </Pressable>
             </View>
             {props.state.status === 'uploading' ? <TransferProgressBar progress={progress} /> : null}
@@ -143,7 +143,7 @@ function DownloadRow(props: Readonly<{ state: Extract<WorkspaceDownloadState, { 
     return (
         <View testID="repository-tree-download-status" style={{ gap: 8 }}>
             <View style={styles.row}>
-                <Ionicons name="download-outline" size={16} color={theme.colors.text.secondary} />
+                <Icon name="download" size={16} color={theme.colors.text.secondary} />
                 <Text numberOfLines={1} style={styles.label}>{label}</Text>
                 <Pressable
                     testID="repository-tree-download-cancel"
@@ -153,7 +153,7 @@ function DownloadRow(props: Readonly<{ state: Extract<WorkspaceDownloadState, { 
                     style={styles.cancelButton}
                     hitSlop={10}
                 >
-                    <Ionicons name="close" size={16} color={theme.colors.text.secondary} />
+                    <Icon name="x" size={16} color={theme.colors.text.secondary} />
                 </Pressable>
             </View>
             <TransferProgressBar progress={progress} />

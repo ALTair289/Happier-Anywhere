@@ -1,6 +1,5 @@
 import React from 'react';
 import { Linking } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -19,6 +18,7 @@ import { TokenStorage, type AuthCredentials } from '@/auth/storage/tokenStorage'
 import { authProviderRegistry, normalizeProviderId } from '@/auth/providers/registry';
 import { useOAuthProviderConfigured } from '@/hooks/server/useOAuthProviderConfigured';
 import { isSafeExternalAuthUrl } from '@/auth/providers/externalAuthUrl';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type ProviderIdentityItemsProps = Readonly<{
     profile: Profile;
@@ -144,7 +144,7 @@ function ProviderIdentityItem(props: Readonly<{
                 cachePolicy="memory-disk"
             />
         ) : (
-            <Ionicons name={iconName as any} size={29} color={iconColor} />
+            <Icon name={iconName as any} size={29} color={iconColor} />
         );
 
     if (!identity) {

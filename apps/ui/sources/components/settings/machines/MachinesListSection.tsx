@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { ActiveSelectionMachinesSection } from '@/components/settings/server/sections/ActiveSelectionMachinesSection';
@@ -8,6 +7,7 @@ import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { t } from '@/text';
 
 import type { useMachinesSettingsViewModel } from './machinesSettingsViewModel';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type MachinesSettingsViewModel = ReturnType<typeof useMachinesSettingsViewModel>;
 
@@ -25,7 +25,7 @@ export const MachinesListSection = React.memo(function MachinesListSection(props
             <ItemGroup title={t('settings.machines')}>
                 <Item
                     title={title}
-                    icon={<Ionicons name="desktop-outline" size={29} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="desktop" size={29} color={theme.colors.text.secondary} />}
                     showChevron={false}
                 />
             </ItemGroup>

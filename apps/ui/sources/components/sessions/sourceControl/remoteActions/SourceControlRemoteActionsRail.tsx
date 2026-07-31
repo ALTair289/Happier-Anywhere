@@ -1,15 +1,15 @@
 import * as React from 'react';
 import { Platform, View } from 'react-native';
-import { Octicons } from '@expo/vector-icons';
 
 import { IconAction } from '@/components/ui/buttons/IconAction';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type SourceControlRemoteAction = Readonly<{
     key: 'fetch' | 'pull' | 'push' | 'publish';
-    iconName: 'sync' | 'arrow-down' | 'arrow-up' | 'upload';
+    iconName: 'arrows-clockwise' | 'arrow-down' | 'arrow-up' | 'upload';
     label: string;
     disabled: boolean;
     onPress: () => void;
@@ -37,7 +37,7 @@ const RemoteActionButton = React.memo((props: Readonly<{
         disabled={props.action.disabled}
         onPress={props.action.onPress}
     >
-        <Octicons name={props.action.iconName} size={16} color={props.iconColor} />
+        <Icon name={props.action.iconName} size={16} color={props.iconColor} />
     </IconAction>
 ));
 

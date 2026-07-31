@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { RoundButton } from '@/components/ui/buttons/RoundButton';
@@ -11,6 +10,7 @@ import { Text } from '@/components/ui/text/Text';
 import { t } from '@/text';
 
 import { OAuthView, type OAuthViewConfig } from '@/components/ui/navigation/OAuthView';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const ConnectedServiceOauthEmbeddedView = React.memo(function ConnectedServiceOauthEmbeddedView(props: Readonly<{
   name: string;
@@ -55,7 +55,7 @@ export const ConnectedServiceOauthEmbeddedView = React.memo(function ConnectedSe
             testID="connectedServices.oauthEmbedded.switchMethodItem"
             title={props.fallbackAction.title}
             subtitle={props.fallbackAction.subtitle}
-            icon={<Ionicons name="swap-horizontal-outline" size={22} color={theme.colors.accent.blue} />}
+            icon={<Icon name="arrows-left-right" size={20} color={theme.colors.accent.blue} />}
             onPress={props.fallbackAction.onPress}
           />
         </ItemGroup>

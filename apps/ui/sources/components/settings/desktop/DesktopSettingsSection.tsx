@@ -1,6 +1,5 @@
 import * as React from 'react';
 
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { Item } from '@/components/ui/lists/Item';
@@ -9,6 +8,7 @@ import { Switch } from '@/components/ui/forms/Switch';
 import { t } from '@/text';
 
 import { useDesktopAutostart } from './useDesktopAutostart';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const DesktopSettingsSection = React.memo(function DesktopSettingsSection() {
     const { theme } = useUnistyles();
@@ -27,7 +27,7 @@ export const DesktopSettingsSection = React.memo(function DesktopSettingsSection
                 testID="settings-desktop-autostart-enabled"
                 title={t('settingsDesktop.startOnLoginTitle')}
                 subtitle={autostart.error ?? t('settingsDesktop.startOnLoginSubtitle')}
-                icon={<Ionicons name="desktop-outline" size={29} color={theme.colors.accent.blue} />}
+                icon={<Icon name="desktop" size={29} color={theme.colors.accent.blue} />}
                 rightElement={(
                     <Switch
                         value={autostart.enabled}

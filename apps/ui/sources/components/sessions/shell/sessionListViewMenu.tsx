@@ -1,12 +1,12 @@
 import React from 'react';
 import { Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
 import { t } from '@/text';
 import type { SessionFolderViewModeV1 } from './sessionFolderShellTypes';
 import type { SessionListFolderSortModeV1 } from '@/sync/domains/session/listing/sessionListFolderSortMode';
+import { Icon, ICON_SIZE } from '@/components/ui/icons/Icon';
 import {
     SESSION_LIST_ORDERING_MODES_V1,
     resolveEffectiveSessionListFolderSortMode,
@@ -59,14 +59,14 @@ export function SessionListViewMenuButton(props: Readonly<{
             category: t('sessionsList.orderingMode.title'),
             title: getOrderingModeTitle(mode),
             icon: (
-                <Ionicons
-                    name={mode === 'custom' ? 'reorder-three-outline' : mode === 'created' ? 'calendar-outline' : 'time-outline'}
-                    size={16}
+                <Icon
+                    name={mode === 'custom' ? 'list' : mode === 'created' ? 'calendar' : 'clock'}
+                    size={ICON_SIZE.sm}
                     color={iconColor}
                 />
             ),
             rightElement: props.orderingMode === mode
-                ? <Ionicons name="checkmark" size={16} color={selectedIconColor} />
+                ? <Icon name="check" size={ICON_SIZE.sm} color={selectedIconColor} />
                 : null,
         })),
         {
@@ -76,7 +76,7 @@ export function SessionListViewMenuButton(props: Readonly<{
             title: props.folderViewMode === 'tree'
                 ? t('sessionsList.folderViewOff')
                 : t('sessionsList.folderViewTree'),
-            icon: <Ionicons name="folder-outline" size={16} color={iconColor} />,
+            icon: <Icon name="folder" size={ICON_SIZE.sm} color={iconColor} />,
             disabled: props.disabled,
         },
         {
@@ -85,10 +85,10 @@ export function SessionListViewMenuButton(props: Readonly<{
             category: t('sessionsList.folderSortMode'),
             title: t('sessionsList.folderSortFoldersFirst'),
             subtitle: t('sessionsList.folderSortFoldersFirstDescription'),
-            icon: <Ionicons name="folder-outline" size={16} color={iconColor} />,
+            icon: <Icon name="folder" size={ICON_SIZE.sm} color={iconColor} />,
             disabled: props.disabled,
             rightElement: effectiveFolderSortMode === 'foldersFirst'
-                ? <Ionicons name="checkmark" size={16} color={selectedIconColor} />
+                ? <Icon name="check" size={ICON_SIZE.sm} color={selectedIconColor} />
                 : null,
         },
         {
@@ -99,10 +99,10 @@ export function SessionListViewMenuButton(props: Readonly<{
             subtitle: folderSortLockedByOrdering
                 ? t('sessionsList.folderSortMixedDisabledInDateMode')
                 : t('sessionsList.folderSortMixedDescription'),
-            icon: <Ionicons name="swap-vertical-outline" size={16} color={iconColor} />,
+            icon: <Icon name="arrows-down-up" size={ICON_SIZE.sm} color={iconColor} />,
             disabled: props.disabled || folderSortLockedByOrdering,
             rightElement: effectiveFolderSortMode === 'mixed'
-                ? <Ionicons name="checkmark" size={16} color={selectedIconColor} />
+                ? <Icon name="check" size={ICON_SIZE.sm} color={selectedIconColor} />
                 : null,
         },
         {
@@ -111,7 +111,7 @@ export function SessionListViewMenuButton(props: Readonly<{
             title: props.hideInactiveSessions
                 ? t('sessionsList.showInactiveSessions')
                 : t('sessionsList.hideInactiveSessions'),
-            icon: <Ionicons name="filter-outline" size={16} color={iconColor} />,
+            icon: <Icon name="funnel-simple" size={ICON_SIZE.sm} color={iconColor} />,
         },
     ], [
         effectiveFolderSortMode,
@@ -177,7 +177,7 @@ export function SessionListViewMenuButton(props: Readonly<{
                     }}
                     hitSlop={8}
                 >
-                    <Ionicons name="filter-outline" size={15} color={iconColor} />
+                    <Icon name="funnel-simple" size={ICON_SIZE.sm} color={iconColor} />
                 </Pressable>
             )}
         />

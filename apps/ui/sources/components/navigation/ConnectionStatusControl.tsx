@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Platform, View, Pressable } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
 import { t } from '@/text';
 import { StatusDot } from '@/components/ui/status/StatusDot';
 import { StatusPill, type StatusPillVariant } from '@/components/ui/status/StatusPill';
@@ -44,6 +43,7 @@ import { ActionListSection } from '@/components/ui/lists/ActionListSection';
 import { sync } from '@/sync/sync';
 import type { ConnectionHealthPresentation } from './connectionStatus/connectionHealthTypes';
 import { isAccountSettingsSyncAttentionStatus } from '@/sync/domains/settings/accountSettingsSyncStatus';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type Variant = 'sidebar' | 'header';
 const RELAY_SETTINGS_ROUTE = '/settings/server';
@@ -474,8 +474,8 @@ export const ConnectionStatusControl = React.memo(function ConnectionStatusContr
                     >
                         {activeServerLabel}
                     </Text>
-                    <Ionicons
-                        name={open ? "chevron-up" : "chevron-down"}
+                    <Icon
+                        name={open ? "caret-up" : "caret-down"}
                         size={chevronSize}
                         color={connectionHealth.color}
                         style={styles.statusChevron}
@@ -523,9 +523,9 @@ export const ConnectionStatusControl = React.memo(function ConnectionStatusContr
                                                 onPress={handleRetryConnection}
                                                 style={styles.popoverRetryButton}
                                             >
-                                                <Ionicons
-                                                    name="refresh-outline"
-                                                    size={17}
+                                                <Icon
+                                                    name="arrow-clockwise"
+                                                    size={16}
                                                     color={theme.colors.text.secondary}
                                                 />
                                             </Pressable>
@@ -594,7 +594,7 @@ export const ConnectionStatusControl = React.memo(function ConnectionStatusContr
                                                     onPress={handleManageRelay}
                                                     style={styles.popoverSectionIconButton}
                                                 >
-                                                    <Ionicons name="settings-outline" size={18} color={theme.colors.text.secondary} />
+                                                    <Icon name="sliders-horizontal" size={16} color={theme.colors.text.secondary} />
                                                 </Pressable>
                                             </View>
                                         </View>

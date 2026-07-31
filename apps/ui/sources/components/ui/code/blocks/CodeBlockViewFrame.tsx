@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Platform, Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -8,6 +7,7 @@ import { Typography } from '@/constants/Typography';
 import { HorizontalOverflowScrollView } from '@/components/ui/scroll/HorizontalOverflowScrollView';
 import { Text } from '@/components/ui/text/Text';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type CodeBlockViewFrameProps = Readonly<{
     code: string;
@@ -77,9 +77,9 @@ export const CodeBlockViewFrame = React.memo<CodeBlockViewFrameProps>(({
             accessibilityRole="button"
             accessibilityLabel={t('common.copy')}
         >
-            <Ionicons
-                name={copied ? 'checkmark-outline' : 'copy-outline'}
-                size={12}
+            <Icon
+                name={copied ? 'check' : 'copy'}
+                size={14}
                 color={copied ? (theme.colors.state.success.foreground ?? theme.colors.text.secondary) : theme.colors.text.secondary}
             />
         </Pressable>

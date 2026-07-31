@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import type { CustomModalInjectedProps } from '@/modal';
@@ -15,6 +14,7 @@ import {
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 /** A profile eligible for pool membership. */
 export type PoolMembershipCandidate = Readonly<{
@@ -52,7 +52,7 @@ const stylesheet = StyleSheet.create((theme) => ({
 
 function PoolMembershipCheckmark() {
     const { theme } = useUnistyles();
-    return <Ionicons name="checkmark" size={20} color={theme.colors.accent.blue} />;
+    return <Icon name="check" size={20} color={theme.colors.accent.blue} />;
 }
 
 export function PoolMembershipEditorModal(props: PoolMembershipEditorModalProps) {

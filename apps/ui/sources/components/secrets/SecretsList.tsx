@@ -1,6 +1,5 @@
 import React from 'react';
 import { Platform, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Item } from '@/components/ui/lists/Item';
@@ -13,6 +12,7 @@ import type { SavedSecret } from '@/sync/domains/settings/savedSecretTypes';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { Text, TextInput } from '@/components/ui/text/Text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 function newId(): string {
@@ -160,7 +160,7 @@ export function SecretsList(props: SecretsListProps) {
                     <Item
                         title={t('secrets.noneTitle')}
                         subtitle={props.noneSubtitle ?? t('secrets.noneSubtitle')}
-                        icon={<Ionicons name="close-circle-outline" size={29} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="x-circle" size={29} color={theme.colors.text.secondary} />}
                         onPress={() => props.onSelectId?.('')}
                         showChevron={false}
                         selected={props.selectedId === ''}
@@ -172,7 +172,7 @@ export function SecretsList(props: SecretsListProps) {
                     <Item
                         title={t('secrets.emptyTitle')}
                         subtitle={t('secrets.emptySubtitle')}
-                        icon={<Ionicons name="key-outline" size={29} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="key" size={29} color={theme.colors.text.secondary} />}
                         showChevron={false}
                     />
                 ) : (
@@ -184,7 +184,7 @@ export function SecretsList(props: SecretsListProps) {
                                 key={secret.id}
                                 title={secret.name}
                                 subtitle={t('secrets.savedHiddenSubtitle')}
-                                icon={<Ionicons name="key-outline" size={29} color={theme.colors.button.secondary.tint} />}
+                                icon={<Icon name="key" size={29} color={theme.colors.button.secondary.tint} />}
                                 onPress={props.onSelectId ? () => props.onSelectId?.(secret.id) : undefined}
                                 showChevron={false}
                                 selected={Boolean(props.onSelectId) ? isSelected : false}
@@ -200,7 +200,7 @@ export function SecretsList(props: SecretsListProps) {
                                                     {
                                                         id: 'default',
                                                         title: isDefault ? t('secrets.actions.unsetDefault') : t('secrets.actions.setDefault'),
-                                                        icon: isDefault ? 'star' : 'star-outline',
+                                                        icon: 'star',
                                                         color: isDefault ? theme.colors.button.primary.background : theme.colors.text.secondary,
                                                         onPress: () => props.onSetDefaultId?.(isDefault ? null : secret.id),
                                                     },
@@ -213,17 +213,17 @@ export function SecretsList(props: SecretsListProps) {
                                                 title={secret.name}
                                                 compactActionIds={['edit']}
                                                 actions={[
-                                                    { id: 'edit', title: t('common.rename'), icon: 'pencil-outline', onPress: () => { void renameSecret(secret); } },
-                                                    { id: 'replace', title: t('secrets.actions.replaceValue'), icon: 'refresh-outline', onPress: () => { void replaceSecretValue(secret); } },
-                                                    { id: 'delete', title: t('common.delete'), icon: 'trash-outline', destructive: true, onPress: () => { void deleteSecret(secret); } },
+                                                    { id: 'edit', title: t('common.rename'), icon: 'pencil', onPress: () => { void renameSecret(secret); } },
+                                                    { id: 'replace', title: t('secrets.actions.replaceValue'), icon: 'arrow-clockwise', onPress: () => { void replaceSecretValue(secret); } },
+                                                    { id: 'delete', title: t('common.delete'), icon: 'trash', destructive: true, onPress: () => { void deleteSecret(secret); } },
                                                 ]}
                                             />
                                         )}
 
                                         {props.onSelectId && (
                                             <View style={{ width: 24, alignItems: 'center', justifyContent: 'center' }}>
-                                                <Ionicons
-                                                    name="checkmark-circle"
+                                                <Icon
+                                                    name="check-circle"
                                                     size={24}
                                                     color={theme.colors.text.primary}
                                                     style={{ opacity: isSelected ? 1 : 0 }}
@@ -244,7 +244,7 @@ export function SecretsList(props: SecretsListProps) {
                         onOpenChange={setIsAddExpanded}
                         title={t('common.add')}
                         subtitle={t('secrets.addSubtitle')}
-                        icon={<Ionicons name="add-circle-outline" size={29} color={theme.colors.button.secondary.tint} />}
+                        icon={<Icon name="plus-circle" size={29} color={theme.colors.button.secondary.tint} />}
                         onCancel={resetAddDraft}
                         onSave={submitAddSecret}
                         saveDisabled={!draftName.trim() || !draftValue.trim()}

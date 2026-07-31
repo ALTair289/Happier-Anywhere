@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { DEFAULT_AGENT_ID } from '@/agents/catalog/catalog';
@@ -34,6 +33,7 @@ import { MemorySettingsCoverageSection } from './MemorySettingsCoverageSection';
 import { MemorySettingsEmbeddingsSection } from './MemorySettingsEmbeddingsSection';
 import { MemorySettingsIndexTelemetrySection } from './MemorySettingsIndexTelemetrySection';
 import { MemorySettingsPrivacySection } from './MemorySettingsPrivacySection';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type IndexMode = MemorySettingsV1['indexMode'];
 
@@ -114,7 +114,7 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
             id: m.id,
             title: m.metadata?.displayName || m.metadata?.host || m.id,
             subtitle: m.metadata?.host || undefined,
-            icon: <Ionicons name="desktop-outline" size={20} color={theme.colors.text.secondary} />,
+            icon: <Icon name="desktop" size={20} color={theme.colors.text.secondary} />,
         }));
     }, [machines, theme.colors.text.secondary]);
 
@@ -186,7 +186,7 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
                     <Item
                         title={t('memorySearchSettings.disabled.title')}
                         subtitle={t('memorySearchSettings.disabled.subtitle')}
-                        icon={<Ionicons name="search-outline" size={29} color={theme.colors.state.success.foreground} />}
+                        icon={<Icon name="magnifying-glass" size={29} color={theme.colors.state.success.foreground} />}
                         onPress={() => { void Modal.alert(t('memorySearchSettings.disabled.alertTitle'), t('memorySearchSettings.disabled.alertBody')); }}
                     />
                 </ItemGroup>
@@ -203,7 +203,7 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
                 <Item
                     title={t('memorySearchSettings.machine.title')}
                     subtitle={selectedMachineTitle}
-                    icon={<Ionicons name="desktop-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="desktop" size={29} color={theme.colors.accent.blue} />}
                     rightElement={loading ? <Text>{t('common.loading')}</Text> : null}
                     showChevron={false}
                 />
@@ -220,14 +220,14 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
                         }}
                         itemTrigger={{
                             title: t('memorySearchSettings.machine.changeTitle'),
-                            icon: <Ionicons name="swap-horizontal-outline" size={29} color={theme.colors.accent.indigo} />,
+                            icon: <Icon name="arrows-left-right" size={29} color={theme.colors.accent.indigo} />,
                         }}
                     />
                 </View>
                 <Item
                     title={t('memorySearchSettings.enabled.title')}
                     subtitle={showReadOnlySettings ? t('common.unavailable') : t('memorySearchSettings.enabled.subtitle')}
-                    icon={<Ionicons name="search-outline" size={29} color={theme.colors.state.success.foreground} />}
+                    icon={<Icon name="magnifying-glass" size={29} color={theme.colors.state.success.foreground} />}
                     rightElement={showReadOnlySettings ? null : (
                         <Switch
                             value={settings.enabled}
@@ -241,13 +241,13 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
                 <Item
                     title={t('memorySearchSettings.status.title')}
                     subtitle={statusSubtitle}
-                    icon={<Ionicons name="analytics-outline" size={29} color={theme.colors.accent.orange} />}
+                    icon={<Icon name="chart-line" size={29} color={theme.colors.accent.orange} />}
                     showChevron={false}
                 />
                 <Item
                     title={t('memorySearchSettings.status.diskUsageTitle')}
                     subtitle={diskUsageSubtitle}
-                    icon={<Ionicons name="hardware-chip-outline" size={29} color={theme.colors.accent.purple} />}
+                    icon={<Icon name="cpu" size={29} color={theme.colors.accent.purple} />}
                     showChevron={false}
                 />
                 {showEmbeddingsStatus ? (
@@ -255,19 +255,19 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
                         <Item
                             title={t('memorySearchSettings.status.embeddingsTitle')}
                             subtitle={embeddingsStatusSubtitle}
-                            icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.accent.indigo} />}
+                            icon={<Icon name="sparkle" size={29} color={theme.colors.accent.indigo} />}
                             showChevron={false}
                         />
                         <Item
                             title={t('memorySearchSettings.status.embeddingsProviderTitle')}
                             subtitle={embeddingsProviderSubtitle}
-                            icon={<Ionicons name="cloud-outline" size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="cloud" size={29} color={theme.colors.accent.blue} />}
                             showChevron={false}
                         />
                         <Item
                             title={t('memorySearchSettings.status.embeddingsModelTitle')}
                             subtitle={embeddingsModelSubtitle}
-                            icon={<Ionicons name="cube-outline" size={29} color={theme.colors.accent.purple} />}
+                            icon={<Icon name="cube" size={29} color={theme.colors.accent.purple} />}
                             showChevron={false}
                         />
                     </>
@@ -294,7 +294,7 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
                     }}
                     itemTrigger={{
                         title: t('memorySearchSettings.indexMode.triggerTitle'),
-                        icon: <Ionicons name="options-outline" size={29} color={theme.colors.accent.orange} />,
+                        icon: <Icon name="sliders-horizontal" size={29} color={theme.colors.accent.orange} />,
                     }}
                 />
             </ItemGroup>
@@ -320,7 +320,7 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
                     }}
                     itemTrigger={{
                         title: t('memorySearchSettings.backfill.triggerTitle'),
-                        icon: <Ionicons name="time-outline" size={29} color={theme.colors.accent.purple} />,
+                        icon: <Icon name="clock" size={29} color={theme.colors.accent.purple} />,
                     }}
                 />
             </ItemGroup>
@@ -339,7 +339,7 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
                     testID="memory-settings-summarizer-backend"
                     title={t('memorySearchSettings.hints.backend.title')}
                     subtitle={settings.hints.summarizerBackendId}
-                    icon={<Ionicons name="server-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="hard-drives" size={29} color={theme.colors.accent.blue} />}
                     onPress={async () => {
                         const next = await Modal.prompt(
                             t('memorySearchSettings.hints.backend.promptTitle'),
@@ -364,7 +364,7 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
                     testID="memory-settings-summarizer-model"
                     title={t('memorySearchSettings.hints.model.title')}
                     subtitle={settings.hints.summarizerModelId}
-                    icon={<Ionicons name="cube-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="cube" size={29} color={theme.colors.accent.indigo} />}
                     onPress={async () => {
                         const next = await Modal.prompt(
                             t('memorySearchSettings.hints.model.promptTitle'),
@@ -400,7 +400,7 @@ export const MemorySettingsView = React.memo(function MemorySettingsView() {
                     }}
                     itemTrigger={{
                         title: t('memorySearchSettings.hints.permissions.triggerTitle'),
-                        icon: <Ionicons name="lock-closed-outline" size={29} color={theme.colors.state.danger.foreground} />,
+                        icon: <Icon name="lock" size={29} color={theme.colors.state.danger.foreground} />,
                     }}
                 />
             </ItemGroup>

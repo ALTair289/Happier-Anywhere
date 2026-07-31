@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { ActivitySpinner, iconMatchedSpinnerSize } from '@/components/ui/feedback/ActivitySpinner';
@@ -46,6 +45,7 @@ import { navigateWithBlurOnWeb } from '@/utils/platform/navigateWithBlurOnWeb';
 import { buildApprovalToolCallLocation, doesApprovalMatchToolCall } from './toolApprovalPromptMatching';
 import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 import { isAskUserQuestionToolName } from '@happier-dev/protocol';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const TOOL_TIMELINE_ROW_HIGHLIGHT_RADIUS = 10;
 
@@ -220,7 +220,7 @@ export const ToolTimelineRow = React.memo((props: {
     const statusKind = resolveToolStatusIndicatorKind(toolForRendering);
     const headerStatusIndicator =
         statusKind === 'error'
-            ? <Ionicons testID="tool-timeline-row-error" name="alert-circle" size={18} color={theme.colors.state.danger.foreground} />
+            ? <Icon testID="tool-timeline-row-error" name="warning-circle" size={16} color={theme.colors.state.danger.foreground} />
             : showTaskRunningIndicator && toolForRendering.state === 'running'
                 ? <ActivitySpinner testID="tool-timeline-row-running" size={iconMatchedSpinnerSize(18)} color={theme.colors.text.secondary} />
                 : null;

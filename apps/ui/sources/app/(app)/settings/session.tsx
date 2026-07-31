@@ -1,5 +1,4 @@
 import React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { Platform } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
@@ -22,6 +21,7 @@ import {
     normalizeSessionListWorkingPlacementMode,
 } from '@/sync/domains/session/listing/attentionPromotion/sessionListAttentionPromotionTypes';
 import { normalizeSessionListFolderSortMode } from '@/sync/domains/session/listing/sessionListFolderSortMode';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     SESSION_LIST_ORDERING_MODES_V1,
     normalizeSessionListOrderingModeV1,
@@ -410,25 +410,25 @@ export default React.memo(function SessionSettingsScreen() {
                 <Item
                     title={t('settingsSession.composer.title')}
                     subtitle={t('settingsSession.composer.entrySubtitle')}
-                    icon={<Ionicons name="send-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="paper-plane-tilt" size={29} color={theme.colors.accent.blue} />}
                     onPress={() => router.push('/settings/session/composer')}
                 />
                 <Item
                     title={t('settingsSession.providerLimits.title')}
                     subtitle={t('settingsSession.providerLimits.entrySubtitle')}
-                    icon={<Ionicons name="speedometer-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="speedometer" size={29} color={theme.colors.accent.indigo} />}
                     onPress={() => router.push('/settings/session/provider-limits')}
                 />
                 <Item
                     title={t('settingsSession.resume.title')}
                     subtitle={t('settingsSession.resume.entrySubtitle')}
-                    icon={<Ionicons name="refresh-outline" size={29} color={theme.colors.state.success.foreground} />}
+                    icon={<Icon name="arrow-clockwise" size={29} color={theme.colors.state.success.foreground} />}
                     onPress={() => router.push('/settings/session/resume')}
                 />
                 <Item
                     title={t('settingsSession.runtime.title')}
                     subtitle={t('settingsSession.runtime.entrySubtitle')}
-                    icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="terminal" size={29} color={theme.colors.accent.indigo} />}
                     onPress={() => router.push('/settings/session/runtime')}
                 />
             </ItemGroup>
@@ -445,7 +445,7 @@ export default React.memo(function SessionSettingsScreen() {
                             ? 'settingsSession.sessionCreation.wizardModeEnabledSubtitle'
                             : 'settingsSession.sessionCreation.wizardModeDisabledSubtitle',
                     )}
-                    icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="sparkle" size={29} color={theme.colors.accent.indigo} />}
                     rightElement={
                         <Switch
                             value={useEnhancedSessionWizard === true}
@@ -459,7 +459,7 @@ export default React.memo(function SessionSettingsScreen() {
                     <Item
                         title={t('settingsSession.sessionCreation.wizardDispositionTitle')}
                         subtitle={t('settingsSession.sessionCreation.wizardDispositionSubtitle')}
-                        icon={<Ionicons name="options-outline" size={29} color={theme.colors.accent.indigo} />}
+                        icon={<Icon name="sliders-horizontal" size={29} color={theme.colors.accent.indigo} />}
                         onPress={() => router.push('/settings/session/new-session-wizard')}
                     />
                 ) : null}
@@ -470,7 +470,7 @@ export default React.memo(function SessionSettingsScreen() {
                             ? 'settingsSession.sessionCreation.rememberLastProjectSelectionsEnabledSubtitle'
                             : 'settingsSession.sessionCreation.rememberLastProjectSelectionsDisabledSubtitle',
                     )}
-                    icon={<Ionicons name="copy-outline" size={29} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="copy" size={29} color={theme.colors.text.secondary} />}
                     rightElement={
                         <Switch
                             value={rememberProjectSelectionsEnabled}
@@ -487,7 +487,7 @@ export default React.memo(function SessionSettingsScreen() {
                             ? 'settingsSession.sessionCreation.rememberLastEngineSelectionsEnabledSubtitle'
                             : 'settingsSession.sessionCreation.rememberLastEngineSelectionsDisabledSubtitle',
                     )}
-                    icon={<Ionicons name="hardware-chip-outline" size={29} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="cpu" size={29} color={theme.colors.text.secondary} />}
                     rightElement={
                         <Switch
                             value={rememberEngineSelectionsEnabled}
@@ -517,7 +517,7 @@ export default React.memo(function SessionSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsAppearance.sessionListDensity.title'),
                         subtitle: t('settingsAppearance.sessionListDensity.subtitle'),
-                        icon: <Ionicons name="albums-outline" size={29} color={theme.colors.accent.indigo} />,
+                        icon: <Icon name="stack" size={29} color={theme.colors.accent.indigo} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-session-sessionListDensity-trigger' },
                     }}
@@ -538,7 +538,7 @@ export default React.memo(function SessionSettingsScreen() {
                     itemTrigger={{
                         title: t('sessionsList.orderingMode.title'),
                         subtitle: t('sessionsList.orderingMode.description'),
-                        icon: <Ionicons name="swap-vertical-outline" size={29} color={theme.colors.accent.indigo} />,
+                        icon: <Icon name="arrows-down-up" size={29} color={theme.colors.accent.indigo} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-session-sessionListOrderingMode-trigger' },
                     }}
@@ -559,7 +559,7 @@ export default React.memo(function SessionSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsSession.sessionList.folderSortModeTitle'),
                         subtitle: t('settingsSession.sessionList.folderSortModeSubtitle'),
-                        icon: <Ionicons name="folder-outline" size={29} color={theme.colors.accent.indigo} />,
+                        icon: <Icon name="folder" size={29} color={theme.colors.accent.indigo} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-session-sessionListFolderSortMode-trigger' },
                     }}
@@ -582,7 +582,7 @@ export default React.memo(function SessionSettingsScreen() {
                         subtitle: sessionListSectionMode === 'single'
                             ? t('settingsSession.sessionList.sectionModeSingleSelectedSubtitle')
                             : t('settingsSession.sessionList.sectionModeActivitySelectedSubtitle'),
-                        icon: <Ionicons name="albums-outline" size={29} color={theme.colors.accent.indigo} />,
+                        icon: <Icon name="stack" size={29} color={theme.colors.accent.indigo} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-session-sessionListSectionMode-trigger' },
                     }}
@@ -603,7 +603,7 @@ export default React.memo(function SessionSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsFeatures.sessionListActiveGrouping'),
                         subtitle: t('settingsFeatures.sessionListActiveGroupingSubtitle'),
-                        icon: <Ionicons name="folder-open-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="folder-open" size={29} color={theme.colors.accent.blue} />,
                         showSelectedSubtitle: false,
                     }}
                     items={groupingMenuItems}
@@ -623,7 +623,7 @@ export default React.memo(function SessionSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsFeatures.sessionListInactiveGrouping'),
                         subtitle: t('settingsFeatures.sessionListInactiveGroupingSubtitle'),
-                        icon: <Ionicons name="calendar-outline" size={29} color={theme.colors.state.success.foreground} />,
+                        icon: <Icon name="calendar" size={29} color={theme.colors.state.success.foreground} />,
                         showSelectedSubtitle: false,
                     }}
                     items={groupingMenuItems}
@@ -632,14 +632,14 @@ export default React.memo(function SessionSettingsScreen() {
                 <Item
                     title={t('settingsFeatures.hideInactiveSessions')}
                     subtitle={t('settingsFeatures.hideInactiveSessionsSubtitle')}
-                    icon={<Ionicons name="eye-off-outline" size={29} color={theme.colors.accent.orange} />}
+                    icon={<Icon name="eye-slash" size={29} color={theme.colors.accent.orange} />}
                     rightElement={<Switch value={hideInactiveSessions} onValueChange={setHideInactiveSessions} />}
                     showChevron={false}
                 />
                 <Item
                     title={t('settingsAppearance.sessionsRightPaneDefaultOpen')}
                     subtitle={t('settingsAppearance.sessionsRightPaneDefaultOpenDescription')}
-                    icon={<Ionicons name="documents-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="files" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             value={sessionsRightPaneDefaultOpen}
@@ -659,7 +659,7 @@ export default React.memo(function SessionSettingsScreen() {
                 <Item
                     title={t('settingsSession.sessionList.tagsTitle')}
                     subtitle={sessionTagsEnabled ? t('settingsSession.sessionList.tagsEnabledSubtitle') : t('settingsSession.sessionList.tagsDisabledSubtitle')}
-                    icon={<Ionicons name="pricetag-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="tag" size={29} color={theme.colors.accent.blue} />}
                     rightElement={<Switch value={Boolean(sessionTagsEnabled)} onValueChange={setSessionTagsEnabled} />}
                     showChevron={false}
                     onPress={() => setSessionTagsEnabled(!sessionTagsEnabled)}
@@ -678,7 +678,7 @@ export default React.memo(function SessionSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsSession.sessionList.identityDisplayTitle'),
                         subtitle: t('settingsSession.sessionList.identityDisplaySubtitle'),
-                        icon: <Ionicons name="person-circle-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="user-circle" size={29} color={theme.colors.accent.blue} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-session-sessionListIdentityDisplay-trigger' },
                     }}
@@ -699,7 +699,7 @@ export default React.memo(function SessionSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsSession.sessionList.headerIdentityDisplayTitle'),
                         subtitle: t('settingsSession.sessionList.headerIdentityDisplaySubtitle'),
-                        icon: <Ionicons name="reader-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="article" size={29} color={theme.colors.accent.blue} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-session-sessionHeaderIdentityDisplay-trigger' },
                     }}
@@ -720,7 +720,7 @@ export default React.memo(function SessionSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsSession.sessionList.activeColorTitle'),
                         subtitle: t('settingsSession.sessionList.activeColorSubtitle'),
-                        icon: <Ionicons name="color-palette-outline" size={29} color={theme.colors.accent.purple} />,
+                        icon: <Icon name="palette" size={29} color={theme.colors.accent.purple} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-session-sessionListActiveColorMode-trigger' },
                     }}
@@ -743,7 +743,7 @@ export default React.memo(function SessionSettingsScreen() {
                         subtitle: workspacePathDisplayMode === 'path'
                             ? t('settingsSession.sessionList.workspacePathDisplayPathSelectedSubtitle')
                             : t('settingsSession.sessionList.workspacePathDisplayNameSelectedSubtitle'),
-                        icon: <Ionicons name="folder-open-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="folder-open" size={29} color={theme.colors.accent.blue} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-session-workspacePathDisplay-trigger' },
                     }}
@@ -756,7 +756,7 @@ export default React.memo(function SessionSettingsScreen() {
                     subtitle={workspaceFaviconsEnabled !== false
                         ? t('settingsSession.sessionList.workspaceFaviconsEnabledSubtitle')
                         : t('settingsSession.sessionList.workspaceFaviconsDisabledSubtitle')}
-                    icon={<Ionicons name="image-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="image" size={29} color={theme.colors.accent.indigo} />}
                     rightElement={
                         <Switch
                             testID="settings-session-workspaceFavicons-toggle"
@@ -773,7 +773,7 @@ export default React.memo(function SessionSettingsScreen() {
                     subtitle={workspaceMachineSubtitlesEnabled !== false
                         ? t('settingsSession.sessionList.workspaceMachineSubtitlesEnabledSubtitle')
                         : t('settingsSession.sessionList.workspaceMachineSubtitlesDisabledSubtitle')}
-                    icon={<Ionicons name="desktop-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="desktop" size={29} color={theme.colors.accent.indigo} />}
                     rightElement={
                         <Switch
                             testID="settings-session-workspaceMachineSubtitles-toggle"
@@ -796,7 +796,7 @@ export default React.memo(function SessionSettingsScreen() {
                     subtitle={sessionListWorkingStatusAnimatedTextEnabled !== false
                         ? t('settingsSession.sessionList.workingStatusAnimatedTextEnabledSubtitle')
                         : t('settingsSession.sessionList.workingStatusAnimatedTextDisabledSubtitle')}
-                    icon={<Ionicons name="pulse-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="pulse" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             testID="settings-session-workingStatusAnimatedText-toggle"
@@ -821,7 +821,7 @@ export default React.memo(function SessionSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsSession.sessionList.attentionPromotionModeTitle'),
                         subtitle: t('settingsSession.sessionList.attentionPromotionModeSubtitle'),
-                        icon: <Ionicons name="arrow-up-circle-outline" size={29} color={theme.colors.accent.indigo} />,
+                        icon: <Icon name="arrow-circle-up" size={29} color={theme.colors.accent.indigo} />,
                         showSelectedSubtitle: true,
                         itemProps: { testID: 'settings-session-attentionPromotionMode-trigger' },
                     }}
@@ -842,7 +842,7 @@ export default React.memo(function SessionSettingsScreen() {
                     itemTrigger={{
                         title: t('settingsSession.sessionList.workingPlacementModeTitle'),
                         subtitle: t('settingsSession.sessionList.workingPlacementModeSubtitle'),
-                        icon: <Ionicons name="play-circle-outline" size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name="play-circle" size={29} color={theme.colors.accent.blue} />,
                         showSelectedSubtitle: true,
                         itemProps: { testID: 'settings-session-workingPlacementMode-trigger' },
                     }}
@@ -865,7 +865,7 @@ export default React.memo(function SessionSettingsScreen() {
                         subtitle: workingIndicatorStyle === 'pulse'
                             ? t('settingsSession.sessionList.workingIndicatorPulseSelectedSubtitle')
                             : t('settingsSession.sessionList.workingIndicatorSpinnerSelectedSubtitle'),
-                        icon: <Ionicons name={workingIndicatorStyle === 'pulse' ? 'radio-button-on-outline' : 'sync-outline'} size={29} color={theme.colors.accent.blue} />,
+                        icon: <Icon name={workingIndicatorStyle === 'pulse' ? 'radio-button' : 'arrows-clockwise'} size={29} color={theme.colors.accent.blue} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-session-workingIndicator-trigger' },
                     }}
@@ -883,7 +883,7 @@ export default React.memo(function SessionSettingsScreen() {
                     subtitle={mobileWorkspaceExperience === 'classic'
                         ? t('settingsSession.mobileWorkspaceExperience.options.classicSubtitle')
                         : t('settingsSession.mobileWorkspaceExperience.options.cockpitSubtitle')}
-                    icon={<Ionicons name="phone-portrait-outline" size={29} color={theme.colors.accent.indigo} />}
+                    icon={<Icon name="device-mobile" size={29} color={theme.colors.accent.indigo} />}
                     rightElement={
                         <Switch
                             testID="settings-session-mobileWorkspaceExperience-switch"
@@ -921,7 +921,7 @@ export default React.memo(function SessionSettingsScreen() {
                                     ? 'settingsSession.promptPersonalization.askAgentToRenameSessionsInitialSelectedSubtitle'
                                     : 'settingsSession.promptPersonalization.askAgentToRenameSessionsOngoingSelectedSubtitle',
                         ),
-                        icon: <Ionicons name="text-outline" size={29} color={theme.colors.accent.indigo} />,
+                        icon: <Icon name="text-aa" size={29} color={theme.colors.accent.indigo} />,
                         showSelectedSubtitle: false,
                         itemProps: { testID: 'settings-session-title-updates-mode-trigger' },
                     }}
@@ -935,7 +935,7 @@ export default React.memo(function SessionSettingsScreen() {
                             ? 'settingsSession.promptPersonalization.askAgentToSuggestReplyOptionsEnabledSubtitle'
                             : 'settingsSession.promptPersonalization.askAgentToSuggestReplyOptionsDisabledSubtitle',
                     )}
-                    icon={<Ionicons name="list-circle-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="list" size={29} color={theme.colors.accent.blue} />}
                     rightElement={
                         <Switch
                             value={normalizedCodingPromptBehavior.responseOptions === 'agent'}

@@ -1,6 +1,5 @@
 import * as React from 'react';
 
-import { Ionicons } from '@expo/vector-icons';
 import { Pressable, View } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -19,6 +18,7 @@ import { fireAndForget } from '@/utils/system/fireAndForget';
 
 import { useLocalNeuralKokoroVoiceCatalog } from './useLocalNeuralKokoroVoiceCatalog.native';
 import { useLocalNeuralModelPackState } from './useLocalNeuralModelPackState.native';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export function LocalNeuralTtsSettings(props: {
   cfgKokoro: VoiceLocalTtsSettings['localNeural'];
@@ -188,10 +188,10 @@ export function LocalNeuralTtsSettings(props: {
         rightElement={
           modelStatus === 'downloading' ? (
             <Pressable onPress={cancelPrepare} hitSlop={10}>
-              <Ionicons name="close" size={20} color={theme.colors.text.secondary} />
+              <Icon name="x" size={20} color={theme.colors.text.secondary} />
             </Pressable>
           ) : (
-            <Ionicons name="download-outline" size={20} color={theme.colors.text.secondary} />
+            <Icon name="download" size={20} color={theme.colors.text.secondary} />
           )
         }
         showChevron={false}
@@ -246,9 +246,9 @@ export function LocalNeuralTtsSettings(props: {
                 }}
                 hitSlop={10}
               >
-                <Ionicons
-                  name={previewingVoiceId === v.id ? 'pause' : 'play'}
-                  size={18}
+                <Icon
+                  name={previewingVoiceId === v.id ? 'pause-circle' : 'play'}
+                  size={16}
                   color={theme.colors.text.secondary}
                 />
               </Pressable>

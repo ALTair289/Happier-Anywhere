@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Platform, Pressable, View, type ScrollViewProps } from 'react-native';
-import { Octicons } from '@expo/vector-icons';
 
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
@@ -32,6 +31,7 @@ import { DiffFilesListView, type DiffFilesListViewHandle } from '@/components/ui
 import { useScmDiffExpandedKeys } from '@/components/sessions/files/content/review/useScmDiffExpandedKeys';
 import { useScmReviewViewabilityConfig } from '@/scm/review/useScmReviewViewabilityConfig';
 import { resolveWebScrollableElement } from '@/components/ui/scroll/resolveWebScrollableElement';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const ViewWithClick = View as unknown as React.ComponentType<
     React.ComponentPropsWithRef<typeof View> & { onClick?: any; onKeyDown?: any; tabIndex?: number }
@@ -810,7 +810,7 @@ function ChangedFilesReviewInner(props: ChangedFilesReviewProps) {
                         tabIndex={0}
                         style={{ paddingHorizontal: 8, paddingVertical: 6 }}
                     >
-                        <Octicons name="link-external" size={14} color={theme.colors.text.secondary} />
+                        <Icon name="arrow-square-out" size={14} color={theme.colors.text.secondary} />
                     </ViewWithClick>
                 )
                 : (
@@ -821,7 +821,7 @@ function ChangedFilesReviewInner(props: ChangedFilesReviewProps) {
                         accessibilityRole="button"
                         accessibilityLabel={t('common.open')}
                     >
-                        <Octicons name="link-external" size={14} color={theme.colors.text.secondary} />
+                        <Icon name="arrow-square-out" size={14} color={theme.colors.text.secondary} />
                     </Pressable>
                 );
 

@@ -1,6 +1,5 @@
 import * as React from 'react';
 
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { DropdownMenu } from '@/components/ui/forms/dropdown/DropdownMenu';
@@ -15,6 +14,7 @@ import { fetchGoogleGeminiModelCatalog, type GoogleGeminiModelSummary } from '@/
 import { fireAndForget } from '@/utils/system/fireAndForget';
 
 import type { LocalSttProviderSpec } from '../_types';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function normalizeSecretStringPromptInput(value: string | null): SecretString | null {
   if (value === null) return null;
@@ -98,7 +98,7 @@ const GoogleGeminiSttSettings: LocalSttProviderSpec['Settings'] = (props) => {
             id: '__custom__',
             title: t('settingsVoice.local.googleGeminiStt.model.customTitle'),
             subtitle: t('settingsVoice.local.googleGeminiStt.model.customSubtitle'),
-            icon: <Ionicons name="create-outline" size={22} color={theme.colors.text.secondary} />,
+            icon: <Icon name="pencil-simple" size={20} color={theme.colors.text.secondary} />,
           },
           ...((models.length > 0
             ? models
@@ -109,7 +109,7 @@ const GoogleGeminiSttSettings: LocalSttProviderSpec['Settings'] = (props) => {
               title: m.displayName,
               subtitle: m.id,
               disabled: !m.id,
-              icon: <Ionicons name="sparkles-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="sparkle" size={20} color={theme.colors.text.secondary} />,
             }))),
         ]}
         onSelect={(id) => {
@@ -157,7 +157,7 @@ const GoogleGeminiSttSettings: LocalSttProviderSpec['Settings'] = (props) => {
                 id: '',
                 title: t('settingsVoice.local.googleGeminiStt.language.autoTitle'),
                 subtitle: t('settingsVoice.local.googleGeminiStt.language.autoSubtitle'),
-                icon: <Ionicons name="sparkles-outline" size={22} color={theme.colors.text.secondary} />,
+                icon: <Icon name="sparkle" size={20} color={theme.colors.text.secondary} />,
               },
             ];
           }
@@ -166,7 +166,7 @@ const GoogleGeminiSttSettings: LocalSttProviderSpec['Settings'] = (props) => {
               id,
               title: getLanguageDisplayName(lang),
               subtitle: id,
-              icon: <Ionicons name="language-outline" size={22} color={theme.colors.text.secondary} />,
+              icon: <Icon name="translate" size={20} color={theme.colors.text.secondary} />,
             },
           ];
         })}
@@ -183,7 +183,7 @@ export const googleGeminiSttProviderSpec: LocalSttProviderSpec = {
   id: 'google_gemini',
   title: t('settingsVoice.local.googleGeminiStt.provider.title'),
   subtitle: t('settingsVoice.local.googleGeminiStt.provider.subtitle'),
-  iconName: 'logo-google',
+  iconName: 'google-logo',
   detail: t('settingsVoice.local.googleGeminiStt.provider.detail'),
   Settings: GoogleGeminiSttSettings,
 };

@@ -7,7 +7,6 @@
  */
 
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 
 import { makePathBrowseInputBehavior } from '@/utils/path/browseInputBehavior';
 
@@ -21,6 +20,7 @@ import {
     type SelectionListStep,
 } from './_shared';
 import { WITH_SEARCH_STEP } from './SelectionListBasicVariants';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const DYNAMIC_SUCCESS_STEP: SelectionListStep = {
     id: 'dynamic-success',
@@ -38,14 +38,14 @@ const DYNAMIC_SUCCESS_STEP: SelectionListStep = {
                         id: 'docs',
                         label: 'Documents',
                         subtitle: 'folder',
-                        icon: <Ionicons name="folder-outline" size={16} />,
+                        icon: <Icon name="folder" size={16} />,
                         autocompleteValue: '~/Documents/',
                     },
                     {
                         id: 'desktop',
                         label: 'Desktop',
                         subtitle: 'folder',
-                        icon: <Ionicons name="folder-outline" size={16} />,
+                        icon: <Icon name="folder" size={16} />,
                         autocompleteValue: '~/Desktop/',
                     },
                 ],
@@ -193,7 +193,7 @@ export function SelectionListDynamicVariants(props: Readonly<{
             >
                 <SelectionList
                     {...makeVariantProps(WITH_SEARCH_STEP, `${rootTestID}-slots-prefix-list`)}
-                    inputPrefix={<Ionicons name="folder-outline" size={16} />}
+                    inputPrefix={<Icon name="folder" size={16} />}
                 />
             </VariantBlock>
 
@@ -203,7 +203,7 @@ export function SelectionListDynamicVariants(props: Readonly<{
             >
                 <SelectionList
                     {...makeVariantProps(WITH_SEARCH_STEP, `${rootTestID}-slots-suffix-list`)}
-                    inputSuffix={<Ionicons name="open-outline" size={16} />}
+                    inputSuffix={<Icon name="arrow-square-out" size={16} />}
                 />
             </VariantBlock>
 
@@ -213,8 +213,8 @@ export function SelectionListDynamicVariants(props: Readonly<{
             >
                 <SelectionList
                     {...makeVariantProps(WITH_SEARCH_STEP, `${rootTestID}-slots-both-list`)}
-                    inputPrefix={<Ionicons name="folder-outline" size={16} />}
-                    inputSuffix={<Ionicons name="open-outline" size={16} />}
+                    inputPrefix={<Icon name="folder" size={16} />}
+                    inputSuffix={<Icon name="arrow-square-out" size={16} />}
                 />
             </VariantBlock>
         </>

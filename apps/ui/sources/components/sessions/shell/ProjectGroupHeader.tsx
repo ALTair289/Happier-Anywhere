@@ -1,7 +1,6 @@
 import React from 'react';
 import { Platform, Pressable, View } from 'react-native';
 import { Image } from 'expo-image';
-import { Ionicons, Octicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
@@ -10,6 +9,7 @@ import { Typography } from '@/constants/Typography';
 import type { SessionListViewItem } from '@/sync/domains/state/storage';
 import { t } from '@/text';
 import { useWorkspaceFavicon } from './useWorkspaceFavicon';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const WORKSPACE_FAVICON_SIZE = 16;
 const WORKSPACE_FAVICON_RADIUS = 4;
@@ -175,20 +175,20 @@ export const ProjectGroupHeader = React.memo(function ProjectGroupHeader(props: 
             {
                 id: 'add-folder',
                 title: t('sessionsList.addFolder'),
-                icon: <Ionicons name="folder-open-outline" size={16} color={actionIconColor} />,
+                icon: <Icon name="folder-open" size={16} color={actionIconColor} />,
                 disabled: !canCreateSession,
             },
             {
                 id: 'rename',
                 title: t('sessionsList.renameWorkspace'),
-                icon: <Ionicons name="pencil-outline" size={16} color={actionIconColor} />,
+                icon: <Icon name="pencil" size={16} color={actionIconColor} />,
             },
         ];
         if (hasCustomLabel) {
             items.push({
                 id: 'reset',
                 title: t('sessionsList.resetWorkspaceName'),
-                icon: <Ionicons name="refresh-outline" size={16} color={actionIconColor} />,
+                icon: <Icon name="arrow-clockwise" size={16} color={actionIconColor} />,
             });
         }
         return items;
@@ -256,9 +256,9 @@ export const ProjectGroupHeader = React.memo(function ProjectGroupHeader(props: 
                                     isWeb && !showChevron ? styles.hoverHiddenChevron : styles.hoverVisibleChevron,
                                 ]}
                             >
-                                <Ionicons
-                                    name={collapsed ? 'chevron-forward' : 'chevron-down'}
-                                    size={12}
+                                <Icon
+                                    name={collapsed ? 'caret-right' : 'caret-down'}
+                                    size={14}
                                     color={chevronColor}
                                 />
                             </View>
@@ -281,8 +281,8 @@ export const ProjectGroupHeader = React.memo(function ProjectGroupHeader(props: 
                             accessible={false}
                             hitSlop={8}
                         >
-                            <Ionicons
-                                name="reorder-three-outline"
+                            <Icon
+                                name="list"
                                 size={14}
                                 color={actionIconColor}
                                 style={[styles.dragHandle, showHoverActions ? styles.dragHandleActive : null]}
@@ -314,7 +314,7 @@ export const ProjectGroupHeader = React.memo(function ProjectGroupHeader(props: 
                                     accessibilityLabel={t('common.moreActions')}
                                     hitSlop={8}
                                 >
-                                    <Octicons name="kebab-horizontal" size={12} color={actionIconColor} />
+                                    <Icon name="dots-three" size={14} color={actionIconColor} />
                                 </Pressable>
                             )}
                         />
@@ -330,7 +330,7 @@ export const ProjectGroupHeader = React.memo(function ProjectGroupHeader(props: 
                             accessibilityLabel={t('machine.launchNewSessionInDirectory')}
                             hitSlop={8}
                         >
-                            <Ionicons name="add" size={14} color={actionIconColor} />
+                            <Icon name="plus" size={14} color={actionIconColor} />
                         </Pressable>
                     ) : null}
                 </View>

@@ -2,7 +2,6 @@ import * as React from 'react';
 import type { LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import { FlatList, Pressable, View, Platform, useWindowDimensions } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { Octicons } from '@expo/vector-icons';
 import { FlashList } from '@/components/ui/lists/flashListCompat/FlashListCompat';
 
 import type { DiffFileEntry } from '@/components/ui/code/model/diff/diffViewModel';
@@ -15,6 +14,7 @@ import { useInlineDiffVirtualizationThresholds } from '@/components/ui/code/diff
 import { resolveInlineDiffVirtualizedMaxHeight } from '@/components/ui/code/diff/resolveInlineDiffVirtualizedMaxHeight';
 import { resolveInlineDiffVirtualizedViewportStyle } from '@/components/ui/code/diff/resolveInlineDiffVirtualizedViewportStyle';
 import { useWebFlashListCrashFallback } from '@/components/ui/lists/useWebFlashListCrashFallback';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const LINE_ADDED_PREFIX = '+';
 const LINE_REMOVED_PREFIX = '-';
@@ -444,7 +444,7 @@ export const DiffFilesListView = React.forwardRef<DiffFilesListViewHandle, DiffF
                                     ];
                                 }}
                             >
-                                <Octicons name="file" size={14} color={styles.openFileIcon.color as any} />
+                                <Icon name="file" size={14} color={styles.openFileIcon.color as any} />
                             </Pressable>
                         ) : null}
                     </View>

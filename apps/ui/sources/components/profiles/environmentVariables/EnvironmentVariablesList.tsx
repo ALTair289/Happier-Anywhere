@@ -1,6 +1,5 @@
 import React from 'react';
 import { View, Platform } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { EnvironmentVariableCard } from './EnvironmentVariableCard';
@@ -12,6 +11,7 @@ import { useEnvironmentVariables } from '@/hooks/server/useEnvironmentVariables'
 import { parseEnvVarTemplate } from '@/utils/profiles/envVarTemplate';
 import { shadowLevelStyle } from '@/shadowElevation';
 import { Text, TextInput } from '@/components/ui/text/Text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 export interface EnvironmentVariablesListProps {
@@ -268,7 +268,7 @@ export function EnvironmentVariablesList({
                     isOpen={isAddExpanded}
                     onOpenChange={setIsAddExpanded}
                     title={t('profiles.environmentVariables.addVariable')}
-                    icon={<Ionicons name="add-circle-outline" size={29} color={theme.colors.button.secondary.tint} />}
+                    icon={<Icon name="plus-circle" size={29} color={theme.colors.button.secondary.tint} />}
                     onCancel={resetAddDraft}
                     onSave={handleAddVariable}
                     saveDisabled={!newVarName.trim()}

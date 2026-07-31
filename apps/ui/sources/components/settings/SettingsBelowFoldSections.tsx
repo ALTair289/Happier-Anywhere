@@ -1,14 +1,13 @@
 import { View, Platform, Linking } from 'react-native';
 import * as React from 'react';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 import { Item } from '@/components/ui/lists/Item';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
-import { DependabotIcon } from '@/components/ui/icons/DependabotIcon';
 import { t } from '@/text';
 import { trackWhatsNewClicked } from '@/track';
 import { requestReview } from '@/utils/system/requestReview';
+import { ICON_SIZE, Icon } from '@/components/ui/icons/Icon';
 
 type SettingsBelowFoldSectionsRouter = ReturnType<typeof useRouter>;
 type SettingsBelowFoldSectionsTheme = ReturnType<typeof useUnistyles>['theme'];
@@ -140,7 +139,7 @@ const SettingsAiAndAgentsSection = React.memo(function SettingsAiAndAgentsSectio
             <Item
                 title={t('settingsProviders.title')}
                 subtitle={t('settingsProviders.entrySubtitle')}
-                icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.accent.orange} />}
+                icon={<Icon name="sparkle" size={29} color={theme.colors.accent.orange} />}
                 onPress={() => router.push('/settings/providers')}
             />
             <Item
@@ -148,7 +147,7 @@ const SettingsAiAndAgentsSection = React.memo(function SettingsAiAndAgentsSectio
                 subtitle={t('settingsSession.subAgentGuidanceEntry.openSubtitle')}
                 icon={(
                     <View style={{ width: 29, height: 29, alignItems: 'center', justifyContent: 'center' }}>
-                        <DependabotIcon size={22} color={theme.colors.accent.orange} />
+                        <Icon name="robot" size={ICON_SIZE.lg} color={theme.colors.accent.orange} />
                     </View>
                 )}
                 onPress={() => router.push('/settings/sub-agent')}
@@ -157,7 +156,7 @@ const SettingsAiAndAgentsSection = React.memo(function SettingsAiAndAgentsSectio
                 <Item
                     title={t('settings.profiles')}
                     subtitle={t('settings.profilesSubtitle')}
-                    icon={<Ionicons name="person-outline" size={29} color={theme.colors.accent.purple} />}
+                    icon={<Icon name="person" size={29} color={theme.colors.accent.purple} />}
                     onPress={() => router.push('/settings/profiles')}
                 />
             )}
@@ -165,7 +164,7 @@ const SettingsAiAndAgentsSection = React.memo(function SettingsAiAndAgentsSectio
                 <Item
                     title={t('settings.connectedServices')}
                     subtitle={t('settings.connectedServicesSubtitle')}
-                    icon={<Ionicons name="key-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="key" size={29} color={theme.colors.accent.blue} />}
                     onPress={() => router.push('/settings/connected-services')}
                 />
             ) : null}
@@ -174,7 +173,7 @@ const SettingsAiAndAgentsSection = React.memo(function SettingsAiAndAgentsSectio
                     testID="settings-mcp-servers-item"
                     title={t('settings.mcpServers')}
                     subtitle={t('settings.mcpServersSubtitle')}
-                    icon={<Ionicons name="extension-puzzle-outline" size={29} color={theme.colors.accent.purple} />}
+                    icon={<Icon name="puzzle-piece" size={29} color={theme.colors.accent.purple} />}
                     onPress={() => router.push('/settings/mcp')}
                 />
             )}
@@ -182,7 +181,7 @@ const SettingsAiAndAgentsSection = React.memo(function SettingsAiAndAgentsSectio
                 <Item
                     title={t('settings.prompts')}
                     subtitle={t('settings.promptsSubtitle')}
-                    icon={<Ionicons name="library-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="books" size={29} color={theme.colors.accent.blue} />}
                     onPress={() => router.push('/settings/prompts')}
                 />
             ) : null}
@@ -190,7 +189,7 @@ const SettingsAiAndAgentsSection = React.memo(function SettingsAiAndAgentsSectio
                 <Item
                     title={t('settings.voiceAssistant')}
                     subtitle={t('settings.voiceAssistantSubtitle')}
-                    icon={<Ionicons name="mic-outline" size={29} color={theme.colors.state.success.foreground} />}
+                    icon={<Icon name="microphone" size={29} color={theme.colors.state.success.foreground} />}
                     onPress={() => router.push('/settings/voice')}
                 />
             ) : null}
@@ -198,7 +197,7 @@ const SettingsAiAndAgentsSection = React.memo(function SettingsAiAndAgentsSectio
                 <Item
                     title={t('settings.memorySearch')}
                     subtitle={t('settings.memorySearchSubtitle')}
-                    icon={<Ionicons name="search-outline" size={29} color={theme.colors.state.success.foreground} />}
+                    icon={<Icon name="magnifying-glass" size={29} color={theme.colors.state.success.foreground} />}
                     onPress={() => router.push('/settings/memory')}
                 />
             ) : null}
@@ -228,25 +227,25 @@ const SettingsSessionsBehaviorSection = React.memo(function SettingsSessionsBeha
             <Item
                 title={t('settings.sessions')}
                 subtitle={terminalUseTmux ? t('settings.sessionSubtitleTmuxEnabled') : t('settings.sessionSubtitleMessageSendingAndTmux')}
-                icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accent.indigo} />}
+                icon={<Icon name="terminal" size={29} color={theme.colors.accent.indigo} />}
                 onPress={() => router.push('/settings/session')}
             />
             <Item
                 title={t('common.actions')}
                 subtitle={t('settings.actionsSubtitle')}
-                icon={<Ionicons name="flash-outline" size={29} color={theme.colors.accent.orange} />}
+                icon={<Icon name="lightning" size={29} color={theme.colors.accent.orange} />}
                 onPress={() => router.push('/settings/actions')}
             />
             <Item
                 title={t('settings.transcript')}
                 subtitle={t('settings.transcriptSubtitle')}
-                icon={<Ionicons name="chatbubbles-outline" size={29} color={theme.colors.accent.indigo} />}
+                icon={<Icon name="chats-circle" size={29} color={theme.colors.accent.indigo} />}
                 onPress={() => router.push('/settings/session/transcript')}
             />
             <Item
                 title={t('settings.permissions')}
                 subtitle={t('settings.permissionsSubtitle')}
-                icon={<Ionicons name="shield-outline" size={29} color={theme.colors.accent.indigo} />}
+                icon={<Icon name="shield" size={29} color={theme.colors.accent.indigo} />}
                 onPress={() => router.push('/settings/session/permissions')}
             />
             {showAutomations ? (
@@ -255,7 +254,7 @@ const SettingsSessionsBehaviorSection = React.memo(function SettingsSessionsBeha
                     subtitle={automationsNeedLocalEnablement
                         ? t('settingsFeatures.expAutomationsSubtitle')
                         : t('settings.automationsSubtitle')}
-                    icon={<Ionicons name="timer-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="timer" size={29} color={theme.colors.accent.blue} />}
                     onPress={() => router.push(automationsNeedLocalEnablement ? '/settings/features' : '/automations')}
                 />
             ) : null}
@@ -263,7 +262,7 @@ const SettingsSessionsBehaviorSection = React.memo(function SettingsSessionsBeha
                 <Item
                     title={t('runs.title')}
                     subtitle={t('settings.executionRunsSubtitle')}
-                    icon={<Ionicons name="play-outline" size={29} color={theme.colors.state.success.foreground} />}
+                    icon={<Icon name="play" size={29} color={theme.colors.state.success.foreground} />}
                     onPress={() => router.push('/runs')}
                 />
             ) : null}
@@ -290,7 +289,7 @@ const SettingsFilesAndSourceControlSection = React.memo(function SettingsFilesAn
                 <Item
                     title={t('settings.filesSourceControl')}
                     subtitle={t('settings.filesSourceControlSubtitle')}
-                    icon={<Ionicons name="git-branch-outline" size={29} color={theme.colors.state.success.foreground} />}
+                    icon={<Icon name="git-branch" size={29} color={theme.colors.state.success.foreground} />}
                     onPress={() => router.push('/settings/source-control')}
                 />
             ) : null}
@@ -298,7 +297,7 @@ const SettingsFilesAndSourceControlSection = React.memo(function SettingsFilesAn
                 <Item
                     title={t('settings.attachments')}
                     subtitle={t('settings.attachmentsSubtitle')}
-                    icon={<Ionicons name="attach-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="paperclip" size={29} color={theme.colors.accent.blue} />}
                     onPress={() => router.push('/settings/attachments')}
                 />
             ) : null}
@@ -314,20 +313,20 @@ const SettingsSystemSection = React.memo(function SettingsSystemSection({ router
             <Item
                 title={t('settings.servers')}
                 subtitle={t('settings.serversSubtitle')}
-                icon={<Ionicons name="server-outline" size={29} color={theme.colors.accent.blue} />}
+                icon={<Icon name="hard-drives" size={29} color={theme.colors.accent.blue} />}
                 onPress={() => router.push('/settings/server')}
             />
             <Item
                 testID="settings-system-status-item"
                 title={t('settings.systemStatus')}
                 subtitle={t('settings.systemStatusSubtitle')}
-                icon={<Ionicons name="pulse-outline" size={29} color={theme.colors.accent.indigo} />}
+                icon={<Icon name="pulse" size={29} color={theme.colors.accent.indigo} />}
                 onPress={() => router.push('/settings/system-status')}
             />
             <Item
                 title={t('settings.notifications')}
                 subtitle={t('settings.notificationsSubtitle')}
-                icon={<Ionicons name="notifications-outline" size={29} color={theme.colors.accent.blue} />}
+                icon={<Icon name="bell" size={29} color={theme.colors.accent.blue} />}
                 onPress={() => router.push('/settings/notifications')}
             />
         </ItemGroup>
@@ -351,7 +350,7 @@ const SettingsDeveloperSection = React.memo(function SettingsDeveloperSection({
         <ItemGroup title={t('settings.developer')}>
             <Item
                 title={t('settings.developerTools')}
-                icon={<Ionicons name="construct-outline" size={29} color={theme.colors.accent.indigo} />}
+                icon={<Icon name="wrench" size={29} color={theme.colors.accent.indigo} />}
                 onPress={() => router.push('/(app)/dev')}
             />
         </ItemGroup>
@@ -385,7 +384,7 @@ const SettingsAboutSection = React.memo(function SettingsAboutSection({
                 <Item
                     title={t('settings.whatsNew')}
                     subtitle={t('settings.whatsNewSubtitle')}
-                    icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.accent.orange} />}
+                    icon={<Icon name="sparkle" size={29} color={theme.colors.accent.orange} />}
                     onPress={() => {
                         trackWhatsNewClicked();
                         router.push('/(app)/changelog');
@@ -396,7 +395,7 @@ const SettingsAboutSection = React.memo(function SettingsAboutSection({
                 <Item
                     title={t('settings.rateUs')}
                     subtitle={t('settings.rateUsSubtitle')}
-                    icon={<Ionicons name="star-outline" size={29} color={theme.colors.accent.orange} />}
+                    icon={<Icon name="star" size={29} color={theme.colors.accent.orange} />}
                     onPress={() => {
                         void requestReview();
                     }}
@@ -404,18 +403,18 @@ const SettingsAboutSection = React.memo(function SettingsAboutSection({
             ) : null}
             <Item
                 title={t('settings.github')}
-                icon={<Ionicons name="logo-github" size={29} color={theme.colors.text.primary} />}
+                icon={<Icon name="github-logo" size={29} color={theme.colors.text.primary} />}
                 subtitle="happier-dev/happier"
                 onPress={handleGitHub}
             />
             <Item
                 title={t('settings.reportIssue')}
-                icon={<Ionicons name="bug-outline" size={29} color={theme.colors.state.danger.foreground} />}
+                icon={<Icon name="bug" size={29} color={theme.colors.state.danger.foreground} />}
                 onPress={handleReportIssue}
             />
             <Item
                 title={t('settings.privacyPolicy')}
-                icon={<Ionicons name="shield-checkmark-outline" size={29} color={theme.colors.accent.blue} />}
+                icon={<Icon name="shield-check" size={29} color={theme.colors.accent.blue} />}
                 onPress={async () => {
                     const url = 'https://docs.happier.dev/legal/privacy';
                     const supported = await Linking.canOpenURL(url);
@@ -426,7 +425,7 @@ const SettingsAboutSection = React.memo(function SettingsAboutSection({
             />
             <Item
                 title={t('settings.termsOfService')}
-                icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.accent.blue} />}
+                icon={<Icon name="file-text" size={29} color={theme.colors.accent.blue} />}
                 onPress={async () => {
                     const url = 'https://docs.happier.dev/legal/terms';
                     const supported = await Linking.canOpenURL(url);
@@ -438,7 +437,7 @@ const SettingsAboutSection = React.memo(function SettingsAboutSection({
             {Platform.OS === 'ios' && (
                 <Item
                     title={t('settings.eula')}
-                    icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="file-text" size={29} color={theme.colors.accent.blue} />}
                     onPress={async () => {
                         const url = 'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/';
                         const supported = await Linking.canOpenURL(url);
@@ -451,7 +450,7 @@ const SettingsAboutSection = React.memo(function SettingsAboutSection({
             <Item
                 title={t('common.version')}
                 detail={appVersion}
-                icon={<Ionicons name="information-circle-outline" size={29} color={theme.colors.text.secondary} />}
+                icon={<Icon name="info" size={29} color={theme.colors.text.secondary} />}
                 onPress={handleVersionClick}
                 showChevron={false}
             />

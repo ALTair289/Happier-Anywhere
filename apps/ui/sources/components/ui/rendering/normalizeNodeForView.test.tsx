@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Icon } from '@/components/ui/icons/Icon';
 
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
@@ -39,7 +40,7 @@ describe('normalizeNodeForView', () => {
         }
         Ionicons.displayName = 'Ionicons';
 
-        const node = React.createElement(Ionicons, { name: 'flash-outline', size: 16 });
+        const node = <Icon name="lightning" size={16} />;
         const normalized = normalizeNodeForView(node);
 
         expect(normalized).toBe(node);

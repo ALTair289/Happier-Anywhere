@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import {
@@ -28,6 +27,7 @@ import {
 import type { ConnectedServicesSelectionOptionAvailability } from '@/components/sessions/new/components/buildNewSessionConnectedServicesSelectionListModel';
 import type { ConnectedServicesServiceBinding } from '@/sync/domains/connectedServices/connectedServicesAgentOptionStateBindings';
 import { resolveConnectedServiceDisplayName } from './model/resolveConnectedServiceDisplayName';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     resolveConnectedServicesAuthLabel,
     type ConnectedServicesAuthWarningCode,
@@ -319,7 +319,7 @@ export function ConnectedServicesDefaultAuthRow(props: ConnectedServicesDefaultA
             <Item
                 testID={`settings-connected-services-default-auth-${props.agentId}`}
                 title={props.agentTitle}
-                icon={<Ionicons name="key-outline" size={22} color={theme.colors.accent.blue} />}
+                icon={<Icon name="key" size={20} color={theme.colors.accent.blue} />}
                 // On a compact (mobile) layout the selected auth value is too long to sit in
                 // the row's right detail next to the title, so surface it in the subtitle and
                 // drop the detail. The wide layout keeps it on the right.

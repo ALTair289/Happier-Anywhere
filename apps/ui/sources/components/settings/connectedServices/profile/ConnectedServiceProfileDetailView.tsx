@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -51,6 +50,7 @@ import { resolveConnectedServiceProfileIdentityDisplay } from '../model/resolveC
 import { promptConnectedServiceTokenValue } from '../promptConnectedServiceTokenValue';
 import { storeConnectedServiceCredentialWithIdentityConfirmation } from '../storeConnectedServiceCredentialWithIdentityConfirmation';
 import { runConnectedServiceCredentialStoredEffects } from '../runConnectedServiceCredentialStoredEffects';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function asStringParam(value: unknown): string {
   if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : '';
@@ -437,7 +437,7 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
                 key={`${poolLabel}:${index}`}
                 testID={`connected-service-profile-pool:${index}`}
                 title={poolLabel}
-                icon={<Ionicons name="layers-outline" size={22} color={theme.colors.text.secondary} />}
+                icon={<Icon name="stack-simple" size={20} color={theme.colors.text.secondary} />}
                 showChevron={false}
               />
             ))
@@ -445,7 +445,7 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
             <EmptyState
               testID="connected-service-profile-pools:empty"
               titleTestID="connected-service-profile-pools:empty:title"
-              icon={<Ionicons name="layers-outline" size={28} color={theme.colors.text.secondary} />}
+              icon={<Icon name="stack-simple" size={29} color={theme.colors.text.secondary} />}
               title={t('connectedServices.profile.pools.emptyTitle')}
               subtitle={t('connectedServices.profile.pools.emptySubtitle')}
             />
@@ -454,7 +454,7 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
             testID="connected-service-profile-action:add-to-pool"
             title={t('connectedServices.profile.addToPool')}
             subtitle={t('connectedServices.profile.addToPoolSubtitle')}
-            icon={<Ionicons name="add-circle-outline" size={22} color={theme.colors.accent.blue} />}
+            icon={<Icon name="plus-circle" size={20} color={theme.colors.accent.blue} />}
             onPress={handleAddToPool}
           />
         </ItemGroup>
@@ -483,7 +483,7 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
           testID="connected-service-profile-action:edit-label"
           title={t('connectedServices.detail.actions.editLabel')}
           subtitle={t('connectedServices.detail.setProfileLabelSubtitle')}
-          icon={<Ionicons name="pencil-outline" size={22} color={theme.colors.accent.blue} />}
+          icon={<Icon name="pencil" size={20} color={theme.colors.accent.blue} />}
           onPress={() => void handleEditLabel()}
         />
       </ItemGroup>
@@ -504,7 +504,7 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
             testID="connected-services-profile-action:reconnect"
             title={t('connectedServices.detail.actions.reconnect')}
             subtitle={t('connectedServices.profile.reconnectSubtitle')}
-            icon={<Ionicons name={CONNECTED_SERVICE_RECONNECT_ICON} size={22} color={theme.colors.accent.blue} />}
+            icon={<Icon name={CONNECTED_SERVICE_RECONNECT_ICON} size={20} color={theme.colors.accent.blue} />}
             onPress={handleReconnect}
           />
         </ItemGroup>
@@ -515,7 +515,7 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
           testID="connected-service-profile-action:disconnect"
           title={t('modals.disconnect')}
           subtitle={t('connectedServices.profile.disconnectSubtitle')}
-          icon={<Ionicons name="trash-outline" size={22} color={theme.colors.state.danger.foreground} />}
+          icon={<Icon name="trash" size={20} color={theme.colors.state.danger.foreground} />}
           onPress={() => void handleDisconnect()}
         />
       </ItemGroup>

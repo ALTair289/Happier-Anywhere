@@ -1,6 +1,5 @@
 import React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
@@ -17,6 +16,7 @@ import { useSetting } from '@/sync/domains/state/storage';
 import { normalizeMcpServersSettingsV1 } from '@/sync/domains/settings/mcpServers/normalizeMcpServersSettingsV1';
 
 import { buildNewSessionMcpSelectionListStep } from './buildNewSessionMcpSelectionListStep';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
 
 type PreviewSuccess = Extract<DaemonMcpServersPreviewResponse, { ok: true }>;
 
@@ -40,7 +40,7 @@ export type NewSessionMcpSelectionContentProps = Readonly<{
 type GroupActionButtonProps = Readonly<{
     testID: string;
     accessibilityLabel: string;
-    icon: React.ComponentProps<typeof Ionicons>['name'];
+    icon: IconName;
     loading?: boolean;
     onPress: () => void;
 }>;
@@ -67,7 +67,7 @@ function GroupActionButton(props: GroupActionButtonProps) {
                 <ActivitySpinner size="small" color={theme.colors.text.tertiary} />
             ) : (
                 normalizeNodeForView(
-                    <Ionicons name={props.icon} size={18} color={theme.colors.text.tertiary} />,
+                    <Icon name={props.icon} size={16} color={theme.colors.text.tertiary} />,
                 )
             )}
         </Pressable>
@@ -88,14 +88,14 @@ export function NewSessionMcpSelectionContent(props: NewSessionMcpSelectionConte
             <GroupActionButton
                 testID="new-session.mcp.happier.refresh"
                 accessibilityLabel={t('common.refresh')}
-                icon="refresh-outline"
+                icon="arrow-clockwise"
                 loading={props.loading}
                 onPress={props.onRefresh}
             />
             <GroupActionButton
                 testID="new-session.mcp.happier.open-settings"
                 accessibilityLabel={t('tabs.settings')}
-                icon="settings-outline"
+                icon="sliders-horizontal"
                 onPress={props.onOpenSettings}
             />
         </View>
@@ -105,7 +105,7 @@ export function NewSessionMcpSelectionContent(props: NewSessionMcpSelectionConte
         <GroupActionButton
             testID="new-session.mcp.detected.refresh"
             accessibilityLabel={t('common.refresh')}
-            icon="refresh-outline"
+            icon="arrow-clockwise"
             loading={props.loading}
             onPress={props.onRefresh}
         />

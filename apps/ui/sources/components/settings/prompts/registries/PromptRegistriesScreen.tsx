@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { ScrollView, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -36,6 +35,7 @@ import { translatePromptLibraryMessage } from '@/sync/ops/promptLibrary/translat
 import { usePrimaryMachineFromActiveSelection } from '@/components/settings/server/hooks/usePrimaryMachineFromActiveSelection';
 import { t, type TranslationKey } from '@/text';
 import { buildPromptRegistryItemDetailsHref } from './promptRegistryItemDetailsHref';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const styles = StyleSheet.create((theme) => ({
   container: {
@@ -141,7 +141,7 @@ export const PromptRegistriesScreen = React.memo(function PromptRegistriesScreen
       id: machine.id,
       title: machine.metadata?.displayName || machine.metadata?.host || machine.id,
       subtitle: machine.id,
-      icon: <Ionicons name="laptop-outline" size={22} color={theme.colors.text.secondary} />,
+      icon: <Icon name="laptop" size={20} color={theme.colors.text.secondary} />,
     }));
   }, [machines, theme.colors.text.secondary]);
 
@@ -346,7 +346,7 @@ export const PromptRegistriesScreen = React.memo(function PromptRegistriesScreen
               testID="promptRegistries.refresh"
               title={t('promptLibrary.registriesRefresh')}
               subtitle={refreshing ? t('common.loading') : t('promptLibrary.registriesRefreshSubtitle')}
-              icon={<Ionicons name="refresh-outline" size={29} color={theme.colors.accent.purple} />}
+              icon={<Icon name="arrow-clockwise" size={29} color={theme.colors.accent.purple} />}
               disabled={refreshing || !machineId}
               onPress={runRefresh}
               showChevron={false}
@@ -359,7 +359,7 @@ export const PromptRegistriesScreen = React.memo(function PromptRegistriesScreen
                 testID="promptRegistries.loading"
                 title={t('common.loading')}
                 subtitle={t('promptLibrary.registriesRefreshSubtitle')}
-                icon={<Ionicons name="refresh-outline" size={29} color={theme.colors.accent.purple} />}
+                icon={<Icon name="arrow-clockwise" size={29} color={theme.colors.accent.purple} />}
                 showChevron={false}
               />
             ) : null}
@@ -370,7 +370,7 @@ export const PromptRegistriesScreen = React.memo(function PromptRegistriesScreen
                 title={source.title}
                 subtitle={source.subtitle || source.id}
                 selected={source.id === selectedSourceId}
-                icon={<Ionicons name="git-branch-outline" size={29} color={theme.colors.text.secondary} />}
+                icon={<Icon name="git-branch" size={29} color={theme.colors.text.secondary} />}
                 onPress={() => void scanSource(source.id)}
                 rightElement={source.origin === 'user' ? (
                   <ItemRowActions
@@ -380,7 +380,7 @@ export const PromptRegistriesScreen = React.memo(function PromptRegistriesScreen
                       {
                         id: 'delete',
                         title: t('common.delete'),
-                        icon: 'trash-outline',
+                        icon: 'trash',
                         destructive: true,
                         onPress: () => removeSource(source.id),
                       },
@@ -393,7 +393,7 @@ export const PromptRegistriesScreen = React.memo(function PromptRegistriesScreen
                 testID="promptRegistries.sources.empty"
                 title={t('promptLibrary.registriesNoSources')}
                 subtitle={t('promptLibrary.registriesNoSourcesSubtitle')}
-                icon={<Ionicons name="albums-outline" size={29} color={theme.colors.text.secondary} />}
+                icon={<Icon name="stack" size={29} color={theme.colors.text.secondary} />}
                 showChevron={false}
               />
             )}
@@ -406,7 +406,7 @@ export const PromptRegistriesScreen = React.memo(function PromptRegistriesScreen
               triggerTestID="promptRegistries.addGitSource"
               title={t('promptLibrary.registriesAddGitSource')}
               subtitle={t('promptLibrary.registriesAddGitSourceSubtitle')}
-              icon={<Ionicons name="add-circle-outline" size={29} color={theme.colors.accent.blue} />}
+              icon={<Icon name="plus-circle" size={29} color={theme.colors.accent.blue} />}
               onCancel={() => {
                 setSourceTitle('');
                 setSourceUrl('');
@@ -459,7 +459,7 @@ export const PromptRegistriesScreen = React.memo(function PromptRegistriesScreen
                 testID={`promptRegistries.item.${index}`}
                 title={item.title}
                 subtitle={item.description || item.displayPath}
-                icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.accent.indigo} />}
+                icon={<Icon name="sparkle" size={29} color={theme.colors.accent.indigo} />}
                 onPress={() => openItemDetails(item)}
                 rightElement={(
                   <ItemRowActions
@@ -469,13 +469,13 @@ export const PromptRegistriesScreen = React.memo(function PromptRegistriesScreen
                       {
                         id: 'details',
                         title: t('common.details'),
-                        icon: 'eye-outline',
+                        icon: 'eye',
                         onPress: () => openItemDetails(item),
                       },
                       {
                         id: 'import',
                         title: t('promptLibrary.externalAssetsImportAction'),
-                        icon: 'download-outline',
+                        icon: 'download',
                         disabled: searching,
                         onPress: () => { void importItem(item); },
                       },
@@ -488,7 +488,7 @@ export const PromptRegistriesScreen = React.memo(function PromptRegistriesScreen
                 testID="promptRegistries.items.empty"
                 title={t('promptLibrary.registriesNoItems')}
                 subtitle={t('promptLibrary.registriesNoItemsSubtitle')}
-                icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.text.secondary} />}
+                icon={<Icon name="sparkle" size={29} color={theme.colors.text.secondary} />}
                 showChevron={false}
               />
             )}

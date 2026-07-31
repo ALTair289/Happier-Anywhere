@@ -6,7 +6,6 @@ import { useUnistyles } from 'react-native-unistyles';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { ItemList } from '@/components/ui/lists/ItemList';
 import { EmptyState } from '@/components/ui/empty/EmptyState';
-import { Ionicons } from '@expo/vector-icons';
 import { Text } from '@/components/ui/text/Text';
 import { Modal } from '@/modal';
 import { t } from '@/text';
@@ -59,6 +58,7 @@ import { storeConnectedServiceCredentialWithIdentityConfirmation } from './store
 import { runConnectedServiceCredentialStoredEffects } from './runConnectedServiceCredentialStoredEffects';
 import { invalidateConnectedServiceGroupsRefreshSignal } from './connectedServiceGroupsRefreshSignal';
 import { useConnectedServiceAuthGroups } from './model/useConnectedServiceAuthGroups';
+import { Icon } from '@/components/ui/icons/Icon';
 
 function asStringParam(value: unknown): string {
   if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : '';
@@ -563,7 +563,7 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
         {sortedProfiles.length === 0 ? (
           <EmptyState
             testID="connected-services-accounts:empty"
-            icon={<Ionicons name="key-outline" size={28} color={theme.colors.text.secondary} />}
+            icon={<Icon name="key" size={29} color={theme.colors.text.secondary} />}
             title={t('connectedServices.detail.profiles.empty')}
           />
         ) : null}

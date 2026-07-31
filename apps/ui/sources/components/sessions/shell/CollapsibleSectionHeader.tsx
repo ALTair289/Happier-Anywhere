@@ -1,11 +1,11 @@
 import React from 'react';
 import { Platform, Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Eyebrow } from '@/components/ui/text/Eyebrow';
 import type { SessionListViewItem } from '@/sync/domains/state/storage';
 import { isSessionListPrimaryHeaderKind } from './sessionListPrimaryHeader';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create((theme) => ({
     headerSection: {
@@ -94,9 +94,9 @@ export const CollapsibleSectionHeader = React.memo(function CollapsibleSectionHe
                             isWeb && !showChevron ? styles.webHoverHiddenChevron : styles.webHoverVisibleChevron,
                         ]}
                     >
-                        <Ionicons
-                            name={props.collapsed ? 'chevron-forward' : 'chevron-down'}
-                            size={12}
+                        <Icon
+                            name={props.collapsed ? 'caret-right' : 'caret-down'}
+                            size={14}
                             color={headerChevronColor}
                         />
                     </View>

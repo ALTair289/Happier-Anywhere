@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Octicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { Text } from '@/components/ui/text/Text';
@@ -10,6 +9,7 @@ import { Modal } from '@/modal';
 import { scmStatusSync } from '@/scm/scmStatusSync';
 import { sessionScmRepositoryInit } from '@/sync/ops/sessions';
 import { SourceControlUpdateButton } from '@/components/sessions/sourceControl/update/SourceControlUpdateControls';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export function NotSourceControlRepositoryState(props: Readonly<{
     sessionId?: string;
@@ -67,7 +67,7 @@ export function NotSourceControlRepositoryState(props: Readonly<{
                 paddingHorizontal: 20,
             }}
         >
-            <Octicons name="git-branch" size={48} color={theme.colors.text.secondary} />
+            <Icon name="git-branch" size={48} color={theme.colors.text.secondary} />
             <Text
                 style={{
                     fontSize: 16,

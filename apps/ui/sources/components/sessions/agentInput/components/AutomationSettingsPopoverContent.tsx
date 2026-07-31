@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import type { AutomationSettingsValue } from '@/components/automations/editor/AutomationSettingsForm';
@@ -27,6 +26,7 @@ import { usePopoverBoundaryRef } from '@/components/ui/popover';
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type Props = Readonly<{
     value: AutomationSettingsValue;
@@ -133,7 +133,7 @@ export function AutomationSettingsPopoverContent(props: Props) {
                                     <Text numberOfLines={1} style={styles.scheduleTriggerText}>
                                         {formatAutomationScheduleTriggerLabel(props.value)}
                                     </Text>
-                                    <Ionicons name="chevron-down" size={16} color={theme.colors.text.secondary} />
+                                    <Icon name="caret-down" size={16} color={theme.colors.text.secondary} />
                                 </Pressable>
                                 <Text style={styles.sentenceText}>.</Text>
                             </View>
@@ -219,7 +219,7 @@ export function AutomationSettingsPopoverContent(props: Props) {
                                                         onPress={() => props.onChange(applyAutomationIntervalUnitValue(props.value, intervalValue - 1, intervalUnit))}
                                                         style={({ pressed }) => [styles.stepButton, pressed ? styles.pressed : null]}
                                                     >
-                                                        <Ionicons name="remove" size={15} color={theme.colors.text.secondary} />
+                                                        <Icon name="minus" size={14} color={theme.colors.text.secondary} />
                                                     </Pressable>
                                                     <TextInput
                                                         testID="automation-interval-minutes-input"
@@ -265,8 +265,8 @@ export function AutomationSettingsPopoverContent(props: Props) {
                                                                 <Text style={styles.unitDropdownText}>
                                                                     {t(selectedIntervalUnit?.labelKey ?? 'automations.form.sentence.intervalUnits.minutes')}
                                                                 </Text>
-                                                                <Ionicons
-                                                                    name={open ? 'chevron-up' : 'chevron-down'}
+                                                                <Icon
+                                                                    name={open ? 'caret-up' : 'caret-down'}
                                                                     size={14}
                                                                     color={theme.colors.text.secondary}
                                                                 />
@@ -279,7 +279,7 @@ export function AutomationSettingsPopoverContent(props: Props) {
                                                         onPress={() => props.onChange(applyAutomationIntervalUnitValue(props.value, intervalValue + 1, intervalUnit))}
                                                         style={({ pressed }) => [styles.stepButton, pressed ? styles.pressed : null]}
                                                     >
-                                                        <Ionicons name="add" size={15} color={theme.colors.text.secondary} />
+                                                        <Icon name="plus" size={14} color={theme.colors.text.secondary} />
                                                     </Pressable>
                                                 </View>
                                             </View>
@@ -323,9 +323,9 @@ export function AutomationSettingsPopoverContent(props: Props) {
                                         })}
                                         style={({ pressed }) => [styles.modeSwitchButton, pressed ? styles.pressed : null]}
                                     >
-                                        <Ionicons
-                                            name={props.value.scheduleKind === 'cron' ? 'repeat-outline' : 'calendar-outline'}
-                                            size={15}
+                                        <Icon
+                                            name={props.value.scheduleKind === 'cron' ? 'repeat' : 'calendar'}
+                                            size={14}
                                             color={theme.colors.accent.blue}
                                         />
                                         <Text style={styles.modeSwitchText}>
@@ -364,7 +364,7 @@ export function AutomationSettingsPopoverContent(props: Props) {
                                     onPress={() => setNotesOpen(true)}
                                     style={({ pressed }) => [styles.addNotesButton, pressed ? styles.pressed : null]}
                                 >
-                                    <Ionicons name="add" size={16} color={theme.colors.text.secondary} />
+                                    <Icon name="plus" size={16} color={theme.colors.text.secondary} />
                                     <Text style={styles.addNotesText}>
                                         {t('automations.form.sentence.addNotes')}
                                     </Text>

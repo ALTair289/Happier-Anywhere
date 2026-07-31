@@ -1,11 +1,11 @@
 import React from 'react';
 import { Animated, Easing, Pressable, View, type TextStyle, type ViewStyle } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
 import { TextInput } from '@/components/ui/text/Text';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const TAG_FILTER_ITEM_PREFIX = 'session-list-tag-filter:';
 const SEARCH_INPUT_EXPANDED_WIDTH = 188;
@@ -252,9 +252,9 @@ export const SessionListHeaderControls = React.memo(function SessionListHeaderCo
         return {
             id: `${TAG_FILTER_ITEM_PREFIX}${tag}`,
             title: tag,
-            icon: <Ionicons name="pricetag-outline" size={15} color={selected ? activeIconColor : iconColor} />,
+            icon: <Icon name="tag" size={14} color={selected ? activeIconColor : iconColor} />,
             rightElement: selected
-                ? <Ionicons name="checkmark" size={15} color={activeIconColor} />
+                ? <Icon name="check" size={14} color={activeIconColor} />
                 : null,
         };
     }), [activeIconColor, allKnownTags, iconColor, selectedTagSet]);
@@ -291,8 +291,8 @@ export const SessionListHeaderControls = React.memo(function SessionListHeaderCo
                     pointerEvents="none"
                     style={[styles.searchShellBorder, animatedSearchChromeStyle]}
                 />
-                <Ionicons
-                    name="search"
+                <Icon
+                    name="magnifying-glass"
                     size={16}
                     color={searchIsOpen ? activeIconColor : iconColor}
                     style={styles.searchIcon}
@@ -334,8 +334,8 @@ export const SessionListHeaderControls = React.memo(function SessionListHeaderCo
                                 hitSlop={10}
                                 style={styles.searchClearButton}
                             >
-                                <Ionicons
-                                    name="close-circle"
+                                <Icon
+                                    name="x-circle"
                                     size={14}
                                     color={theme.colors.text.tertiary}
                                 />
@@ -372,8 +372,8 @@ export const SessionListHeaderControls = React.memo(function SessionListHeaderCo
                             hitSlop={8}
                             style={styles.iconButton}
                         >
-                            <Ionicons
-                                name="pricetag-outline"
+                            <Icon
+                                name="tag"
                                 size={16}
                                 color={selectedTags.length > 0 ? activeIconColor : iconColor}
                             />

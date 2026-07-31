@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Platform, Pressable, ScrollView, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons, Octicons } from '@expo/vector-icons';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
 import { Text } from '@/components/ui/text/Text';
@@ -24,6 +23,7 @@ import { IconAction } from '@/components/ui/buttons/IconAction';
 import { SidebarCollapseIcon, SidebarExpandIcon } from '@/components/navigation/shell/SidebarIcons';
 import { resolveOptionalSessionScreenTestId, useSessionScreenTestIdsEnabled } from '../shell/sessionScreenTestIds';
 import { usePaneFocusMode } from '@/components/appShell/panes/focusMode/usePaneFocusMode';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     SessionCommitDetailsViewForPanel,
     SessionFileDetailsViewForPanel,
@@ -416,7 +416,7 @@ export const SessionDetailsPanel = React.memo((props: SessionDetailsPanelProps) 
             testID={resolveOptionalSessionScreenTestId(sessionScreenTestIdsEnabled, 'session-details-close')}
             accessibilityLabel={closeButtonAtStart ? t('common.back') : t('session.detailsPanel.closeA11y')}
         >
-            <Octicons name={closeButtonAtStart ? 'chevron-left' : 'chevron-right'} size={18} color={theme.colors.text.secondary} />
+            <Icon name={closeButtonAtStart ? 'caret-left' : 'caret-right'} size={16} color={theme.colors.text.secondary} />
         </IconAction>
     );
 
@@ -439,7 +439,7 @@ export const SessionDetailsPanel = React.memo((props: SessionDetailsPanelProps) 
                             tab.kind === 'commit'
                                 ? 'git-commit'
                                 : tab.kind === 'scmReview'
-                                    ? 'diff'
+                                    ? 'git-diff'
                                     : tab.kind === 'scmStash'
                                         ? 'archive'
                                         : tab.kind === 'terminal'
@@ -480,7 +480,7 @@ export const SessionDetailsPanel = React.memo((props: SessionDetailsPanelProps) 
                                             )}
                                         />
                                     ) : (
-                                        <Octicons
+                                        <Icon
                                             name={iconName as any}
                                             size={14}
                                             color={isActive ? theme.colors.text.secondary : theme.colors.text.secondary}
@@ -543,7 +543,7 @@ export const SessionDetailsPanel = React.memo((props: SessionDetailsPanelProps) 
                                         accessibilityLabel={t('session.detailsPanel.closeTabA11y')}
                                         hitSlop={10}
                                     >
-                                        <Octicons name="x" size={13} color={theme.colors.text.secondary} />
+                                        <Icon name="x" size={14} color={theme.colors.text.secondary} />
                                     </Pressable>
                                 </View>
                             </View>
@@ -561,9 +561,9 @@ export const SessionDetailsPanel = React.memo((props: SessionDetailsPanelProps) 
                                 : t('session.detailsPanel.enterFocusModeA11y')
                         }
                     >
-                        <Ionicons
-                            name={focusMode.active ? 'contract-outline' : 'expand-outline'}
-                            size={18}
+                        <Icon
+                            name={focusMode.active ? 'arrows-in' : 'arrows-out'}
+                            size={16}
                             color={theme.colors.text.secondary}
                         />
                     </IconAction>

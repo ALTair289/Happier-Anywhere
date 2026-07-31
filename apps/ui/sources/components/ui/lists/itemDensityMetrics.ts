@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 
+import { ICON_SIZE } from '@/components/ui/icons/Icon';
 import type { ResolvedItemDensity } from '@/components/ui/lists/useResolvedItemDensity';
 
 function selectValue<T>(values: { ios?: T; default: T }): T {
@@ -68,6 +69,39 @@ export const ITEM_ICON_BOX_SIZE: Record<ResolvedItemDensity, number> = {
     cozy: selectValue({ ios: 22, default: 24 }),
     compact: selectValue({ ios: 18, default: 20 }),
     tight: selectValue({ ios: 18, default: 18 }),
+};
+
+
+/**
+ * The glyph size for an item row and for every menu row that shares this scale.
+ *
+ * On the shared icon scale, one step per density. This was briefly derived from the row's own type
+ * metrics — cap height of the title down to the baseline of the subtitle — which is defensible on
+ * paper and looked wrong: the icons read as oversized badges beside their text, and because iOS and
+ * web use different line heights the two platforms diverged, so native dropdowns came out visibly
+ * bigger than the web ones. A scale step is coarser and better here, and it is the same number
+ * everywhere.
+ */
+export const ITEM_ICON_GLYPH_SIZE: Record<ResolvedItemDensity, number> = {
+    comfortable: ICON_SIZE.xl,
+    cozy: ICON_SIZE.lg,
+    compact: ICON_SIZE.md,
+    tight: ICON_SIZE.sm,
+};
+
+/**
+ * The glyph size for a MENU row — a dropdown or action list — one step below an item row.
+ *
+ * Menu rows and settings rows share `Item`/`SelectableRow` but not their density: a settings row is a
+ * destination with a subtitle and room to breathe, a menu row is a dense list of choices. Sizing both
+ * from one table made the dropdowns look oversized, which is the same conflation the box-versus-glyph
+ * split fixed one level down.
+ */
+export const MENU_ROW_ICON_GLYPH_SIZE: Record<ResolvedItemDensity, number> = {
+    comfortable: ICON_SIZE.lg,
+    cozy: ICON_SIZE.md,
+    compact: ICON_SIZE.sm,
+    tight: ICON_SIZE.sm,
 };
 
 export const ITEM_ICON_MARGIN_RIGHT: Record<ResolvedItemDensity, number> = {

@@ -1,4 +1,3 @@
-import { Ionicons, Octicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import * as React from 'react';
 import { Platform } from 'react-native';
@@ -7,6 +6,7 @@ import { useUnistyles } from 'react-native-unistyles';
 import { PrimaryCircleIconButton } from '@/components/ui/buttons/PrimaryCircleIconButton';
 import { hapticsLight } from '@/components/ui/theme/haptics';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const AgentInputSubmitButton = React.memo(function AgentInputSubmitButton(props: Readonly<{
     testID: string;
@@ -66,7 +66,7 @@ export const AgentInputSubmitButton = React.memo(function AgentInputSubmitButton
             style={{ marginLeft: 8, marginRight: 8 }}
         >
             {props.hasSendableContent ? (
-                <Octicons
+                <Icon
                     name="arrow-up"
                     size={16}
                     color={theme.colors.button.primary.tint}
@@ -74,7 +74,7 @@ export const AgentInputSubmitButton = React.memo(function AgentInputSubmitButton
                 />
             ) : props.micPressHandler ? (
                 props.micActive ? (
-                    <Ionicons name="stop-circle" size={22} color={theme.colors.button.primary.tint} />
+                    <Icon name="stop-circle" size={20} color={theme.colors.button.primary.tint} />
                 ) : (
                     <Image
                         source={require('@/assets/images/icon-voice-white.png')}
@@ -83,9 +83,9 @@ export const AgentInputSubmitButton = React.memo(function AgentInputSubmitButton
                     />
                 )
             ) : showStopWhenEmpty ? (
-                <Ionicons name="stop" size={18} color={theme.colors.button.primary.tint} />
+                <Icon name="stop" size={16} weight="fill" color={theme.colors.button.primary.tint} />
             ) : (
-                <Octicons
+                <Icon
                     name="arrow-up"
                     size={16}
                     color={theme.colors.button.primary.tint}

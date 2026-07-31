@@ -1,6 +1,5 @@
 import React from 'react';
 import { Pressable, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
@@ -15,6 +14,7 @@ import { navigateWithBlurOnWeb } from '@/utils/platform/deferOnWeb';
 import { ignoreNextRowPress } from '@/utils/ui/ignoreNextRowPress';
 import { t } from '@/text';
 import { formatAutomationNextRun, formatAutomationScheduleLabel } from './automationListFormatting';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type Props = Readonly<{
     title: string;
@@ -132,9 +132,9 @@ export const AutomationListGroup = React.memo((props: Props) => {
                                     {runState === 'running' ? (
                                         <ActivitySpinner size="small" color={theme.colors.text.secondary} />
                                     ) : runState === 'queued' ? (
-                                        <Ionicons name="checkmark" size={18} color={theme.colors.text.secondary} />
+                                        <Icon name="check" size={16} color={theme.colors.text.secondary} />
                                     ) : (
-                                        <Ionicons name="play" size={18} color={theme.colors.text.secondary} />
+                                        <Icon name="play" size={16} color={theme.colors.text.secondary} />
                                     )}
                                 </Pressable>
                                 <Switch

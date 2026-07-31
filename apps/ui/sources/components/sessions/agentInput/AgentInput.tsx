@@ -1,4 +1,3 @@
-import { Ionicons, Octicons } from '@expo/vector-icons';
 import * as React from 'react';
 import { View, Platform, useWindowDimensions, ViewStyle, Pressable, ScrollView } from 'react-native';
 import { layout } from '@/components/ui/layout/layout';
@@ -170,6 +169,8 @@ import {
 } from '@/keyboard/composer';
 import { useKeyboardShortcutHandlers } from '@/keyboard/KeyboardShortcutProvider';
 import type { KeyboardShortcutHandlers } from '@/keyboard/runtime';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
+import type { StyleProp } from 'react-native';
 
 /**
  * Synthesized model-card toggle id for catalog-declared extended-context model variants
@@ -540,7 +541,7 @@ function AgentInputHiddenUsageOverflow(props: AgentInputHiddenUsageOverflowProps
                     pressed ? styles.hiddenUsageOverflowPressed : null,
                 ]}
             >
-                <Ionicons name="ellipsis-horizontal" size={14} color={theme.colors.text.secondary} />
+                <Icon name="dots-three" size={14} color={theme.colors.text.secondary} />
             </Pressable>
             <AgentInputContentPopover
                 open={open}
@@ -1117,20 +1118,20 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const keyboardShortcutDisabledCommandIdsV1 = useSetting('keyboardShortcutDisabledCommandIdsV1') ?? [];
     const renderIoniconNode = React.useCallback(
         (
-            name: React.ComponentProps<typeof Ionicons>['name'],
+            name: IconName,
             size: number,
             color: string,
-            style?: React.ComponentProps<typeof Ionicons>['style'],
-        ) => normalizeNodeForView(<Ionicons name={name} size={size} color={color} style={style} />),
+            style?: StyleProp<ViewStyle>,
+        ) => normalizeNodeForView(<Icon name={name} size={size} color={color} style={style} />),
         [],
     );
     const renderOcticonNode = React.useCallback(
         (
-            name: React.ComponentProps<typeof Octicons>['name'],
+            name: IconName,
             size: number,
             color: string,
-            style?: React.ComponentProps<typeof Octicons>['style'],
-        ) => normalizeNodeForView(<Octicons name={name} size={size} color={color} style={style} />),
+            style?: StyleProp<ViewStyle>,
+        ) => normalizeNodeForView(<Icon name={name} size={size} color={color} style={style} />),
         [],
     );
 
@@ -1322,7 +1323,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
             const profileIcon = React.useMemo(() => {
                 // Always show a stable "profile" icon so the chip reads as Profile selection (not "current provider").
-                return 'person-circle-outline';
+                return 'user-circle';
             }, []);
 
     const supportsExactContextUsageBadge = React.useMemo(
@@ -1982,10 +1983,10 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         return {
             optionValue: found?.value ?? appliedModelId,
             iconName: props.sessionActive === true
-                ? 'play-circle-outline' as const
+                ? 'play-circle' as const
                 : props.sessionActive === false
-                    ? 'time-outline' as const
-                    : 'information-circle-outline' as const,
+                    ? 'clock' as const
+                    : 'info' as const,
             summary: t(`agentInput.model.${status}`, { model: label }),
         };
     }, [effectiveModelPolicy.appliedModelId, modelOptions, props.sessionActive]);
@@ -2221,11 +2222,10 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 ...(appliedModelPresentation?.optionValue === option.value
                     ? {
                         trailingStatusIcon: (
-                            <Ionicons
+                            <Icon
                                 name={appliedModelPresentation.iconName}
                                 size={16}
                                 color={theme.colors.text.secondary}
-                                accessibilityElementsHidden
                             />
                         ),
                         accessibilityLabel: appliedModelPresentation.summary,
@@ -2939,7 +2939,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     ]}
                 >
                     {renderIoniconNode(
-                        props.inputExpansion.expanded ? 'contract-outline' : 'expand-outline',
+                        props.inputExpansion.expanded ? 'arrows-in' : 'arrows-out',
                         16,
                         theme.colors.text.secondary,
                     )}
@@ -3401,7 +3401,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             ]}
                         >
                             <View style={styles.fileDropOverlayContent}>
-                                {renderIoniconNode('attach-outline', 18, theme.colors.text.primary)}
+                                {renderIoniconNode('paperclip', 18, theme.colors.text.primary)}
                                 <Text style={styles.fileDropOverlayText}>{t('agentInput.dropToAttach')}</Text>
                             </View>
                         </View>

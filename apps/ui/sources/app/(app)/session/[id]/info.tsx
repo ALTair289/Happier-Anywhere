@@ -1,7 +1,6 @@
 import React, { useCallback } from 'react';
 import { View } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { Ionicons, Octicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
 import { Item } from '@/components/ui/lists/Item';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
@@ -91,6 +90,7 @@ import {
     setSessionTagLabels as setSessionOrganizationTagLabels,
 } from '@/sync/ops/sessionOrganization';
 import { buildSessionOrganizationListViewState } from '@/sync/domains/session/organization/viewState';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
     buildSessionDebugInformation,
     isSessionDebugInformationEnabled,
@@ -304,13 +304,13 @@ function SessionInfoVolatileDetailItems({
             <Item
                 title={t('sessionInfo.lastUpdated')}
                 subtitle={formatDate(session.updatedAt)}
-                icon={<Ionicons name="time-outline" size={29} color={theme.colors.accent.blue} />}
+                icon={<Icon name="clock" size={29} color={theme.colors.accent.blue} />}
                 showChevron={false}
             />
             <Item
                 title={t('sessionInfo.sequence')}
                 detail={session.seq.toString()}
-                icon={<Ionicons name="git-commit-outline" size={29} color={theme.colors.accent.blue} />}
+                icon={<Icon name="git-commit" size={29} color={theme.colors.accent.blue} />}
                 showChevron={false}
             />
         </>
@@ -385,7 +385,7 @@ function SessionInfoActivityGroup({
             <Item
                 title={t('sessionInfo.sessionStatus')}
                 detail={sessionStatus.statusText}
-                icon={<Ionicons name="pulse-outline" size={29} color={sessionStatus.statusColor} />}
+                icon={<Icon name="pulse" size={29} color={sessionStatus.statusColor} />}
                 showChevron={false}
             />
             {showRawDiagnostics ? (
@@ -393,14 +393,14 @@ function SessionInfoActivityGroup({
                     <Item
                         title={t('sessionInfo.thinking')}
                         detail={session.thinking ? t('common.yes') : t('common.no')}
-                        icon={<Ionicons name="bulb-outline" size={29} color={session.thinking ? theme.colors.accent.yellow : theme.colors.text.secondary} />}
+                        icon={<Icon name="lightbulb" size={29} color={session.thinking ? theme.colors.accent.yellow : theme.colors.text.secondary} />}
                         showChevron={false}
                     />
                     {session.thinking && (
                         <Item
                             title={t('sessionInfo.thinkingSince')}
                             subtitle={formatDate(session.thinkingAt)}
-                            icon={<Ionicons name="timer-outline" size={29} color={theme.colors.accent.yellow} />}
+                            icon={<Icon name="timer" size={29} color={theme.colors.accent.yellow} />}
                             showChevron={false}
                         />
                     )}
@@ -427,7 +427,7 @@ function SessionInfoExecutionRunsAction({
         <Item
             title={t('runs.title')}
             subtitle={t('sessionInfo.executionRunsSubtitle')}
-            icon={<Ionicons name="play-outline" size={29} color={theme.colors.accent.blue} />}
+            icon={<Icon name="play" size={29} color={theme.colors.accent.blue} />}
             onPress={() => router.push(routeScope.buildHref(sessionId, { suffix: '/runs' }))}
         />
     );
@@ -970,7 +970,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         <Item
                             title={t('sessionInfo.cliVersionOutdated')}
                             subtitle={t('sessionInfo.updateCliInstructions')}
-                            icon={<Ionicons name="warning-outline" size={29} color={theme.colors.accent.orange} />}
+                            icon={<Icon name="warning" size={29} color={theme.colors.accent.orange} />}
                             showChevron={false}
                             copy="happier self update"
                         />
@@ -984,7 +984,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                     <Item
                         title={t('sessionInfo.happySessionId')}
                         subtitle={`${session.id.substring(0, 8)}...${session.id.substring(session.id.length - 8)}`}
-                        icon={<Ionicons name="finger-print-outline" size={29} color={theme.colors.accent.blue} />}
+                        icon={<Icon name="fingerprint" size={29} color={theme.colors.accent.blue} />}
                         copy={session.id}
                     />
                     {vendorResumeId && vendorResumeLabelKey && vendorResumeCopiedKey && (
@@ -998,13 +998,13 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                     <Item
                         title={t('sessionInfo.connectionStatus')}
                         detail={sessionStatus.isConnected ? t('status.online') : t('status.offline')}
-                        icon={<Ionicons name="pulse-outline" size={29} color={sessionStatus.isConnected ? theme.colors.state.success.foreground : theme.colors.text.secondary} />}
+                        icon={<Icon name="pulse" size={29} color={sessionStatus.isConnected ? theme.colors.state.success.foreground : theme.colors.text.secondary} />}
                         showChevron={false}
                     />
                     <Item
                         title={t('sessionInfo.created')}
                         subtitle={formatDate(session.createdAt)}
-                        icon={<Ionicons name="calendar-outline" size={29} color={theme.colors.accent.blue} />}
+                        icon={<Icon name="calendar" size={29} color={theme.colors.accent.blue} />}
                         showChevron={false}
                     />
                     <SessionInfoVolatileDetailItems sessionId={session.id} formatDate={formatDate} />
@@ -1016,7 +1016,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         <Item
                             title={t('sessionInfo.renameSession')}
                             subtitle={t('sessionInfo.renameSessionSubtitle')}
-                            icon={<Ionicons name="pencil-outline" size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="pencil" size={29} color={theme.colors.accent.blue} />}
                             onPress={handleRenameSession}
                         />
                     )}
@@ -1025,7 +1025,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             testID="session-info-fork-session"
                             title={t('sessionInfo.forkSession')}
                             subtitle={t('sessionInfo.forkSessionSubtitle')}
-                            icon={<Ionicons name="git-branch-outline" size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="git-branch" size={29} color={theme.colors.accent.blue} />}
                             onPress={performFork}
                             loading={forkingSession}
                         />
@@ -1034,14 +1034,14 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         testID="session-info-new-session-same-setup"
                         title={t('sessionInfo.newSessionSameSetup')}
                         subtitle={t('sessionInfo.newSessionSameSetupSubtitle')}
-                        icon={<Ionicons name="copy-outline" size={29} color={theme.colors.accent.blue} />}
+                        icon={<Icon name="copy" size={29} color={theme.colors.accent.blue} />}
                         onPress={handleNewSessionSameSetup}
                     />
                     {devModeEnabled ? (
                         <Item
                             testID="session-info-copy-debug-information"
                             title={t('sessionInfo.copyDebugInformation')}
-                            icon={<Ionicons name="copy-outline" size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="copy" size={29} color={theme.colors.accent.blue} />}
                             copy={sessionDebugInformation.text}
                         />
                     ) : null}
@@ -1049,7 +1049,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         <Item
                             title={handoffActionSpec.title}
                             subtitle={handoffActionSpec.description}
-                            icon={<Octicons name="arrow-switch" size={24} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="arrows-left-right" size={24} color={theme.colors.accent.blue} />}
                             onPress={performHandoff}
                             loading={handingOffSession}
                         />
@@ -1092,7 +1092,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         <Item
                             title={t('sessionInfo.automationsTitle')}
                             subtitle={t('sessionInfo.automationsSubtitle')}
-                            icon={<Ionicons name="timer-outline" size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="timer" size={29} color={theme.colors.accent.blue} />}
                             onPress={() => router.push(routeScope.buildHref(session.id, { suffix: '/automations' }))}
                         />
                     ) : null}
@@ -1100,7 +1100,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         <Item
                             title={t('sessionInfo.copyResumeCommand')}
                             subtitle={t('sessionInfo.resumeCommand', { sessionId: session.id })}
-                            icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accent.purple} />}
+                            icon={<Icon name="terminal" size={29} color={theme.colors.accent.purple} />}
                             showChevron={false}
                             copy={t('sessionInfo.resumeCommand', { sessionId: session.id })}
                         />
@@ -1108,7 +1108,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                     <Item
                         title={t('sessionInfo.viewSessionLogTitle')}
                         subtitle={t('sessionInfo.viewSessionLogSubtitle')}
-                        icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.accent.blue} />}
+                        icon={<Icon name="file-text" size={29} color={theme.colors.accent.blue} />}
                         onPress={() => router.push(routeScope.buildHref(session.id, { suffix: '/log' }))}
                     />
                     {displayMachineId && (
@@ -1123,7 +1123,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                                     {displayMachineId}
                                 </Text>
                             }
-                            icon={<Ionicons name="server-outline" size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="hard-drives" size={29} color={theme.colors.accent.blue} />}
                             onPress={() => router.push(`/machine/${displayMachineId}`)}
                         />
                     )}
@@ -1131,7 +1131,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         <Item
                             title={t('sessionInfo.manageSharing')}
                             subtitle={t('sessionInfo.manageSharingSubtitle')}
-                            icon={<Ionicons name="share-outline" size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="share" size={29} color={theme.colors.accent.blue} />}
                             onPress={() => router.push(routeScope.buildHref(session.id, { suffix: '/sharing' }))}
                         />
                     )}
@@ -1163,13 +1163,13 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         <Item
                             title={t('sessionInfo.host')}
                             subtitle={session.metadata.host}
-                            icon={<Ionicons name="desktop-outline" size={29} color={theme.colors.accent.indigo} />}
+                            icon={<Icon name="desktop" size={29} color={theme.colors.accent.indigo} />}
                             showChevron={false}
                         />
                         <Item
                             title={t('sessionInfo.path')}
                             subtitle={formatPathRelativeToHome(session.metadata.path, session.metadata.homeDir)}
-                            icon={<Ionicons name="folder-outline" size={29} color={theme.colors.accent.indigo} />}
+                            icon={<Icon name="folder" size={29} color={theme.colors.accent.indigo} />}
                             showChevron={false}
                         />
                         {session.metadata.version && (
@@ -1177,7 +1177,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                                 title={t('sessionInfo.cliVersion')}
                                 subtitle={session.metadata.version}
                                 detail={isCliOutdated ? '⚠️' : undefined}
-                                icon={<Ionicons name="git-branch-outline" size={29} color={isCliOutdated ? theme.colors.accent.orange : theme.colors.accent.indigo} />}
+                                icon={<Icon name="git-branch" size={29} color={isCliOutdated ? theme.colors.accent.orange : theme.colors.accent.indigo} />}
                                 showChevron={false}
                             />
                         )}
@@ -1185,7 +1185,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             <Item
                                 title={t('sessionInfo.operatingSystem')}
                                 subtitle={formatOSPlatform(session.metadata.os)}
-                                icon={<Ionicons name="hardware-chip-outline" size={29} color={theme.colors.accent.indigo} />}
+                                icon={<Icon name="cpu" size={29} color={theme.colors.accent.indigo} />}
                                 showChevron={false}
                             />
                         )}
@@ -1198,14 +1198,14 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                                         ? flavor
                                         : t(getAgentCore(DEFAULT_AGENT_ID).displayNameKey);
                                 })()}
-                                icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.accent.indigo} />}
+                                icon={<Icon name="sparkle" size={29} color={theme.colors.accent.indigo} />}
                                 showChevron={false}
                             />
                             {useProfiles && session.metadata?.profileId !== undefined && (
                                 <Item
                                     title={t('sessionInfo.aiProfile')}
                                     detail={profileLabel}
-                                    icon={<Ionicons name="person-circle-outline" size={29} color={theme.colors.accent.indigo} />}
+                                    icon={<Icon name="user-circle" size={29} color={theme.colors.accent.indigo} />}
                                     showChevron={false}
                                 />
                             )}
@@ -1213,7 +1213,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                                 <Item
                                     title={t('sessionInfo.processId')}
                                     subtitle={session.metadata.hostPid.toString()}
-                                icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accent.indigo} />}
+                                icon={<Icon name="terminal" size={29} color={theme.colors.accent.indigo} />}
                                 showChevron={false}
                             />
                         )}
@@ -1221,7 +1221,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             <Item
                                 title={t('sessionInfo.happyHome')}
                                 subtitle={formatPathRelativeToHome(session.metadata.happyHomeDir, session.metadata.homeDir)}
-                                icon={<Ionicons name="home-outline" size={29} color={theme.colors.accent.indigo} />}
+                                icon={<Icon name="house" size={29} color={theme.colors.accent.indigo} />}
                                 showChevron={false}
                             />
                         )}
@@ -1229,7 +1229,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             <Item
                                 title={t('sessionLog.logPathCopyLabel')}
                                 subtitle={formatPathRelativeToHome(sessionLogPath, session.metadata.homeDir)}
-                                icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.accent.indigo} />}
+                                icon={<Icon name="file-text" size={29} color={theme.colors.accent.indigo} />}
                                 copy={sessionLogPath}
                                 showChevron={false}
                             />
@@ -1238,7 +1238,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             <Item
                                 title={t('sessionInfo.providerSessionLogs', { provider: providerDisplayName })}
                                 subtitle={formatPathRelativeToHome(providerSessionArtifactPath, session.metadata.homeDir)}
-                                icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.accent.indigo} />}
+                                icon={<Icon name="file-text" size={29} color={theme.colors.accent.indigo} />}
                                 copy={providerSessionArtifactPath}
                                 showChevron={false}
                             />
@@ -1247,7 +1247,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             <Item
                                 title={t('sessionInfo.attachFromTerminal')}
                                 subtitle={attachCommand}
-                                icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accent.indigo} />}
+                                icon={<Icon name="terminal" size={29} color={theme.colors.accent.indigo} />}
                                 copy={attachCommand}
                                 showChevron={false}
                             />
@@ -1256,7 +1256,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             <Item
                                 title={t('sessionInfo.tmuxTarget')}
                                 subtitle={tmuxTarget}
-                                icon={<Ionicons name="albums-outline" size={29} color={theme.colors.accent.indigo} />}
+                                icon={<Icon name="stack" size={29} color={theme.colors.accent.indigo} />}
                                 showChevron={false}
                             />
                         )}
@@ -1264,13 +1264,13 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             <Item
                                 title={t('sessionInfo.tmuxFallback')}
                                 subtitle={tmuxFallbackReason}
-                                icon={<Ionicons name="alert-circle-outline" size={29} color={theme.colors.accent.orange} />}
+                                icon={<Icon name="warning-circle" size={29} color={theme.colors.accent.orange} />}
                                 showChevron={false}
                             />
                         )}
                         <Item
                             title={t('sessionInfo.copyMetadata')}
-                            icon={<Ionicons name="copy-outline" size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name="copy" size={29} color={theme.colors.accent.blue} />}
                             copy={JSON.stringify(session.metadata, null, 2)}
                         />
                     </ItemGroup>
@@ -1282,14 +1282,14 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         <Item
                             title={t('sessionInfo.controlledByUser')}
                             detail={session.agentState.controlledByUser ? t('common.yes') : t('common.no')}
-                            icon={<Ionicons name="person-outline" size={29} color={theme.colors.accent.orange} />}
+                            icon={<Icon name="person" size={29} color={theme.colors.accent.orange} />}
                             showChevron={false}
                         />
                         {session.agentState.requests && Object.keys(session.agentState.requests).length > 0 && (
                             <Item
                                 title={t('sessionInfo.pendingRequests')}
                                 detail={Object.keys(session.agentState.requests).length.toString()}
-                                icon={<Ionicons name="hourglass-outline" size={29} color={theme.colors.accent.orange} />}
+                                icon={<Icon name="hourglass" size={29} color={theme.colors.accent.orange} />}
                                 showChevron={false}
                             />
                         )}
@@ -1310,7 +1310,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             <>
                                 <Item
                                     title={t('sessionInfo.agentState')}
-                                    icon={<Ionicons name="code-working-outline" size={29} color={theme.colors.accent.orange} />}
+                                    icon={<Icon name="code" size={29} color={theme.colors.accent.orange} />}
                                     onPress={handleToggleAgentStateJson}
                                 />
                                 {expandedRawJsonSection === 'agentState' && expandedRawJsonCode && (
@@ -1327,7 +1327,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             <>
                                 <Item
                                     title={t('sessionInfo.metadata')}
-                                    icon={<Ionicons name="information-circle-outline" size={29} color={theme.colors.accent.indigo} />}
+                                    icon={<Icon name="info" size={29} color={theme.colors.accent.indigo} />}
                                     onPress={handleToggleMetadataJson}
                                 />
                                 {expandedRawJsonSection === 'metadata' && expandedRawJsonCode && (
@@ -1344,7 +1344,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             <>
                                 <Item
                                     title={t('sessionInfo.sessionStatus')}
-                                    icon={<Ionicons name="analytics-outline" size={29} color={theme.colors.accent.blue} />}
+                                    icon={<Icon name="chart-line" size={29} color={theme.colors.accent.blue} />}
                                     onPress={handleToggleSessionStatusJson}
                                 />
                                 {expandedRawJsonSection === 'sessionStatus' && expandedRawJsonCode && (
@@ -1360,7 +1360,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         {/* Full Session Object */}
                         <Item
                             title={t('sessionInfo.fullSessionObject')}
-                            icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.state.success.foreground} />}
+                            icon={<Icon name="file-text" size={29} color={theme.colors.state.success.foreground} />}
                             onPress={handleToggleSessionJson}
                         />
                         {expandedRawJsonSection === 'session' && expandedRawJsonCode && (
@@ -1421,7 +1421,7 @@ export default () => {
         // Still loading data
         return (
             <View testID="session-info-screen" style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-                <Ionicons name="hourglass-outline" size={48} color={theme.colors.text.secondary} />
+                <Icon name="hourglass" size={48} color={theme.colors.text.secondary} />
                 <Text style={{ color: theme.colors.text.secondary, fontSize: 17, marginTop: 16, ...Typography.default('semiBold') }}>{t('common.loading')}</Text>
             </View>
         );
@@ -1431,7 +1431,7 @@ export default () => {
         // Session has been deleted or doesn't exist
         return (
             <View testID="session-info-screen" style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-                <Ionicons name="trash-outline" size={48} color={theme.colors.text.secondary} />
+                <Icon name="trash" size={48} color={theme.colors.text.secondary} />
                 <Text style={{ color: theme.colors.text.primary, fontSize: 20, marginTop: 16, ...Typography.default('semiBold') }}>{t('errors.sessionDeleted')}</Text>
                 <Text style={{ color: theme.colors.text.secondary, fontSize: 15, marginTop: 8, textAlign: 'center', paddingHorizontal: 32, ...Typography.default() }}>{t('errors.sessionDeletedDescription')}</Text>
             </View>

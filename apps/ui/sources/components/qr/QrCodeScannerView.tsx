@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { AppState, Linking, Platform, Pressable, useWindowDimensions, View } from 'react-native';
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
@@ -13,6 +12,7 @@ import { Typography } from '@/constants/Typography';
 import { isRunningOnMac } from '@/utils/platform/platform';
 import { isWebQrScannerSupported } from '@/utils/platform/qrScannerSupport';
 import { isWebMobileLikeQrScannerHost } from '@/utils/platform/webMobileHeuristics';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create((theme) => ({
     root: {
@@ -263,12 +263,11 @@ export const QrCodeScannerView = React.memo(function QrCodeScannerView(props: Qr
                         onPress={props.onCancel}
                         style={styles.closeButton}
                     >
-                        <Ionicons
+                        <Icon
                             testID={`${props.testIDPrefix}-close-icon`}
-                            name="close"
-                            size={22}
+                            name="x"
+                            size={20}
                             color={closeIconColor}
-                            style={{ color: closeIconColor }}
                         />
                     </Pressable>
                     <View style={styles.titleBlock} pointerEvents="none">

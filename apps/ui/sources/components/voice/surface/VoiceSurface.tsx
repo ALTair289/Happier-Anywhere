@@ -2,7 +2,6 @@ import * as React from 'react';
 import { Platform, Pressable, ScrollView, View } from 'react-native';
 import { usePathname, useRouter } from 'expo-router';
 
-import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { Typography } from '@/constants/Typography';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -34,6 +33,7 @@ import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { isHiddenSystemSession } from '@happier-dev/protocol';
 import { getVoiceAgentSessionTeleportAvailability } from '@/voice/agent/getVoiceAgentSessionTeleportAvailability';
 import { normalizeNonEmptyString } from '@/voice/shared/normalizeNonEmptyString';
+import { Icon } from '@/components/ui/icons/Icon';
 
 
 export type VoiceSurfaceVariant = 'sidebar' | 'session';
@@ -302,12 +302,12 @@ export function VoiceSurface(props: Readonly<{ variant: VoiceSurfaceVariant; ses
               ]}
             >
               <StatusDot color={statusInfo.dot} isPulsing={snap.status === 'connecting'} size={7} style={styles.dot as any} />
-              <Ionicons name="mic-off-outline" size={13} color={theme.colors.text.primary} style={styles.micIcon as any} />
+              <Icon name="microphone-slash" size={14} color={theme.colors.text.primary} style={styles.micIcon as any} />
             </Pressable>
           ) : (
             <View style={[styles.micBadge, { backgroundColor: theme.colors.surface.inset, borderColor: theme.colors.border.default }]}>
               <StatusDot color={statusInfo.dot} isPulsing={snap.status === 'connecting'} size={7} style={styles.dot as any} />
-              <Ionicons name={snap.mode === 'listening' ? 'mic' : 'mic-off-outline'} size={13} color={theme.colors.text.primary} style={styles.micIcon as any} />
+              <Icon name={snap.mode === 'listening' ? 'microphone' : 'microphone-slash'} size={14} color={theme.colors.text.primary} style={styles.micIcon as any} />
             </View>
           )}
           <View style={styles.statusTextCol}>
@@ -341,7 +341,7 @@ export function VoiceSurface(props: Readonly<{ variant: VoiceSurfaceVariant; ses
               }}
               style={({ pressed }) => [{ opacity: pressed ? 0.72 : 1 }, styles.iconAction as any]}
             >
-              <Ionicons name="close-circle-outline" size={18} color={theme.colors.text.secondary} />
+              <Icon name="x-circle" size={16} color={theme.colors.text.secondary} />
             </Pressable>
           ) : null}
 
@@ -377,7 +377,7 @@ export function VoiceSurface(props: Readonly<{ variant: VoiceSurfaceVariant; ses
               }}
               style={({ pressed }) => [{ opacity: pressed ? 0.72 : 1 }, styles.iconAction as any]}
             >
-              <Ionicons name="chatbubble-ellipses-outline" size={18} color={theme.colors.text.secondary} />
+              <Icon name="chat-circle-dots" size={16} color={theme.colors.text.secondary} />
             </Pressable>
           ) : null}
 
@@ -392,7 +392,7 @@ export function VoiceSurface(props: Readonly<{ variant: VoiceSurfaceVariant; ses
               }}
               style={({ pressed }) => [{ opacity: pressed ? 0.72 : 1 }, styles.iconAction as any]}
             >
-              <Ionicons name="navigate-outline" size={18} color={theme.colors.text.secondary} />
+              <Icon name="navigation-arrow" size={16} color={theme.colors.text.secondary} />
             </Pressable>
           ) : null}
 
@@ -404,7 +404,7 @@ export function VoiceSurface(props: Readonly<{ variant: VoiceSurfaceVariant; ses
             accessibilityLabel={canStop ? t('voiceAssistant.tapToEnd') : t('voiceAssistant.label')}
           >
             {canStop ? (
-              <Ionicons name="stop-circle" size={22} color={theme.colors.button?.primary?.tint ?? theme.colors.text.primary} />
+              <Icon name="stop-circle" size={20} color={theme.colors.button?.primary?.tint ?? theme.colors.text.primary} />
             ) : (
               <Image
                 source={require('@/assets/images/icon-voice-white.png')}
@@ -425,7 +425,7 @@ export function VoiceSurface(props: Readonly<{ variant: VoiceSurfaceVariant; ses
                 accessibilityLabel={t('voiceSurface.a11y.toggleActivity')}
                 style={({ pressed }) => [{ opacity: pressed ? 0.72 : 1 }, styles.feedHeaderLeft as any]}
               >
-              <Ionicons name={expanded ? 'chevron-down' : 'chevron-forward'} size={14} color={theme.colors.text.secondary} />
+              <Icon name={expanded ? 'caret-down' : 'caret-right'} size={14} color={theme.colors.text.secondary} />
               <Text style={[styles.feedTitle, { color: theme.colors.text.secondary }]}>
                 {t('voiceActivity.title')}
               </Text>

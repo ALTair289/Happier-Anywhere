@@ -1,4 +1,3 @@
-import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import * as React from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
@@ -14,6 +13,7 @@ import {
 import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 import type {
     AgentInputAttachment,
@@ -147,7 +147,7 @@ export const AgentInputAttachmentsRow = React.memo(function AgentInputAttachment
             >
                 {composerBadges.map((badge) => {
                     const icon = badge.icon?.(theme.colors.text.secondary) ?? (
-                        <Ionicons name="document-outline" size={14} color={theme.colors.text.secondary} />
+                        <Icon name="file" size={14} color={theme.colors.text.secondary} />
                     );
                     const content = (
                         <>
@@ -172,7 +172,7 @@ export const AgentInputAttachmentsRow = React.memo(function AgentInputAttachment
                             }}
                             testID={badge.testID ? `${badge.testID}-remove` : undefined}
                         >
-                            <Ionicons name="close-circle" size={16} color={theme.colors.text.secondary} />
+                            <Icon name="x-circle" size={16} color={theme.colors.text.secondary} />
                         </Pressable>
                     ) : null;
 
@@ -241,7 +241,7 @@ export const AgentInputAttachmentsRow = React.memo(function AgentInputAttachment
                                     ) : null}
                                     {att.status === 'error' ? (
                                         <View style={[styles.attachmentImageOverlay, styles.attachmentImageErrorOverlay]}>
-                                            <Ionicons name="alert-circle" size={20} color={theme.colors.overlay.foreground} />
+                                            <Icon name="warning-circle" size={20} color={theme.colors.overlay.foreground} />
                                         </View>
                                     ) : null}
                                 </Pressable>
@@ -257,7 +257,7 @@ export const AgentInputAttachmentsRow = React.memo(function AgentInputAttachment
                                         hitSlop={8}
                                         style={styles.attachmentImageRemoveButton}
                                     >
-                                        <Ionicons name="close-circle" size={18} color={theme.colors.text.secondary} />
+                                        <Icon name="x-circle" size={16} color={theme.colors.text.secondary} />
                                     </Pressable>
                                 ) : null}
                             </View>
@@ -266,7 +266,7 @@ export const AgentInputAttachmentsRow = React.memo(function AgentInputAttachment
 
                     return (
                         <View key={att.key} style={styles.attachmentChip}>
-                            <Ionicons name="document-outline" size={14} color={theme.colors.text.secondary} />
+                            <Icon name="file" size={14} color={theme.colors.text.secondary} />
                             <Text
                                 numberOfLines={1}
                                 style={styles.attachmentChipText}
@@ -291,7 +291,7 @@ export const AgentInputAttachmentsRow = React.memo(function AgentInputAttachment
                                     disabled={removingDisabled}
                                     hitSlop={8}
                                 >
-                                    <Ionicons name="close-circle" size={16} color={theme.colors.text.secondary} />
+                                    <Icon name="x-circle" size={16} color={theme.colors.text.secondary} />
                                 </Pressable>
                             ) : null}
                         </View>

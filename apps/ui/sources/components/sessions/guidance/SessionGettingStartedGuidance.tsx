@@ -7,7 +7,6 @@ import { CenteredInfoTile } from '@/components/ui/lists/CenteredInfoTile';
 import { t } from '@/text';
 import { router } from 'expo-router';
 import { Modal } from '@/modal';
-import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
@@ -33,6 +32,7 @@ import { listSessionGettingStartedCliCommands } from './listSessionGettingStarte
 import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeForView';
 import { runAfterInteractionsWithFallback } from '@/utils/timing/runAfterInteractionsWithFallback';
 import { setClipboardStringSafe } from '@/utils/ui/clipboard';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type SessionGettingStartedGuidanceVariant = 'phone' | 'sidebar' | 'primaryPane' | 'newSessionBlocking';
 
@@ -444,9 +444,9 @@ function SessionGettingStartedGuidanceViewImpl(props: SessionGettingStartedGuida
                     title={title}
                     description={subtitle}
                     icon={(
-                        <Ionicons
+                        <Icon
                             testID="session-empty-state-icon"
-                            name="chatbubbles-outline"
+                            name="chats-circle"
                             size={48}
                             color={theme.colors.text.secondary}
                             style={{ marginBottom: 12 }}
@@ -530,7 +530,7 @@ function SessionGettingStartedGuidanceViewImpl(props: SessionGettingStartedGuida
                                                   testID={`session-getting-started-copy-${step.id}-copied`}
                                               />
                                           ) : normalizeNodeForView(
-                                              <Ionicons name="copy-outline" size={16} color={theme.colors.text.secondary} />,
+                                              <Icon name="copy" size={16} color={theme.colors.text.secondary} />,
                                           )}
                                       </Pressable>
                                 </View>

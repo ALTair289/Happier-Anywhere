@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 
 import type {
     SelectionListDynamicSectionResolveResult,
@@ -18,6 +17,7 @@ import { t } from '@/text';
 
 import { buildExistingWorktreeOptions } from './worktreeExistingOptions';
 import { pathsAreSameWorktree } from './worktreePathComparison';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const WORKTREE_ROW_ICON_SIZE = 16;
 
@@ -247,11 +247,7 @@ export function buildWorktreeNameStep(params: Readonly<{
                 return {
                     id: 'worktree-name-create',
                     label: t('newSession.worktree.nameStep.customHint'),
-                    icon: React.createElement(Ionicons, {
-                        name: 'create-outline',
-                        size: WORKTREE_ROW_ICON_SIZE,
-                        color: rowIconColor,
-                    }),
+                    icon: <Icon name="pencil-simple" size={WORKTREE_ROW_ICON_SIZE} color={rowIconColor} />,
                     requiresInputValue: true,
                 };
             }
@@ -259,11 +255,7 @@ export function buildWorktreeNameStep(params: Readonly<{
             return {
                 id: 'worktree-name-create',
                 label: t('newSession.worktree.nameStep.createNamed', { name }),
-                icon: React.createElement(Ionicons, {
-                    name: 'add-circle-outline',
-                    size: WORKTREE_ROW_ICON_SIZE,
-                    color: rowIconColor,
-                }),
+                icon: <Icon name="plus-circle" size={WORKTREE_ROW_ICON_SIZE} color={rowIconColor} />,
                 onSelect: () => create(name),
             };
         },
@@ -276,11 +268,7 @@ export function buildWorktreeNameStep(params: Readonly<{
                     {
                         id: 'worktree-name-suggested',
                         label: t('newSession.worktree.nameStep.useSuggested', { name: worktreeNameSuggestion }),
-                        icon: React.createElement(Ionicons, {
-                            name: 'sparkles-outline',
-                            size: WORKTREE_ROW_ICON_SIZE,
-                            color: rowIconColor,
-                        }),
+                        icon: <Icon name="sparkle" size={WORKTREE_ROW_ICON_SIZE} color={rowIconColor} />,
                         onSelect: () => create(worktreeNameSuggestion),
                     },
                 ],
@@ -324,11 +312,7 @@ export function buildWorktreeReuseOrCreateStep(params: Readonly<{
                         id: 'worktree-reuse-existing',
                         label: t('newSession.worktree.reuseOrCreate.useExisting'),
                         subtitle: params.existingWorktreePath,
-                        icon: React.createElement(Ionicons, {
-                            name: 'layers-outline',
-                            size: WORKTREE_ROW_ICON_SIZE,
-                            color: params.rowIconColor,
-                        }),
+                        icon: <Icon name="stack-simple" size={WORKTREE_ROW_ICON_SIZE} color={params.rowIconColor} />,
                         onSelect: () => params.onReuseExistingWorktreeForBranch({
                             worktreePath: params.existingWorktreePath,
                             branch: params.existingBranch,
@@ -338,11 +322,7 @@ export function buildWorktreeReuseOrCreateStep(params: Readonly<{
                         id: 'worktree-create-from-branch',
                         label: t('newSession.worktree.reuseOrCreate.createNew'),
                         subtitle: t('newSession.worktree.reuseOrCreate.createNewSubtitle'),
-                        icon: React.createElement(Ionicons, {
-                            name: 'add-circle-outline',
-                            size: WORKTREE_ROW_ICON_SIZE,
-                            color: params.rowIconColor,
-                        }),
+                        icon: <Icon name="plus-circle" size={WORKTREE_ROW_ICON_SIZE} color={params.rowIconColor} />,
                         openStep: buildWorktreeNameStep({
                             baseRef: params.baseRef,
                             sourceKind: params.sourceKind,
@@ -409,11 +389,7 @@ export function buildWorktreeBranchOption(params: Readonly<{
         id: `branch:${params.branch.type}:${params.branch.name}`,
         label: params.branch.name,
         subtitle,
-        icon: React.createElement(Ionicons, {
-            name: 'git-branch-outline',
-            size: WORKTREE_ROW_ICON_SIZE,
-            color: params.rowIconColor,
-        }),
+        icon: <Icon name="git-branch" size={WORKTREE_ROW_ICON_SIZE} color={params.rowIconColor} />,
     } as const;
 
     if (willReuse && existingWorktree !== null) {
@@ -561,22 +537,14 @@ export function buildWorktreeSelectionListSteps(params: WorktreeSelectionListBui
             id: 'current_path',
             label: t('newSession.checkout.noWorktree'),
             subtitle: params.currentDirPath || undefined,
-            icon: React.createElement(Ionicons, {
-                name: 'folder-outline',
-                size: WORKTREE_ROW_ICON_SIZE,
-                color: params.rowIconColor,
-            }),
+            icon: <Icon name="folder" size={WORKTREE_ROW_ICON_SIZE} color={params.rowIconColor} />,
             onSelect: params.onSelectCurrentDir,
         },
         {
             id: 'create_git_worktree',
             label: t('newSession.checkout.newWorktree'),
             subtitle: t('newSession.checkout.newWorktreeSubtitle'),
-            icon: React.createElement(Ionicons, {
-                name: 'add-circle-outline',
-                size: WORKTREE_ROW_ICON_SIZE,
-                color: params.rowIconColor,
-            }),
+            icon: <Icon name="plus-circle" size={WORKTREE_ROW_ICON_SIZE} color={params.rowIconColor} />,
             openStep: createStep,
         },
     ];
@@ -617,11 +585,7 @@ export function buildWorktreeSelectionListSteps(params: WorktreeSelectionListBui
                     id: PENDING_GIT_WORKTREE_OPTION_ID,
                     label: `${t('newSession.checkout.newWorktree')}: ${params.pendingWorktreeName}`,
                     subtitle: pendingSubtitle,
-                    icon: React.createElement(Ionicons, {
-                        name: 'add-circle',
-                        size: WORKTREE_ROW_ICON_SIZE,
-                        color: params.rowIconColor,
-                    }),
+                    icon: <Icon name="plus-circle" size={WORKTREE_ROW_ICON_SIZE} color={params.rowIconColor} />,
                     onSelect: params.onSelectPendingWorktree ?? (() => {}),
                 },
             ],

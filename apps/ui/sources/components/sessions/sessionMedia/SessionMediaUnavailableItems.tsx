@@ -1,11 +1,11 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Text } from '@/components/ui/text/Text';
 import { t } from '@/text';
 import type { SessionMediaUnavailableSummary } from '@/sync/domains/sessionMedia/sessionMediaMessageMeta';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -48,9 +48,9 @@ export const SessionMediaUnavailableItems = React.memo(function SessionMediaUnav
                     accessibilityLabel={t('files.sessionMedia.imageUnavailable')}
                     style={styles.item}
                 >
-                    <Ionicons
-                        name="alert-circle-outline"
-                        size={18}
+                    <Icon
+                        name="warning-circle"
+                        size={16}
                         color={theme.colors.state.danger.foreground}
                     />
                     <Text style={styles.label}>{t('files.sessionMedia.imageUnavailable')}</Text>

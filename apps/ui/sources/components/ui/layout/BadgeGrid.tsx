@@ -1,9 +1,9 @@
 import * as React from 'react';
 import { View, ViewStyle, StyleProp } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export interface BadgeGridItem {
     id: string;
@@ -38,7 +38,7 @@ export const BadgeGrid = React.memo<BadgeGridProps>(({ items, columns = 3, testI
                 const icon = STATUS_ICON[item.status];
                 return (
                     <View key={item.id} style={[styles.badge, { minWidth }]}>
-                        <Ionicons
+                        <Icon
                             name={icon.name as any}
                             size={16}
                             color={icon.color}

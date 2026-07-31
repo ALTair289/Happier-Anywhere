@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Platform, Pressable, View, type GestureResponderEvent } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { Text } from '@/components/ui/text/Text';
@@ -10,6 +9,7 @@ import type { Machine } from '@/sync/domains/state/storageTypes';
 import { isMachineOnline } from '@/utils/sessions/machineUtils';
 
 import { resolveMachinePickerPresence } from '../resolveMachinePickerPresence';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type AccessoryPressEvent = Partial<GestureResponderEvent> & {
     nativeEvent?: GestureResponderEvent['nativeEvent'] & {
@@ -106,10 +106,11 @@ export function MachineSelectionRowAccessory(props: MachineSelectionRowAccessory
                         ? t('newSession.pathPicker.favoriteRemove')
                         : t('newSession.pathPicker.favoriteAdd')}
                 >
-                    <Ionicons
-                        name={props.isFavorite ? 'star' : 'star-outline'}
-                        size={22}
+                    <Icon
+                        name="star"
+                        size={20}
                         color={props.isFavorite ? selectedColor : theme.colors.text.secondary}
+                        weight={props.isFavorite ? 'fill' : 'regular'}
                     />
                 </Pressable>
             ) : null}

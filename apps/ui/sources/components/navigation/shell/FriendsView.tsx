@@ -24,12 +24,12 @@ import { useRouter } from 'expo-router';
 import { layout } from '@/components/ui/layout/layout';
 import { useIsTablet } from '@/utils/platform/responsive';
 import { Header } from '@/components/navigation/Header';
-import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { FeedItemCard } from '@/components/inbox/cards/FeedItemCard';
 import { RequireFriendsIdentityForFriends } from '@/components/friends/RequireFriendsIdentityForFriends';
 import { useFriendsIdentityReadiness } from '@/hooks/server/useFriendsIdentityReadiness';
 import { Text } from '@/components/ui/text/Text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const styles = StyleSheet.create((theme) => ({
     container: {
@@ -102,7 +102,7 @@ function HeaderRightTablet() {
                 justifyContent: 'center',
             }}
         >
-            <Ionicons name="person-add-outline" size={24} color={theme.colors.chrome.header.foreground} />
+            <Icon name="user-plus" size={24} color={theme.colors.chrome.header.foreground} />
         </Pressable>
     );
 }

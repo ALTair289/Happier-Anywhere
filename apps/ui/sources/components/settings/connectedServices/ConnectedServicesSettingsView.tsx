@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { View } from 'react-native';
 import { useNavigation, useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { SvgXml } from 'react-native-svg';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -36,6 +35,7 @@ import { resolveConnectedServiceDisplayName } from './model/resolveConnectedServ
 import { ConnectedServicesDefaultAuthRow } from './ConnectedServicesDefaultAuthRow';
 import { ConnectedServicesProviderStateSharingDefaultsGroup } from './ConnectedServicesProviderStateSharingSettings';
 import { SettingsHeaderAddButton } from '../navigation/SettingsHeaderAddButton';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const BRAND_ICON_SIZE = 24;
 
@@ -262,7 +262,7 @@ export const ConnectedServicesSettingsView = React.memo(function ConnectedServic
             <View style={styles.iconBox}>
               {brandXml
                 ? <SvgXml xml={brandXml} width={BRAND_ICON_SIZE} height={BRAND_ICON_SIZE} />
-                : <Ionicons name="key-outline" size={22} color={theme.colors.text.primary} />}
+                : <Icon name="key" size={20} color={theme.colors.text.primary} />}
               {hasProfiles ? (
                 <StatusDot
                   testID={`connected-services-index:${serviceId}:health-dot`}

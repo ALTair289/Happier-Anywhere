@@ -4,9 +4,9 @@ import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
-import { Octicons } from '@expo/vector-icons';
 import type { ScmLogEntry } from '@happier-dev/protocol';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 type SourceControlOperationsHistorySectionProps = Readonly<{
     theme: any;
@@ -98,7 +98,7 @@ export function SourceControlOperationsHistorySection(props: SourceControlOperat
                                 {new Date(entry.timestamp).toLocaleString()}
                             </Text>
                         </View>
-                        <Octicons name="chevron-right" size={14} color={theme.colors.text.secondary} />
+                        <Icon name="caret-right" size={14} color={theme.colors.text.secondary} />
                     </View>
                 </Pressable>
             ))}
@@ -127,7 +127,7 @@ export function SourceControlOperationsHistorySection(props: SourceControlOperat
                         <Text style={{ color: theme.colors.text.link, fontSize: 12, ...Typography.default('semiBold') }}>
                             {historyLoading ? t('common.loading') : t('files.operationsHistory.loadMore')}
                         </Text>
-                        <Octicons name="chevron-down" size={14} color={theme.colors.text.secondary} />
+                        <Icon name="caret-down" size={14} color={theme.colors.text.secondary} />
                     </View>
                 </Pressable>
             )}

@@ -1,6 +1,5 @@
 import React from 'react';
 import { Stack, useRouter, useLocalSearchParams, useNavigation } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { Platform, Pressable } from 'react-native';
 import { Item } from '@/components/ui/lists/Item';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
@@ -22,6 +21,7 @@ import { PopoverScope } from '@/components/ui/popover';
 import { resolveSpawnServerRouteParam } from '@/components/sessions/new/navigation/spawnServerRouteParam';
 import { safeRouterBack } from '@/utils/navigation/safeRouterBack';
 import { setNewSessionPickerReturnParams } from '@/components/sessions/new/navigation/setNewSessionPickerReturnParams';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export default React.memo(function ProfilePickerScreen() {
     const { theme } = useUnistyles();
@@ -361,7 +361,7 @@ export default React.memo(function ProfilePickerScreen() {
                 accessibilityRole="button"
                 accessibilityLabel={t('common.back')}
             >
-                <Ionicons name="chevron-back" size={22} color={theme.colors.chrome.header.foreground} />
+                <Icon name="caret-left" size={20} color={theme.colors.chrome.header.foreground} />
             </Pressable>
         );
     }, [handleBackPress, theme.colors.chrome.header.foreground]);
@@ -391,13 +391,13 @@ export default React.memo(function ProfilePickerScreen() {
                         <Item
                             title={t('settingsFeatures.profiles')}
                             subtitle={t('settingsFeatures.profilesDisabled')}
-                            icon={<Ionicons name="person-outline" size={29} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="person" size={29} color={theme.colors.text.secondary} />}
                             showChevron={false}
                         />
                         <Item
                             title={t('settings.featuresTitle')}
                             subtitle={t('settings.featuresSubtitle')}
-                            icon={<Ionicons name="flask-outline" size={29} color={theme.colors.text.secondary} />}
+                            icon={<Icon name="flask" size={29} color={theme.colors.text.secondary} />}
                             onPress={() => router.push('/settings/features')}
                         />
                     </ItemGroup>

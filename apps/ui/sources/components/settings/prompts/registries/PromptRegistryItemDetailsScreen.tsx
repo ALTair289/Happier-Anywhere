@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { ScrollView, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -31,6 +30,7 @@ import { installPromptRegistryItem } from '@/sync/ops/promptLibrary/installPromp
 import { createPromptRegistrySkillArtifactFromFetchedItem } from '@/sync/ops/promptLibrary/promptRegistrySkillImports';
 import { translatePromptLibraryMessage } from '@/sync/ops/promptLibrary/translatePromptLibraryMessage';
 import { t, type TranslationKey } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 import {
   listPromptAssetTypesForScope,
   resolvePromptAssetTypeSelection,
@@ -196,7 +196,7 @@ export const PromptRegistryItemDetailsScreen = React.memo(function PromptRegistr
         id: entry.id,
         title: entry.title,
         subtitle: entry.description,
-        icon: <Ionicons name="layers-outline" size={22} color={theme.colors.text.secondary} />,
+        icon: <Icon name="stack-simple" size={20} color={theme.colors.text.secondary} />,
       }));
   }, [scopeCompatibleInstallTypes, theme.colors.text.secondary]);
 
@@ -209,7 +209,7 @@ export const PromptRegistryItemDetailsScreen = React.memo(function PromptRegistr
       subtitle: entry === 'symlink'
         ? t('promptLibrary.externalAssetsInstallMethodSymlinkSubtitle')
         : t('promptLibrary.externalAssetsInstallMethodCopySubtitle'),
-      icon: <Ionicons name={entry === 'symlink' ? 'git-branch-outline' : 'copy-outline'} size={22} color={theme.colors.text.secondary} />,
+      icon: <Icon name={entry === 'symlink' ? 'git-branch' : 'copy'} size={20} color={theme.colors.text.secondary} />,
     }));
   }, [availableInstallModes, theme.colors.text.secondary]);
 
@@ -317,7 +317,7 @@ export const PromptRegistryItemDetailsScreen = React.memo(function PromptRegistr
                   id: machine.id,
                   title: machine.metadata?.displayName || machine.metadata?.host || machine.id,
                   subtitle: machine.id,
-                  icon: <Ionicons name="laptop-outline" size={22} color={theme.colors.text.secondary} />,
+                  icon: <Icon name="laptop" size={20} color={theme.colors.text.secondary} />,
                 })),
                 onSelect: setMachineId,
               }}
@@ -336,28 +336,28 @@ export const PromptRegistryItemDetailsScreen = React.memo(function PromptRegistr
               testID="promptRegistries.details.source"
               title={t('promptLibrary.registriesItemSource')}
               subtitle={sourceLabel}
-              icon={<Ionicons name="git-branch-outline" size={29} color={theme.colors.text.secondary} />}
+              icon={<Icon name="git-branch" size={29} color={theme.colors.text.secondary} />}
               showChevron={false}
             />
             <Item
               testID="promptRegistries.details.path"
               title={t('promptLibrary.registriesItemPath')}
               subtitle={props.displayPath ?? item?.description ?? props.itemId}
-              icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.accent.indigo} />}
+              icon={<Icon name="sparkle" size={29} color={theme.colors.accent.indigo} />}
               showChevron={false}
             />
             <Item
               testID="promptRegistries.details.files"
               title={t('promptLibrary.registriesItemFiles')}
               subtitle={String(additionalFilesCount)}
-              icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.text.secondary} />}
+              icon={<Icon name="file-text" size={29} color={theme.colors.text.secondary} />}
               showChevron={false}
             />
             <Item
               testID="promptRegistries.details.import"
               title={t('promptLibrary.externalAssetsImportAction')}
               subtitle={importing ? t('common.loading') : t('promptLibrary.registriesItemImportSubtitle')}
-              icon={<Ionicons name="download-outline" size={29} color={theme.colors.accent.purple} />}
+              icon={<Icon name="download" size={29} color={theme.colors.accent.purple} />}
               disabled={!item || importing}
               onPress={runImport}
             />
@@ -369,13 +369,13 @@ export const PromptRegistryItemDetailsScreen = React.memo(function PromptRegistr
                   id: 'project',
                   title: t('promptLibrary.externalAssetsProjectScope'),
                   subtitle: t('promptLibrary.externalAssetsProjectScopeSubtitle'),
-                  icon: <Ionicons name="folder-outline" size={22} color={theme.colors.accent.indigo} />,
+                  icon: <Icon name="folder" size={20} color={theme.colors.accent.indigo} />,
                 },
                 {
                   id: 'user',
                   title: t('promptLibrary.externalAssetsUserScope'),
                   subtitle: t('promptLibrary.externalAssetsUserScopeSubtitle'),
-                  icon: <Ionicons name="person-outline" size={22} color={theme.colors.accent.blue} />,
+                  icon: <Icon name="person" size={20} color={theme.colors.accent.blue} />,
                 },
               ]}
               selectedId={installScope}
@@ -383,7 +383,7 @@ export const PromptRegistryItemDetailsScreen = React.memo(function PromptRegistr
               itemTrigger={{
                 title: t('promptLibrary.externalAssetsScope'),
                 subtitle: installScope === 'project' ? t('promptLibrary.externalAssetsProjectScope') : t('promptLibrary.externalAssetsUserScope'),
-                icon: <Ionicons name="albums-outline" size={29} color={theme.colors.accent.indigo} />,
+                icon: <Icon name="stack" size={29} color={theme.colors.accent.indigo} />,
               }}
               rowKind="item"
               connectToTrigger
@@ -398,7 +398,7 @@ export const PromptRegistryItemDetailsScreen = React.memo(function PromptRegistr
               itemTrigger={{
                 title: t('promptLibrary.externalAssetsExportType'),
                 subtitle: installType?.title ?? t('promptLibrary.externalAssetsNoTypes'),
-                icon: <Ionicons name="layers-outline" size={29} color={theme.colors.text.secondary} />,
+                icon: <Icon name="stack-simple" size={29} color={theme.colors.text.secondary} />,
               }}
               rowKind="item"
               connectToTrigger
@@ -415,7 +415,7 @@ export const PromptRegistryItemDetailsScreen = React.memo(function PromptRegistr
                 subtitle: selectedInstallMode === 'symlink'
                   ? t('promptLibrary.externalAssetsInstallMethodSymlink')
                   : t('promptLibrary.externalAssetsInstallMethodCopy'),
-                icon: <Ionicons name={selectedInstallMode === 'symlink' ? 'git-branch-outline' : 'copy-outline'} size={29} color={theme.colors.text.secondary} />,
+                icon: <Icon name={selectedInstallMode === 'symlink' ? 'git-branch' : 'copy'} size={29} color={theme.colors.text.secondary} />,
               }}
               rowKind="item"
               connectToTrigger
@@ -434,7 +434,7 @@ export const PromptRegistryItemDetailsScreen = React.memo(function PromptRegistr
                 />
               )}
               subtitleLines={0}
-              icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.text.secondary} />}
+              icon={<Icon name="sparkle" size={29} color={theme.colors.text.secondary} />}
               mode="info"
               showChevron={false}
             />

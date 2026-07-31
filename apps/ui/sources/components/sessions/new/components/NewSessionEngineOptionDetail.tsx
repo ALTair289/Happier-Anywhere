@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { buildBackendTargetKey, type BackendTargetRefV1, type ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
@@ -26,6 +25,7 @@ import {
 } from '@/sync/domains/models/favoriteModelSelections';
 import { t } from '@/text';
 import { readNonBlankSessionControlIdentifier } from '@/sync/domains/sessionControl/opaqueIdentifiers';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export type NewSessionEngineOptionDetailProps = Readonly<{
     backendTarget: BackendTargetRefV1;
@@ -123,10 +123,11 @@ function EngineFavoriteToggle(props: Readonly<{
             onPress={props.onToggle}
             style={styles.engineFavoriteButton}
         >
-            <Ionicons
-                name={props.favorite ? 'star' : 'star-outline'}
+            <Icon
+                name="star"
                 size={20}
                 color={props.favorite ? selectedColor : theme.colors.text.secondary}
+                weight={props.favorite ? 'fill' : 'regular'}
             />
         </Pressable>
     );

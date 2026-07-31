@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { useUnistyles } from 'react-native-unistyles';
 import { createTwoFilesPatch } from 'diff';
-import { Ionicons } from '@expo/vector-icons';
 
 import { getSingularPatch } from '@pierre/diffs';
 import type { DiffLineAnnotation, FileDiffMetadata, FileDiffOptions, OnDiffLineClickProps } from '@pierre/diffs';
@@ -27,6 +26,7 @@ import {
     REVIEW_COMMENT_LINE_AFFORDANCE_TEST_ID,
 } from '@/components/ui/code/diff/reviewComments/ReviewCommentLineAffordance';
 import { buildPierreInitialPresentationCacheKey } from './pierreInitialPresentation.web';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const PIERRE_REVIEW_COMMENT_HOVER_SLOT_UNSAFE_CSS = `
 [data-column-number] {
@@ -120,10 +120,10 @@ function PierreReviewCommentHoverAffordance(props: {
             }}
             type="button"
         >
-            <Ionicons
+            <Icon
                 color={props.color}
-                name={props.active ? 'close-circle-outline' : REVIEW_COMMENT_LINE_AFFORDANCE_ICON_NAME}
-                size={15}
+                name={props.active ? 'x-circle' : REVIEW_COMMENT_LINE_AFFORDANCE_ICON_NAME}
+                size={14}
                 testID={REVIEW_COMMENT_LINE_AFFORDANCE_ICON_TEST_ID}
             />
         </button>

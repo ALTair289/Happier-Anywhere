@@ -41,7 +41,6 @@ import {
 } from '@/sync/ops/sessionOrganization';
 import { sessionTagKey } from './sessionTagUtils';
 import { t } from '@/text';
-import { Ionicons } from '@expo/vector-icons';
 import { Modal } from '@/modal';
 import type { DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
 import { Item } from '@/components/ui/lists/Item';
@@ -150,6 +149,7 @@ import {
     readSessionListSelectionKeysFromVisibleEntries,
 } from './selection/sessionListSelectionKeys';
 import { SessionListSelectionActionBarHost } from './selection/SessionListSelectionActionBar';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export { ProjectGroupHeader } from './ProjectGroupHeader';
 export { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
@@ -1376,7 +1376,7 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
             return {
                 id: `move-to-folder:${target.folderId ?? 'null'}`,
                 title: target.folderId == null ? t('sessionsList.moveToWorkspaceRoot') : target.title,
-                icon: <Ionicons name={target.folderId == null ? 'return-up-back-outline' : 'folder-outline'} size={16} color={theme.colors.text.secondary} />,
+                icon: <Icon name={target.folderId == null ? 'arrow-elbow-up-left' : 'folder'} size={16} color={theme.colors.text.secondary} />,
                 rowContainerStyle: paddingLeft == null ? undefined : { paddingLeft },
                 disabled: !folderActionsEnabled,
             };
@@ -2314,7 +2314,7 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
                     title={hideInactiveSessions
                         ? t('sessionInfo.inactiveAndArchivedSessions')
                         : t('sessionInfo.archivedSessions')}
-                    icon={<Ionicons name="archive-outline" size={22} color={theme.colors.text.secondary} />}
+                    icon={<Icon name="archive" size={20} color={theme.colors.text.secondary} />}
                     onPress={() => router.push('/session/archived')}
                 />
             </ItemGroup>

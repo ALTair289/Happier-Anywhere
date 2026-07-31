@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import {
@@ -24,6 +23,7 @@ import { useSettingMutable } from '@/sync/domains/state/storage';
 import type { Machine } from '@/sync/domains/state/storageTypes';
 import { parseMcpCommandLine } from '@/sync/domains/settings/mcpServers/parseMcpCommandLine';
 import { t } from '@/text';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const McpServerConfigureForm = React.memo(function McpServerConfigureForm(props: Readonly<{
     draftServer: McpServerCatalogEntryV1;
@@ -153,7 +153,7 @@ export const McpServerConfigureForm = React.memo(function McpServerConfigureForm
                                 <Item
                                     title={t('settings.mcpServersAdvancedCommandEditorTitle')}
                                     subtitle={t('settings.mcpServersAdvancedCommandEditorSubtitle')}
-                                    icon={<Ionicons name="options-outline" size={29} color={theme.colors.text.secondary} />}
+                                    icon={<Icon name="sliders-horizontal" size={29} color={theme.colors.text.secondary} />}
                                     selected={advancedCommandEditorOpen}
                                     onPress={() => setAdvancedCommandEditorOpen((value) => !value)}
                                 />
@@ -224,7 +224,7 @@ export const McpServerConfigureForm = React.memo(function McpServerConfigureForm
             <McpValueRefMapEditor
                 kind="env"
                 title={t('settings.mcpServersEditorEnv')}
-                iconName="code-outline"
+                iconName="code"
                 entries={props.draftServer.env}
                 secrets={props.secrets}
                 onChangeSecrets={props.onChangeSecrets}
@@ -240,7 +240,7 @@ export const McpServerConfigureForm = React.memo(function McpServerConfigureForm
                 <McpValueRefMapEditor
                     kind="header"
                     title={t('settings.mcpServersEditorHeaders')}
-                    iconName="key-outline"
+                    iconName="key"
                     entries={props.draftServer.remote?.headers ?? {}}
                     secrets={props.secrets}
                     onChangeSecrets={props.onChangeSecrets}
@@ -263,7 +263,7 @@ export const McpServerConfigureForm = React.memo(function McpServerConfigureForm
                     <Item
                         title={t('settings.mcpServersBindingsEmptyTitle')}
                         subtitle={t('settings.mcpServersBindingsEmptySubtitle')}
-                        icon={<Ionicons name="pin-outline" size={29} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="push-pin" size={29} color={theme.colors.text.secondary} />}
                         showChevron={false}
                     />
                 </ItemGroup>

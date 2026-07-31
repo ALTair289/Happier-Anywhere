@@ -1,12 +1,12 @@
 import * as React from 'react';
 import { Platform, View } from 'react-native';
-import { Octicons } from '@expo/vector-icons';
 
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import type { ScmStatusFiles } from '@/scm/scmStatusFiles';
 import type { ScmWorkingSnapshot } from '@/sync/domains/state/storageTypes';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const SourceControlBranchMenuLazy = React.lazy(async () => {
     const mod = await import('@/components/sessions/sourceControl/branches/SourceControlBranchMenu');
@@ -104,7 +104,7 @@ function SourceControlBranchSummaryImpl({
                     backgroundColor: theme.colors.surface.inset ?? theme.colors.input.background,
                 }}
             >
-                <Octicons name={iconName as any} size={14} color={theme.colors.text.secondary} />
+                <Icon name={iconName as any} size={14} color={theme.colors.text.secondary} />
                 <Text style={{ fontSize: 12, color: theme.colors.text.secondary, ...Typography.default('semiBold') }}>
                     {label}
                 </Text>
@@ -138,7 +138,7 @@ function SourceControlBranchSummaryImpl({
                 >
                     {String(value)}
                 </Text>
-                <Octicons name={iconName as any} size={14} color={theme.colors.text.secondary} />
+                <Icon name={iconName as any} size={14} color={theme.colors.text.secondary} />
             </View>
         );
     };
@@ -165,9 +165,9 @@ function SourceControlBranchSummaryImpl({
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
                     <View style={{ minWidth: 0, flex: 1, gap: 4 }}>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                            <Octicons
+                            <Icon
                                 name="git-branch"
-                                size={15}
+                                size={14}
                                 color={theme.colors.text.secondary}
                                 style={{ flexShrink: 0 }}
                             />
@@ -226,8 +226,8 @@ function SourceControlBranchSummaryImpl({
                     </View>
 
                     <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 5, flexShrink: 0 }}>
-                        <InlineStat value={staged} iconName="diff-added" />
-                        <InlineStat value={unstaged} iconName="diff-modified" />
+                        <InlineStat value={staged} iconName="plus-square" />
+                        <InlineStat value={unstaged} iconName="pencil-simple" />
                         {showTracking ? <InlineStat value={ahead} iconName="arrow-up" /> : null}
                         {showTracking ? <InlineStat value={behind} iconName="arrow-down" /> : null}
                     </View>
@@ -251,7 +251,7 @@ function SourceControlBranchSummaryImpl({
                     marginBottom: 8,
                 }}
             >
-                <Octicons name="git-branch" size={16} color={theme.colors.text.secondary} style={{ marginRight: 6 }} />
+                <Icon name="git-branch" size={16} color={theme.colors.text.secondary} style={{ marginRight: 6 }} />
                 <Text
                     style={{
                         fontSize: 16,
@@ -263,8 +263,8 @@ function SourceControlBranchSummaryImpl({
                 </Text>
             </View>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                <StatPill label={includedLabel} value={staged} iconName="diff-added" />
-                <StatPill label={pendingLabel} value={unstaged} iconName="diff-modified" />
+                <StatPill label={includedLabel} value={staged} iconName="plus-square" />
+                <StatPill label={pendingLabel} value={unstaged} iconName="pencil-simple" />
                 {showTracking && (
                     <StatPill label={t('files.branchSummary.ahead')} value={ahead} iconName="arrow-up" />
                 )}

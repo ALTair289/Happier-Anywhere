@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { View } from 'react-native';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import { useUnistyles } from 'react-native-unistyles';
@@ -28,6 +27,7 @@ import {
     type ProviderSetupQueueState,
 } from './providerSetupQueue';
 import { useProviderCliInstallQueue, type ProviderCliInstallStatus } from './useProviderCliInstallQueue';
+import { Icon } from '@/components/ui/icons/Icon';
 
 const DEFAULT_PROVIDER_IDS = AGENT_IDS.filter((agentId) => agentId !== 'customAcp');
 
@@ -165,14 +165,14 @@ export const ProviderSetupFlow = React.memo(function ProviderSetupFlow(props: Re
                                     ? installStatus === 'installing'
                                         ? <ActivitySpinner size="small" color={theme.colors.text.secondary} />
                                         : installStatus === 'installed'
-                                            ? <Ionicons name="checkmark-circle" size={20} color={theme.colors.accent.blue} />
+                                            ? <Icon name="check-circle" size={20} color={theme.colors.accent.blue} />
                                             : installStatus === 'failed'
-                                                ? <Ionicons name="alert-circle" size={20} color={theme.colors.text.secondary} />
+                                                ? <Icon name="warning-circle" size={20} color={theme.colors.text.secondary} />
                                                 : installStatus === 'queued'
-                                                    ? <Ionicons name="time-outline" size={20} color={theme.colors.text.secondary} />
+                                                    ? <Icon name="clock" size={20} color={theme.colors.text.secondary} />
                                                     : undefined
                                     : selected
-                                        ? <Ionicons name="checkmark-circle" size={20} color={theme.colors.accent.blue} />
+                                        ? <Icon name="check-circle" size={20} color={theme.colors.accent.blue} />
                                         : undefined
                             }
                             onPress={async () => {

@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import type { DaemonMcpServersDetectWarningV1, DetectedMcpServerV1 } from '@happier-dev/protocol';
@@ -16,6 +15,7 @@ import { t } from '@/text';
 
 import { describeMachine, formatDetectedWarning, resolveDetectedServerStatusLabel, resolveTransportIconName } from './mcpServerUi';
 import { resolveMachineServerId } from './resolveMachineServerId';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export const McpDetectedServersTab = React.memo(function McpDetectedServersTab(props: Readonly<{
     machines: readonly Machine[];
@@ -65,7 +65,7 @@ export const McpDetectedServersTab = React.memo(function McpDetectedServersTab(p
                         subtitle: props.selectedMachineId
                             ? describeMachine(props.selectedMachineId, props.machines)
                             : t('settings.mcpServersNoMachineSelected'),
-                        icon: <Ionicons name="laptop-outline" size={29} color={theme.colors.accent.indigo} />,
+                        icon: <Icon name="laptop" size={29} color={theme.colors.accent.indigo} />,
                     }}
                     rowKind="item"
                     connectToTrigger
@@ -76,7 +76,7 @@ export const McpDetectedServersTab = React.memo(function McpDetectedServersTab(p
                     testID="settings.mcpServers.detect.directory"
                     title={t('settings.mcpServersDetectedDirectoryTitle')}
                     subtitle={t('settings.mcpServersDetectedDirectorySubtitle')}
-                    icon={<Ionicons name="folder-open-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="folder-open" size={29} color={theme.colors.accent.blue} />}
                     showChevron={false}
                     rightElement={(
                         <View style={styles.directoryInputRow}>
@@ -102,7 +102,7 @@ export const McpDetectedServersTab = React.memo(function McpDetectedServersTab(p
                     testID="settings.mcpServers.detect.refresh"
                     title={t('settings.mcpServersDetectedRefreshTitle')}
                     subtitle={props.loading ? t('common.loading') : t('settings.mcpServersDetectedRefreshSubtitle')}
-                    icon={<Ionicons name="refresh-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="arrow-clockwise" size={29} color={theme.colors.accent.blue} />}
                     onPress={props.onRefresh}
                     disabled={props.loading || !props.selectedMachineId}
                     showChevron={false}
@@ -116,7 +116,7 @@ export const McpDetectedServersTab = React.memo(function McpDetectedServersTab(p
                         key={`${warning.provider}:${warning.code}:${index}`}
                         title={t('settings.mcpServersDetectedWarningsTitle')}
                         subtitle={formatDetectedWarning(warning)}
-                        icon={<Ionicons name="alert-circle-outline" size={29} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="warning-circle" size={29} color={theme.colors.text.secondary} />}
                         showChevron={false}
                     />
                     ))}
@@ -133,7 +133,7 @@ export const McpDetectedServersTab = React.memo(function McpDetectedServersTab(p
                             subtitle={server.transport === 'stdio'
                                 ? [server.stdio?.command ?? '', ...(server.stdio?.args ?? [])].filter(Boolean).join(' ')
                                 : (server.remote?.url ?? '')}
-                            icon={<Ionicons name={resolveTransportIconName(server.transport)} size={29} color={theme.colors.accent.blue} />}
+                            icon={<Icon name={resolveTransportIconName(server.transport)} size={29} color={theme.colors.accent.blue} />}
                             detail={resolveDetectedServerStatusLabel(server.provider, server.enabled)}
                             onPress={() => props.onImport(server)}
                         />
@@ -143,7 +143,7 @@ export const McpDetectedServersTab = React.memo(function McpDetectedServersTab(p
                         testID="settings.mcpServers.detect.empty"
                         title={t('settings.mcpServersDetectedEmptyTitle')}
                         subtitle={t('settings.mcpServersDetectedEmptySubtitle')}
-                        icon={<Ionicons name="search-outline" size={29} color={theme.colors.text.secondary} />}
+                        icon={<Icon name="magnifying-glass" size={29} color={theme.colors.text.secondary} />}
                         showChevron={false}
                         mode="info"
                     />

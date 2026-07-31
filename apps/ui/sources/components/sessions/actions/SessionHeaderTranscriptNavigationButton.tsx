@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { useAppPaneScope } from '@/components/appShell/panes/hooks/useAppPaneScope';
@@ -8,6 +7,7 @@ import { useSessionCockpitChromeRegistration } from '@/components/workspaceCockp
 import { t } from '@/text';
 import { useOptionalSessionScreenTestId } from '../shell/sessionScreenTestIds';
 import { SESSION_HEADER_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export function useOpenTranscriptNavigationSurface(params: Readonly<{
     scopeId: string;
@@ -49,7 +49,7 @@ export const SessionHeaderTranscriptNavigationButton = React.memo((props: Readon
             accessibilityRole="button"
             accessibilityLabel={t('session.openTranscriptNavigation')}
         >
-            <Ionicons name="list-outline" size={SESSION_HEADER_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
+            <Icon name="list" size={SESSION_HEADER_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
         </Pressable>
     );
 });
