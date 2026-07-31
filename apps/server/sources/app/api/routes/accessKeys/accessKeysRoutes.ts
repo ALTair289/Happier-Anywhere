@@ -2,6 +2,7 @@ import { Fastify } from "../../types";
 import { z } from "zod";
 import { db } from "@/storage/db";
 import { log } from "@/utils/logging/log";
+import { validateCurrentMachineSocket } from "@/app/machines/validateCurrentMachineSocket";
 
 async function findOwnedSessionAndMachine(params: Readonly<{
     userId: string;
@@ -13,15 +14,15 @@ async function findOwnedSessionAndMachine(params: Readonly<{
             where: { id: params.sessionId, accountId: params.userId },
             select: { id: true },
         }),
-        db.machine.findFirst({
-            where: { id: params.machineId, accountId: params.userId },
-            select: { id: true },
+        validateCurrentMachineSocket({
+            accountId: params.userId,
+            machineId: params.machineId,
         }),
     ]);
 
     return {
         sessionExists: session !== null,
-        machineExists: machine !== null,
+        machineExists: machine.ok,
     };
 }
 
@@ -221,6 +222,14 @@ export function accessKeysRoutes(app: Fastify) {
         const { data, expectedVersion } = request.body;
 
         try {
+            const currentMachine = await validateCurrentMachineSocket({
+                accountId: userId,
+                machineId,
+            });
+            if (!currentMachine.ok) {
+                return reply.code(404).send({ error: 'Access key not found' });
+            }
+
             // Get current access key for version check
             const currentAccessKey = await db.accessKey.findUnique({
                 where: {

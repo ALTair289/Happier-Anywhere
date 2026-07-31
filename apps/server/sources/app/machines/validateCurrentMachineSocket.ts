@@ -16,6 +16,15 @@ export type CurrentMachineSocketValidationResult =
 export type CurrentMachineSocketValidationErrorReason =
     Extract<CurrentMachineSocketValidationResult, { ok: false }>["reason"];
 
+export function classifyCurrentMachineSocketRecord(
+    machine: Readonly<{ revokedAt: Date | null; replacedByMachineId: string | null }> | null,
+): CurrentMachineSocketValidationResult {
+    if (!machine) return { ok: false, reason: "machine_not_found" };
+    if (machine.revokedAt) return { ok: false, reason: "machine_revoked" };
+    if (machine.replacedByMachineId) return { ok: false, reason: "machine_replaced" };
+    return { ok: true };
+}
+
 export async function validateCurrentMachineSocket(params: Readonly<{
     accountId: string;
     machineId: string;
@@ -26,10 +35,7 @@ export async function validateCurrentMachineSocket(params: Readonly<{
         where: { accountId: params.accountId, id: params.machineId },
         select: { revokedAt: true, replacedByMachineId: true },
     });
-    if (!machine) return { ok: false, reason: "machine_not_found" };
-    if (machine.revokedAt) return { ok: false, reason: "machine_revoked" };
-    if (machine.replacedByMachineId) return { ok: false, reason: "machine_replaced" };
-    return { ok: true };
+    return classifyCurrentMachineSocketRecord(machine);
 }
 
 export function formatCurrentMachineSocketError(reason: CurrentMachineSocketValidationErrorReason): string {

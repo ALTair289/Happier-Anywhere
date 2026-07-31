@@ -1,6 +1,7 @@
 import type { Socket } from "socket.io";
 
 import type { ClientConnection } from "@/app/events/eventPayloadTypes";
+import { classifyCurrentMachineSocketRecord } from "@/app/machines/validateCurrentMachineSocket";
 import { db } from "@/storage/db";
 import type { Tx } from "@/storage/inTx";
 
@@ -37,8 +38,7 @@ export async function hasCurrentSessionScopedMachineAccessInTx(params: Readonly<
     });
     return accessKey !== null
         && accessKey.session.accountId === params.accountId
-        && accessKey.machine.revokedAt === null
-        && accessKey.machine.replacedByMachineId === null;
+        && classifyCurrentMachineSocketRecord(accessKey.machine).ok;
 }
 
 export async function hasCurrentSessionScopedMachineAccess(params: Readonly<{
