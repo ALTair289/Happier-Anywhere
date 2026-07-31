@@ -4519,6 +4519,7 @@ export class ApiSessionClient extends EventEmitter {
             sessionId: this.sessionId,
             encryptionKey: this.encryptionKey,
             encryptionVariant: this.encryptionVariant,
+            sessionEncryptionMode: this.sessionEncryptionMode,
             take: opts?.take,
         });
         const supervisor = this.sessionConnectionSupervisor;

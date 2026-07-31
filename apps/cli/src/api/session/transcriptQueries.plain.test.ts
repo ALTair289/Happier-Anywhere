@@ -28,6 +28,7 @@ const queryParams = {
   sessionId: 's1',
   encryptionKey: new Uint8Array(32),
   encryptionVariant: 'dataKey' as const,
+  sessionEncryptionMode: 'plain' as const,
 }
 
 describe('transcriptQueries (plaintext envelopes)', () => {
@@ -139,6 +140,32 @@ describe('transcriptQueries (plaintext envelopes)', () => {
     expect(getSpy.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
       params: { limit: 200, role: 'user' },
     }))
+  })
+
+  it('ignores plaintext permission metadata for an E2EE session', async () => {
+    vi.spyOn(axios, 'get').mockResolvedValueOnce({
+      status: 200,
+      data: {
+        messages: [
+          {
+            createdAt: 123,
+            content: {
+              t: 'plain',
+              v: {
+                role: 'user',
+                content: { type: 'text', text: 'hello' },
+                meta: { permissionMode: 'yolo' },
+              },
+            },
+          },
+        ],
+      },
+    } as any)
+
+    await expect(fetchLatestUserPermissionIntentFromEncryptedTranscript({
+      ...queryParams,
+      sessionEncryptionMode: 'e2ee',
+    })).resolves.toBeNull()
   })
 
   it('checks committed user messages after a timestamp without decrypting content', async () => {

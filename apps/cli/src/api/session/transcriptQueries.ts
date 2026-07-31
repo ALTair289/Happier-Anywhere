@@ -1,6 +1,7 @@
 import axios from 'axios';
 
 import { resolveLatestPermissionIntent } from '@happier-dev/agents';
+import type { SessionEncryptionMode } from '@happier-dev/protocol';
 
 import { logger } from '@/ui/logger';
 import { isAuthenticationError } from '../client/httpStatusError';
@@ -87,7 +88,7 @@ export async function fetchRecentTranscriptTextItemsForAcpImportFromServer(
 }
 
 export async function fetchLatestUserPermissionIntentFromEncryptedTranscript(
-  params: SessionTranscriptQueryParams & { take?: number },
+  params: SessionTranscriptQueryParams & { sessionEncryptionMode: SessionEncryptionMode; take?: number },
 ): Promise<{ intent: PermissionMode; updatedAt: number } | null> {
   const take = normalizeTake(params.take, 200);
   const serverUrl = resolveServerHttpBaseUrl();
@@ -116,6 +117,8 @@ export async function fetchLatestUserPermissionIntentFromEncryptedTranscript(
       const content = msg?.content;
       const parsedContent = SessionMessageContentSchema.safeParse(content);
       if (!parsedContent.success) continue;
+      if (params.sessionEncryptionMode === 'e2ee' && parsedContent.data.t !== 'encrypted') continue;
+      if (params.sessionEncryptionMode === 'plain' && parsedContent.data.t !== 'plain') continue;
 
       let decrypted: unknown;
       if (parsedContent.data.t === 'plain') {
