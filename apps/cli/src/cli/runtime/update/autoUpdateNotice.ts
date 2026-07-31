@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 
 import {
   acquireSingleFlightLock,
+  compareVersions,
   formatUpdateNotice,
   readUpdateCache,
   shouldNotifyUpdate,
@@ -160,9 +161,13 @@ export function maybeAutoUpdateNotice(params: Readonly<{
   // Cross-channel cache entries can exist if the cache was populated before
   // the `self check` filter was added. Suppress the notice; it'll self-heal.
   const latestMatchesRing = doesVersionMatchRing(cachedLatest, publicReleaseRing);
-  const updateAvailable = Boolean(cached?.updateAvailable) && latestMatchesRing;
   const latest = latestMatchesRing ? cachedLatest : null;
   const current = typeof cached?.current === 'string' ? cached.current : null;
+  const effectiveCurrent = current
+    ?? (typeof cached?.runtimeVersion === 'string' ? cached.runtimeVersion : null)
+    ?? (typeof cached?.invokerVersion === 'string' ? cached.invokerVersion : null);
+  const candidateIsNewer = !latest || !effectiveCurrent || compareVersions(latest, effectiveCurrent) > 0;
+  const updateAvailable = Boolean(cached?.updateAvailable) && latestMatchesRing && candidateIsNewer;
   const notifiedAt = typeof cached?.notifiedAt === 'number' ? cached.notifiedAt : null;
 
   const shouldNotify = shouldNotifyUpdate({
