@@ -105,7 +105,7 @@ export function createClaudeUnifiedResumeChoiceStartupResolver(params: Readonly<
   settleMs: number;
   startupMode?: EnhancedMode | undefined;
   isRuntimeControlInFlight?: (() => boolean) | undefined;
-  onResumeSummaryCompactResidue?: (() => void) | undefined;
+  onResumeSummaryCompactionSubmitted?: (() => void) | undefined;
 }>): ClaudeUnifiedStartupDialogResolver {
   let pendingAnswerTask: Promise<void> | null = null;
   let terminalAnswerInFlight = false;
@@ -152,7 +152,7 @@ export function createClaudeUnifiedResumeChoiceStartupResolver(params: Readonly<
           wait: params.wait,
           settleMs: params.settleMs,
           onSubmitted: decision.choice === 'resume_from_summary'
-            ? params.onResumeSummaryCompactResidue
+            ? params.onResumeSummaryCompactionSubmitted
             : undefined,
         }).finally(() => {
           terminalAnswerInFlight = false;
@@ -224,7 +224,7 @@ export function createClaudeUnifiedResumeChoiceStartupResolver(params: Readonly<
       wait: params.wait,
       settleMs: params.settleMs,
       onSubmitted: params.choice === 'resume_from_summary'
-        ? params.onResumeSummaryCompactResidue
+        ? params.onResumeSummaryCompactionSubmitted
         : undefined,
     });
     if (result.kind === 'answered' || result.kind === 'not_visible') {

@@ -90,7 +90,7 @@ export function createClaudeUnifiedTerminalSharedCallbacks<Mode extends Enhanced
       controlPort,
       startupMode,
       isRuntimeControlInFlight,
-      onResumeSummaryCompactResidue,
+      onResumeSummaryCompactionSubmitted,
     }) =>
       createClaudeUnifiedResumeChoiceStartupResolver({
         choice: startupMode.claudeUnifiedTerminalResumeChoice ?? 'ask_every_time',
@@ -100,7 +100,7 @@ export function createClaudeUnifiedTerminalSharedCallbacks<Mode extends Enhanced
         settleMs: DEFAULT_CLAUDE_TUI_CONTROL_TIMINGS.commandSettleMs,
         startupMode,
         isRuntimeControlInFlight,
-        onResumeSummaryCompactResidue,
+        onResumeSummaryCompactionSubmitted,
       }),
     tuiRuntimeControl: {
       featureEnabled: params.tuiRuntimeControlEnabled,

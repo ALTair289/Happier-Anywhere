@@ -451,10 +451,18 @@ async function runSlashControl(ctx: SlashControlContext, spec: SlashControlSpec)
   }
 }
 
+function normalizeSlashControlValue(value: string): string | null {
+  const normalized = String(value ?? '').trim();
+  if (!normalized || /[\u0000-\u001f\u007f-\u009f]/.test(normalized)) return null;
+  return normalized;
+}
+
 export async function applyModelControl(ctx: SlashControlContext, model: string): Promise<ControlAttemptResult> {
+  const requested = normalizeSlashControlValue(model);
+  if (!requested) return { kind: 'failed', reason: 'invalid_control_value' };
   return runSlashControl(ctx, {
     key: 'model',
-    commandText: `/model ${model}`,
+    commandText: `/model ${requested}`,
     resolveFinalState: async (state) => {
       if (!isClaudeUnifiedRegisteredDialogVisible(state, SWITCH_MODEL_DIALOG)) return state;
       return injectRegisteredDialogAnswer({ ctx, state, entry: SWITCH_MODEL_DIALOG, choice: 'confirm' });
@@ -464,7 +472,9 @@ export async function applyModelControl(ctx: SlashControlContext, model: string)
 }
 
 export async function applyEffortControl(ctx: SlashControlContext, effort: string): Promise<ControlAttemptResult> {
-  const requested = effort.trim().toLowerCase();
+  const normalized = normalizeSlashControlValue(effort);
+  if (!normalized) return { kind: 'failed', reason: 'invalid_control_value' };
+  const requested = normalized.toLowerCase();
   // `/effort ultracode` runs at xhigh, so the dialog announces "Switching to xhigh" (binary source
   // 2.1.173: `ultracode` maps to `xhigh` before the confirmation component renders).
   const acceptableTargets = requested === 'ultracode' ? ['ultracode', 'xhigh'] : [requested];

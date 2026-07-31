@@ -92,7 +92,6 @@ import {
 } from './dialogChoice/claudeUnifiedDialogChoiceScreenProbe';
 import type { ClaudeUnifiedDialogChoiceBroker } from './dialogChoice/claudeUnifiedDialogChoiceBroker';
 import { hasClaudeUnifiedVisibleDialog } from './tuiControls/dialogRegistry';
-import { createClaudeResumeSummaryCompactResidueEpisode } from './resumeChoice/resumeSummaryCompactResidue';
 import type {
   ClaudeUnifiedInputConsumer,
   ClaudeUnifiedInputArbiter,
@@ -448,7 +447,7 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
     controlPort: TerminalControlPort;
     startupMode: Mode;
     isRuntimeControlInFlight: () => boolean;
-    onResumeSummaryCompactResidue: () => void;
+    onResumeSummaryCompactionSubmitted: () => void;
   }>) => ClaudeUnifiedStartupDialogResolver | null | undefined) | undefined;
   tuiRuntimeControl?: ClaudeUnifiedTuiRuntimeControlOptions<Mode> | undefined;
 }>;
@@ -1125,6 +1124,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
   let unregisterInFlightSteerAvailabilityRefresh: (() => void) | null = null;
   let inFlightSteerWiring: ClaudeUnifiedInFlightSteerWiring<Mode> | null = null;
   let notifyTerminalComposerCleared: (() => void) | null = null;
+  let arbiterForResumeSummaryCompaction: ClaudeUnifiedInputArbiter<Mode> | null = null;
   let terminalComposerClearedWakePending = false;
   let terminalAttachment: NonNullable<Metadata['terminal']> | null = null;
   let removeProcessSignalCleanup: (() => void) | null = null;
@@ -1268,7 +1268,6 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
   }
   const activeHandle = handle;
   const activeHookSubscription = hookSubscription ?? ensureHookSubscription();
-  const resumeSummaryCompactResidue = createClaudeResumeSummaryCompactResidueEpisode();
   const preserveActiveTerminalHost = async (
     reason: 'planned_runner_refresh' | 'wrapper_exit' | 'controller_failure' | 'auth_switch_handoff',
   ): Promise<void> => {
@@ -1738,7 +1737,16 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
           controlPort: startupDialogControlPort,
           startupMode: startupInput.mode,
           isRuntimeControlInFlight: () => runtimeControlBridge?.isControlInFlight() === true,
-          onResumeSummaryCompactResidue: resumeSummaryCompactResidue.arm,
+          onResumeSummaryCompactionSubmitted: () => {
+            // Claude owns the `/compact` turn triggered by this dialog choice. Fence every
+            // Pending provider effect immediately after the successful choice write—before the
+            // asynchronous PreCompact hook—so an exact send-now request cannot Escape-cancel the
+            // provider-owned startup turn. PostCompact releases the existing arbiter lifecycle.
+            arbiterForResumeSummaryCompaction?.observeLifecycle({
+              type: 'compaction',
+              phase: 'started',
+            });
+          },
         }) ?? undefined)
         : undefined;
       const captureInputStateForGuard = hostResolution.adapter.captureInputState;
@@ -1776,7 +1784,6 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                     await steerDraftClearPort.sendSpecialKey('Escape');
                   },
                   ownComposerTexts: ownComposerTextLog,
-                  resumeSummaryCompactResidue,
                 });
                 // An idle recognized dialog has no real composer. Route its parsed screen through
                 // the single owner-first dialog evaluator; that evaluator either observes the
@@ -1940,6 +1947,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
           }
         },
       });
+      arbiterForResumeSummaryCompaction = arbiter;
       notifyTerminalComposerCleared = () => {
         arbiter.notifyTerminalComposerCleared();
       };
@@ -2178,19 +2186,6 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                       ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS,
                     onStalled: async () => {
                       await dialogChoiceScreenProbe?.probe();
-                      if (!captureInputStateForGuard || !steerDraftClearPort) return;
-                      const compactResidue = await clearOwnLeftoverComposerDraft({
-                        captureInputState: () => captureInputStateForGuard(activeHandle),
-                        sendClearKey: async () => {
-                          await steerDraftClearPort.sendSpecialKey('Escape');
-                        },
-                        ownComposerTexts: { matches: () => false },
-                        resumeSummaryCompactResidue,
-                      });
-                      if (compactResidue.status !== 'cleared') return;
-                      lifecycleBridge?.settleAttemptLocalCommandAborted(
-                        'resume_summary_compact_idle_residue',
-                      );
                     },
                     onStarvation: () => {
                       // Mid-turn stall budget exhausted with the turn still active (e.g. an API-retry
@@ -2424,7 +2419,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       throw fatalRuntimeError;
     }
   } finally {
-    resumeSummaryCompactResidue.cancel();
+    arbiterForResumeSummaryCompaction = null;
     if (turnInterruptRegistered) {
       opts.setTurnInterrupt?.(null);
     }

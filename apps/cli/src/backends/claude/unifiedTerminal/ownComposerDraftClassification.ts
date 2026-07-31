@@ -2,7 +2,6 @@ import type { ClaudeScreenState } from './tuiControls/screenState';
 import { isClaudeComposerCaptureStyleUnavailablePlaceholderCandidate } from './tuiControls/composerCaptureClassification';
 import { hasClaudeUnifiedVisibleDialog } from './tuiControls/dialogRegistry';
 import { isControllerTypedSlashCommandResidue } from './tuiControls/slashControls';
-import type { ClaudeResumeSummaryCompactResidueEpisode } from './resumeChoice/resumeSummaryCompactResidue';
 
 export type ClaudeOwnComposerDraftClassification =
   | 'empty'
@@ -28,7 +27,6 @@ export function classifyClaudeOwnComposerDraft(params: Readonly<{
   screen: ClaudeScreenState;
   rawText: string;
   ownComposerTexts: Readonly<{ matches: (draft: string) => boolean }>;
-  resumeSummaryCompactResidue?: Pick<ClaudeResumeSummaryCompactResidueEpisode, 'ownsComposerDraft'> | undefined;
   /** Clear-key guards must short-circuit on generation; read-only evaluators may still classify. */
   stopOnGenerating?: boolean | undefined;
 }>): ClaudeOwnComposerDraftClassification {
@@ -36,11 +34,7 @@ export function classifyClaudeOwnComposerDraft(params: Readonly<{
   if (params.screen.usageLimitDialogVisible) return 'provider_unavailable';
   if (params.stopOnGenerating !== false && params.screen.generating) return 'generating';
   if (hasNonInputComposerState(params.screen)) return 'non_input_state';
-  if (content.length === 0) {
-    params.resumeSummaryCompactResidue?.ownsComposerDraft(content);
-    return 'empty';
-  }
-  if (params.resumeSummaryCompactResidue?.ownsComposerDraft(content) === true) return 'own';
+  if (content.length === 0) return 'empty';
   if (params.ownComposerTexts.matches(content)) return 'own';
   // Controller-typed slash commands are echo-suppressed out of the persisted transcript, so a
   // respawned registry can never exact-match their residue. The finite controller vocabulary

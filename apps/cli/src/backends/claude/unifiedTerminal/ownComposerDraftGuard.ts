@@ -1,7 +1,6 @@
 import { parseClaudeScreenState, type ClaudeScreenState } from './tuiControls/screenState';
 import { classifyClaudeOwnComposerDraft } from './ownComposerDraftClassification';
 import { resolveClaudeUnifiedDialogBlockedReason } from './tuiControls/dialogRegistry';
-import type { ClaudeResumeSummaryCompactResidueEpisode } from './resumeChoice/resumeSummaryCompactResidue';
 
 const DEFAULT_DRAFT_CLEAR_SETTLE_MS = 250;
 // Same bounded semantics as the slash-control leftover clear (lane U): one clear key can leave the
@@ -42,7 +41,6 @@ export async function clearOwnLeftoverComposerDraft(opts: Readonly<{
   /** Sends ONE composer-clear keypress (Escape). Only invoked for exact-match own leftovers. */
   sendClearKey: () => Promise<void>;
   ownComposerTexts: Readonly<{ matches: (draft: string) => boolean }>;
-  resumeSummaryCompactResidue?: Pick<ClaudeResumeSummaryCompactResidueEpisode, 'ownsComposerDraft'> | undefined;
   settleMs?: number | undefined;
   wait?: ((ms: number) => Promise<void>) | undefined;
   /** Telemetry tap: fired after each clear attempt with the recaptured screen. */
@@ -69,7 +67,6 @@ export async function clearOwnLeftoverComposerDraft(opts: Readonly<{
       screen: captureResult.screen,
       rawText: captureResult.rawText,
       ownComposerTexts: opts.ownComposerTexts,
-      resumeSummaryCompactResidue: opts.resumeSummaryCompactResidue,
     });
   }
 

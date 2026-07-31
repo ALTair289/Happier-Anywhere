@@ -85,8 +85,8 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
     }
   });
 
-  it('clears the one-shot resume-summary /compact residue before delivering the queued Pending row once', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'happier-claude-resume-summary-compact-residue-'));
+  it('does not interrupt provider-owned resume-summary compaction before delivering the queued Pending row once', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-claude-resume-summary-compaction-'));
     tempDirs.push(dir);
     const workspaceDir = join(dir, 'workspace');
     await mkdir(workspaceDir, { recursive: true });
@@ -98,7 +98,7 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
     await writeFile(transcriptPath, '');
     const previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
     process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
-    const { session } = createPermissionHandlerSessionStub('resume-summary-compact-residue-session');
+    const { session } = createPermissionHandlerSessionStub('resume-summary-compaction-session');
     const broker = new ClaudeUnifiedDialogChoiceBroker(session);
     const abortController = new AbortController();
     const pendingPrompt = 'Continue the queued transcript viewport investigation.';
@@ -107,13 +107,11 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
     let pendingPulled = false;
     let resumeAnswerSubmitted = false;
     let compactPromptSubmitted = false;
-    let compactResidueProvenanceArmed = false;
-    const sentKeys: string[] = [];
     const onPromptAcceptedByProvider = vi.fn();
     const onTerminalPromptInjected = vi.fn();
     const handle: TerminalHostHandle = {
       kind: 'tmux',
-      sessionName: 'happier-claude-resume-summary-compact-residue-test',
+      sessionName: 'happier-claude-resume-summary-compaction-test',
       paneId: '%1',
       attachMetadata: {
         attachStrategy: 'terminal_host',
@@ -133,7 +131,7 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
       async sendLiteralText(text) {
         expect(text).toBe('1');
         resumeAnswerSubmitted = true;
-        screenText = composerScreen('/compact ');
+        screenText = composerScreen('/compact ', true);
         const hook = subscribedHook;
         if (!hook) throw new Error('resume answer ran before the provider hook bridge subscribed');
         hook({
@@ -148,6 +146,14 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
           transcript_path: transcriptPath,
           prompt: '/compact',
         });
+        await appendFile(transcriptPath, `${JSON.stringify({
+          type: 'user',
+          uuid: 'resume-summary-native-compact-row',
+          sessionId: claudeSessionId,
+          timestamp: new Date().toISOString(),
+          isSidechain: false,
+          message: { role: 'user', content: '/compact' },
+        })}\n`);
         compactPromptSubmitted = true;
         return { status: 'sent', at: Date.now() };
       },
@@ -155,10 +161,7 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
         return { status: 'sent', at: Date.now() };
       },
       async sendSpecialKey(key) {
-        sentKeys.push(key);
-        if (key === 'Escape') {
-          screenText = composerScreen('');
-        }
+        throw new Error(`Unexpected startup-compaction key: ${key}`);
         return { status: 'sent', at: Date.now() };
       },
     };
@@ -177,13 +180,15 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
         observedAt: Date.now(),
       })),
       createControlPort: vi.fn(() => controlPort),
-      interruptTurn: vi.fn(async () => {}),
+      interruptTurn: vi.fn(async () => {
+        throw new Error('Provider-owned startup compaction must not be interrupted');
+      }),
       dispose: vi.fn(async () => {}),
     };
 
     const sessionPromise = runClaudeUnifiedTerminalSession({
       path: workspaceDir,
-      happySessionId: 'resume-summary-compact-residue-session',
+      happySessionId: 'resume-summary-compaction-session',
       sessionId: claudeSessionId,
       transcriptPath,
       hookPluginDir: join(dir, 'owned-happier-hook-plugin'),
@@ -195,13 +200,14 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
           message: pendingPrompt,
           mode: { permissionMode: 'default', claudeUnifiedTerminalHost: 'tmux' },
           userMessageLocalIds: ['resume-summary-pending-local-id'],
+          pendingProviderAction: 'interrupt_and_send',
         };
       },
       onPromptAcceptedByProvider,
       onTerminalPromptInjected,
       resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
       buildSpawn: async () => ({ spawnArgv: ['/bin/claude'], spawnEnv: {} }),
-      createSessionName: () => 'happier-claude-resume-summary-compact-residue-test',
+      createSessionName: () => 'happier-claude-resume-summary-compaction-test',
       subscribeClaudeSessionHooks: (callback) => {
         subscribedHook = callback;
         return () => {
@@ -213,7 +219,7 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
         controlPort: startupPort,
         startupMode,
         isRuntimeControlInFlight,
-        onResumeSummaryCompactResidue,
+        onResumeSummaryCompactionSubmitted,
       }) =>
         createClaudeUnifiedResumeChoiceStartupResolver({
           choice: 'resume_from_summary',
@@ -223,23 +229,34 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
           settleMs: 0,
           startupMode,
           isRuntimeControlInFlight,
-          onResumeSummaryCompactResidue: () => {
-            compactResidueProvenanceArmed = true;
-            onResumeSummaryCompactResidue();
-          },
+          onResumeSummaryCompactionSubmitted,
         }),
       lifecycleCompletionQuiescenceMs: 0,
-      dialogTurnStallScreenProbeQuietMs: 10,
-      dialogTurnStallScreenProbeMaxAttempts: 1,
+      dialogTurnStallScreenProbeQuietMs: 1_000,
+      dialogTurnStallScreenProbeMaxAttempts: 0,
       dialogTurnEndScreenProbeDelaysMs: [],
     });
 
     try {
       await waitUntil(() => resumeAnswerSubmitted);
       await waitUntil(() => compactPromptSubmitted);
-      await waitUntil(() => compactResidueProvenanceArmed);
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      expect(adapter.interruptTurn).not.toHaveBeenCalled();
+      expect(injectUserPrompt).not.toHaveBeenCalled();
 
-      await waitUntil(() => sentKeys.includes('Escape'));
+      const hook = subscribedHook;
+      if (!hook) throw new Error('provider hook bridge unsubscribed during compaction');
+      hook({
+        hook_event_name: 'PreCompact',
+        session_id: claudeSessionId,
+        transcript_path: transcriptPath,
+      });
+      screenText = composerScreen('');
+      hook({
+        hook_event_name: 'PostCompact',
+        session_id: claudeSessionId,
+        transcript_path: transcriptPath,
+      });
       await waitUntil(() => injectUserPrompt.mock.calls.length === 1);
       await waitUntil(() => onTerminalPromptInjected.mock.calls.length === 1);
       expect(onPromptAcceptedByProvider).not.toHaveBeenCalled();
@@ -253,7 +270,7 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
         message: { role: 'user', content: pendingPrompt },
       })}\n`);
       await waitUntil(() => onPromptAcceptedByProvider.mock.calls.length === 1);
-      expect(sentKeys).toEqual(['Escape']);
+      expect(adapter.interruptTurn).not.toHaveBeenCalled();
       expect(injectUserPrompt).toHaveBeenCalledTimes(1);
       expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
         message: pendingPrompt,
