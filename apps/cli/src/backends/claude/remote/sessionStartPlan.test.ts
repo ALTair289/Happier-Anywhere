@@ -87,10 +87,10 @@ describe('resolveClaudeRemoteSessionStartPlan', () => {
     expect(result).toEqual({ startFrom: 'last-session-id', shouldContinue: false });
   });
 
-  it('starts fresh for a hook-only current session whose transcript has not materialized', () => {
+  it('fails instead of starting fresh when an explicitly requested resume transcript is unavailable', () => {
     const logDebug = vi.fn();
 
-    const result = resolveClaudeRemoteSessionStartPlan(
+    expect(() => resolveClaudeRemoteSessionStartPlan(
       {
         sessionId: 'startup-only-session',
         transcriptPath: '/tmp/missing.jsonl',
@@ -107,12 +107,10 @@ describe('resolveClaudeRemoteSessionStartPlan', () => {
         logDebug,
         logPrefix: 'claudeRemoteAgentSdk',
       },
-    );
-
-    expect(result).toEqual({ startFrom: null, shouldContinue: false });
-    expect(logDebug).toHaveBeenCalledWith(
-      '[claudeRemoteAgentSdk] Session startup-only-session has no materialized transcript yet; starting fresh instead of resuming',
-    );
+    )).toThrow(expect.objectContaining({
+      code: 'claude_resume_session_unavailable',
+    }));
+    expect(logDebug).not.toHaveBeenCalled();
   });
 
   it('keeps a materialized current session even when deep transcript validation is conservative', () => {

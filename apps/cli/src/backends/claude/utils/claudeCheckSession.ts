@@ -3,11 +3,23 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getProjectPath } from "./path";
 
-export function claudeCheckSession(sessionId: string, path: string, transcriptPath?: string | null) {
-    const projectDir = getProjectPath(path);
+export function resolveClaudeSessionTranscriptPath(
+    sessionId: string,
+    path: string,
+    transcriptPath?: string | null,
+    claudeConfigDir?: string | null,
+): string {
+    const explicitPath = typeof transcriptPath === 'string' ? transcriptPath.trim() : '';
+    return explicitPath || join(getProjectPath(path, claudeConfigDir), `${sessionId}.jsonl`);
+}
 
-    // Prefer explicit transcript path (from Claude hook) over the project-dir heuristic.
-    const sessionFile = transcriptPath ?? join(projectDir, `${sessionId}.jsonl`);
+export function claudeCheckSession(
+    sessionId: string,
+    path: string,
+    transcriptPath?: string | null,
+    claudeConfigDir?: string | null,
+) {
+    const sessionFile = resolveClaudeSessionTranscriptPath(sessionId, path, transcriptPath, claudeConfigDir);
     const sessionExists = existsSync(sessionFile);
     if (!sessionExists) {
         logger.debug(`[claudeCheckSession] Path ${sessionFile} does not exist`);

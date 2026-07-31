@@ -10,7 +10,7 @@ import {
 
 // Mock getProjectPath to use test directory
 vi.mock('./path', () => ({
-    getProjectPath: (path: string) => path
+    getProjectPath: (path: string, configDir?: string | null) => configDir ?? path
 }));
 
 describe('claudeCheckSession', () => {
@@ -166,8 +166,19 @@ describe('claudeCheckSession', () => {
             const transcriptPath = join(altDir, `${sessionId}.jsonl`);
             writeFileSync(transcriptPath, JSON.stringify({ uuid: 'msg-override', type: 'user' }) + '\n');
 
-            // RED: current implementation ignores transcriptPath and checks only `${getProjectPath(path)}/${sessionId}.jsonl`
             expect(claudeCheckSession(sessionId, testDir, transcriptPath)).toBe(true);
+        });
+
+        it('should resolve the transcript from the selected Claude config directory', () => {
+            const sessionId = '44444444-4444-4444-4444-444444444444';
+            const selectedConfigDir = join(testDir, 'selected-claude-config');
+            mkdirSync(selectedConfigDir, { recursive: true });
+            writeFileSync(
+                join(selectedConfigDir, `${sessionId}.jsonl`),
+                JSON.stringify({ uuid: 'msg-selected-config', type: 'user' }) + '\n',
+            );
+
+            expect(claudeCheckSession(sessionId, testDir, null, selectedConfigDir)).toBe(true);
         });
     });
 
