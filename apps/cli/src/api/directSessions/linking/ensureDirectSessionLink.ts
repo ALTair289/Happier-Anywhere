@@ -25,6 +25,7 @@ import {
   type ConnectedServiceRuntimeSnapshot,
 } from '@/daemon/connectedServices/connectedServiceRuntimeSnapshot';
 import { listSessionMarkers, type DaemonSessionMarker } from '@/daemon/sessionRegistry';
+import { normalizePathForComparison } from '@/utils/path/normalizePathForComparison';
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -39,13 +40,6 @@ function normalizeNullableString(value: unknown): string | null {
 function asMetadataRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
-}
-
-function normalizeDirectoryKey(value: unknown): string | null {
-  const normalized = normalizeNullableString(value);
-  if (!normalized) return null;
-  const slashed = normalized.replaceAll('\\', '/').replace(/\/+$/, '');
-  return /^[a-zA-Z]:\//.test(slashed) ? slashed.toLowerCase() : slashed;
 }
 
 function resolveSessionSummaryTitle(metadata: Readonly<Record<string, unknown>>): string | null {
@@ -129,9 +123,9 @@ function resolveMarkerDirectoryKeys(marker: DaemonSessionMarker): ReadonlySet<st
   const respawn = asMetadataRecord(marker.respawn);
   return new Set(
     [
-      normalizeDirectoryKey(marker.cwd),
-      normalizeDirectoryKey(metadata?.path),
-      normalizeDirectoryKey(respawn?.directory),
+      normalizePathForComparison(marker.cwd),
+      normalizePathForComparison(metadata?.path),
+      normalizePathForComparison(respawn?.directory),
     ].filter((value): value is string => Boolean(value)),
   );
 }
@@ -169,7 +163,7 @@ async function resolveConnectedServiceRuntimeSnapshotForDirectLink(params: Reado
     .sort((left, right) => right.marker.updatedAt - left.marker.updatedAt)[0];
   if (exactRemoteMatch) return exactRemoteMatch.snapshot;
 
-  const directoryKey = normalizeDirectoryKey(params.directoryHint);
+  const directoryKey = normalizePathForComparison(params.directoryHint);
   if (!directoryKey) return {};
 
   const contextualMatches = markersWithSnapshots

@@ -562,6 +562,80 @@ describe('codexLocalLauncher', () => {
     }
   });
 
+  it('does not bind a fresh session to a concurrent rollout from another workspace', async () => {
+    const fixture = await createCodexBinaryFixture();
+    const unrelatedSessionId = randomUUID();
+    const ownSessionId = randomUUID();
+    const nowIso = new Date().toISOString();
+    const unrelatedRollout = join(fixture.sessionsRoot, 'rollout-unrelated.jsonl');
+
+    await writeFile(
+      unrelatedRollout,
+      `${JSON.stringify({
+        type: 'session_meta',
+        payload: {
+          id: unrelatedSessionId,
+          timestamp: nowIso,
+          cwd: join(fixture.sessionsRoot, 'other-workspace'),
+          originator: 'happier_cli',
+          source: {
+            subagent: {
+              thread_spawn: {
+                parent_thread_id: randomUUID(),
+                depth: 1,
+              },
+            },
+          },
+        },
+      })}\n`,
+      'utf8',
+    );
+    await writeFakeCodexScript(fixture.fakeCodex, {
+      terminatedFlag: fixture.terminatedFlag,
+      sessionMetaDelayMs: 300,
+      recordArgv: false,
+    });
+
+    const { session, metadataUpdates } = createLocalSessionHarness();
+    const messageQueue = createLocalMessageQueue();
+    const restoreEnv = applyCodexLauncherEnv({
+      HAPPIER_CODEX_SESSIONS_DIR: fixture.sessionsRoot,
+      HAPPIER_CODEX_TUI_BIN: fixture.fakeCodex,
+      TEST_CODEX_SESSION_ID: ownSessionId,
+      TEST_CODEX_TIMESTAMP: nowIso,
+      TEST_CODEX_ARGV_PATH: undefined,
+    });
+
+    try {
+      const launcherPromise = codexLocalLauncher({
+        path: fixture.sessionsRoot,
+        api: {},
+        session,
+        messageQueue,
+        permissionMode: 'default',
+        rolloutDiscovery: {
+          initialTimeoutMs: 1_000,
+          initialPollIntervalMs: 25,
+          extendedPollIntervalMs: 25,
+        },
+      });
+
+      await waitFor(() => {
+        expect(metadataUpdates.some((metadata) => metadata.codexSessionId === ownSessionId)).toBe(true);
+      });
+      expect(metadataUpdates.some((metadata) => metadata.codexSessionId === unrelatedSessionId)).toBe(false);
+
+      messageQueue.push('switch', { permissionMode: 'default' });
+      await expect(launcherPromise).resolves.toEqual({ type: 'switch', resumeId: ownSessionId });
+      await waitFor(() => {
+        expect(existsSync(fixture.terminatedFlag)).toBe(true);
+      });
+    } finally {
+      restoreEnv();
+      await cleanupCodexBinaryFixture(fixture);
+    }
+  });
+
   it('defers UI-triggered remote switch until an active Codex task completes', async () => {
     const fixture = await createCodexBinaryFixture();
     const sessionId = randomUUID();

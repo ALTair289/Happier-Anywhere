@@ -2,6 +2,11 @@ import { open, readdir, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
+import {
+    normalizePathForComparison,
+    resolvePathForComparison,
+} from '@/utils/path/normalizePathForComparison';
+
 export type CodexSessionMetaPayload = {
     id?: string;
     timestamp?: string;
@@ -51,14 +56,37 @@ function isSessionMetaFreshForStart(opts: { sessionMeta: CodexSessionMetaPayload
     return ts >= opts.startedAtMs - CODEX_SESSION_META_CLOCK_SKEW_MS;
 }
 
+function isSubagentRollout(sessionMeta: CodexSessionMetaPayload): boolean {
+    const source = sessionMeta.source;
+    return Boolean(
+        source
+        && typeof source === 'object'
+        && !Array.isArray(source)
+        && Object.prototype.hasOwnProperty.call(source, 'subagent'),
+    );
+}
+
+async function isOwnedFreshRootRollout(opts: {
+    sessionMeta: CodexSessionMetaPayload;
+    startedAtMs: number;
+    expectedCwd: string | null;
+}): Promise<boolean> {
+    if (!isSessionMetaFreshForStart(opts)) return false;
+    if (isSubagentRollout(opts.sessionMeta) || !opts.expectedCwd) return false;
+
+    const candidateCwd = await resolvePathForComparison(opts.sessionMeta.cwd);
+    return candidateCwd === opts.expectedCwd;
+}
+
 type RolloutFileEntry = Readonly<{ filePath: string; mtimeMs: number }>;
 
 async function collectRolloutFiles(opts: ScanOptions): Promise<RolloutFileEntry[]> {
     const results: string[] = [];
     const maxDepth = Math.max(0, typeof opts.maxDepth === 'number' ? opts.maxDepth : 10);
+    const scanLimit = Math.max(0, opts.scanLimit);
 
     async function walk(dir: string, depth: number): Promise<void> {
-        if (depth >= maxDepth) return;
+        if (depth >= maxDepth || results.length >= scanLimit) return;
 
         let entries: any[];
         try {
@@ -66,7 +94,9 @@ async function collectRolloutFiles(opts: ScanOptions): Promise<RolloutFileEntry[
         } catch {
             return;
         }
+        entries.sort((left, right) => String(right.name).localeCompare(String(left.name)));
         for (const entry of entries) {
+            if (results.length >= scanLimit) return;
             const name = typeof entry.name === 'string' ? entry.name : String(entry.name);
             const full = join(dir, name);
             if (entry.isSymbolicLink()) continue;
@@ -82,8 +112,9 @@ async function collectRolloutFiles(opts: ScanOptions): Promise<RolloutFileEntry[
 
     await walk(opts.sessionsRootDir, 0);
 
-    // Prefer newest by filename timestamp (or filesystem birthtime), but include mtime as a signal so we can
-    // still observe rollouts that Codex continues to append to (the filename timestamp may be very old).
+    // Codex date-partitions rollouts under zero-padded YYYY/MM/DD directories and timestamped filenames.
+    // Traverse those names newest-first and enforce scanLimit before statting. A full stat-and-sort of a
+    // long-lived Codex home can otherwise delay local-control attachment for minutes.
     const withTime: Array<{ filePath: string; sortMs: number; mtimeMs: number }> = [];
     for (const filePath of results) {
         try {
@@ -97,7 +128,7 @@ async function collectRolloutFiles(opts: ScanOptions): Promise<RolloutFileEntry[
         }
     }
     withTime.sort((a, b) => b.sortMs - a.sortMs || b.mtimeMs - a.mtimeMs);
-    return withTime.slice(0, Math.max(0, opts.scanLimit)).map((x) => ({ filePath: x.filePath, mtimeMs: x.mtimeMs }));
+    return withTime.map((x) => ({ filePath: x.filePath, mtimeMs: x.mtimeMs }));
 }
 
 async function readFirstLine(filePath: string): Promise<string | null> {
@@ -187,10 +218,10 @@ export function scoreCodexRolloutCandidate(opts: {
         score -= 100;
     }
 
-    // Weak signal only.
-    if (typeof opts.sessionMeta.cwd === 'string') {
-        if (opts.sessionMeta.cwd === opts.cwd) score += 20;
-        else if (opts.cwd.startsWith(opts.sessionMeta.cwd)) score += 5;
+    const expectedCwd = normalizePathForComparison(opts.cwd);
+    const candidateCwd = normalizePathForComparison(opts.sessionMeta.cwd);
+    if (expectedCwd !== null && candidateCwd === expectedCwd) {
+        score += 20;
     }
 
     return score;
@@ -237,7 +268,10 @@ export async function discoverCodexRolloutFileOnce(opts: {
             const idFromName = parseResumeIdFromRolloutFilename(entry.filePath);
             if (!idFromName) continue;
             if (entry.mtimeMs < opts.startedAtMs - CODEX_SESSION_META_CLOCK_SKEW_MS) continue;
-            const fallbackMeta: CodexSessionMetaPayload = { id: idFromName, timestamp: new Date(entry.mtimeMs).toISOString(), cwd: opts.cwd };
+            const fallbackMeta: CodexSessionMetaPayload = {
+                id: idFromName,
+                timestamp: new Date(entry.mtimeMs).toISOString(),
+            };
             const score = scoreCodexRolloutCandidate({
                 sessionMeta: fallbackMeta,
                 startedAtMs: opts.startedAtMs,
@@ -255,16 +289,23 @@ export async function discoverCodexRolloutFileOnce(opts: {
     }
     scored.sort((a, b) => b.score - a.score);
 
-    // When starting a brand-new Codex session, require the rollout's own start time (session_meta.timestamp,
-    // or the mtime-derived fallback for files whose first line has not flushed yet) to be close to the
-    // launcher's startedAt. A long-running Codex session elsewhere will keep its rollout's mtime fresh while
-    // its session_meta.timestamp stays old — if we also accepted "fresh mtime" here, that unrelated session's
-    // rollout would be picked up and mirrored into this Happy session.
-    const candidates = resumeId
-        ? scored
-        : scored.filter((entry) =>
-            isSessionMetaFreshForStart({ sessionMeta: entry.sessionMeta, startedAtMs: opts.startedAtMs }),
-          );
+    // A fresh local-control launch has no provider session id yet, so ownership must be established by
+    // the rollout's own metadata. Fail closed until session_meta proves that the rollout is fresh, belongs
+    // to this workspace, and represents a root Codex session rather than a concurrent subagent.
+    const expectedCwd = resumeId ? null : await resolvePathForComparison(opts.cwd);
+    const candidates = [];
+    for (const entry of scored) {
+        if (
+            resumeId
+            || await isOwnedFreshRootRollout({
+                sessionMeta: entry.sessionMeta,
+                startedAtMs: opts.startedAtMs,
+                expectedCwd,
+            })
+        ) {
+            candidates.push(entry);
+        }
+    }
 
     const best = candidates[0];
     if (!best) return null;
