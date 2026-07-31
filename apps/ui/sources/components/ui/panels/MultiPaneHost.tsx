@@ -6,6 +6,7 @@ import { ResizableDockedPane } from './ResizableDockedPane';
 import { ESCAPE_KEY_BLOCKER_PRIORITIES, getMaxEscapeKeyBlockerPriority, isEscapeEventHandled } from './escapeKeyHandling';
 import { motionTokens } from '@/components/ui/motion/motionTokens';
 import { useReducedMotionPreference } from '@/hooks/ui/useReducedMotionPreference';
+import { shadowLevelStyle } from '@/shadowElevation';
 
 export type MultiPaneHostProps = Readonly<{
     main: React.ReactNode;
@@ -45,6 +46,10 @@ export const MultiPaneHost = React.memo((props: MultiPaneHostProps) => {
     const overlayDurationMs = reduceMotion ? motionTokens.durationMs.instant : motionTokens.durationMs.base;
     const overlayUseNativeDriver = Platform.OS !== 'web';
     const overlayZIndexBase = 50;
+    // One radius wherever a pane meets the header. The header spans above these columns and is not
+    // part of them, so a square top-left corner reads as a slab wedged underneath; rounding it lets
+    // the pane sit into the header instead. Matches the content sheet's seam radius.
+    const PANE_TOP_CORNER_RADIUS_PX = 16;
 
     const [rightOverlayClosing, setRightOverlayClosing] = React.useState(false);
     const [detailsOverlayClosing, setDetailsOverlayClosing] = React.useState(false);
@@ -262,6 +267,14 @@ export const MultiPaneHost = React.memo((props: MultiPaneHostProps) => {
                             bottom: 0,
                             zIndex: overlayZIndexBase + 1,
                             backgroundColor: theme.colors.surface.base,
+                            // Overlay only. Docked, this pane is part of the layout and its seam is
+                            // the hairline border; floating above the content it is a modal surface,
+                            // so it takes the modal elevation and rounds the one edge that shows.
+                            // Its own `overflow` clips the content, not the shadow it casts.
+                            borderTopLeftRadius: PANE_TOP_CORNER_RADIUS_PX,
+                            borderBottomLeftRadius: PANE_TOP_CORNER_RADIUS_PX,
+                            overflow: 'hidden',
+                            ...shadowLevelStyle(theme.colors.shadowLevels[6]),
                             transform: [
                                 {
                                     translateX: detailsPresence.progress.interpolate({
@@ -317,6 +330,16 @@ export const MultiPaneHost = React.memo((props: MultiPaneHostProps) => {
                             zIndex: layout.right === 'overlay' ? overlayZIndexBase + 3 : overlayZIndexBase - 1,
                             backgroundColor: theme.colors.surface.base,
                             opacity: layout.right === 'overlay' ? 1 : 0,
+                            // Same rule as the details overlay: a floating pane is a modal surface,
+                            // a hidden/parked one is not.
+                            ...(layout.right === 'overlay'
+                                ? {
+                                    borderTopLeftRadius: PANE_TOP_CORNER_RADIUS_PX,
+                                    borderBottomLeftRadius: PANE_TOP_CORNER_RADIUS_PX,
+                                    overflow: 'hidden' as const,
+                                    ...shadowLevelStyle(theme.colors.shadowLevels[6]),
+                                }
+                                : null),
                             transform: [
                                 {
                                     translateX: layout.right === 'overlay'
@@ -374,6 +397,12 @@ export const MultiPaneHost = React.memo((props: MultiPaneHostProps) => {
                             minHeight: 0,
                             minWidth: 0,
                             backgroundColor: theme.colors.surface.base,
+                            borderTopLeftRadius: PANE_TOP_CORNER_RADIUS_PX,
+                            // Required for the radius to be visible at all: the pane's children
+                            // paint their own backgrounds (the tab strip's inset fill) straight into
+                            // the corner otherwise. An element's own `overflow` clips its DESCENDANTS,
+                            // not the shadow it casts itself, so the seam below survives this.
+                            overflow: 'hidden',
                             // Seam, not a border. The docked pane sits ABOVE the main content, so
                             // it casts onto it rather than being fenced off by a line — the same
                             // treatment as the sidebar/content seam, mirrored. x-offset only, wide
@@ -435,6 +464,12 @@ export const MultiPaneHost = React.memo((props: MultiPaneHostProps) => {
                             minHeight: 0,
                             minWidth: 0,
                             backgroundColor: theme.colors.surface.base,
+                            borderTopLeftRadius: PANE_TOP_CORNER_RADIUS_PX,
+                            // Required for the radius to be visible at all: the pane's children
+                            // paint their own backgrounds (the tab strip's inset fill) straight into
+                            // the corner otherwise. An element's own `overflow` clips its DESCENDANTS,
+                            // not the shadow it casts itself, so the seam below survives this.
+                            overflow: 'hidden',
                             // Seam, not a border. The docked pane sits ABOVE the main content, so
                             // it casts onto it rather than being fenced off by a line — the same
                             // treatment as the sidebar/content seam, mirrored. x-offset only, wide

@@ -194,8 +194,10 @@ export const desktopSidebarChromeStyles = StyleSheet.create((theme) => ({
         position: 'relative',
     },
     topNotificationButton: {
-        width: DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_GLYPH_SIZE_PX,
-        height: DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_GLYPH_SIZE_PX,
+        // The BUTTON box, not the glyph: sizing a container off the glyph constant clipped the icon
+        // the moment the glyph grew.
+        width: DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_BUTTON_SIZE_PX,
+        height: DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_BUTTON_SIZE_PX,
         alignItems: 'center',
         justifyContent: 'center',
         position: 'relative',

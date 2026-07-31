@@ -128,7 +128,7 @@ export const lightTheme = {
             // Half the weight of `default`, for seams and for controls whose border should imply an
             // edge without competing with the content inside it. Introduced for the sidebar/content
             // seam and shared by the quiet toolbar buttons rather than re-typed as a literal.
-            subtle: 'rgba(0, 0, 0, 0.041)',
+            subtle: 'rgba(0, 0, 0, 0.062)',
         },
         effect: {
             surfaceHighlight: 'transparent',
@@ -451,7 +451,7 @@ export const darkTheme = {
             surface: 'rgba(255,255,255,0.056)',
             strong: 'rgba(255,255,255,0.090)',
             modal: 'rgba(255,255,255,0.064)',
-            subtle: 'rgba(255,255,255,0.025)',
+            subtle: 'rgba(255,255,255,0.040)',
         },
         effect: {
             surfaceHighlight: 'transparent',
