@@ -42,6 +42,11 @@ export {
   type SessionPendingQueueWakeResponseV1,
 } from './sessionControl/sessionPendingQueueWakeV1.js';
 export {
+  computeCanonicalDomainSeparatedDigest,
+  encodeCanonicalLengthDelimited,
+} from './crypto/canonicalDigest.js';
+
+export {
   DaemonSessionGoalClearRequestV1Schema,
   DaemonSessionGoalGetRequestV1Schema,
   DaemonSessionGoalSetRequestV1Schema,
@@ -1050,7 +1055,10 @@ export {
   TERMINAL_PROVISIONING_V2_CONTENT_PRIVATE_KEY_BYTES,
   TERMINAL_PROVISIONING_V2_PLAINTEXT_BYTES,
   TERMINAL_PROVISIONING_V2_VERSION_BYTE,
+  isTerminalProvisioningV3Payload,
+  openTerminalProvisioningV3Payload,
   openTerminalProvisioningV2Payload,
+  sealTerminalProvisioningV3Payload,
   sealTerminalProvisioningV2Payload,
 } from './crypto/terminalProvisioningV2.js';
 

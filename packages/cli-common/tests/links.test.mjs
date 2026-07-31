@@ -19,6 +19,30 @@ test('buildTerminalConnectLinks adds server param to web + mobile links', () => 
   );
 });
 
+test('buildTerminalConnectLinks carries optional authenticated-pairing context in both links', () => {
+  const out = buildTerminalConnectLinks({
+    webappUrl: 'https://app.happier.dev',
+    serverUrl: 'https://stack.example.test',
+    publicKeyB64Url: 'terminal-key',
+    pairing: {
+      secretB64Url: 'pairing-secret',
+      createdAtMs: 1_000,
+      expiresAtMs: 61_000,
+    },
+  });
+
+  const suffix =
+    '&pairingSecret=pairing-secret&createdAt=1000&expiresAt=61000';
+  assert.equal(
+    out.webUrl,
+    `https://app.happier.dev/terminal/connect#key=terminal-key&server=https%3A%2F%2Fstack.example.test${suffix}`,
+  );
+  assert.equal(
+    out.mobileUrl,
+    `happier://terminal?key=terminal-key&server=https%3A%2F%2Fstack.example.test${suffix}`,
+  );
+});
+
 test('buildConfigureServerLinks encodes server URL', () => {
   const webappUrl = 'https://app.happier.dev';
   const serverUrl = 'https://stack.example.test';

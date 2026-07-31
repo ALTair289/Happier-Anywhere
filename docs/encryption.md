@@ -574,6 +574,33 @@ Feature gates:
 
 Do not gate plaintext behavior on raw env vars or `capabilities` fields.
 
+## Terminal pairing authentication rollout
+
+Terminal pairing v3 adds a 32-byte secret to the QR/deep link and authenticates the sealed
+content-key response with HMAC-SHA-256. The terminal keeps that secret local and does not include it
+in the relay auth request.
+
+The current rollout is an **expansion phase**: new native clients produce v3 responses, while the
+terminal still accepts legacy v1/v2 responses for compatibility. Until a later release activates
+v3 enforcement, a malicious relay can still downgrade the exchange to a forged legacy response.
+
+Users who want to opt into enforcement during the expansion phase can require the current
+authenticated protocol locally:
+
+```bash
+HAPPIER_TERMINAL_PAIRING_REQUIRE=v3 happier auth
+```
+
+`v3` is a minimum accepted pairing-protocol requirement: legacy v1/v2 responses are rejected, and
+future supported versions may satisfy the same or a stronger requirement. Unknown values fail
+closed with a configuration error. For `auth request --json` plus `auth wait`, the requirement is
+persisted in the private pending-auth state so the wait process cannot accidentally lose it.
+
+Native-app QR pairing can provide relay-independent authentication once enforcement is active
+because the secret travels camera-to-app. Web pairing cannot make the same guarantee against a
+hostile self-hosted relay: that relay also serves the JavaScript which receives the secret, so the
+web flow necessarily trusts its web origin.
+
 ## Implementation references
 - Client crypto: `apps/cli/src/api/encryption.ts`
 - Session message format: `apps/cli/src/api/types.ts`
