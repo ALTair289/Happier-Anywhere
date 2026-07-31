@@ -4,7 +4,6 @@ import { createInterface } from 'node:readline';
 
 import {
   clearCredentials,
-  clearDaemonState,
   readCredentials,
   updateSettings,
 } from '@/persistence';
@@ -69,7 +68,6 @@ export async function handleAuthLogout(args: string[]): Promise<void> {
         }
 
         await clearCredentials();
-        await clearDaemonState().catch(() => {});
 
         await updateSettings((settings) => {
           return clearServerScopedAuthStateInSettings(settings, targetServerId);
