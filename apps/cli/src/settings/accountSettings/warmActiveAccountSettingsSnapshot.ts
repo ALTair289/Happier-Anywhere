@@ -4,7 +4,7 @@ import { logger as defaultLogger } from '@/ui/logger';
 import { refreshAccountSettingsForMinimumVersion } from './refreshAccountSettingsForMinimumVersion';
 
 type WarmLogger = Readonly<{
-  warn: (message: string, error?: unknown) => void;
+  debug: (message: string, error?: unknown) => void;
 }>;
 
 type WarmDeps = NonNullable<Parameters<typeof refreshAccountSettingsForMinimumVersion>[0]['deps']>;
@@ -38,7 +38,7 @@ export async function warmActiveAccountSettingsSnapshotBestEffort(params: Readon
     });
     return true;
   } catch (error) {
-    logger.warn('[accountSettings] Failed to warm active account-settings snapshot (non-fatal)', error);
+    logger.debug('[accountSettings] Failed to warm active account-settings snapshot (non-fatal)', error);
     return false;
   }
 }

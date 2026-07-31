@@ -2312,7 +2312,7 @@ export class ApiSessionClient extends EventEmitter {
         );
 
         if (isAccountSettingsUpdate && !accountSettingsUpdate) {
-            logger.warn('[accountSettings] Ignoring malformed live account settings update and withholding pending eligibility wakes');
+            logger.debug('[accountSettings] Ignoring malformed live account settings update and withholding pending eligibility wakes');
             this.accountSettingsSyncBarrier = Promise.resolve(false);
             this.accountSettingsSyncBarrierState = 'failed';
             this.userSocketSettingsConvergedEpoch = -1;
@@ -2353,7 +2353,7 @@ export class ApiSessionClient extends EventEmitter {
             }
             return true;
         })().catch((error) => {
-            logger.warn('[accountSettings] Failed to apply live account settings update; withholding pending eligibility wakes', {
+            logger.debug('[accountSettings] Failed to apply live account settings update; withholding pending eligibility wakes', {
                 settingsVersion: accountSettingsUpdate?.version
                     ?? (data.body.t === 'account-settings-changed' ? data.body.settingsVersion : null),
                 error: serializeAxiosErrorForLog(error),
@@ -2830,7 +2830,7 @@ export class ApiSessionClient extends EventEmitter {
             return true;
         })().catch((error) => {
             failure = error;
-            logger.warn('[accountSettings] Failed request-only reconnect convergence; withholding pending eligibility wakes', {
+            logger.debug('[accountSettings] Failed request-only reconnect convergence; withholding pending eligibility wakes', {
                 settingsVersion,
                 error: serializeAxiosErrorForLog(error),
             });

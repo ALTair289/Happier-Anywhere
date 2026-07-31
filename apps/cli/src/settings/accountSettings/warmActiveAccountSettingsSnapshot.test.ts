@@ -59,12 +59,14 @@ describe('warmActiveAccountSettingsSnapshotBestEffort', () => {
     expect(bootstrapAccountSettingsContext).not.toHaveBeenCalled();
   });
 
-  it('fails open (returns false, never throws) when the refresh fails', async () => {
-    const warnings: unknown[] = [];
+  it('fails open and keeps the non-fatal diagnostic out of the user console', async () => {
+    const diagnostics: unknown[] = [];
 
     await expect(warmActiveAccountSettingsSnapshotBestEffort({
       credentials: createCredentialsStub(),
-      logger: { warn: (message, error) => { warnings.push([message, error]); } },
+      logger: {
+        debug: (message, error) => { diagnostics.push([message, error]); },
+      },
       deps: {
         getActiveSnapshot: () => null,
         bootstrapAccountSettingsContext: vi.fn(async () => {
@@ -74,6 +76,6 @@ describe('warmActiveAccountSettingsSnapshotBestEffort', () => {
       },
     })).resolves.toBe(false);
 
-    expect(warnings).toHaveLength(1);
+    expect(diagnostics).toHaveLength(1);
   });
 });
