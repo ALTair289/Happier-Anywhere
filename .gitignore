@@ -149,5 +149,14 @@ _.env.pipeline.production.local
 /apply_fix.py
 /apps/cli/.restore.*
 /apps/cli/.runner-snapshots/
+/apps/cli/package.yaml
 /evidence/
 /liveqa_*.mjs
+
+# One-off UI icon migration scratch scripts (maintained generators and mappings stay tracked)
+/apps/ui/scripts/icons/codemod*.mjs
+/apps/ui/scripts/icons/fix*.mjs
+/apps/ui/scripts/icons/inventory.mjs
+/apps/ui/scripts/icons/migrate.mjs
+/apps/ui/scripts/icons/scanner.mjs
+/apps/ui/scripts/icons/snapSizes.mjs
