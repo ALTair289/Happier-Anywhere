@@ -237,11 +237,22 @@ export async function sweepStaleClaudeCodeMacOsKeychainCredentials(params: Reado
     if (String(result.stderr ?? '').includes('could not be found')) continue;
     throw buildKeychainCommandError(String(result.stderr ?? ''), result.status);
   }
-  logger.info('[DAEMON RUN] Claude Code keychain stale credential sweep', {
+  const skippedCounts = skipped.reduce<Record<ClaudeCodeMacOsKeychainSweepSkipReason, number>>(
+    (counts, entry) => {
+      counts[entry.reason] += 1;
+      return counts;
+    },
+    {
+      different_account: 0,
+      global_service: 0,
+      not_happier_managed_service: 0,
+    },
+  );
+  logger.debug('[DAEMON RUN] Claude Code keychain stale credential sweep', {
     event: 'claude_code_keychain_stale_credential_sweep',
     scanned: entries.length,
-    deleted,
-    skipped,
+    deletedCount: deleted.length,
+    skippedCounts,
     decidedAtMs: Date.now(),
   });
   return {

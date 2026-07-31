@@ -25,12 +25,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 describe('Claude Code credential file write policy', () => {
   afterEach(() => {
     if (vi.isMockFunction(logger.info)) vi.mocked(logger.info).mockRestore();
+    if (vi.isMockFunction(logger.debug)) vi.mocked(logger.debug).mockRestore();
     renameSpy.mockClear();
     writeFileSpy.mockClear();
   });
 
   it('does not replace .credentials.json when the materialized fingerprint is unchanged', async () => {
-    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const consoleInfo = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const fileDiagnostic = vi.spyOn(logger, 'debug').mockImplementation(() => {});
     const { resolveClaudeCodeCredentialsFilePath, writeClaudeCodeCredentialsFile } = await import(
       './claudeCodeCredentialFile'
     );
@@ -60,10 +62,11 @@ describe('Claude Code credential file write policy', () => {
 
     expect(renameSpy).not.toHaveBeenCalled();
     expect(writeFileSpy).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith(
+    expect(fileDiagnostic).toHaveBeenCalledWith(
       '[DAEMON RUN] Claude Code credential file decision',
       expect.objectContaining({ decision: 'skip_fingerprint_match' }),
     );
+    expect(consoleInfo).not.toHaveBeenCalled();
     await expect(readFile(resolveClaudeCodeCredentialsFilePath(claudeConfigDir), 'utf8')).resolves.toContain(
       'stable-access-placeholder',
     );

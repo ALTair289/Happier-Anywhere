@@ -168,7 +168,7 @@ function logCredentialMaterializationDecision(params: Readonly<{
   reason: string;
   incomingUpdatedAtMs?: number | null;
 }>): void {
-  logger.info('[DAEMON RUN] Claude Code credential materialization decision', {
+  logger.debug('[DAEMON RUN] Claude Code credential materialization decision', {
     event: 'claude_code_credential_materialization_decision',
     ...(params.diagnosticContext ?? {}),
     decision: params.decision,

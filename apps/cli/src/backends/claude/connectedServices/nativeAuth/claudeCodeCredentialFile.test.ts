@@ -24,6 +24,7 @@ const REALISTIC_EXPIRES_AT_MS = REALISTIC_ISSUED_AT_MS + 60 * 60 * 1000;
 describe('claudeCodeCredentialFile', () => {
   beforeEach(() => {
     vi.spyOn(logger, 'info').mockImplementation(() => {});
+    vi.spyOn(logger, 'debug').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -262,7 +263,7 @@ describe('claudeCodeCredentialFile', () => {
   });
 
   it('emits safe machine-greppable diagnostics for write and freshness-skip decisions', async () => {
-    const info = vi.mocked(logger.info);
+    const info = vi.mocked(logger.debug);
     const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-diagnostic-test-'));
     const writeWithDiagnostics = writeClaudeCodeCredentialsFile as (
       params: Parameters<typeof writeClaudeCodeCredentialsFile>[0] & Readonly<{
@@ -339,10 +340,11 @@ describe('claudeCodeCredentialFile', () => {
       }),
     );
     expect(JSON.stringify(info.mock.calls)).not.toContain('secret');
+    expect(logger.info).not.toHaveBeenCalled();
   });
 
   it('emits safe source and fingerprint diagnostics when reading credentials', async () => {
-    const info = vi.mocked(logger.info);
+    const info = vi.mocked(logger.debug);
     const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-read-diagnostic-test-'));
     await writeClaudeCodeCredentialsFile({
       claudeConfigDir,
@@ -386,6 +388,7 @@ describe('claudeCodeCredentialFile', () => {
       }),
     );
     expect(JSON.stringify(info.mock.calls)).not.toContain('secret');
+    expect(logger.info).not.toHaveBeenCalled();
   });
 
   it('parses credential health without exposing credential values', async () => {

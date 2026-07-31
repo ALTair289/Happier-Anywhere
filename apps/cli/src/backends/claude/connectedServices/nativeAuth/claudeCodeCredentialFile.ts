@@ -174,7 +174,7 @@ function logCredentialFileDecision(params: Readonly<{
   const existingFreshness = params.existing
     ? readClaudeCodeCredentialFreshness(params.existing.payload, params.existing.updatedAtMs)
     : null;
-  logger.info('[DAEMON RUN] Claude Code credential file decision', {
+  logger.debug('[DAEMON RUN] Claude Code credential file decision', {
     event: 'claude_code_credential_file_decision',
     ...(params.diagnosticContext ?? {}),
     decision: params.decision,
@@ -206,7 +206,7 @@ function logCredentialRead(params: Readonly<{
   const freshness = params.result
     ? readClaudeCodeCredentialFreshness(params.result.payload, params.result.updatedAtMs)
     : null;
-  logger.info('[DAEMON RUN] Claude Code credential read', {
+  logger.debug('[DAEMON RUN] Claude Code credential read', {
     event: 'claude_code_credential_read',
     ...(params.diagnosticContext ?? {}),
     source: params.result?.source ?? 'missing',

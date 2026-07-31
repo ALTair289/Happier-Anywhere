@@ -48,7 +48,7 @@ describe('materializeClaudeCodeNativeAuth', () => {
     if (ORIGINAL_PLATFORM_DESCRIPTOR) {
       Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'linux' });
     }
-    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    vi.spyOn(logger, 'debug').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -867,7 +867,7 @@ describe('materializeClaudeCodeNativeAuth', () => {
     expect(JSON.stringify(result.diagnostics)).not.toContain('secret-placeholder');
     await expect(lstat(join(claudeConfigDir, '.credentials.json'))).rejects.toThrow();
     await expect(lstat(join(claudeConfigDir, '.claude.json'))).rejects.toThrow();
-    expect(logger.info).toHaveBeenCalledWith(
+    expect(logger.debug).toHaveBeenCalledWith(
       '[DAEMON RUN] Claude Code credential materialization decision',
       expect.objectContaining({
         event: 'claude_code_credential_materialization_decision',

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 
+import { logger } from '@/ui/logger';
+
 const { spawnSpy } = vi.hoisted(() => ({
   spawnSpy: vi.fn(),
 }));
@@ -187,6 +189,8 @@ describe('claudeCodeMacOsKeychain', () => {
   });
 
   it('sweeps ALL Happier-managed derived services for the account (live or otherwise) and is idempotent', async () => {
+    const consoleInfo = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const fileDiagnostic = vi.spyOn(logger, 'debug').mockImplementation(() => {});
     // Under the file-only design Happier neither writes nor reads a derived (suffixed) keychain item,
     // so EVERY managed suffixed item — including one whose home is currently live — is obsolete cruft
     // and must be removed. Liveness no longer protects an item (nothing reads it), which is why the
@@ -243,6 +247,21 @@ describe('claudeCodeMacOsKeychain', () => {
     expect(entries.get('global')).toEqual({ account: 'tester', service: 'Claude Code-credentials' });
     expect(entries.get('other-account')).toEqual({ account: 'someone-else', service: otherAccountService });
     expect(entries.get('other-service')).toEqual({ account: 'tester', service: 'Other App credentials-3333cccc' });
+    expect(fileDiagnostic).toHaveBeenCalledWith(
+      '[DAEMON RUN] Claude Code keychain stale credential sweep',
+      expect.objectContaining({
+        scanned: 5,
+        deletedCount: 2,
+        skippedCounts: {
+          different_account: 1,
+          global_service: 1,
+          not_happier_managed_service: 1,
+        },
+      }),
+    );
+    expect(JSON.stringify(fileDiagnostic.mock.calls)).not.toContain(liveHomeService);
+    expect(JSON.stringify(fileDiagnostic.mock.calls)).not.toContain(otherAccountService);
+    expect(consoleInfo).not.toHaveBeenCalled();
   });
 
   it('never deletes the global service or a different-account item (protects the user login and test residue)', async () => {
