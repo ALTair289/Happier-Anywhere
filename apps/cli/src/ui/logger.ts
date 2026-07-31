@@ -76,13 +76,17 @@ async function pruneDaemonLogsForCurrentLogger(logFilePath: string): Promise<voi
 }
 
 async function pruneSessionLogsForCurrentLogger(logFilePath: string): Promise<void> {
+  const keepCount = resolveSessionLogKeepCount()
   await pruneLogsByCount({
     dir: configuration.logsDir,
     suffix: LOG_FILE_SUFFIX,
     excludeSuffix: DAEMON_LOG_SUFFIX,
-    keepCount: resolveSessionLogKeepCount(),
+    keepCount,
     keepPath: logFilePath,
-    keepPaths: resolveCrashedSessionLogKeepPaths(configuration.logsDir),
+    keepPaths: [
+      ...resolveCrashedSessionLogKeepPaths(configuration.logsDir),
+      ...resolveLiveSessionLogKeepPaths(configuration.logsDir, keepCount),
+    ],
   }).catch(() => ({ pruned: 0 }))
 }
 
@@ -136,6 +140,44 @@ function resolveCrashedSessionLogKeepPaths(logsDir: string): string[] {
       .map((file) => join(logsDir, file));
   } catch {
     return [];
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return Boolean(
+      error
+      && typeof error === 'object'
+      && 'code' in error
+      && error.code === 'EPERM',
+    )
+  }
+}
+
+function resolveLiveSessionLogKeepPaths(logsDir: string, keepCount: number): string[] {
+  try {
+    const livenessByPid = new Map<number, boolean>()
+    return readdirSync(logsDir)
+      .filter((file) => file.endsWith(LOG_FILE_SUFFIX) && !file.endsWith(DAEMON_LOG_SUFFIX))
+      .sort((a, b) => a < b ? 1 : a > b ? -1 : 0)
+      .slice(Math.max(0, keepCount))
+      .filter((file) => {
+        const match = /-pid-(\d+)\.log$/.exec(file)
+        if (!match) return false
+        const pid = Number(match[1])
+        if (!Number.isSafeInteger(pid) || pid <= 0) return false
+        const cached = livenessByPid.get(pid)
+        if (cached !== undefined) return cached
+        const alive = isProcessAlive(pid)
+        livenessByPid.set(pid, alive)
+        return alive
+      })
+      .map((file) => join(logsDir, file))
+  } catch {
+    return []
   }
 }
 

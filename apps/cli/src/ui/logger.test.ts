@@ -243,7 +243,7 @@ describe('logger', () => {
         mkdirSync(logsDir, { recursive: true });
         for (let index = 0; index < 6; index += 1) {
             writeFileSync(
-                join(logsDir, `2026-06-30-10-${String(index).padStart(2, '0')}-00-pid-${index}.log`),
+                join(logsDir, `2026-06-30-10-${String(index).padStart(2, '0')}-00-pid-${910_000 + index}.log`),
                 `old session ${index}\n`,
                 'utf8',
             );
@@ -268,24 +268,24 @@ describe('logger', () => {
         mkdirSync(sessionExitDir, { recursive: true });
         for (let index = 1; index <= 7; index += 1) {
             writeFileSync(
-                join(logsDir, `2026-06-30-10-${String(index).padStart(2, '0')}-00-pid-${index}.log`),
+                join(logsDir, `2026-06-30-10-${String(index).padStart(2, '0')}-00-pid-${920_000 + index}.log`),
                 `old session ${index}\n`,
                 'utf8',
             );
         }
         writeFileSync(
             join(sessionExitDir, 'z-session-crashed-old-pid-3.json'),
-            JSON.stringify({ sessionId: 'crashed-old', pid: 3, observedAt: 10, reason: 'process-exited', code: 1 }),
+            JSON.stringify({ sessionId: 'crashed-old', pid: 920_003, observedAt: 10, reason: 'process-exited', code: 1 }),
             'utf8',
         );
         writeFileSync(
             join(sessionExitDir, 'a-session-crashed-new-pid-2.json'),
-            JSON.stringify({ sessionId: 'crashed-new', pid: 2, observedAt: 20, reason: 'process-exited', code: 1 }),
+            JSON.stringify({ sessionId: 'crashed-new', pid: 920_002, observedAt: 20, reason: 'process-exited', code: 1 }),
             'utf8',
         );
         writeFileSync(
             join(sessionExitDir, 'session-clean-pid-1.json'),
-            JSON.stringify({ sessionId: 'clean', pid: 1, reason: 'process-exited', code: 0 }),
+            JSON.stringify({ sessionId: 'clean', pid: 920_001, reason: 'process-exited', code: 0 }),
             'utf8',
         );
 
@@ -296,9 +296,34 @@ describe('logger', () => {
                 .filter(file => file.endsWith('.log') && !file.endsWith('-daemon.log'))
                 .sort();
             expect(sessionLogs).toHaveLength(4);
-            expect(sessionLogs).toContain('2026-06-30-10-02-00-pid-2.log');
-            expect(sessionLogs).not.toContain('2026-06-30-10-03-00-pid-3.log');
-            expect(sessionLogs).not.toContain('2026-06-30-10-01-00-pid-1.log');
+            expect(sessionLogs).toContain('2026-06-30-10-02-00-pid-920002.log');
+            expect(sessionLogs).not.toContain('2026-06-30-10-03-00-pid-920003.log');
+            expect(sessionLogs).not.toContain('2026-06-30-10-01-00-pid-920001.log');
+        });
+    });
+
+    it('retains a live runner log outside the normal session log budget', async () => {
+        process.env.HAPPIER_SESSION_LOG_KEEP_COUNT = '3';
+        const logsDir = join(tempDir, 'logs');
+        mkdirSync(logsDir, { recursive: true });
+        const liveRunnerLog = `2020-01-01-00-00-00-pid-${process.pid}.log`;
+        writeFileSync(join(logsDir, liveRunnerLog), 'live runner history\n', 'utf8');
+        for (let index = 1; index <= 7; index += 1) {
+            writeFileSync(
+                join(logsDir, `2026-06-30-10-${String(index).padStart(2, '0')}-00-pid-${900_000 + index}.log`),
+                `inactive session ${index}\n`,
+                'utf8',
+            );
+        }
+
+        await import('@/ui/logger');
+
+        await vi.waitFor(() => {
+            const sessionLogs = readdirSync(logsDir)
+                .filter(file => file.endsWith('.log') && !file.endsWith('-daemon.log'))
+                .sort();
+            expect(sessionLogs).toHaveLength(4);
+            expect(sessionLogs).toContain(liveRunnerLog);
         });
     });
 
