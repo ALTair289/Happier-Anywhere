@@ -10157,7 +10157,7 @@ settingsSession: {
         yesForCommandPrefix:
           "はい、このコマンドプレフィックスについては確認しない",
         yesForSubcommand: "はい、このサブコマンドについては確認しない",
-        yesForCommandName: "はい、このコマンドについては確認しない",
+        yesForCommandName: "はい、このセッションでは一致するすべてのコマンドを許可",
         stop: "停止",
         noTellClaude: "いいえ、フィードバックを提供",
       },

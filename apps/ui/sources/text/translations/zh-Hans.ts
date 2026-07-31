@@ -9553,7 +9553,7 @@ settingsSession: {
         yesForTool: "是，不再询问此工具",
         yesForCommandPrefix: "是，不再询问此命令前缀",
         yesForSubcommand: "是，不再询问此子命令",
-        yesForCommandName: "是，不再询问此命令",
+        yesForCommandName: "是，在此会话中允许所有匹配的命令",
         stop: "停止",
         noTellClaude: "否，提供反馈",
       },

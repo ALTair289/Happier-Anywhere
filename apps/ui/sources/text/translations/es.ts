@@ -9944,7 +9944,7 @@ settingsSession: {
         yesForCommandPrefix:
           "Sí, no volver a preguntar para este prefijo de comando",
         yesForSubcommand: "Sí, no volver a preguntar para este subcomando",
-        yesForCommandName: "Sí, no volver a preguntar para este comando",
+        yesForCommandName: "Sí, permitir cualquier comando coincidente en esta sesión",
         stop: "Detener",
         noTellClaude: "No, proporcionar comentarios",
       },

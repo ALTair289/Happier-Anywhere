@@ -9199,7 +9199,7 @@ settingsSession: {
               yesForTool: 'Sí, no tornis a preguntar per aquesta eina',
               yesForCommandPrefix: "Sí, no tornis a preguntar per aquest prefix d'ordre",
               yesForSubcommand: "Sí, no tornis a preguntar per aquesta subordre",
-              yesForCommandName: "Sí, no tornis a preguntar per aquesta ordre",
+              yesForCommandName: "Sí, permet qualsevol ordre coincident durant aquesta sessió",
               stop: 'Atura',
               noTellClaude: 'No, proporciona comentaris',
           }

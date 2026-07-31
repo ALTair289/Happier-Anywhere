@@ -10049,7 +10049,7 @@ settingsSession: {
         yesForCommandPrefix:
           "Sim, não perguntar novamente para este prefixo de comando",
         yesForSubcommand: "Sim, não perguntar novamente para este subcomando",
-        yesForCommandName: "Sim, não perguntar novamente para este comando",
+        yesForCommandName: "Sim, permitir qualquer comando correspondente nesta sessão",
         stop: "Parar",
         noTellClaude: "Não, fornecer feedback",
       },

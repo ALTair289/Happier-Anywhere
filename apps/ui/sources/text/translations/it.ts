@@ -10256,7 +10256,7 @@ settingsSession: {
         yesForCommandPrefix:
           "Sì, non chiedere più per questo prefisso di comando",
         yesForSubcommand: "Sì, non chiedere più per questo sottocomando",
-        yesForCommandName: "Sì, non chiedere più per questo comando",
+        yesForCommandName: "Sì, consenti qualsiasi comando corrispondente in questa sessione",
         stop: "Ferma",
         noTellClaude: "No, fornisci feedback",
       },

@@ -9243,7 +9243,7 @@ settingsSession: {
             yesForTool: "Yes, don't ask again for this tool",
             yesForCommandPrefix: "Yes, don't ask again for this command prefix",
             yesForSubcommand: "Yes, don't ask again for this subcommand",
-            yesForCommandName: "Yes, don't ask again for this command",
+            yesForCommandName: "Yes, allow any matching command this session",
             stop: 'Stop',
             noTellClaude: 'No, and provide feedback',
         }

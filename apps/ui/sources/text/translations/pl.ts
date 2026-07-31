@@ -9931,7 +9931,7 @@ settingsSession: {
         yesForCommandPrefix:
           "Tak, nie pytaj ponownie dla tego prefiksu polecenia",
         yesForSubcommand: "Tak, nie pytaj ponownie dla tego podpolecenia",
-        yesForCommandName: "Tak, nie pytaj ponownie dla tego polecenia",
+        yesForCommandName: "Tak, zezwól na każde pasujące polecenie w tej sesji",
         stop: "Zatrzymaj",
         noTellClaude: "Nie, przekaż opinię",
       },
