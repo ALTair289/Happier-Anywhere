@@ -3,8 +3,28 @@ import { Platform, Pressable, View, StyleProp, ViewStyle, TextStyle } from 'reac
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeForView';
+import { ICON_LABEL_OPTICAL_NUDGE_STYLE } from '@/components/ui/icons/iconOpticalAlignment';
+import { MENU_ROW_ICON_GLYPH_SIZE } from '@/components/ui/lists/itemDensityMetrics';
+import { useResolvedItemDensity, type ResolvedItemDensity } from '@/components/ui/lists/useResolvedItemDensity';
 import { Text } from '@/components/ui/text/Text';
 
+
+/**
+ * Resizes an icon-like accessory, and only an icon-like one.
+ *
+ * Mirrors `Item`'s accessory rule: a node is icon-like when it names a glyph and takes a size and
+ * has no children. Avatars, gauges and composed nodes are laid out by their own owner and must not
+ * be stretched to the icon box.
+ */
+function sizeRowIconForDensity(node: React.ReactNode, glyphSize: number): React.ReactNode {
+    if (!React.isValidElement(node) || node.type === React.Fragment) return node;
+    const props = (node.props ?? {}) as Record<string, unknown>;
+    const isIconLike = typeof props.name === 'string'
+        && (typeof props.size === 'number' || typeof props.size === 'string')
+        && props.children == null;
+    if (!isIconLike) return node;
+    return React.cloneElement(node, { size: glyphSize } as Record<string, unknown>);
+}
 
 export type SelectableRowVariant = 'slim' | 'default' | 'selectable';
 
@@ -15,6 +35,8 @@ export type SelectableRowProps = Readonly<{
     left?: React.ReactNode;
     right?: React.ReactNode;
     leftGap?: number;
+    /** Row density; drives the left icon's glyph size, matching `Item`. Defaults to the user setting. */
+    density?: ResolvedItemDensity;
 
     selected?: boolean;
     disabled?: boolean;
@@ -84,6 +106,8 @@ const stylesheet = StyleSheet.create((theme) => ({
         marginRight: 12,
         alignItems: 'center',
         justifyContent: 'center',
+        // Optical, not geometric — see ICON_LABEL_OPTICAL_NUDGE_STYLE.
+        ...ICON_LABEL_OPTICAL_NUDGE_STYLE,
     },
     content: {
         flex: 1,
@@ -160,10 +184,17 @@ export function SelectableRow(props: SelectableRowProps) {
                 ? styles.rowSelectable
                 : styles.rowDefault;
 
+    const iconGlyphSize = MENU_ROW_ICON_GLYPH_SIZE[useResolvedItemDensity(props.density)];
     const titleColorStyle = props.destructive ? styles.titleDestructive : null;
     const titleVariantStyle = variant === 'selectable' ? styles.titleSelectable : null;
     const subtitleVariantStyle = variant === 'selectable' ? styles.subtitleSelectable : null;
-    const leftAccessory = React.useMemo(() => normalizeNodeForView(props.left ?? null), [props.left]);
+    // A menu row's icon is one size whichever row kind the dropdown chose. `Item` rows have always
+    // been resized to the density; `SelectableRow` rows passed the call site's number straight
+    // through, so the same DropdownMenu could show 16px icons on one menu and 24px on the next.
+    const leftAccessory = React.useMemo(
+        () => sizeRowIconForDensity(normalizeNodeForView(props.left ?? null), iconGlyphSize),
+        [props.left, iconGlyphSize],
+    );
     const rightAccessory = React.useMemo(() => normalizeNodeForView(props.right ?? null), [props.right]);
     const accessoryTitleAlignmentStyle = props.subtitle ? styles.accessoryTitleAligned : null;
 
