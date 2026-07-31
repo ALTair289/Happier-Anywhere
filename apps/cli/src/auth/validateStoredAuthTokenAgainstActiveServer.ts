@@ -1,6 +1,5 @@
-import { resolveLoopbackHttpUrl } from '@/api/client/loopbackUrl';
 import { isAuthenticationStatus } from '@/api/client/httpStatusError';
-import { configuration } from '@/configuration';
+import { resolveServerHttpBaseUrl } from '@/api/client/serverHttpBaseUrl';
 
 export type ActiveServerStoredTokenValidationResult = Readonly<
   | { state: 'valid'; httpStatus: number }
@@ -34,7 +33,7 @@ export async function validateStoredAuthTokenAgainstActiveServer(
     return { state: 'invalid', httpStatus: 401, reasonCode: 'missing-token' };
   }
 
-  const baseUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+  const baseUrl = resolveServerHttpBaseUrl();
 
   try {
     const response = await fetch(`${baseUrl}/v1/account/profile`, {
