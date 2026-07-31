@@ -5,7 +5,6 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Typography } from '@/constants/Typography';
 import { RoundButton } from '@/components/ui/buttons/RoundButton';
 import { useConnectTerminal } from '@/hooks/session/useConnectTerminal';
-import { Ionicons } from '@expo/vector-icons';
 import { TerminalConnectRouteShell } from '@/components/terminal/connect/TerminalConnectRouteShell';
 import { ItemList } from '@/components/ui/lists/ItemList';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
@@ -15,10 +14,14 @@ import { t } from '@/text';
 import { useAuth } from '@/auth/context/AuthContext';
 import { getServerUrl } from '@/sync/domains/server/serverConfig';
 import { clearPendingTerminalConnect, setPendingTerminalConnect } from '@/sync/domains/pending/pendingTerminalConnect';
-import { buildTerminalConnectDeepLink } from '@/utils/path/terminalConnectUrl';
+import {
+    buildTerminalConnectDeepLink,
+    type ParsedTerminalConnectUrl,
+} from '@/utils/path/terminalConnectUrl';
 import { canonicalizeServerUrl } from '@/sync/domains/server/url/serverUrlCanonical';
 import { resolveEffectiveServerUrlOverride } from '@/sync/domains/server/url/serverUrlOverridePolicy';
 import { safeRouterBack } from '@/utils/navigation/safeRouterBack';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export default function TerminalScreen() {
     const router = useRouter();
@@ -55,7 +58,7 @@ export default function TerminalScreen() {
         if (Array.isArray(keyParam) && keyParam[0]?.trim()) return keyParam[0].trim();
 
         // Legacy deep-link format: happier://terminal?<publicKeyB64Url>
-        const knownParams = new Set(['key', 'server']);
+        const knownParams = new Set(['key', 'server', 'pairingSecret', 'createdAt', 'expiresAt']);
         const unknownKeys = Object.keys(searchParams).filter((k) => !knownParams.has(k));
         if (unknownKeys.length !== 1) return null;
         const legacyKey = unknownKeys[0]?.trim();
@@ -68,6 +71,23 @@ export default function TerminalScreen() {
         if (Array.isArray(v) && v[0]?.trim()) return v[0].trim();
         return null;
     }, [searchParams]);
+    const pairing = React.useMemo<ParsedTerminalConnectUrl['pairing']>(() => {
+        const readOne = (value: string | string[] | undefined): string =>
+            typeof value === 'string' ? value.trim() : Array.isArray(value) ? String(value[0] ?? '').trim() : '';
+        const secretB64Url = readOne(searchParams.pairingSecret);
+        const createdAtMs = Number(readOne(searchParams.createdAt));
+        const expiresAtMs = Number(readOne(searchParams.expiresAt));
+        if (
+            !secretB64Url
+            || !Number.isSafeInteger(createdAtMs)
+            || !Number.isSafeInteger(expiresAtMs)
+            || createdAtMs < 0
+            || expiresAtMs <= createdAtMs
+        ) {
+            return undefined;
+        }
+        return { secretB64Url, createdAtMs, expiresAtMs };
+    }, [searchParams.createdAt, searchParams.expiresAt, searchParams.pairingSecret]);
     const { processAuthUrl, isLoading } = useConnectTerminal({
         onSuccess: () => {
             navigateBackOrToHome();
@@ -90,15 +110,17 @@ export default function TerminalScreen() {
         setPendingTerminalConnect({
             publicKeyB64Url: publicKey,
             serverUrl: effectiveTarget || currentServerUrl || getServerUrl(),
+            ...(pairing ? { pairing } : {}),
         });
         router.replace('/');
-    }, [auth.isAuthenticated, publicKey, router, serverUrl]);
+    }, [auth.isAuthenticated, pairing, publicKey, router, serverUrl]);
 
     const handleConnect = async () => {
         if (publicKey) {
             const authUrl = buildTerminalConnectDeepLink({
                 publicKeyB64Url: publicKey,
                 serverUrl,
+                pairing,
             });
             await processAuthUrl(authUrl);
         }
@@ -143,8 +165,8 @@ export default function TerminalScreen() {
                         paddingVertical: 32,
                         paddingHorizontal: 16
                     }}>
-                        <Ionicons
-                            name="warning-outline"
+                        <Icon
+                            name="warning"
                             size={48}
                             color={theme.colors.state.danger.foreground}
                             style={{ marginBottom: 16 }}
@@ -183,8 +205,8 @@ export default function TerminalScreen() {
                     paddingVertical: 24,
                     paddingHorizontal: 16
                 }}>
-                    <Ionicons
-                        name="terminal-outline"
+                    <Icon
+                        name="terminal"
                         size={48}
                         color={theme.colors.radio.active}
                         style={{ marginBottom: 16 }}
@@ -215,13 +237,13 @@ export default function TerminalScreen() {
                 <Item
                     title={t('terminal.publicKey')}
                     detail={`${publicKey.substring(0, 12)}...`}
-                    icon={<Ionicons name="key-outline" size={29} color={theme.colors.radio.active} />}
+                    icon={<Icon name="key" size={29} color={theme.colors.radio.active} />}
                     showChevron={false}
                 />
                 <Item
                     title={t('terminal.encryption')}
                     detail={t('terminal.endToEndEncrypted')}
-                    icon={<Ionicons name="lock-closed-outline" size={29} color={theme.colors.state.success.foreground} />}
+                    icon={<Icon name="lock" size={29} color={theme.colors.state.success.foreground} />}
                     showChevron={false}
                 />
             </ItemGroup>
@@ -260,7 +282,7 @@ export default function TerminalScreen() {
                 <Item
                     title={t('terminal.clientSideProcessing')}
                     subtitle={t('terminal.linkProcessedOnDevice')}
-                    icon={<Ionicons name="shield-checkmark-outline" size={29} color={theme.colors.state.success.foreground} />}
+                    icon={<Icon name="shield-check" size={29} color={theme.colors.state.success.foreground} />}
                     showChevron={false}
                 />
             </ItemGroup>

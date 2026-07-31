@@ -1,4 +1,5 @@
 import {
+    sealTerminalProvisioningV3Payload,
     sealTerminalProvisioningV2Payload,
 } from '@happier-dev/protocol';
 
@@ -24,6 +25,19 @@ export function buildTerminalResponseV2(params: Readonly<{
     return sealTerminalProvisioningV2Payload({
         contentPrivateKey: params.contentPrivateKey,
         recipientPublicKey: params.terminalEphemeralPublicKey,
+        randomBytes: getRandomBytes,
+    });
+}
+
+export function buildTerminalResponseV3(params: Readonly<{
+    contentPrivateKey: Uint8Array;
+    terminalEphemeralPublicKey: Uint8Array;
+    pairingSecret: Uint8Array;
+    createdAtMs: number;
+    expiresAtMs: number;
+}>): Uint8Array {
+    return sealTerminalProvisioningV3Payload({
+        ...params,
         randomBytes: getRandomBytes,
     });
 }

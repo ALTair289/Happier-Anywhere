@@ -2,7 +2,11 @@ import React from 'react';
 import { act } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import tweetnacl from 'tweetnacl';
-import { deriveAccountMachineKeyFromRecoverySecret, openTerminalProvisioningV2Payload } from '@happier-dev/protocol';
+import {
+    deriveAccountMachineKeyFromRecoverySecret,
+    openTerminalProvisioningV2Payload,
+    openTerminalProvisioningV3Payload,
+} from '@happier-dev/protocol';
 import { renderScreen } from '@/dev/testkit';
 import { installSessionHooksCommonModuleMocks } from './sessionHooksTestHelpers';
 
@@ -10,7 +14,15 @@ import { installSessionHooksCommonModuleMocks } from './sessionHooksTestHelpers'
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const routerReplaceSpy = vi.fn();
-const setPendingTerminalConnectSpy = vi.fn((_pending: { publicKeyB64Url: string; serverUrl: string }) => {});
+const setPendingTerminalConnectSpy = vi.fn((_pending: {
+    publicKeyB64Url: string;
+    serverUrl: string;
+    pairing?: {
+        secretB64Url: string;
+        createdAtMs: number;
+        expiresAtMs: number;
+    };
+}) => {});
 const modalAlertSpy = vi.fn((..._args: unknown[]) => {});
 const modalAlertAsyncSpy = vi.fn(async (...args: unknown[]) => {
     modalAlertSpy(...args);
@@ -126,10 +138,24 @@ vi.mock('@/sync/domains/state/storageStore', () => {
     return { storage, getStorage: () => storage };
 });
 
-function buildTerminalConnectUrl(params: Readonly<{ terminalPublicKey: Uint8Array; serverUrl?: string }>): string {
+function buildTerminalConnectUrl(params: Readonly<{
+    terminalPublicKey: Uint8Array;
+    serverUrl?: string;
+    pairingSecret?: Uint8Array;
+    createdAtMs?: number;
+    expiresAtMs?: number;
+}>): string {
     const publicKeyB64Url = Buffer.from(params.terminalPublicKey).toString('base64url');
     const server = encodeURIComponent(params.serverUrl ?? 'https://api.happier.dev');
-    return `happier://terminal?key=${publicKeyB64Url}&server=${server}`;
+    const pairing =
+        params.pairingSecret
+        && params.createdAtMs !== undefined
+        && params.expiresAtMs !== undefined
+            ? `&pairingSecret=${Buffer.from(params.pairingSecret).toString('base64url')}`
+                + `&createdAt=${params.createdAtMs}`
+                + `&expiresAt=${params.expiresAtMs}`
+            : '';
+    return `happier://terminal?key=${publicKeyB64Url}&server=${server}${pairing}`;
 }
 
 function createDataKeyCredentials(params: Readonly<{ token: string; machineKeyByte: number; publicKeyByte?: number }>) {
@@ -170,15 +196,26 @@ describe('useConnectTerminal unauthenticated flow', () => {
 
         await renderScreen(React.createElement(Probe));
 
+        const pairingSecret = new Uint8Array(32).fill(11);
         let result = true;
         await act(async () => {
-            result = await hookApi!.processAuthUrl('happier://terminal?key=abc123&server=https%3A%2F%2Fapi.happier.dev');
+            result = await hookApi!.processAuthUrl(buildTerminalConnectUrl({
+                terminalPublicKey: new Uint8Array([1, 2, 3]),
+                pairingSecret,
+                createdAtMs: 1_000,
+                expiresAtMs: 61_000,
+            }));
         });
 
         expect(result).toBe(false);
         expect(setPendingTerminalConnectSpy).toHaveBeenCalledWith({
-            publicKeyB64Url: 'abc123',
+            publicKeyB64Url: Buffer.from(new Uint8Array([1, 2, 3])).toString('base64url'),
             serverUrl: 'https://api.happier.dev',
+            pairing: {
+                secretB64Url: Buffer.from(pairingSecret).toString('base64url'),
+                createdAtMs: 1_000,
+                expiresAtMs: 61_000,
+            },
         });
         expect(modalAlertSpy).toHaveBeenCalledWith('terminal.connectTerminal', 'modals.pleaseSignInFirst', [
             { text: 'common.continue' },
@@ -361,6 +398,44 @@ describe('useConnectTerminal unauthenticated flow', () => {
         const opened = openTerminalProvisioningV2Payload({ payload: responseV2!, recipientSecretKeyOrSeed: terminalSecretKey });
         expect(opened).not.toBeNull();
         expect(Array.from(opened!)).toEqual(Array.from(contentPrivateKey));
+    });
+
+    it('uses an authenticated v3 response when the QR includes pairing context', async () => {
+        authApproveSpy.mockClear();
+        authApproveSpy.mockResolvedValue('approved');
+        authCredentials = createDataKeyCredentials({ token: 'token-v3', machineKeyByte: 7 });
+        const terminalSecretKey = new Uint8Array(32).fill(5);
+        const terminalPublicKey = tweetnacl.box.keyPair.fromSecretKey(terminalSecretKey).publicKey;
+        const pairingSecret = new Uint8Array(32).fill(11);
+
+        const { useConnectTerminal } = await import('./useConnectTerminal');
+        let hookApi: ReturnType<typeof useConnectTerminal> | null = null;
+        function Probe() {
+            hookApi = useConnectTerminal();
+            return null;
+        }
+        await renderScreen(React.createElement(Probe));
+
+        await act(async () => {
+            await hookApi!.processAuthUrl(buildTerminalConnectUrl({
+                terminalPublicKey,
+                pairingSecret,
+                createdAtMs: 1_000,
+                expiresAtMs: 61_000,
+            }));
+        });
+
+        const response = authApproveSpy.mock.calls[0]?.[3] as Uint8Array | undefined;
+        expect(response).toBeDefined();
+        expect(openTerminalProvisioningV3Payload({
+            payload: response!,
+            recipientSecretKeyOrSeed: terminalSecretKey,
+            terminalEphemeralPublicKey: terminalPublicKey,
+            pairingSecret,
+            createdAtMs: 1_000,
+            expiresAtMs: 61_000,
+            nowMs: 2_000,
+        })).toEqual(new Uint8Array(32).fill(7));
     });
 
     it('uses refreshed credentials after a server switch instead of the stale sync encryption key', async () => {

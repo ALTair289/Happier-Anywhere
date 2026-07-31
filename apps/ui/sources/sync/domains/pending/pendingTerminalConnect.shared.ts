@@ -1,12 +1,20 @@
+export type PendingTerminalPairing = Readonly<{
+    secretB64Url: string;
+    createdAtMs: number;
+    expiresAtMs: number;
+}>;
+
 export type PendingTerminalConnect = Readonly<{
     publicKeyB64Url: string;
     serverUrl: string;
+    pairing?: PendingTerminalPairing;
 }>;
 
 export type PendingTerminalConnectRecord = Readonly<{
     publicKeyB64Url: string;
     serverUrl: string;
     createdAtMs: number;
+    pairing?: PendingTerminalPairing;
 }>;
 
 const DEFAULT_TTL_MS = 10 * 60 * 1000;
@@ -21,11 +29,35 @@ function readTtlFromEnv(): number {
 
 const ttlMs = readTtlFromEnv();
 
+function normalizePairing(value: unknown): PendingTerminalPairing | undefined {
+    if (!value || typeof value !== 'object') return undefined;
+    const record = value as Record<string, unknown>;
+    const secretB64Url = String(record.secretB64Url ?? '').trim();
+    const createdAtMs = Number(record.createdAtMs);
+    const expiresAtMs = Number(record.expiresAtMs);
+    if (
+        !secretB64Url
+        || !Number.isSafeInteger(createdAtMs)
+        || !Number.isSafeInteger(expiresAtMs)
+        || createdAtMs < 0
+        || expiresAtMs <= createdAtMs
+    ) {
+        return undefined;
+    }
+    return { secretB64Url, createdAtMs, expiresAtMs };
+}
+
 export function toRecord(value: PendingTerminalConnect): PendingTerminalConnectRecord | null {
     const publicKeyB64Url = String(value?.publicKeyB64Url ?? '').trim();
     const serverUrl = String(value?.serverUrl ?? '').trim();
     if (!publicKeyB64Url || !serverUrl) return null;
-    return { publicKeyB64Url, serverUrl, createdAtMs: Date.now() };
+    const pairing = normalizePairing(value.pairing);
+    return {
+        publicKeyB64Url,
+        serverUrl,
+        createdAtMs: Date.now(),
+        ...(pairing ? { pairing } : {}),
+    };
 }
 
 export function fromRecord(value: unknown): PendingTerminalConnect | null {
@@ -36,5 +68,10 @@ export function fromRecord(value: unknown): PendingTerminalConnect | null {
     const createdAtMs = Number(record.createdAtMs ?? 0);
     if (!publicKeyB64Url || !serverUrl || !Number.isFinite(createdAtMs) || createdAtMs <= 0) return null;
     if (Date.now() - createdAtMs > ttlMs) return null;
-    return { publicKeyB64Url, serverUrl };
+    const pairing = normalizePairing(record.pairing);
+    return {
+        publicKeyB64Url,
+        serverUrl,
+        ...(pairing ? { pairing } : {}),
+    };
 }

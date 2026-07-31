@@ -6,7 +6,11 @@ import { useAuth } from '@/auth/context/AuthContext';
 import { TokenStorage, type AuthCredentials, isLegacyAuthCredentials } from '@/auth/storage/tokenStorage';
 import { decodeBase64 } from '@/encryption/base64';
 import { authApprove } from '@/auth/flows/approve';
-import { buildTerminalResponseV1, buildTerminalResponseV2 } from '@/auth/terminal/terminalProvisioning';
+import {
+    buildTerminalResponseV1,
+    buildTerminalResponseV2,
+    buildTerminalResponseV3,
+} from '@/auth/terminal/terminalProvisioning';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { getActiveServerSnapshot, getActiveServerUrl } from '@/sync/domains/server/serverProfiles';
@@ -82,7 +86,11 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
                 });
 
             if (effectiveParsedServerUrl) {
-                setPendingTerminalConnect({ publicKeyB64Url: parsed.publicKeyB64Url, serverUrl: effectiveParsedServerUrl });
+                setPendingTerminalConnect({
+                    publicKeyB64Url: parsed.publicKeyB64Url,
+                    serverUrl: effectiveParsedServerUrl,
+                    ...(parsed.pairing ? { pairing: parsed.pairing } : {}),
+                });
                 const switched = await upsertActivateAndSwitchServer({
                     serverUrl: effectiveParsedServerUrl,
                     source: 'url',
@@ -114,6 +122,7 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
                 setPendingTerminalConnect({
                     publicKeyB64Url: parsed.publicKeyB64Url,
                     serverUrl: effectiveParsedServerUrl || currentServerUrl || getActiveServerUrl(),
+                    ...(parsed.pairing ? { pairing: parsed.pairing } : {}),
                 });
                 await Modal.alertAsync(t('terminal.connectTerminal'), t('modals.pleaseSignInFirst'), [
                     { text: t('common.continue') },
@@ -129,10 +138,22 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
             );
 
             const contentPrivateKey = resolveTerminalProvisioningContentPrivateKey(activeCredentials);
-            const responseV2 = buildTerminalResponseV2({
-                contentPrivateKey,
-                terminalEphemeralPublicKey: publicKey,
-            });
+            const pairingSecret = parsed.pairing
+                ? decodeBase64(parsed.pairing.secretB64Url, 'base64url')
+                : null;
+            const responseV2 =
+                parsed.pairing && pairingSecret?.length === 32
+                    ? buildTerminalResponseV3({
+                        contentPrivateKey,
+                        terminalEphemeralPublicKey: publicKey,
+                        pairingSecret,
+                        createdAtMs: parsed.pairing.createdAtMs,
+                        expiresAtMs: parsed.pairing.expiresAtMs,
+                    })
+                    : buildTerminalResponseV2({
+                        contentPrivateKey,
+                        terminalEphemeralPublicKey: publicKey,
+                    });
 
             const responseV1 =
                 allowLegacySecretExportEnabled && isLegacyAuthCredentials(activeCredentials)

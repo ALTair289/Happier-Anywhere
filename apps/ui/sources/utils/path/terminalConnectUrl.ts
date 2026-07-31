@@ -4,6 +4,11 @@ import { parseHappierCustomSchemeUrl } from '@/utils/url/parseHappierCustomSchem
 export type ParsedTerminalConnectUrl = Readonly<{
     publicKeyB64Url: string;
     serverUrl: string | null;
+    pairing?: Readonly<{
+        secretB64Url: string;
+        createdAtMs: number;
+        expiresAtMs: number;
+    }>;
 }>;
 
 const SAFE_SERVER_PROTOCOLS = new Set(['http:', 'https:']);
@@ -25,6 +30,37 @@ function normalizeWebPathname(pathname: string): string {
     return String(pathname ?? '').replace(/\/+$/, '');
 }
 
+function parsePairingContext(params: URLSearchParams): ParsedTerminalConnectUrl['pairing'] {
+    const secretB64Url = (params.get('pairingSecret') ?? '').trim();
+    const createdAtMs = Number(params.get('createdAt'));
+    const expiresAtMs = Number(params.get('expiresAt'));
+    if (
+        !secretB64Url
+        || !Number.isSafeInteger(createdAtMs)
+        || !Number.isSafeInteger(expiresAtMs)
+        || createdAtMs < 0
+        || expiresAtMs <= createdAtMs
+    ) {
+        return undefined;
+    }
+    return { secretB64Url, createdAtMs, expiresAtMs };
+}
+
+function withPairingContext(
+    base: Omit<ParsedTerminalConnectUrl, 'pairing'>,
+    params: URLSearchParams,
+): ParsedTerminalConnectUrl {
+    const pairing = parsePairingContext(params);
+    return pairing ? { ...base, pairing } : base;
+}
+
+function buildPairingQuerySuffix(pairing: ParsedTerminalConnectUrl['pairing']): string {
+    if (!pairing) return '';
+    return `&pairingSecret=${encodeURIComponent(pairing.secretB64Url)}`
+        + `&createdAt=${pairing.createdAtMs}`
+        + `&expiresAt=${pairing.expiresAtMs}`;
+}
+
 function parseTerminalConnectWebUrl(raw: string): ParsedTerminalConnectUrl | null {
     try {
         const parsed = new URL(raw);
@@ -40,7 +76,7 @@ function parseTerminalConnectWebUrl(raw: string): ParsedTerminalConnectUrl | nul
         if (!key) return null;
 
         const serverUrl = normalizeServerUrl(params.get('server') ?? '');
-        return { publicKeyB64Url: key, serverUrl };
+        return withPairingContext({ publicKeyB64Url: key, serverUrl }, params);
     } catch {
         return null;
     }
@@ -49,26 +85,30 @@ function parseTerminalConnectWebUrl(raw: string): ParsedTerminalConnectUrl | nul
 export function buildTerminalConnectDeepLink(params: Readonly<{
     publicKeyB64Url: string;
     serverUrl: string | null | undefined;
+    pairing?: ParsedTerminalConnectUrl['pairing'];
 }>): string {
     const terminalPrefix = `${resolveAppUrlScheme()}://terminal?`;
     const publicKeyB64Url = String(params.publicKeyB64Url ?? '').trim();
     const safeServerUrl = normalizeServerUrl(params.serverUrl ?? '');
-    if (!safeServerUrl) {
+    const pairingSuffix = buildPairingQuerySuffix(params.pairing);
+    if (!safeServerUrl && !pairingSuffix) {
         return `${terminalPrefix}${publicKeyB64Url}`;
     }
-    return `${terminalPrefix}key=${encodeURIComponent(publicKeyB64Url)}&server=${encodeURIComponent(safeServerUrl)}`;
+    const serverSuffix = safeServerUrl ? `&server=${encodeURIComponent(safeServerUrl)}` : '';
+    return `${terminalPrefix}key=${encodeURIComponent(publicKeyB64Url)}${serverSuffix}${pairingSuffix}`;
 }
 
 export function buildTerminalConnectWebHref(params: Readonly<{
     publicKeyB64Url: string;
     serverUrl: string | null | undefined;
+    pairing?: ParsedTerminalConnectUrl['pairing'];
 }>): string {
     const publicKeyB64Url = String(params.publicKeyB64Url ?? '').trim();
     const safeServerUrl = normalizeServerUrl(params.serverUrl ?? '');
 
-    const hash = safeServerUrl
-        ? `#key=${encodeURIComponent(publicKeyB64Url)}&server=${encodeURIComponent(safeServerUrl)}`
-        : `#key=${encodeURIComponent(publicKeyB64Url)}`;
+    const serverSuffix = safeServerUrl ? `&server=${encodeURIComponent(safeServerUrl)}` : '';
+    const hash =
+        `#key=${encodeURIComponent(publicKeyB64Url)}${serverSuffix}${buildPairingQuerySuffix(params.pairing)}`;
 
     return `${TERMINAL_CONNECT_WEB_PATH}${hash}`;
 }
@@ -105,5 +145,5 @@ export function parseTerminalConnectUrl(url: string): ParsedTerminalConnectUrl |
     if (!key) return null;
 
     const serverUrl = normalizeServerUrl(params.get('server') ?? '');
-    return { publicKeyB64Url: key, serverUrl };
+    return withPairingContext({ publicKeyB64Url: key, serverUrl }, params);
 }

@@ -5,7 +5,6 @@ import { useRouter } from 'expo-router';
 import { Typography } from '@/constants/Typography';
 import { RoundButton } from '@/components/ui/buttons/RoundButton';
 import { useConnectTerminal } from '@/hooks/session/useConnectTerminal';
-import { Ionicons } from '@expo/vector-icons';
 import { ItemList } from '@/components/ui/lists/ItemList';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { Item } from '@/components/ui/lists/Item';
@@ -17,16 +16,22 @@ import { getActiveServerSnapshot, getActiveServerUrl } from '@/sync/domains/serv
 import { normalizeServerUrl, upsertActivateAndSwitchServer } from '@/sync/domains/server/activeServerSwitch';
 import { resolveEffectiveServerUrlOverride } from '@/sync/domains/server/url/serverUrlOverridePolicy';
 import { clearPendingTerminalConnect, getPendingTerminalConnect, setPendingTerminalConnect } from '@/sync/domains/pending/pendingTerminalConnect';
-import { buildTerminalConnectDeepLink, parseTerminalConnectUrl } from '@/utils/path/terminalConnectUrl';
+import {
+    buildTerminalConnectDeepLink,
+    parseTerminalConnectUrl,
+    type ParsedTerminalConnectUrl,
+} from '@/utils/path/terminalConnectUrl';
 import { fireAndForget } from '@/utils/system/fireAndForget';
 import { safeRouterBack } from '@/utils/navigation/safeRouterBack';
 import { useUnistyles } from 'react-native-unistyles';
+import { Icon } from '@/components/ui/icons/Icon';
 
 export default function TerminalConnectScreen() {
     const router = useRouter();
     const { theme } = useUnistyles();
     const [publicKey, setPublicKey] = useState<string | null>(null);
     const [serverUrlFromHash, setServerUrlFromHash] = useState<string | null>(null);
+    const [pairing, setPairing] = useState<ParsedTerminalConnectUrl['pairing']>(undefined);
     const [hashProcessed, setHashProcessed] = useState(false);
     const auth = useAuth();
     const authRedirectTriggeredRef = React.useRef(false);
@@ -66,6 +71,7 @@ export default function TerminalConnectScreen() {
             const parsed = parseTerminalConnectUrl(window.location.href);
             if (parsed?.publicKeyB64Url) {
                 setPublicKey(parsed.publicKeyB64Url);
+                setPairing(parsed.pairing);
 
                 const activeServerSnapshot = getActiveServerSnapshot();
                 const activeServerUrl = normalizeServerUrl(activeServerSnapshot.serverUrl);
@@ -87,6 +93,7 @@ export default function TerminalConnectScreen() {
                     setPendingTerminalConnect({
                         publicKeyB64Url: parsed.publicKeyB64Url,
                         serverUrl: desiredServerUrl,
+                        ...(parsed.pairing ? { pairing: parsed.pairing } : {}),
                     });
                     setServerUrlFromHash(desiredServerUrl);
                 }
@@ -98,6 +105,7 @@ export default function TerminalConnectScreen() {
                 if (pending?.publicKeyB64Url) {
                     setPublicKey(pending.publicKeyB64Url);
                     setServerUrlFromHash(pending.serverUrl);
+                    setPairing(pending.pairing);
                 }
             }
             setHashProcessed(true);
@@ -125,6 +133,7 @@ export default function TerminalConnectScreen() {
         setPendingTerminalConnect({
             publicKeyB64Url: publicKey,
             serverUrl: desiredServerUrl,
+            ...(pairing ? { pairing } : {}),
         });
 
         fireAndForget((async () => {
@@ -149,13 +158,14 @@ export default function TerminalConnectScreen() {
             }
             router.replace('/');
         })(), { tag: 'TerminalConnectScreen.redirectToAuth' });
-    }, [auth.credentials, auth.isAuthenticated, auth.refreshFromActiveServer, hashProcessed, publicKey, router, serverUrlFromHash]);
+    }, [auth.credentials, auth.isAuthenticated, auth.refreshFromActiveServer, hashProcessed, pairing, publicKey, router, serverUrlFromHash]);
 
     const handleConnect = async () => {
         if (publicKey) {
             const authUrl = buildTerminalConnectDeepLink({
                 publicKeyB64Url: publicKey,
                 serverUrl: serverUrlFromHash,
+                pairing,
             });
             await processAuthUrl(authUrl);
         }
@@ -176,8 +186,8 @@ export default function TerminalConnectScreen() {
                         paddingVertical: 32,
                         paddingHorizontal: 16
                     }}>
-                        <Ionicons 
-                            name="laptop-outline" 
+                        <Icon
+                            name="laptop"
                             size={64} 
                             color={theme.colors.text.secondary}
                             style={{ marginBottom: 16 }} 
@@ -252,8 +262,8 @@ export default function TerminalConnectScreen() {
                         paddingVertical: 32,
                         paddingHorizontal: 16
                     }}>
-                        <Ionicons 
-                            name="warning-outline" 
+                        <Icon
+                            name="warning"
                             size={48} 
                             color={theme.colors.state.danger.foreground}
                             style={{ marginBottom: 16 }} 
@@ -292,8 +302,8 @@ export default function TerminalConnectScreen() {
                     paddingVertical: 24,
                     paddingHorizontal: 16
                 }}>
-                    <Ionicons 
-                        name="terminal-outline" 
+                    <Icon
+                        name="terminal"
                         size={48} 
                         color={theme.colors.accent.blue}
                         style={{ marginBottom: 16 }} 
@@ -323,13 +333,13 @@ export default function TerminalConnectScreen() {
                 <Item
                     title={t('terminal.publicKey')}
                     detail={`${publicKey.substring(0, 12)}...`}
-                    icon={<Ionicons name="key-outline" size={29} color={theme.colors.accent.blue} />}
+                    icon={<Icon name="key" size={29} color={theme.colors.accent.blue} />}
                     showChevron={false}
                 />
                 <Item
                     title={t('terminal.encryption')}
                     detail={t('terminal.endToEndEncrypted')}
-                    icon={<Ionicons name="lock-closed-outline" size={29} color={theme.colors.state.success.foreground} />}
+                    icon={<Icon name="lock" size={29} color={theme.colors.state.success.foreground} />}
                     showChevron={false}
                 />
             </ItemGroup>
@@ -368,7 +378,7 @@ export default function TerminalConnectScreen() {
                 <Item
                     title={t('terminal.clientSideProcessing')}
                     subtitle={t('terminal.linkProcessedLocally')}
-                    icon={<Ionicons name="shield-checkmark-outline" size={29} color={theme.colors.state.success.foreground} />}
+                    icon={<Icon name="shield-check" size={29} color={theme.colors.state.success.foreground} />}
                     showChevron={false}
                 />
             </ItemGroup>
