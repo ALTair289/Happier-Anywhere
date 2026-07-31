@@ -81,6 +81,12 @@ function createWebLegendFirstPaintDeps(): TranscriptFirstPaintStateDeps {
     };
 }
 
+function readRenderRawFallback(tree: TestRenderer.ReactTestRenderer): unknown {
+    const json = tree.toJSON();
+    const node = Array.isArray(json) ? json[0] : json;
+    return (node?.props as Record<string, unknown> | undefined)?.renderRawFallback;
+}
+
 describe('enriched Markdown runtime readiness join', () => {
     beforeEach(() => {
         vi.resetModules();
@@ -185,6 +191,51 @@ describe('enriched Markdown runtime readiness join', () => {
             coverVisible: false,
             markdownAstReady: true,
         });
+
+        act(() => {
+            tree.unmount();
+        });
+    });
+
+    it('stops hiding the raw Markdown fallback once the runtime has settled', async () => {
+        // Hiding the raw fallback is only defensible while the runtime is still loading:
+        // the transcript cover is held over exactly that window, and the AST lands in the
+        // same commit the cover releases. Once the runtime has settled, a raw fallback can
+        // only mean the parse itself failed, and hiding it renders real text present-but-
+        // invisible with nothing bounding the window (measured cold-boot window: 1 903 of
+        // 1 904 chars inside a visibility:hidden <p>).
+        let resolvePreload: (() => void) | null = null;
+        runtimeBoundary.preload.mockImplementation(() => new Promise<void>((resolve) => {
+            resolvePreload = () => {
+                runtimeBoundary.astReady = true;
+                resolve();
+            };
+        }));
+        const { EnrichedMarkdownTextAdapter } = await import('./EnrichedMarkdownTextAdapter');
+        const fallbackModes: unknown[] = [];
+
+        let tree!: TestRenderer.ReactTestRenderer;
+        await act(async () => {
+            tree = TestRenderer.create(
+                <EnrichedMarkdownTextAdapter
+                    markdown={'## Cold heading\n\nCold body'}
+                    profile="transcript"
+                    selectable
+                    streamingAnimated={false}
+                />,
+            );
+            await Promise.resolve();
+        });
+        fallbackModes.push(readRenderRawFallback(tree));
+
+        await act(async () => {
+            resolvePreload?.();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        fallbackModes.push(readRenderRawFallback(tree));
+
+        expect(fallbackModes).toEqual(['hidden', true]);
 
         act(() => {
             tree.unmount();

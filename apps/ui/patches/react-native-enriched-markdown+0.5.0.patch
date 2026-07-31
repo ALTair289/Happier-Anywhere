@@ -593,7 +593,7 @@ index c6c73b0..397b78a 100644
    return /*#__PURE__*/_jsx("div", {
      style: wrapperStyle,
 diff --git a/node_modules/react-native-enriched-markdown/lib/module/web/parseMarkdown.js b/node_modules/react-native-enriched-markdown/lib/module/web/parseMarkdown.js
-index 7604c13..1240bdf 100644
+index 7604c13..cec61ad 100644
 --- a/node_modules/react-native-enriched-markdown/lib/module/web/parseMarkdown.js
 +++ b/node_modules/react-native-enriched-markdown/lib/module/web/parseMarkdown.js
 @@ -1,32 +1,171 @@
@@ -775,7 +775,6 @@ index 7604c13..1240bdf 100644
 +  return JSON.parse(JSON.stringify(ast));
  }
  //# sourceMappingURL=parseMarkdown.js.map
-\ No newline at end of file
 diff --git a/node_modules/react-native-enriched-markdown/lib/module/web/renderers/BlockRenderers.js b/node_modules/react-native-enriched-markdown/lib/module/web/renderers/BlockRenderers.js
 index 5bdaee9..ab8bc37 100644
 --- a/node_modules/react-native-enriched-markdown/lib/module/web/renderers/BlockRenderers.js
@@ -921,10 +920,10 @@ index 0000000..74504cf
 +export * from '../../typescript/src/web/streamingReveal';
 diff --git a/node_modules/react-native-enriched-markdown/lib/module/web/streamingReveal.js b/node_modules/react-native-enriched-markdown/lib/module/web/streamingReveal.js
 new file mode 100644
-index 0000000..b502339
+index 0000000..f8682a8
 --- /dev/null
 +++ b/node_modules/react-native-enriched-markdown/lib/module/web/streamingReveal.js
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,167 @@
 +"use strict";
 +
 +import { createElement } from 'react';
@@ -1021,6 +1020,19 @@ index 0000000..b502339
 +    ...range,
 +    end: Math.min(range.end, params.currentComparisonText.length)
 +  }));
++
++  // A mount — a remount above all — starts with no baseline: previousComparisonText
++  // is empty while this instance already renders the whole message. Diffing against
++  // '' makes the entire message look appended (the source-append bound cannot help
++  // either: previousSourceLength is 0, so the window spans everything), every word
++  // re-enters the reveal, and the block replays its opacity keyframe. Measured on
++  // web: 1 570 of 2 098 rendered chars below opacity 0.5 for ~155 ms immediately
++  // after the enriched run was replaced mid-stream. Content already rendered when
++  // this instance first compared is not new — seed the baseline and reveal nothing.
++  // Genuine appends after the seed still animate word by word.
++  if (params.previousComparisonText === '' && params.currentComparisonText.length > 0) {
++    return mergeRevealRanges(retainedRanges);
++  }
 +  const commonPrefixLength = readCommonPrefixLength(params.previousComparisonText, params.currentComparisonText);
 +  const revealFloor = resolveStreamingRevealFloor({
 +    commonPrefixLength,
@@ -1529,10 +1541,11 @@ index 70eb3a4..7bcdecb 100644
  
    return (
 diff --git a/node_modules/react-native-enriched-markdown/src/web/parseMarkdown.ts b/node_modules/react-native-enriched-markdown/src/web/parseMarkdown.ts
-index 911e3f1..6da0772 100644
+index 911e3f1..d10ff3a 100644
 --- a/node_modules/react-native-enriched-markdown/src/web/parseMarkdown.ts
 +++ b/node_modules/react-native-enriched-markdown/src/web/parseMarkdown.ts
-@@ -2,36 +2,101 @@ import type { ASTNode } from './types';
+@@ -1,37 +1,102 @@
+ import type { ASTNode } from './types';
  import type { Md4cFlags } from '../types/MarkdownStyle';
 +import createMd4cModule from './wasm/md4c.js';
  
@@ -1585,8 +1598,8 @@ index 911e3f1..6da0772 100644
  
  // SINGLE_FILE=1 inlines the WASM binary as base64 inside md4c.js, so no
 -// network fetch is needed — only a one-time decode + compile on first call.
-+// runtime fetch is needed — only a one-time decode + compile on first call.
 -function initializeParser(): Promise<ParseFn> {
++// runtime fetch is needed — only a one-time decode + compile on first call.
 +function initializeParser(): Promise<ParserRuntime> {
    if (!parserPromise) {
 -    parserPromise = import('./wasm/md4c')
@@ -1646,7 +1659,7 @@ index 911e3f1..6da0772 100644
  function isASTNode(value: unknown): value is ASTNode {
    return (
      typeof value === 'object' &&
-@@ -41,19 +105,145 @@ function isASTNode(value: unknown): value is ASTNode {
+@@ -41,19 +106,145 @@ function isASTNode(value: unknown): value is ASTNode {
    );
  }
  
@@ -1953,10 +1966,10 @@ index dca24cf..e6662ba 100644
        renderChildren={renderChildren}
 diff --git a/node_modules/react-native-enriched-markdown/src/web/streamingReveal.ts b/node_modules/react-native-enriched-markdown/src/web/streamingReveal.ts
 new file mode 100644
-index 0000000..ebfce6e
+index 0000000..ac600d9
 --- /dev/null
 +++ b/node_modules/react-native-enriched-markdown/src/web/streamingReveal.ts
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,293 @@
 +import { createElement, type ReactNode } from 'react';
 +import type { ASTNode, NodeType, RenderCapabilities } from './types';
 +
@@ -2128,6 +2141,22 @@ index 0000000..ebfce6e
 +    ...range,
 +    end: Math.min(range.end, params.currentComparisonText.length),
 +  }));
++
++  // A mount — a remount above all — starts with no baseline: previousComparisonText
++  // is empty while this instance already renders the whole message. Diffing against
++  // '' makes the entire message look appended (the source-append bound cannot help
++  // either: previousSourceLength is 0, so the window spans everything), every word
++  // re-enters the reveal, and the block replays its opacity keyframe. Measured on
++  // web: 1 570 of 2 098 rendered chars below opacity 0.5 for ~155 ms immediately
++  // after the enriched run was replaced mid-stream. Content already rendered when
++  // this instance first compared is not new — seed the baseline and reveal nothing.
++  // Genuine appends after the seed still animate word by word.
++  if (
++    params.previousComparisonText === '' &&
++    params.currentComparisonText.length > 0
++  ) {
++    return mergeRevealRanges(retainedRanges);
++  }
 +
 +  const commonPrefixLength = readCommonPrefixLength(
 +    params.previousComparisonText,

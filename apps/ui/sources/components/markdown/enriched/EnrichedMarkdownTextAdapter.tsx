@@ -121,7 +121,13 @@ export const EnrichedMarkdownTextAdapter = React.memo((props: EnrichedMarkdownTe
         if (Platform.OS === 'web') {
             const webProps: Record<string, unknown> = {
                 'data-testid': props.testID,
-                renderRawFallback: 'hidden',
+                // Hiding the raw Markdown fallback is only defensible while the runtime is
+                // still loading: the transcript holds its first-paint cover over exactly that
+                // window, and the remount below lands the AST in the same commit the cover
+                // releases. Once the runtime has settled, a raw fallback can only mean the
+                // parse itself failed, and hiding it would leave real text present-but-
+                // invisible with nothing bounding the window.
+                renderRawFallback: runtimeStatus === 'pending' ? 'hidden' : true,
             };
             if (props.streamingAnimated) {
                 webProps.streamingAnimation = true;
@@ -138,7 +144,7 @@ export const EnrichedMarkdownTextAdapter = React.memo((props: EnrichedMarkdownTe
             allowFontScaling: true,
             streamingAnimation: props.streamingAnimated && flavor === 'commonmark',
         };
-    }, [flavor, props.streamingAnimated, props.suppressLeadingTopMargin, props.testID]);
+    }, [flavor, props.streamingAnimated, props.suppressLeadingTopMargin, props.testID, runtimeStatus]);
 
     const containerStyle = React.useMemo(() => {
         if (Platform.OS !== 'web' || revealConfig == null) {
