@@ -19,7 +19,6 @@ const {
     reapSameHomeDaemonOrphansBeforeStartMock: vi.fn(async () => ({
         stoppedPids: [],
         preservedPids: [],
-        removedStaleStatePaths: [],
         failedPids: [],
     })),
     renderDaemonInstalledServiceConflictMock: vi.fn(() => ({
@@ -90,7 +89,6 @@ describe('startDaemon ownership preflight', () => {
         reapSameHomeDaemonOrphansBeforeStartMock.mockImplementation(async () => ({
             stoppedPids: [],
             preservedPids: [],
-            removedStaleStatePaths: [],
             failedPids: [],
         }));
         vi.unstubAllGlobals();
