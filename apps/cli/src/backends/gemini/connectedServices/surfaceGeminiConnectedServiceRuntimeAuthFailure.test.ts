@@ -167,11 +167,11 @@ describe('surfaceGeminiConnectedServiceRuntimeAuthFailure', () => {
     expect(report).toMatchObject({
       handled: true,
       statusCode: 'recovery_superseded_source_tuple_mismatch',
-      statusMessage: 'Connected-service account already updated; the old turn was interrupted. Retry your request.',
+      statusMessage: 'Connected-service account already updated; the old turn was interrupted.',
     });
     expect(session.events).toEqual([{
       type: 'message',
-      message: 'Connected-service account already updated; the old turn was interrupted. Retry your request.',
+      message: 'Connected-service account already updated; the old turn was interrupted.',
     }]);
     expect(session.metadataUpdates).toBe(0);
   });

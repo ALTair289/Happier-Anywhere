@@ -513,7 +513,7 @@ describe('runGemini input consumer migration', () => {
 
     expect(session.sendSessionEvent).toHaveBeenCalledWith({
       type: 'message',
-      message: 'Connected-service account already updated; the old turn was interrupted. Retry your request.',
+      message: 'Connected-service account already updated; the old turn was interrupted.',
     });
     expect(surfacePrimarySessionRuntimeIssueMock).not.toHaveBeenCalled();
   });

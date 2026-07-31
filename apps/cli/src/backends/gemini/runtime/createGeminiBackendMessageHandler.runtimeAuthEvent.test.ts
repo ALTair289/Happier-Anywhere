@@ -119,7 +119,7 @@ describe('createGeminiBackendMessageHandler (provider runtime error events)', ()
     await expect.poll(() => session.sendSessionEvent.mock.calls).toEqual([[
       {
         type: 'message',
-        message: 'Connected-service account already updated; the old turn was interrupted. Retry your request.',
+        message: 'Connected-service account already updated; the old turn was interrupted.',
       },
     ]]);
     expect(session.sendAgentMessage).not.toHaveBeenCalled();
@@ -153,7 +153,7 @@ describe('createGeminiBackendMessageHandler (provider runtime error events)', ()
     await expect.poll(() => session.sendSessionEvent.mock.calls).toEqual([[
       {
         type: 'message',
-        message: 'Connected-service account already updated; the old turn was interrupted. Retry your request.',
+        message: 'Connected-service account already updated; the old turn was interrupted.',
       },
     ]]);
     expect(session.sendAgentMessage).not.toHaveBeenCalled();
