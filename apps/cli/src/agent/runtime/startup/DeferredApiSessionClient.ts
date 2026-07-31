@@ -34,7 +34,13 @@ export type DeferredApiSessionTarget = Readonly<{
     opts: { localId: string; meta?: Record<string, unknown> },
   ) => Promise<void>;
   sendCodexMessage: (body: unknown) => void;
+  sendCodexMessageCommitted?: (body: unknown, opts: { localId: string }) => Promise<unknown>;
   sendUserTextMessage: (text: string, opts?: { localId?: string; meta?: Record<string, unknown> }) => void;
+  sendUserTextMessageCommitted?: (
+    text: string,
+    opts: { localId: string; meta?: Record<string, unknown> },
+  ) => Promise<void>;
+  sendSessionEventCommitted?: (event: unknown, opts: { localId: string }) => Promise<unknown>;
   enqueueSessionUserMessage?: (params: Readonly<{
     text: string;
     localId?: string;
@@ -204,26 +210,10 @@ export class DeferredApiSessionClient {
     _body: unknown,
     _opts: { localId: string; meta?: Record<string, unknown> },
   ): Promise<void> {
-    const target = this.target;
-    if (target && !this.flushInFlight) {
-      return target.sendAgentMessageCommitted(_provider, _body, _opts);
-    }
-
-    const deferred = createDeferredPromise<void>();
-    if (this.cancelled) {
-      deferred.resolve();
-      return deferred.promise;
-    }
-
-    this.pushBufferedCall(
-      async (t) => {
-        await t.sendAgentMessageCommitted(_provider, _body, _opts);
-        deferred.resolve();
-      },
-      { hint: 'sendAgentMessageCommitted' },
-      { onDrop: () => deferred.resolve() },
+    return this.forwardCommittedCall(
+      (target) => target.sendAgentMessageCommitted(_provider, _body, _opts),
+      'sendAgentMessageCommitted',
     );
-    return deferred.promise;
   }
 
   sendCodexMessage(_body: unknown): void {
@@ -239,6 +229,18 @@ export class DeferredApiSessionClient {
     this.pushBufferedCall((t) => t.sendCodexMessage(_body), { hint: 'sendCodexMessage' });
   }
 
+  sendCodexMessageCommitted(_body: unknown, _opts: { localId: string }): Promise<unknown> {
+    return this.forwardCommittedCall(
+      (target) => {
+        if (!target.sendCodexMessageCommitted) {
+          throw new Error('Attached session does not support committed Codex messages');
+        }
+        return target.sendCodexMessageCommitted(_body, _opts);
+      },
+      'sendCodexMessageCommitted',
+    );
+  }
+
   sendUserTextMessage(_text: string, _opts?: { localId?: string; meta?: Record<string, unknown> }): void {
     const target = this.target;
     if (target && !this.flushInFlight) {
@@ -250,6 +252,33 @@ export class DeferredApiSessionClient {
       return;
     }
     this.pushBufferedCall((t) => t.sendUserTextMessage(_text, _opts), { hint: 'sendUserTextMessage' });
+  }
+
+  sendUserTextMessageCommitted(
+    _text: string,
+    _opts: { localId: string; meta?: Record<string, unknown> },
+  ): Promise<void> {
+    return this.forwardCommittedCall(
+      (target) => {
+        if (!target.sendUserTextMessageCommitted) {
+          throw new Error('Attached session does not support committed user messages');
+        }
+        return target.sendUserTextMessageCommitted(_text, _opts);
+      },
+      'sendUserTextMessageCommitted',
+    );
+  }
+
+  sendSessionEventCommitted(_event: unknown, _opts: { localId: string }): Promise<unknown> {
+    return this.forwardCommittedCall(
+      (target) => {
+        if (!target.sendSessionEventCommitted) {
+          throw new Error('Attached session does not support committed session events');
+        }
+        return target.sendSessionEventCommitted(_event, _opts);
+      },
+      'sendSessionEventCommitted',
+    );
   }
 
   async enqueueSessionUserMessage(_params: Readonly<{
@@ -639,6 +668,34 @@ export class DeferredApiSessionClient {
     const after = this.target;
     if (!after) return fallback;
     return await Promise.resolve(fn(after));
+  }
+
+  private forwardCommittedCall<TResult>(
+    call: (target: DeferredApiSessionTarget) => Promise<TResult>,
+    hint: string,
+  ): Promise<TResult> {
+    const target = this.target;
+    if (target && !this.flushInFlight) {
+      return call(target);
+    }
+
+    const deferred = createDeferredPromise<TResult>();
+    if (this.cancelled) {
+      deferred.resolve(undefined as TResult);
+      return deferred.promise;
+    }
+
+    this.pushBufferedCall(
+      async (attachedTarget) => {
+        deferred.resolve(await call(attachedTarget));
+      },
+      { hint },
+      {
+        onDrop: () => deferred.resolve(undefined as TResult),
+        onError: (error) => deferred.reject(error),
+      },
+    );
+    return deferred.promise;
   }
 
   private pushBufferedCall(

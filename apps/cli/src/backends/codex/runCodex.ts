@@ -57,7 +57,10 @@ import {
 import { connectionState } from '@/api/offline/serverConnectionErrors';
 import type { ApiSessionClient } from '@/api/session/sessionClient';
 import { createCurrentSessionTranscriptPort } from '@/api/session/createCurrentSessionTranscriptPort';
-import { DeferredApiSessionClient } from '@/agent/runtime/startup/DeferredApiSessionClient';
+import {
+    DeferredApiSessionClient,
+    type DeferredApiSessionTarget,
+} from '@/agent/runtime/startup/DeferredApiSessionClient';
 import { configuration } from '@/configuration';
 import type { PendingQueueDeliveryBlockedReason } from '@/api/session/pendingQueueV2Transport';
 import { createAgentSessionMediaPersister } from '@/session/sessionMedia/createAgentSessionMediaPersister';
@@ -630,7 +633,7 @@ export async function runCodex(opts: {
         if (!deferredSession) return;
         if (deferredSessionAttached) return;
         deferredSessionAttached = true;
-        await deferredSession.attach(target as any);
+        await deferredSession.attach(target as unknown as DeferredApiSessionTarget);
     };
 
     // Attach to existing Happy session (inactive-session-resume) OR create a new one.

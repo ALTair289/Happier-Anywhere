@@ -244,7 +244,10 @@ describe('DeferredApiSessionClient', () => {
       sendAgentMessage: vi.fn(),
       sendAgentMessageCommitted: vi.fn(async (_input?: unknown) => {}),
       sendCodexMessage: vi.fn(),
+      sendCodexMessageCommitted: vi.fn(async () => ({ seq: 1 })),
       sendUserTextMessage: vi.fn(),
+      sendUserTextMessageCommitted: vi.fn(async () => {}),
+      sendSessionEventCommitted: vi.fn(async () => ({ seq: 2 })),
       updateMetadata: vi.fn(),
       updateAgentState: vi.fn(),
       keepAlive: vi.fn(),
@@ -279,6 +282,10 @@ describe('DeferredApiSessionClient', () => {
     await expect(deferred.discardCommittedMessageLocalIds({ localIds: ['a'], reason: 'manual' })).resolves.toBe(2);
 
     deferred.recordClaudeJsonlMessageConsumed({ type: 'user', uuid: 'u1' });
+    await deferred.sendAgentMessageCommitted('codex', { type: 'text', text: 'agent' }, { localId: 'agent-1' });
+    await deferred.sendCodexMessageCommitted({ type: 'tool-call', callId: 'call-1' }, { localId: 'codex-1' });
+    await deferred.sendUserTextMessageCommitted('user', { localId: 'user-1' });
+    await deferred.sendSessionEventCommitted({ type: 'context-compaction', phase: 'completed' }, { localId: 'event-1' });
     deferred.sendSessionDeath();
     await deferred.flush();
     await deferred.close();
@@ -289,6 +296,23 @@ describe('DeferredApiSessionClient', () => {
     expect(real.fetchCommittedClaudeJsonlMessageBaseline).toHaveBeenCalledWith({ take: 1 });
     expect(real.fetchRecentTranscriptTextItemsForAcpImport).toHaveBeenCalledWith({ take: 1 });
     expect(real.recordClaudeJsonlMessageConsumed).toHaveBeenCalledWith({ type: 'user', uuid: 'u1' }, undefined);
+    expect(real.sendAgentMessageCommitted).toHaveBeenCalledExactlyOnceWith(
+      'codex',
+      { type: 'text', text: 'agent' },
+      { localId: 'agent-1' },
+    );
+    expect(real.sendCodexMessageCommitted).toHaveBeenCalledExactlyOnceWith(
+      { type: 'tool-call', callId: 'call-1' },
+      { localId: 'codex-1' },
+    );
+    expect(real.sendUserTextMessageCommitted).toHaveBeenCalledExactlyOnceWith(
+      'user',
+      { localId: 'user-1' },
+    );
+    expect(real.sendSessionEventCommitted).toHaveBeenCalledExactlyOnceWith(
+      { type: 'context-compaction', phase: 'completed' },
+      { localId: 'event-1' },
+    );
     expect(real.setProviderOwnedUserMessageEchoClassifier).toHaveBeenCalledWith(classifier);
     expect(real.popPendingMessage).toHaveBeenCalledTimes(1);
     expect(real.sendSessionDeath).toHaveBeenCalledTimes(1);

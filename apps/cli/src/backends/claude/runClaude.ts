@@ -69,6 +69,7 @@ import { runStartupCoordinator } from '@/agent/runtime/startup/startupCoordinato
 import { createStartupTiming } from '@/agent/runtime/startup/startupTiming';
 import { writeStartupOverridesCacheForBackend } from '@/agent/runtime/startup/startupOverridesCache';
 import { createClaudeStartupSpec, type ClaudeStartupArtifacts } from '@/backends/claude/startup/createClaudeStartupSpec';
+import type { DeferredApiSessionTarget } from '@/agent/runtime/startup/DeferredApiSessionClient';
 import { resolveRunnerMcpServers } from '@/mcp/runtime/resolveRunnerMcpServers';
 import { registerSessionHandlers } from '@/rpc/handlers/registerSessionHandlers';
 import {
@@ -1636,7 +1637,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                     if (wiredServerSession) return;
                     wiredServerSession = true;
 
-                    await artifacts.deferredSession.attach(session as any);
+                    await artifacts.deferredSession.attach(session as unknown as DeferredApiSessionTarget);
 
                     if (currentSession && pushSender) {
                         currentSession.setPushSender(pushSender);

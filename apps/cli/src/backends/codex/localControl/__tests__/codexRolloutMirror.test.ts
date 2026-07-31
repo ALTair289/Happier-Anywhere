@@ -3,6 +3,11 @@ import { mkdtemp, writeFile, appendFile, rm, mkdir, stat } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexRolloutMirror } from '../codexRolloutMirror';
+import {
+  DeferredApiSessionClient,
+  type DeferredApiSessionTarget,
+} from '@/agent/runtime/startup/DeferredApiSessionClient';
+import type { ApiSessionClient } from '@/api/session/sessionClient';
 
 type CodexBody = { type?: string; message?: string; callId?: string };
 type SessionEvent = { type?: string; message?: string };
@@ -58,6 +63,55 @@ afterEach(async () => {
 });
 
 describe('CodexRolloutMirror', () => {
+  it('replays a rollout user message through the fast-start deferred session boundary', async () => {
+    const root = rememberTempDir(await mkdtemp(join(tmpdir(), 'codex-rollout-deferred-')));
+    const filePath = join(root, 'rollout.jsonl');
+    await writeFile(filePath, [
+      JSON.stringify({ type: 'session_meta', payload: { id: 'codex-session-1' } }),
+      JSON.stringify({
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'hi from the terminal' }],
+        },
+      }),
+      '',
+    ].join('\n'), 'utf8');
+
+    const committedUserMessages: Array<{ text: string; localId: string }> = [];
+    const deferred = new DeferredApiSessionClient({
+      placeholderSessionId: 'PID-deferred-rollout',
+      limits: { maxEntries: 20, maxBytes: 20_000 },
+    });
+    await deferred.attach({
+      sessionId: 'happier-session-1',
+      rpcHandlerManager: { registerHandler: () => {}, invokeLocal: async () => ({}) },
+      sendUserTextMessageCommitted: async (text: string, opts: { localId: string }) => {
+        committedUserMessages.push({ text, localId: opts.localId });
+      },
+    } as unknown as DeferredApiSessionTarget);
+
+    const mirror = new CodexRolloutMirror({
+      filePath,
+      debug: false,
+      onCodexSessionId: () => {},
+      session: deferred as unknown as ApiSessionClient,
+    });
+    try {
+      await mirror.start();
+    } finally {
+      await mirror.stop();
+    }
+
+    expect(committedUserMessages).toEqual([
+      {
+        text: 'hi from the terminal',
+        localId: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    ]);
+  });
+
   it('emits main rollout lifecycle events without turning them into transcript output', async () => {
     const lifecycleEvents: unknown[] = [];
     const codexBodies: CodexBody[] = [];
