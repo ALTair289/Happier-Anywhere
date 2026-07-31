@@ -2374,6 +2374,16 @@
   resolved "https://registry.npmjs.org/@hono/node-server/-/node-server-1.19.9.tgz"
   integrity sha512-vHL6w3ecZsky+8P5MD+eFfaGTyCeOHUIFYMGpQGbrBTSmNNoxv0if69rEZ5giu36weC5saFuznL411gRX7bJDw==
 
+"@hugeicons/core-free-icons@4.2.3":
+  version "4.2.3"
+  resolved "https://registry.npmjs.org/@hugeicons/core-free-icons/-/core-free-icons-4.2.3.tgz#9fe176324556ba9145e5e9fd06ea614e24850c83"
+  integrity sha512-fpiU0qFZkv4ABi23xJ2m4qNr0BBfuIaYjPboN8WDA6aj9D+OzXa7eykxKOpACZRuGbDz1U9S5DsNx1d5KNnsgA==
+
+"@hugeicons/react-native@1.0.15":
+  version "1.0.15"
+  resolved "https://registry.npmjs.org/@hugeicons/react-native/-/react-native-1.0.15.tgz#d16ef57e70fedf37923d53d394a3178e82465324"
+  integrity sha512-YKg+k16uz7FRgq/ReaWrf0qzdRDOkEruQBE4/oVWZ2qZXq9T4mqj3P3HoZ7Uk/pi8KVlpZTi7TAokwizsQMbFA==
+
 "@huggingface/jinja@^0.5.3":
   version "0.5.5"
   resolved "https://registry.npmjs.org/@huggingface/jinja/-/jinja-0.5.5.tgz"
@@ -14744,6 +14754,11 @@ phonemizer@^1.2.1:
   version "1.2.1"
   resolved "https://registry.npmjs.org/phonemizer/-/phonemizer-1.2.1.tgz"
   integrity sha512-v0KJ4mi2T4Q7eJQ0W15Xd4G9k4kICSXE8bpDeJ8jisL4RyJhNWsweKTOi88QXFc4r4LZlz5jVL5lCHhkpdT71A==
+
+phosphor-react-native@3.0.6:
+  version "3.0.6"
+  resolved "https://registry.npmjs.org/phosphor-react-native/-/phosphor-react-native-3.0.6.tgz#aa3738683d1c6ffcfa36123885d9073f2171e230"
+  integrity sha512-mIhv+hBbDWz3yLbTOq/esVUkrMoKzEvLIcSeZo3YTdT+sbOBxzxKg5WZN3wpqt3pkkhKf0wVpOyZ3d9mNBNRhg==
 
 picocolors@^1.0.0, picocolors@^1.1.1:
   version "1.1.1"

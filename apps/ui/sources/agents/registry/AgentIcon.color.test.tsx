@@ -12,11 +12,11 @@ const catalogSpies = vi.hoisted(() => ({
         ? '<svg fill="#111111" stroke="#222222"><path fill="#333333" stroke="none" /></svg>'
         : null),
     getAgentIconTintColor: vi.fn(() => '#444444'),
-    getAgentCore: vi.fn(() => ({ ui: { agentPickerIconName: 'flash-outline' } })),
+    getAgentCore: vi.fn(() => ({ ui: { agentPickerIconName: 'lightning' } })),
 }));
 
-vi.mock('@expo/vector-icons', () => ({
-    Ionicons: (props: any) => React.createElement('Ionicons', props),
+vi.mock('@/components/ui/icons/Icon', () => ({
+    Icon: (props: any) => React.createElement('Icon', props),
 }));
 
 vi.mock('react-native-svg', () => ({
@@ -99,8 +99,8 @@ describe('AgentIcon color override', () => {
             />,
         );
 
-        expect(screen.findAllByType('Ionicons' as never)[0]?.props).toMatchObject({
-            name: 'flash-outline',
+        expect(screen.findAllByType('Icon' as never)[0]?.props).toMatchObject({
+            name: 'lightning',
             size: 20,
             color: '#777777',
             testID: 'fallback-agent-icon',

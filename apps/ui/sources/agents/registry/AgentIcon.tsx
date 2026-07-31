@@ -1,11 +1,12 @@
 import * as React from 'react';
 import type { StyleProp, ImageStyle } from 'react-native';
 import { Image } from 'expo-image';
-import { Ionicons } from '@expo/vector-icons';
 import { SvgXml } from 'react-native-svg';
 import { useUnistyles } from 'react-native-unistyles';
 
 import type { AgentId } from './registryCore';
+import { Icon, type IconName } from '@/components/ui/icons/Icon';
+import type { ViewStyle } from 'react-native';
 
 import {
     getAgentIconSource,
@@ -58,13 +59,13 @@ export const AgentIcon = React.memo(function AgentIcon(props: AgentIconProps) {
     const source = getAgentIconSource(agentId);
     if (!source) {
         // Core stores this as a Node-safe string; this UI boundary owns the Ionicons contract.
-        const fallbackIconName = getAgentCore(agentId).ui.agentPickerIconName as React.ComponentProps<typeof Ionicons>['name'];
+        const fallbackIconName = getAgentCore(agentId).ui.agentPickerIconName as IconName;
         return (
-            <Ionicons
+            <Icon
                 name={fallbackIconName}
                 size={size}
                 color={color ?? getAgentIconTintColor(agentId, theme) ?? theme.colors.text.secondary}
-                style={style as React.ComponentProps<typeof Ionicons>['style']}
+                style={style as StyleProp<ViewStyle>}
                 testID={testID}
             />
         );
