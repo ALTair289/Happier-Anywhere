@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fastify from 'fastify';
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 
 import { deriveAccountMachineKeyFromRecoverySecret } from '@happier-dev/protocol';
 
@@ -26,6 +27,7 @@ describe('auth pairing commands (request/approve/wait) (json)', () => {
     'HAPPIER_NO_BROWSER_OPEN',
     'HAPPIER_AUTH_METHOD',
     'HAPPIER_AUTH_POLL_INTERVAL_MS',
+    'HAPPIER_TERMINAL_PAIRING_REQUIRE',
     'HAPPIER_SERVER_URL',
     'HAPPIER_PUBLIC_SERVER_URL',
     'HAPPIER_WEBAPP_URL',
@@ -53,6 +55,44 @@ describe('auth pairing commands (request/approve/wait) (json)', () => {
     vi.unstubAllGlobals();
     await removeTempDir(remoteHomeDir);
     await removeTempDir(localHomeDir);
+  });
+
+  it('persists an opt-in v3 requirement with split request/wait state', async () => {
+    const app = fastify({ logger: false });
+    app.post('/v1/auth/request', async (_req, reply) => reply.send({ state: 'requested' }));
+    await app.ready();
+    const restoreAxios = installAxiosFastifyAdapter({ app, origin: 'http://happier-auth.test' });
+
+    try {
+      envScope.patch({
+        HAPPIER_HOME_DIR: remoteHomeDir,
+        HAPPIER_SERVER_URL: 'http://happier-auth.test',
+        HAPPIER_PUBLIC_SERVER_URL: 'http://happier-auth.test',
+        HAPPIER_WEBAPP_URL: 'http://webapp.test',
+        HAPPIER_TERMINAL_PAIRING_REQUIRE: 'v3',
+      });
+      vi.resetModules();
+
+      const { handleAuthRequest } = await import('./auth/request');
+      const output = captureConsoleLogAndMuteStdout();
+      try {
+        await handleAuthRequest(['--json']);
+        const request = JSON.parse(output.logs[0] ?? '') as {
+          pairingRequirement?: string;
+          stateFile?: string;
+        };
+        expect(request.pairingRequirement).toBe('v3');
+        const state = JSON.parse(await readFile(String(request.stateFile), 'utf8')) as {
+          pairingRequirement?: string;
+        };
+        expect(state.pairingRequirement).toBe('v3');
+      } finally {
+        output.restore();
+      }
+    } finally {
+      restoreAxios();
+      await app.close().catch(() => {});
+    }
   });
 
   it('pairs a remote machine by creating a claim-gated request, approving it with an authenticated local CLI, then waiting and writing dataKey credentials on the remote', async () => {
@@ -193,6 +233,7 @@ describe('auth pairing commands (request/approve/wait) (json)', () => {
         expect(parsed.success).toBe(true);
         expect(parsed.token).toBe('issued-token');
         expect(parsed.encryptionType).toBe('dataKey');
+        expect(parsed.pairingAuthentication).toBe('legacy');
       } finally {
         waitOut.restore();
       }

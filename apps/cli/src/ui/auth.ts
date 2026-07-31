@@ -19,6 +19,13 @@ import { buildConfigureServerLinks, buildTerminalConnectLinks } from '@happier-d
 import { tailscaleServeHttpsUrlForInternalServerUrl } from '@/integrations/tailscale/tailscaleServe';
 import { isInsecureRemoteHttpServerUrl, isLocalishServerUrl, isLoopbackHttpServerUrl } from '@/server/serverUrlClassification';
 import { decodeJwtPayload } from '@/cloud/decodeJwtPayload';
+import {
+    createTerminalPairingAuthentication,
+    openTerminalProvisioningResponse,
+    readTerminalPairingRequirement,
+    type TerminalPairingAuthentication,
+    type TerminalPairingRequirement,
+} from '@/auth/terminalProvisioningResponse';
 
 export type PostTerminalAuthRequestCompatibleResponse =
     | { state: 'requested' }
@@ -213,6 +220,11 @@ export async function doAuth(): Promise<Credentials | null> {
     const claimSecret = new Uint8Array(randomBytes(32));
     const claimSecretB64Url = Buffer.from(claimSecret).toString('base64url');
     const claimSecretHash = createHash('sha256').update(Buffer.from(claimSecret)).digest('base64url');
+    const pairingRequirement = readTerminalPairingRequirement();
+    const pairing = createTerminalPairingAuthentication({
+        nowMs: Date.now(),
+        randomBytes: (length) => new Uint8Array(randomBytes(length)),
+    });
 
     // Create a new authentication request
     try {
@@ -239,15 +251,32 @@ export async function doAuth(): Promise<Credentials | null> {
 
     // Handle authentication based on selected method
     if (authMethod === 'mobile') {
-        return await doMobileAuth({ keypair, claimSecret: claimSecretB64Url });
+        return await doMobileAuth({ keypair, claimSecret: claimSecretB64Url, pairing, pairingRequirement });
     }
     if (authMethod === 'web') {
-        return await doWebAuth({ keypair, claimSecret: claimSecretB64Url });
+        return await doWebAuth({ keypair, claimSecret: claimSecretB64Url, pairing, pairingRequirement });
     }
-    return await doBothAuth({ keypair, claimSecret: claimSecretB64Url });
+    return await doBothAuth({ keypair, claimSecret: claimSecretB64Url, pairing, pairingRequirement });
 }
 
-async function doBothAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; claimSecret: string }>): Promise<Credentials | null> {
+function toTerminalConnectPairingContext(pairing: TerminalPairingAuthentication): Readonly<{
+    secretB64Url: string;
+    createdAtMs: number;
+    expiresAtMs: number;
+}> {
+    return {
+        secretB64Url: Buffer.from(pairing.secret).toString('base64url'),
+        createdAtMs: pairing.createdAtMs,
+        expiresAtMs: pairing.expiresAtMs,
+    };
+}
+
+async function doBothAuth(params: Readonly<{
+    keypair: tweetnacl.BoxKeyPair;
+    claimSecret: string;
+    pairing: TerminalPairingAuthentication;
+    pairingRequirement: TerminalPairingRequirement | null;
+}>): Promise<Credentials | null> {
     if (process.stdout.isTTY) {
         console.clear();
     }
@@ -257,6 +286,7 @@ async function doBothAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; clai
         webappUrl: configuration.webappUrl,
         serverUrl: configuration.serverUrl,
         publicKeyB64Url,
+        pairing: toTerminalConnectPairingContext(params.pairing),
     });
     const terminalMobileEmbedsServerUrl = terminalLinks.mobileUrl.includes('server=');
 
@@ -269,6 +299,9 @@ async function doBothAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; clai
     console.log('');
     printServerUrlReachabilityHint(configuration.serverUrl);
     console.log('Recommended: use the mobile app first. It makes linking additional devices easier.');
+    if (params.pairingRequirement === 'v3') {
+        console.log('Authenticated pairing v3 is required. For protection from an untrusted relay, approve with the native mobile app; web pairing trusts the web app origin.');
+    }
     console.log('');
     console.log('Before you continue:');
     if (terminalMobileEmbedsServerUrl) {
@@ -326,7 +359,7 @@ async function doBothAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; clai
         }
     }
 
-    return await waitForAuthentication({ keypair: params.keypair, claimSecret: params.claimSecret });
+    return await waitForAuthentication(params);
 }
 
 async function postTerminalAuthRequestCompatible(params: Readonly<{
@@ -388,7 +421,12 @@ function selectAuthenticationMethod(): Promise<AuthMethod | null> {
 /**
  * Handle mobile authentication flow
  */
-async function doMobileAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; claimSecret: string }>): Promise<Credentials | null> {
+async function doMobileAuth(params: Readonly<{
+    keypair: tweetnacl.BoxKeyPair;
+    claimSecret: string;
+    pairing: TerminalPairingAuthentication;
+    pairingRequirement: TerminalPairingRequirement | null;
+}>): Promise<Credentials | null> {
     if (process.stdout.isTTY) {
         console.clear();
     }
@@ -400,6 +438,9 @@ async function doMobileAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; cl
     console.log(`Web app URL: ${configuration.webappUrl}\n`);
     printServerUrlReachabilityHint(configuration.serverUrl);
     console.log('Recommended: use the mobile app first. It makes linking additional devices easier.');
+    if (params.pairingRequirement === 'v3') {
+        console.log('Authenticated pairing v3 is required. For protection from an untrusted relay, approve with the native mobile app; web pairing trusts the web app origin.');
+    }
     console.log('If you already have a Happier account on another device, sign in with that same account.\n');
 
     const publicKeyB64Url = encodeBase64Url(params.keypair.publicKey);
@@ -407,6 +448,7 @@ async function doMobileAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; cl
         webappUrl: configuration.webappUrl,
         serverUrl: configuration.serverUrl,
         publicKeyB64Url,
+        pairing: toTerminalConnectPairingContext(params.pairing),
     });
     const terminalMobileEmbedsServerUrl = terminalLinks.mobileUrl.includes('server=');
 
@@ -443,13 +485,18 @@ async function doMobileAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; cl
     console.log(terminalLinks.webUrl);
     console.log('');
 
-    return await waitForAuthentication({ keypair: params.keypair, claimSecret: params.claimSecret });
+    return await waitForAuthentication(params);
 }
 
 /**
  * Handle web authentication flow
  */
-async function doWebAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; claimSecret: string }>): Promise<Credentials | null> {
+async function doWebAuth(params: Readonly<{
+    keypair: tweetnacl.BoxKeyPair;
+    claimSecret: string;
+    pairing: TerminalPairingAuthentication;
+    pairingRequirement: TerminalPairingRequirement | null;
+}>): Promise<Credentials | null> {
     if (process.stdout.isTTY) {
         console.clear();
     }
@@ -460,6 +507,9 @@ async function doWebAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; claim
     }
     console.log(`Web app URL: ${configuration.webappUrl}\n`);
     printServerUrlReachabilityHint(configuration.serverUrl);
+    if (params.pairingRequirement === 'v3') {
+        console.log('Authenticated pairing v3 is required, but web pairing still trusts the web app origin. Use the native mobile app for protection from an untrusted relay.\n');
+    }
     console.log('If you already have a Happier account on another device, sign in with that same account.\n');
 
     const publicKeyB64Url = encodeBase64Url(params.keypair.publicKey);
@@ -467,6 +517,7 @@ async function doWebAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; claim
         webappUrl: configuration.webappUrl,
         serverUrl: configuration.serverUrl,
         publicKeyB64Url,
+        pairing: toTerminalConnectPairingContext(params.pairing),
     });
     const webUrl = terminalLinks.webUrl;
     const noOpenRaw = (process.env.HAPPIER_NO_BROWSER_OPEN ?? '').toString().trim();
@@ -501,13 +552,18 @@ async function doWebAuth(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; claim
         printMobileLinkMissingServerUrlHint({ serverUrl: configuration.serverUrl, kind: 'terminalConnect' });
     }
 
-    return await waitForAuthentication({ keypair: params.keypair, claimSecret: params.claimSecret });
+    return await waitForAuthentication(params);
 }
 
 /**
  * Wait for authentication to complete and return credentials
  */
-async function waitForAuthentication(params: Readonly<{ keypair: tweetnacl.BoxKeyPair; claimSecret: string }>): Promise<Credentials | null> {
+async function waitForAuthentication(params: Readonly<{
+    keypair: tweetnacl.BoxKeyPair;
+    claimSecret: string;
+    pairing: TerminalPairingAuthentication;
+    pairingRequirement: TerminalPairingRequirement | null;
+}>): Promise<Credentials | null> {
     process.stdout.write('Waiting for authentication');
     let dots = 0;
     let cancelled = false;
@@ -532,28 +588,33 @@ async function waitForAuthentication(params: Readonly<{ keypair: tweetnacl.BoxKe
             try {
                 const tryFinalizeWithTokenAndEncryptedResponse = async (token: string, responseB64: string): Promise<Credentials | null> => {
                     const r = decodeBase64(responseB64);
-                    const decrypted = decryptWithEphemeralKey(r, params.keypair.secretKey);
-                    if (!decrypted) {
-                        console.log('\n\nFailed to decrypt response. Please try again.');
+                    const opened = openTerminalProvisioningResponse({
+                        payload: r,
+                        terminalSecretKey: params.keypair.secretKey,
+                        terminalPublicKey: params.keypair.publicKey,
+                        pairing: params.pairing,
+                        requirement: params.pairingRequirement,
+                        nowMs: Date.now(),
+                    });
+                    if (!opened) {
+                        console.log(
+                            params.pairingRequirement === 'v3'
+                                ? '\n\nAuthenticated terminal pairing v3 is required. Update the Happier mobile app and scan a new QR code.'
+                                : '\n\nFailed to decrypt response. Please try again.',
+                        );
                         return null;
                     }
 
-                    if (decrypted.length === 32) {
-                        await writeCredentialsLegacy({ secret: decrypted, token });
+                    if (opened.type === 'legacy') {
+                        await writeCredentialsLegacy({ secret: opened.key, token });
                         console.log('\n\n✓ Authentication successful\n');
-                        return { encryption: { type: 'legacy', secret: decrypted }, token };
+                        return { encryption: { type: 'legacy', secret: opened.key }, token };
                     }
 
-                    if (decrypted[0] === 0) {
-                        const machineKey = decrypted.slice(1, 33);
-                        const publicKeyBytes = tweetnacl.box.keyPair.fromSecretKey(machineKey).publicKey;
-                        await writeCredentialsDataKey({ publicKey: publicKeyBytes, machineKey, token });
-                        console.log('\n\n✓ Authentication successful\n');
-                        return { encryption: { type: 'dataKey', publicKey: publicKeyBytes, machineKey }, token };
-                    }
-
-                    console.log('\n\nFailed to decrypt response. Please try again.');
-                    return null;
+                    const publicKeyBytes = tweetnacl.box.keyPair.fromSecretKey(opened.key).publicKey;
+                    await writeCredentialsDataKey({ publicKey: publicKeyBytes, machineKey: opened.key, token });
+                    console.log('\n\n✓ Authentication successful\n');
+                    return { encryption: { type: 'dataKey', publicKey: publicKeyBytes, machineKey: opened.key }, token };
                 };
 
                 const legacyPollOnce = async (): Promise<

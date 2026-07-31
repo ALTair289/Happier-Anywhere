@@ -8,6 +8,10 @@ import { encodeBase64, encodeBase64Url } from '@/api/encryption';
 import { configuration } from '@/configuration';
 import { applyServerSelectionFromArgs } from '@/server/serverSelection';
 import { buildConfigureServerLinks, buildTerminalConnectLinks } from '@happier-dev/cli-common/links';
+import {
+  createTerminalPairingAuthentication,
+  readTerminalPairingRequirement,
+} from '@/auth/terminalProvisioningResponse';
 
 function sha256Base64Url(input: Uint8Array): string {
   return createHash('sha256').update(Buffer.from(input)).digest('base64url');
@@ -36,6 +40,12 @@ export async function handleAuthRequest(args: string[]): Promise<void> {
   const claimSecret = new Uint8Array(randomBytes(32));
   const claimSecretB64Url = Buffer.from(claimSecret).toString('base64url');
   const claimSecretHash = sha256Base64Url(claimSecret);
+  const pairingRequirement = readTerminalPairingRequirement();
+  const pairing = createTerminalPairingAuthentication({
+    nowMs: Date.now(),
+    randomBytes: (length) => new Uint8Array(randomBytes(length)),
+  });
+  const pairingSecretB64Url = Buffer.from(pairing.secret).toString('base64url');
 
   const publicKeyB64 = encodeBase64(keypair.publicKey);
   await axios.post(`${configuration.apiServerUrl}/v1/auth/request`, {
@@ -53,6 +63,10 @@ export async function handleAuthRequest(args: string[]): Promise<void> {
         publicKey: publicKeyB64,
         secretKey: encodeBase64(keypair.secretKey),
         claimSecret: claimSecretB64Url,
+        pairingSecret: pairingSecretB64Url,
+        pairingCreatedAtMs: pairing.createdAtMs,
+        pairingExpiresAtMs: pairing.expiresAtMs,
+        ...(pairingRequirement ? { pairingRequirement } : {}),
         createdAt: new Date().toISOString(),
       },
       null,
@@ -73,6 +87,11 @@ export async function handleAuthRequest(args: string[]): Promise<void> {
     webappUrl: configuration.webappUrl,
     serverUrl: configuration.publicServerUrl,
     publicKeyB64Url,
+    pairing: {
+      secretB64Url: pairingSecretB64Url,
+      createdAtMs: pairing.createdAtMs,
+      expiresAtMs: pairing.expiresAtMs,
+    },
   });
 
   console.log(
@@ -80,6 +99,12 @@ export async function handleAuthRequest(args: string[]): Promise<void> {
       publicKey: publicKeyB64,
       publicKeyB64Url,
       claimSecret: claimSecretB64Url,
+      pairing: {
+        secretB64Url: pairingSecretB64Url,
+        createdAtMs: pairing.createdAtMs,
+        expiresAtMs: pairing.expiresAtMs,
+      },
+      pairingRequirement: pairingRequirement ?? 'compatible',
       serverId: configuration.activeServerId,
       serverUrl: configuration.serverUrl,
       publicServerUrl: configuration.publicServerUrl,
