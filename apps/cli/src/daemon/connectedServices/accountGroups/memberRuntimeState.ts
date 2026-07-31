@@ -189,7 +189,7 @@ export async function persistMemberRuntimeStateWithPositiveEvidence(params: Read
    * Diagnosability sink (QA2-F01 / RR-8): the positive-evidence success chain was log-silent, so a
    * live clear of member blockers was invisible. NAMES only — never credential/token values.
    */
-  logger?: Pick<typeof defaultLogger, 'info'>;
+  logger?: Pick<typeof defaultLogger, 'debug'>;
 }>): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const group = await params.api.getConnectedServiceAuthGroup({
@@ -214,7 +214,7 @@ export async function persistMemberRuntimeStateWithPositiveEvidence(params: Read
         expectedRuntimeStateRevision: group.runtimeStateRevision,
         memberStates: [{ profileId: params.profileId, state: reconciled }],
       });
-      (params.logger ?? defaultLogger).info('[DAEMON RUN] Connected-service member blockers cleared by positive evidence', {
+      (params.logger ?? defaultLogger).debug('[DAEMON RUN] Connected-service member blockers cleared by positive evidence', {
         serviceId: params.serviceId,
         groupId: params.groupId,
         profileId: params.profileId,

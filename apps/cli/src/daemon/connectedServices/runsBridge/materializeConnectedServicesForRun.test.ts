@@ -365,20 +365,20 @@ describe('createExecutionRunConnectedServicesBridge', () => {
     expect(registry.listRefreshTargets()).toEqual([]);
   });
 
-  it('logs materialize + release diagnostics WITHOUT ever emitting env values/tokens (QA2-F01)', async () => {
+  it('keeps materialize + release diagnostics file-only without emitting env values/tokens (QA2-F01)', async () => {
     const registry = new ConnectedServiceRuntimeRegistry();
     const cleanupOnExit = vi.fn();
-    const info = vi.fn();
+    const debug = vi.fn();
     const bridge = createExecutionRunConnectedServicesBridge({
       resolveAuthForSpawn: (async () => buildResolved(cleanupOnExit)) as unknown as ResolveConnectedServiceAuthForRun,
       runtimeRegistry: registry,
-      logger: { info },
+      logger: { debug },
     });
 
     await bridge.materialize(buildRequest());
     await bridge.release({ runId: 'run_codex_1', pid: 4242, materializationKey: RUN_KEY });
 
-    const materializeLog = info.mock.calls.find((call) => String(call[0]).includes('materialized'));
+    const materializeLog = debug.mock.calls.find((call) => String(call[0]).includes('materialized'));
     expect(materializeLog?.[1]).toMatchObject({
       runId: 'run_codex_1',
       agentId: 'codex',
@@ -387,12 +387,12 @@ describe('createExecutionRunConnectedServicesBridge', () => {
       envKeyCount: 1,
     });
 
-    const releaseLog = info.mock.calls.find((call) => String(call[0]).includes('released'));
+    const releaseLog = debug.mock.calls.find((call) => String(call[0]).includes('released'));
     expect(releaseLog?.[1]).toMatchObject({ runId: 'run_codex_1', released: true, cleanupRan: true });
 
     // Values-never-logged: the materialized env VALUE (a home path / would be a token) must never
     // appear anywhere in the emitted diagnostics.
-    const serialized = JSON.stringify(info.mock.calls);
+    const serialized = JSON.stringify(debug.mock.calls);
     expect(serialized).not.toContain('/materialized/run/codex/codex-home');
   });
 
@@ -410,16 +410,16 @@ describe('createExecutionRunConnectedServicesBridge', () => {
         },
       },
     });
-    const info = vi.fn();
+    const debug = vi.fn();
     const bridge = createExecutionRunConnectedServicesBridge({
       resolveAuthForSpawn: (async () => buildResolved()) as unknown as ResolveConnectedServiceAuthForRun,
       runtimeRegistry: registry,
-      logger: { info },
+      logger: { debug },
     });
 
     await bridge.materialize(buildRequest());
 
-    const materializeLog = info.mock.calls.find((call) => String(call[0]).includes('materialized'));
+    const materializeLog = debug.mock.calls.find((call) => String(call[0]).includes('materialized'));
     // The run keyspace means a same-pid session no longer forces a coverage skip.
     expect(materializeLog?.[1]).toMatchObject({ registered: true });
     const refreshKeys = registry.listRefreshTargets().map((target) => target.materializationKey).sort();

@@ -7,7 +7,7 @@ import { logConnectedServiceAuthSwitchResult } from './logConnectedServiceAuthSw
 
 describe('logConnectedServiceAuthSwitchResult', () => {
   it('logs successful switch results with latency and binding diagnostics', () => {
-    const logger = { info: vi.fn() };
+    const logger = { debug: vi.fn() };
     const previousBindings: ConnectedServiceBindingsV1 = {
       v: 1,
       bindingsByServiceId: {
@@ -40,7 +40,7 @@ describe('logConnectedServiceAuthSwitchResult', () => {
       expectedGroupGenerationByServiceId: { anthropic: 7 },
     });
 
-    expect(logger.info).toHaveBeenCalledWith(
+    expect(logger.debug).toHaveBeenCalledWith(
       '[DAEMON RUN] Connected-service session auth switch result',
       expect.objectContaining({
         sessionId: 'sess-1',
@@ -62,7 +62,7 @@ describe('logConnectedServiceAuthSwitchResult', () => {
   });
 
   it('logs failed switch results with diagnostics and latency', () => {
-    const logger = { info: vi.fn() };
+    const logger = { debug: vi.fn() };
     const result: SessionConnectedServiceAuthSwitchResult = {
       ok: false,
       errorCode: 'restart_failed',
@@ -84,7 +84,7 @@ describe('logConnectedServiceAuthSwitchResult', () => {
       expectedGroupGenerationByServiceId: undefined,
     });
 
-    expect(logger.info).toHaveBeenCalledWith(
+    expect(logger.debug).toHaveBeenCalledWith(
       '[DAEMON RUN] Connected-service session auth switch result',
       expect.objectContaining({
         ok: false,

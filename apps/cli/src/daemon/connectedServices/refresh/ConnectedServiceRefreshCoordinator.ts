@@ -981,7 +981,7 @@ export class ConnectedServiceRefreshCoordinator {
     reason: 'setup_token' | 'adopted_current' | 'not_needed';
     accessToken: string;
   }>): void {
-    logger.info('[DAEMON RUN] Connected-service bridge served current access token (no rotation)', {
+    logger.debug('[DAEMON RUN] Connected-service bridge served current access token (no rotation)', {
       serviceId: input.serviceId,
       profileId: input.profileId,
       reason: input.reason,

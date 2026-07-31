@@ -120,7 +120,7 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
    * ONE line at materialize success and ONE at release. NEVER log env values or tokens — only the
    * COUNT of env-key names is emitted.
    */
-  logger?: Pick<typeof defaultLogger, 'info'>;
+  logger?: Pick<typeof defaultLogger, 'debug'>;
   /**
    * Resolve the broker selection identity (R3-6/NF-1) from the run's MATERIALIZED env. Injected by the
    * daemon wiring — reuses the SAME env-key reader the session-target registration uses (no second
@@ -230,7 +230,7 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
         cleanupPromise: null,
       });
 
-      logger.info('[DAEMON RUN] Connected-service run materialized', {
+      logger.debug('[DAEMON RUN] Connected-service run materialized', {
         runId: request.runId,
         agentId: request.agentId,
         materializationKey: request.materializationKey,
@@ -285,7 +285,7 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
       // pid-keyed target is a different keyspace and is never touched by a run release.
       deps.runtimeRegistry?.unregisterRunKey(request.materializationKey);
       if (!entry) {
-        logger.info('[DAEMON RUN] Connected-service run released', {
+        logger.debug('[DAEMON RUN] Connected-service run released', {
           runId: request.runId,
           released: false,
           cleanupRan: false,
@@ -300,7 +300,7 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
         await entry.cleanupPromise;
       } catch (error) {
         entry.cleanupPromise = null;
-        logger.info('[DAEMON RUN] Connected-service run released', {
+        logger.debug('[DAEMON RUN] Connected-service run released', {
           runId: request.runId,
           released: false,
           cleanupRan,
@@ -310,7 +310,7 @@ export function createExecutionRunConnectedServicesBridge(deps: Readonly<{
       if (releaseEntriesByKey.get(request.materializationKey) === entry) {
         releaseEntriesByKey.delete(request.materializationKey);
       }
-      logger.info('[DAEMON RUN] Connected-service run released', {
+      logger.debug('[DAEMON RUN] Connected-service run released', {
         runId: request.runId,
         released: true,
         cleanupRan,

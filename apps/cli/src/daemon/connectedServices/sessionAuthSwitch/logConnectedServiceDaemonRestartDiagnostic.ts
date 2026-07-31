@@ -5,5 +5,5 @@ import type { ConnectedServiceDaemonRestartDiagnosticRecord } from './requestCon
 export function logConnectedServiceDaemonRestartDiagnostic(
   record: ConnectedServiceDaemonRestartDiagnosticRecord,
 ): void {
-  logger.info('[DAEMON RUN] Connected-service daemon restart diagnostic', record);
+  logger.debug('[DAEMON RUN] Connected-service daemon restart diagnostic', record);
 }

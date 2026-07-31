@@ -3,7 +3,7 @@ import type { ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 import type { SessionConnectedServiceAuthSwitchResult } from './switchSessionConnectedServiceAuth';
 
 export function logConnectedServiceAuthSwitchResult(input: Readonly<{
-  logger: Pick<typeof console, 'info'>;
+  logger: Pick<typeof console, 'debug'>;
   sessionId: string;
   agentId: string;
   serviceIds: readonly string[];
@@ -13,7 +13,7 @@ export function logConnectedServiceAuthSwitchResult(input: Readonly<{
   previousBindings: ConnectedServiceBindingsV1;
   expectedGroupGenerationByServiceId: Readonly<Record<string, number>> | undefined;
 }>): void {
-  input.logger.info('[DAEMON RUN] Connected-service session auth switch result', {
+  input.logger.debug('[DAEMON RUN] Connected-service session auth switch result', {
     sessionId: input.sessionId,
     agentId: input.agentId,
     serviceIds: input.serviceIds,

@@ -136,7 +136,7 @@ describe('persistMemberRuntimeStateWithPositiveEvidence', () => {
       getConnectedServiceAuthGroup: vi.fn(async () => persisted),
       updateConnectedServiceAuthGroupRuntimeState: vi.fn(async () => persisted),
     };
-    const info = vi.fn();
+    const debug = vi.fn();
 
     const cleared = await persistMemberRuntimeStateWithPositiveEvidence({
       api,
@@ -146,23 +146,23 @@ describe('persistMemberRuntimeStateWithPositiveEvidence', () => {
       generation: 7,
       evidence: { kind: 'successful_turn', observedAtMs: 2_000 },
       normalizePolicy: () => DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
-      logger: { info },
+      logger: { debug },
     });
 
     expect(cleared).toBe(true);
-    expect(info).toHaveBeenCalledTimes(1);
-    expect(info.mock.calls[0]?.[1]).toMatchObject({
+    expect(debug).toHaveBeenCalledTimes(1);
+    expect(debug.mock.calls[0]?.[1]).toMatchObject({
       serviceId: 'openai-codex',
       groupId: 'group-1',
       profileId: 'primary',
       evidenceKind: 'successful_turn',
     });
-    const clearedKinds = (info.mock.calls[0]?.[1] as { clearedBlockerKinds: string[] }).clearedBlockerKinds;
+    const clearedKinds = (debug.mock.calls[0]?.[1] as { clearedBlockerKinds: string[] }).clearedBlockerKinds;
     expect(clearedKinds).toEqual(
       expect.arrayContaining(['authInvalidUntilMs', 'credentialHealthStatus', 'lastFailureKind', 'lastObservedAtMs']),
     );
     // Values-never-logged: the blocker VALUE (the reauth deadline) must never appear in diagnostics.
-    expect(JSON.stringify(info.mock.calls)).not.toContain('987654');
+    expect(JSON.stringify(debug.mock.calls)).not.toContain('987654');
   });
 
   it('does not log when nothing is cleared (no positive-evidence change)', async () => {
@@ -171,7 +171,7 @@ describe('persistMemberRuntimeStateWithPositiveEvidence', () => {
       getConnectedServiceAuthGroup: vi.fn(async () => persisted),
       updateConnectedServiceAuthGroupRuntimeState: vi.fn(async () => persisted),
     };
-    const info = vi.fn();
+    const debug = vi.fn();
 
     await persistMemberRuntimeStateWithPositiveEvidence({
       api,
@@ -182,11 +182,11 @@ describe('persistMemberRuntimeStateWithPositiveEvidence', () => {
       // Evidence not newer than the last observation → no clear, no persist, no log.
       evidence: { kind: 'successful_turn', observedAtMs: 4_000 },
       normalizePolicy: () => DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
-      logger: { info },
+      logger: { debug },
     });
 
     expect(api.updateConnectedServiceAuthGroupRuntimeState).not.toHaveBeenCalled();
-    expect(info).not.toHaveBeenCalled();
+    expect(debug).not.toHaveBeenCalled();
   });
 
   it('does not clear stale generations', async () => {

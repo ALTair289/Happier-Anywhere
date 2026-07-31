@@ -8,7 +8,6 @@ import type { ConnectedServiceDaemonRestartDiagnosticRecord } from './requestCon
 vi.mock('@/ui/logger', () => ({
   logger: {
     debug: vi.fn(),
-    info: vi.fn(),
   },
 }));
 
@@ -17,7 +16,7 @@ describe('logConnectedServiceDaemonRestartDiagnostic', () => {
     vi.clearAllMocks();
   });
 
-  it('emits restart diagnostics at info level so daemon timelines are visible by default', () => {
+  it('keeps restart diagnostics in the debug file instead of the user console', () => {
     const record: ConnectedServiceDaemonRestartDiagnosticRecord = {
       type: 'connected_service_daemon_restart',
       trigger: 'manual_switch',
@@ -37,10 +36,9 @@ describe('logConnectedServiceDaemonRestartDiagnostic', () => {
 
     logConnectedServiceDaemonRestartDiagnostic(record);
 
-    expect(logger.info).toHaveBeenCalledWith(
+    expect(logger.debug).toHaveBeenCalledWith(
       '[DAEMON RUN] Connected-service daemon restart diagnostic',
       record,
     );
-    expect(logger.debug).not.toHaveBeenCalled();
   });
 });
