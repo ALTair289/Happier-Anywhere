@@ -26,6 +26,24 @@ function createFakeChildProcess(): SpawnMockChild {
 }
 
 describe('buildPowerShellStartWindowsTerminalInvocation', () => {
+  it('escapes Windows Terminal command delimiters in every argv field', () => {
+    const invocation = buildPowerShellStartWindowsTerminalInvocation({
+      windowId: 'window;one',
+      title: 'title;two',
+      workingDirectory: 'C:\\repo;three',
+      filePath: 'C:\\tools;four\\happier.exe',
+      args: ['arg;five'],
+    });
+
+    const script = invocation.args.at(-1) ?? '';
+    expect(script).toContain('window\\;one');
+    expect(script).toContain('title\\;two');
+    expect(script).toContain('repo\\;three');
+    expect(script).toContain('tools\\;four');
+    expect(script).toContain('arg\\;five');
+    expect(script).not.toContain('window;one');
+  });
+
   it('quotes the Windows Terminal command line so paths and arguments with spaces stay intact', () => {
     const invocation = buildPowerShellStartWindowsTerminalInvocation({
       filePath: 'C:\\Program Files\\nodejs\\node.exe',

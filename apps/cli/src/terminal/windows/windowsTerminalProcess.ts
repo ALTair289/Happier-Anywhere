@@ -60,6 +60,10 @@ function quoteWindowsProcessArgument(value: string): string {
   return `${quoted}"`;
 }
 
+function escapeWindowsTerminalCommandSeparator(value: string): string {
+  return value.replaceAll(';', '\\;');
+}
+
 function parsePowerShellStartProcessPid(stdout: string): number | null {
   const trimmed = stdout.replaceAll('\u0000', '').trim();
   if (!trimmed) return null;
@@ -104,7 +108,10 @@ export function buildPowerShellStartWindowsTerminalInvocation(params: {
     params.filePath,
     ...params.args,
   ];
-  const argsCommandLine = argsArray.map((arg) => quoteWindowsProcessArgument(arg)).join(' ');
+  const argsCommandLine = argsArray
+    .map(escapeWindowsTerminalCommandSeparator)
+    .map((arg) => quoteWindowsProcessArgument(arg))
+    .join(' ');
   const script = [
     '$ErrorActionPreference = "Stop";',
     `$p = Start-Process -FilePath 'wt.exe' -ArgumentList ${toPowerShellStringLiteral(argsCommandLine)} -WorkingDirectory ${toPowerShellStringLiteral(params.workingDirectory)} -PassThru;`,
