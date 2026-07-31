@@ -183,6 +183,7 @@ export function RootLayoutNavigationEffects(): React.ReactElement | null {
             const route = buildTerminalConnectWebHref({
                 publicKeyB64Url: pendingTerminalConnect.publicKeyB64Url,
                 serverUrl: pendingTerminalConnect.serverUrl,
+                pairing: pendingTerminalConnect.pairing,
             });
 
             // If we are already on the terminal-connect page (which persists a pending connect while
