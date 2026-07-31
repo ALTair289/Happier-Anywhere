@@ -3,7 +3,6 @@ import { terminateProcessGroup } from './utils/proc/terminate.mjs';
 import { killPidOwnedByStack } from './utils/proc/ownership.mjs';
 import { resolveAuthSeedFromEnv, resolveAutoCopyFromMainEnabled } from './utils/stack/startup.mjs';
 import { coerceHappyMonorepoRootFromPath, getStacksStorageRoot } from './utils/paths/paths.mjs';
-import { runCaptureIfCommandExists } from './utils/proc/commands.mjs';
 import { readLastLines } from './utils/fs/tail.mjs';
 import { ensureCliBuilt, isCliDistBuildLockActive } from './utils/proc/pm.mjs';
 import { resolveJavaScriptRuntimeCommand } from '@happier-dev/cli-common/providers/managedJavaScriptRuntime';
@@ -18,7 +17,7 @@ import { ensureActiveAccessKeyValid } from './utils/auth/ensure_active_access_ke
 import { decodeJwtPayloadUnsafe } from './utils/auth/decode_jwt_payload_unsafe.mjs';
 import { formatDaemonAuthScopeDiagnostic, formatDaemonCredentialsTokenSubChangedWarning } from './utils/auth/format_daemon_auth_scope_diagnostic.mjs';
 import { applyStackActiveServerScopeEnv, applyStackDaemonLifecycleScopeEnv } from './utils/auth/stable_scope_id.mjs';
-import { existsSync, readdirSync, readFileSync, realpathSync, unlinkSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { chmod, copyFile, mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -244,94 +243,6 @@ async function persistStackDaemonMachineTransferEnv({ stackName, env = process.e
 
   await ensureEnvFileUpdated({ envPath, updates });
   return { ok: true, changed: true, envPath, updatedKeys: updates.map(({ key }) => key) };
-}
-
-export async function cleanupStaleDaemonState(homeDir, options = {}) {
-  const serverUrl = resolveServerUrlFromOptions(options);
-  const env = resolveEnvFromOptions(options);
-  const { statePath, lockPath } = resolvePreferredStackDaemonStatePaths({ cliHomeDir: homeDir, serverUrl, env });
-
-  if (!existsSync(lockPath)) {
-    return;
-  }
-
-  const lsofHasPath = async (pid, pathNeedle) => {
-    try {
-      const out = await runCaptureIfCommandExists('lsof', ['-nP', '-p', String(pid)]);
-      return out.includes(pathNeedle);
-    } catch {
-      return false;
-    }
-  };
-
-  const canProveLsofOwnership = async (pid, pathNeedle) => {
-    try {
-      const out = await runCaptureIfCommandExists('lsof', ['-nP', '-p', String(pid)], { env });
-      // runCaptureIfCommandExists returns '' when lsof is not found
-      if (out === '') {
-        return { available: false, owns: false };
-      }
-      return { available: true, owns: out.includes(pathNeedle) };
-    } catch {
-      return { available: false, owns: false };
-    }
-  };
-
-  // If lock PID exists and is running, keep lock/state ONLY if it still owns the lock file path.
-  try {
-    const raw = readFileSync(lockPath, 'utf-8').trim();
-    const pid = Number(raw);
-    if (Number.isFinite(pid) && pid > 0) {
-      try {
-        process.kill(pid, 0);
-        // If PID was recycled, refuse to trust it unless we can prove it's associated with this home dir.
-        // This prevents cross-stack daemon kills due to stale lock files.
-        const ownership = await canProveLsofOwnership(pid, lockPath);
-        if (ownership.owns) {
-          return;
-        }
-        // CRITICAL: If lsof is unavailable and the PID is running, fail-safe by keeping the files.
-        // This prevents a second daemon from starting while the first is still running.
-        if (!ownership.available) {
-          return;
-        }
-      } catch {
-        // stale pid
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  // If state PID exists and is running, keep lock/state.
-  if (existsSync(statePath)) {
-    try {
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
-      const pid = typeof state?.pid === 'number' ? state.pid : null;
-      if (pid) {
-        try {
-          process.kill(pid, 0);
-          // Only keep if we can prove it still uses this home dir (via state path).
-          const ownership = await canProveLsofOwnership(pid, statePath);
-          if (ownership.owns) {
-            return;
-          }
-          // CRITICAL: If lsof is unavailable and the PID is running, fail-safe by keeping the files.
-          // This prevents a second daemon from starting while the first is still running.
-          if (!ownership.available) {
-            return;
-          }
-        } catch {
-          // stale pid
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  try { unlinkSync(lockPath); } catch { /* ignore */ }
-  try { unlinkSync(statePath); } catch { /* ignore */ }
 }
 
 export function checkDaemonState(cliHomeDir, options = {}) {
@@ -2250,8 +2161,8 @@ export async function startLocalDaemonWithAuth({
     runtimeStatePath,
   });
 
-  // Clean up stale lock/state files that can block daemon start.
-  await cleanupStaleDaemonState(cliHomeDir, { serverUrl: internalServerUrl, env: daemonEnv });
+  // The daemon lifecycle lock is the sole publication/removal authority. A fixed daemon start
+  // exact-reclaims stale lock bytes and atomically replaces stale state after it acquires ownership.
   await syncStackRuntimeDaemonPidFromDaemonState({
     runtimeStatePath,
     cliHomeDir,

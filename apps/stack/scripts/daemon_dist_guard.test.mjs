@@ -20,6 +20,7 @@ import {
   startLocalDaemonWithAuth,
   stopLocalDaemon,
 } from './daemon.mjs';
+import { resolveStackDaemonStatePaths } from './utils/auth/credentials_paths.mjs';
 import { recordStackRuntimeStart } from './utils/stack/runtime_state.mjs';
 import { writeStubHappierCliFiles } from './testkit/core/stub_happier_cli_files.mjs';
 
@@ -1296,19 +1297,51 @@ process.exit(0);
   };
 }
 
-async function writePathResolvedRuntimeCommand({ binDir, stopMode = 'kill-state' } = {}) {
+async function writePathResolvedRuntimeCommand({
+  binDir,
+  stopMode = 'kill-state',
+  preStartObservationPath = '',
+  preStartStatePath = '',
+  preStartLockPath = '',
+} = {}) {
   await mkdir(binDir, { recursive: true });
   const commandPath = join(binDir, 'happier-runtime-cmd');
+  const observedStatePathLine = preStartStatePath
+    ? `STATE=${shellQuote(preStartStatePath)}`
+    : '';
+  const preStartObservation = preStartObservationPath
+    ? `"${process.execPath}" -e ${shellQuote(`
+const fs = require('node:fs');
+const readExact = (path) => {
+  try {
+    return fs.readFileSync(path, 'utf-8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    throw error;
+  }
+};
+fs.writeFileSync(
+  process.argv[3],
+  JSON.stringify({
+    stateRaw: readExact(process.argv[1]),
+    lockRaw: readExact(process.argv[2]),
+  }),
+  'utf-8',
+);
+`)} ${shellQuote(preStartStatePath)} ${shellQuote(preStartLockPath)} ${shellQuote(preStartObservationPath)} || exit $?`
+    : '';
   const script = `#!/bin/sh
 HOME_DIR="${'$'}{HAPPIER_HOME_DIR:-${'$'}{HAPPIER_STACK_CLI_HOME_DIR:-}}"
 if [ -z "$HOME_DIR" ]; then
   exit 2
 fi
 STATE="$HOME_DIR/daemon.state.json"
+${observedStatePathLine}
 case "$1" in
   daemon)
     case "$2" in
       start)
+        ${preStartObservation}
         "${process.execPath}" -e ${shellQuote(FAKE_PING_AWARE_DAEMON_CHILD_SCRIPT)} "$STATE" daemon start >/dev/null 2>&1 &
         exit 0
         ;;
@@ -3277,6 +3310,86 @@ test('startLocalDaemonWithAuth kills the daemon from daemon.state.json when daem
       internalServerUrl,
       cliHomeDir,
       env,
+    });
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('startLocalDaemonWithAuth preserves exact daemon publication bytes until the replacement CLI starts', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-owner-publication-'));
+  try {
+    const { internalServerUrl, publicServerUrl } = await reserveLoopbackServerUrls();
+    const cliHomeDir = join(tmp, 'stack', 'cli');
+    const binDir = join(tmp, 'bin');
+    const observationPath = join(tmp, 'pre-start-publication.json');
+    const env = buildDaemonDistGuardEnv({
+      HAPPIER_STACK_CLI_BUILD: '0',
+      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    });
+    const daemonEnv = getDaemonEnv({
+      baseEnv: env,
+      cliHomeDir,
+      internalServerUrl,
+      publicServerUrl,
+      stackName: 'dev',
+      cliIdentity: 'default',
+    });
+    const {
+      serverScopedStatePath: statePath,
+      serverScopedLockPath: lockPath,
+    } = resolveStackDaemonStatePaths({
+      cliHomeDir,
+      serverUrl: internalServerUrl,
+      env: daemonEnv,
+    });
+    const stateRaw = JSON.stringify({
+      pid: 999999,
+      httpPort: 4321,
+      startTime: '2026-07-30T12:00:00.000Z',
+      marker: 'exact-predecessor-publication',
+    }) + '\n';
+    const lockRaw = '999999\n';
+    const { cliCommand } = await writePathResolvedRuntimeCommand({
+      binDir,
+      stopMode: 'noop',
+      preStartObservationPath: observationPath,
+      preStartStatePath: statePath,
+      preStartLockPath: lockPath,
+    });
+
+    await mkdir(cliHomeDir, { recursive: true });
+    await writeFile(join(cliHomeDir, 'access.key'), 'dummy\n', 'utf-8');
+    await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
+    await mkdir(dirname(statePath), { recursive: true });
+    await writeFile(statePath, stateRaw, 'utf-8');
+    await writeFile(lockPath, lockRaw, 'utf-8');
+
+    await startLocalDaemonWithAuth({
+      cliBin: join(tmp, 'runtime', 'cli', 'happier'),
+      cliCommand,
+      cliHomeDir,
+      internalServerUrl,
+      publicServerUrl,
+      isShuttingDown: () => false,
+      forceRestart: true,
+      env,
+      stackName: 'dev',
+      cliIdentity: 'default',
+    });
+
+    const observed = JSON.parse(await readFile(observationPath, 'utf-8'));
+    assert.equal(observed.stateRaw, stateRaw);
+    assert.equal(observed.lockRaw, lockRaw);
+
+    await stopLocalDaemon({
+      cliBin: join(tmp, 'runtime', 'cli', 'happier'),
+      cliCommand,
+      internalServerUrl,
+      cliHomeDir,
+      env,
+      stackName: 'dev',
+      cliIdentity: 'default',
     });
   } finally {
     await rm(tmp, { recursive: true, force: true });
