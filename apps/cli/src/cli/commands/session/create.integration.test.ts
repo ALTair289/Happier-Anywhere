@@ -12,7 +12,7 @@ import { deriveBoxPublicKeyFromSeed, sealEncryptedDataKeyEnvelopeV1 } from '@hap
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
 import { captureConsoleJsonOutput } from '@/testkit/logger/captureOutput';
-import { clearDaemonState, writeDaemonState } from '@/persistence';
+import { clearDaemonStateForTests, writeDaemonState } from '@/persistence';
 import { createPendingFirstInput } from '@/daemon/spawn/pendingFirstInput';
 import { SESSION_CREATE_USAGE } from './create/parseSessionCreateSpawnOptions';
 
@@ -221,7 +221,7 @@ describe('happier session create (integration)', () => {
   });
 
   afterEach(async () => {
-    await clearDaemonState();
+    await clearDaemonStateForTests();
     if (server) {
       await new Promise<void>((resolve, reject) => {
         server!.close((error) => (error ? reject(error) : resolve()));

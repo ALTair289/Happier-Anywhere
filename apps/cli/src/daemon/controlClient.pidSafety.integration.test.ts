@@ -82,8 +82,8 @@ describe.sequential('daemon control client PID safety', () => {
 
       // Process should still be alive (PID reuse safety).
       expect(() => process.kill(child.pid!, 0)).not.toThrow();
-      // Stale daemon state should be removed so future control commands can recover.
-      expect(existsSync(configuration.daemonStateFile)).toBe(false);
+      // An unrelated PID is not proof that this caller owns the persisted publication.
+      expect(existsSync(configuration.daemonStateFile)).toBe(true);
     } finally {
       removeTempDirSync(homeDir);
     }
@@ -180,7 +180,7 @@ describe.sequential('daemon control client PID safety', () => {
         'utf-8',
       );
       expect(await checkIfDaemonRunningAndCleanupStaleState()).toBe(false);
-      expect(existsSync(configuration.daemonStateFile)).toBe(false);
+      expect(existsSync(configuration.daemonStateFile)).toBe(true);
     } finally {
       vi.unstubAllGlobals();
       await app.close();

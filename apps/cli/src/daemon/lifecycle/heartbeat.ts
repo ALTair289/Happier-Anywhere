@@ -2,7 +2,7 @@ import { readFileSync } from 'fs';
 
 import type { ApiMachineClient } from '@/api/apiMachine';
 import type { DaemonLocallyPersistedState } from '@/persistence';
-import { readDaemonState, writeDaemonState } from '@/persistence';
+import { readDaemonState, writeDaemonStateIfLockOwned } from '@/persistence';
 import { projectPath } from '@/projectPath';
 import { logger } from '@/ui/logger';
 import { gcExecutionRunMarkers } from '@/daemon/executionRunRegistry';
@@ -315,12 +315,13 @@ export function startDaemonHeartbeatLoop(params: Readonly<{
         });
       }
 
-      // Before recklessly overwriting the daemon state file, we should check if we are the ones who own it
-      // Race condition is possible, but thats okay for the time being :D
+      // Observe an already-published successor before constructing this heartbeat. The subsequent
+      // owner-gated write closes the lock handoff race between this read and publication.
       const daemonState = await readDaemonState();
       if (daemonState && daemonState.pid !== process.pid) {
         logger.debug('[DAEMON RUN] Somehow a different daemon was started without killing us. We should kill ourselves.');
         requestShutdown('exception', 'A different daemon was started without killing us. We should kill ourselves.');
+        return;
       }
 
       // Heartbeat
@@ -342,7 +343,10 @@ export function startDaemonHeartbeatLoop(params: Readonly<{
           daemonLogPath: fileState.daemonLogPath,
           controlToken: fileState.controlToken,
         };
-        writeDaemonState(updatedState);
+        if (!writeDaemonStateIfLockOwned(updatedState)) {
+          requestShutdown('exception', 'Daemon lifecycle lock ownership changed before heartbeat publication.');
+          return;
+        }
         if (process.env.DEBUG) {
           logger.debug(
             `[DAEMON RUN] Health check completed at ${new Date(updatedState.lastHeartbeatAt ?? Date.now()).toISOString()}`,

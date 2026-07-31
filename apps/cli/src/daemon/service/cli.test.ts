@@ -855,7 +855,7 @@ describe('runDaemonServiceCliCommand', () => {
         commandExistsInPath: vi.fn(() => true),
       }));
 
-      const [{ runDaemonServiceCliCommand }, { clearDaemonState }] = await Promise.all([
+      const [{ runDaemonServiceCliCommand }, { clearDaemonStateForTests: clearDaemonState }] = await Promise.all([
         loadCliModule(),
         import('@/persistence'),
       ]);
@@ -915,7 +915,7 @@ describe('runDaemonServiceCliCommand', () => {
       }));
 
       try {
-        const [{ runDaemonServiceCliCommand }, { clearDaemonState }] = await Promise.all([
+        const [{ runDaemonServiceCliCommand }, { clearDaemonStateForTests: clearDaemonState }] = await Promise.all([
           loadCliModule(),
           import('@/persistence'),
         ]);
@@ -1051,7 +1051,7 @@ describe('runDaemonServiceCliCommand', () => {
       const controlClient = await import('@/daemon/controlClient');
       vi.spyOn(controlClient, 'stopDaemon').mockImplementation(stopDaemonMock);
 
-      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { writeDaemonState, clearDaemonState }] = await Promise.all([
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { writeDaemonState, clearDaemonStateForTests: clearDaemonState }] = await Promise.all([
         loadCliModule(),
         import('@/persistence'),
       ]);
@@ -1281,7 +1281,7 @@ describe('runDaemonServiceCliCommand', () => {
         commandExistsInPath: vi.fn(() => true),
       }));
 
-      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonState }] = await Promise.all([
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonStateForTests: clearDaemonState }] = await Promise.all([
         loadCliModule(),
         import('@/persistence'),
       ]);
@@ -1351,7 +1351,7 @@ describe('runDaemonServiceCliCommand', () => {
         commandExistsInPath: vi.fn(() => true),
       }));
 
-      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonState, writeCredentialsLegacy, writeDaemonState }, { configuration }] = await Promise.all([
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonStateForTests: clearDaemonState, writeCredentialsLegacy, writeDaemonState }, { configuration }] = await Promise.all([
         loadCliModule(),
         import('@/persistence'),
         import('@/configuration'),
@@ -1423,7 +1423,7 @@ describe('runDaemonServiceCliCommand', () => {
         commandExistsInPath: vi.fn(() => true),
       }));
 
-      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonState, writeCredentialsLegacy, writeDaemonState }, { configuration }] = await Promise.all([
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonStateForTests: clearDaemonState, writeCredentialsLegacy, writeDaemonState }, { configuration }] = await Promise.all([
         loadCliModule(),
         import('@/persistence'),
         import('@/configuration'),
@@ -1499,7 +1499,7 @@ describe('runDaemonServiceCliCommand', () => {
         commandExistsInPath: vi.fn(() => true),
       }));
 
-      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonState, writeCredentialsLegacy, writeDaemonState }, { configuration }] = await Promise.all([
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonStateForTests: clearDaemonState, writeCredentialsLegacy, writeDaemonState }, { configuration }] = await Promise.all([
         loadCliModule(),
         import('@/persistence'),
         import('@/configuration'),
@@ -1782,7 +1782,7 @@ describe('runDaemonServiceCliCommand', () => {
       }));
 
       const controlClient = await import('@/daemon/controlClient');
-      const [{ clearDaemonState, writeDaemonState }, { configuration }] = await Promise.all([
+      const [{ clearDaemonStateForTests: clearDaemonState, writeDaemonState }, { configuration }] = await Promise.all([
         import('@/persistence'),
         import('@/configuration'),
       ]);
@@ -1887,7 +1887,7 @@ describe('runDaemonServiceCliCommand', () => {
       }));
 
       const controlClient = await import('@/daemon/controlClient');
-      const [{ clearDaemonState, writeDaemonState }, { configuration }] = await Promise.all([
+      const [{ clearDaemonStateForTests: clearDaemonState, writeDaemonState }, { configuration }] = await Promise.all([
         import('@/persistence'),
         import('@/configuration'),
       ]);
@@ -2278,7 +2278,7 @@ describe('runDaemonServiceCliCommand', () => {
         commandExistsInPath: vi.fn(() => true),
       }));
 
-      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonState }] = await Promise.all([
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonStateForTests: clearDaemonState }] = await Promise.all([
         loadCliModule(),
         import('@/persistence'),
       ]);

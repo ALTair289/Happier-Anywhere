@@ -194,6 +194,7 @@ vi.mock('@/backends/catalog', async () => {
 
 vi.mock('@/persistence', () => ({
     writeDaemonState: vi.fn(),
+    writeDaemonStateIfLockOwned: vi.fn(() => true),
     writeConnectedServiceBrokerState: vi.fn(),
     clearDaemonState: vi.fn(async () => {}),
     acquireDaemonLock: vi.fn(async () => harness.lockHandle),

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { createTempDirSync, removeTempDirSync } from '@/testkit/fs/tempDir';
 
@@ -101,6 +102,7 @@ describe('stopDaemon: graceful wait before force kill', () => {
         return undefined as any;
       }) as any);
 
+      mkdirSync(dirname(configuration.daemonStateFile), { recursive: true });
       writeFileSync(
         configuration.daemonStateFile,
         JSON.stringify(
@@ -120,7 +122,11 @@ describe('stopDaemon: graceful wait before force kill', () => {
       const { existsSync } = await import('node:fs');
       expect(existsSync(configuration.daemonStateFile)).toBe(true);
 
-      const { readDaemonState } = await import('@/persistence');
+      const {
+        readDaemonState,
+        writeConnectedServiceBrokerState,
+        writeDaemonState,
+      } = await import('@/persistence');
       const persisted = await readDaemonState();
       expect(persisted?.pid).toBe(daemonPid);
 
@@ -133,6 +139,18 @@ describe('stopDaemon: graceful wait before force kill', () => {
 
       setTimeout(() => {
         alive = false;
+        writeDaemonState({
+          pid: daemonPid + 1,
+          httpPort: daemonPort + 1,
+          startedAt: Date.now() + 1,
+          startedWithCliVersion: '0.0.0-test',
+          runtimeId: 'runtime-successor',
+          controlToken: 'successor-control-token',
+        });
+        writeConnectedServiceBrokerState({
+          httpPort: daemonPort + 1,
+          connectedServiceBrokerRefreshToken: 'successor-broker-capability',
+        });
       }, 3000);
 
       const stopPromise = stopDaemon();
@@ -143,7 +161,14 @@ describe('stopDaemon: graceful wait before force kill', () => {
 
       expect(fetchMock).toHaveBeenCalled();
       expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2);
-      expect(existsSync(configuration.daemonStateFile)).toBe(false);
+      expect(JSON.parse(readFileSync(configuration.daemonStateFile, 'utf8'))).toMatchObject({
+        pid: daemonPid + 1,
+        runtimeId: 'runtime-successor',
+      });
+      expect(JSON.parse(readFileSync(configuration.connectedServiceBrokerStateFile, 'utf8'))).toEqual({
+        httpPort: daemonPort + 1,
+        connectedServiceBrokerRefreshToken: 'successor-broker-capability',
+      });
 
       const forceSignals = killSpy.mock.calls
         .map(([, signal]) => signal)
@@ -154,7 +179,7 @@ describe('stopDaemon: graceful wait before force kill', () => {
     }
   });
 
-  it('falls back to the lock-file pid when daemon state is temporarily missing', async () => {
+  it('does not kill or delete a lock-only startup without daemon-state ownership proof', async () => {
     const homeDir = createTempDirSync('happier-cli-daemon-stop-lock-fallback-');
     envScope.patch({
       HAPPIER_HOME_DIR: homeDir,
@@ -192,6 +217,7 @@ describe('stopDaemon: graceful wait before force kill', () => {
         return undefined as any;
       }) as any);
 
+      mkdirSync(dirname(configuration.daemonLockFile), { recursive: true });
       writeFileSync(configuration.daemonLockFile, String(daemonPid), 'utf-8');
 
       expect(existsSync(configuration.daemonStateFile)).toBe(false);
@@ -199,10 +225,11 @@ describe('stopDaemon: graceful wait before force kill', () => {
 
       await stopDaemon();
 
-      expect(killSpy).toHaveBeenCalledWith(daemonPid, 'SIGTERM');
-      expect(alive).toBe(false);
+      expect(killSpy).toHaveBeenCalledTimes(1);
+      expect(killSpy).toHaveBeenCalledWith(daemonPid, 0);
+      expect(alive).toBe(true);
       expect(existsSync(configuration.daemonStateFile)).toBe(false);
-      expect(existsSync(configuration.daemonLockFile)).toBe(false);
+      expect(existsSync(configuration.daemonLockFile)).toBe(true);
     } finally {
       removeTempDirSync(homeDir);
     }

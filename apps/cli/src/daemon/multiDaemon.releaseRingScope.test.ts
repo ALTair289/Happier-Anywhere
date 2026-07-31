@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -298,6 +298,16 @@ describe('multiDaemon release ring scoping', () => {
       const legacyOrphanStatePath = join(orphanServerDir, 'daemon.dev.state.json');
       writeFileSync(canonicalOrphanStatePath, orphanState, 'utf-8');
       writeFileSync(legacyOrphanStatePath, orphanState, 'utf-8');
+      const staleServerDir = join(homeDir, 'servers', 'stale');
+      const staleStatePath = join(staleServerDir, 'daemon.state.json');
+      const staleStateRaw = JSON.stringify({
+        pid: Number.MAX_SAFE_INTEGER,
+        httpPort: 7791,
+        startedAt: Date.now(),
+        startedWithCliVersion: '0.1.2',
+      }) + '\n';
+      mkdirSync(staleServerDir, { recursive: true });
+      writeFileSync(staleStatePath, staleStateRaw, 'utf-8');
 
       vi.resetModules();
       const { reapSameHomeDaemonOrphansBeforeStart } = await import('./multiDaemon');
@@ -308,8 +318,9 @@ describe('multiDaemon release ring scoping', () => {
       expect(result.preservedPids).toContain(process.pid);
       expect(() => process.kill(process.pid, 0)).not.toThrow();
       expect(() => process.kill(orphan.pid, 0)).toThrow();
-      expect(existsSync(canonicalOrphanStatePath)).toBe(false);
-      expect(existsSync(legacyOrphanStatePath)).toBe(false);
+      expect(existsSync(canonicalOrphanStatePath)).toBe(true);
+      expect(existsSync(legacyOrphanStatePath)).toBe(true);
+      expect(readFileSync(staleStatePath, 'utf-8')).toBe(staleStateRaw);
     } finally {
       await orphan.kill();
     }

@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { readdir, readFile, unlink } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { createServerUrlComparableKey } from '@happier-dev/protocol';
@@ -35,7 +35,6 @@ type SameHomeDaemonStateRecord = Readonly<{
 export type SameHomeDaemonOrphanReapResult = Readonly<{
   stoppedPids: readonly number[];
   preservedPids: readonly number[];
-  removedStaleStatePaths: readonly string[];
   failedPids: readonly number[];
 }>;
 
@@ -350,7 +349,7 @@ function hasUsableControlToken(state: NormalizedDaemonState): boolean {
 /**
  * Best-effort stop for all daemons found in known server profiles.
  * Safety: does not force-kill processes; uses the daemon control HTTP endpoint.
- * Also clears stale state files when the PID is not alive.
+ * Daemon publication cleanup remains owned by the daemon lifecycle lock.
  */
 export async function stopAllDaemonsBestEffort(opts: StopDaemonOptions = {}): Promise<void> {
   const statuses = await listDaemonStatusesForAllKnownServers();
@@ -359,26 +358,12 @@ export async function stopAllDaemonsBestEffort(opts: StopDaemonOptions = {}): Pr
     const state = await readDaemonStateFromPath(statePath);
     if (!state) continue;
 
-    if (!isPidAlive(state.pid)) {
-      try {
-        await unlink(statePath);
-      } catch {
-        // ignore
-      }
-      continue;
-    }
+    if (!isPidAlive(state.pid)) continue;
 
     const stopped = await stopDaemonViaHttpBestEffort(state, opts);
     if (!stopped) continue;
 
-    const exited = await waitForProcessDeath(state.pid, 2500);
-    if (!exited) continue;
-
-    try {
-      await unlink(statePath);
-    } catch {
-      // ignore
-    }
+    await waitForProcessDeath(state.pid, 2500);
   }
 }
 
@@ -393,26 +378,17 @@ export async function reapSameHomeDaemonOrphansBeforeStart(
   );
   const stoppedPids = new Set<number>();
   const preservedPids = new Set<number>();
-  const removedStaleStatePaths = new Set<string>();
   const failedPids = new Set<number>();
   const stoppedOrAttemptedPids = new Set<number>();
 
   for (const record of await listSameHomeDaemonStateRecords()) {
-    const { state, statePath } = record;
+    const { state } = record;
     if (preservePids.has(state.pid)) {
       preservedPids.add(state.pid);
       continue;
     }
 
-    if (!isPidAlive(state.pid)) {
-      try {
-        await unlink(statePath);
-        removedStaleStatePaths.add(statePath);
-      } catch {
-        // Best effort cleanup only.
-      }
-      continue;
-    }
+    if (!isPidAlive(state.pid)) continue;
 
     if (stoppedOrAttemptedPids.has(state.pid)) {
       continue;
@@ -437,18 +413,11 @@ export async function reapSameHomeDaemonOrphansBeforeStart(
     }
 
     stoppedPids.add(state.pid);
-    try {
-      await unlink(statePath);
-      removedStaleStatePaths.add(statePath);
-    } catch {
-      // Best effort cleanup only.
-    }
   }
 
   return {
     stoppedPids: [...stoppedPids],
     preservedPids: [...preservedPids],
-    removedStaleStatePaths: [...removedStaleStatePaths],
     failedPids: [...failedPids],
   };
 }

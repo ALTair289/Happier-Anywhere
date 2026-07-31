@@ -4,7 +4,7 @@
  */
 
 import { logger } from '@/ui/logger';
-import { clearDaemonState, readDaemonState } from '@/persistence';
+import { readDaemonState } from '@/persistence';
 import { Metadata } from '@/api/types';
 import { projectPath } from '@/projectPath';
 import { existsSync, readFileSync, statSync } from 'fs';
@@ -268,8 +268,7 @@ export async function inspectDaemonRunningStateAndCleanupStaleState(): Promise<D
   }
 
   if (state.controlToken && (!state.httpPort || typeof state.httpPort !== 'number')) {
-    logger.debug('[DAEMON RUN] Daemon state missing httpPort, cleaning up state');
-    await cleanupDaemonState();
+    logger.debug('[DAEMON RUN] Daemon state missing httpPort, preserving daemon-owned state for startup replacement');
     return { status: 'not-running' };
   }
 
@@ -300,8 +299,7 @@ export async function inspectDaemonRunningStateAndCleanupStaleState(): Promise<D
         timeoutMs: resolveDaemonPingTimeoutMs(),
       });
       if (liveness === 'unauthorized') {
-        logger.debug('[DAEMON RUN] Daemon /ping rejected control token, cleaning up state');
-        await cleanupDaemonState();
+        logger.debug('[DAEMON RUN] Daemon /ping rejected control token, preserving daemon-owned state for startup replacement');
         return { status: 'not-running' };
       }
       if (liveness === 'pid_not_running') {
@@ -954,15 +952,6 @@ export async function isDaemonRunningCurrentlyInstalledHappyVersion(params: Read
   }
 }
 
-export async function cleanupDaemonState(): Promise<void> {
-  try {
-    await clearDaemonState();
-    logger.debug('[DAEMON RUN] Daemon state file removed');
-  } catch (error) {
-    logger.debug('[DAEMON RUN] Error cleaning up daemon metadata', error);
-  }
-}
-
 function readDaemonLockPid(): number | null {
   try {
     if (!existsSync(configuration.daemonLockFile)) {
@@ -987,7 +976,6 @@ async function forceKillKnownDaemonPid(pid: number): Promise<void> {
   const safeToKill = proc?.type === 'daemon' || proc?.type === 'dev-daemon';
   if (!safeToKill) {
     logger.warn(`[CONTROL CLIENT] Refusing to force-kill PID ${pid} (does not look like a happier daemon process)`);
-    await cleanupDaemonState();
     return;
   }
 
@@ -1000,11 +988,9 @@ async function forceKillKnownDaemonPid(pid: number): Promise<void> {
     } catch {
       // already exited
     }
-    await cleanupDaemonState();
     logger.debug('Force killed daemon (SIGTERM/SIGKILL)');
   } catch (error) {
     logger.debug('Daemon already dead');
-    await cleanupDaemonState();
   }
 }
 
@@ -1041,7 +1027,6 @@ export async function stopDaemon(params: { stopSessions?: boolean } = {}) {
 
       // Wait for daemon to die
       await waitForProcessDeath(state.pid, resolveDaemonStopWaitForDeathTimeoutMs());
-      await cleanupDaemonState();
       logger.debug('Daemon stopped gracefully via HTTP');
       return;
     } catch (error) {

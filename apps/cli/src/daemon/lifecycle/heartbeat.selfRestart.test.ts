@@ -13,7 +13,7 @@ vi.mock('fs', async (importOriginal) => {
 
 vi.mock('@/persistence', () => ({
   readDaemonState: vi.fn(),
-  writeDaemonState: vi.fn(),
+  writeDaemonStateIfLockOwned: vi.fn(),
 }));
 
 vi.mock('@/daemon/runtime/spawnDetachedDaemonStartSync', () => ({
@@ -31,7 +31,7 @@ vi.mock('@/ui/logger', () => ({
 
 import { readFileSync } from 'fs';
 
-import { readDaemonState, writeDaemonState } from '@/persistence';
+import { readDaemonState, writeDaemonStateIfLockOwned } from '@/persistence';
 import { spawnDetachedDaemonStartSync } from '@/daemon/runtime/spawnDetachedDaemonStartSync';
 import { spawnSleepyDetachedProcess } from '@/daemon/testkit/fakeDaemonLifecycle.testkit';
 
@@ -209,7 +209,11 @@ describe('startDaemonHeartbeatLoop daemon self-restart', () => {
         }) as any);
 
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ version: '2.0.0' }) as any);
-      vi.mocked(spawnDetachedDaemonStartSync).mockResolvedValue({ unref: vi.fn() } as any);
+      let selfRestartCorrelationId = '';
+      vi.mocked(spawnDetachedDaemonStartSync).mockImplementation(async (options) => {
+        selfRestartCorrelationId = String(options?.env?.HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID ?? '');
+        return { unref: vi.fn() } as any;
+      });
       vi.mocked(readDaemonState)
         .mockResolvedValueOnce({
           pid: process.pid,
@@ -223,8 +227,18 @@ describe('startDaemonHeartbeatLoop daemon self-restart', () => {
           startedAt: Date.now(),
           startedWithCliVersion: '2.0.0',
           runtimeId: 'runtime-heartbeat-confirmed',
+          selfRestartCorrelationId,
           controlToken: 'replacement-control-token',
-        });
+        })
+        .mockImplementation(async () => ({
+          pid: replacement.pid,
+          httpPort: 7002,
+          startedAt: Date.now(),
+          startedWithCliVersion: '2.0.0',
+          runtimeId: 'runtime-heartbeat-confirmed',
+          selfRestartCorrelationId,
+          controlToken: 'replacement-control-token',
+        }));
       vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
         if (
@@ -339,11 +353,116 @@ describe('startDaemonHeartbeatLoop daemon self-restart', () => {
     expect(tick).toBeTypeOf('function');
     await tick!();
 
-    expect(vi.mocked(writeDaemonState)).toHaveBeenCalledWith(expect.objectContaining({
+    expect(vi.mocked(writeDaemonStateIfLockOwned)).toHaveBeenCalledWith(expect.objectContaining({
       startedWithPublicReleaseChannel: 'preview',
       runtimeId: 'runtime-heartbeat',
       startupSource: 'background-service',
       serviceLabel: 'com.happier.cli.daemon.default',
     }));
+  }, 15_000);
+
+  it('requests shutdown without overwriting a successor daemon publication', async () => {
+    happyHomeDir = join(tmpdir(), `happier-cli-heartbeat-successor-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    process.env.HAPPIER_HOME_DIR = happyHomeDir;
+    mkdirSync(join(happyHomeDir, 'logs'), { recursive: true });
+    process.env.HAPPIER_DAEMON_HEARTBEAT_INTERVAL = '1';
+
+    vi.resetModules();
+
+    let tick: (() => Promise<void>) | undefined;
+    vi.spyOn(global, 'setInterval').mockImplementation(((handler: (...args: any[]) => any) => {
+      tick = handler as unknown as () => Promise<void>;
+      return 1 as any;
+    }) as any);
+
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ version: '1.0.0' }) as any);
+    vi.mocked(readDaemonState).mockReset().mockResolvedValue({
+      pid: process.pid + 1,
+      httpPort: 9876,
+      startedAt: Date.now(),
+      startedWithCliVersion: '1.0.0',
+      runtimeId: 'runtime-successor',
+      controlToken: 'successor-control-token',
+    });
+    vi.mocked(writeDaemonStateIfLockOwned).mockClear();
+    const requestShutdown = vi.fn();
+
+    const { startDaemonHeartbeatLoop } = await import('./heartbeat');
+
+    startDaemonHeartbeatLoop({
+      pidToTrackedSession: new Map(),
+      spawnResourceCleanupByPid: new Map(),
+      sessionAttachCleanupByPid: new Map(),
+      getApiMachineForSessions: () => null,
+      controlPort: 8765,
+      fileState: {
+        pid: process.pid,
+        httpPort: 8765,
+        startedAt: Date.now(),
+        startedWithCliVersion: '1.0.0',
+        runtimeId: 'runtime-retiring',
+        controlToken: 'retiring-control-token',
+      },
+      currentCliVersion: '1.0.0',
+      requestShutdown,
+    });
+
+    expect(tick).toBeTypeOf('function');
+    await tick!();
+
+    expect(requestShutdown).toHaveBeenCalledTimes(1);
+    expect(writeDaemonStateIfLockOwned).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('fails closed when a successor takes the lifecycle lock after ownership is read', async () => {
+    happyHomeDir = join(tmpdir(), `happier-cli-heartbeat-lock-successor-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    process.env.HAPPIER_HOME_DIR = happyHomeDir;
+    mkdirSync(join(happyHomeDir, 'logs'), { recursive: true });
+    process.env.HAPPIER_DAEMON_HEARTBEAT_INTERVAL = '1';
+
+    vi.resetModules();
+
+    let tick: (() => Promise<void>) | undefined;
+    vi.spyOn(global, 'setInterval').mockImplementation(((handler: (...args: any[]) => any) => {
+      tick = handler as unknown as () => Promise<void>;
+      return 1 as any;
+    }) as any);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ version: '1.0.0' }) as any);
+    vi.mocked(readDaemonState).mockReset().mockResolvedValue({
+      pid: process.pid,
+      httpPort: 8765,
+      startedAt: Date.now(),
+      startedWithCliVersion: '1.0.0',
+    });
+    vi.mocked(writeDaemonStateIfLockOwned).mockReset().mockReturnValue(false);
+    const requestShutdown = vi.fn();
+
+    const { startDaemonHeartbeatLoop } = await import('./heartbeat');
+    startDaemonHeartbeatLoop({
+      pidToTrackedSession: new Map(),
+      spawnResourceCleanupByPid: new Map(),
+      sessionAttachCleanupByPid: new Map(),
+      getApiMachineForSessions: () => null,
+      controlPort: 8765,
+      fileState: {
+        pid: process.pid,
+        httpPort: 8765,
+        startedAt: Date.now(),
+        startedWithCliVersion: '1.0.0',
+      },
+      currentCliVersion: '1.0.0',
+      requestShutdown,
+    });
+
+    expect(tick).toBeTypeOf('function');
+    await tick!();
+
+    expect(writeDaemonStateIfLockOwned).toHaveBeenCalledTimes(1);
+    expect(writeDaemonStateIfLockOwned).toHaveReturnedWith(false);
+    expect(requestShutdown).toHaveBeenCalledTimes(1);
+    expect(requestShutdown).toHaveBeenCalledWith(
+      'exception',
+      'Daemon lifecycle lock ownership changed before heartbeat publication.',
+    );
   }, 15_000);
 });

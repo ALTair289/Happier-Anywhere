@@ -14,7 +14,7 @@ vi.mock('fs', async (importOriginal) => {
 
 vi.mock('@/persistence', () => ({
     readDaemonState: vi.fn(),
-    writeDaemonState: vi.fn(),
+    writeDaemonStateIfLockOwned: vi.fn(),
 }));
 
 describe('startDaemonHeartbeatLoop workspace replication gc', () => {

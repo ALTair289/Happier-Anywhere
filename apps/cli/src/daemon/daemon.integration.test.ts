@@ -22,7 +22,7 @@ import {
   stopDaemon,
   checkIfDaemonRunningAndCleanupStaleState,
 } from '@/daemon/controlClient';
-import { readCredentials, readDaemonState, clearDaemonState, writeDaemonState } from '@/persistence';
+import { readCredentials, readDaemonState, clearDaemonStateForTests, writeDaemonState } from '@/persistence';
 import { Metadata } from '@/api/types';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { getLatestDaemonLog } from '@/ui/logger';
@@ -151,7 +151,7 @@ describe('ensureDaemonFullyStoppedBeforeRestart helper', () => {
     try {
       process.env.HAPPIER_HOME_DIR = tempHomeDir;
       reloadConfiguration();
-      await clearDaemonState();
+      await clearDaemonStateForTests();
 
       child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
         stdio: 'ignore',
@@ -716,7 +716,7 @@ describe.skipIf(!daemonIntegrationSuiteEnabled)('Daemon Integration Tests', { ti
     expect(finalLogs.length).toBeGreaterThanOrEqual(initialLogs.length);
     
     // Clean up state file manually since daemon couldn't do it
-    await clearDaemonState();
+    await clearDaemonStateForTests();
   });
 
   it('should die with cleanup logs when SIGTERM is sent', async () => {
@@ -747,7 +747,7 @@ describe.skipIf(!daemonIntegrationSuiteEnabled)('Daemon Integration Tests', { ti
     expect(logContent).toContain('cleanup');
     
     // Clean up state file if it still exists (should have been cleaned by SIGTERM handler)
-    await clearDaemonState();
+    await clearDaemonStateForTests();
   });
 
   it('should detect daemon version mismatch and restart without workspace mutation', { timeout: 120_000 }, async () => {

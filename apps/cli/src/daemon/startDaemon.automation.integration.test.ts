@@ -451,16 +451,25 @@ vi.mock('@/backends/catalog', async (importOriginal) => ({
   notifyTerminalAttachmentRetiredThroughCatalog: vi.fn(async () => {}),
 }));
 
-vi.mock('@/persistence', () => ({
-  writeDaemonState: vi.fn(),
-  writeConnectedServiceBrokerState: vi.fn(),
-  acquireDaemonLock: vi.fn(async () => harness.lockHandle),
-  releaseDaemonLock: vi.fn(async () => {}),
-  readCredentials: vi.fn(async () => null),
-  readSettings: vi.fn(async () => ({ experiments: true })),
-  readAccountChangesCursor: harness.readAccountChangesCursor,
-  writeAccountChangesCursor: harness.writeAccountChangesCursor,
-}));
+vi.mock('@/persistence', () => {
+  const writeDaemonState = vi.fn();
+  const clearDaemonState = vi.fn(async () => true);
+  return {
+    clearDaemonState,
+    writeDaemonState,
+    writeDaemonStateIfLockOwned: vi.fn((state: unknown) => {
+      writeDaemonState(state);
+      return true;
+    }),
+    writeConnectedServiceBrokerState: vi.fn(),
+    acquireDaemonLock: vi.fn(async () => harness.lockHandle),
+    releaseDaemonLock: vi.fn(async () => {}),
+    readCredentials: vi.fn(async () => null),
+    readSettings: vi.fn(async () => ({ experiments: true })),
+    readAccountChangesCursor: harness.readAccountChangesCursor,
+    writeAccountChangesCursor: harness.writeAccountChangesCursor,
+  };
+});
 
 vi.mock('@/settings/accountSettings/activeAccountSettingsSnapshot', () => ({
   getActiveAccountSettingsSnapshot: vi.fn(() => harness.getActiveAccountSettingsSnapshot()),
@@ -1344,6 +1353,122 @@ describe('startDaemon automation wiring (integration)', () => {
         process.env.HAPPIER_DAEMON_MACHINE_REGISTRATION_RETRY_JITTER_MS = retryJitterOriginal;
       }
       vi.useRealTimers();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('does not publish delayed machine registration after shutdown begins', async () => {
+    vi.useRealTimers();
+    harness.setAutoShutdownAfterAutomationStart(false);
+
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const registration = createDeferred<Awaited<ReturnType<
+      typeof import('@/api/machine/ensureMachineRegistered').ensureMachineRegistered
+    >>>();
+    const startupSourceOriginal = process.env.HAPPIER_DAEMON_STARTUP_SOURCE;
+    const selfRestartCorrelationIdOriginal = process.env.HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID;
+    const selfRestartDeadlineMsOriginal = process.env.HAPPIER_DAEMON_SELF_RESTART_DEADLINE_MS;
+    let run: Promise<void> | null = null;
+
+    try {
+      process.env.HAPPIER_DAEMON_STARTUP_SOURCE = 'self-restart';
+      process.env.HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID = 'self-restart-delayed-machine-registration';
+      process.env.HAPPIER_DAEMON_SELF_RESTART_DEADLINE_MS = String(Date.now() + 60_000);
+
+      const { ensureMachineRegistered } = await import('@/api/machine/ensureMachineRegistered');
+      vi.mocked(ensureMachineRegistered).mockImplementationOnce(() => registration.promise);
+      const { writeDaemonState } = await import('@/persistence');
+      const { startDaemon } = await import('./startDaemon');
+
+      run = startDaemon();
+      await waitForCondition(
+        () => vi.mocked(ensureMachineRegistered).mock.calls.length >= 1,
+        'Expected background machine registration to begin',
+      );
+      expect(writeDaemonState).toHaveBeenCalledTimes(1);
+
+      harness.requestShutdown('happier-cli');
+      await run;
+      run = null;
+
+      registration.resolve({
+        machineId: 'machine-after-shutdown',
+        didRotateMachineId: true,
+        machine: createRegisteredMachine('machine-after-shutdown'),
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(writeDaemonState).toHaveBeenCalledTimes(1);
+      expect(writeDaemonState).not.toHaveBeenCalledWith(expect.objectContaining({
+        machineId: 'machine-after-shutdown',
+      }));
+    } finally {
+      harness.requestShutdown('happier-cli');
+      if (run) await run;
+      restoreProcessEnvValue('HAPPIER_DAEMON_STARTUP_SOURCE', startupSourceOriginal);
+      restoreProcessEnvValue('HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID', selfRestartCorrelationIdOriginal);
+      restoreProcessEnvValue('HAPPIER_DAEMON_SELF_RESTART_DEADLINE_MS', selfRestartDeadlineMsOriginal);
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('owner-clears published daemon and broker state before releasing the lock after a fatal startup error', async () => {
+    vi.useRealTimers();
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    try {
+      const {
+        clearDaemonState,
+        releaseDaemonLock,
+        writeConnectedServiceBrokerState,
+        writeDaemonState,
+      } = await import('@/persistence');
+      const { startDaemonHeartbeatLoop } = await import('./lifecycle/heartbeat');
+      vi.mocked(startDaemonHeartbeatLoop).mockImplementationOnce(() => {
+        throw new Error('fatal after daemon publication');
+      });
+      const { startDaemon } = await import('./startDaemon');
+
+      await startDaemon();
+
+      expect(writeDaemonState).toHaveBeenCalledTimes(1);
+      expect(writeConnectedServiceBrokerState).toHaveBeenCalledTimes(1);
+      expect(clearDaemonState).toHaveBeenCalledWith({
+        expectedOwner: {
+          pid: process.pid,
+          startedAt: expect.any(Number),
+        },
+      });
+      expect(vi.mocked(clearDaemonState).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(releaseDaemonLock).mock.invocationCallOrder[0]!,
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('still releases the lifecycle lock when fatal owner cleanup fails', async () => {
+    vi.useRealTimers();
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    try {
+      const { clearDaemonState, releaseDaemonLock } = await import('@/persistence');
+      vi.mocked(clearDaemonState).mockRejectedValueOnce(new Error('fatal owner cleanup failed'));
+      const { startDaemonHeartbeatLoop } = await import('./lifecycle/heartbeat');
+      vi.mocked(startDaemonHeartbeatLoop).mockImplementationOnce(() => {
+        throw new Error('fatal after daemon publication');
+      });
+      const { startDaemon } = await import('./startDaemon');
+
+      await startDaemon();
+
+      expect(clearDaemonState).toHaveBeenCalledTimes(1);
+      expect(releaseDaemonLock).toHaveBeenCalledWith(harness.lockHandle);
+      expect(vi.mocked(clearDaemonState).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(releaseDaemonLock).mock.invocationCallOrder[0]!,
+      );
+    } finally {
       exitSpy.mockRestore();
     }
   });

@@ -59,7 +59,7 @@ import {
 } from '@/backends/catalog';
 import { CATALOG_AGENT_IDS } from '@/backends/types';
 import {
-  writeDaemonState,
+  writeDaemonStateIfLockOwned,
   writeConnectedServiceBrokerState,
   DaemonLocallyPersistedState,
   acquireDaemonLock,
@@ -1599,6 +1599,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
   const { waitForAuthEnabled, waitForAuthTimeoutMs } = resolveWaitForAuthConfig(process.env);
 
   let daemonLockHandle: Awaited<ReturnType<typeof acquireDaemonLock>> = null;
+  let publishedDaemonStateOwner: Readonly<{ pid: number; startedAt: number }> | null = null;
   const inheritedRuntimeId = String(process.env.HAPPIER_DAEMON_RUNTIME_ID ?? '').trim();
   const runtimeId = inheritedRuntimeId || randomUUID();
   const startupSource = resolveDaemonStartupSourceFromEnv(process.env);
@@ -1678,7 +1679,6 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       });
       if (
         orphanReapResult.stoppedPids.length > 0
-        || orphanReapResult.removedStaleStatePaths.length > 0
         || orphanReapResult.failedPids.length > 0
       ) {
         logger.debug('[DAEMON RUN] Same-home daemon orphan reap complete', orphanReapResult);
@@ -6645,15 +6645,22 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       controlToken,
     };
     selfRestartFileState = fileState;
+    const connectedServiceBrokerState = {
+      httpPort: controlPort,
+      connectedServiceBrokerRefreshToken: deriveConnectedServiceBrokerRefreshToken(controlToken),
+    };
     let didWriteDaemonState = false;
     const writeDaemonStateOnce = () => {
       if (didWriteDaemonState) return;
       didWriteDaemonState = true;
-      writeDaemonState(fileState);
-      writeConnectedServiceBrokerState({
-        httpPort: controlPort,
-        connectedServiceBrokerRefreshToken: deriveConnectedServiceBrokerRefreshToken(controlToken),
-      });
+      if (!writeDaemonStateIfLockOwned(fileState)) {
+        throw new Error('Daemon state publication rejected because the process no longer owns the lifecycle lock');
+      }
+      publishedDaemonStateOwner = {
+        pid: fileState.pid,
+        startedAt: fileState.startedAt,
+      };
+      writeConnectedServiceBrokerState(connectedServiceBrokerState);
       logger.debug('[DAEMON RUN] Daemon state written');
     };
     writeDaemonStateOnce();
@@ -7543,17 +7550,23 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               caller: 'startDaemon',
             });
             preflightMachineRegistration = null;
-            machineId = ensured.machineId;
-            if (fileState.machineId !== machineId) {
-              fileState.machineId = machineId;
-              writeDaemonState(fileState);
-            }
-            const machine = ensured.machine;
-            logger.debug(`[DAEMON RUN] Machine registered: ${machine.id}`);
-
             if (shutdownInitiated) {
               return;
             }
+            const ensuredMachineId = ensured.machineId;
+            if (fileState.machineId !== ensuredMachineId) {
+              const nextState: DaemonLocallyPersistedState = {
+                ...fileState,
+                machineId: ensuredMachineId,
+              };
+              if (!writeDaemonStateIfLockOwned(nextState)) {
+                return;
+              }
+              fileState.machineId = ensuredMachineId;
+            }
+            machineId = ensuredMachineId;
+            const machine = ensured.machine;
+            logger.debug(`[DAEMON RUN] Machine registered: ${machine.id}`);
 
             // Create realtime machine session
             const connectedApiMachine = diagnosticSubsystemGates.disableMachineSync
@@ -8062,8 +8075,20 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       // Clear daemon.state.json early in shutdown so callers observing "stop" don't race a later
       // heartbeat tick or long tail cleanup work (and to satisfy daemon stop integration tests).
       try {
-        await clearDaemonState({ includeLockFile: false });
-        logger.debug('[DAEMON RUN] Daemon state file removed');
+        const didClearOwnedDaemonState = await clearDaemonState({
+          expectedOwner: {
+            pid: fileState.pid,
+            startedAt: fileState.startedAt,
+          },
+        });
+        if (didClearOwnedDaemonState) {
+          publishedDaemonStateOwner = null;
+        }
+        logger.debug(
+          didClearOwnedDaemonState
+            ? '[DAEMON RUN] Daemon state file removed'
+            : '[DAEMON RUN] Daemon state file preserved because shutdown no longer owns the publication',
+        );
       } catch (error) {
         logger.debug('[DAEMON RUN] Error cleaning up daemon metadata', error);
       }
@@ -8154,12 +8179,22 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
     const shutdownRequest = await resolvesWhenShutdownRequested;
     await cleanupAndShutdown(shutdownRequest.source, shutdownRequest.errorMessage);
   } catch (error) {
-    try {
-      if (daemonLockHandle) {
-        await releaseDaemonLock(daemonLockHandle);
+    if (daemonLockHandle) {
+      if (publishedDaemonStateOwner) {
+        try {
+          await clearDaemonState({
+            expectedOwner: publishedDaemonStateOwner,
+          });
+          publishedDaemonStateOwner = null;
+        } catch {
+          // The process is terminating; lock release must still run so a later daemon can recover.
+        }
       }
-    } catch {
-      // ignore
+      try {
+        await releaseDaemonLock(daemonLockHandle);
+      } catch {
+        // ignore
+      }
     }
     if (error instanceof DaemonOwnershipConflictError) {
       process.exit(resolveDaemonOwnershipConflictExitCode(startupSource, error.owner));

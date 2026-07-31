@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
 import { reloadConfiguration } from '@/configuration';
-import { writeDaemonState, clearDaemonState } from '@/persistence';
+import { writeDaemonState, clearDaemonStateForTests } from '@/persistence';
 import * as controlClient from '@/daemon/controlClient';
 import {
   notifyDaemonConnectedServiceTurnLifecycle,
@@ -67,7 +67,7 @@ describe('daemon control client (HTTP error responses)', () => {
   let tmpHomeDir: string | null = null;
 
   afterEach(async () => {
-    await clearDaemonState();
+    await clearDaemonStateForTests();
     envScope.restore();
     envScope = createEnvKeyScope(['HAPPIER_HOME_DIR']);
     reloadConfiguration();
