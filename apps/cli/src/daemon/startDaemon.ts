@@ -1133,6 +1133,43 @@ export function resolveConnectedServiceContinuationOriginId(input: Readonly<{
   return reportId || null;
 }
 
+type ContinueAfterRuntimeAuthSwitch = (input: Readonly<{
+  sessionId: string;
+  attemptId: string;
+  action: 'hot_applied' | 'restart_requested';
+  switchReason?: ConnectedServiceSessionAuthSwitchReason;
+}>) => Promise<void>;
+
+export async function continueAfterSupersededRuntimeAuthFailure(input: Readonly<{
+  result: unknown;
+  sessionId: string;
+  interruptedOriginId?: string | null;
+  continueAfterRuntimeAuthSwitch: ContinueAfterRuntimeAuthSwitch;
+}>): Promise<boolean> {
+  if (
+    !input.result
+    || typeof input.result !== 'object'
+    || !('status' in input.result)
+    || input.result.status !== 'recovery_superseded'
+    || !('reason' in input.result)
+    || (
+      input.result.reason !== 'source_tuple_unavailable'
+      && input.result.reason !== 'source_tuple_mismatch'
+    )
+  ) {
+    return false;
+  }
+  const interruptedOriginId = input.interruptedOriginId?.trim() ?? '';
+  if (input.result.reason === 'source_tuple_mismatch' && interruptedOriginId) {
+    await input.continueAfterRuntimeAuthSwitch({
+      sessionId: input.sessionId,
+      attemptId: interruptedOriginId,
+      action: 'hot_applied',
+    });
+  }
+  return true;
+}
+
 const PREVIOUS_RUNNER_RETIRED_RESPAWN_TERMINAL_REASONS = new Set<SessionRunnerRespawnTerminalReason>([
   'already_running',
   'stop_requested',
@@ -5725,14 +5762,12 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             recoveryInvocationSource: input.source,
             classification: input.classification,
           });
-          if (
-            result
-            && typeof result === 'object'
-            && 'status' in result
-            && result.status === 'recovery_superseded'
-            && 'reason' in result
-            && (result.reason === 'source_tuple_unavailable' || result.reason === 'source_tuple_mismatch')
-          ) {
+          if (await continueAfterSupersededRuntimeAuthFailure({
+            result,
+            sessionId: input.sessionId,
+            interruptedOriginId,
+            continueAfterRuntimeAuthSwitch,
+          })) {
             return result;
           }
           if (

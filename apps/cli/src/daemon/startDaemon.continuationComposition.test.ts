@@ -1,10 +1,11 @@
 import { readFile } from 'node:fs/promises';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createConnectedServiceSwitchDeferralQueue } from './connectedServices/sessionAuthSwitch/connectedServiceSwitchDeferralQueue';
 import {
   doesRestartCompletionProvePreviousRunnerRetired,
+  continueAfterSupersededRuntimeAuthFailure,
   resolveConnectedServiceContinuationInterruptionForSwitch,
   resolveConnectedServiceContinuationOriginId,
   resolveContinuationResumePromptMode,
@@ -71,6 +72,43 @@ describe('startDaemon connected-service continuation composition', () => {
       activeTurnId: 'turn-stale',
       reportId: 'runtime-auth-report:origin-a',
     })).toBeNull();
+  });
+
+  it('enqueues one ordinary Pending continuation when a fresh interrupted report is superseded by current account truth', async () => {
+    const continueAfterRuntimeAuthSwitch = vi.fn(async () => {});
+
+    await expect(continueAfterSupersededRuntimeAuthFailure({
+      result: {
+        status: 'recovery_superseded',
+        reason: 'source_tuple_mismatch',
+      },
+      sessionId: 'session-1',
+      interruptedOriginId: 'runtime-auth-report:origin-a',
+      continueAfterRuntimeAuthSwitch,
+    })).resolves.toBe(true);
+
+    expect(continueAfterRuntimeAuthSwitch).toHaveBeenCalledOnce();
+    expect(continueAfterRuntimeAuthSwitch).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      attemptId: 'runtime-auth-report:origin-a',
+      action: 'hot_applied',
+    });
+  });
+
+  it('keeps source-unavailable supersession passive because no exact interrupted origin can be authorized', async () => {
+    const continueAfterRuntimeAuthSwitch = vi.fn(async () => {});
+
+    await expect(continueAfterSupersededRuntimeAuthFailure({
+      result: {
+        status: 'recovery_superseded',
+        reason: 'source_tuple_unavailable',
+      },
+      sessionId: 'session-1',
+      interruptedOriginId: 'runtime-auth-report:origin-a',
+      continueAfterRuntimeAuthSwitch,
+    })).resolves.toBe(true);
+
+    expect(continueAfterRuntimeAuthSwitch).not.toHaveBeenCalled();
   });
 
   it('accepts terminal respawn outcomes as retired-predecessor proof but fails closed on waiter timeout', () => {
