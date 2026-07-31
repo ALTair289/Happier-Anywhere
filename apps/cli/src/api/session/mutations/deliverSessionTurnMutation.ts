@@ -2,6 +2,7 @@ import axios from 'axios';
 import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 
 import { isAuthenticationError } from '@/api/client/httpStatusError';
+import { reloadConfiguration } from '@/configuration';
 import {
     isServerHttpEndpointConnectionFailure,
     resolveServerHttpBaseUrl,
@@ -330,6 +331,9 @@ export async function deliverSessionTurnMutation(params: Readonly<{
         ...(exactMutation.success ? { exactMutation: exactMutation.data } : {}),
     });
     if (httpResult.status === 'failed' && isServerHttpEndpointConnectionFailure(httpResult.error)) {
+        // Refresh the complete selection through its owner so endpoint and credential scope
+        // cannot diverge when a long-running process observes an environment update.
+        reloadConfiguration();
         const refreshedServerUrl = resolveServerHttpBaseUrl();
         if (refreshedServerUrl !== serverUrl) {
             httpServerUrl = refreshedServerUrl;

@@ -7,9 +7,8 @@ import {
   isAuthenticationStatus,
   readAuthenticationStatus,
 } from '@/api/client/httpStatusError';
+import { resolveServerHttpBaseUrl } from '@/api/client/serverHttpBaseUrl';
 import type { Credentials } from '@/persistence';
-import { configuration } from '@/configuration';
-import { resolveLoopbackHttpUrl } from '@/api/client/loopbackUrl';
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
 import {
   resolveSessionEncryptionContextFromCredentials,
@@ -85,7 +84,7 @@ async function fetchSingleHappyTranscriptRow(params: {
   sessionId: string;
   beforeSeq: number;
 }): Promise<RawTranscriptRow | null> {
-  const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+  const serverUrl = resolveServerHttpBaseUrl();
   const response = await axios.get(`${serverUrl}/v1/sessions/${params.sessionId}/messages`, {
     headers: {
       Authorization: `Bearer ${params.token}`,
