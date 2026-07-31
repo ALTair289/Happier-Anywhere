@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { findTestInstanceByTypeWithProps, flattenTestStyle, renderScreen } from '@/dev/testkit';
 import { installUiListsCommonModuleMocks } from '../uiListsTestHelpers';
 import { lightTheme } from '@/theme';
+import { ITEM_ICON_GLYPH_SIZE } from '@/components/ui/lists/itemDensityMetrics';
 
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -81,7 +82,7 @@ describe('Item mode prop', () => {
     it('never shows chevron when mode="info" regardless of showChevron prop', async () => {
         const { Item } = await import('../Item');
         const screen = await renderScreen(<Item title="Info" mode="info" showChevron={true} onPress={() => {}} />);
-        expect(screen.findAllByProps({ name: 'chevron-forward' })).toHaveLength(0);
+        expect(screen.findAllByProps({ name: 'caret-right' })).toHaveLength(0);
     });
 
     it('does NOT reduce opacity when mode="info" (unlike disabled)', async () => {
@@ -155,12 +156,12 @@ describe('Item mode prop', () => {
         const screen = await renderScreen(
             <Item
                 title="Density icon"
-                icon={React.createElement('Ionicons', { name: 'albums-outline', size: 29, color: '#09f' })}
+                icon={React.createElement('Ionicons', { name: 'stack', size: 29, color: '#09f' })}
             />,
         );
 
-        const leftIcon = screen.findAllByProps({ name: 'albums-outline' })[0];
-        expect(leftIcon?.props?.size).toBe(24);
+        const leftIcon = screen.findAllByProps({ name: 'stack' })[0];
+        expect(leftIcon?.props?.size).toBe(ITEM_ICON_GLYPH_SIZE.cozy);
         uiItemDensitySetting = 'comfortable';
     });
 
@@ -170,7 +171,7 @@ describe('Item mode prop', () => {
 
         const screen = await renderScreen(<Item title="Chevron row" onPress={() => {}} />);
 
-        const chevronIcon = screen.findAllByProps({ name: 'chevron-forward' })[0];
+        const chevronIcon = screen.findAllByProps({ name: 'caret-right' })[0];
         expect(chevronIcon?.props?.size).toBe(15);
         uiItemDensitySetting = 'comfortable';
     });
@@ -180,7 +181,7 @@ describe('Item mode prop', () => {
         const screen = await renderScreen(
             <Item title="Badged" onPress={() => {}} rightElement={React.createElement('Text', null, 'badge')} />,
         );
-        expect(screen.findAllByProps({ name: 'chevron-forward' })).toHaveLength(0);
+        expect(screen.findAllByProps({ name: 'caret-right' })).toHaveLength(0);
     });
 
     it('keeps the chevron alongside a rightElement when keepChevronWithRightElement is set', async () => {
@@ -193,7 +194,7 @@ describe('Item mode prop', () => {
                 keepChevronWithRightElement
             />,
         );
-        expect(screen.findAllByProps({ name: 'chevron-forward' }).length).toBeGreaterThan(0);
+        expect(screen.findAllByProps({ name: 'caret-right' }).length).toBeGreaterThan(0);
     });
 
     it('applies a hover background on web for interactive items', async () => {

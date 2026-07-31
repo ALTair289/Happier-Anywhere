@@ -11,7 +11,7 @@ export const deviceTtsProviderSpec: LocalTtsProviderSpec = {
   id: 'device',
   title: t('settingsVoice.local.deviceTts'),
   subtitle: t('settingsVoice.local.deviceTtsSubtitle'),
-  iconName: 'phone-portrait-outline',
+  iconName: 'device-mobile',
   detail: 'Device',
   Settings: DeviceTtsSettings,
   test: async ({ sample }) => {

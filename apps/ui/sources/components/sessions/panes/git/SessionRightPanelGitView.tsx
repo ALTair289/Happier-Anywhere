@@ -388,7 +388,7 @@ export const SessionRightPanelGitView = React.memo((props: SessionRightPanelGitV
         if (caps.writeRemoteFetch) {
             actions.push({
                 key: 'fetch',
-                iconName: 'sync',
+                iconName: 'arrows-clockwise',
                 label: t('files.sourceControlOperations.actions.fetch'),
                 testID: 'scm-update-remote-action-fetch',
                 disabled: busy,

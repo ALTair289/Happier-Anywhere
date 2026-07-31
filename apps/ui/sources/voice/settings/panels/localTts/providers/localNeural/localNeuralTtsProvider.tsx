@@ -26,7 +26,7 @@ export const localNeuralTtsProviderSpec: LocalTtsProviderSpec = {
   id: 'local_neural',
   title: 'Local neural (beta)',
   subtitle: 'Kokoro model. Uses Kokoro-js on web and Sherpa-ONNX on native (requires a model download).',
-  iconName: 'sparkles-outline',
+  iconName: 'sparkle',
   detail: 'Kokoro',
   Settings: LocalNeuralProviderSettings,
   test: async ({ cfgTts, networkTimeoutMs, sample }) => {

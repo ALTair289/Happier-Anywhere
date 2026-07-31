@@ -6,6 +6,7 @@ import { AgentIcon } from '@/agents/registry/AgentIcon';
 import { getAgentPickerIconScale } from '@/agents/registry/registryUi';
 import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeForView';
 import { Text } from '@/components/ui/text/Text';
+import { ICON_LABEL_OPTICAL_NUDGE_STYLE } from '@/components/ui/icons/iconOpticalAlignment';
 
 const AGENT_CHIP_LOGO_SLOT_SIZE = 16;
 const AGENT_CHIP_LOGO_SIZE = 16;
@@ -43,7 +44,9 @@ export function createAgentSelectionActionChip(params: Readonly<{
                         agentId={params.agentId}
                         size={AGENT_CHIP_LOGO_SIZE}
                         color={params.tint}
-                        style={{ transform: [{ scale: iconScale }] }}
+                        // Composed, not replaced: the brand scale is per-agent optical correction,
+                        // the translate is the shared text-baseline nudge every chip glyph gets.
+                        style={{ transform: [{ scale: iconScale }, ...ICON_LABEL_OPTICAL_NUDGE_STYLE.transform] }}
                         testID="agent-input-agent-chip-logo"
                     />,
                 )}

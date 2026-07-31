@@ -15,7 +15,7 @@ export type VisibleAppUpdateStatusModel = Readonly<{
     visible: true;
     kind: AppUpdateStatusKind;
     tone: AppUpdateStatusTone;
-    iconName: 'download-outline' | 'refresh-outline' | 'sparkles-outline';
+    iconName: 'download' | 'arrow-clockwise' | 'sparkle';
     label: string;
     message: string;
     actionLabel: string;

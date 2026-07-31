@@ -1989,7 +1989,7 @@ describe('PendingMessagesTranscriptBlock', () => {
         expect(headerToggleStyle.borderWidth).toBe(0);
         expect(headerToggleStyle.paddingHorizontal).toBe(0);
         expect(headerToggleStyle.paddingVertical).toBe(0);
-        expect(screen.findByProps({ name: 'chevron-up' })).toBeTruthy();
+        expect(screen.findByProps({ name: 'caret-up' })).toBeTruthy();
         expect(screen.findByType('ScrollView').props.style?.maxHeight).toBe(80);
     });
 
@@ -2030,7 +2030,7 @@ describe('PendingMessagesTranscriptBlock', () => {
 
         await screen.pressByTestIdAsync('pendingMessages.headerToggle');
 
-        expect(screen.findByProps({ name: 'chevron-down' })).toBeTruthy();
+        expect(screen.findByProps({ name: 'caret-down' })).toBeTruthy();
         expect(screen.findByType('ScrollView').props.style?.maxHeight).toBe(520);
     });
 
@@ -2053,7 +2053,7 @@ describe('PendingMessagesTranscriptBlock', () => {
         await screen.pressByTestIdAsync('pendingMessages.headerToggle');
         await screen.pressByTestIdAsync('pendingMessages.headerToggle');
 
-        expect(screen.findByProps({ name: 'chevron-up' })).toBeTruthy();
+        expect(screen.findByProps({ name: 'caret-up' })).toBeTruthy();
         expect(screen.findByType('ScrollView').props.style?.maxHeight).toBe(80);
     });
 
@@ -2094,7 +2094,7 @@ describe('PendingMessagesTranscriptBlock', () => {
             nextScroll!.props.onContentSizeChange(0, 160);
         });
 
-        expect(screen.findByProps({ name: 'chevron-up' })).toBeTruthy();
+        expect(screen.findByProps({ name: 'caret-up' })).toBeTruthy();
         expect(screen.findByType('ScrollView').props.style?.maxHeight).toBe(80);
     });
 

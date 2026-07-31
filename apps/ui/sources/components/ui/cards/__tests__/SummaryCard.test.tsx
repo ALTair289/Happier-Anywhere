@@ -46,13 +46,13 @@ describe('SummaryCard', () => {
         const { SummaryCard } = await import('../SummaryCard');
         const screen = await renderScreen(<SummaryCard entries={SAMPLE_ENTRIES} onPress={() => {}} testID="summary-card" />);
 
-        expect(screen.findByProps({ name: 'chevron-forward' })).toBeTruthy();
+        expect(screen.findByProps({ name: 'caret-right' })).toBeTruthy();
     });
 
     it('does not show chevron without onPress', async () => {
         const { SummaryCard } = await import('../SummaryCard');
         const screen = await renderScreen(<SummaryCard entries={SAMPLE_ENTRIES} testID="summary-card" />);
 
-        expect(() => screen.findByProps({ name: 'chevron-forward' })).toThrow();
+        expect(() => screen.findByProps({ name: 'caret-right' })).toThrow();
     });
 });

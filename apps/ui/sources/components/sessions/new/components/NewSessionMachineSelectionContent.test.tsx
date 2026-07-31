@@ -241,10 +241,10 @@ describe('NewSessionMachineSelectionContent', () => {
 
         const recentOption = getOption(recentSection, 'm-recent');
         expect(recentOption.testID).toBe('new-session-machine-option:m-recent');
-        expect(readIconName(recentOption)).toBe('time-outline');
+        expect(readIconName(recentOption)).toBe('clock');
 
         const favoriteOption = getOption(favoritesSection, 'm-fav');
-        expect(readIconName(favoriteOption)).toBe('desktop-outline');
+        expect(readIconName(favoriteOption)).toBe('desktop');
 
         const offlineOption = getOption(allSection, 'm-offline');
         expect(offlineOption.disabled).toBe(true);

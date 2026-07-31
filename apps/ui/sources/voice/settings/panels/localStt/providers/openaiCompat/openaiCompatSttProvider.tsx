@@ -76,7 +76,7 @@ export const openaiCompatSttProviderSpec: LocalSttProviderSpec = {
   id: 'openai_compat',
   title: 'OpenAI-compatible endpoint',
   subtitle: 'Use your own Whisper-compatible transcription server.',
-  iconName: 'cloud-outline',
+  iconName: 'cloud',
   detail: 'Endpoint',
   Settings: OpenAiCompatSttSettings,
 };

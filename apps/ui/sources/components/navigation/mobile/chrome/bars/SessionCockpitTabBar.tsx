@@ -50,24 +50,24 @@ export const SessionCockpitTabBar = React.memo((props: SessionCockpitTabBarProps
                 ),
             },
         },
-        { id: 'browse', label: t('common.files'), icon: 'folder-outline' },
+        { id: 'browse', label: t('common.files'), icon: 'folder' },
         {
             id: 'git',
             label: t('session.rightPanel.tabs.git'),
-            icon: 'git-branch-outline',
+            icon: 'git-branch',
             badge: gitBadge ?? undefined,
         },
-        { id: 'navigation', label: t('session.transcriptNavigation.title'), icon: 'list-outline' },
+        { id: 'navigation', label: t('session.transcriptNavigation.title'), icon: 'list' },
         {
             id: 'tabs',
             label: t('workspaceCockpit.tabs'),
-            icon: 'albums-outline',
+            icon: 'stack',
             badge: openTabsBadgeEnabled && props.openDetailsTabCount > 0
                 ? { kind: 'count', value: props.openDetailsTabCount }
                 : undefined,
         },
         ...(props.terminalTabAvailable
-            ? [{ id: 'terminal', label: t('settings.terminal'), icon: 'terminal-outline' } satisfies SessionCockpitTabDefinition]
+            ? [{ id: 'terminal', label: t('settings.terminal'), icon: 'terminal' } satisfies SessionCockpitTabDefinition]
             : []),
     ];
 

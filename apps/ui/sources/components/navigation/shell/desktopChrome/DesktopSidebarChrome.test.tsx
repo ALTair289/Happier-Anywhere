@@ -101,7 +101,7 @@ describe('DesktopSidebarChrome', () => {
                     id: 'settings',
                     title: 'settings.title',
                     inlineTestID: 'nav-settings',
-                    icon: 'cog-outline',
+                    icon: 'gear',
                     onPress: vi.fn(),
                 }]}
                 renderHeaderOverflowVisual={() => <View testID="desktop-sidebar-overflow-visual" />}
@@ -200,13 +200,13 @@ describe('DesktopSidebarChrome', () => {
                 onPressHome={vi.fn()}
                 environmentBadge={null}
                 headerActions={[
-                    { id: 'inbox', title: 'Inbox', inlineTestID: 'sidebar-inbox-button', icon: 'mail-outline', onPress: vi.fn() },
-                    { id: 'settings', title: 'Settings', inlineTestID: 'nav-settings', icon: 'cog-outline', onPress: vi.fn() },
-                    { id: 'newSession', title: 'New', inlineTestID: 'nav-new-session', icon: 'add-outline', onPress: vi.fn() },
+                    { id: 'inbox', title: 'Inbox', inlineTestID: 'sidebar-inbox-button', icon: 'envelope', onPress: vi.fn() },
+                    { id: 'settings', title: 'Settings', inlineTestID: 'nav-settings', icon: 'gear', onPress: vi.fn() },
+                    { id: 'newSession', title: 'New', inlineTestID: 'nav-new-session', icon: 'plus', onPress: vi.fn() },
                 ]}
                 topUtilityActions={[
-                    { id: 'inbox', title: 'Inbox', inlineTestID: 'sidebar-inbox-button', icon: 'mail-outline', onPress: vi.fn() },
-                    { id: 'settings', title: 'Settings', inlineTestID: 'nav-settings', icon: 'cog-outline', onPress: vi.fn() },
+                    { id: 'inbox', title: 'Inbox', inlineTestID: 'sidebar-inbox-button', icon: 'envelope', onPress: vi.fn() },
+                    { id: 'settings', title: 'Settings', inlineTestID: 'nav-settings', icon: 'gear', onPress: vi.fn() },
                 ]}
                 renderHeaderOverflowVisual={() => <View testID="desktop-sidebar-overflow-visual" />}
                 popoverBoundaryRef={{ current: null }}

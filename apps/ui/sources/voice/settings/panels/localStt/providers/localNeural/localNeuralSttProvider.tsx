@@ -20,7 +20,7 @@ export const localNeuralSttProviderSpec: LocalSttProviderSpec = {
   id: 'local_neural',
   title: 'Local neural (beta)',
   subtitle: 'Streaming STT via Sherpa-ONNX on native (requires a model download).',
-  iconName: 'sparkles-outline',
+  iconName: 'sparkle',
   detail: 'Sherpa',
   Settings: LocalNeuralProviderSettings,
 };

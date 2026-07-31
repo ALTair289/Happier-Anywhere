@@ -16,7 +16,7 @@ describe('getInstallablesRegistryEntries', () => {
         ]);
         expect(entries.find((entry) => entry.key === INSTALLABLE_KEYS.GH)).toMatchObject({
             title: 'GitHub CLI',
-            iconName: 'git-pull-request-outline',
+            iconName: 'git-pull-request',
             groupTitleKey: 'newSession.githubCliBanner.title',
             installLabels: {
                 installKey: 'newSession.githubCliBanner.install',

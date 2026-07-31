@@ -111,7 +111,6 @@ export function buildCoreAgentInputControlNodes(params: Readonly<{
         accessibilityLabel: params.sessionModeAccessibilityLabel,
         chipStyle: params.chipStyle,
         textStyle: params.textStyle,
-        iconKind: params.sessionModeChipPresentation?.iconKind,
         iconName: params.sessionModeChipPresentation?.iconName,
         onPress: params.onModePress,
     }) : null;

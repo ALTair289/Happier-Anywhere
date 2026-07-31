@@ -82,12 +82,17 @@ describe('PathFavoriteToggleButton', () => {
         expect(pressable!.props.accessibilityLabel).toBe('Remove from favorites');
         expect(pressable!.props['aria-pressed']).toBe(true);
 
-        const icon = screen.find((node) => String(node.type) === 'Ionicons');
+        // Under Ionicons the on/off states were two different glyph NAMES (star vs star-outline).
+        // One icon family later the glyph is the same in both states and colour is the whole
+        // distinction, so that is what this asserts — otherwise the toggle could go stateless again
+        // without a single test noticing, which is exactly what happened.
+        const icon = screen.find((node) => String(node.type) === 'Icon');
         expect(icon).toBeTruthy();
         expect(icon!.props.name).toBe('star');
+        expect(icon!.props.color).toBe('#f59e0b');
     });
 
-    it('renders the outline star and uses the add label when path is not a favorite', async () => {
+    it('dims the star and uses the add label when path is not a favorite', async () => {
         const { PathFavoriteToggleButton } = await import('./PathFavoriteToggleButton');
 
         const screen = await renderScreen(
@@ -105,8 +110,9 @@ describe('PathFavoriteToggleButton', () => {
         expect(pressable!.props.accessibilityLabel).toBe('Add to favorites');
         expect(pressable!.props['aria-pressed']).toBe(false);
 
-        const icon = screen.find((node) => String(node.type) === 'Ionicons');
-        expect(icon!.props.name).toBe('star-outline');
+        const icon = screen.find((node) => String(node.type) === 'Icon');
+        expect(icon!.props.name).toBe('star');
+        expect(icon!.props.color).toBe('#999');
     });
 
     it('survives Pressable invoking the style callback with web-only `hovered` state', async () => {

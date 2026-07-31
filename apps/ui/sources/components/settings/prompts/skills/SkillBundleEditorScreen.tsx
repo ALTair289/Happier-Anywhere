@@ -318,14 +318,14 @@ export const SkillBundleEditorScreen = React.memo((props: Readonly<{ artifactId:
                   actions.push({
                     id: 'edit',
                     title: t('common.edit'),
-                    icon: 'pencil-outline',
+                    icon: 'pencil',
                     onPress: () => router.push(editPath),
                   });
                 }
                 actions.push({
                   id: 'delete',
                   title: t('common.delete'),
-                  icon: 'trash-outline',
+                  icon: 'trash',
                   destructive: true,
                   onPress: () => removeSupportingFile(entry.path),
                 });

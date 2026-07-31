@@ -96,13 +96,12 @@ installAgentInputCommonModuleMocks({
 
 function findIconNode(
     tree: Awaited<ReturnType<typeof renderScreen>>['tree'] | { root: any } | { findAll: (predicate: (node: any) => boolean) => any[] },
-    type: 'Ionicons' | 'Octicons',
     name: string,
 ): any {
     const root = 'root' in tree ? tree.root : tree;
     return root.findAll((node: any) => (
         typeof node.type === 'string' &&
-        String(node.type) === type &&
+        String(node.type) === 'Icon' &&
         (node.props as any)?.name === name
     ))[0];
 }
@@ -788,8 +787,8 @@ describe('AgentInput (modelOptionsOverride)', () => {
         const modeChip = screen.findByTestId('agent-input-session-mode-chip');
         expect(modeChip).toBeTruthy();
         expect(modeChip?.props.accessibilityLabel).toContain('Build');
-        expect(findIconNode(modeChip!, 'Octicons', 'rocket')).toBeTruthy();
-        expect(findIconNode(modeChip!, 'Ionicons', 'list-outline')).toBeUndefined();
+        expect(findIconNode(modeChip!, 'rocket-launch')).toBeTruthy();
+        expect(findIconNode(modeChip!, 'list')).toBeUndefined();
 
         await screen.pressByTestIdAsync('agent-input-session-mode-chip');
 
@@ -823,8 +822,8 @@ describe('AgentInput (modelOptionsOverride)', () => {
         const modeChip = screen.findByTestId('agent-input-session-mode-chip');
         expect(modeChip).toBeTruthy();
         expect(modeChip?.props.accessibilityLabel).toContain('Plan');
-        expect(findIconNode(modeChip!, 'Ionicons', 'list-outline')).toBeTruthy();
-        expect(findIconNode(modeChip!, 'Octicons', 'rocket')).toBeUndefined();
+        expect(findIconNode(modeChip!, 'list')).toBeTruthy();
+        expect(findIconNode(modeChip!, 'rocket-launch')).toBeUndefined();
         expect(screen.findByTestId('agent-input-session-mode-chip-label:plan')).toBeTruthy();
     });
 
@@ -1322,7 +1321,7 @@ describe('AgentInput (modelOptionsOverride)', () => {
 
         expect(lastModelPickerOverlayProps?.selectedValue).toBe('default');
         const currentOption = lastModelPickerOverlayProps?.options?.find((option: any) => option.value === 'session-model');
-        expect(currentOption?.trailingStatusIcon?.props?.name).toBe('time-outline');
+        expect(currentOption?.trailingStatusIcon?.props?.name).toBe('clock');
         expect(currentOption?.icon).toBeUndefined();
         expect(currentOption?.accessibilityLabel).toContain('agentInput.model.lastUsed');
         expect(lastModelPickerOverlayProps?.summary).toContain('agentInput.model.lastUsed');
@@ -1372,7 +1371,7 @@ describe('AgentInput (modelOptionsOverride)', () => {
         const appliedOption = lastModelPickerOverlayProps?.options?.find(
             (option: any) => option.value === 'session-model',
         );
-        expect(appliedOption?.trailingStatusIcon?.props?.name).toBe('play-circle-outline');
+        expect(appliedOption?.trailingStatusIcon?.props?.name).toBe('play-circle');
         expect(appliedOption?.accessibilityLabel).toContain('agentInput.model.running');
     });
 
@@ -1442,7 +1441,7 @@ describe('AgentInput (modelOptionsOverride)', () => {
         expect(logo?.type).toBe('SvgXml');
         expect(logo?.props.width).toBe(16);
         expect(logo?.props.height).toBe(16);
-        expect(logo?.props.style).toEqual({ transform: [{ scale: 0.9 }] });
+        expect(logo?.props.style.transform).toContainEqual({ scale: 0.9 });
     });
 
     it('reuses non-Pi picker-row scaling for the engine chip logo', async () => {
@@ -1471,7 +1470,7 @@ describe('AgentInput (modelOptionsOverride)', () => {
         expect(logo?.type).toBe('SvgXml');
         expect(logo?.props.width).toBe(16);
         expect(logo?.props.height).toBe(16);
-        expect(logo?.props.style).toEqual({ transform: [{ scale: 0.9 }] });
+        expect(logo?.props.style.transform).toContainEqual({ scale: 0.9 });
     });
 
     it('caps the engine popover at 570px when the rail is hidden in stacked layout', async () => {

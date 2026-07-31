@@ -6,7 +6,7 @@ import { useAppPaneScope } from '@/components/appShell/panes/hooks/useAppPaneSco
 import { SidebarCollapseIcon, SidebarExpandIcon } from '@/components/navigation/shell/SidebarIcons';
 import { t } from '@/text';
 import { useOptionalSessionScreenTestId } from '../shell/sessionScreenTestIds';
-import { SESSION_HEADER_DENSE_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
+import { SESSION_HEADER_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
 
 /**
  * Opens and closes the right sidebar itself.
@@ -17,6 +17,9 @@ import { SESSION_HEADER_DENSE_ICON_SIZE_PX } from '@/components/sessions/actions
  *
  * The glyphs come from the canonical `SidebarIcons` pair and the strings from the details panel's
  * own toggle. A second icon or a second string for the same concept would be the split-brain.
+ *
+ * `edge="right"` mirrors the glyph: it draws a panel on the left by default, which pointed at the
+ * opposite side of the screen from the sidebar this actually opens.
  */
 export const SessionHeaderRightSidebarButton = React.memo((props: Readonly<{
     scopeId: string;
@@ -56,9 +59,9 @@ export const SessionHeaderRightSidebarButton = React.memo((props: Readonly<{
             }
         >
             {isOpen ? (
-                <SidebarCollapseIcon size={SESSION_HEADER_DENSE_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
+                <SidebarCollapseIcon edge="right" size={SESSION_HEADER_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
             ) : (
-                <SidebarExpandIcon size={SESSION_HEADER_DENSE_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
+                <SidebarExpandIcon edge="right" size={SESSION_HEADER_ICON_SIZE_PX} color={theme.colors.chrome.header.foreground} />
             )}
         </Pressable>
     );

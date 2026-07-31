@@ -1,6 +1,5 @@
 import React from 'react';
 import { View, useWindowDimensions, InteractionManager } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useLaunchSelectionMachines, useSessionRecentPathEntries, storage, useSetting, useSettingMutable, useSettings } from '@/sync/domains/state/storage';
 import { settingsDefaults } from '@/sync/domains/settings/settings';
 import { useRouter, useLocalSearchParams, useNavigation, usePathname } from 'expo-router';

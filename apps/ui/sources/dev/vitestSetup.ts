@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeEach, vi } from 'vitest';
 
 import { installVitestRnShim } from './vitestRnShim';
 import { resetRuntimeFetch } from '@/utils/system/runtimeFetch';
+import { SHADOW_LEVELS } from '@/shadowElevation';
 import { standardCleanup } from './testkit/cleanup/standardCleanup';
 import { createReanimatedModuleMock } from './testkit/mocks/reanimated';
 import { resetReactNativeMmkvStub } from './reactNativeMmkvStub';
@@ -400,6 +401,36 @@ vi.mock('@expo/vector-icons', () => ({
     MaterialIcons: 'MaterialIcons',
 }));
 
+// The icon seam renders as an inspectable host element in tests, exactly as `Ionicons` did before
+// it — so assertions stay `findTestInstanceByTypeWithProps(screen, 'Icon', { name: 'terminal' })`
+// and need not know which Phosphor component a name resolves to. The seam's own behaviour (the
+// per-glyph optical scale, weight defaults) is covered by its dedicated test, which unmocks this.
+// Static, not `importOriginal` — pulling the real module back in here re-enters a module that is
+// mid-require and trips vitest's ERR_INTERNAL_ASSERTION. `ICON_SIZE` is a plain value object, so
+// restating it costs nothing; `IconName` is a type and erases.
+vi.mock('@/components/ui/icons/Icon', () => ({
+    Icon: 'Icon',
+    ICON_SIZE: { xs: 14, sm: 16, md: 20, lg: 24, xl: 29 },
+}));
+
+// Phosphor draws with `react-native-svg`, whose native primitives do not exist in the node test
+// runtime — without this, every component rendering a real icon fails to construct. Host-element
+// stand-ins keep the icon component in the tree while the leaf drawing primitives become
+// inspectable placeholders. A test needing different behaviour can still mock it locally.
+vi.mock('react-native-svg', () => {
+    const host = (name: string) => name;
+    return {
+        default: host('Svg'), Svg: host('Svg'), SvgXml: host('SvgXml'),
+        Path: host('Path'), G: host('G'), Circle: host('Circle'), Ellipse: host('Ellipse'),
+        Rect: host('Rect'), Line: host('Line'), Polyline: host('Polyline'), Polygon: host('Polygon'),
+        Text: host('SvgText'), TSpan: host('TSpan'), Defs: host('Defs'), Use: host('Use'),
+        Mask: host('Mask'), ClipPath: host('ClipPath'), Pattern: host('Pattern'),
+        Image: host('SvgImage'), LinearGradient: host('LinearGradient'),
+        RadialGradient: host('RadialGradient'), Stop: host('Stop'), Symbol: host('SvgSymbol'),
+        Marker: host('Marker'), ForeignObject: host('ForeignObject'),
+    };
+});
+
 // `@shopify/react-native-skia` requires native bindings; stub it for node/Vitest.
 vi.mock('@shopify/react-native-skia', () => ({
     Canvas: 'Canvas',
@@ -622,14 +653,17 @@ vi.mock('react-native-unistyles', () => {
                 header: { background: '#ffffff', foreground: '#18171C' },
             },
             shadow: { color: '#000000', opacity: 0.1 },
-            shadowLevels: Array.from({ length: 6 }, (_value, idx) => ({
+            // Keyed off the real scale rather than a hand-counted length: as a 0-indexed array of
+            // length 6 this silently had no entry for the highest level, and every consumer of it
+            // crashed on `undefined` the moment the scale grew.
+            shadowLevels: Object.fromEntries(SHADOW_LEVELS.map((level) => [level, {
                 boxShadow: '0 0 0 rgba(0, 0, 0, 0)',
                 shadowColor: '#000000',
-                shadowOffset: { width: 0, height: idx },
+                shadowOffset: { width: 0, height: level },
                 shadowOpacity: 0.1,
-                shadowRadius: idx,
-                elevation: idx,
-            })),
+                shadowRadius: level,
+                elevation: level,
+            }])),
             shadowPopoverArrowBoxShadow: '0 0 0 rgba(0, 0, 0, 0)',
             overlay: {
                 scrim: 'rgba(0, 0, 0, 0.45)',

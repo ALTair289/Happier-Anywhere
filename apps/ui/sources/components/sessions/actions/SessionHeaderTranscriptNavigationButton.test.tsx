@@ -70,8 +70,8 @@ describe('SessionHeaderTranscriptNavigationButton', () => {
 
         expect(openRightSpy).toHaveBeenCalledWith({ tabId: 'navigation' });
         expect(setRightTabSpy).toHaveBeenCalledWith('navigation');
-        expect(findTestInstanceByTypeWithProps(screen, 'Ionicons', {
-            name: 'list-outline',
+        expect(findTestInstanceByTypeWithProps(screen, 'Icon', {
+            name: 'list',
             size: SESSION_HEADER_ICON_SIZE_PX,
         })).toBeTruthy();
     });

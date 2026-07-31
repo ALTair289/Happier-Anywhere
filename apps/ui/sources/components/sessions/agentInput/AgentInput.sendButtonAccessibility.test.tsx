@@ -320,8 +320,8 @@ describe('AgentInput (send button accessibility)', () => {
         const images = send.findAllByType('Image' as any);
         expect(images.length).toBe(0);
 
-        const octicons = send.findAllByType('Octicons' as any);
-        expect(octicons.some((n) => n.props?.name === 'arrow-up')).toBe(true);
+        const glyphs = send.findAllByType('Icon' as any);
+        expect(glyphs.some((n) => n.props?.name === 'arrow-up')).toBe(true);
 
         await screen.unmount();
         featureEnabledState.voice = true;
@@ -347,12 +347,11 @@ describe('AgentInput (send button accessibility)', () => {
         expect(send).toBeTruthy();
         if (!send) throw new Error('session-composer-send not found');
 
-        const ionicons = send.findAllByType('Ionicons' as any);
-        expect(ionicons.some((n) => n.props?.name === 'stop')).toBe(true);
-
-        const octicons = send.findAllByType('Octicons' as any);
-        expect(octicons.some((n) => n.props?.name === 'stop')).toBe(false);
-        expect(octicons.some((n) => n.props?.name === 'arrow-up')).toBe(false);
+        // This used to assert one family drew the glyph and the other did not; behind a single-family
+        // seam the contract that still means something is which glyph the button shows.
+        const glyphs = send.findAllByType('Icon' as any);
+        expect(glyphs.some((n) => n.props?.name === 'stop')).toBe(true);
+        expect(glyphs.some((n) => n.props?.name === 'arrow-up')).toBe(false);
 
         await screen.unmount();
         featureEnabledState.voice = true;
@@ -573,8 +572,8 @@ describe('AgentInput (send button accessibility)', () => {
         const images = send.findAllByType('Image' as any);
         expect(images.length).toBe(1);
 
-        const octicons = send.findAllByType('Octicons' as any);
-        expect(octicons.some((n) => n.props?.name === 'arrow-up')).toBe(false);
+        const glyphs = send.findAllByType('Icon' as any);
+        expect(glyphs.some((n) => n.props?.name === 'arrow-up')).toBe(false);
 
         await screen.unmount();
     });
@@ -600,11 +599,9 @@ describe('AgentInput (send button accessibility)', () => {
         const images = send.findAllByType('Image' as any);
         expect(images.length).toBe(0);
 
-        const ionicons = send.findAllByType('Ionicons' as any);
-        expect(ionicons.some((n) => n.props?.name === 'stop-circle')).toBe(true);
-
-        const octicons = send.findAllByType('Octicons' as any);
-        expect(octicons.some((n) => n.props?.name === 'arrow-up')).toBe(false);
+        const glyphs = send.findAllByType('Icon' as any);
+        expect(glyphs.some((n) => n.props?.name === 'stop-circle')).toBe(true);
+        expect(glyphs.some((n) => n.props?.name === 'arrow-up')).toBe(false);
 
         await screen.unmount();
     });

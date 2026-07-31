@@ -139,9 +139,9 @@ export function resolveTransportLabel(transport: McpServerCatalogEntryTransportV
 }
 
 export function resolveTransportIconName(transport: McpServerCatalogEntryTransportV1) {
-    if (transport === 'stdio') return 'terminal-outline' as const;
-    if (transport === 'sse') return 'radio-outline' as const;
-    return 'cloud-outline' as const;
+    if (transport === 'stdio') return 'terminal' as const;
+    if (transport === 'sse') return 'radio' as const;
+    return 'cloud' as const;
 }
 
 export function resolveAgentToolsDeliveryLabel(delivery: AgentToolsDelivery): string {

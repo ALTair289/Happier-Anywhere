@@ -25,7 +25,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toEqual({
             kind: 'queued',
             showSpinner: false,
-            iconName: 'time-outline',
+            iconName: 'clock',
         });
     });
 
@@ -36,7 +36,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toEqual({
             kind: 'saving',
             showSpinner: true,
-            iconName: 'cloud-upload-outline',
+            iconName: 'cloud-arrow-up',
         });
     });
 
@@ -56,7 +56,7 @@ describe('getPendingMessageVisualState', () => {
         })).toEqual({
             kind: 'materializing',
             showSpinner: true,
-            iconName: 'navigate-outline',
+            iconName: 'navigation-arrow',
         });
     });
 
@@ -66,7 +66,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toEqual({
             kind: 'delivering',
             showSpinner: true,
-            iconName: 'navigate-outline',
+            iconName: 'navigation-arrow',
         });
     });
 
@@ -78,7 +78,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toEqual({
             kind: 'send_unconfirmed',
             showSpinner: true,
-            iconName: 'cloud-upload-outline',
+            iconName: 'cloud-arrow-up',
         });
     });
 
@@ -90,7 +90,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toEqual({
             kind: 'send_failed',
             showSpinner: false,
-            iconName: 'alert-circle-outline',
+            iconName: 'warning-circle',
         });
     });
 
@@ -146,7 +146,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toMatchObject({
             kind: 'blocked',
             showSpinner: false,
-            iconName: 'alert-circle-outline',
+            iconName: 'warning-circle',
             deliveryBlockedPresentation: { isUnknown: true },
         });
         expect(getPendingMessageVisualState(pendingMessage({
@@ -156,7 +156,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toMatchObject({
             kind: 'delivery_uncertain',
             showSpinner: false,
-            iconName: 'alert-circle-outline',
+            iconName: 'warning-circle',
         });
     });
 
@@ -168,7 +168,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toEqual({
             kind: 'delivering',
             showSpinner: false,
-            iconName: 'navigate-outline',
+            iconName: 'navigation-arrow',
         });
     });
 
@@ -179,7 +179,7 @@ describe('getPendingMessageVisualState', () => {
         })).toEqual({
             kind: 'queued_behind_turn',
             showSpinner: false,
-            iconName: 'time-outline',
+            iconName: 'clock',
             queuedBehindTurn: { reason: 'waiting_for_foreground_turn', turnStartedAtMs: 1000 },
         });
 
@@ -189,7 +189,7 @@ describe('getPendingMessageVisualState', () => {
         })).toEqual({
             kind: 'queued',
             showSpinner: false,
-            iconName: 'time-outline',
+            iconName: 'clock',
         });
     });
 
@@ -201,7 +201,7 @@ describe('getPendingMessageVisualState', () => {
         })).toEqual({
             kind: 'queued_behind_turn',
             showSpinner: false,
-            iconName: 'time-outline',
+            iconName: 'clock',
             queuedBehindTurn: { reason: 'waiting_for_foreground_turn' },
         });
     });
@@ -352,7 +352,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toEqual({
             kind: 'blocked',
             showSpinner: false,
-            iconName: 'alert-circle-outline',
+            iconName: 'warning-circle',
             deliveryBlockedReason: 'payload_too_large',
             deliveryBlockedPresentation: {
                 labelKey: 'session.pendingMessages.deliveryBlockedReasons.payloadTooLarge',
@@ -366,7 +366,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toEqual({
             kind: 'blocked',
             showSpinner: false,
-            iconName: 'alert-circle-outline',
+            iconName: 'warning-circle',
             deliveryBlockedReason: 'provider_unavailable_before_acceptance',
             deliveryBlockedPresentation: {
                 labelKey: 'session.pendingMessages.deliveryBlockedReasons.providerUnavailableBeforeAcceptance',
@@ -380,7 +380,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toEqual({
             kind: 'blocked',
             showSpinner: false,
-            iconName: 'alert-circle-outline',
+            iconName: 'warning-circle',
             deliveryBlockedReason: 'runtime_config_blocked',
             deliveryBlockedPresentation: {
                 labelKey: 'session.pendingMessages.deliveryBlockedReasons.runtimeConfigBlocked',
@@ -395,7 +395,7 @@ describe('getPendingMessageVisualState', () => {
         }))).toEqual({
             kind: 'blocked',
             showSpinner: false,
-            iconName: 'alert-circle-outline',
+            iconName: 'warning-circle',
             deliveryBlockedReason: 'unknown',
             deliveryBlockedPresentation: {
                 labelKey: 'session.pendingMessages.deliveryBlockedReasons.unknown',

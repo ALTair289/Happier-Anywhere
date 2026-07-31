@@ -63,7 +63,7 @@ export function getInstallablesRegistryEntries(): readonly InstallableRegistryEn
         [INSTALLABLE_KEYS.CODEX_ACP]: {
             enabledWhen: () => true,
             title: t('deps.installable.codexAcp.title'),
-            iconName: 'swap-horizontal-outline',
+            iconName: 'arrows-left-right',
             groupTitleKey: 'newSession.codexAcpBanner.title',
             supportsManagedOverrideInstall: false,
             installLabels: {
@@ -90,7 +90,7 @@ export function getInstallablesRegistryEntries(): readonly InstallableRegistryEn
         [INSTALLABLE_KEYS.GH]: {
             enabledWhen: () => true,
             title: t('deps.installable.githubCli.title'),
-            iconName: 'git-pull-request-outline',
+            iconName: 'git-pull-request',
             groupTitleKey: 'newSession.githubCliBanner.title',
             supportsManagedOverrideInstall: false,
             installLabels: {

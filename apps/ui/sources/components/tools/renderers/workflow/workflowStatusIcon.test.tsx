@@ -17,7 +17,7 @@ async function iconNameFor(status: SessionWorkflowAgentStatusV1): Promise<string
         tree = renderer.create(<WorkflowStatusIcon status={status} />);
     });
     const root = (tree as renderer.ReactTestRenderer).root;
-    const icons = root.findAllByType('Ionicons' as unknown as React.ComponentType);
+    const icons = root.findAllByType('Icon' as unknown as React.ComponentType);
     const name = icons.length > 0 ? (icons[0]!.props as { name?: string }).name ?? null : null;
     act(() => (tree as renderer.ReactTestRenderer).unmount());
     return name;
@@ -26,13 +26,13 @@ async function iconNameFor(status: SessionWorkflowAgentStatusV1): Promise<string
 describe('WorkflowStatusIcon glyph mapping', () => {
     it('maps distinct terminal glyphs so queued/done/failed are visually distinguishable (U-19)', async () => {
         // Queued/pending = a static muted dot, NOT a spinner.
-        expect(await iconNameFor('pending')).toBe('ellipse-outline');
+        expect(await iconNameFor('pending')).toBe('circle');
         // Done = a success check.
-        expect(await iconNameFor('complete')).toBe('checkmark-circle');
+        expect(await iconNameFor('complete')).toBe('check-circle');
         // Failed = a danger cross.
-        expect(await iconNameFor('failed')).toBe('close-circle');
+        expect(await iconNameFor('failed')).toBe('x-circle');
         // Blocked = a caution glyph.
-        expect(await iconNameFor('blocked')).toBe('alert-circle');
+        expect(await iconNameFor('blocked')).toBe('warning-circle');
     });
 
     it('renders a spinner (not a static Ionicon) while an agent is actively running', async () => {

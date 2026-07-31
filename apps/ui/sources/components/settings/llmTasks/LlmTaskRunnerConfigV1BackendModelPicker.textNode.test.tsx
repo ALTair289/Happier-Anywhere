@@ -135,7 +135,7 @@ vi.mock('@/components/settings/pickers/agentDropdownItems', () => ({
             id: 'claude',
             title: 'Claude',
             subtitle: 'claude',
-            icon: React.createElement('Ionicons', { name: 'sparkles-outline' }),
+            icon: React.createElement('Ionicons', { name: 'sparkle' }),
         },
     ],
 }));

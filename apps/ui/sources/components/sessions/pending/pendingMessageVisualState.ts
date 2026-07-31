@@ -48,7 +48,7 @@ export type PendingMessageSessionRuntimeInput = Readonly<{
 export type PendingMessageVisualState = Readonly<{
     kind: PendingMessageVisualStateKind;
     showSpinner: boolean;
-    iconName: 'cloud-upload-outline' | 'time-outline' | 'navigate-outline' | 'alert-circle-outline';
+    iconName: 'cloud-arrow-up' | 'clock' | 'navigation-arrow' | 'warning-circle';
     deliveryBlockedReason?: PendingMessage['pendingDeliveryBlockedReason'];
     deliveryBlockedPresentation?: PendingDeliveryBlockedReasonPresentation;
     queuedBehindTurn?: PendingMessageQueuedBehindTurnPresentation;
@@ -103,7 +103,7 @@ export function getPendingMessageVisualState(
         return {
             kind: 'materializing',
             showSpinner: true,
-            iconName: 'navigate-outline',
+            iconName: 'navigation-arrow',
         };
     }
 
@@ -112,8 +112,8 @@ export function getPendingMessageVisualState(
     // outranks any stale local failure marker and must never regress to “Not sent”.
     if (message.pendingOutboxOperation === 'cancel') {
         return message.sendState === 'failed'
-            ? { kind: 'cancel_failed', showSpinner: false, iconName: 'alert-circle-outline' }
-            : { kind: 'cancelling', showSpinner: true, iconName: 'time-outline' };
+            ? { kind: 'cancel_failed', showSpinner: false, iconName: 'warning-circle' }
+            : { kind: 'cancelling', showSpinner: true, iconName: 'clock' };
     }
     const isPersistedQuarantine = message.pendingOutboxQuarantineReason !== undefined;
     const isRetainedByDurablePendingOwner = message.source === 'server_pending'
@@ -123,14 +123,14 @@ export function getPendingMessageVisualState(
         return {
             kind: 'send_failed',
             showSpinner: false,
-            iconName: 'alert-circle-outline',
+            iconName: 'warning-circle',
         };
     }
     if (!isRetainedByDurablePendingOwner && message.sendState === 'unconfirmed') {
         return {
             kind: 'send_unconfirmed',
             showSpinner: true,
-            iconName: 'cloud-upload-outline',
+            iconName: 'cloud-arrow-up',
         };
     }
 
@@ -138,7 +138,7 @@ export function getPendingMessageVisualState(
         return {
             kind: 'saving',
             showSpinner: true,
-            iconName: 'cloud-upload-outline',
+            iconName: 'cloud-arrow-up',
         };
     }
 
@@ -155,13 +155,13 @@ export function getPendingMessageVisualState(
             return {
                 ...blockedState,
                 kind: 'delivery_uncertain',
-                iconName: 'alert-circle-outline',
+                iconName: 'warning-circle',
             };
         }
         return {
             ...blockedState,
             kind: 'blocked',
-            iconName: 'alert-circle-outline',
+            iconName: 'warning-circle',
         };
     }
 
@@ -169,7 +169,7 @@ export function getPendingMessageVisualState(
         return {
             kind: 'delivering',
             showSpinner: false,
-            iconName: 'navigate-outline',
+            iconName: 'navigation-arrow',
         };
     }
 
@@ -177,7 +177,7 @@ export function getPendingMessageVisualState(
         return {
             kind: 'delivering',
             showSpinner: true,
-            iconName: 'navigate-outline',
+            iconName: 'navigation-arrow',
         };
     }
 
@@ -186,7 +186,7 @@ export function getPendingMessageVisualState(
     const queuedWait = (reason: PendingMessageQueuedBehindTurnPresentation['reason']): PendingMessageVisualState => ({
         kind: 'queued_behind_turn',
         showSpinner: false,
-        iconName: 'time-outline',
+        iconName: 'clock',
         queuedBehindTurn: {
             reason,
             ...(typeof turnStartedAtMs === 'number' && Number.isFinite(turnStartedAtMs) && turnStartedAtMs > 0
@@ -240,6 +240,6 @@ export function getPendingMessageVisualState(
     return {
         kind: 'queued',
         showSpinner: false,
-        iconName: 'time-outline',
+        iconName: 'clock',
     };
 }
