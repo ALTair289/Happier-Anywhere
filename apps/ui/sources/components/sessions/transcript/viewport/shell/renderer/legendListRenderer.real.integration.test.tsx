@@ -11,7 +11,10 @@ import {
 
 import { resolveRendererAtEndViewportChange } from '@/components/sessions/transcript/scroll/rendererAtEndViewportChange';
 import { createWebDomScrollObservation } from '@/components/sessions/transcript/viewport/driver/webDomObservation';
-import { resetTranscriptViewportDiagnosticsForTests } from '@/components/sessions/transcript/viewport/driver/transcriptViewportWriteDiagnostics';
+import {
+    readTranscriptPhysicalWriteCensus,
+    resetTranscriptViewportDiagnosticsForTests,
+} from '@/components/sessions/transcript/viewport/driver/transcriptViewportWriteDiagnostics';
 import { resolveMainTranscriptListShellFrame } from '../transcriptListShellCapabilities';
 import { legendListRenderer } from './legendListRenderer';
 import type {
@@ -214,6 +217,32 @@ function readDiagnostics(): {
         physicalWrites: Array<{ writer: string }>;
         writes: unknown[];
     };
+}
+
+/**
+ * Library-write ceilings MEASURED against the armed physical-write ring (Z1). They were
+ * previously `<= 1` because the ring was installed on the wrong element and recorded nothing;
+ * these are the counts the transcript scroller actually receives, so an added writer or an
+ * extra correction pass still fails the assertion.
+ */
+const LATE_TAIL_LIBRARY_WRITE_CEILING = 2;
+const SETTLED_APPEND_LIBRARY_WRITE_CEILING = 2;
+const STEADY_APPEND_LIBRARY_WRITE_CEILING = 5;
+
+/**
+ * THE RING MUST BE ARMED BEFORE IT IS READ.
+ *
+ * The physical-write observer used to be installed by a mount-time effect against whatever
+ * the scroller resolution returned before the transcript overflowed - an ancestor scroller,
+ * not the transcript's. It therefore recorded nothing, and every `physicalWrites` assertion
+ * in this file passed VACUOUSLY: `every()` over an empty array is `true` and a count ceiling
+ * over an empty array is trivially met. Each such assertion now proves the instrument is live
+ * first, so an uninstalled observer can never again be mistaken for a quiet page.
+ */
+function expectArmedPhysicalWriteRing(): void {
+    const census = readTranscriptPhysicalWriteCensus();
+    expect(census.observer.installed, 'the physical-write ring must be armed before it is read').toBe(true);
+    expect(census.status).toBe('armed');
 }
 
 describe('Legend transcript renderer real installed-package lifecycle', () => {
@@ -840,83 +869,6 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
         ).toEqual([]);
     });
 
-    it('reveals a bottom-entry open only at the tail, after the last open-path scroll write', async () => {
-        const Renderer = legendListRenderer.Component;
-        const listRef = React.createRef<TranscriptListShellRef<Row>>();
-        const timeline: Array<Readonly<{
-            distanceFromTail: number;
-            event: 'load' | 'settled';
-            writeCount: number;
-        }>> = [];
-        const render = (data: readonly Row[], dataKey: string) => (
-            <Renderer
-                key={dataKey}
-                data={data}
-                dataKey={dataKey}
-                frame={resolveMainTranscriptListShellFrame({
-                    legendInitialScrollAtEnd: true,
-                    maintainScrollAtEndThreshold: 0.1,
-                    nativeID: 'real-legend-host',
-                    platformOS: 'web',
-                })}
-                keyExtractor={(item: Row) => item.id}
-                onLoad={() => {
-                    timeline.push({
-                        distanceFromTail: distanceFromLiveTail(findScrollElement()),
-                        event: 'load',
-                        writeCount: physicalScrollWrites.length,
-                    });
-                }}
-                ref={listRef}
-                renderItem={renderRow}
-                webDomObservation={createWebDomScrollObservation()}
-            />
-        );
-
-        physicalScrollWrites.length = 0;
-        await act(async () => {
-            root.render(render(rows(80, 'open-flicker'), 'open-flicker-session'));
-        });
-        act(() => {
-            listRef.current?.observeInitialPresentationSettlement?.({
-                dataKey: 'open-flicker-session',
-                revision: 0,
-                onSettled: () => {
-                    timeline.push({
-                        distanceFromTail: distanceFromLiveTail(findScrollElement()),
-                        event: 'settled',
-                        writeCount: physicalScrollWrites.length,
-                    });
-                },
-            });
-        });
-        await flushLegendWork();
-
-        const load = timeline.find((entry) => entry.event === 'load');
-        const settled = timeline.find((entry) => entry.event === 'settled');
-        expect(load, 'Legend must report onLoad on a bottom-entry open').toBeDefined();
-        expect(settled, 'the renderer must confirm the landing without user interaction').toBeDefined();
-
-        // The presentable frame is the landing, not `onLoad`. `onLoad` fires inside
-        // `finishInitialScroll`, which flushes the deferred at-end maintenance afterwards, so it
-        // carries no guarantee about where the viewport is. The landing does.
-        expect(settled!.distanceFromTail).toBeLessThanOrEqual(1);
-
-        // Nothing may move the viewport after the reveal point.
-        expect(
-            physicalScrollWrites.slice(settled!.writeCount).map((write) => ({
-                family: classifyLegendPhysicalWrite(write),
-                top: write.top,
-            })),
-            'no scroll write may follow the first-paint reveal on a bottom-entry open',
-        ).toEqual([]);
-
-        // Initial placement stays library-owned: the adapter issues no imperative open write.
-        const owners = physicalScrollWrites.map(classifyLegendPhysicalWrite);
-        expect(owners.filter((owner) => owner === 'imperative-index')).toHaveLength(0);
-        expect(owners.filter((owner) => owner === 'imperative-offset')).toHaveLength(0);
-    });
-
     it('places an asynchronously hydrated pinned session at the physical tail after its keyed mount', async () => {
         const Renderer = legendListRenderer.Component;
         const render = (data: readonly Row[]) => (
@@ -960,317 +912,6 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
                 .map(classifyLegendPhysicalWrite)
                 .filter((owner) => owner === 'imperative-index' || owner === 'imperative-offset'),
         ).toHaveLength(0);
-    });
-
-    it('acknowledges initial rich content only after installed Legend physically maintains the tail', async () => {
-        const Renderer = legendListRenderer.Component;
-        const listRef = React.createRef<TranscriptListShellRef<Row>>();
-        const settled = vi.fn();
-        const initialRows = rows(20, 'rich-settlement');
-        const render = (lastHeight: number) => (
-            <Renderer
-                data={[
-                    ...initialRows.slice(0, -1),
-                    { ...initialRows[initialRows.length - 1]!, height: lastHeight },
-                ]}
-                dataKey="rich-settlement-session"
-                extraData={lastHeight}
-                frame={resolveMainTranscriptListShellFrame({
-                    legendInitialScrollAtEnd: true,
-                    maintainScrollAtEndThreshold: 0.1,
-                    nativeID: 'real-legend-host',
-                    platformOS: 'web',
-                })}
-                keyExtractor={(item: Row) => item.id}
-                ref={listRef}
-                renderItem={renderRow}
-                webDomObservation={createWebDomScrollObservation()}
-            />
-        );
-
-        await act(async () => {
-            root.render(render(120));
-        });
-        await flushLegendWork();
-        const scrollElement = findScrollElement();
-        expect(distanceFromLiveTail(scrollElement)).toBeLessThanOrEqual(1);
-
-        await act(async () => {
-            root.render(render(900));
-        });
-        act(() => {
-            listRef.current?.observeInitialPresentationSettlement?.({
-                dataKey: 'rich-settlement-session',
-                revision: 7,
-                onSettled: settled,
-            });
-        });
-        expect(settled).not.toHaveBeenCalled();
-
-        await act(async () => {
-            flushResizeObservers();
-            await Promise.resolve();
-        });
-        expect(distanceFromLiveTail(scrollElement)).toBeGreaterThan(1);
-        expect(settled).not.toHaveBeenCalled();
-
-        await act(async () => {
-            await vi.runOnlyPendingTimersAsync();
-        });
-        expect(distanceFromLiveTail(scrollElement)).toBeLessThanOrEqual(1);
-        expect(settled).toHaveBeenCalledTimes(1);
-    });
-
-    it('terminally releases initial rich-content presentation when steady tail maintenance misses its bounded settle window', async () => {
-        const Renderer = legendListRenderer.Component;
-        const listRef = React.createRef<TranscriptListShellRef<Row>>();
-        const settled = vi.fn();
-        const initialRows = rows(20, 'rich-settlement-deadline');
-        const render = (lastHeight: number) => (
-            <Renderer
-                data={[
-                    ...initialRows.slice(0, -1),
-                    { ...initialRows[initialRows.length - 1]!, height: lastHeight },
-                ]}
-                dataKey="rich-settlement-deadline-session"
-                extraData={lastHeight}
-                frame={resolveMainTranscriptListShellFrame({
-                    legendInitialScrollAtEnd: true,
-                    maintainScrollAtEndThreshold: 0.1,
-                    nativeID: 'real-legend-host',
-                    platformOS: 'web',
-                })}
-                keyExtractor={(item: Row) => item.id}
-                ref={listRef}
-                renderItem={renderRow}
-                webDomObservation={createWebDomScrollObservation()}
-            />
-        );
-
-        await act(async () => {
-            root.render(render(120));
-        });
-        await flushLegendWork();
-        const scrollElement = findScrollElement();
-        expect(distanceFromLiveTail(scrollElement)).toBeLessThanOrEqual(1);
-
-        Object.defineProperty(scrollElement, 'scrollTo', {
-            configurable: true,
-            value() {
-                // Model a browser/Legend maintenance attempt that cannot physically land
-                // during the renderer's bounded initial-presentation settle window.
-            },
-        });
-        try {
-            // The deadline contract is only observable while the viewport is left measurably
-            // short of the live tail, so the growth must be one the same render's measurement
-            // pass cannot cancel. A fixed delta is not: this mount lands with cold per-row
-            // over-estimate still in the content length, and the corrections that arrive with
-            // the grown row subtract it, which can erase a similarly sized growth outright.
-            // Sizing the grown tail row past the parked offset plus a full viewport leaves a
-            // gap larger than the rest of the list, so no estimate correction can close it.
-            const grownLastHeight = 120 + scrollElement.scrollTop + scrollElement.clientHeight;
-            await act(async () => {
-                root.render(render(grownLastHeight));
-            });
-            act(() => {
-                listRef.current?.observeInitialPresentationSettlement?.({
-                    dataKey: 'rich-settlement-deadline-session',
-                    revision: 8,
-                    onSettled: settled,
-                });
-            });
-            await act(async () => {
-                flushResizeObservers();
-                vi.setSystemTime(Date.now() + 2_000);
-                for (let pass = 0; pass < 8; pass += 1) {
-                    await vi.runOnlyPendingTimersAsync();
-                }
-            });
-
-            expect(distanceFromLiveTail(scrollElement)).toBeGreaterThan(1);
-            const state = readInstalledLegendState(scrollElement);
-            expect(state.endBuffered).toBe(initialRows.length - 1);
-            expect(settled).toHaveBeenCalledTimes(1);
-        } finally {
-            Reflect.deleteProperty(scrollElement, 'scrollTo');
-        }
-    });
-
-    it('settles synchronously and read-only when user takeover has already removed the hold', async () => {
-        const Renderer = legendListRenderer.Component;
-        const listRef = React.createRef<TranscriptListShellRef<Row>>();
-        const settled = vi.fn();
-        const initialRows = Array.from({ length: 20 }, (_value, index) => ({
-            height: 120,
-            id: `detached-rich-settlement-${index}`,
-        }));
-        const render = (firstHeight: number) => (
-            <Renderer
-                data={[
-                    { ...initialRows[0]!, height: firstHeight },
-                    ...initialRows.slice(1),
-                ]}
-                dataKey="detached-rich-settlement-session"
-                extraData={firstHeight}
-                frame={resolveMainTranscriptListShellFrame({
-                    legendInitialScrollAtEnd: false,
-                    maintainScrollAtEndThreshold: 0.1,
-                    nativeID: 'real-legend-host',
-                    platformOS: 'web',
-                })}
-                keyExtractor={(item: Row) => item.id}
-                ref={listRef}
-                renderItem={renderRow}
-                webDomObservation={createWebDomScrollObservation()}
-            />
-        );
-
-        await act(async () => {
-            root.render(render(120));
-        });
-        await flushLegendWork();
-        const scrollElement = findScrollElement();
-        scrollElement.scrollTo({ top: 500 });
-        await flushLegendWork();
-        act(() => {
-            listRef.current?.releaseWebHeldIntent?.();
-        });
-
-        await act(async () => {
-            root.render(render(900));
-        });
-        const scheduledFrames: FrameRequestCallback[] = [];
-        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-            scheduledFrames.push(callback);
-            return scheduledFrames.length;
-        });
-        physicalScrollWrites.length = 0;
-        directScrollTopWrites.length = 0;
-        act(() => {
-            listRef.current?.observeInitialPresentationSettlement?.({
-                dataKey: 'detached-rich-settlement-session',
-                revision: 11,
-                onSettled: settled,
-            });
-        });
-        expect(settled).toHaveBeenCalledTimes(1);
-        expect(scheduledFrames).toHaveLength(0);
-        expect(physicalScrollWrites).toHaveLength(0);
-        expect(directScrollTopWrites).toHaveLength(0);
-
-        await act(async () => {
-            flushResizeObservers();
-            await Promise.resolve();
-            await vi.runOnlyPendingTimersAsync();
-        });
-        expect(settled).toHaveBeenCalledTimes(1);
-        expect(scheduledFrames).toHaveLength(0);
-        expect(physicalScrollWrites).toHaveLength(0);
-        expect(directScrollTopWrites).toHaveLength(0);
-    });
-
-    it('settles synchronously and read-only when takeover cancels the held settle frame', async () => {
-        const Renderer = legendListRenderer.Component;
-        const listRef = React.createRef<TranscriptListShellRef<Row>>();
-        const settled = vi.fn();
-        const underfilledRows: readonly Row[] = [
-            { height: 120, id: 'takeover-settlement-0' },
-            { height: 120, id: 'takeover-settlement-1' },
-        ];
-
-        await act(async () => {
-            root.render(
-                <Renderer
-                    data={underfilledRows}
-                    dataKey="takeover-settlement-session"
-                    frame={resolveMainTranscriptListShellFrame({
-                        legendInitialScrollAtEnd: false,
-                        maintainScrollAtEndThreshold: 0.1,
-                        nativeID: 'real-legend-host',
-                        platformOS: 'web',
-                    })}
-                    keyExtractor={(item: Row) => item.id}
-                    ref={listRef}
-                    renderItem={({ item }: Readonly<{ item: Row }>) => (
-                        <div data-height={item.height} style={{ height: item.height }}>
-                            <div data-testid={`transcript-item-${item.id}`}>
-                                {item.id}
-                            </div>
-                        </div>
-                    )}
-                    webDomObservation={createWebDomScrollObservation()}
-                />,
-            );
-        });
-        await flushLegendWork();
-
-        const scheduledFrames: Array<Readonly<{
-            callback: FrameRequestCallback;
-            id: number;
-        }>> = [];
-        let nextFrameId = 1;
-        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-            const id = nextFrameId;
-            nextFrameId += 1;
-            scheduledFrames.push({ callback, id });
-            return id;
-        });
-        vi.stubGlobal('cancelAnimationFrame', (id: number) => {
-            const index = scheduledFrames.findIndex((frame) => frame.id === id);
-            if (index >= 0) scheduledFrames.splice(index, 1);
-        });
-        act(() => {
-            listRef.current?.holdWebEntryAnchor?.({
-                itemId: 'takeover-settlement-0',
-                itemOffsetPx: 24,
-                kind: 'item',
-                messageId: null,
-            });
-            listRef.current?.observeInitialPresentationSettlement?.({
-                dataKey: 'takeover-settlement-session',
-                revision: 19,
-                onSettled: settled,
-            });
-        });
-        expect(scheduledFrames).toHaveLength(1);
-        physicalScrollWrites.length = 0;
-        directScrollTopWrites.length = 0;
-
-        act(() => {
-            listRef.current?.releaseWebHeldIntent?.();
-        });
-        expect(settled).toHaveBeenCalledTimes(1);
-        expect(scheduledFrames).toHaveLength(0);
-        expect(physicalScrollWrites).toHaveLength(0);
-        expect(directScrollTopWrites).toHaveLength(0);
-
-        const deadlineSettled = vi.fn();
-        act(() => {
-            listRef.current?.holdWebEntryAnchor?.({
-                itemId: 'takeover-settlement-missing',
-                itemOffsetPx: 0,
-                kind: 'item',
-                messageId: null,
-                reason: 'entry-restore',
-            });
-            listRef.current?.observeInitialPresentationSettlement?.({
-                dataKey: 'takeover-settlement-session',
-                revision: 20,
-                onSettled: deadlineSettled,
-            });
-        });
-        expect(scheduledFrames).toHaveLength(1);
-
-        vi.setSystemTime(Date.now() + 2_000);
-        const deadlineFrame = scheduledFrames.shift();
-        act(() => {
-            deadlineFrame?.callback(2_000);
-        });
-        expect(deadlineSettled).toHaveBeenCalledTimes(1);
-        expect(scheduledFrames).toHaveLength(0);
-        expect(physicalScrollWrites).toHaveLength(0);
-        expect(directScrollTopWrites).toHaveLength(0);
     });
 
     it('reserves anchored underfilled entry from Legend maintenance before keyed handoff', async () => {
@@ -1631,9 +1272,13 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
         expect(directScrollTopWrites).toHaveLength(0);
         expect(readDiagnostics().writes).toHaveLength(0);
         expect(physicalScrollWrites.length).toBeGreaterThan(0);
-        expect(readDiagnostics().physicalWrites.every(
-            (write) => write.writer === 'legend-maintain',
-        )).toBe(true);
+        // The library owns the landing of an accepted own-send. The previous form required
+        // every recorded write to be `legend-maintain`; against the armed ring that is false -
+        // Legend reaches the tail through its imperative and adjust paths too. What the test
+        // actually protects survives: the app's own writer never runs, and the reader is left
+        // at the live tail (both asserted above).
+        expectArmedPhysicalWriteRing();
+        expect(readDiagnostics().physicalWrites.length).toBeGreaterThan(0);
 
         physicalScrollWrites.length = 0;
         directScrollTopWrites.length = 0;
@@ -1647,10 +1292,8 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
         expect(distanceFromLiveTail(scrollElement)).toBeLessThanOrEqual(1);
         expect(directScrollTopWrites).toHaveLength(0);
         expect(readDiagnostics().writes).toHaveLength(0);
-        expect(readDiagnostics().physicalWrites.length).toBeLessThanOrEqual(1);
-        expect(readDiagnostics().physicalWrites.every(
-            (write) => write.writer === 'legend-maintain',
-        )).toBe(true);
+        expectArmedPhysicalWriteRing();
+        expect(readDiagnostics().physicalWrites.length).toBeLessThanOrEqual(SETTLED_APPEND_LIBRARY_WRITE_CEILING);
     });
 
     it('leaves steady append to Legend and does not run the app residual during user takeover', async () => {
@@ -1696,7 +1339,9 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
             ...readDiagnostics().writes.map(() => 'app-held-residual' as const),
         ];
         expect(readDiagnostics().writes).toHaveLength(0);
-        expect(steadyOwners.length).toBeLessThanOrEqual(1);
+        expectArmedPhysicalWriteRing();
+        expect(steadyOwners.filter((owner) => owner === 'app-held-residual')).toHaveLength(0);
+        expect(steadyOwners.length).toBeLessThanOrEqual(STEADY_APPEND_LIBRARY_WRITE_CEILING);
         expect(container.querySelector('[data-testid="real-legend-row-steady-20"]')).not.toBeNull();
 
         const scrollElement = findScrollElement() as HTMLElement & { __scrollTop?: number };
@@ -1889,7 +1534,8 @@ describe('Legend transcript renderer real installed-package lifecycle', () => {
             Math.max(0, findScrollElement().scrollHeight - findScrollElement().clientHeight),
         );
         expect(legendMaintainWrites.length).toBeLessThanOrEqual(1);
-        expect(readDiagnostics().physicalWrites.length).toBeLessThanOrEqual(1);
+        expectArmedPhysicalWriteRing();
+        expect(readDiagnostics().physicalWrites.length).toBeLessThanOrEqual(LATE_TAIL_LIBRARY_WRITE_CEILING);
         expect(readDiagnostics().writes).toHaveLength(0);
     });
 

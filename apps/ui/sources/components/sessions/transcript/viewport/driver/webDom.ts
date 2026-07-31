@@ -226,10 +226,19 @@ export function performWebDomViewportCommand(
             // and never mount the target index at any scrollTop. Ask the renderer to re-anchor
             // its window at the target; prepend/entry restores intentionally stay DOM-only so
             // they preserve the existing anchor-recovery ownership contract.
-            try {
-                deps.listRef.current?.scrollToIndex?.({ index: index ?? 0, animated: false });
-            } catch {
-                // Renderer refusal is non-fatal; the DOM estimate write still applies.
+            //
+            // NEVER default an unresolved target to index 0. Index 0 is the HEAD of the
+            // transcript, so `index ?? 0` turns "I could not locate the jump target" into a
+            // silent teleport to the top of the content — the same head-collapse class measured
+            // on 2026-07-30, where Legend resolving an index it could not place as offset 0
+            // parked the reader on the fork divider. A target without a data index has no
+            // renderer window to re-anchor; the DOM write below is the only owner.
+            if (index != null) {
+                try {
+                    deps.listRef.current?.scrollToIndex?.({ index, animated: false });
+                } catch {
+                    // Renderer refusal is non-fatal; the DOM estimate write still applies.
+                }
             }
         }
         // Prefer measured-band extrapolation over the renderer's estimated layout for
@@ -238,17 +247,24 @@ export function performWebDomViewportCommand(
         // (`transcript-web-hot-tail-item-*` vs `transcript-item-*`) so findWebTranscriptItemElement
         // cannot locate them. Read their rect directly via the hot-tail prefix so
         // scrollWebDomToTranscriptItem can use the measured layout path instead.
-        const bandLayout = hotFooterItemId
+        // `index ?? 0` here would extrapolate/read the layout of the HEAD row whenever the
+        // target has no data index, and that head layout then becomes the write target — the
+        // same head-collapse default as the renderer re-anchor above. An indexless target
+        // has no estimated layout to read; leave it null so the caller falls through to its
+        // DOM/hot-tail owner instead of aiming at row 0.
+        const bandLayout = hotFooterItemId || index == null
             ? null
             : resolveWebBandExtrapolatedTranscriptItemLayout({
                 container: metrics.element,
                 listData: deps.listDataRef.current,
                 scrollTop: metrics.scrollTop,
-                targetIndex: index ?? 0,
+                targetIndex: index,
             });
         const itemLayout = hotFooterItemId
             ? hotFooterItemLayout
-            : bandLayout ?? readScrollableChatListItemLayout(deps.listRef.current, index ?? 0);
+            : bandLayout ?? (index == null
+                ? null
+                : readScrollableChatListItemLayout(deps.listRef.current, index));
         // Pre-write reads for the jump anchor hold below: rects and scrollTop both
         // change once the write lands, but content-y (rect-derived + scrollTop at the
         // same instant) is scroll-invariant only when both are read together.

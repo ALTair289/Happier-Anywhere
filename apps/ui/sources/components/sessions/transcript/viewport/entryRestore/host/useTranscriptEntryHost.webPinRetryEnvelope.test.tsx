@@ -31,6 +31,7 @@ import type { TranscriptListRendererKind } from '@/components/sessions/transcrip
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 import type { SessionEntryViewportRefValue } from './useTranscriptEntryHost';
 import { useTranscriptEntryHost } from './useTranscriptEntryHost';
+import { createTranscriptUserScrollIntentOwner } from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
 
 vi.mock('@/sync/sync', () => ({
     sync: {
@@ -137,6 +138,7 @@ function createEnvelopeHarness(params: Readonly<{
         jumpToSeqActiveRef: { current: false },
         lastScrollOffsetForIntentRef: { current: null },
         lastUserScrollIntentAtMsRef: { current: Number.NEGATIVE_INFINITY },
+        userScrollIntent: createTranscriptUserScrollIntentOwner(),
         latestJumpToSeqRef: { current: null },
         listContentHeightRef: { current: 46080 },
         listDataRef: { current: items },

@@ -1,8 +1,9 @@
 import * as React from 'react';
 import { View, type LayoutChangeEvent, type NativeSyntheticEvent, type NativeScrollEvent } from 'react-native';
 import {
-    observeTranscriptPhysicalScrollMethods,
-    observeTranscriptRevealVisibility,
+    disposeTranscriptViewportElementObservers,
+    ensureTranscriptViewportElementObservers,
+    isTranscriptViewportDiagnosticsEnabled,
     recordTranscriptHeldIntentLifecycle,
     recordTranscriptScrollSample,
 } from '@/components/sessions/transcript/viewport/driver/transcriptViewportWriteDiagnostics';
@@ -485,12 +486,23 @@ function LegendListTranscriptRendererInner<TItem>(
         intent: LegendHeldScrollIntent;
         targetOffset: number;
     }> | null>(null);
+    // The geometry the PREVIOUS web landing read of the live transaction observed. A correction
+    // may only be spent on evidence that is no longer in motion (see the coherence precondition
+    // in `evaluateLanding`); the app's own landed write rebases it, so correcting once never
+    // disqualifies the next correction.
+    const lastWebLandingObservationRef = React.useRef<Readonly<{
+        currentOffset: number;
+        intent: LegendHeldScrollIntent;
+        scrollRange: number;
+    }> | null>(null);
     const pendingWebTailMaterializationKeyRef = React.useRef<string | null>(null);
-    // One materialization scroll EVER per tail identity: after a successful mount, the
-    // measured residual owner re-mounts a flapped-out tail by scrolling — a second
-    // scrollToIndex re-enters Legend's estimate-target retry machinery and closes a
+    // One materialization scroll EVER per DATASET identity (`dataKey`): after a successful
+    // mount, the measured residual owner re-mounts a flapped-out tail by scrolling — a second
+    // imperative tail command re-enters Legend's estimate-target retry machinery and closes a
     // materialize↔correct loop (live capture 2026-07-23: 255 re-fired scrollToIndex vs
     // the measured-bottom corrections, oscillating the reopened viewport for minutes).
+    // Keying this on the tail ROW identity plus `dataLength` re-armed it on every hydration
+    // wave, which is how one cold open still issued 16 placement commands (2026-07-30).
     const completedWebTailMaterializationKeyRef = React.useRef<string | null>(null);
     const completedKeyedIdentityMaterializationRef = React.useRef(false);
     const lastPublishedAtEndStateRef = React.useRef<TranscriptRendererAtEndState | null>(null);
@@ -890,6 +902,24 @@ function LegendListTranscriptRendererInner<TItem>(
             allowRootFallback: true,
         });
         if (metrics) webScrollableElementRef.current = metrics.element;
+        // Opt-in rare-defect probe (no-op unless happier.debug.viewportWrites=1). Armed HERE,
+        // at the canonical scroller resolution, because a mount-time effect could not re-arm:
+        // the transcript does not overflow yet at mount, so the resolver falls back past the
+        // transcript root onto an ancestor (live: the 384px left rail) or onto the root itself,
+        // and the ring then certified an unrelated element's silence as the transcript's.
+        // Legend's own scrollable node is the earliest TRUE identity of the transcript scroller
+        // — it is the element Legend writes to and it does not wait for transient overflow — so
+        // it is preferred, and the containment check keeps that preference honest.
+        if (isTranscriptViewportDiagnosticsEnabled()) {
+            const legendNode = directLegendNode ?? legendListRef.current?.getScrollableNode?.();
+            const legendScrollElement = typeof HTMLElement !== 'undefined' && legendNode instanceof HTMLElement
+                ? legendNode
+                : null;
+            ensureTranscriptViewportElementObservers({
+                element: legendScrollElement ?? metrics?.element ?? null,
+                transcriptRoot: root,
+            });
+        }
         return metrics;
     }, [isWebFrame, props.frame.rendererOptions.identity.nativeID]);
 
@@ -1082,15 +1112,10 @@ function LegendListTranscriptRendererInner<TItem>(
 
     React.useEffect(() => {
         if (!isWebFrame) return;
-        const element = readWebScrollMetrics()?.element;
-        if (!element) return;
-        // Opt-in rare-defect probe (no-op unless happier.debug.viewportWrites=1).
-        const disposePhysicalWrites = observeTranscriptPhysicalScrollMethods(element);
-        const disposeRevealVisibility = observeTranscriptRevealVisibility(element);
-        return () => {
-            disposePhysicalWrites?.();
-            disposeRevealVisibility?.();
-        };
+        // Arming follows `readWebScrollMetrics` (see there); this effect only opens the probe
+        // on mount and tears it down on unmount.
+        readWebScrollMetrics();
+        return () => disposeTranscriptViewportElementObservers();
     }, [isWebFrame, readWebScrollMetrics]);
 
     const releaseHeldScrollIntent = React.useCallback((
@@ -1166,28 +1191,50 @@ function LegendListTranscriptRendererInner<TItem>(
         // Target the tail through Legend once; after it mounts, Legend's maintain-at-end
         // lifecycle owns final alignment. This is not an offscreen keep-alive and does not
         // widen the virtualization window for detached readers.
-        const tailItem = data[lastIndex];
-        if (tailItem === undefined) return true;
-        const tailKey = `${dataLength}:${props.keyExtractor(
-            tailItem,
-            toSourceIndex(lastIndex, dataLength, projectChronologicalIndex),
-        )}`;
-        if (pendingWebTailMaterializationKeyRef.current === tailKey) return true;
-        if (completedWebTailMaterializationKeyRef.current === tailKey) return false;
-        completedWebTailMaterializationKeyRef.current = tailKey;
-        pendingWebTailMaterializationKeyRef.current = tailKey;
+        //
+        // COMMANDED BY INTENT, NOT BY A FROZEN INDEX, AND KEYED TO THE DATASET IDENTITY.
+        // The previous form was keyed `${dataLength}:${keyExtractor(tail)}` and issued
+        // `scrollToIndex({ index: dataLength - 1 })`. Both halves failed on a multi-wave
+        // open (measured live on web, session cms4aenky5lnktm72sfmya6uk, cold route load,
+        // reproduced twice: 16 scrollToIndex commands per open, 8 of them landing at
+        // scrollTop 0 while maxScroll was ~1936):
+        //   - `dataLength` in the key RE-ARMED the "one materialization EVER" guard the
+        //     comment above claims on every hydration wave (324 -> 2291 -> 2253 -> 12241px);
+        //   - `scrollToIndex` freezes `index` at REQUEST time while Legend resolves the
+        //     offset at RUN time (`calculateOffsetForIndex` -> `positions[index] || 0`), and
+        //     `runWhenReady` runs a deferred request regardless of readiness after 800ms. The
+        //     tail index of the 1-row placeholder list a forked transcript publishes first is
+        //     0, and index 0 is the HEAD of the content once messages arrive - on a fork that
+        //     is literally the fork-divider row the reader was teleported to.
+        // `scrollToEnd` re-derives `data.length - 1` inside Legend at run time and
+        // re-evaluates its own readiness predicate there, which is why the same capture scored
+        // it 0 wrong landings out of 7 against the index form's 8 out of 16. `dataKey` is the
+        // logical dataset (session) identity, so one entry gets exactly one placement
+        // transaction no matter how many hydration waves it takes.
+        const materializationKey = props.dataKey;
+        if (pendingWebTailMaterializationKeyRef.current === materializationKey) return true;
+        if (completedWebTailMaterializationKeyRef.current === materializationKey) return false;
+        completedWebTailMaterializationKeyRef.current = materializationKey;
+        pendingWebTailMaterializationKeyRef.current = materializationKey;
         pendingViewportCauseRef.current = 'command';
-        settleLegendScroll(legendListRef.current?.scrollToIndex({
-            animated: false,
-            index: lastIndex,
-            viewPosition: 1,
-        }), () => {
-            if (pendingWebTailMaterializationKeyRef.current === tailKey) {
+        // Symmetric with the keyed-identity path below: without these, end placements were the
+        // one materialization family no in-app instrument could count, so a capture could not
+        // tell "the tail was never commanded" from "the tail was commanded and landed wrong".
+        recordTranscriptHeldIntentLifecycle({
+            ...readHeldIntentDiagnosticIdentity(intent),
+            event: 'materialization-start',
+        });
+        settleLegendScroll(legendListRef.current?.scrollToEnd({ animated: false }), () => {
+            if (pendingWebTailMaterializationKeyRef.current === materializationKey) {
                 pendingWebTailMaterializationKeyRef.current = null;
             }
+            recordTranscriptHeldIntentLifecycle({
+                ...readHeldIntentDiagnosticIdentity(intent),
+                event: 'materialization-settled',
+            });
         });
         return true;
-    }, [data, dataLength, isWebFrame, projectChronologicalIndex, props.keyExtractor]);
+    }, [dataLength, isWebFrame, props.dataKey]);
 
     const requestWebKeyedIdentityMaterialization = React.useCallback((
         intent: LegendHeldScrollIntent,
@@ -1200,6 +1247,33 @@ function LegendListTranscriptRendererInner<TItem>(
             ? resolveAnchorHoldDataIndex(intent.anchor.itemId)
             : resolveHeldIntentIndex(intent);
         if (index < 0 || index >= dataLength) return false;
+        // WITHHOLD UNTIL THE TARGET CAN PHYSICALLY BE HELD — the keyed-identity twin of the
+        // guard `requestWebHeldEndMaterialization` already carries. `scrollToIndex` freezes
+        // `index` at REQUEST time while Legend resolves the offset at RUN time
+        // (`calculateOffsetForIndex` -> `positions[index] || 0`) and `runWhenReady` dispatches a
+        // deferred request regardless of readiness after 800ms, so an unresolved position
+        // collapses the target to offset 0 — the HEAD — which is the exact opposite of a
+        // saved-anchor restore. The DOM adds a second, independent collapse the end path never
+        // hits: `scrollTo` CLAMPS to the scroller's CURRENT range, so a target beyond a
+        // still-hydrating `scrollHeight` lands at that placeholder range's end and no later
+        // signal re-issues the one-shot (live cold SPA entry with a persisted detached anchor,
+        // session cms4aenky5lnktm72sfmya6uk 2026-07-30: `scrollToIndex` resolved 813 into a
+        // transcript whose eventual range was 32878px, because the DOM range was still 813).
+        // Withholding must NOT consume the one-shot: the bounded settle loop is already polling
+        // and re-requests as soon as the geometry can hold the target.
+        const targetPosition = legendListRef.current?.getState()?.positionAtIndex?.(index);
+        const hasResolvedTargetPosition = typeof targetPosition === 'number'
+            && Number.isFinite(targetPosition);
+        if (index > 0 && (!hasResolvedTargetPosition || (targetPosition as number) <= 0)) return true;
+        const materializationMetrics = readWebScrollMetrics();
+        if (
+            hasResolvedTargetPosition
+            && materializationMetrics
+            && Math.max(0, materializationMetrics.scrollHeight - materializationMetrics.clientHeight)
+                < (targetPosition as number)
+        ) {
+            return true;
+        }
         // One materialization request belongs to this held identity transaction. Estimated
         // geometry is not written; after the row mounts, the existing DOM-truth path corrects
         // the exact within-row offset.
@@ -1224,6 +1298,7 @@ function LegendListTranscriptRendererInner<TItem>(
     }, [
         dataLength,
         isWebFrame,
+        readWebScrollMetrics,
         resolveAnchorHoldDataIndex,
         resolveHeldIntentIndex,
     ]);
@@ -1510,6 +1585,14 @@ function LegendListTranscriptRendererInner<TItem>(
             landedOffset,
             targetOffset: landing.targetOffset,
         };
+        // Our own landed offset is the new coherence baseline: the reader did not move, we did.
+        if (landedOffset !== null && typeof landing.maxOffset === 'number' && Number.isFinite(landing.maxOffset)) {
+            lastWebLandingObservationRef.current = {
+                currentOffset: landedOffset,
+                intent,
+                scrollRange: landing.maxOffset,
+            };
+        }
         recordTranscriptHeldIntentLifecycle({
             ...readHeldIntentDiagnosticIdentity(intent),
             basis: landing.basis,
@@ -1555,6 +1638,39 @@ function LegendListTranscriptRendererInner<TItem>(
                 residual: landing.residual,
                 targetOffset: landing.targetOffset,
             });
+            // COHERENCE PRECONDITION — a correction is only spendable on evidence that is not
+            // still in motion. Legend's own MVCP compensation (`ScrollAdjustHandler` ->
+            // `scrollAdjustBy`) and the reader's momentum both move the scroller BETWEEN the
+            // geometry commit and the frame this transaction reads it, and a residual measured
+            // across that seam is an artifact of the seam, not a misalignment: Legend's
+            // compensation for a prepend/remeasure was exact in 100% of ~4,900 sampled frames
+            // (2026-07-30 above-viewport remeasure capture), yet this writer was caught
+            // cancelling `scrollAdjustBy(+343)` 1 ms later and undoing a ~31,000px prepend
+            // compensation outright on the same session. So require the SAME reader offset and
+            // the SAME scroll range as the PREVIOUS read of this same transaction. This is a
+            // precondition on evidence, never a delay or a suppression window: a genuine
+            // residual survives into the very next settle frame — which the bounded cadence is
+            // already polling — and is written there, while a one-frame seam artifact does not.
+            const previousObservation = lastWebLandingObservationRef.current;
+            const hasWebScrollRange = landing.basis === 'web-dom'
+                && typeof landing.maxOffset === 'number'
+                && Number.isFinite(landing.maxOffset);
+            if (hasWebScrollRange) {
+                lastWebLandingObservationRef.current = {
+                    currentOffset: landing.currentOffset,
+                    intent,
+                    scrollRange: landing.maxOffset as number,
+                };
+            }
+            // A transaction's FIRST read has nothing to disagree with; entry restore and every
+            // fresh hold must still land promptly. Only an observed CHANGE withholds.
+            const geometryStableSinceLastRead = !hasWebScrollRange
+                || previousObservation == null
+                || previousObservation.intent !== intent
+                || (
+                    previousObservation.currentOffset === landing.currentOffset
+                    && previousObservation.scrollRange === landing.maxOffset
+                );
             // A target already sitting on a physical clamp boundary with the viewport beyond
             // it is settled by the platform spring itself; corrections against the spring
             // re-launch it (S-D boundary vibration).
@@ -1591,6 +1707,7 @@ function LegendListTranscriptRendererInner<TItem>(
                     return false;
                 }
                 if (Math.abs(landing.residual) < LEGEND_HELD_INTENT_ALIGNMENT_EPSILON_PX) return false;
+                if (!geometryStableSinceLastRead) return false;
                 writeHeldIntentResidual(intent, landing);
                 return false;
             }
@@ -1625,6 +1742,7 @@ function LegendListTranscriptRendererInner<TItem>(
                     return false;
                 }
             }
+            if (!geometryStableSinceLastRead) return false;
             pendingLargeResidualConfirmationRef.current = null;
             writeHeldIntentResidual(intent, landing);
             return false;
@@ -2197,7 +2315,7 @@ function LegendListTranscriptRendererInner<TItem>(
         // corrector fighting live input — the mechanism behind the late (>1s post-gesture)
         // unbounded-magnitude write measured on 2026-07-30.
         const userScrollInputExplainsMovement =
-            (globalThis as any).__U1_OFF !== true && userScrollIntent.isLive(Date.now())
+            userScrollIntent.isLive(Date.now())
             && (
                 userScrollIntent.isGestureActive()
                 || (movementDirection !== null && userScrollIntent.lastInputDirection() === movementDirection)

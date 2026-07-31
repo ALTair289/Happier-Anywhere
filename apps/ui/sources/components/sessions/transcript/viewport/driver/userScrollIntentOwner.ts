@@ -14,15 +14,27 @@ export const TRANSCRIPT_USER_SCROLL_INPUT_CONTINUATION_WINDOW_MS = 320;
  */
 export type TranscriptUserScrollIntentGesture = 'drag' | 'momentum';
 
+/**
+ * Read-only view of the owner's single last-input cell, in the `{ current }` shape the host
+ * already threads into its bottom-follow, entry-restore, prepend and lifecycle consumers.
+ *
+ * READ-ONLY IS THE POINT. The first version of this owner exposed a mutable ref *and* kept a
+ * private `lastRawInputAtMs`, so nine host sites assigned the ref directly and desynchronized the
+ * two halves: a command-boundary revoke cleared the ref while `isLive()` still claimed the reader
+ * was driving, and a host record advanced the ref while `lastInputAtMs()` stayed `-Infinity`. That
+ * is the same split brain this owner exists to remove, one layer down. There is now exactly one
+ * cell; every writer goes through `recordInput` / `setGestureActive` / `revokeInputEvidence` /
+ * `clear`, and the compiler enforces it.
+ */
+export type TranscriptUserScrollIntentTimestampReader = Readonly<{ readonly current: number }>;
+
 export type TranscriptUserScrollIntentOwner = Readonly<{
     /**
-     * The ONE storage location for "when did the reader last express scroll intent".
-     * Exposed with `MutableRef<number>` shape because it IS the ref the host already
-     * threads into the bottom-follow, entry-restore, prepend and lifecycle consumers.
-     * Producers: raw input handlers (host + renderer) and the classifier's
-     * `web-user-scroll-intent-timestamp` lifecycle effect. There is no second copy.
+     * Live read-only view of the ONE storage location for "when did the reader last express scroll
+     * intent". Producers: raw input handlers (host + renderer) and the classifier's
+     * `web-user-scroll-intent-timestamp` lifecycle effect.
      */
-    readonly timestampRef: { current: number };
+    readonly timestampRef: TranscriptUserScrollIntentTimestampReader;
     /** True while a drag/momentum phase is open. */
     isGestureActive(): boolean;
     /**
@@ -43,6 +55,52 @@ export type TranscriptUserScrollIntentOwner = Readonly<{
      * treating that as the reader's would abandon the anchor they are reading (live S-D, 2026-07-11).
      */
     lastInputDirection(): -1 | 1 | null;
+    /**
+     * STATE, not an event: the reader left the live tail under their own hand and has not come
+     * back. Does NOT decay — `isLive` and every `nowMs - t < window` predicate go false a few
+     * hundred milliseconds after the gesture ends, which is exactly when an automatic follow
+     * writer used to move a reader who had deliberately parked away from the tail. A reader who
+     * scrolled up and stopped has not consented to being returned to the bottom; that consent is
+     * only re-established by their own return or by an explicit command.
+     *
+     * Mirrors the persisted-viewport shape on purpose: `markSessionLiveTailIntent` DELETES the
+     * stored viewport record on send / enqueue / leave-at-tail, i.e. "pinned to the live tail" is
+     * already expressed as the ABSENCE of a parked position. This is the same fact, in-session.
+     */
+    isParkedAwayFromLiveTail(): boolean;
+    /** The parked distance in px, or `null` when the reader is at the live tail. */
+    parkedDistanceFromLiveTailPx(): number | null;
+    /**
+     * Feed a MEASURED distance from the live tail. Deliberately asymmetric:
+     * - Parking (leaving the tail) requires live raw input, so content growing below a following
+     *   reader — which also increases the measured distance — can never park them.
+     * - Releasing (arriving inside the pin band) is unconditional, because being at the tail is
+     *   being at the tail whatever moved you there. This also makes a false park self-healing:
+     *   the worst case is that one automatic follow write is skipped and the next measured
+     *   arrival clears it.
+     * No per-frame attribution is consulted: `resolveWebGenuineScrollMovement` stays the owner of
+     * "is THIS frame ours or the reader's", and it must not become an input to liveness or parking
+     * (that is the Q1-WEB-1 exclusion, and collapsing them re-breaks it).
+     */
+    observeDistanceFromLiveTail(input: Readonly<{
+        atMs: number;
+        distanceFromLiveTailPx: number;
+        pinThresholdPx: number;
+    }>): void;
+    /**
+     * The reader is (back) at the live tail by explicit command: jump-to-bottom, follow-bottom
+     * intent, send/enqueue, a trusted bottom arrival. Clears the parked position — the same
+     * deletion `markSessionLiveTailIntent` performs on the persisted record.
+     *
+     * SEPARATE FROM `revokeInputEvidence` ON PURPOSE. The two facts have different producers:
+     * input evidence is revoked at EVERY command boundary (the renderer invalidates inertia
+     * continuation on `scrollToIndex`, `scrollToOffset`, an entry-anchor landing and an explicit
+     * jump takeover), and only a SUBSET of those commands returns the reader to the live tail.
+     * Folding the parked release into the revoke let a jump to an arbitrary older message —
+     * navigation AWAY from the tail — silently re-authorize automatic bottom-follow writes,
+     * which is precisely what parking exists to refuse.
+     */
+    releaseLiveTailParking(): void;
     /** Record raw, unforgeable scroll input (wheel / drag / momentum / touch / keyboard). */
     recordInput(input: Readonly<{ atMs: number; direction?: -1 | 1 | null }>): void;
     /** Open or close a continuous gesture phase. Closing also records terminal input. */
@@ -55,6 +113,10 @@ export type TranscriptUserScrollIntentOwner = Readonly<{
      * Revoke recorded input EVIDENCE at a command/data boundary (explicit jump, logical session
      * phase change) while leaving an OPEN gesture phase intact: a command issued mid-fling must not
      * pretend the finger left the screen.
+     *
+     * Does NOT touch the parked position. Most callers are navigation commands with no opinion
+     * about the live tail (`scrollToIndex`/`scrollToOffset` to an older message, an entry-anchor
+     * landing); a deliberate return calls `releaseLiveTailParking` in addition.
      */
     revokeInputEvidence(): void;
     /** Full revoke, including any open gesture phase: session change / teardown. */
@@ -84,17 +146,29 @@ export type TranscriptUserScrollIntentOwner = Readonly<{
  *   treating that as a detach strands the armed hold (live native S-C, 2026-07-11).
  */
 export function createTranscriptUserScrollIntentOwner(): TranscriptUserScrollIntentOwner {
-    const timestampRef = { current: Number.NEGATIVE_INFINITY };
+    // THE one cell. `timestampRef` below is a read-only live view over it, not a second copy.
     let lastRawInputAtMs = Number.NEGATIVE_INFINITY;
     let lastRawInputDirection: -1 | 1 | null = null;
     let dragActive = false;
     let momentumActive = false;
+    let parkedDistanceFromLiveTailPx: number | null = null;
+
+    const timestampRef: TranscriptUserScrollIntentTimestampReader = {
+        get current(): number {
+            return lastRawInputAtMs;
+        },
+    };
+
+    const isLive = (nowMs: number): boolean => {
+        if (dragActive || momentumActive) return true;
+        if (!Number.isFinite(nowMs)) return false;
+        return nowMs - lastRawInputAtMs <= TRANSCRIPT_USER_SCROLL_INPUT_CONTINUATION_WINDOW_MS;
+    };
 
     const recordInput = (input: Readonly<{ atMs: number; direction?: -1 | 1 | null }>): void => {
         if (!Number.isFinite(input.atMs)) return;
         lastRawInputAtMs = input.atMs;
         lastRawInputDirection = input.direction ?? null;
-        timestampRef.current = input.atMs;
     };
 
     return {
@@ -102,16 +176,32 @@ export function createTranscriptUserScrollIntentOwner(): TranscriptUserScrollInt
         isGestureActive() {
             return dragActive || momentumActive;
         },
-        isLive(nowMs) {
-            if (dragActive || momentumActive) return true;
-            if (!Number.isFinite(nowMs)) return false;
-            return nowMs - lastRawInputAtMs <= TRANSCRIPT_USER_SCROLL_INPUT_CONTINUATION_WINDOW_MS;
-        },
+        isLive,
         lastInputAtMs() {
             return lastRawInputAtMs;
         },
         lastInputDirection() {
             return lastRawInputDirection;
+        },
+        isParkedAwayFromLiveTail() {
+            return parkedDistanceFromLiveTailPx !== null;
+        },
+        parkedDistanceFromLiveTailPx() {
+            return parkedDistanceFromLiveTailPx;
+        },
+        observeDistanceFromLiveTail(input) {
+            if (!Number.isFinite(input.distanceFromLiveTailPx)) return;
+            const distance = Math.max(0, input.distanceFromLiveTailPx);
+            const threshold = Number.isFinite(input.pinThresholdPx) ? Math.max(0, input.pinThresholdPx) : 0;
+            if (distance <= threshold) {
+                parkedDistanceFromLiveTailPx = null;
+                return;
+            }
+            if (!isLive(input.atMs)) return;
+            parkedDistanceFromLiveTailPx = distance;
+        },
+        releaseLiveTailParking() {
+            parkedDistanceFromLiveTailPx = null;
         },
         recordInput,
         setGestureActive(input) {
@@ -125,16 +215,15 @@ export function createTranscriptUserScrollIntentOwner(): TranscriptUserScrollInt
             recordInput({ atMs: input.atMs });
         },
         revokeInputEvidence() {
-            timestampRef.current = Number.NEGATIVE_INFINITY;
             lastRawInputAtMs = Number.NEGATIVE_INFINITY;
             lastRawInputDirection = null;
         },
         clear() {
-            timestampRef.current = Number.NEGATIVE_INFINITY;
             lastRawInputAtMs = Number.NEGATIVE_INFINITY;
             lastRawInputDirection = null;
             dragActive = false;
             momentumActive = false;
+            parkedDistanceFromLiveTailPx = null;
         },
     };
 }

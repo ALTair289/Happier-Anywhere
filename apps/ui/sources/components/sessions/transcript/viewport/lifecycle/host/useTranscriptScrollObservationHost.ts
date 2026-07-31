@@ -116,6 +116,8 @@ import {
     type WebTranscriptKeyboardVerticalDirection,
 } from '@/components/sessions/transcript/viewport/lifecycle/webTranscriptKeyboardOwner';
 
+import type { TranscriptUserScrollIntentOwner, TranscriptUserScrollIntentTimestampReader } from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
+
 type MutableRef<T> = { current: T };
 type ScrollObservationPlan = TranscriptLifecycleHostScrollObservationPlan;
 type WebPassiveLiveTailCorrectionEffect = NonNullable<ScrollObservationPlan['webPassiveLiveTailCorrectionEffect']>;
@@ -178,7 +180,8 @@ export type TranscriptScrollObservationHostDeps = Readonly<{
     lastPinOffsetForIntentRef: MutableRef<number | null>;
     lastRouteJumpProtectionClearingWebMovementAtMsRef: MutableRef<number>;
     lastScrollOffsetForIntentRef: MutableRef<number | null>;
-    lastUserScrollIntentAtMsRef: MutableRef<number>;
+    lastUserScrollIntentAtMsRef: TranscriptUserScrollIntentTimestampReader;
+    userScrollIntent: TranscriptUserScrollIntentOwner;
     latestCommittedActivityKey: string | null | undefined;
     lifecycleHost: TranscriptLifecycleHost;
     markNativeInitialViewportAppliedForCurrentSession: () => void;
@@ -484,9 +487,9 @@ export function useTranscriptScrollObservationHost(
     ) => {
         for (const effect of effects) {
             if (effect.sessionId !== deps.sessionId) continue;
-            deps.lastUserScrollIntentAtMsRef.current = effect.timestampMs;
+            deps.userScrollIntent.recordInput({ atMs: effect.timestampMs });
         }
-    }, [deps.lastUserScrollIntentAtMsRef, deps.sessionId]);
+    }, [deps.sessionId, deps.userScrollIntent]);
     const applyWebUserScrollIntentTimestampLifecycleEffects = React.useCallback((
         effects: readonly TranscriptViewportLifecycleEffect[],
     ) => {
@@ -644,7 +647,7 @@ export function useTranscriptScrollObservationHost(
             if (effect.sessionId !== deps.sessionId) continue;
             switch (effect.type) {
                 case 'native-touch-record-intent-timestamp':
-                    deps.lastUserScrollIntentAtMsRef.current = effect.timestampMs;
+                    deps.userScrollIntent.recordInput({ atMs: effect.timestampMs });
                     break;
                 case 'native-touch-suppress-native-mount-settle-auto-pin':
                     deps.nativeMountSettleAutoPinSuppressedRef.current = true;
@@ -778,7 +781,7 @@ export function useTranscriptScrollObservationHost(
             if (effect.sessionId !== deps.sessionId) continue;
             switch (effect.type) {
                 case 'local-interaction-record-intent-timestamp':
-                    deps.lastUserScrollIntentAtMsRef.current = effect.timestampMs;
+                    deps.userScrollIntent.recordInput({ atMs: effect.timestampMs });
                     break;
                 case 'local-interaction-suppress-native-mount-settle-auto-pin':
                     deps.nativeMountSettleAutoPinSuppressedRef.current = true;
@@ -857,7 +860,9 @@ export function useTranscriptScrollObservationHost(
         for (const effect of effects) {
             if (effect.sessionId !== deps.sessionId) continue;
             if (effect.type === 'adopt-native-trusted-bottom-arrival') {
-                deps.lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+                deps.userScrollIntent.revokeInputEvidence();
+                // A trusted arrival at the bottom IS the reader back at the live tail.
+                deps.userScrollIntent.releaseLiveTailParking();
                 deps.nativeMountSettleAutoPinSuppressedRef.current = false;
                 deps.nativeBottomFollowRearmedAfterDragRef.current = true;
                 deps.wantsPinnedRef.current = true;
@@ -981,6 +986,14 @@ export function useTranscriptScrollObservationHost(
             deps.lastPinOffsetForIntentRef.current = state.lastDistanceFromLiveTailPx;
             deps.lastScrollOffsetForIntentRef.current = state.nextScrollOffsetPx;
             deps.wantsPinnedRef.current = state.wantsPinned;
+            // The reader's measured position, into the intent owner's durable parked fact. The
+            // owner parks only while raw input is live and releases on any arrival inside the pin
+            // band, so growth below a following reader cannot park them and a false park heals.
+            deps.userScrollIntent.observeDistanceFromLiveTail({
+                atMs: Date.now(),
+                distanceFromLiveTailPx: state.lastDistanceFromLiveTailPx,
+                pinThresholdPx: deps.pinThresholdPxRef.current,
+            });
             deps.emitViewportChange?.(state.viewportState);
             deps.scheduleViewportAnchorCaptureRef.current(state.anchorCapture.viewportState, {
                 suppressAnchorCapture: state.anchorCapture.suppressAnchorCapture,
@@ -1002,10 +1015,12 @@ export function useTranscriptScrollObservationHost(
         deps.emitViewportChange,
         deps.lastPinOffsetForIntentRef,
         deps.lastScrollOffsetForIntentRef,
+        deps.pinThresholdPxRef,
         deps.platformOS,
         deps.scheduleViewportAnchorCaptureRef,
         deps.sessionId,
         deps.shouldSuppressGenericViewportStateForProtectedJumpSeq,
+        deps.userScrollIntent,
         deps.wantsPinnedRef,
         drainDeferredNewerMessages,
     ]);
@@ -1035,6 +1050,14 @@ export function useTranscriptScrollObservationHost(
             applied = true;
             const { state } = typed;
             deps.lastPinOffsetForIntentRef.current = state.lastDistanceFromLiveTailPx;
+            // Renderer-owned continuous follow still reports the reader's measured position here,
+            // and it is the only observation the app gets on that path — so the parked fact must
+            // be fed from it too, or the whole model is dead wherever Legend owns follow.
+            deps.userScrollIntent.observeDistanceFromLiveTail({
+                atMs: Date.now(),
+                distanceFromLiveTailPx: state.lastDistanceFromLiveTailPx,
+                pinThresholdPx: deps.pinThresholdPxRef.current,
+            });
             deps.commitJumpToBottomDistanceForVisibility(state.jumpButtonDistanceFromLiveTailPx);
             deps.commitScrollPinEvent(state.scrollPinEvent);
         }
@@ -1043,7 +1066,9 @@ export function useTranscriptScrollObservationHost(
         deps.commitJumpToBottomDistanceForVisibility,
         deps.commitScrollPinEvent,
         deps.lastPinOffsetForIntentRef,
+        deps.pinThresholdPxRef,
         deps.sessionId,
+        deps.userScrollIntent,
     ]);
     const applyGenericScrollObservationSuppressionEffects = React.useCallback((
         effects: readonly TranscriptViewportLifecycleEffect[],
@@ -1076,6 +1101,12 @@ export function useTranscriptScrollObservationHost(
             if (effect.type !== 'apply-native-momentum-settle-away-release-state') continue;
             deps.wantsPinnedRef.current = false;
             deps.cancelScheduledPinToBottom();
+            // A native momentum settle that landed away from the tail IS the reader parking.
+            deps.userScrollIntent.observeDistanceFromLiveTail({
+                atMs: Date.now(),
+                distanceFromLiveTailPx: effect.distanceFromLiveTailPx,
+                pinThresholdPx: deps.pinThresholdPxRef.current,
+            });
             deps.lastPinOffsetForIntentRef.current = effect.distanceFromLiveTailPx;
             deps.commitJumpToBottomDistanceForVisibility(effect.distanceFromLiveTailPx);
             deps.commitScrollPinEvent(effect.scrollPinEvent);
@@ -1090,8 +1121,10 @@ export function useTranscriptScrollObservationHost(
         deps.commitScrollPinEvent,
         deps.emitViewportChange,
         deps.lastPinOffsetForIntentRef,
+        deps.pinThresholdPxRef,
         deps.scheduleViewportAnchorCaptureRef,
         deps.sessionId,
+        deps.userScrollIntent,
         deps.wantsPinnedRef,
     ]);
     const applyNativeMomentumSettleAwayReleaseLifecycleEffects = React.useCallback((

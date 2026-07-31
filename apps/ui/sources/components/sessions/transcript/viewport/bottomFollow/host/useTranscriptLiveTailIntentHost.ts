@@ -8,6 +8,7 @@ import type {
     TranscriptScrollPinEvent,
     TranscriptScrollPinState,
 } from '@/components/sessions/transcript/scroll/transcriptBottomFollowMode';
+import type { TranscriptUserScrollIntentOwner } from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
 import type { TranscriptLifecycleHost } from '@/components/sessions/transcript/viewport/lifecycle/lifecycleHost';
 import { useCommittedTranscriptRef } from '@/components/sessions/transcript/viewport/lifecycle/host/useCommittedTranscriptRef';
 import type { TranscriptRendererAtEndState } from '@/components/sessions/transcript/viewport/shell/renderer/types';
@@ -23,11 +24,11 @@ type LiveTailIntentHostDeps = Readonly<{
     emitViewportChange(state: TranscriptViewportChangeState): boolean;
     isPinnedRef: MutableRef<boolean>;
     lastPinOffsetForIntentRef: MutableRef<number | null>;
-    lastUserScrollIntentAtMsRef: MutableRef<number>;
     lifecycleHost: Pick<TranscriptLifecycleHost, 'planExplicitReturnToLiveTail'>;
     scrollPinRef: MutableRef<TranscriptScrollPinState>;
     sessionId: string;
     transcriptScrollPinEnabled: boolean;
+    userScrollIntent: TranscriptUserScrollIntentOwner;
     wantsPinnedRef: MutableRef<boolean>;
 }>;
 
@@ -73,7 +74,11 @@ export function useTranscriptLiveTailIntentHost(deps: LiveTailIntentHostDeps) {
         for (const effect of plan.explicitReturnEffects) {
             if (effect.sessionId !== current.sessionId) continue;
             if (effect.type === 'apply-explicit-return-clear-user-scroll-intent') {
-                current.lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+                current.userScrollIntent.revokeInputEvidence();
+                // Jump-to-bottom / follow-bottom intent IS the reader's consent to be followed
+                // again. Without this the parked state outlives the deliberate return and every
+                // subsequent automatic bottom-follow write stays refused for the life of the mount.
+                current.userScrollIntent.releaseLiveTailParking();
                 continue;
             }
             current.commitScrollPinState({ ...current.scrollPinRef.current, isPinned: effect.isPinned, newActivityCount: 0 });

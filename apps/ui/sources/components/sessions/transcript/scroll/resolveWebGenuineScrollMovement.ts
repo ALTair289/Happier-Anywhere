@@ -91,12 +91,11 @@ export function resolveWebGenuineScrollMovement(params: Readonly<{
         previousObservedClientHeight,
         previousStreak,
         distanceFromBottom,
-        hasWitnessedUserInput: rawWitnessedUserInput,
+        hasWitnessedUserInput,
         pinThresholdPx,
         sustainFrames,
         isTrusted,
     } = params;
-    const hasWitnessedUserInput = (globalThis as any).__U1_OFF === true ? undefined : rawWitnessedUserInput;
 
     // No prior observation, or scrollTop landed exactly where we last wrote it (the programmatic write's
     // own echo) → not a user movement.

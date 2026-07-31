@@ -193,10 +193,52 @@ describe('web content-growth live-tail pin suppression', () => {
         vi.spyOn(Date, 'now').mockReturnValue(nowMs);
         const userScrollIntent = createTranscriptUserScrollIntentOwner();
         userScrollIntent.recordInput({ atMs: nowMs - 5_000 });
+        // Stopped INSIDE the pin band: they are at the live tail, so following it is what they
+        // asked for. This is the paired negative that keeps the parked guard from being a blanket
+        // suppression.
+        userScrollIntent.observeDistanceFromLiveTail({
+            atMs: nowMs - 5_000,
+            distanceFromLiveTailPx: 40,
+            pinThresholdPx: 72,
+        });
 
         const { tailWrites, unmount } = await runContentGrowth(userScrollIntent);
 
         expect(tailWrites).toBe(1);
+        await unmount();
+    });
+
+    /**
+     * THE REPORTED SYMPTOM. "I scroll, the scroll ENDS, and then it moves back."
+     *
+     * Every input-recency predicate in this corridor — `isLive`'s 320ms continuation window, the
+     * 250ms auto-pin delay, `recentUserIntent` — is FALSE five seconds after the last wheel event.
+     * So the guard that has to hold here cannot be an event window; no constant is long enough for
+     * a reader who is READING. The automatic writer resolves to the ABSOLUTE bottom and its
+     * decision basis (`previousDistanceFromLiveTailPx`) is captured BEFORE the growth it responds
+     * to, so a basis taken while the reader was still at the tail authorizes yanking them back by
+     * exactly how far they had scrolled up.
+     */
+    it('does not re-pin the live tail seconds after the reader parked away from it', async () => {
+        setPlatformOS('web');
+        const nowMs = 100_000;
+        vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+        const userScrollIntent = createTranscriptUserScrollIntentOwner();
+        // The reader wheels up; the frame they land on measures 300px from the live tail.
+        userScrollIntent.recordInput({ atMs: nowMs - 5_000, direction: -1 });
+        userScrollIntent.observeDistanceFromLiveTail({
+            atMs: nowMs - 5_000,
+            distanceFromLiveTailPx: 300,
+            pinThresholdPx: 72,
+        });
+        // Then they STOP and read for five seconds. No further input of any kind.
+        expect(userScrollIntent.isLive(nowMs)).toBe(false);
+
+        // Content height changes. `PREVIOUS_WEB_METRICS` is the pre-growth basis: 40px from the
+        // tail, i.e. it still claims the reader was following.
+        const { tailWrites, unmount } = await runContentGrowth(userScrollIntent);
+
+        expect(tailWrites).toBe(0);
         await unmount();
     });
 });

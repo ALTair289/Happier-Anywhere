@@ -3,6 +3,7 @@ import renderer, { act } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 
 import { resolveJumpToBottomAffordanceState } from '@/components/sessions/transcript/scroll/jumpToBottomAffordanceState';
+import { createTranscriptUserScrollIntentOwner } from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
 import { useTranscriptLiveTailIntentHost } from './useTranscriptLiveTailIntentHost';
 
 type Host = ReturnType<typeof useTranscriptLiveTailIntentHost>;
@@ -28,7 +29,7 @@ function createDeps(
         emitViewportChange,
         isPinnedRef: createRef(true),
         lastPinOffsetForIntentRef: createRef(0),
-        lastUserScrollIntentAtMsRef: createRef(0),
+        userScrollIntent: createTranscriptUserScrollIntentOwner(),
         lifecycleHost: {
             planExplicitReturnToLiveTail: vi.fn(),
         },
@@ -237,6 +238,65 @@ describe('useTranscriptLiveTailIntentHost commit timing', () => {
         }, { cause: 'user' });
         expect(emitA).toHaveBeenCalledTimes(1);
         expect(emitB).not.toHaveBeenCalled();
+
+        await act(async () => {
+            tree.unmount();
+        });
+    });
+});
+
+describe('useTranscriptLiveTailIntentHost live-tail parking release', () => {
+    it('releases the reader parked position on an explicit return to the live tail', async () => {
+        // O1: the parked position is durable STATE with no timer — while it holds, every
+        // automatic bottom-follow write is refused at `applyAuthorizedBottomFollowWrite`. The
+        // deliberate return (jump-to-bottom / follow-bottom intent) is the reader's consent to
+        // be followed again, so it MUST clear it here. If it does not, a reader who scrolled up
+        // and then pressed jump-to-bottom lands at the tail and is never followed again for the
+        // life of the mount.
+        const sessionId = 'session-parked-jump';
+        const deps = createDeps(sessionId, 'renderer', vi.fn(() => true));
+        (deps.lifecycleHost.planExplicitReturnToLiveTail as ReturnType<typeof vi.fn>)
+            .mockImplementation(() => ({
+                explicitReturnEffects: [
+                    { sessionId, type: 'apply-explicit-return-clear-user-scroll-intent' },
+                    {
+                        distanceFromLiveTailPx: 0,
+                        isPinned: true,
+                        sessionId,
+                        type: 'apply-explicit-return-to-live-tail-viewport',
+                    },
+                ],
+                lifecycleEffects: [],
+                state: {
+                    automaticPinAuthority: true,
+                    bottomFollowState: { dragSession: null, mode: 'following' },
+                    fingerDown: false,
+                    followMode: 'following',
+                    gesturePhase: 'settled',
+                    sessionId,
+                },
+                viewportEffects: [],
+            }));
+        const apiRef = { current: null as Host | null };
+        let tree!: renderer.ReactTestRenderer;
+
+        await act(async () => {
+            tree = renderer.create(renderHarness({ apiRef, deps }));
+        });
+
+        // The reader wheels up and the landing frame measures them 900px from the tail.
+        deps.userScrollIntent.recordInput({ atMs: Date.now(), direction: -1 });
+        deps.userScrollIntent.observeDistanceFromLiveTail({
+            atMs: Date.now(),
+            distanceFromLiveTailPx: 900,
+            pinThresholdPx: 72,
+        });
+        expect(deps.userScrollIntent.isParkedAwayFromLiveTail()).toBe(true);
+
+        apiRef.current!.commitExplicitReturnToLiveTailState('jump-to-bottom');
+
+        expect(deps.userScrollIntent.isParkedAwayFromLiveTail()).toBe(false);
+        expect(deps.userScrollIntent.parkedDistanceFromLiveTailPx()).toBeNull();
 
         await act(async () => {
             tree.unmount();

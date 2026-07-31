@@ -28,6 +28,7 @@ import type { TranscriptViewportCommandController } from '@/components/sessions/
 import type { TranscriptViewportTransactionOutcome } from '@/components/sessions/transcript/viewport/transcriptViewportOwnership';
 import type { TranscriptViewportChangeState } from '@/components/sessions/transcript/chatListTypes';
 import type { TranscriptExitEntrySnapshot } from '@/components/sessions/transcript/viewport/lifecycle/transcriptSameSessionHandoff';
+import type { TranscriptUserScrollIntentOwner } from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
 
 type MutableRef<T> = { current: T };
 type SessionEntryRenderResetEffects = TranscriptLifecycleHostSessionEntryPlan['renderResetEffects'];
@@ -98,7 +99,7 @@ export type TranscriptSessionEntryLifecycleDeps = Readonly<{
     lastPinOffsetForIntentRef: MutableRef<number | null>;
     lastRouteJumpProtectionClearingWebMovementAtMsRef: MutableRef<number>;
     lastScrollOffsetForIntentRef: MutableRef<number | null>;
-    lastUserScrollIntentAtMsRef: MutableRef<number>;
+    userScrollIntent: TranscriptUserScrollIntentOwner;
     latestCommittedActivityKey: string | null | undefined;
     lifecycleHost: TranscriptLifecycleHost;
     listContentHeightRef: MutableRef<number>;
@@ -381,7 +382,7 @@ export function useTranscriptSessionEntryLifecycle(
         deps.wantsPinnedRef.current = Boolean(shouldFollowBottom);
         deps.isPinnedRef.current = shouldFollowBottom;
         deps.commitBottomFollowModeState(lifecycleEntry.state.bottomFollowState);
-        deps.lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+        deps.userScrollIntent.clear();
         deps.lastExplicitWebScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
         deps.lastRouteJumpProtectionClearingWebMovementAtMsRef.current = Number.NEGATIVE_INFINITY;
         deps.lastAutoRepinAtMsRef.current = Number.NEGATIVE_INFINITY;
@@ -449,7 +450,7 @@ export function useTranscriptSessionEntryLifecycle(
             entryOffsetY,
             shouldFollowBottom,
         } = consumeSessionOpenArmEntryViewportState();
-        deps.lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+        deps.userScrollIntent.clear();
         deps.lastExplicitWebScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
         deps.lastRouteJumpProtectionClearingWebMovementAtMsRef.current = Number.NEGATIVE_INFINITY;
         deps.lastAutoRepinAtMsRef.current = Number.NEGATIVE_INFINITY;

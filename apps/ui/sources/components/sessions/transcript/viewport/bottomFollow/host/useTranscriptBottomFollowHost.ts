@@ -46,7 +46,10 @@ import {
     type BottomFollowWriteSchedulerState,
 } from '@/components/sessions/transcript/viewport/bottomFollow/writeScheduler';
 import { useExplicitJumpWriteBarrier } from '@/components/sessions/transcript/viewport/bottomFollow/explicitJumpWriteBarrier';
-import type { TranscriptUserScrollIntentOwner } from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
+import type {
+    TranscriptUserScrollIntentOwner,
+    TranscriptUserScrollIntentTimestampReader,
+} from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
 import {
     resolveNativeBottomFollowPreviousFollow,
     resolveNativeContentMaterializationAutoPin,
@@ -131,7 +134,7 @@ export type TranscriptBottomFollowHostDeps = Readonly<{
      * Alias of `userScrollIntent.timestampRef` — the ONE storage location. Kept as a named dep
      * because the native policies below consume it as a plain timestamp.
      */
-    lastUserScrollIntentAtMsRef: MutableRef<number>;
+    lastUserScrollIntentAtMsRef: TranscriptUserScrollIntentTimestampReader;
     lastNativePinOffsetRef: MutableRef<number | null>;
     latestCommittedActivityKey: string | null | undefined;
     lifecycleHost: BottomFollowLifecycleHost;
@@ -307,9 +310,24 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
      * `recentUserIntent` — read this, so "is the reader driving right now" has one answer.
      */
     const hasRecentUserScrollIntent = React.useCallback((nowMs: number): boolean => (
-        ((globalThis as any).__U1_OFF !== true && userScrollIntent.isLive(nowMs))
+        userScrollIntent.isLive(nowMs)
         || nowMs - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS
     ), [lastUserScrollIntentAtMsRef, userScrollIntent]);
+
+    /**
+     * The reader deliberately parked away from the live tail. No AUTOMATIC writer may move them,
+     * for as long as that holds — which is the half `hasRecentUserScrollIntent` structurally
+     * cannot cover, because every input-recency window has gone false by the time the reported
+     * symptom happens ("I scroll, the scroll ENDS, and then it moves back"). The decision basis of
+     * an automatic write is captured BEFORE the growth it responds to and can execute a frame or a
+     * scheduler delay later, by which point "was the reader near the tail" is a claim about the
+     * past; this is a claim about now, and it does not expire.
+     *
+     * This is a decision NOT to write — never a window, cover, or delay that hides movement.
+     */
+    const isReaderParkedAwayFromLiveTail = React.useCallback((): boolean => (
+        userScrollIntent.isParkedAwayFromLiveTail()
+    ), [userScrollIntent]);
 
     const lastNativeBottomFollowPinCommandRef = React.useRef<{
         sessionId: string;
@@ -941,6 +959,10 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
     const applyAuthorizedBottomFollowWrite = React.useCallback((
         effect: Extract<BottomFollowWriteSchedulerEffect<WebTranscriptScrollMetrics>, { type: 'authorize-write' }>,
     ): boolean => {
+        // THE single choke point for every automatic bottom-follow write — scheduled and
+        // immediate, web and native. `blank-recovery` is exempt: it is a fault response to a
+        // viewport showing nothing, not a follow decision.
+        if (effect.writer !== 'blank-recovery' && isReaderParkedAwayFromLiveTail()) return false;
         switch (effect.command) {
             case 'web-bottom-follow-adjustment':
                 return applyWebBottomFollowAdjustment(
@@ -995,6 +1017,7 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         applyWebBottomFollowAdjustment,
         executeViewportCommand,
         hasNativeInitialViewportAppliedForCurrentSession,
+        isReaderParkedAwayFromLiveTail,
         pinNativeFlashListToBottomIfMeasured,
         pinToBottom,
         pinToBottomRespectingNativeMountSettle,
@@ -1221,7 +1244,9 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
         // has no known end. Drop the automatic write; the next content growth re-requests it, and
         // the renderer keeps maintaining the tail if the reader ends up back at it. This is a
         // decision NOT to write — never a window that hides movement.
-        if ((globalThis as any).__U1_OFF !== true && userScrollIntent.isLive(Date.now())) return null;
+        if (userScrollIntent.isLive(Date.now())) return null;
+        // Parked is STATE: there is no wait that makes the write correct, now or in 5 seconds.
+        if (isReaderParkedAwayFromLiveTail()) return null;
         return resolveTranscriptAutoFollowPinWaitMs({
             autoPinDelayMs: TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
             canAutoFollow: canAutoFollowForReason(reason),
@@ -1232,6 +1257,7 @@ export function useTranscriptBottomFollowHost(deps: TranscriptBottomFollowHostDe
     }, [
         canAutoFollowForReason,
         hasRearmedNativeBottomFollow,
+        isReaderParkedAwayFromLiveTail,
         lastUserScrollIntentAtMsRef,
         userScrollIntent,
     ]);

@@ -56,7 +56,7 @@ export function resolveJumpToBottomAffordanceState(params: Readonly<{
     // not the derived pin bit. Inside a viewport the pin bit still owns it: renderer
     // maintain-at-end and the near-tail dead zone are exactly the band where a pinned reader
     // must see no pill.
-    const pinClaimContradictedByDistance = (globalThis as any).__U1_OFF !== true && viewportHeightPx > 0 && distanceFromBottom > viewportHeightPx;
+    const pinClaimContradictedByDistance = viewportHeightPx > 0 && distanceFromBottom > viewportHeightPx;
     if (params.isPinned && !pinClaimContradictedByDistance) return HIDDEN_JUMP_TO_BOTTOM_AFFORDANCE;
 
     const revealThresholdPx = normalizeNonNegativeInteger(params.revealThresholdPx);

@@ -211,7 +211,7 @@ export function createWebDomScrollObservation(params?: Readonly<{
                 // auto-pin free to snap them back to the tail. A command/geometry boundary still
                 // revokes everything through `invalidateUserMovementAuthority`.
                 streak = null;
-                if ((globalThis as any).__U1_OFF === true || !userScrollIntent.isLive(Date.now())) {
+                if (!userScrollIntent.isLive(Date.now())) {
                     invalidateUserMovementAuthority();
                 }
             }

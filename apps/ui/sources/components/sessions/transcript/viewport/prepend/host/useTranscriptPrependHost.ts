@@ -49,6 +49,7 @@ import {
     isWebTranscriptScrollable,
 } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 import type { ChatTranscriptListItem } from '@/components/sessions/transcript/chatListTypes';
+import type { TranscriptUserScrollIntentTimestampReader } from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
 
 const TRANSCRIPT_WEB_PREPEND_INDEX_RECOVERY_RETRY_MS = 16;
 
@@ -57,7 +58,7 @@ type MutableRef<T> = { current: T };
 type TranscriptPrependHostDeps = Readonly<{
     commandHostRef: MutableRef<TranscriptViewportCommandHost | null>;
     currentSessionId: string;
-    lastUserScrollIntentAtMsRef: MutableRef<number>;
+    lastUserScrollIntentAtMsRef: TranscriptUserScrollIntentTimestampReader;
     listContentHeight: number;
     listContentHeightRef: MutableRef<number>;
     listDataLength: number;

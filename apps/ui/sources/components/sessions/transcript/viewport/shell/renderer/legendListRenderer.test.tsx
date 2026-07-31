@@ -153,7 +153,7 @@ vi.mock('@legendapp/list/react-native', () => ({
                 }
                 return Promise.resolve();
             });
-            const scrollToIndex = vi.fn((params: Readonly<{ index: number }>) => {
+            const runIndexScroll = (index: number) => {
                 if (rejectNextScroll) {
                     rejectNextScroll = false;
                     return Promise.reject(new Error('scroll failed'));
@@ -161,12 +161,18 @@ vi.mock('@legendapp/list/react-native', () => ({
                 const currentData = dataRef.current;
                 if (legendVirtualizationBoundary) {
                     setMountedRange({
-                        end: Math.min(currentData.length - 1, params.index),
-                        start: Math.max(0, params.index - legendVirtualizationBoundary.initialMountedItemCount + 1),
+                        end: Math.min(currentData.length - 1, index),
+                        start: Math.max(0, index - legendVirtualizationBoundary.initialMountedItemCount + 1),
                     });
                 }
                 return Promise.resolve();
-            });
+            };
+            const scrollToIndex = vi.fn((params: Readonly<{ index: number }>) => runIndexScroll(params.index));
+            // Real Legend implements scrollToEnd as scrollToIndex against `data.length - 1`
+            // resolved AT RUN TIME (`react-native.web.js` scrollToEnd -> scrollToIndex), so it
+            // materializes the tail exactly like the index form. Mirroring that here keeps the
+            // boundary honest now that the adapter commands the tail by intent.
+            const scrollToEnd = vi.fn(() => runIndexScroll(Math.max(0, dataRef.current.length - 1)));
             return {
                 cancelInitialScrollPreservation: vi.fn(),
                 clearCaches: vi.fn(),
@@ -199,7 +205,7 @@ vi.mock('@legendapp/list/react-native', () => ({
                         },
                     };
                 }),
-                scrollToEnd: makeScrollMethod(),
+                scrollToEnd,
                 scrollToIndex,
                 scrollToOffset: makeScrollMethod(),
             };
@@ -2865,17 +2871,21 @@ describe('Legend transcript renderer adapter', () => {
         await screen.update(render([{ id: 'row-1' }, { id: 'row-2' }]));
         // The appended final index is not yet inside Legend's reported mounted range. A
         // content-length scroll would trust the same incomplete geometry as the cold-load bug;
-        // materialize the new final index first, then ordinary measurements own alignment.
-        expect(assignedLegendRef.scrollToIndex).toHaveBeenCalledWith({
-            animated: false,
-            index: 1,
-            viewPosition: 1,
-        });
+        // materialize the tail first, then ordinary measurements own alignment. The command is
+        // Legend's END intent, never an index frozen at request time: a frozen index is
+        // resolved against Legend's position table when the deferred request RUNS, so on a
+        // multi-wave hydration it resolves to an interior row - or to offset 0, the HEAD (8
+        // such landings measured per cold open, 2026-07-30).
+        expect(assignedLegendRef.scrollToIndex).not.toHaveBeenCalled();
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledWith({ animated: false });
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledTimes(1);
 
         assignedLegendRef.scrollToEnd.mockClear();
         capturedLegendListProps.onWheel({ deltaY: -300 });
         capturedLegendListProps.onItemSizeChanged({ index: 0, previous: 400, size: 500 });
         await screen.update(render([{ id: 'row-1' }, { id: 'row-2' }, { id: 'row-3' }]));
+        // One placement transaction per dataset identity: a later hydration wave must not
+        // re-arm it, which is what `${dataLength}:${tailKey}` did.
         expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
     });
 
@@ -2909,14 +2919,14 @@ describe('Legend transcript renderer adapter', () => {
         );
         const screen = await renderScreen(render([{ id: 'row-1' }]));
 
-        // Appended tail outside the mounted range: the one-shot materialization fires.
+        // Appended tail outside the mounted range: the one-shot materialization fires, as
+        // Legend's END intent rather than a frozen index.
         legendStateOverride = { ...legendStateOverride, contentLength: 1_440 };
         await screen.update(render([{ id: 'row-1' }, { id: 'row-2' }]));
-        expect(assignedLegendRef.scrollToIndex).toHaveBeenCalledWith({
-            animated: false,
-            index: 1,
-            viewPosition: 1,
-        });
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledWith({ animated: false });
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledTimes(1);
+        expect(assignedLegendRef.scrollToIndex).not.toHaveBeenCalled();
+        assignedLegendRef.scrollToEnd.mockClear();
         assignedLegendRef.scrollToIndex.mockClear();
         assignedLegendRef.scrollToOffset.mockClear();
 
@@ -2926,17 +2936,20 @@ describe('Legend transcript renderer adapter', () => {
         legendStateOverride = { ...legendStateOverride, end: 1, scroll: 840 };
         capturedLegendListProps.onItemSizeChanged({ index: 1, previous: 100, size: 400 });
         expect(assignedLegendRef.scrollToOffset).not.toHaveBeenCalled();
+        expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
         expect(assignedLegendRef.scrollToIndex).not.toHaveBeenCalled();
 
         // The tail flaps back OUT of Legend's believed range (measured corrections move
-        // the window). Materialization is one-shot per tail identity: re-issuing the
-        // index scroll re-enters Legend's estimate-target retry and closes a
+        // the window). Materialization is one-shot per DATASET identity: re-issuing the
+        // tail command re-enters Legend's estimate-target retry and closes a
         // materialize<->correct loop (live capture 2026-07-23, 255 re-fires). The
         // measured residual owner re-mounts the tail by scrolling instead.
+        assignedLegendRef.scrollToEnd.mockClear();
         assignedLegendRef.scrollToIndex.mockClear();
         assignedLegendRef.scrollToOffset.mockClear();
         legendStateOverride = { ...legendStateOverride, end: 0, scroll: 700 };
         capturedLegendListProps.onItemSizeChanged({ index: 0, previous: 400, size: 401 });
+        expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
         expect(assignedLegendRef.scrollToIndex).not.toHaveBeenCalled();
     });
 
@@ -4180,6 +4193,340 @@ describe('Legend transcript renderer adapter', () => {
         expect(anchorRow.top).toBe(100);
     });
 
+    it('never cancels a Legend geometry compensation with a keyed correction read across the seam', async () => {
+        // Live RED (2026-07-30, session cms4aenky5lnktm72sfmya6uk, cold SPA entry with a
+        // persisted detached anchor + reading-pace scrolling): Legend's MVCP compensation for a
+        // pagination prepend was exact, and this writer cancelled it ~1ms later from a read
+        // taken while the compensated offset was already applied but the row geometry commit
+        // was not — measured as `scrollTop 31046 -> 30703` against `scrollAdjustBy(+343)`, and
+        // as a single `-31,015px` undo of a prepend compensation. A correction must only be
+        // spent on geometry that is no longer in motion.
+        let nowMs = 1_000;
+        vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+        const animationFrames: FrameRequestCallback[] = [];
+        vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+            animationFrames.push(callback);
+            return animationFrames.length;
+        }));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+        class FakeHTMLElement {
+            public clientHeight = 600;
+            public height = 240;
+            public isConnected = true;
+            public parentElement: FakeHTMLElement | null = null;
+            public scrollHeight = 20_000;
+            private currentScrollTop = 0;
+            public get scrollTop() { return this.currentScrollTop; }
+            public set scrollTop(value: number) {
+                const landed = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight));
+                if (this === root) anchorRow.top -= landed - this.currentScrollTop;
+                this.currentScrollTop = landed;
+            }
+            public testId: string | null = null;
+            public top = 0;
+            public contains = () => true;
+            public getAttribute = (name: string) => name === 'data-testid' ? this.testId : null;
+            public getBoundingClientRect = () => ({
+                bottom: this.top + this.height,
+                height: this.height,
+                left: 0,
+                right: 800,
+                top: this.top,
+                width: 800,
+                x: 0,
+                y: this.top,
+                toJSON: () => ({}),
+            });
+            public querySelector = () => anchorRow;
+            public querySelectorAll = () => [anchorRow];
+        }
+        const root = new FakeHTMLElement();
+        root.height = 600;
+        const anchorRow = new FakeHTMLElement();
+        anchorRow.testId = 'transcript-anchor-message-target';
+        anchorRow.parentElement = root;
+
+        vi.stubGlobal('HTMLElement', FakeHTMLElement);
+        vi.stubGlobal('document', { getElementById: () => root });
+        vi.stubGlobal('window', {
+            getComputedStyle: () => ({ overflowX: 'hidden', overflowY: 'auto' }),
+        });
+
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+        const listRef = React.createRef<TranscriptListShellRef<{ id: string }>>();
+        await renderScreen(
+            <Renderer
+                webDomObservation={mountedWebDomObservation}
+                ref={listRef}
+                data={[{ id: 'target' }, { id: 'newer' }]}
+                dataKey="prepend-seam"
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    legendInitialScrollAtEnd: false,
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'web',
+                })}
+            />,
+        );
+
+        // Detached reading position with the anchor exactly where the hold wants it.
+        root.scrollTop = 690;
+        anchorRow.top = 100;
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 690 } } });
+        getShellRef(listRef).holdWebEntryAnchor?.({
+            itemId: 'target',
+            itemOffsetPx: 100,
+            kind: 'message',
+            messageId: null,
+        });
+        nowMs += 400;
+        act(() => animationFrames.splice(0).forEach((callback) => callback(1)));
+        expect(root.scrollTop).toBe(690);
+
+        // Legend compensates a 343px content growth ABOVE the reader (`ScrollAdjustHandler` ->
+        // `scrollAdjustBy`). Its own scroll event reaches the renderer while the row-position
+        // commit has not landed, so the DOM still reports the anchor at its pre-growth absolute
+        // top — a 343px "misalignment" that is the seam, not the reader's geometry. The residual
+        // is deliberately BELOW the viewport: the viewport-exceeding confirmation rule cannot
+        // see this class, which is why the live capture wrote through it.
+        root.scrollHeight = 20_343;
+        root.scrollTop = 1_033;
+        anchorRow.top = 100 - 343;
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 1_033 } } });
+        expect(root.scrollTop).toBe(1_033);
+
+        // The commit lands: the anchor is exactly where Legend's compensation put it. Nothing to
+        // correct, and nothing was clobbered in the meantime.
+        anchorRow.top = 100;
+        act(() => animationFrames.splice(0).forEach((callback) => callback(2)));
+        expect(root.scrollTop).toBe(1_033);
+        expect(anchorRow.top).toBe(100);
+
+        // A residual that OUTLIVES the seam is still corrected by the same transaction: stable
+        // geometry, persistent misalignment, one write.
+        anchorRow.top = 160;
+        act(() => animationFrames.splice(0).forEach((callback) => callback(3)));
+        act(() => animationFrames.splice(0).forEach((callback) => callback(4)));
+        expect(root.scrollTop).toBe(1_093);
+    });
+
+    it('withholds the keyed-identity materialization until the scroller can hold the resolved target', async () => {
+        // Live RED (2026-07-30, same session, cold SPA entry with a persisted detached anchor):
+        // `scrollToIndex` was issued while the DOM scroller could only accept 813px of what
+        // became a 32,878px transcript, so the command landed at that placeholder range's end
+        // and the one-shot was already spent. `scrollTo` clamps to the CURRENT range; the
+        // end-materialization path already withholds on Legend's unresolved position and the
+        // keyed path must withhold on both facts, without consuming its one request.
+        vi.spyOn(Date, 'now').mockImplementation(() => 1_000);
+        const animationFrames: FrameRequestCallback[] = [];
+        vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+            animationFrames.push(callback);
+            return animationFrames.length;
+        }));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+        class FakeHTMLElement {
+            public clientHeight = 600;
+            public height = 600;
+            public isConnected = true;
+            public parentElement: FakeHTMLElement | null = null;
+            public scrollHeight = 1_400;
+            private currentScrollTop = 0;
+            public get scrollTop() { return this.currentScrollTop; }
+            public set scrollTop(value: number) {
+                this.currentScrollTop = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight));
+            }
+            public testId: string | null = null;
+            public top = 0;
+            public contains = () => true;
+            public getAttribute = (name: string) => name === 'data-testid' ? this.testId : null;
+            public getBoundingClientRect = () => ({
+                bottom: this.top + this.height,
+                height: this.height,
+                left: 0,
+                right: 800,
+                top: this.top,
+                width: 800,
+                x: 0,
+                y: this.top,
+                toJSON: () => ({}),
+            });
+            // The held row is not mounted yet: the landing degrades to Legend's position estimate.
+            public querySelector = () => null;
+            public querySelectorAll = () => [];
+        }
+        const root = new FakeHTMLElement();
+
+        vi.stubGlobal('HTMLElement', FakeHTMLElement);
+        vi.stubGlobal('document', { getElementById: () => root });
+        vi.stubGlobal('window', {
+            getComputedStyle: () => ({ overflowX: 'hidden', overflowY: 'auto' }),
+        });
+
+        legendStateOverride = {
+            positionAtIndex: (index: number) => (index === 0 ? 30_900 : undefined),
+            sizeAtIndex: () => 240,
+        };
+
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+        const listRef = React.createRef<TranscriptListShellRef<{ id: string }>>();
+        await renderScreen(
+            <Renderer
+                webDomObservation={mountedWebDomObservation}
+                ref={listRef}
+                data={[{ id: 'target' }, { id: 'newer' }]}
+                dataKey="keyed-materialization-withhold"
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    legendInitialScrollAtEnd: false,
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'web',
+                })}
+            />,
+        );
+
+        getShellRef(listRef).holdWebEntryAnchor?.({
+            itemId: 'target',
+            itemOffsetPx: 100,
+            kind: 'message',
+            messageId: null,
+        });
+        capturedLegendListProps.onItemSizeChanged({ index: 0, previous: 240, size: 500 });
+        act(() => animationFrames.splice(0).forEach((callback) => callback(16)));
+        act(() => animationFrames.splice(0).forEach((callback) => callback(32)));
+
+        // The scroller can hold 800px of a target 30,800px away: commanding it now would spend
+        // the one-shot on a clamped landing.
+        expect(assignedLegendRef.scrollToIndex).not.toHaveBeenCalled();
+        expect(root.scrollTop).toBe(0);
+
+        // Hydration finishes and the range can hold the target: the withheld request is issued
+        // exactly once by the same polling transaction.
+        root.scrollHeight = 40_000;
+        capturedLegendListProps.onItemSizeChanged({ index: 0, previous: 500, size: 520 });
+        act(() => animationFrames.splice(0).forEach((callback) => callback(48)));
+        expect(assignedLegendRef.scrollToIndex).toHaveBeenCalledTimes(1);
+        expect(assignedLegendRef.scrollToIndex).toHaveBeenCalledWith({
+            animated: false,
+            index: 0,
+            viewPosition: 0,
+        });
+    });
+
+    it('withholds the keyed-identity materialization while Legend collapses the target position to the head', async () => {
+        // The OTHER, independent half of the same guard — and the one its sibling above cannot
+        // reach, because that test holds an INDEX-0 anchor, so `index > 0` short-circuits the
+        // position branch and only the DOM-range branch runs.
+        //
+        // Legend resolves the offset from `positions[index] || 0`, so a non-head target whose
+        // position has not been laid out yet resolves to 0 — the HEAD, the exact opposite of a
+        // saved-anchor restore — and `runWhenReady` dispatches the frozen index anyway after
+        // 800ms. Here the DOM range can hold anything, so the collapsed position is the ONLY
+        // reason to withhold, and withholding must not spend the one-shot.
+        vi.spyOn(Date, 'now').mockImplementation(() => 1_000);
+        const animationFrames: FrameRequestCallback[] = [];
+        vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+            animationFrames.push(callback);
+            return animationFrames.length;
+        }));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+        class FakeHTMLElement {
+            public clientHeight = 600;
+            public height = 600;
+            public isConnected = true;
+            public parentElement: FakeHTMLElement | null = null;
+            // Fully hydrated range: the DOM-range withhold condition can never fire here.
+            public scrollHeight = 40_000;
+            private currentScrollTop = 20_000;
+            public get scrollTop() { return this.currentScrollTop; }
+            public set scrollTop(value: number) {
+                this.currentScrollTop = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight));
+            }
+            public testId: string | null = null;
+            public top = 0;
+            public contains = () => true;
+            public getAttribute = (name: string) => name === 'data-testid' ? this.testId : null;
+            public getBoundingClientRect = () => ({
+                bottom: this.top + this.height,
+                height: this.height,
+                left: 0,
+                right: 800,
+                top: this.top,
+                width: 800,
+                x: 0,
+                y: this.top,
+                toJSON: () => ({}),
+            });
+            // The held row is not mounted yet: the landing degrades to Legend's position estimate.
+            public querySelector = () => null;
+            public querySelectorAll = () => [];
+        }
+        const root = new FakeHTMLElement();
+
+        vi.stubGlobal('HTMLElement', FakeHTMLElement);
+        vi.stubGlobal('document', { getElementById: () => root });
+        vi.stubGlobal('window', {
+            getComputedStyle: () => ({ overflowX: 'hidden', overflowY: 'auto' }),
+        });
+
+        let targetPosition = 0;
+        legendStateOverride = {
+            positionAtIndex: (index: number) => (index === 1 ? targetPosition : 0),
+            sizeAtIndex: () => 240,
+        };
+
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+        const listRef = React.createRef<TranscriptListShellRef<{ id: string }>>();
+        await renderScreen(
+            <Renderer
+                webDomObservation={mountedWebDomObservation}
+                ref={listRef}
+                data={[{ id: 'older' }, { id: 'target' }]}
+                dataKey="keyed-materialization-collapsed-position"
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    legendInitialScrollAtEnd: false,
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'web',
+                })}
+            />,
+        );
+
+        getShellRef(listRef).holdWebEntryAnchor?.({
+            itemId: 'target',
+            itemOffsetPx: 100,
+            kind: 'message',
+            messageId: null,
+        });
+        capturedLegendListProps.onItemSizeChanged({ index: 0, previous: 240, size: 500 });
+        act(() => animationFrames.splice(0).forEach((callback) => callback(16)));
+        act(() => animationFrames.splice(0).forEach((callback) => callback(32)));
+
+        // Legend still answers 0 for index 1: commanding now would land on the head and spend
+        // the one request. Nothing is written either — the reader stays where they were.
+        expect(assignedLegendRef.scrollToIndex).not.toHaveBeenCalled();
+        expect(root.scrollTop).toBe(20_000);
+
+        // The layout resolves; the unspent one-shot is issued exactly once, for the target.
+        targetPosition = 900;
+        capturedLegendListProps.onItemSizeChanged({ index: 0, previous: 500, size: 520 });
+        act(() => animationFrames.splice(0).forEach((callback) => callback(48)));
+        expect(assignedLegendRef.scrollToIndex).toHaveBeenCalledTimes(1);
+        expect(assignedLegendRef.scrollToIndex).toHaveBeenCalledWith({
+            animated: false,
+            index: 1,
+            viewPosition: 0,
+        });
+    });
+
     it('keeps the held web tail semantic after an external rollback without adding an app correction', async () => {
         // USER-REALITY-DIVERGENCE symptom 3 (typing pins below the true bottom): each composer
         // growth produced ONE held-tail correction write, Legend replayed the old offset, and
@@ -4450,6 +4797,11 @@ describe('Legend transcript renderer adapter', () => {
         root.scrollTop = 715;
         expect(targetRow.top).toBe(-191);
         capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 715 } } });
+        // The displacement is confirmed by the settle frame the resumed transaction schedules:
+        // a correction is only spent on geometry that is no longer in motion (a single read
+        // taken across Legend's own compensation seam is an artifact — live 2026-07-30). One
+        // frame later the offset is still 715, so the same correction lands, unchanged.
+        act(() => animationFrames.splice(0).forEach((callback) => callback(3)));
 
         expect(root.scrollTop).toBe(500);
         expect(targetRow.top).toBe(24);

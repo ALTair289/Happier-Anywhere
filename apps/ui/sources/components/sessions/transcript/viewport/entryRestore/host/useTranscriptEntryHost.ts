@@ -67,6 +67,7 @@ import type { TranscriptRenderWindowProjection } from '@/components/sessions/tra
 import type { TranscriptJumpTarget } from '@/components/sessions/transcript/viewport/jump/transcriptJumpTargetTypes';
 import { waitForVisualUpdateWithTimeout } from '@/components/sessions/transcript/pagination/waitForVisualUpdateWithTimeout';
 import type { TranscriptListRendererKind } from '@/components/sessions/transcript/viewport/shell/renderer/types';
+import type { TranscriptUserScrollIntentOwner, TranscriptUserScrollIntentTimestampReader } from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
 
 type MutableRef<T> = { current: T };
 type LoadOlderOptions = TranscriptPrependOlderLoadOptions;
@@ -165,7 +166,8 @@ type TranscriptEntryHostDeps = Readonly<{
     jumpToSeq: number | null | undefined;
     jumpToSeqActiveRef: MutableRef<boolean>;
     lastScrollOffsetForIntentRef: MutableRef<number | null>;
-    lastUserScrollIntentAtMsRef: MutableRef<number>;
+    lastUserScrollIntentAtMsRef: TranscriptUserScrollIntentTimestampReader;
+    userScrollIntent: TranscriptUserScrollIntentOwner;
     latestJumpToSeqRef: MutableRef<number | null>;
     listContentHeight: number;
     listContentHeightRef: MutableRef<number>;
@@ -976,6 +978,9 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
                 deps.initialWebPinStabilizingRef.current = false;
                 return true;
             }
+            // Parked is STATE: a reader who scrolled away during the open envelope must not be
+            // pinned back when their input recency expires mid-retry.
+            if (deps.userScrollIntent.isParkedAwayFromLiveTail()) return false;
             if (Date.now() - deps.lastUserScrollIntentAtMsRef.current < deps.autoPinDelayMs) return false;
             let pinApplied = false;
             if (!deps.entryRestoreOwner.hasOpenTransaction(deps.sessionId)) {
@@ -1007,6 +1012,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.sessionId,
         deps.wantsPinnedRef,
         verifyWebEntryRestoreTransaction,
+        deps.userScrollIntent,
     ]);
 
     // The retry chain's whole life is the open stabilize envelope (armAtMs +
@@ -1047,6 +1053,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
             if (
                 !completed &&
                 deps.wantsPinnedRef.current !== false &&
+                !deps.userScrollIntent.isParkedAwayFromLiveTail() &&
                 !deps.entryRestoreOwner.hasOpenTransaction(handle.sessionId) &&
                 Date.now() - deps.lastUserScrollIntentAtMsRef.current >= deps.autoPinDelayMs
             ) {
@@ -1058,6 +1065,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
             if (
                 !deps.jumpToSeqActiveRef.current &&
                 deps.wantsPinnedRef.current !== false &&
+                !deps.userScrollIntent.isParkedAwayFromLiveTail() &&
                 typeof nextRetryDelayMs === 'number' &&
                 Number.isFinite(nextRetryDelayMs) &&
                 Date.now() - deps.lastUserScrollIntentAtMsRef.current >= deps.autoPinDelayMs
@@ -1089,6 +1097,7 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
         deps.wantsPinnedRef,
         executeSessionOpenInitialPinAttempt,
         isSessionOpenWebInitialPinEnvelopeOpen,
+        deps.userScrollIntent,
     ]);
 
     const scheduleFirstSessionOpenWebInitialPinRetry = React.useCallback((): void => {

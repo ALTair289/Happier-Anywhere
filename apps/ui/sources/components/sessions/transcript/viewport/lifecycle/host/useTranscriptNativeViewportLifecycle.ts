@@ -12,6 +12,8 @@ import {
     shouldIgnoreNativeInvalidScrollObservation as resolveShouldIgnoreNativeInvalidScrollObservation,
 } from '@/components/sessions/transcript/viewport/nativePassiveScrollPolicy';
 
+import type { TranscriptUserScrollIntentOwner } from '@/components/sessions/transcript/viewport/driver/userScrollIntentOwner';
+
 type MutableRef<T> = { current: T };
 type NativeUserScrollTakeoverApplyEffect =
     TranscriptLifecycleHostNativeUserScrollTakeoverPlan['nativeUserScrollTakeoverEffects'][number];
@@ -22,7 +24,7 @@ export function useTranscriptNativeViewportLifecycle(params: Readonly<{
     entryRestoreOwner: EntryRestoreOwner;
     entrySliceWindowRef: MutableRef<{ sessionId: string; anchorRowId: string } | null>;
     lifecycleHost: TranscriptLifecycleHost;
-    lastUserScrollIntentAtMsRef: MutableRef<number>;
+    userScrollIntent: TranscriptUserScrollIntentOwner;
     measurementHost: TranscriptMeasurementHost;
     nativeMountSettleAutoPinSuppressedRef: MutableRef<boolean>;
     nativeInitialViewportPendingObservationRef: MutableRef<boolean>;
@@ -41,7 +43,7 @@ export function useTranscriptNativeViewportLifecycle(params: Readonly<{
         entryRestoreOwner,
         entrySliceWindowRef,
         lifecycleHost,
-        lastUserScrollIntentAtMsRef,
+        userScrollIntent,
         measurementHost,
         nativeInitialViewportPendingObservationRef,
         nativeMountSettleAutoPinSuppressedRef,
@@ -92,14 +94,14 @@ export function useTranscriptNativeViewportLifecycle(params: Readonly<{
                     updateNativeInitialViewportPendingObservation(false);
                     break;
                 case 'native-user-scroll-record-intent-timestamp':
-                    lastUserScrollIntentAtMsRef.current = effect.timestampMs;
+                    userScrollIntent.recordInput({ atMs: effect.timestampMs });
                     break;
             }
         }
     }, [
         consumedSessionEntryViewportRef,
         entrySliceWindowRef,
-        lastUserScrollIntentAtMsRef,
+        userScrollIntent,
         nativeMountSettleAutoPinSuppressedRef,
         pendingNativeMountSettleBottomPinHostRef,
         preemptEntryRestoreTransaction,

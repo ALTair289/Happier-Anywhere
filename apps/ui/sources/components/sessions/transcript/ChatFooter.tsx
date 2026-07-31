@@ -92,7 +92,7 @@ export const ChatFooter = React.memo((props: ChatFooterProps) => {
             <ComposerAuxiliaryFrame>
                 <SessionWarningActionBanner
                     testID="session-chatFooter-localControl"
-                    iconName="information-circle"
+                    iconName="info"
                     body={t(textKey)}
                     actionTestID={actionTestID}
                     actionLabel={actionLabelKey ? t(actionLabelKey) : undefined}
@@ -139,7 +139,7 @@ export const ChatFooter = React.memo((props: ChatFooterProps) => {
             <ComposerAuxiliaryFrame>
                 <SessionWarningActionBanner
                     testID="session-chatFooter-directControl"
-                    iconName="information-circle"
+                    iconName="info"
                     body={t(textKey)}
                     secondaryActions={showPersistAction
                         ? [{

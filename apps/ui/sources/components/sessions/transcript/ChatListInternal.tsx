@@ -863,11 +863,11 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         emitViewportChange,
         isPinnedRef,
         lastPinOffsetForIntentRef,
-        lastUserScrollIntentAtMsRef,
         lifecycleHost,
         scrollPinRef,
         sessionId: props.sessionId,
         transcriptScrollPinEnabled,
+        userScrollIntent,
         wantsPinnedRef,
     });
     const cancelScheduledViewportAnchorCapture = React.useCallback(() => {
@@ -907,12 +907,12 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         entryRestoreOwner,
         entrySliceWindowRef,
         lifecycleHost,
-        lastUserScrollIntentAtMsRef,
         measurementHost,
         nativeInitialViewportPendingObservationRef,
         nativeMountSettleAutoPinSuppressedRef,
         pendingNativeMountSettleBottomPinHostRef,
         platformOS: Platform.OS,
+        userScrollIntent,
         preemptEntryRestoreTransaction,
         sessionEntryViewportRef,
         sessionId: props.sessionId,
@@ -969,12 +969,12 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         lastPinOffsetForIntentRef,
         lastRouteJumpProtectionClearingWebMovementAtMsRef,
         lastScrollOffsetForIntentRef,
-        lastUserScrollIntentAtMsRef,
         latestCommittedActivityKey: props.latestCommittedActivityKey,
         lifecycleHost,
         listContentHeightRef,
         listLayoutHeightRef,
         measurementHost,
+        userScrollIntent,
         nativeBottomFollowRearmedAfterDragRef,
         nativeEntryRestorePaintReleaseTimeoutRef,
         nativeFirstPaintFallbackReleaseTimeoutRef,
@@ -1015,7 +1015,10 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
                     preemptEntryRestoreTransaction();
                     break;
                 case 'follow-bottom-intent-clear-user-scroll-intent':
-                    lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+                    userScrollIntent.revokeInputEvidence();
+                    // Follow-bottom intent is a deliberate return to the live tail, so it also
+                    // releases the parked position (the revoke covers input recency only).
+                    userScrollIntent.releaseLiveTailParking();
                     break;
                 case 'follow-bottom-intent-record-live-tail-pin-offset':
                     lastPinOffsetForIntentRef.current = effect.distanceFromLiveTailPx;
@@ -1025,6 +1028,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     }, [
         preemptEntryRestoreTransaction,
         props.sessionId,
+        userScrollIntent,
     ]);
     const applyUnmountCleanup = React.useCallback(() => {
         flushPendingJumpSeqViewportPromotionForExitRef.current();
@@ -2081,6 +2085,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         lastScrollOffsetForIntentRef,
         lastUserScrollIntentAtMsRef,
         latestJumpToSeqRef,
+        userScrollIntent,
         listContentHeight,
         listContentHeightRef,
         listDataLength: listData.length,
@@ -2360,6 +2365,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         listContentHeightRef,
         listDataRef,
         listLayoutHeightRef,
+        userScrollIntent,
         listRef,
         loadOlderInFlightRef: loadOlderInFlight,
         markNativeInitialViewportAppliedForCurrentSession,
