@@ -5,6 +5,10 @@ import {
 
 import { fetchJson } from '../http';
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : null;
+}
+
 export async function daemonControlPostJson<T = any>(params: {
   port: number;
   path: string;
@@ -25,7 +29,38 @@ export async function daemonControlPostJson<T = any>(params: {
       body: JSON.stringify(params.body ?? {}),
       timeoutMs: params.timeoutMs ?? defaultTimeoutMs,
     });
-    return { status: res.status, data: res.data };
+    if (params.path !== '/spawn-session') {
+      return { status: res.status, data: res.data };
+    }
+
+    const spawnResponse = asRecord(res.data);
+    const immediateSessionId = typeof spawnResponse?.sessionId === 'string'
+      ? spawnResponse.sessionId.trim()
+      : '';
+    const spawnNonce = typeof spawnResponse?.spawnNonce === 'string'
+      ? spawnResponse.spawnNonce.trim()
+      : '';
+    const isPending = spawnResponse?.success === true
+      && (spawnResponse.status === 'pending' || spawnResponse.sessionIdStatus === 'pending');
+    if (!isPending || immediateSessionId || !spawnNonce) {
+      return { status: res.status, data: res.data };
+    }
+
+    const sessionId = await resolveDaemonSpawnSessionId({
+      port: params.port,
+      controlToken: params.controlToken,
+      spawnNonce,
+      timeoutMs: params.timeoutMs ?? defaultTimeoutMs,
+    });
+    return {
+      status: res.status,
+      data: {
+        ...spawnResponse,
+        status: 'success',
+        sessionIdStatus: 'available',
+        sessionId,
+      } as T,
+    };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(`daemonControlPostJson failed (port=${params.port} path=${params.path}): ${reason}`);
