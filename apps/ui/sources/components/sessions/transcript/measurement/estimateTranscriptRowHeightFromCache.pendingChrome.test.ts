@@ -11,6 +11,10 @@ const MEASURED_ONE_SHORT_PENDING_MESSAGE_PX = 68.625;
 const PENDING_QUEUE_SCROLL_CAP_PX = 80;
 const PENDING_QUEUE_HEADER_PX = 14.625;
 const PENDING_QUEUE_HEADER_WITH_SUBTITLE_PX = 31;
+/** `contentContainerStyle.paddingTop` + (`userMessageBubble` paddingVertical ×2 + wrapper paddingBottom). */
+const PENDING_QUEUE_ONE_MESSAGE_CHROME_PX = 6 + 24;
+/** `transcriptMarkdownTextStyle.lineHeight` — the typography the committed bubble also paints. */
+const TRANSCRIPT_MARKDOWN_LINE_PX = 24;
 
 function pendingMessage(overrides: Partial<PendingMessage> = {}): PendingMessage {
     return {
@@ -62,17 +66,38 @@ describe('pending-queue estimate is chrome-aware', () => {
             .toBeCloseTo(MEASURED_ONE_SHORT_PENDING_MESSAGE_PX, 1);
     });
 
-    it('never exceeds the block header plus its own scroll cap, however long the queue is', () => {
+    it('never exceeds the block header plus its own scroll cap, however long the QUEUE is', () => {
         const bounded = PENDING_QUEUE_HEADER_PX + PENDING_QUEUE_SCROLL_CAP_PX;
 
-        // One long message: the old model returned ~246px for a row that paints ~95px.
-        expect(estimatePendingQueue([pendingMessage({ text: 'x'.repeat(600) })])).toBeCloseTo(bounded, 1);
+        // Two long messages: the old model returned ~340px for a block that paints ~95px.
+        expect(estimatePendingQueue([
+            pendingMessage({ id: 'p1', text: 'a'.repeat(300) }),
+            pendingMessage({ id: 'p2', text: 'b'.repeat(300) }),
+        ])).toBeCloseTo(bounded, 1);
         // Three long messages: the old model returned ~438px — a ~340px phantom gap at the tail.
         expect(estimatePendingQueue([
             pendingMessage({ id: 'p1', text: 'a'.repeat(300) }),
             pendingMessage({ id: 'p2', text: 'b'.repeat(300) }),
             pendingMessage({ id: 'p3', text: 'c'.repeat(300) }),
         ])).toBeCloseTo(bounded, 1);
+    });
+
+    /**
+     * D (2026-08-01). The SEND crossover: `pending-queue` holding exactly one utterance is the row
+     * that is about to be replaced by that utterance's committed bubble. Capping it at the queue's
+     * compact bound made the handover a measured +136px height jump (94.25 → 230 for a 258-char
+     * message, `.project/reviews/2026-08-01-send-transition/M-send-transition.md` §6), and this
+     * estimate is a POSITION, so it has to agree with the block or it manufactures the same error
+     * from the other side.
+     */
+    it('sizes a single queued utterance from its own content, not the queue scroll cap', () => {
+        // 600 chars ⇒ ceil(600/72) = 9 rendered lines.
+        const natural = PENDING_QUEUE_HEADER_PX
+            + PENDING_QUEUE_ONE_MESSAGE_CHROME_PX
+            + 9 * TRANSCRIPT_MARKDOWN_LINE_PX;
+
+        expect(natural).toBeGreaterThan(PENDING_QUEUE_HEADER_PX + PENDING_QUEUE_SCROLL_CAP_PX);
+        expect(estimatePendingQueue([pendingMessage({ text: 'x'.repeat(600) })])).toBeCloseTo(natural, 1);
     });
 
     it('grows monotonically with the queue up to that bound', () => {

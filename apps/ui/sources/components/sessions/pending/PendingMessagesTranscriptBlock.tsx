@@ -27,6 +27,7 @@ import {
     isPendingMessageProviderDeliveryInFlight,
     type PendingMessageVisualState,
 } from './pendingMessageVisualState';
+import { shouldClipPendingQueueContent } from './pendingQueueContentClipping';
 import { useTerminalComposerClearAction } from '@/components/sessions/terminalComposer/useTerminalComposerClearAction';
 import { usePendingInputInterruptAndRunAction } from './usePendingInputInterruptAndRunAction';
 import {
@@ -253,6 +254,9 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
 
     const pendingCount = props.pendingMessages.length;
     const discardedCount = props.discardedMessages.length;
+    // One queued utterance is the send crossover, not a queue: it paints at the height its own
+    // committed bubble will have. See `pendingQueueContentClipping`.
+    const clipsQueueContent = shouldClipPendingQueueContent({ pendingCount, discardedCount });
     const hasProviderDeliveryInFlight = props.pendingMessages.some(isPendingMessageProviderDeliveryInFlight);
     const pendingDeliveryVisualStates = React.useMemo(() => {
         let hasEarlierPendingPredecessor = false;
@@ -659,7 +663,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     }) => {
         const { message, index, renderDragHandle } = args;
         const text = getPendingText(message).trim();
-        const isCollapsible = collapseThresholdChars > 0 && text.length >= collapseThresholdChars;
+        const isCollapsible = clipsQueueContent && collapseThresholdChars > 0 && text.length >= collapseThresholdChars;
         const isExpanded = expandedMessageIds[message.id] === true || !isCollapsible;
 
         const menuKey = `active:${message.id}`;
@@ -1090,6 +1094,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     }, [
         canSteerNow,
         canReorderPendingMessages,
+        clipsQueueContent,
         hoveredMessageId,
         collapseThresholdChars,
         collapsedLines,
@@ -1264,18 +1269,24 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     if (pendingCount <= 0 && discardedCount <= 0) return null;
 
     const canExpandPendingQueue =
-        pendingCount > 0
+        clipsQueueContent
+        && pendingCount > 0
         && typeof scrollContentHeightPx === 'number'
         && Number.isFinite(scrollContentHeightPx)
         && scrollContentHeightPx > maxHeightPx;
     const isQueueExpanded = canExpandPendingQueue && isPendingQueueExpanded;
-    const maxHeight = isQueueExpanded ? expandedMaxHeightPx : maxHeightPx;
+    // `undefined` — not a large number — when the block is not clipping: an unclipped block has no
+    // bound to expand to, so the header toggle correctly has nothing to offer.
+    const maxHeight = clipsQueueContent
+        ? (isQueueExpanded ? expandedMaxHeightPx : maxHeightPx)
+        : undefined;
     const headerLabel =
         pendingCount > 0
             ? `${t('session.pendingMessages.title')} (${pendingCount})`
             : t('session.pendingMessages.discarded.title');
     const clampedViewportHeightPx =
-        typeof scrollContentHeightPx === 'number' && Number.isFinite(scrollContentHeightPx) && scrollContentHeightPx > 0
+        maxHeight !== undefined
+        && typeof scrollContentHeightPx === 'number' && Number.isFinite(scrollContentHeightPx) && scrollContentHeightPx > 0
             ? Math.max(1, Math.min(Math.trunc(scrollContentHeightPx), maxHeight))
             : undefined;
     const showTerminalComposerClearAction = Boolean(

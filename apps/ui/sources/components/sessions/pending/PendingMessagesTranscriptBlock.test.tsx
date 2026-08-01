@@ -1950,11 +1950,88 @@ describe('PendingMessagesTranscriptBlock', () => {
         expect(modalAlert).toHaveBeenCalledTimes(0);
     });
 
+    /**
+     * D (2026-08-01) — the SEND crossover. A block holding exactly one queued utterance is showing
+     * the message that is about to be replaced by its own committed bubble. Two independent
+     * clippers used to shrink it — the block's compact scroll cap and the per-message line clamp —
+     * and the committed bubble has neither, so the handover measured as a height jump of
+     * +16..+136px on native (`.project/reviews/2026-08-01-send-transition/M-send-transition.md` §6,
+     * 94.25 → 230 for a 258-char message). Clipping is a property of a QUEUE, not of one utterance.
+     */
+    describe('send crossover: one queued utterance paints like its committed bubble', () => {
+        const LONG_TEXT = 'x'.repeat(400);
+
+        function crossoverSettings() {
+            return {
+                transcriptPendingQueueMaxHeightPx: 80,
+                transcriptPendingQueueExpandedMaxHeightPx: 520,
+                transcriptPendingMessageCollapseThresholdChars: 160,
+                transcriptPendingMessageCollapsedLines: 2,
+            };
+        }
+
+        function longPendingMessage(id: string, createdAt: number) {
+            return { id, text: LONG_TEXT, displayText: undefined, createdAt, updatedAt: createdAt, localId: id, rawRecord: {} };
+        }
+
+        it('does not clip a single long queued utterance', async () => {
+            settingValues = crossoverSettings();
+            const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+            const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [longPendingMessage('p1', 0)],
+                discardedMessages: [],
+            }));
+
+            const scroll = screen.findByTestId('pendingMessages.scroll');
+            expect(scroll!.props.style?.maxHeight).toBeUndefined();
+            // The committed bubble renders markdown; a clipped preview renders plain clamped text.
+            expect(screen.findByType('MarkdownView' as any)).toBeTruthy();
+            expect(screen.findByTestId('pendingMessages.viewMore:p1')).toBeNull();
+
+            // Learning that the content overflows the compact bound must not re-clip it, and must
+            // not offer an expand affordance for content that is already fully painted.
+            await act(async () => {
+                scroll!.props.onContentSizeChange(0, 400);
+            });
+            expect(screen.findByTestId('pendingMessages.scroll')!.props.style?.maxHeight).toBeUndefined();
+            expect(screen.findByTestId('pendingMessages.headerToggle')).toBeNull();
+
+            // The delivery affordance the user reads is unchanged by any of this.
+            expect(screen.findByTestId('pendingMessages.pendingAffordanceLabel:p1')).toBeTruthy();
+        });
+
+        it('still clips the block as soon as a second row shares it', async () => {
+            settingValues = crossoverSettings();
+            const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+            const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [longPendingMessage('p1', 0), longPendingMessage('p2', 1)],
+                discardedMessages: [],
+            }));
+
+            expect(screen.findByTestId('pendingMessages.scroll')!.props.style?.maxHeight).toBe(80);
+            expect(screen.findByTestId('pendingMessages.viewMore:p1')).toBeTruthy();
+            expect(screen.findByTestId('pendingMessages.viewMore:p2')).toBeTruthy();
+        });
+    });
+
+    /**
+     * A QUEUE — two or more rows. One row is the send crossover and is deliberately unclipped; see
+     * the `send crossover` describe above and `pendingQueueContentClipping`.
+     */
+    function queuedPendingMessages() {
+        return [
+            { id: 'p1', text: 'hello', displayText: undefined, createdAt: 0, updatedAt: 0, localId: 'p1', rawRecord: {} },
+            { id: 'p2', text: 'world', displayText: undefined, createdAt: 1, updatedAt: 1, localId: 'p2', rawRecord: {} },
+        ];
+    }
+
     it('uses an 80px default max-height for the pending queue block', async () => {
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
                 sessionId: 's1',
-                pendingMessages: [{ id: 'p1', text: 'hello', displayText: undefined, createdAt: 0, updatedAt: 0, localId: 'p1', rawRecord: {} }],
+                pendingMessages: queuedPendingMessages(),
                 discardedMessages: [],
             }));
 
@@ -1972,7 +2049,7 @@ describe('PendingMessagesTranscriptBlock', () => {
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
                 sessionId: 's1',
-                pendingMessages: [{ id: 'p1', text: 'hello', displayText: undefined, createdAt: 0, updatedAt: 0, localId: 'p1', rawRecord: {} }],
+                pendingMessages: queuedPendingMessages(),
                 discardedMessages: [],
             }));
 
@@ -1998,7 +2075,7 @@ describe('PendingMessagesTranscriptBlock', () => {
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
                 sessionId: 's1',
-                pendingMessages: [{ id: 'p1', text: 'hello', displayText: undefined, createdAt: 0, updatedAt: 0, localId: 'p1', rawRecord: {} }],
+                pendingMessages: queuedPendingMessages(),
                 discardedMessages: [],
             }));
 
@@ -2019,7 +2096,7 @@ describe('PendingMessagesTranscriptBlock', () => {
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
                 sessionId: 's1',
-                pendingMessages: [{ id: 'p1', text: 'hello', displayText: undefined, createdAt: 0, updatedAt: 0, localId: 'p1', rawRecord: {} }],
+                pendingMessages: queuedPendingMessages(),
                 discardedMessages: [],
             }));
 
@@ -2042,7 +2119,7 @@ describe('PendingMessagesTranscriptBlock', () => {
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
                 sessionId: 's1',
-                pendingMessages: [{ id: 'p1', text: 'hello', displayText: undefined, createdAt: 0, updatedAt: 0, localId: 'p1', rawRecord: {} }],
+                pendingMessages: queuedPendingMessages(),
                 discardedMessages: [],
             }));
 
@@ -2063,11 +2140,14 @@ describe('PendingMessagesTranscriptBlock', () => {
             transcriptPendingQueueExpandedMaxHeightPx: 520,
         };
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
-        const firstPendingMessage = { id: 'p1', text: 'hello', displayText: undefined, createdAt: 0, updatedAt: 0, localId: 'p1', rawRecord: {} };
-        const secondPendingMessage = { id: 'p2', text: 'world', displayText: undefined, createdAt: 1, updatedAt: 1, localId: 'p2', rawRecord: {} };
+        const firstQueue = queuedPendingMessages();
+        const secondQueue = [
+            { id: 'p3', text: 'again', displayText: undefined, createdAt: 2, updatedAt: 2, localId: 'p3', rawRecord: {} },
+            { id: 'p4', text: 'and again', displayText: undefined, createdAt: 3, updatedAt: 3, localId: 'p4', rawRecord: {} },
+        ];
         const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
                 sessionId: 's1',
-                pendingMessages: [firstPendingMessage],
+                pendingMessages: firstQueue,
                 discardedMessages: [],
             }));
 
@@ -2086,7 +2166,7 @@ describe('PendingMessagesTranscriptBlock', () => {
 
         await screen.update(React.createElement(PendingMessagesTranscriptBlock, {
             sessionId: 's1',
-            pendingMessages: [secondPendingMessage],
+            pendingMessages: secondQueue,
             discardedMessages: [],
         }));
         const nextScroll = screen.findByTestId('pendingMessages.scroll');

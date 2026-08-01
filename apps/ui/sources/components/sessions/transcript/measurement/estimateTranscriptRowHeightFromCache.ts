@@ -1,4 +1,5 @@
 import { getPendingMessageVisualState } from '@/components/sessions/pending/pendingMessageVisualState';
+import { shouldClipPendingQueueContent } from '@/components/sessions/pending/pendingQueueContentClipping';
 import { transcriptMarkdownTextStyle } from '@/components/sessions/transcript/transcriptMarkdownTypography';
 import type { Message } from '@/sync/domains/messages/messageTypes';
 import { settingsDefaults } from '@/sync/domains/settings/settings';
@@ -158,6 +159,12 @@ const ESTIMATE_TOOL_CARD_ROW_PX = 328;
  * measured: the two-line header (only when queued and discarded rows coexist), the per-message
  * notices, and the discarded section. They sit INSIDE the capped scroll box, so for any queue big
  * enough to reach the cap they cannot move the answer at all.
+ *
+ * D (2026-08-01): the cap is now conditional. A block holding exactly one queued utterance is the
+ * SEND crossover and does not clip, so this estimate must follow the same rule from the same owner
+ * — see `shouldClipPendingQueueContent`. The per-message line clamp is gated by that same
+ * predicate, which is why it has never needed modelling here: it is only ever active for a queue
+ * whose content already exceeds the cap.
  */
 const PENDING_QUEUE_HEADER_ROW_PX = 14.625;
 /** Header grows a second 12px line when the "Discarded (n)" subtitle is present (`gap: 2`). */
@@ -200,6 +207,13 @@ function estimatePendingQueueRowPx(item: Extract<TranscriptRowShellItem, { kind:
         // not reachable from a pure size estimate, so a `queued_behind_turn` wait notice is NOT
         // modelled — it is absorbed by the cap for any queue that reaches it, and superseded by the
         // row's own onLayout otherwise.
+        // D (2026-08-01) RESIDUAL, stated rather than engineered around: an UNCLIPPED single
+        // utterance no longer has a cap to absorb that notice, so a message queued behind an active
+        // turn estimates 26px short until its own onLayout lands. It is one frame in one
+        // runtime-derived state, and `transcriptRowShellSignature` deliberately does not key on that
+        // state, so the row's measured height is never deleted because of it. Threading session
+        // runtime into a pure size estimate to model a notice onLayout corrects in the same commit
+        // buys a mechanism, not a fix.
         const visualState = getPendingMessageVisualState(pendingMessage);
         if (visualState.kind === 'send_failed') {
             scrollContentPx += PENDING_QUEUE_MESSAGE_RETRY_NOTICE_PX;
@@ -221,11 +235,19 @@ function estimatePendingQueueRowPx(item: Extract<TranscriptRowShellItem, { kind:
         ? PENDING_QUEUE_HEADER_WITH_SUBTITLE_PX
         : PENDING_QUEUE_HEADER_ROW_PX;
     // NOT a ceiling on a position-bearing value (see C-1 above): this is the block's OWN painted
-    // bound. The `ScrollView` carries `maxHeight`, so content past it is scrolled, never painted.
-    // The account default is modelled because a pure estimate cannot read the setting; a user who
-    // raises `transcriptPendingQueueMaxHeightPx` (or expands the queue, which is a post-measurement
-    // interaction) undershoots until that row's next onLayout, instead of overshooting without end.
-    const scrollBoxPx = Math.min(scrollContentPx, PENDING_QUEUE_SCROLL_MAX_HEIGHT_PX);
+    // bound, and only when the block actually clips (`shouldClipPendingQueueContent` is the single
+    // owner of that decision — a disagreement with the renderer is a literal gap or overlap under
+    // the tail). The `ScrollView` carries `maxHeight`, so content past it is scrolled, never
+    // painted. The account default is modelled because a pure estimate cannot read the setting; a
+    // user who raises `transcriptPendingQueueMaxHeightPx` (or expands the queue, which is a
+    // post-measurement interaction) undershoots until that row's next onLayout, instead of
+    // overshooting without end.
+    const scrollBoxPx = shouldClipPendingQueueContent({
+        pendingCount: item.pendingMessages.length,
+        discardedCount: item.discardedMessages.length,
+    })
+        ? Math.min(scrollContentPx, PENDING_QUEUE_SCROLL_MAX_HEIGHT_PX)
+        : scrollContentPx;
     return headerPx + (hasTerminalDraftNotice ? PENDING_QUEUE_TERMINAL_DRAFT_NOTICE_PX : 0) + scrollBoxPx;
 }
 
