@@ -22,7 +22,6 @@ import {
 } from '../lib/rolling-version-allocation.mjs';
 import { withCurrentVersionLine } from '../lib/rolling-release-notes.mjs';
 import { resolveGitHubRepoSlug } from '../../github/resolve-github-repo-slug.mjs';
-import { prepareBinaryReleaseAssets } from './prepare-binary-assets.mjs';
 import { getBinaryPublishProductSpec } from './product-specs.mjs';
 import { inspectServerRuntimeCandidate } from './server-runtime-candidate.mjs';
 
@@ -370,6 +369,9 @@ export async function publishBinaryReleaseMain(options = {}) {
     }
     const assetsBaseUrl = `https://github.com/${repoSlug}/releases/download/${versionTag}`;
 
+    // Artifact preparation owns build-only workspace dependencies. Keep it out of the
+    // pre-install version-allocation path used by the release actor guard.
+    const { prepareBinaryReleaseAssets } = await import('./prepare-binary-assets.mjs');
     await prepareBinaryReleaseAssets({
       repoRoot,
       productId: productSpec.id,

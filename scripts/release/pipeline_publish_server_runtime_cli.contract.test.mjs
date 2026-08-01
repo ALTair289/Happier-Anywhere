@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,4 +62,63 @@ test('server runtime publisher exposes separate unsigned candidate build and aut
   assert.match(publisherSource, /authorized-sha/);
   assert.match(publisherSource, /server-runtime-candidate\.mjs/);
   assert.match(wrapperSource, /publishing\/publish-binary-release\.mjs/);
+});
+
+test('server runtime version allocation runs before workspace dependencies are installed', () => {
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'happier-server-release-preinstall-'));
+  const loaderPath = join(fixtureDir, 'reject-workspace-imports.mjs');
+  const githubOutputPath = join(fixtureDir, 'github-output.txt');
+  writeFileSync(
+    loaderPath,
+    [
+      "export async function resolve(specifier, context, nextResolve) {",
+      "  if (specifier.startsWith('@happier-dev/')) {",
+      "    throw new Error(`workspace dependency imported before install: ${specifier}`);",
+      "  }",
+      "  return nextResolve(specifier, context);",
+      "}",
+      '',
+    ].join('\n'),
+  );
+
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--experimental-loader',
+        loaderPath,
+        resolve(repoRoot, 'scripts', 'pipeline', 'release', 'publish-server-runtime.mjs'),
+        '--phase',
+        'build-candidate',
+        '--channel',
+        'dev',
+        '--base-version',
+        '0.1.0',
+        '--allow-stable',
+        'false',
+        '--run-contracts',
+        'false',
+        '--check-installers',
+        'false',
+        '--dry-run',
+        '--github-output',
+        githubOutputPath,
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          GITHUB_RUN_NUMBER: '217',
+          GITHUB_RUN_ATTEMPT: '1',
+          HAPPIER_RELEASE_PUBLISHED_VERSIONS_JSON: JSON.stringify({ github: {}, npm: {} }),
+        },
+        encoding: 'utf8',
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(fs.readFileSync(githubOutputPath, 'utf8'), /^version=0\.1\.0-dev\.\d+$/m);
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
 });
