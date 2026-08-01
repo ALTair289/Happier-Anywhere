@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE } from '@happier-dev/agents';
+import { SESSION_RPC_METHODS } from '@happier-dev/protocol';
 
 import type { AgentState } from '@/api/types';
 import { createPermissionHandlerSessionStub } from '../../utils/permissionHandler.testkit';
@@ -140,6 +141,28 @@ describe('ClaudeUnifiedDialogChoiceBroker lifecycle', () => {
     expect(client.agentState.completedRequests['dialog-1']).toMatchObject({
       status: 'approved',
       decision: 'allow',
+    });
+  });
+
+  it('accepts the modern structured answer for a recognized dialog choice', async () => {
+    const { session, client } = createPermissionHandlerSessionStub('dialog-broker-structured-answer');
+    const broker = new ClaudeUnifiedDialogChoiceBroker(session, { createRequestId: () => 'dialog-1' });
+    broker.activate();
+
+    const pending = broker.requestDialogChoice({ dialog: dialog(EFFORT_DIALOG) });
+    await vi.waitFor(() => expect(client.agentState.requests['dialog-1']).toBeDefined());
+
+    const respond = client.rpcHandlerManager.getHandler(SESSION_RPC_METHODS.SESSION_STRUCTURED_QUESTION_RESPOND_V1);
+    if (!respond) throw new Error('expected structured-question RPC handler');
+    await Reflect.apply(respond, undefined, [{
+      id: 'dialog-1',
+      structuredAnswersV1: { answer: ['confirm'] },
+    }]);
+
+    await expect(pending).resolves.toEqual({ dialogId: 'effort_change', choice: 'confirm' });
+    expect(client.agentState.completedRequests['dialog-1']).toMatchObject({
+      status: 'approved',
+      dialogChoice: 'confirm',
     });
   });
 

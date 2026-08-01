@@ -385,14 +385,21 @@ export function getClaudeUnifiedDialogIdentity(dialog: ClaudeUnifiedVisibleDialo
   });
 }
 
-export function resolveClaudeUnifiedDialogSelectedOption(
+export function resolveClaudeUnifiedDialogSelectedOption<
+  TOption extends Readonly<{ choice: string; label: string }>,
+>(
   answers: Readonly<Record<string, unknown>> | null | undefined,
-  options: readonly ClaudeUnifiedDialogOption[],
-): ClaudeUnifiedDialogOption | null {
+  options: readonly TOption[],
+): TOption | null {
   if (!answers) return null;
   for (const value of Object.values(answers)) {
-    if (typeof value !== 'string') continue;
-    const normalized = normalizeChoiceToken(value);
+    const answer = typeof value === 'string'
+      ? value
+      : Array.isArray(value) && value.length === 1 && typeof value[0] === 'string'
+        ? value[0]
+        : null;
+    if (answer === null) continue;
+    const normalized = normalizeChoiceToken(answer);
     const match = options.find((candidate) => (
       normalizeChoiceToken(candidate.choice) === normalized
       || normalizeChoiceToken(candidate.label) === normalized

@@ -22,6 +22,7 @@ import type {
 import {
   buildClaudeUnifiedDialogQuestionInput,
   getClaudeUnifiedDialogIdentity,
+  resolveClaudeUnifiedDialogSelectedOption,
 } from '../tuiControls/dialogRegistry';
 
 export const CLAUDE_UNIFIED_DIALOG_CHOICE_QUESTION = 'How should Claude continue?' as const;
@@ -114,12 +115,11 @@ function decodeDialogChoice(
 ): ClaudeUnifiedDialogChoiceDecision | null {
   if (payload.approved !== true) return null;
   const answers = readObject(payload.answers);
-  if (!answers) return null;
-  const raw = answers[CLAUDE_UNIFIED_DIALOG_CHOICE_QUESTION]
-    ?? Object.values(answers).find((value) => typeof value === 'string');
-  if (typeof raw !== 'string') return null;
-  const normalized = raw.trim();
-  const selected = options.find((option) => option.choice === normalized || option.label === normalized);
+  const structuredAnswers = readObject(payload.structuredAnswersV1);
+  const selected = resolveClaudeUnifiedDialogSelectedOption(
+    { ...(structuredAnswers ?? {}), ...(answers ?? {}) },
+    options,
+  );
   if (!selected) return null;
   return { dialogId, choice: selected.choice };
 }
