@@ -2,7 +2,7 @@ import * as React from 'react';
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { flushHookEffects, invokeTestInstanceHandler, renderScreen } from '@/dev/testkit';
+import { flushHookEffects, renderScreen } from '@/dev/testkit';
 
 import { installTranscriptMotionCommonModuleMocks } from './transcriptMotionTestHelpers';
 
@@ -41,6 +41,7 @@ vi.mock('./TranscriptMotionContext', () => ({
         gate: {
             isFresh: () => true,
             consumeFreshness: () => true,
+            markPainted: () => undefined,
         },
     }),
 }));
@@ -69,13 +70,6 @@ describe('TranscriptEnterWrapper (native)', () => {
 
         const animatedView = screen.findByType('Animated.View');
         expect(animatedView.props.style?.transform).toBeUndefined();
-
-        invokeTestInstanceHandler(
-            animatedView,
-            'onLayout',
-            { nativeEvent: { layout: { width: 320, height: 48 } } },
-            'transcript enter wrapper',
-        );
 
         expect(capturedTimingConfigs).toHaveLength(1);
         // The translate timing was the only `toValue: 0` animation; opacity animates to 1.

@@ -5192,6 +5192,99 @@ describe('Legend transcript renderer adapter', () => {
         });
     });
 
+    it('never issues a second native tail correction while its own previous write is unobserved', async () => {
+        // Live RED (UNIT M, 2026-08-01, session cms73p2bx6bhatm7arizze83t, send S11 on the
+        // iOS simulator with per-frame Legend state + stack-attributed writers):
+        //   t=26390  api.scrollToOffset {offset:101360.5}  state.scroll 101142.666
+        //   t=26469  api.scrollToOffset {offset:101352.5}  state.scroll 101142.666
+        // Two corrections 79ms apart to targets 8px apart, both spent on the SAME unmoved
+        // `state.scroll`: the first write had not been observed yet, and the target moved only
+        // because `contentLength` shrank 8px between the two commits. The existing idempotence
+        // guard keys on target EQUALITY, so a tail that is still moving defeats it and the
+        // corrector becomes a second viewport owner beside Legend's own maintain-at-end and its
+        // MVCP compensation (11 writes in 3.4s for one send). Web already refuses this through
+        // its landed-offset guard; native has no landed read, so the precondition is that our
+        // own previous write must have MOVED the scroller before another one is spendable.
+        // This is a state precondition, never a timer: nothing here waits, and any real scroll
+        // movement re-opens correction on the very next settle frame (asserted below).
+        setPlatformOS('ios');
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+
+        legendStateOverride = {
+            contentLength: 1_200,
+            end: 0,
+            isAtEnd: true,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+            scroll: 600,
+            scrollLength: 600,
+            start: 0,
+        };
+        const screen = await renderScreen(
+            <Renderer
+                webDomObservation={mountedWebDomObservation}
+                data={[{ id: 'row-1' }]}
+                dataKey="session-test"
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'ios',
+                })}
+                header={React.createElement('BottomSlot')}
+            />,
+        );
+        const identityHost = screen.tree.root.findByProps({ nativeID: 'legend-main-native-id' });
+        identityHost.props.onLayout({ nativeEvent: { layout: { height: 670, width: 800, x: 0, y: 0 } } });
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 40, width: 800, x: 0, y: 0 } },
+        });
+        assignedLegendRef.scrollToEnd.mockClear();
+        assignedLegendRef.scrollToOffset.mockClear();
+
+        // The crossover: MVCP compensation left the viewport 210px short of a tail that is
+        // still moving. The beyond-threshold fallback is legitimately the app's here.
+        legendStateOverride = {
+            ...legendStateOverride,
+            contentLength: 1_810,
+            isAtEnd: false,
+            isNearEnd: false,
+            isWithinMaintainScrollAtEndThreshold: false,
+            scroll: 1_000,
+        };
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 192, width: 800, x: 0, y: 0 } },
+        });
+        expect(assignedLegendRef.scrollToOffset).toHaveBeenCalledTimes(1);
+        expect(assignedLegendRef.scrollToOffset).toHaveBeenLastCalledWith({
+            animated: false,
+            offset: 1_210,
+        });
+
+        // Next commit, still inside the stalled crossover: the tail moved 8px while the write
+        // we just issued has not reached `state.scroll`. Correcting again here is the measured
+        // second owner.
+        legendStateOverride = { ...legendStateOverride, contentLength: 1_802 };
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 200, width: 800, x: 0, y: 0 } },
+        });
+        expect(assignedLegendRef.scrollToOffset).toHaveBeenCalledTimes(1);
+
+        // Our write is observed (the scroller moved) and the tail has grown further. That is
+        // fresh evidence, so the transaction corrects again — the precondition is not a latch.
+        legendStateOverride = { ...legendStateOverride, contentLength: 2_000, scroll: 1_202 };
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 208, width: 800, x: 0, y: 0 } },
+        });
+        expect(assignedLegendRef.scrollToOffset).toHaveBeenCalledTimes(2);
+        expect(assignedLegendRef.scrollToOffset).toHaveBeenLastCalledWith({
+            animated: false,
+            offset: 1_400,
+        });
+        expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
+    });
+
     it('arms a native visible-anchor hold for an app height commit and keeps the first visible row still', async () => {
         // Live S-C (2026-07-11, both platforms): tool expansion commits re-anchor Legend's
         // mounted window; under Legend `localHeightChangeRestoreOwner` is 'renderer' but no

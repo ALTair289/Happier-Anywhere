@@ -5,39 +5,39 @@ import { motionTokens } from '@/components/ui/motion/motionTokens';
 
 import { useTranscriptMotion } from './TranscriptMotionContext';
 
-function scheduleNextVisualFrame(callback: () => void): () => void {
-    const raf = globalThis.requestAnimationFrame;
-    if (typeof raf !== 'function') {
-        callback();
-        return () => {};
-    }
-
-    let cancelled = false;
-    const id = raf(() => {
-        if (!cancelled) {
-            callback();
-        }
-    });
-
-    return () => {
-        cancelled = true;
-        globalThis.cancelAnimationFrame?.(id);
-    };
-}
-
 export const TranscriptEnterWrapper = React.memo(function TranscriptEnterWrapper(props: {
     id: string;
     createdAt: number;
+    /**
+     * Content identities this row paints (see `resolveTranscriptUtteranceIdentity`). Declared by
+     * BOTH rows of the pending → committed handover, so the second one is recognised as a
+     * continuation of pixels the reader already has rather than a new arrival.
+     */
+    paintedIds?: readonly string[] | null;
     children: React.ReactNode;
 }) {
     const runtime = useTranscriptMotion();
+    const paintedIds = props.paintedIds ?? null;
 
     const shouldPrepareEnterRef = React.useRef(
         runtime != null &&
         runtime.config.preset !== 'off' &&
         runtime.config.animateNewItemsEnabled === true &&
-        runtime.gate.isFresh({ id: props.id, createdAt: props.createdAt }),
+        runtime.gate.isFresh({ id: props.id, createdAt: props.createdAt, paintedIds }),
     );
+
+    // Runs after every layout effect in the commit, so a row that DOES animate has already consumed
+    // its own freshness below before its identities are recorded here. Rows that never animate
+    // (stale by age, motion off) still have to record what they painted — the reader saw them.
+    // Keyed by content rather than array identity: `renderItem` rebuilds the array each render.
+    const gate = runtime?.gate;
+    const paintedIdsRef = React.useRef(paintedIds);
+    paintedIdsRef.current = paintedIds;
+    const paintedIdsKey = paintedIds ? paintedIds.join('\u0000') : '';
+    React.useEffect(() => {
+        if (paintedIdsKey.length === 0) return;
+        gate?.markPainted(paintedIdsRef.current);
+    }, [gate, paintedIdsKey]);
 
     if (!shouldPrepareEnterRef.current || runtime == null) {
         return <>{props.children}</>;
@@ -47,6 +47,7 @@ export const TranscriptEnterWrapper = React.memo(function TranscriptEnterWrapper
         <AnimatedTranscriptEnterWrapper
             id={props.id}
             createdAt={props.createdAt}
+            paintedIds={paintedIds}
             runtime={runtime}
         >
             {props.children}
@@ -55,7 +56,7 @@ export const TranscriptEnterWrapper = React.memo(function TranscriptEnterWrapper
 });
 
 /**
- * A fresh row enters by FADE ONLY, on every platform.
+ * A fresh row enters by FADE ONLY, on every platform, and the fade starts when the row COMMITS.
  *
  * J/D4 (2026-07-30) — deliberate decision, recorded because the previous code hid the opposite one
  * behind a misnamed flag: `const animateTranslateOnWeb = Platform.OS !== 'web'` is TRUE on native,
@@ -67,31 +68,27 @@ export const TranscriptEnterWrapper = React.memo(function TranscriptEnterWrapper
  * measured MVCP excursion at that handover; (3) it removes a native/web asymmetry that no product
  * decision asked for. Whether new rows animate at all remains owned by the motion preset /
  * `animateNewItemsEnabled`, not by a platform check here.
+ *
+ * F/D1 (2026-08-01) — the reveal is no longer gated on `onLayout` plus a following
+ * `requestAnimationFrame`. Both are JS-thread events, and the native capture in
+ * `.project/reviews/2026-08-01-send-transition/M-send-transition.md` measured a 1.0–3.6 s JS stall
+ * spanning EVERY send: the row committed, occupied its space, and stayed at `opacity: 0` until the
+ * thread came back — recorded as 500 ms of a pixel-standard-deviation-0.00 band on send S7. That is
+ * a reveal gate that can hang, i.e. a cover. Starting the timing in the commit's layout effect
+ * bounds the invisible window by the animation itself, and on native `useNativeDriver` then runs it
+ * on the UI thread, so a stalled JS thread can no longer hold a committed row invisible.
  */
 const AnimatedTranscriptEnterWrapper = React.memo(function AnimatedTranscriptEnterWrapper(props: {
     id: string;
     createdAt: number;
+    paintedIds: readonly string[] | null;
     runtime: NonNullable<ReturnType<typeof useTranscriptMotion>>;
     children: React.ReactNode;
 }) {
     const runtime = props.runtime;
     const opacity = React.useRef(new Animated.Value(0)).current;
     const animationStartedRef = React.useRef(false);
-    const cancelScheduledStartRef = React.useRef<(() => void) | null>(null);
     const shouldAnimateRef = React.useRef<boolean | null>(null);
-
-    React.useLayoutEffect(() => {
-        if (shouldAnimateRef.current == null) {
-            shouldAnimateRef.current = runtime.gate.consumeFreshness({
-                id: props.id,
-                createdAt: props.createdAt,
-            });
-        }
-
-        if (shouldAnimateRef.current !== true) {
-            opacity.setValue(1);
-        }
-    }, [opacity, props.createdAt, props.id, runtime.gate]);
 
     const startEnterAnimation = React.useCallback(() => {
         if (animationStartedRef.current) return;
@@ -110,26 +107,27 @@ const AnimatedTranscriptEnterWrapper = React.memo(function AnimatedTranscriptEnt
         }).start();
     }, [opacity, runtime?.config.preset]);
 
-    const handleLayout = React.useCallback(() => {
-        if (shouldAnimateRef.current !== true) return;
-        if (animationStartedRef.current) return;
-        if (cancelScheduledStartRef.current) return;
+    React.useLayoutEffect(() => {
+        if (shouldAnimateRef.current == null) {
+            // Consumed on commit, never during render: an abandoned render must not burn the
+            // row's one entrance.
+            shouldAnimateRef.current = runtime.gate.consumeFreshness({
+                id: props.id,
+                createdAt: props.createdAt,
+                paintedIds: props.paintedIds,
+            });
+        }
 
-        cancelScheduledStartRef.current = scheduleNextVisualFrame(() => {
-            cancelScheduledStartRef.current = null;
-            startEnterAnimation();
-        });
-    }, [startEnterAnimation]);
+        if (shouldAnimateRef.current !== true) {
+            opacity.setValue(1);
+            return;
+        }
 
-    React.useEffect(() => {
-        return () => {
-            cancelScheduledStartRef.current?.();
-            cancelScheduledStartRef.current = null;
-        };
-    }, []);
+        startEnterAnimation();
+    }, [opacity, props.createdAt, props.id, props.paintedIds, runtime.gate, startEnterAnimation]);
 
     return (
-        <Animated.View onLayout={handleLayout} style={{ opacity }}>
+        <Animated.View style={{ opacity }}>
             {props.children}
         </Animated.View>
     );

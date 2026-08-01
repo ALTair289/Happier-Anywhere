@@ -1535,17 +1535,45 @@ function LegendListTranscriptRendererInner<TItem>(
             : landing.residual;
         if (Math.abs(correctionResidual) < LEGEND_HELD_INTENT_ALIGNMENT_EPSILON_PX) return false;
         const previous = lastHeldIntentCorrectionRef.current;
-        if (previous?.intent === intent && previous.targetOffset === landing.targetOffset) {
+        if (previous?.intent === intent) {
+            const targetUnchanged = previous.targetOffset === landing.targetOffset;
             if (landing.basis === 'web-dom' && typeof previous.landedOffset === 'number') {
                 // Web idempotence is landed-aware: if the scroller still sits where OUR last
                 // write landed (possibly clamped), re-writing is a no-op loop - skip. If an
                 // external writer (Legend offset replay, browser scroll anchoring) moved it
                 // away from our landed offset, that is new evidence and the held keyed target
                 // must re-correct.
-                if (landing.currentOffset === previous.landedOffset) return false;
+                if (targetUnchanged && landing.currentOffset === previous.landedOffset) return false;
             } else if (
                 landing.basis !== 'native-physical'
                 && previous.currentOffset === landing.currentOffset
+                // ONE TAIL WRITE PER OBSERVED MOVEMENT — the native twin of the landed-offset
+                // guard above. A native write has no synchronously readable landing, so the
+                // only evidence that our previous correction reached the scroller is
+                // `state.scroll` moving off the offset we corrected FROM. Until it does, the
+                // transaction is reading its own un-applied write.
+                //
+                // For a held-'end' transaction a MOVED TARGET is not independent evidence: the
+                // target IS the tail, and the write already in flight already commands the
+                // tail. Legend advances `state.scroll` optimistically inside `requestAdjust`
+                // and then discards the reconciling native scroll observations
+                // (`ignoreScrollFromMVCP`, cleared by a 100ms timeout a stalled JS thread
+                // cannot run), so through a content mutation the offset stands still while
+                // `contentLength` walks the tail a few px per commit — and target equality,
+                // the only guard here before, never fires. Measured on the send crossover
+                // (UNIT M, 2026-08-01, S11): scrollToOffset(101360.5) then
+                // scrollToOffset(101352.5) 79ms later, both spent on state.scroll 101142.666,
+                // one of three writers issuing eleven writes in 3.4s for one send.
+                //
+                // A KEYED hold keeps target-equality semantics: its destination is a row
+                // identity whose measured position genuinely relocates (expansion cascade,
+                // late row measurement), and that relocation is new evidence even while our
+                // own write is unobserved.
+                //
+                // This is a precondition on evidence, never a delay or suppression window:
+                // nothing is scheduled, and the first settle frame in which the scroller has
+                // actually moved corrects the remainder against the geometry it then reports.
+                && (targetUnchanged || intent.kind === 'end')
             ) {
                 return false;
             }
