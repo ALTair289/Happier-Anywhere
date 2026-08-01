@@ -18,6 +18,7 @@ import { buildAscBuildsListUrl } from './testflight-asc-builds-url.mjs';
 import { buildEasBuildViewArgs } from './testflight-eas-cli-args.mjs';
 import { resolveExternalGroupSelections } from './testflight-group-resolution.mjs';
 import { readIosIpaMetadata } from './read-ios-ipa-metadata.mjs';
+import { ensureBetaReviewSubmission } from './testflight-beta-review.mjs';
 
 function fail(message) {
   console.error(message);
@@ -336,34 +337,6 @@ async function attachBuildToGroups({ token, build, groups }) {
   }
 }
 
-async function ensureBetaReviewSubmission({ token, build, submitBetaReview }) {
-  if (submitBetaReview === 'false') return;
-  const existingSubmissionId = String(build?.relationships?.betaAppReviewSubmission?.data?.id ?? '').trim();
-  if (existingSubmissionId) {
-    console.log(`[pipeline] beta review submission already exists for build ${String(build?.id ?? '').trim()}: ${existingSubmissionId}`);
-    return;
-  }
-  await ascRequest({
-    token,
-    method: 'POST',
-    url: buildAscBaseUrl('/v1/betaAppReviewSubmissions'),
-    body: {
-      data: {
-        type: 'betaAppReviewSubmissions',
-        relationships: {
-          build: {
-            data: {
-              type: 'builds',
-              id: String(build?.id ?? '').trim(),
-            },
-          },
-        },
-      },
-    },
-  });
-  console.log(`[pipeline] submitted build ${String(build?.id ?? '').trim()} for TestFlight Beta App Review`);
-}
-
 async function main() {
   const repoRoot = path.resolve(process.cwd());
   const { values } = parseArgs({
@@ -465,7 +438,9 @@ async function main() {
   await ensureBetaReviewSubmission({
     token,
     build,
-    submitBetaReview: submitBetaReview === 'auto' ? 'true' : submitBetaReview,
+    submitBetaReview,
+    request: ascRequest,
+    buildAscBaseUrl,
   });
 }
 
