@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 const uiPackagePath = join(repoRoot, 'apps', 'ui', 'package.json');
+const uiPostinstallPath = join(repoRoot, 'apps', 'ui', 'tools', 'postinstall.mjs');
 const uiPostinstallRunnerPath = join(repoRoot, 'apps', 'ui', 'tools', 'postinstall', 'runUiPostinstall.cjs');
 const require = createRequire(import.meta.url);
 
@@ -158,6 +159,26 @@ test('ui postinstall runtime owns patch-package as an install-time dependency', 
     uiPackageJson?.devDependencies?.['patch-package'],
     undefined,
     'apps/ui should not keep patch-package in devDependencies once postinstall depends on it at install time'
+  );
+});
+
+test('ui postinstall invokes the Skia setup CLI without a package-manager shim', async () => {
+  const postinstallSource = await readFile(uiPostinstallPath, 'utf8');
+
+  assert.doesNotMatch(
+    postinstallSource,
+    /command:\s*['"]npx['"]/,
+    'shell-free Windows spawns cannot resolve the npx.cmd shim',
+  );
+  assert.match(
+    postinstallSource,
+    /@shopify['"],\s*['"]react-native-skia['"],\s*['"]scripts['"],\s*['"]setup-canvaskit\.js['"]/,
+    'postinstall should resolve the Skia-owned CLI script from the installed package',
+  );
+  assert.match(
+    postinstallSource,
+    /command:\s*process\.execPath/,
+    'postinstall should invoke the JavaScript CLI through the current Node runtime',
   );
 });
 

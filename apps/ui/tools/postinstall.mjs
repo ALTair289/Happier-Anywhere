@@ -328,7 +328,28 @@ if (wants('verify-sentry-react-native-replay-post-init-patch')) {
 }
 
 if (wants('setup-skia-web')) {
-    runCommandOrExit({ command: 'npx', args: ['setup-skia-web', 'public'], options: { cwd: expoAppDir } });
+    const skiaSetupCliCandidatePaths = [
+        path.resolve(expoAppNodeModulesDir, '@shopify', 'react-native-skia', 'scripts', 'setup-canvaskit.js'),
+        path.resolve(repoRootNodeModulesDir, '@shopify', 'react-native-skia', 'scripts', 'setup-canvaskit.js'),
+    ];
+    const skiaSetupCliPath = skiaSetupCliCandidatePaths.find((candidatePath) =>
+        fs.existsSync(candidatePath),
+    );
+
+    if (!skiaSetupCliPath) {
+        console.error(
+            `Could not find the React Native Skia web setup CLI at:\n${skiaSetupCliCandidatePaths
+                .map((candidatePath) => `- ${candidatePath}`)
+                .join('\n')}`,
+        );
+        process.exit(1);
+    }
+
+    runCommandOrExit({
+        command: process.execPath,
+        args: [skiaSetupCliPath, 'public'],
+        options: { cwd: expoAppDir },
+    });
 }
 
 // Vendor Monaco static assets for web/desktop code editor. Metro can't bundle Monaco workers reliably, so we serve
