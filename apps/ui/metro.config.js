@@ -220,6 +220,23 @@ config.watchFolders = existingWatchFolders.filter(
 
 const rootNodeModules = path.resolve(__dirname, "../../node_modules");
 const appNodeModules = path.resolve(__dirname, "node_modules");
+const enrichedMarkdownStreamingRevealModule =
+  "react-native-enriched-markdown/lib/module/web/streamingReveal.js";
+
+function resolvePatchedEnrichedMarkdownModule(moduleName) {
+  if (moduleName !== enrichedMarkdownStreamingRevealModule) return null;
+
+  const relativeSegments = enrichedMarkdownStreamingRevealModule.split("/");
+  for (const nodeModulesDir of [appNodeModules, rootNodeModules]) {
+    const candidate = path.resolve(nodeModulesDir, ...relativeSegments);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  throw new Error(
+    `[EnrichedMarkdown] Required patched module "${enrichedMarkdownStreamingRevealModule}" is missing. `
+    + "Run the UI postinstall so the app-owned react-native-enriched-markdown patch is applied.",
+  );
+}
 
 function safeReadJson(filePath) {
   try {
@@ -432,6 +449,11 @@ const defaultResolveRequest = config.resolver.resolveRequest;
 config.resolver.resolveRequest = (context, moduleName, platform) => {
   const generatedWorkletResolution = resolveGeneratedWorkletModule(moduleName);
   if (generatedWorkletResolution) return generatedWorkletResolution;
+
+  const patchedEnrichedMarkdownModule = resolvePatchedEnrichedMarkdownModule(moduleName);
+  if (patchedEnrichedMarkdownModule) {
+    return { type: "sourceFile", filePath: patchedEnrichedMarkdownModule };
+  }
 
   // Fix event-target-shim/index import - exports define "." not "./index"
   let resolvedModuleName = moduleName;
