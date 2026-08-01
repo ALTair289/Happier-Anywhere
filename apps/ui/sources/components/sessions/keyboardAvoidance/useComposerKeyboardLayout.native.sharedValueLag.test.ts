@@ -89,6 +89,17 @@ vi.mock('react-native-reanimated', async () => {
             }
             return ref.current;
         },
+        // Derived values are recomputed on the UI thread, which observes committed writes only.
+        // Reading through the same lagging shared values keeps this suite's premise intact.
+        useDerivedValue: <T,>(factory: () => T) => {
+            const factoryRef = React.useRef(factory);
+            factoryRef.current = factory;
+            const derived = React.useRef<{ value: T } | null>(null);
+            if (!derived.current) {
+                derived.current = { get value() { return factoryRef.current(); } } as { value: T };
+            }
+            return derived.current;
+        },
     };
 });
 

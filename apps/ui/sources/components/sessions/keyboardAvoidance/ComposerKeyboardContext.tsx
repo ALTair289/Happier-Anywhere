@@ -9,7 +9,13 @@ export type ComposerKeyboardLayout = Readonly<{
     keyboardHeightForInset: SharedValue<number>;
     keyboardHeightLive: SharedValue<number>;
     keyboardProgress: SharedValue<number>;
+    // Settled total: what the list's bottom inset will be once the current keyboard transition
+    // finishes. Notified to subscribers, and the value every JS-side consumer must agree on.
     listBottomInset: SharedValue<number>;
+    // The same total, sampled continuously on the UI thread. Rendering reads this one so the
+    // transcript follows the keyboard frame by frame instead of jumping to the settled total in
+    // one commit whenever the JS thread is busy. The two agree at rest.
+    listBottomInsetAnimated: SharedValue<number>;
     getKeyboardHeight?: () => number;
     retainKeyboardLift?: () => () => void;
     setComposerInputFocused?: (focused: boolean) => void;

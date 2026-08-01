@@ -1,10 +1,12 @@
 import * as React from 'react';
-import { Platform, View, type StyleProp, type ViewStyle } from 'react-native';
+import { Platform, type StyleProp, type ViewStyle } from 'react-native';
+import Animated, { useAnimatedStyle } from 'react-native-reanimated';
 
 import { useComposerKeyboardLayout } from './ComposerKeyboardContext';
 import type { ComposerKeyboardLayout } from './ComposerKeyboardContext';
 
 function normalizeInsetHeight(height: number): number {
+    'worklet';
     return typeof height === 'number' && Number.isFinite(height)
         ? Math.max(0, height)
         : 0;
@@ -31,11 +33,9 @@ export function ComposerKeyboardScrollInset(props: Readonly<{
     testID?: string;
 }>): React.ReactElement | null {
     const layout = useComposerKeyboardLayout();
-    const [height, setHeight] = React.useState(() => resolveCurrentInsetHeight(layout));
     const lastReportedHeightRef = React.useRef<number | null>(null);
-    const applyHeight = React.useCallback((nextHeight: number) => {
+    const reportHeight = React.useCallback((nextHeight: number) => {
         const normalizedHeight = normalizeInsetHeight(nextHeight);
-        setHeight((current) => (current === normalizedHeight ? current : normalizedHeight));
         if (lastReportedHeightRef.current !== normalizedHeight) {
             lastReportedHeightRef.current = normalizedHeight;
             props.onHeightChange?.(normalizedHeight);
@@ -44,19 +44,19 @@ export function ComposerKeyboardScrollInset(props: Readonly<{
 
     React.useEffect(() => {
         if (!layout) {
-            applyHeight(0);
+            reportHeight(0);
             return undefined;
         }
         const subscribeListBottomInset = layout.subscribeListBottomInset;
         if (!subscribeListBottomInset) {
-            applyHeight(resolveCurrentInsetHeight(layout));
+            reportHeight(resolveCurrentInsetHeight(layout));
             return undefined;
         }
         // The notified payload is computed by the writer from its own fresh inputs and is
-        // the canonical inset on every platform. Re-deriving from shared-value reads at
-        // delivery time is stale on native: guest-runtime writes are async, so `.value`
-        // lags the payload by one step and the final composer-growth update is lost
-        // (live-diagnosed 2026-07-09: transcript rows rendered under the composer).
+        // the canonical SETTLED inset on every platform. Re-deriving from shared-value reads at
+        // delivery time is stale on native: guest-runtime writes are async, so `.value` lags the
+        // payload by one step and the final composer-growth update is lost (live-diagnosed
+        // 2026-07-09: transcript rows rendered under the composer).
         //
         // Subscribing FIRST is what keeps that rule true for every later effect run too: the
         // writer replays its last notified total synchronously, so the local derivation is
@@ -67,23 +67,34 @@ export function ComposerKeyboardScrollInset(props: Readonly<{
         let replayedNotifiedInset = false;
         const unsubscribe = subscribeListBottomInset((nextHeight) => {
             replayedNotifiedInset = true;
-            applyHeight(nextHeight);
+            reportHeight(nextHeight);
         });
         if (!replayedNotifiedInset) {
-            applyHeight(resolveCurrentInsetHeight(layout));
+            reportHeight(resolveCurrentInsetHeight(layout));
         }
         return unsubscribe;
-    }, [applyHeight, layout]);
+    }, [reportHeight, layout]);
+
+    // The rendered height comes from the continuously tracked inset, not from the notified
+    // settled total. Both describe the same quantity and agree at rest, but only the animated
+    // one keeps moving while the JS thread is busy — and this spacer is what every visible
+    // transcript row sits on, so a single-commit collapse here translates the whole transcript
+    // in one frame (measured 2026-08-01: 190-257 px per send, 11/11 sends, while the keyboard
+    // was still mid-dismissal). `onHeightChange` above keeps reporting the settled total, which
+    // is what JS-side consumers must agree on.
+    const animatedInsetStyle = useAnimatedStyle(() => ({
+        height: normalizeInsetHeight(layout ? layout.listBottomInsetAnimated.value : 0),
+    }), [layout]);
 
     if (!layout) {
         return null;
     }
 
     return (
-        <View
+        <Animated.View
             pointerEvents="none"
             testID={props.testID}
-            style={[props.style, { height }]}
+            style={[props.style, animatedInsetStyle]}
         />
     );
 }

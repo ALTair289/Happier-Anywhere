@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { Platform } from 'react-native';
 
 import type { MockComposerKeyboardScaffoldHarness } from '../harness/composerKeyboardScaffoldHarness';
 
@@ -29,6 +30,7 @@ export type ComposerKeyboardLayout = Readonly<{
     keyboardHeightLive: TestSharedValue<number>;
     keyboardProgress: TestSharedValue<number>;
     listBottomInset: TestSharedValue<number>;
+    listBottomInsetAnimated: TestSharedValue<number>;
     getKeyboardHeight: () => number;
     retainKeyboardLift: () => () => void;
     setComposerMeasuredHeight: (height: number) => void;
@@ -96,6 +98,29 @@ function createTestSharedValue<TValue>(value: TValue): TestSharedValue<TValue> {
     return sharedValue;
 }
 
+// The animated list inset is a derived value on both platform hooks: web reads the list inset
+// directly, native recomputes the same total from the live keyboard geometry. Model it as a
+// lazily evaluated shared value so a test can move the keyboard without a notification, the way
+// the UI thread does.
+function createDerivedTestSharedValue(read: () => number): TestSharedValue<number> {
+    const derived = {
+        get value() {
+            return read();
+        },
+        set value(_next: number) {
+            throw new Error('The animated list inset is derived; drive its inputs instead.');
+        },
+        get: () => read(),
+        set: () => {
+            throw new Error('The animated list inset is derived; drive its inputs instead.');
+        },
+        addListener: () => {},
+        removeListener: () => {},
+        modify: () => {},
+    };
+    return derived as TestSharedValue<number>;
+}
+
 export function createMockComposerKeyboardLayout(
     overrides: MockComposerKeyboardLayoutOverrides = {},
 ): ComposerKeyboardLayout {
@@ -109,16 +134,24 @@ export function createMockComposerKeyboardLayout(
     availablePanelHeightSubscribersByValue.set(availablePanelHeight, availablePanelHeightSubscribers);
     keyboardHeightSubscribersByValue.set(keyboardHeightLive, keyboardHeightSubscribers);
     listBottomInsetSubscribersByValue.set(listBottomInset, listBottomInsetSubscribers);
+    const bottomInset = createTestSharedValue(overrides.bottomInset ?? 0);
+    const keyboardHeightForInset = createTestSharedValue(overrides.keyboardHeightForInset ?? 0);
+    const listBottomInsetAnimated = createDerivedTestSharedValue(() => (
+        Platform.OS === 'web'
+            ? Math.max(0, listBottomInset.value)
+            : Math.max(0, composerHeight.value + Math.max(keyboardHeightForInset.value, bottomInset.value))
+    ));
 
     return {
         availablePanelHeight,
-        bottomInset: createTestSharedValue(overrides.bottomInset ?? 0),
+        bottomInset,
         composerHeight,
         isKeyboardLiftSuppressed: createTestSharedValue(overrides.isKeyboardLiftSuppressed ?? false),
-        keyboardHeightForInset: createTestSharedValue(overrides.keyboardHeightForInset ?? 0),
+        keyboardHeightForInset,
         keyboardHeightLive,
         keyboardProgress: createTestSharedValue(overrides.keyboardProgress ?? 0),
         listBottomInset,
+        listBottomInsetAnimated,
         getKeyboardHeight: () => keyboardHeightLive.value,
         retainKeyboardLift: () => () => {},
         setComposerMeasuredHeight: (height) => {

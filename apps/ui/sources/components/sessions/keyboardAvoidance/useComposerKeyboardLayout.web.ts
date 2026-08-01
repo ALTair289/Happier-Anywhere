@@ -178,6 +178,10 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         keyboardHeightLive,
         keyboardProgress,
         listBottomInset,
+        // On web the composer sits in normal layout flow and the visual-viewport inset is
+        // applied synchronously on the only thread there is, so the settled total is already
+        // the continuously tracked one.
+        listBottomInsetAnimated: listBottomInset,
         retainKeyboardLift,
         setComposerMeasuredHeight,
         subscribeAvailablePanelHeight,

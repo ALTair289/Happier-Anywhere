@@ -37,6 +37,7 @@ export type AvailablePanelHeightInput = Readonly<{
 }>;
 
 function normalizeNonNegativeNumber(value: number | null | undefined): number {
+    'worklet';
     if (typeof value !== 'number' || !Number.isFinite(value)) {
         return 0;
     }
@@ -64,14 +65,19 @@ export function resolveComposerTranslateY({ keyboardHeight }: ComposerTranslateI
 }
 
 export function resolveComposerBottomOffset({ keyboardHeight, safeAreaBottom }: ComposerBottomOffsetInput): number {
+    'worklet';
     return Math.max(normalizeNonNegativeNumber(keyboardHeight), normalizeNonNegativeNumber(safeAreaBottom));
 }
 
+// Marked as a worklet so the one formula for the list's bottom inset stays canonical on both
+// threads: the JS-side layout writer notifies settled totals with it, and the UI-side derived
+// value recomputes the same total per keyboard frame.
 export function resolveListBottomInset({
     composerHeight,
     keyboardHeightForInset,
     safeAreaBottom,
 }: ListBottomInsetInput): number {
+    'worklet';
     return normalizeNonNegativeNumber(composerHeight)
         + resolveComposerBottomOffset({ keyboardHeight: keyboardHeightForInset, safeAreaBottom });
 }

@@ -67,6 +67,18 @@ vi.mock('react-native-reanimated', async () => {
     return {
         runOnJS: (callback: (...args: readonly unknown[]) => void) => callback,
         useSharedValue: <T,>(value: T) => React.useRef({ value }).current,
+        // A real derived value is recomputed on the UI thread whenever one of its inputs
+        // changes, so reads observe the current inputs without a JS render. Model that with a
+        // lazy getter over the latest worklet rather than a render-time snapshot.
+        useDerivedValue: <T,>(factory: () => T) => {
+            const factoryRef = React.useRef(factory);
+            factoryRef.current = factory;
+            const derived = React.useRef<{ value: T } | null>(null);
+            if (!derived.current) {
+                derived.current = { get value() { return factoryRef.current(); } } as { value: T };
+            }
+            return derived.current;
+        },
     };
 });
 
@@ -273,6 +285,9 @@ describe('useComposerKeyboardLayout native', () => {
         expect(hook.getCurrent().keyboardHeightLive.value).toBe(0);
         expect(hook.getCurrent().keyboardHeightForInset.value).toBe(0);
         expect(hook.getCurrent().listBottomInset.value).toBe(140);
+        // The continuously tracked inset reads the keyboard animation value directly, so it
+        // needs the same post-hide latch: a stale animated height must not re-inflate it.
+        expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(140);
     });
 
     it('does not resurrect hidden keyboard lift from a stale non-zero end frame after iOS hide', async () => {
@@ -765,5 +780,46 @@ describe('useComposerKeyboardLayout native', () => {
         expect(hook.getCurrent().bottomInset.value).toBe(100);
         expect(hook.getCurrent().keyboardHeightLive.value).toBe(100);
         expect(hook.getCurrent().listBottomInset.value).toBe(240);
+    });
+
+    it('tracks the keyboard animation in the animated list inset while the notified inset snaps to its target', async () => {
+        // Measured 2026-08-01 on 11 real sends
+        // (`.project/reviews/2026-08-01-send-transition/traces/S7.csv` t=25605,
+        // `S11.csv` t=22917): the transcript collapsed 258 px in a SINGLE frame at send while
+        // the keyboard was still animating away. Every keyboard transition opens with
+        // `onStart`, which reports the TARGET frame, so the notified inset reaches its end
+        // value before the keyboard has moved a pixel. That total is correct for consumers
+        // that must agree on where the content settles; it is the wrong value to render.
+        nativeHookState.platformOS = 'ios';
+        const { useComposerKeyboardLayout } = await import('./useComposerKeyboardLayout.native');
+        const hook = await renderHook(() => useComposerKeyboardLayout({ safeAreaBottom: 34 }));
+
+        act(() => {
+            hook.getCurrent().setComposerMeasuredHeight(134);
+        });
+        act(() => {
+            nativeHookState.reanimatedKeyboardHeight = -291;
+            nativeHookState.keyboardHandlers?.onEnd?.({ height: 291, progress: 1 });
+        });
+
+        // At rest both readings agree: they are the same quantity, sampled differently.
+        expect(hook.getCurrent().listBottomInset.value).toBe(425);
+        expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(425);
+
+        act(() => {
+            nativeHookState.keyboardHandlers?.onStart?.({ height: 0, progress: 0 });
+        });
+
+        expect(hook.getCurrent().listBottomInset.value).toBe(168);
+        // The keyboard has not moved yet, so the rendered spacer must not have moved either.
+        expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(425);
+
+        // Mid-dismissal frames are produced by the keyboard animation on the UI thread, with no
+        // JS notification in between — the JS thread is busy committing the send.
+        nativeHookState.reanimatedKeyboardHeight = -145;
+        expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(279);
+
+        nativeHookState.reanimatedKeyboardHeight = 0;
+        expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(168);
     });
 });

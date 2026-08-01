@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { Keyboard, Platform, useWindowDimensions } from 'react-native';
 import { useKeyboardHandler, useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller';
-import { runOnJS, useSharedValue } from 'react-native-reanimated';
+import { runOnJS, useDerivedValue, useSharedValue } from 'react-native-reanimated';
 
 import {
     resolveAvailablePanelHeight,
@@ -608,6 +608,44 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         shouldRetainAndroidZeroProgressStartFrame,
     ]);
 
+    // `listBottomInset` above is the SETTLED total. Every keyboard transition opens with
+    // `onStart`, which reports the target frame, so that total reaches its end value before the
+    // keyboard has moved a pixel — and it then travels to the renderer as React state on the JS
+    // thread. Measured 2026-08-01 across 11 real sends
+    // (`.project/reviews/2026-08-01-send-transition/traces/S7.csv` t=25605, `S11.csv` t=22917):
+    // the transcript's bottom spacer collapsed 258 px in a single frame while the keyboard was
+    // still animating away, and every visible row translated with it, because the JS thread was
+    // stalled 0.7-3.6 s across the send.
+    //
+    // This derived value is the same quantity recomputed on the UI thread from the keyboard's
+    // own animation, so the rendered spacer tracks the keyboard frame by frame no matter what
+    // the JS thread is doing. It applies the same guards as `onMove` — suppression, the
+    // post-hide latch, retained lift and the interactive-dismiss freeze — because it reads the
+    // raw animation value, which honours none of them on its own.
+    const listBottomInsetAnimated = useDerivedValue(() => {
+        const liftIsSuppressed = isKeyboardLiftSuppressed.value;
+        const framesAreIgnored = ignoreKeyboardFramesUntilComposerFocus.value;
+        const interactiveDismissIsActive = isInteractiveDismissActive.value;
+        const liftIsRetained = isKeyboardLiftRetained.value;
+        const settledInsetKeyboardHeight = keyboardHeightForInset.value;
+        const retainedAbsoluteHeight = keyboardHeightAbsolute.value;
+        const measuredComposerHeight = composerHeight.value;
+        const safeArea = safeAreaBottomValue.value;
+        const animatedAbsoluteHeight = Math.max(0, Math.abs(keyboardAnimation.height.value));
+        const absoluteHeight = liftIsRetained && animatedAbsoluteHeight === 0
+            ? retainedAbsoluteHeight
+            : animatedAbsoluteHeight;
+        const liveKeyboardHeight = resolveKeyboardHeightWithinScaffold(absoluteHeight, layoutBottomInsetValue.value);
+        const insetKeyboardHeight = liftIsSuppressed
+            ? 0
+            : (framesAreIgnored || interactiveDismissIsActive ? settledInsetKeyboardHeight : liveKeyboardHeight);
+        return resolveListBottomInset({
+            composerHeight: measuredComposerHeight,
+            keyboardHeightForInset: insetKeyboardHeight,
+            safeAreaBottom: safeArea,
+        });
+    }, [keyboardAnimation.height]);
+
     const retainKeyboardLift = React.useCallback(() => {
         let released = false;
         keyboardRetentionCountRef.current += 1;
@@ -688,6 +726,7 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         keyboardHeightLive,
         keyboardProgress,
         listBottomInset,
+        listBottomInsetAnimated,
         retainKeyboardLift,
         setComposerInputFocused,
         setComposerMeasuredHeight,
@@ -705,6 +744,7 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         keyboardHeightLive,
         keyboardProgress,
         listBottomInset,
+        listBottomInsetAnimated,
         retainKeyboardLift,
         setComposerInputFocused,
         setComposerMeasuredHeight,
