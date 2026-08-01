@@ -4,8 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeForView';
 import { ICON_LABEL_OPTICAL_NUDGE_STYLE } from '@/components/ui/icons/iconOpticalAlignment';
-import { MENU_ROW_ICON_GLYPH_SIZE } from '@/components/ui/lists/itemDensityMetrics';
-import { useResolvedItemDensity, type ResolvedItemDensity } from '@/components/ui/lists/useResolvedItemDensity';
+import { MENU_ROW_METRICS } from '@/components/ui/lists/itemDensityMetrics';
 import { Text } from '@/components/ui/text/Text';
 
 
@@ -35,8 +34,6 @@ export type SelectableRowProps = Readonly<{
     left?: React.ReactNode;
     right?: React.ReactNode;
     leftGap?: number;
-    /** Row density; drives the left icon's glyph size, matching `Item`. Defaults to the user setting. */
-    density?: ResolvedItemDensity;
 
     selected?: boolean;
     disabled?: boolean;
@@ -184,13 +181,13 @@ export function SelectableRow(props: SelectableRowProps) {
                 ? styles.rowSelectable
                 : styles.rowDefault;
 
-    const iconGlyphSize = MENU_ROW_ICON_GLYPH_SIZE[useResolvedItemDensity(props.density)];
+    const iconGlyphSize = MENU_ROW_METRICS.iconGlyphSizePx;
     const titleColorStyle = props.destructive ? styles.titleDestructive : null;
     const titleVariantStyle = variant === 'selectable' ? styles.titleSelectable : null;
     const subtitleVariantStyle = variant === 'selectable' ? styles.subtitleSelectable : null;
-    // A menu row's icon is one size whichever row kind the dropdown chose. `Item` rows have always
-    // been resized to the density; `SelectableRow` rows passed the call site's number straight
-    // through, so the same DropdownMenu could show 16px icons on one menu and 24px on the next.
+    // A menu row's icon is one size whichever row kind the dropdown chose, and whatever list density
+    // the user prefers. `SelectableRow` rows used to pass the call site's number straight through, so
+    // the same DropdownMenu could show 16px icons on one menu and 24px on the next.
     const leftAccessory = React.useMemo(
         () => sizeRowIconForDensity(normalizeNodeForView(props.left ?? null), iconGlyphSize),
         [props.left, iconGlyphSize],

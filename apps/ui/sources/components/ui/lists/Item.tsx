@@ -21,7 +21,7 @@ import {
     ITEM_CHEVRON_SIZE,
     ITEM_ICON_BOX_SIZE,
     ITEM_ICON_GLYPH_SIZE,
-    MENU_ROW_ICON_GLYPH_SIZE,
+    MENU_ROW_METRICS,
     ITEM_ICON_MARGIN_RIGHT,
     ITEM_SUBTITLE_TEXT_METRICS,
     ITEM_TITLE_TEXT_METRICS,
@@ -80,10 +80,13 @@ export interface ItemProps {
      */
     iconBoxSize?: number;
     /**
-     * Which surface this row belongs to. A menu row is a dense list of choices and takes a smaller
-     * glyph than a settings row, even at the same density.
+     * Which surface this row belongs to.
+     *
+     * A menu row is a transient list of choices, not a destination with room to breathe, so it takes
+     * the flat {@link MENU_ROW_METRICS} — a smaller glyph on a shorter row — and ignores the list
+     * density setting entirely. See that constant for why density has no business reaching a menu.
      */
-    iconSizing?: 'item' | 'menu';
+    rowRole?: 'item' | 'menu';
     rightElement?: React.ReactNode;
     onPress?: () => void;
     onDoublePress?: () => void;
@@ -130,6 +133,15 @@ export interface ItemProps {
     pressableStyle?: StyleProp<ViewStyle>;
     copy?: boolean | string;
 }
+
+/**
+ * The menu role's row box, applied over whichever density styles the row would otherwise take.
+ *
+ * Plain objects rather than stylesheet entries because they carry no theme and must win the cascade
+ * wherever they are appended; see {@link MENU_ROW_METRICS} for why a menu ignores density at all.
+ */
+const MENU_ROW_HEIGHT_STYLE = { minHeight: MENU_ROW_METRICS.minHeightPx } as const;
+const MENU_ROW_PADDING_STYLE = { paddingVertical: MENU_ROW_METRICS.paddingVerticalPx } as const;
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -298,7 +310,7 @@ export const Item = React.memo<ItemProps>((props) => {
         icon,
         leftElement,
         iconBoxSize,
-    iconSizing,
+    rowRole,
         rightElement,
         onPress,
         onDoublePress,
@@ -445,37 +457,55 @@ export const Item = React.memo<ItemProps>((props) => {
     const isCompact = resolvedDensity === 'compact';
     const isTight = resolvedDensity === 'tight';
     const hasSubtitleContent = Boolean(subtitle || subtitleAccessory);
-    const containerPadding = hasSubtitleContent
-        ? (isTight ? styles.containerWithSubtitleTight : isCompact ? styles.containerWithSubtitleCompact : isCozy ? styles.containerWithSubtitleCozy : styles.containerWithSubtitle)
-        : (isTight ? styles.containerWithoutSubtitleTight : isCompact ? styles.containerWithoutSubtitleCompact : isCozy ? styles.containerWithoutSubtitleCozy : styles.containerWithoutSubtitle);
+    const isMenuRow = rowRole === 'menu';
+    const containerPadding = isMenuRow
+        ? MENU_ROW_PADDING_STYLE
+        : hasSubtitleContent
+            ? (isTight ? styles.containerWithSubtitleTight : isCompact ? styles.containerWithSubtitleCompact : isCozy ? styles.containerWithSubtitleCozy : styles.containerWithSubtitle)
+            : (isTight ? styles.containerWithoutSubtitleTight : isCompact ? styles.containerWithoutSubtitleCompact : isCozy ? styles.containerWithoutSubtitleCozy : styles.containerWithoutSubtitle);
     const containerCore = isTight
-        ? [styles.container, styles.containerTight]
+        ? [styles.container, styles.containerTight, isMenuRow ? MENU_ROW_HEIGHT_STYLE : null]
         : isCompact
-            ? [styles.container, styles.containerCompact]
+            ? [styles.container, styles.containerCompact, isMenuRow ? MENU_ROW_HEIGHT_STYLE : null]
             : isCozy
-                ? [styles.container, styles.containerCozy]
-            : styles.container;
+                ? [styles.container, styles.containerCozy, isMenuRow ? MENU_ROW_HEIGHT_STYLE : null]
+            : [styles.container, isMenuRow ? MENU_ROW_HEIGHT_STYLE : null];
     const iconBoxSizeOverride = iconBoxSize != null
         ? { width: iconBoxSize, height: iconBoxSize }
         : null;
-    const iconContainerStyle = isTight
-        ? [styles.iconContainer, styles.iconContainerTight, iconBoxSizeOverride]
-        : isCompact
-            ? [styles.iconContainer, styles.iconContainerCompact, iconBoxSizeOverride]
-            : isCozy
-                ? [styles.iconContainer, styles.iconContainerCozy, iconBoxSizeOverride]
-            : [styles.iconContainer, iconBoxSizeOverride];
     const resolvedIconDensity = isTight ? 'tight' : isCompact ? 'compact' : isCozy ? 'cozy' : 'comfortable';
     const chevronSize = ITEM_CHEVRON_SIZE[resolvedIconDensity];
     // One glyph size for every row in a list, whether or not that row happens to carry a subtitle.
     // Branching on the subtitle is tempting — it is what makes the icon span exactly two lines — but
     // a settings list mixes one- and two-line rows freely, and sizing each row to its own content
     // produces a column of icons that step up and down. Uniform beats locally-perfect here.
-    const resolvedIconGlyphSize = (iconSizing === 'menu' ? MENU_ROW_ICON_GLYPH_SIZE : ITEM_ICON_GLYPH_SIZE)[resolvedIconDensity];
+    const resolvedIconGlyphSize = isMenuRow
+        ? MENU_ROW_METRICS.iconGlyphSizePx
+        : ITEM_ICON_GLYPH_SIZE[resolvedIconDensity];
     // The container must not clip a glyph that is now taller than the nominal box.
-    const resolvedIconBoxSize = Math.max(ITEM_ICON_BOX_SIZE[resolvedIconDensity], resolvedIconGlyphSize);
+    const resolvedIconBoxSize = isMenuRow
+        ? MENU_ROW_METRICS.iconBoxSizePx
+        : Math.max(ITEM_ICON_BOX_SIZE[resolvedIconDensity], resolvedIconGlyphSize);
+    const menuIconBoxStyle = isMenuRow
+        ? {
+            width: MENU_ROW_METRICS.iconBoxSizePx,
+            height: MENU_ROW_METRICS.iconBoxSizePx,
+            marginRight: MENU_ROW_METRICS.iconMarginRightPx,
+        }
+        : null;
+    // `iconBoxSizeOverride` stays last: a call site that reserved room for an oversized leading
+    // element (a capacity gauge, an avatar) means it whatever surface the row belongs to.
+    const iconContainerStyle = isTight
+        ? [styles.iconContainer, styles.iconContainerTight, menuIconBoxStyle, iconBoxSizeOverride]
+        : isCompact
+            ? [styles.iconContainer, styles.iconContainerCompact, menuIconBoxStyle, iconBoxSizeOverride]
+            : isCozy
+                ? [styles.iconContainer, styles.iconContainerCozy, menuIconBoxStyle, iconBoxSizeOverride]
+            : [styles.iconContainer, menuIconBoxStyle, iconBoxSizeOverride];
 
-    const resolvedIconMarginRight = ITEM_ICON_MARGIN_RIGHT[resolvedIconDensity];
+    const resolvedIconMarginRight = isMenuRow
+        ? MENU_ROW_METRICS.iconMarginRightPx
+        : ITEM_ICON_MARGIN_RIGHT[resolvedIconDensity];
     const sizedIcon = React.useMemo(() => resizeItemIconForDensity(icon, resolvedIconGlyphSize), [icon, resolvedIconGlyphSize]);
     const titleSizeStyle = isTight ? styles.titleTight : isCompact ? styles.titleCompact : isCozy ? styles.titleCozy : null;
     const subtitleSizeStyle = isTight ? styles.subtitleTight : isCompact ? styles.subtitleCompact : isCozy ? styles.subtitleCozy : null;

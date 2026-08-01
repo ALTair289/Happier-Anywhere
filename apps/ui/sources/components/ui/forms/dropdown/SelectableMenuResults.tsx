@@ -201,7 +201,7 @@ export function SelectableMenuResults(props: {
                         <Item
                             {...(props.itemProps ?? {})}
                             // A dropdown row is a menu row, whatever density the user has chosen.
-                            iconSizing="menu"
+                            rowRole="menu"
                             testID={optionTestID}
                             title={item.title}
                             subtitle={item.subtitleNode ?? item.subtitle}

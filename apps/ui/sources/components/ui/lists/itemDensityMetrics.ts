@@ -90,19 +90,29 @@ export const ITEM_ICON_GLYPH_SIZE: Record<ResolvedItemDensity, number> = {
 };
 
 /**
- * The glyph size for a MENU row — a dropdown or action list — one step below an item row.
+ * Everything that sizes a MENU row — a dropdown, a picker, an action list.
  *
- * Menu rows and settings rows share `Item`/`SelectableRow` but not their density: a settings row is a
- * destination with a subtitle and room to breathe, a menu row is a dense list of choices. Sizing both
- * from one table made the dropdowns look oversized, which is the same conflation the box-versus-glyph
- * split fixed one level down.
+ * Flat, and that is the point. Menu rows and settings rows share `Item`/`SelectableRow`, so a menu
+ * row used to inherit the whole item scale: at the default density a 20px glyph in a 24px box on a
+ * 44px row, while the menu rows that happened to render through `SelectableRow` sat at 16 on 36. One
+ * concept, two sizes, chosen by which component the call site reached for.
+ *
+ * Density is a LIST setting — how much of a settings screen or a file tree fits on screen. A menu is
+ * transient and self-contained: nothing about a user preferring dense file trees says their dropdowns
+ * should be 8px taller. Letting the preference through gave one menu four possible heights decided
+ * somewhere else entirely, which is why these numbers are constants and not another table.
+ *
+ * The values are the canonical menu row's, the one `SelectableRow` has always drawn: a 16px glyph, a
+ * 12px gap, and 8px above and below a 20px line — 36px in total.
  */
-export const MENU_ROW_ICON_GLYPH_SIZE: Record<ResolvedItemDensity, number> = {
-    comfortable: ICON_SIZE.lg,
-    cozy: ICON_SIZE.md,
-    compact: ICON_SIZE.sm,
-    tight: ICON_SIZE.sm,
-};
+export const MENU_ROW_METRICS = {
+    iconGlyphSizePx: ICON_SIZE.sm,
+    /** No reserved box beyond the glyph: a menu row has one column of icons, all the same size. */
+    iconBoxSizePx: ICON_SIZE.sm,
+    iconMarginRightPx: 12,
+    minHeightPx: 36,
+    paddingVerticalPx: 8,
+} as const;
 
 export const ITEM_ICON_MARGIN_RIGHT: Record<ResolvedItemDensity, number> = {
     comfortable: 12,

@@ -61,3 +61,41 @@ describe('itemDensityMetrics glyph vs box', () => {
         }
     });
 });
+
+describe('menu row metrics', () => {
+    it('does not vary with the list density setting', async () => {
+        const { MENU_ROW_METRICS } = await importItemDensityMetricsForPlatform('web');
+
+        // A dropdown is a dropdown. The density setting sizes the user's LISTS — settings rows,
+        // file trees — and letting it reach a transient menu made the same menu render at four
+        // different heights depending on a preference set somewhere else entirely.
+        expect(Object.values(MENU_ROW_METRICS).every((value) => typeof value === 'number')).toBe(true);
+    });
+
+    it('resolves identically on iOS and web', async () => {
+        const ios = await importItemDensityMetricsForPlatform('ios');
+        const web = await importItemDensityMetricsForPlatform('web');
+
+        expect(ios.MENU_ROW_METRICS).toEqual(web.MENU_ROW_METRICS);
+    });
+
+    it('is tighter than the tightest item row', async () => {
+        const { MENU_ROW_METRICS, ITEM_ICON_GLYPH_SIZE, ITEM_ICON_BOX_SIZE } = await importItemDensityMetricsForPlatform('web');
+
+        // The regression this pins: dropdown rows that render through `Item` used to inherit the
+        // settings-row scale — a 20px glyph in a 24px box on a 44px row — while the dropdown rows
+        // that render through `SelectableRow` sat at 16 on 36. One concept, two sizes, decided by
+        // which component the call site happened to reach for.
+        const tightestItemGlyph = Math.min(...Object.values(ITEM_ICON_GLYPH_SIZE));
+        const tightestItemBox = Math.min(...Object.values(ITEM_ICON_BOX_SIZE));
+        expect(MENU_ROW_METRICS.iconGlyphSizePx).toBeLessThanOrEqual(tightestItemGlyph);
+        expect(MENU_ROW_METRICS.iconBoxSizePx).toBeLessThanOrEqual(tightestItemBox);
+    });
+
+    it('keeps its glyph on the app icon scale', async () => {
+        const { MENU_ROW_METRICS } = await importItemDensityMetricsForPlatform('web');
+        const { ICON_SIZE } = await import('@/components/ui/icons/Icon');
+
+        expect(new Set<number>(Object.values(ICON_SIZE)).has(MENU_ROW_METRICS.iconGlyphSizePx)).toBe(true);
+    });
+});

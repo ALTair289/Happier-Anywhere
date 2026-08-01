@@ -8,6 +8,11 @@ import { motionTokens } from '@/components/ui/motion/motionTokens';
 import { useReducedMotionPreference } from '@/hooks/ui/useReducedMotionPreference';
 import { shadowLevelStyle } from '@/shadowElevation';
 
+// One radius wherever a pane meets the header. The header spans above these columns and is not
+// part of them, so a square top-left corner reads as a slab wedged underneath; rounding it lets
+// the pane sit into the header instead. Matches the content sheet's seam radius.
+const PANE_TOP_CORNER_RADIUS_PX = 16;
+
 export type MultiPaneHostProps = Readonly<{
     main: React.ReactNode;
     hideMain?: boolean;
@@ -46,10 +51,50 @@ export const MultiPaneHost = React.memo((props: MultiPaneHostProps) => {
     const overlayDurationMs = reduceMotion ? motionTokens.durationMs.instant : motionTokens.durationMs.base;
     const overlayUseNativeDriver = Platform.OS !== 'web';
     const overlayZIndexBase = 50;
-    // One radius wherever a pane meets the header. The header spans above these columns and is not
-    // part of them, so a square top-left corner reads as a slab wedged underneath; rounding it lets
-    // the pane sit into the header instead. Matches the content sheet's seam radius.
-    const PANE_TOP_CORNER_RADIUS_PX = 16;
+
+    // One surface for both docked panes. Details and right are separate columns wearing identical
+    // chrome; while this lived inline in each of them the two copies had to be edited in lockstep,
+    // which is exactly the shape that lets one quietly fall behind the other.
+    const dockedPaneSurfaceStyle = React.useMemo(() => ({
+        flex: 1,
+        minHeight: 0,
+        minWidth: 0,
+        backgroundColor: theme.colors.surface.base,
+        borderTopLeftRadius: PANE_TOP_CORNER_RADIUS_PX,
+        // Required for the radius to be visible at all: the pane's children paint their own
+        // backgrounds (the tab strip's inset fill) straight into the corner otherwise. An element's
+        // own `overflow` clips its DESCENDANTS, not the shadow it casts itself, so the seam below
+        // survives this.
+        overflow: 'hidden' as const,
+        // Seam, not a border. The docked pane sits ABOVE the main content, so it casts onto it
+        // rather than being fenced off by a line — the same treatment as the sidebar/content seam,
+        // mirrored. x-offset only, wide blur, no spread: the cast hugs the edge and stays a gradient
+        // rather than reading as a second divider. Web-only; native keeps the hairline alone because
+        // this cast is not expressible in the native shadow API.
+        //
+        // Hairline AND cast, deliberately. This is the one place the border-XOR-shadow rule bends:
+        // the pane is a sibling column rather than a floating surface, so the cast alone reads as a
+        // smudge without a defined edge. The hairline gives the edge, the cast gives the depth.
+        //
+        // Both edges that face the app get the line. The pane is inset from the top as well as the
+        // left — the header runs above it — so stopping at the left edge left the rounded corner
+        // trailing off into nothing where the arc turned horizontal.
+        borderLeftWidth: StyleSheet.hairlineWidth,
+        borderTopWidth: StyleSheet.hairlineWidth,
+        // Half the weight of border.default on purpose. The cast already carries the separation, so
+        // this line only has to define the edge — at full token strength it competes with the shadow
+        // and reads as a divider again. Expressed as alpha, not a flat hex, so it composites over
+        // whatever the pane is sitting on.
+        borderLeftColor: theme.colors.border.subtle,
+        borderTopColor: theme.colors.border.subtle,
+        ...(Platform.OS === 'web'
+            ? {
+                boxShadow: theme.dark
+                    ? '-5px 0 22px rgba(0, 0, 0, 0.13)'
+                    : '-5px 0 22px rgba(0, 0, 0, 0.035)',
+            }
+            : {}),
+    }), [theme]);
 
     const [rightOverlayClosing, setRightOverlayClosing] = React.useState(false);
     const [detailsOverlayClosing, setDetailsOverlayClosing] = React.useState(false);
@@ -391,44 +436,7 @@ export const MultiPaneHost = React.memo((props: MultiPaneHostProps) => {
                     onCommitWidthPx={props.onCommitDetailsDockWidthPx}
                     onDragWidthPx={props.onDragDetailsDockWidthPx}
                 >
-                    <View
-                        style={{
-                            flex: 1,
-                            minHeight: 0,
-                            minWidth: 0,
-                            backgroundColor: theme.colors.surface.base,
-                            borderTopLeftRadius: PANE_TOP_CORNER_RADIUS_PX,
-                            // Required for the radius to be visible at all: the pane's children
-                            // paint their own backgrounds (the tab strip's inset fill) straight into
-                            // the corner otherwise. An element's own `overflow` clips its DESCENDANTS,
-                            // not the shadow it casts itself, so the seam below survives this.
-                            overflow: 'hidden',
-                            // Seam, not a border. The docked pane sits ABOVE the main content, so
-                            // it casts onto it rather than being fenced off by a line — the same
-                            // treatment as the sidebar/content seam, mirrored. x-offset only, wide
-                            // blur, no spread: the cast hugs the edge and stays a gradient rather
-                            // than reading as a second divider. Web-only; native keeps a hairline
-                            // because this cast is not expressible in the native shadow API.
-                            // Hairline AND cast, deliberately. This is the one place the
-                            // border-XOR-shadow rule bends: the pane is a sibling column rather
-                            // than a floating surface, so the cast alone reads as a smudge without
-                            // a defined edge. The hairline gives the edge, the cast gives the depth.
-                            borderLeftWidth: StyleSheet.hairlineWidth,
-                            // Half the weight of border.default on purpose. The cast already
-                            // carries the separation, so this line only has to define the edge —
-                            // at full token strength it competes with the shadow and reads as a
-                            // divider again. Expressed as alpha, not a flat hex, so it composites
-                            // over whatever the pane is sitting on.
-                            borderLeftColor: theme.colors.border.subtle,
-                            ...(Platform.OS === 'web'
-                                ? {
-                                    boxShadow: theme.dark
-                                        ? '-5px 0 22px rgba(0, 0, 0, 0.13)'
-                                        : '-5px 0 22px rgba(0, 0, 0, 0.035)',
-                                }
-                                : {}),
-                        }}
-                    >
+                    <View style={dockedPaneSurfaceStyle}>
                         {detailsPresence.node}
                     </View>
                 </ResizableDockedPane>
@@ -458,44 +466,7 @@ export const MultiPaneHost = React.memo((props: MultiPaneHostProps) => {
                     onCommitWidthPx={props.onCommitRightDockWidthPx}
                     onDragWidthPx={props.onDragRightDockWidthPx}
                 >
-                    <View
-                        style={{
-                            flex: 1,
-                            minHeight: 0,
-                            minWidth: 0,
-                            backgroundColor: theme.colors.surface.base,
-                            borderTopLeftRadius: PANE_TOP_CORNER_RADIUS_PX,
-                            // Required for the radius to be visible at all: the pane's children
-                            // paint their own backgrounds (the tab strip's inset fill) straight into
-                            // the corner otherwise. An element's own `overflow` clips its DESCENDANTS,
-                            // not the shadow it casts itself, so the seam below survives this.
-                            overflow: 'hidden',
-                            // Seam, not a border. The docked pane sits ABOVE the main content, so
-                            // it casts onto it rather than being fenced off by a line — the same
-                            // treatment as the sidebar/content seam, mirrored. x-offset only, wide
-                            // blur, no spread: the cast hugs the edge and stays a gradient rather
-                            // than reading as a second divider. Web-only; native keeps a hairline
-                            // because this cast is not expressible in the native shadow API.
-                            // Hairline AND cast, deliberately. This is the one place the
-                            // border-XOR-shadow rule bends: the pane is a sibling column rather
-                            // than a floating surface, so the cast alone reads as a smudge without
-                            // a defined edge. The hairline gives the edge, the cast gives the depth.
-                            borderLeftWidth: StyleSheet.hairlineWidth,
-                            // Half the weight of border.default on purpose. The cast already
-                            // carries the separation, so this line only has to define the edge —
-                            // at full token strength it competes with the shadow and reads as a
-                            // divider again. Expressed as alpha, not a flat hex, so it composites
-                            // over whatever the pane is sitting on.
-                            borderLeftColor: theme.colors.border.subtle,
-                            ...(Platform.OS === 'web'
-                                ? {
-                                    boxShadow: theme.dark
-                                        ? '-5px 0 22px rgba(0, 0, 0, 0.13)'
-                                        : '-5px 0 22px rgba(0, 0, 0, 0.035)',
-                                }
-                                : {}),
-                        }}
-                    >
+                    <View style={dockedPaneSurfaceStyle}>
                         {rightPresence.node}
                     </View>
                 </ResizableDockedPane>

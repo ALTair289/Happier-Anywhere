@@ -6,7 +6,7 @@ import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { IconAction } from '@/components/ui/buttons/IconAction';
-import { SegmentedTabBar, type SegmentedTab } from '@/components/ui/navigation/SegmentedTabBar';
+import { SegmentedTabBar, SEGMENTED_TAB_ICON_SIZE_PX, type SegmentedTab } from '@/components/ui/navigation/SegmentedTabBar';
 import { useAppPaneScope } from '@/components/appShell/panes/hooks/useAppPaneScope';
 import { SessionRightPanelAgentsView } from '@/components/sessions/panes/agents/SessionRightPanelAgentsView';
 import { SessionBrowseFilesSurface } from '@/components/sessions/panes/surfaces/SessionBrowseFilesSurface';
@@ -102,7 +102,7 @@ export const SessionRightPanel = React.memo((props: SessionRightPanelProps) => {
         // Icons, not words. Four labels cost a full text row in a pane this narrow, and the
         // labels survive as the accessible name and the hover tooltip.
         const glyph = (name: IconName) => (
-            <Icon name={name} size={14} color={theme.colors.text.secondary} />
+            <Icon name={name} size={SEGMENTED_TAB_ICON_SIZE_PX} color={theme.colors.text.secondary} />
         );
         const base: SegmentedTab<RightTabId>[] = [
             { id: 'git', label: t('session.rightPanel.tabs.git'), icon: glyph('git-branch') },

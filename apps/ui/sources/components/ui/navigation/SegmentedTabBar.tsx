@@ -4,7 +4,18 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { shadowLevelStyle } from '@/shadowElevation';
 import { Text } from '@/components/ui/text/Text';
+import { ICON_SIZE } from '@/components/ui/icons/Icon';
 import { GradientSurface } from '@/components/ui/surfaces/GradientSurface';
+
+/**
+ * The glyph size for an icon-only segmented bar.
+ *
+ * Owned here rather than at the call site because the bar reserves the matching slot height below:
+ * the two numbers have to move together, and when they lived apart the icons were sized to the
+ * LABEL's optical height (16) and then drawn at 14, so an iconic bar read lighter than the textual
+ * one it replaced. A tab is a primary control in its pane — it takes the standard toolbar step.
+ */
+export const SEGMENTED_TAB_ICON_SIZE_PX = ICON_SIZE.md;
 
 export type SegmentedTab<T extends string = string> = Readonly<{
     id: T;
@@ -66,11 +77,13 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.text.primary,
         fontWeight: '600',
     },
-    // Matches the label's optical height so an iconic bar is the same height as a textual one.
+    // Sized to the glyph, not to the label it replaces. Holding the slot at the label's 16px optical
+    // height kept an iconic bar exactly as tall as a textual one, which sounds right and is not: the
+    // glyph then has to shrink below its own step to fit, and the bar reads weaker than the words.
     tabIcon: {
         alignItems: 'center',
         justifyContent: 'center',
-        height: 16,
+        height: SEGMENTED_TAB_ICON_SIZE_PX,
     },
 }));
 
