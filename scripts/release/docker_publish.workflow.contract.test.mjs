@@ -110,24 +110,21 @@ test('nightly dev docker waits for the release artifacts it consumes', async () 
   );
 });
 
-test('Docker artifact resolution loads checked-in release runtime without a workspace install', async () => {
-  const resolver = await readFile(
-    join(repoRoot, 'scripts', 'pipeline', 'docker', 'resolve-release-artifact-build-args.mjs'),
-    'utf8',
-  );
-  assert.doesNotMatch(
-    resolver,
-    /from ['"]@happier-dev\/release-runtime\//,
-    'publish-docker runs before workspace dependencies are installed, so its resolver must not require a workspace symlink',
+test('Docker publishing installs and builds its release-runtime dependency', async () => {
+  const publishDocker = await loadWorkflow('publish-docker.yml');
+  assert.match(
+    publishDocker,
+    /Enable Corepack \(Yarn\)[\s\S]*?corepack prepare yarn@1\.22\.22 --activate/,
+    'publish-docker should pin the repository Yarn runtime before installing dependencies',
   );
   assert.match(
-    resolver,
-    /packages\/release-runtime\/dist\/assets\.js/,
-    'Docker artifact resolution should use the canonical checked-in release-runtime assets implementation',
+    publishDocker,
+    /Install dependencies[\s\S]*?HAPPIER_INSTALL_SCOPE:\s*["']release-runtime["'][\s\S]*?uses:\s*\.\/\.github\/actions\/install-yarn-dependencies/,
+    'publish-docker should install and postinstall-build the release-runtime workspace it imports',
   );
   assert.match(
-    resolver,
-    /packages\/release-runtime\/dist\/github\.js/,
-    'Docker artifact resolution should use the canonical checked-in release-runtime GitHub implementation',
+    publishDocker,
+    /Install dependencies[\s\S]*?Build & push images \(pipeline\)/,
+    'the release-runtime dependency must be available before Docker artifact resolution starts',
   );
 });

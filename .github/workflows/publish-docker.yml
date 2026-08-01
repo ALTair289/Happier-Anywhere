@@ -132,6 +132,22 @@ jobs:
           token: ${{ steps.app_token.outputs.token }}
           persist-credentials: false
 
+      - name: Enable Corepack (Yarn)
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+
+      - name: Install dependencies
+        env:
+          YARN_PRODUCTION: "false"
+          npm_config_production: "false"
+          HAPPIER_INSTALL_SCOPE: "release-runtime"
+          HAPPIER_UI_VENDOR_WEB_ASSETS: "0"
+          npm_config_registry: https://registry.npmjs.org
+        uses: ./.github/actions/install-yarn-dependencies
+        with:
+          args: --frozen-lockfile --ignore-engines
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
