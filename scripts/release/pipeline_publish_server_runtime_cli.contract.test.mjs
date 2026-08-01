@@ -122,3 +122,58 @@ test('server runtime version allocation runs before workspace dependencies are i
     rmSync(fixtureDir, { recursive: true, force: true });
   }
 });
+
+test('authorized server finalizer control scripts load without installed workspace dependencies', () => {
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'happier-server-finalizer-preinstall-'));
+  const loaderPath = join(fixtureDir, 'reject-workspace-imports.mjs');
+  writeFileSync(
+    loaderPath,
+    [
+      "export async function resolve(specifier, context, nextResolve) {",
+      "  if (specifier.startsWith('@happier-dev/')) {",
+      "    throw new Error(`workspace dependency imported in credentialed finalizer: ${specifier}`);",
+      "  }",
+      "  return nextResolve(specifier, context);",
+      "}",
+      '',
+    ].join('\n'),
+  );
+
+  const scripts = [
+    {
+      path: resolve(repoRoot, 'scripts', 'pipeline', 'release', 'publishing', 'prepare-binary-assets.mjs'),
+      args: [],
+      expectedFailure: /Unknown binary publish product/,
+    },
+    {
+      path: resolve(repoRoot, 'scripts', 'pipeline', 'release', 'publish-manifests.mjs'),
+      args: [],
+      expectedFailure: /--product is required/,
+    },
+    {
+      path: resolve(repoRoot, 'scripts', 'pipeline', 'release', 'verify-artifacts.mjs'),
+      args: ['--artifacts-dir', fixtureDir],
+      expectedFailure: /no checksums file found/,
+    },
+  ];
+
+  try {
+    for (const script of scripts) {
+      const result = spawnSync(
+        process.execPath,
+        ['--experimental-loader', loaderPath, script.path, ...script.args],
+        { cwd: repoRoot, env: process.env, encoding: 'utf8' },
+      );
+      const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+      assert.doesNotMatch(
+        output,
+        /workspace dependency imported in credentialed finalizer/,
+        `${script.path} imported a workspace package before the finalizer could validate trusted artifacts`,
+      );
+      assert.notEqual(result.status, 0, `${script.path} unexpectedly completed without its required inputs`);
+      assert.match(output, script.expectedFailure);
+    }
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});

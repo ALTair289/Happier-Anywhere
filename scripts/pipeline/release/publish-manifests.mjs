@@ -5,7 +5,7 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
-import { normalizeChannel, parseArgs } from './lib/binary-release.mjs';
+import { normalizeChannel, parseArgs } from './lib/release-arguments.mjs';
 import { buildManifestRecord, parseArtifactFilename } from './lib/manifests.mjs';
 
 function parseChecksums(raw) {

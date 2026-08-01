@@ -7,12 +7,30 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
-import { commandExists, execOrThrow, fileSha256, parseArgs } from './lib/binary-release.mjs';
+import { fileSha256 } from './lib/release-files.mjs';
+import { parseArgs } from './lib/release-arguments.mjs';
 import { shouldSmokeTestReleaseArtifact } from './publishing/artifact-smoke-compatibility.mjs';
 import { terminateProcessTreeByPid } from '../../testing/process/processTree.mjs';
 
 const DEFAULT_BINARY_SMOKE_TIMEOUT_MS = 20_000;
 const DEFAULT_SERVER_BINARY_SMOKE_TIMEOUT_MS = 15_000;
+
+function execOrThrow(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd ?? process.cwd(),
+    env: options.env ?? process.env,
+    stdio: options.stdio ?? 'inherit',
+    encoding: 'utf-8',
+    input: options.input,
+    ...(Number.isFinite(options.timeoutMs) ? { timeout: options.timeoutMs } : {}),
+  });
+  if (result.error) {
+    throw new Error(`[release] failed to run ${command}: ${result.error.message}`, { cause: result.error });
+  }
+  if ((result.status ?? 1) !== 0) {
+    throw new Error(`[release] ${command} exited with status ${result.status ?? 'unknown'}`);
+  }
+}
 
 function parseChecksums(raw) {
   const lines = String(raw ?? '')
@@ -205,9 +223,6 @@ async function main() {
   if (fileExists(minisigPath)) {
     if (!pubKeyPath) {
       throw new Error('[release] signature found but no --public-key/MINISIGN_PUBLIC_KEY provided');
-    }
-    if (!commandExists('minisign')) {
-      throw new Error('[release] minisign required to verify signatures');
     }
     execOrThrow('minisign', ['-Vm', checksumsPath, '-p', pubKeyPath], { stdio: 'inherit' });
   }

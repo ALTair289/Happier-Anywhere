@@ -10,7 +10,7 @@ import { normalizePublicReleaseChannel } from '../lib/public-release-rings.mjs';
 import { resolveArtifactVerifyExecution, resolveArtifactVerifyTarget } from './artifact-verify-target.mjs';
 import { getBinaryPublishProductSpec } from './product-specs.mjs';
 import { finalizeServerRuntimeCandidate } from './server-runtime-candidate.mjs';
-import { maybeSignFile } from '../lib/binary-release.mjs';
+import { maybeSignFile } from '../lib/minisign-signing.mjs';
 
 const MANIFEST_PUBLISH_SCRIPT_RELATIVE_PATH = 'scripts/pipeline/release/publish-manifests.mjs';
 

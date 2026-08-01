@@ -13,6 +13,8 @@ const releaseRings = require(path.resolve(here, '..', '..', '..', '..', 'package
 /** @type {(id: any) => any} */
 const getReleaseRingCatalogEntry = releaseRings.getReleaseRingCatalogEntry;
 /** @type {() => readonly any[]} */
+const listPublicReleaseRingCatalogEntries = releaseRings.listPublicReleaseRingCatalogEntries;
+/** @type {() => readonly any[]} */
 const listPublicReleaseRingLabels = releaseRings.listPublicReleaseRingLabels;
 /** @type {(raw: any) => any} */
 const normalizePublicReleaseRingId = releaseRings.normalizePublicReleaseRingId;
@@ -23,6 +25,10 @@ const normalizePublicReleaseRingId = releaseRings.normalizePublicReleaseRingId;
  */
 export function normalizePublicReleaseChannel(raw) {
   return normalizePublicReleaseRingId(raw);
+}
+
+export function listPublicReleaseChannels() {
+  return listPublicReleaseRingCatalogEntries();
 }
 
 /**
