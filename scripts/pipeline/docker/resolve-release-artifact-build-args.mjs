@@ -3,8 +3,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { resolveReleaseAssetBundle } from '@happier-dev/release-runtime/assets';
-import { fetchGitHubReleaseByTag as fetchGitHubReleaseByTagDefault } from '@happier-dev/release-runtime/github';
+import { resolveReleaseAssetBundle } from '../../../packages/release-runtime/dist/assets.js';
+import { fetchGitHubReleaseByTag as fetchGitHubReleaseByTagDefault } from '../../../packages/release-runtime/dist/github.js';
 
 import {
   normalizePublicReleaseChannel,

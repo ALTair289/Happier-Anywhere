@@ -109,3 +109,25 @@ test('nightly dev docker waits for the release artifacts it consumes', async () 
     /docker:[\s\S]*?needs:\s*\[cli, server_runtime, ui_web\][\s\S]*?uses:\s+\.\/\.github\/workflows\/publish-docker\.yml/,
   );
 });
+
+test('Docker artifact resolution loads checked-in release runtime without a workspace install', async () => {
+  const resolver = await readFile(
+    join(repoRoot, 'scripts', 'pipeline', 'docker', 'resolve-release-artifact-build-args.mjs'),
+    'utf8',
+  );
+  assert.doesNotMatch(
+    resolver,
+    /from ['"]@happier-dev\/release-runtime\//,
+    'publish-docker runs before workspace dependencies are installed, so its resolver must not require a workspace symlink',
+  );
+  assert.match(
+    resolver,
+    /packages\/release-runtime\/dist\/assets\.js/,
+    'Docker artifact resolution should use the canonical checked-in release-runtime assets implementation',
+  );
+  assert.match(
+    resolver,
+    /packages\/release-runtime\/dist\/github\.js/,
+    'Docker artifact resolution should use the canonical checked-in release-runtime GitHub implementation',
+  );
+});
