@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -63,6 +64,45 @@ test('ui postinstall distinguishes a workspace junction from an installed packag
       stdio: 'inherit',
     },
   }]);
+});
+
+test('ui postinstall keeps filtered patch directories on the target node_modules volume', async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), 'happier-ui-filtered-patches-'));
+  const patchDir = join(fixtureRoot, 'patches');
+  const nodeModulesDir = join(fixtureRoot, 'node_modules');
+
+  try {
+    await mkdir(join(nodeModulesDir, 'react-native-enriched-markdown'), { recursive: true });
+    await mkdir(patchDir, { recursive: true });
+    await writeFile(
+      join(patchDir, 'react-native-enriched-markdown+0.0.12.patch'),
+      'patch contents',
+      'utf8',
+    );
+    await writeFile(join(patchDir, 'missing-package+1.0.0.patch'), 'ignored', 'utf8');
+
+    const { createFilteredPatchDir } = await import(
+      '../../apps/ui/tools/postinstall/filteredPatchDirectory.mjs'
+    );
+    const filteredPatchDir = createFilteredPatchDir({
+      patchDir,
+      nodeModulesDir,
+      label: 'windows',
+    });
+
+    assert.ok(filteredPatchDir);
+    assert.equal(
+      dirname(filteredPatchDir),
+      nodeModulesDir,
+      'the filtered directory must share the target node_modules volume on Windows',
+    );
+    assert.deepEqual(
+      await readdir(filteredPatchDir),
+      ['react-native-enriched-markdown+0.0.12.patch'],
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
 });
 
 test('ui postinstall runner skips installed package context and respects npm_execpath', async () => {

@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import process from 'node:process';
 import url from 'node:url';
 import { resolveUiPostinstallTasks } from './resolveUiPostinstallTasks.mjs';
 import { ensureNohoistPeerLinks } from './ensureNohoistPeerLinks.mjs';
+import { createFilteredPatchDir } from './postinstall/filteredPatchDirectory.mjs';
 import { runCommandBestEffort, runCommandOrExit } from './postinstall/runCommand.mjs';
 import { verifyNativePatchCompilation } from './postinstall/verifyNativePatchCompilation.mjs';
 
@@ -65,32 +65,6 @@ if (!patchPackageCliPath) {
 const tasks = resolveUiPostinstallTasks({ env: process.env });
 const wants = (id) => tasks.includes(id);
 
-function listPatchFiles(dir) {
-    try {
-        return fs.readdirSync(dir, { withFileTypes: true })
-            .filter((entry) => entry.isFile() && entry.name.endsWith('.patch'))
-            .map((entry) => entry.name);
-    } catch {
-        return [];
-    }
-}
-
-function resolvePatchTargetPackageName(patchFileName) {
-    const raw = patchFileName.endsWith('.patch') ? patchFileName.slice(0, -'.patch'.length) : patchFileName;
-    const parts = raw.split('+').filter(Boolean);
-    if (parts.length < 2) return '';
-    if (parts[0].startsWith('@')) {
-        if (parts.length < 3) return '';
-        return `${parts[0]}/${parts[1]}`;
-    }
-    return parts[0];
-}
-
-function packageExists(nodeModulesDir, packageName) {
-    if (!nodeModulesDir || !packageName) return false;
-    return fs.existsSync(path.resolve(nodeModulesDir, packageName));
-}
-
 function findReactNativeEnrichedMarkdownPackageDirs() {
     return [
         path.resolve(repoRootNodeModulesDir, 'react-native-enriched-markdown'),
@@ -105,24 +79,6 @@ function findSentryReactNativePackageDirs() {
     ].filter((packageDir) => fs.existsSync(packageDir));
 }
 
-function createFilteredPatchDir({ patchDir: inputPatchDir, nodeModulesDir, label }) {
-    const patchFiles = listPatchFiles(inputPatchDir);
-    if (patchFiles.length === 0) return '';
-
-    const selected = patchFiles.filter((fileName) => {
-        const pkgName = resolvePatchTargetPackageName(fileName);
-        return packageExists(nodeModulesDir, pkgName);
-    });
-
-    if (selected.length === 0) return '';
-
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `happier-ui-patches-${label}-`));
-    for (const fileName of selected) {
-        fs.copyFileSync(path.resolve(inputPatchDir, fileName), path.resolve(tmpDir, fileName));
-    }
-    return tmpDir;
-}
-
 if (wants('patch-package')) {
     // Note: this repo uses Yarn workspaces, so some dependencies are hoisted to the repo root.
     // patch-package only patches packages present in the current working directory's
@@ -130,11 +86,15 @@ if (wants('patch-package')) {
     if (fs.existsSync(repoRootNodeModulesDir)) {
         const filteredPatchDir = createFilteredPatchDir({ patchDir, nodeModulesDir: repoRootNodeModulesDir, label: 'root' });
         if (filteredPatchDir) {
-            runCommandOrExit({
-                command: process.execPath,
-                args: [patchPackageCliPath, '--patch-dir', path.relative(repoRootDir, filteredPatchDir)],
-                options: { cwd: repoRootDir },
-            });
+            try {
+                runCommandOrExit({
+                    command: process.execPath,
+                    args: [patchPackageCliPath, '--patch-dir', path.relative(repoRootDir, filteredPatchDir)],
+                    options: { cwd: repoRootDir },
+                });
+            } finally {
+                fs.rmSync(filteredPatchDir, { recursive: true, force: true });
+            }
         }
     }
 
@@ -143,11 +103,15 @@ if (wants('patch-package')) {
     if (fs.existsSync(expoAppNodeModulesDir)) {
         const filteredPatchDir = createFilteredPatchDir({ patchDir, nodeModulesDir: expoAppNodeModulesDir, label: 'ui' });
         if (filteredPatchDir) {
-            runCommandOrExit({
-                command: process.execPath,
-                args: [patchPackageCliPath, '--patch-dir', path.relative(expoAppDir, filteredPatchDir)],
-                options: { cwd: expoAppDir },
-            });
+            try {
+                runCommandOrExit({
+                    command: process.execPath,
+                    args: [patchPackageCliPath, '--patch-dir', path.relative(expoAppDir, filteredPatchDir)],
+                    options: { cwd: expoAppDir },
+                });
+            } finally {
+                fs.rmSync(filteredPatchDir, { recursive: true, force: true });
+            }
         }
     }
 }
