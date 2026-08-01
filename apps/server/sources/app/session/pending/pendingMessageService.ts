@@ -680,6 +680,7 @@ export async function updatePendingRequestedAction(params: {
                 status: true,
                 deliveryState: true,
                 deliveryBlockedReason: true,
+                providerAction: true,
                 requestedAction: true,
                 updatedAt: true,
             },
@@ -702,7 +703,10 @@ export async function updatePendingRequestedAction(params: {
                 && existing.deliveryBlockedReason === "steering_unavailable"
                 && (currentActionValue.kind === "steer_now" || currentActionValue.kind === "steer_if_active")
                 && requestedActionResult.data.kind === "send_now";
-            if (releasesSteeringUnavailableBlock) {
+            const retriesProviderRejectedBeforeAcceptance =
+                existing.deliveryState === "blocked"
+                && existing.deliveryBlockedReason === "provider_rejected_before_acceptance";
+            if (releasesSteeringUnavailableBlock || retriesProviderRejectedBeforeAcceptance) {
                 const updated = await tx.sessionPendingMessage.updateMany({
                     where: {
                         sessionId,
@@ -710,12 +714,14 @@ export async function updatePendingRequestedAction(params: {
                         status: "queued",
                         deliveryState: "blocked",
                         deliveryBlockedReason: existing.deliveryBlockedReason,
+                        providerAction: existing.providerAction,
                         updatedAt: existing.updatedAt,
                     },
                     data: {
                         requestedAction: requestedActionResult.data,
                         deliveryState: null,
                         deliveryBlockedReason: null,
+                        providerAction: null,
                         updatedAt: nextUpdatedAt,
                     },
                 });
@@ -735,13 +741,14 @@ export async function updatePendingRequestedAction(params: {
             if (existing.deliveryState !== null) {
                 return { ok: false, error: "action-conflict" } as const;
             }
-            if (isDeepStrictEqual(currentActionValue, requestedActionResult.data)) {
+            if (existing.providerAction === null && isDeepStrictEqual(currentActionValue, requestedActionResult.data)) {
                 const retained = await tx.sessionPendingMessage.count({
                     where: {
                         sessionId,
                         localId,
                         status: "queued",
                         deliveryState: null,
+                        providerAction: null,
                         updatedAt: existing.updatedAt,
                     },
                 });
@@ -769,9 +776,14 @@ export async function updatePendingRequestedAction(params: {
                     localId,
                     status: "queued",
                     deliveryState: null,
+                    providerAction: existing.providerAction,
                     updatedAt: existing.updatedAt,
                 },
-                data: { requestedAction: requestedActionResult.data, updatedAt: nextUpdatedAt },
+                data: {
+                    requestedAction: requestedActionResult.data,
+                    providerAction: null,
+                    updatedAt: nextUpdatedAt,
+                },
             });
             if (updated.count === 0) {
                 return { ok: false, error: "action-conflict" } as const;

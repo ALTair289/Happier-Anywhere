@@ -2211,6 +2211,83 @@ describe("pendingMessageService (shared sessions)", () => {
         })).resolves.toEqual({ ok: false, error: "action-conflict" });
     });
 
+    it("retries the same pending row after the provider rejects it before acceptance", async () => {
+        const owner = await createAccount("requested-action-provider-rejected-owner");
+        const session = await createSession(owner.id);
+        const localId = `requested-action-provider-rejected-${randomUUID()}`;
+
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-requested-action-provider-rejected",
+            requestedAction: { v: 1, kind: "send_now" },
+        });
+        await blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            reason: "provider_rejected_before_acceptance",
+        });
+        await db.sessionPendingMessage.update({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            data: { providerAction: "interrupt_and_send" },
+        });
+
+        await expect(updatePendingRequestedAction({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toMatchObject({
+            ok: true,
+            didUpdate: true,
+            pendingBlockedCount: 0,
+        });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { requestedAction: true, providerAction: true, deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual({
+            requestedAction: { v: 1, kind: "send_now" },
+            providerAction: null,
+            deliveryState: null,
+            deliveryBlockedReason: null,
+        });
+    });
+
+    it("repairs an orphaned provider claim when the user explicitly retries the row", async () => {
+        const owner = await createAccount("requested-action-orphaned-claim-owner");
+        const session = await createSession(owner.id);
+        const localId = `requested-action-orphaned-claim-${randomUUID()}`;
+
+        await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-requested-action-orphaned-claim",
+            requestedAction: { v: 1, kind: "send_now" },
+        });
+        await db.sessionPendingMessage.update({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            data: { providerAction: "interrupt_and_send" },
+        });
+
+        await expect(updatePendingRequestedAction({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            requestedAction: { v: 1, kind: "send_now" },
+        })).resolves.toMatchObject({ ok: true, didUpdate: true });
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { requestedAction: true, providerAction: true, deliveryState: true },
+        })).resolves.toEqual({
+            requestedAction: { v: 1, kind: "send_now" },
+            providerAction: null,
+            deliveryState: null,
+        });
+    });
+
     it("does not reopen a runtime-disposed-before-delivery row through an action update", async () => {
         const owner = await createAccount("requested-action-runtime-disposed-owner");
         const session = await createSession(owner.id);
