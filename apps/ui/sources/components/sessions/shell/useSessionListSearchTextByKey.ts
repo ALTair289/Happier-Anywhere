@@ -51,86 +51,6 @@ function collectSessionKeys(items: ReadonlyArray<SessionListViewItem>): Readonly
     return keys;
 }
 
-function findSessionKey(
-    items: ReadonlyArray<SessionListViewItem>,
-    targetSessionId: string,
-): SessionSearchKey | null {
-    for (const item of items) {
-        if (item.type !== 'session') continue;
-        const serverId = String(item.serverId ?? '').trim();
-        const sessionId = String(item.session?.id ?? '').trim();
-        if (!serverId || sessionId !== targetSessionId) continue;
-        return { serverId, sessionId, key: sessionTagKey(serverId, sessionId) };
-    }
-    return null;
-}
-
-function useIncrementalSessionKeys(
-    items: ReadonlyArray<SessionListViewItem>,
-): ReadonlyArray<SessionSearchKey> {
-    const delta = getStorage()((state) => state.sessionListRenderableDelta);
-    const cacheRef = React.useRef<{
-        items: ReadonlyArray<SessionListViewItem> | null;
-        deltaRevision: number | null;
-        keys: ReadonlyArray<SessionSearchKey>;
-        keyBySessionId: Map<string, SessionSearchKey>;
-    }>({
-        items: null,
-        deltaRevision: null,
-        keys: EMPTY_SESSION_KEYS,
-        keyBySessionId: new Map(),
-    });
-    const cache = cacheRef.current;
-
-    if (items === cache.items && (delta?.revision ?? null) === cache.deltaRevision) {
-        return cache.keys;
-    }
-
-    const canApplyDelta = delta
-        && cache.items !== null
-        && cache.deltaRevision !== null
-        && delta.revision !== cache.deltaRevision
-        && delta.rebuiltSessionListViewData !== true;
-    if (canApplyDelta) {
-        let changed = false;
-        const nextBySessionId = new Map(cache.keyBySessionId);
-        for (const sessionId of delta.removedSessionIds) {
-            changed = nextBySessionId.delete(sessionId) || changed;
-        }
-        for (const sessionId of delta.changedSessionIds) {
-            if (!nextBySessionId.has(sessionId)) {
-                const entry = findSessionKey(items, sessionId);
-                if (!entry) {
-                    cache.items = items;
-                    cache.deltaRevision = delta.revision;
-                    cache.keys = collectSessionKeys(items);
-                    cache.keyBySessionId = new Map(cache.keys.map((key) => [key.sessionId, key]));
-                    return cache.keys;
-                }
-                nextBySessionId.set(sessionId, entry);
-                changed = true;
-            }
-        }
-        cache.items = items;
-        cache.deltaRevision = delta.revision;
-        if (changed) {
-            cache.keys = cache.keys
-                .filter((entry) => nextBySessionId.has(entry.sessionId))
-                .concat(
-                    Array.from(nextBySessionId.values()).filter((entry) => !cache.keyBySessionId.has(entry.sessionId)),
-                );
-            cache.keyBySessionId = nextBySessionId;
-        }
-        return cache.keys;
-    }
-
-    cache.items = items;
-    cache.deltaRevision = delta?.revision ?? null;
-    cache.keys = collectSessionKeys(items);
-    cache.keyBySessionId = new Map(cache.keys.map((key) => [key.sessionId, key]));
-    return cache.keys;
-}
-
 function buildSearchTextForSession(state: StorageState, sessionId: string): string | null {
     const parts: string[] = [];
     const committed = state.sessionMessages[sessionId];
@@ -211,7 +131,13 @@ export function useSessionListSearchTextByKey(
     items: ReadonlyArray<SessionListViewItem>,
     enabled: boolean,
 ): Readonly<Record<string, string>> {
-    const sessionKeys = useIncrementalSessionKeys(items);
+    // The searchable keys are a pure projection of the rendered items, so they are
+    // derived from `items` alone. Subscribing to the session-list change envelope
+    // here would wake this list on every store apply to recompute a constant.
+    const sessionKeys = React.useMemo(
+        () => (enabled ? collectSessionKeys(items) : EMPTY_SESSION_KEYS),
+        [enabled, items],
+    );
     const selector = React.useMemo(
         () => createSessionListSearchTextSelector(sessionKeys),
         [sessionKeys],
