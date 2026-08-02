@@ -47,12 +47,11 @@ vi.mock('@/components/ui/text/Text', () => ({
     TextInput: (props: any) => React.createElement('TextInput', props, props.children),
 }));
 
-let copyButtonsVisible = false;
-
-vi.mock('@/components/sessions/transcript/messageCopyVisibility', () => ({
-    shouldShowMessageCopyButton: () => copyButtonsVisible,
-    shouldShowMessageSelectButton: () => copyButtonsVisible,
-}));
+// `messageCopyVisibility` is internal domain logic, not a boundary: it is a pure function of the row's
+// platform/hover/selection input. The real owner runs here, so this file cannot drift away from its
+// export names again. Under the Vitest React Native stub `Platform.OS` is `'node'` — a non-web,
+// hoverless platform — so the row actions are revealed for every row, which is what the copy/select
+// assertions below need.
 
 vi.mock('@/components/sessions/transcript/structured/StructuredMessageBlock', () => ({
     StructuredMessageBlock: () => null,
@@ -107,7 +106,6 @@ vi.mock('@/components/sessions/transcript/messageSelection/SelectMessageButton',
 describe('MessageView unsupported-content rendering', () => {
     beforeEach(() => {
         vi.resetModules();
-        copyButtonsVisible = false;
         debugState.enabled = true;
     });
 
@@ -144,7 +142,6 @@ describe('MessageView unsupported-content rendering', () => {
         });
 
         it('copies the raw diagnostic so the offending payload type can be reported', async () => {
-            copyButtonsVisible = true;
             setClipboardStringSafeMock.mockClear();
             const { MessageView } = await import('./MessageView');
 
@@ -221,7 +218,6 @@ describe('MessageView unsupported-content rendering', () => {
         });
 
         it('does not leak the raw fallback text into select-preview/copy text for the user own message', async () => {
-            copyButtonsVisible = true;
             setClipboardStringSafeMock.mockClear();
             const { MessageView } = await import('./MessageView');
 
