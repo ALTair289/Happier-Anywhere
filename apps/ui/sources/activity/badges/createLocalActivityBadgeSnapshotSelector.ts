@@ -326,6 +326,24 @@ function buildRuntimeFreshnessRecordSignature(
     }).join('\u001d');
 }
 
+type BadgeSnapshotSourceIdentity = Readonly<{
+    sessions: StorageState['sessions'];
+    sessionListRenderables: StorageState['sessionListRenderables'];
+    sessionMessages: StorageState['sessionMessages'];
+    isDataReady: boolean;
+    deltaRevision: number | null;
+}>;
+
+function isSameBadgeSnapshot(
+    previous: LocalActivityBadgeSnapshot,
+    next: LocalActivityBadgeSnapshot,
+): boolean {
+    return previous.count === next.count
+        && previous.hasLocalBadgeSource === next.hasLocalBadgeSource
+        && previous.isDataReady === next.isDataReady
+        && previous.showNonNumericDot === next.showNonNumericDot;
+}
+
 export function createLocalActivityBadgeSnapshotSelector(
     params: LocalActivityBadgeSnapshotSelectorParams,
 ): (state: StorageState) => LocalActivityBadgeSnapshot {
@@ -339,6 +357,18 @@ export function createLocalActivityBadgeSnapshotSelector(
     let previousDeltaRevision: number | null = null;
     let previousSignature: string | null = null;
     let previousSnapshot: LocalActivityBadgeSnapshot | null = null;
+    let previousSourceIdentity: BadgeSnapshotSourceIdentity | null = null;
+
+    // The selector is the badge's subscription: React re-renders only when this
+    // returns a different object. An evaluation that reaches the same badge values
+    // must therefore return the *same* snapshot instance, not an equal one.
+    const commitSnapshot = (next: LocalActivityBadgeSnapshot): LocalActivityBadgeSnapshot => {
+        if (previousSnapshot !== null && isSameBadgeSnapshot(previousSnapshot, next)) {
+            return previousSnapshot;
+        }
+        previousSnapshot = next;
+        return next;
+    };
 
     const rebuildAttentionCache = (
         state: StorageState,
@@ -405,8 +435,30 @@ export function createLocalActivityBadgeSnapshotSelector(
     };
 
     return (state) => {
-        const nowMs = Date.now();
         const delta = state.sessionListRenderableDelta;
+        const deltaRevision = delta?.revision ?? null;
+        // Store notifications that moved none of this badge's inputs cannot change
+        // its snapshot, so they must cost O(1) rather than a derivation pass.
+        if (
+            previousSnapshot !== null
+            && previousSourceIdentity !== null
+            && previousSourceIdentity.sessions === state.sessions
+            && previousSourceIdentity.sessionListRenderables === state.sessionListRenderables
+            && previousSourceIdentity.sessionMessages === state.sessionMessages
+            && previousSourceIdentity.isDataReady === state.isDataReady
+            && previousSourceIdentity.deltaRevision === deltaRevision
+        ) {
+            return previousSnapshot;
+        }
+        previousSourceIdentity = {
+            sessions: state.sessions,
+            sessionListRenderables: state.sessionListRenderables,
+            sessionMessages: state.sessionMessages,
+            isDataReady: state.isDataReady,
+            deltaRevision,
+        };
+
+        const nowMs = Date.now();
         const hasLocalBadgeSource =
             hasRecordValues(state.sessions)
             || hasRecordValues(state.sessionListRenderables)
@@ -435,13 +487,12 @@ export function createLocalActivityBadgeSnapshotSelector(
                 count,
                 params.hasNonNumericInboxAttention === true ? 1 : 0,
             ].join('\u001c');
-            previousSnapshot = {
+            return commitSnapshot({
                 count,
                 hasLocalBadgeSource,
                 isDataReady: state.isDataReady,
                 showNonNumericDot: count === 0 && params.hasNonNumericInboxAttention,
-            };
-            return previousSnapshot;
+            });
         }
         const snapshotSignature = params.badgesEnabled
             ? [
@@ -485,13 +536,12 @@ export function createLocalActivityBadgeSnapshotSelector(
 
         if (!params.badgesEnabled) {
             previousSignature = snapshotSignature;
-            previousSnapshot = {
+            return commitSnapshot({
                 count: 0,
                 hasLocalBadgeSource,
                 isDataReady: state.isDataReady,
                 showNonNumericDot: false,
-            };
-            return previousSnapshot;
+            });
         }
 
         const badgeSessions = resolveActivityAttentionSessionsFromRecords({
@@ -510,14 +560,13 @@ export function createLocalActivityBadgeSnapshotSelector(
         });
 
         previousSignature = snapshotSignature;
-        previousDeltaRevision = delta?.revision ?? null;
+        previousDeltaRevision = deltaRevision;
         rebuildAttentionCache(state, nowMs);
-        previousSnapshot = {
+        return commitSnapshot({
             count: badgeState.count,
             hasLocalBadgeSource,
             isDataReady: state.isDataReady,
             showNonNumericDot: badgeState.showNonNumericDot,
-        };
-        return previousSnapshot;
+        });
     };
 }

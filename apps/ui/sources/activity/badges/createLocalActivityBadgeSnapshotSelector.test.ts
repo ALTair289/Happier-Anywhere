@@ -344,6 +344,93 @@ describe('createLocalActivityBadgeSnapshotSelector', () => {
         expect(sessionFieldReads).toBe(readsAfterFirst);
     });
 
+    it('returns the same snapshot instance when a delta tick leaves the badge unchanged', () => {
+        const selector = createLocalActivityBadgeSnapshotSelector({
+            badgesEnabled: true,
+            friendRequestCount: 0,
+            hasNonNumericInboxAttention: false,
+            sessionOptions: {
+                showPendingPermissionRequests: true,
+                showPendingUserActionRequests: true,
+                showUnread: true,
+            },
+        });
+        const renderable = createRenderable({ id: 'session1', hasUnreadMessages: true });
+        const first = selector(createStorageState({
+            sessionListRenderables: { session1: renderable },
+            sessionListRenderableDelta: {
+                revision: 1,
+                changedSessionIds: ['session1'],
+                removedSessionIds: [],
+                rebuiltSessionListViewData: true,
+            },
+        }));
+
+        const second = selector(createStorageState({
+            sessionListRenderables: { session1: renderable },
+            sessionListRenderableDelta: {
+                revision: 2,
+                changedSessionIds: ['session1'],
+                removedSessionIds: [],
+                rebuiltSessionListViewData: false,
+            },
+        }));
+
+        expect(second.count).toBe(1);
+        // Identity, not equality: this selector is the badge's React subscription,
+        // so an equal-but-new object is a wasted render for every delta tick.
+        expect(second).toBe(first);
+    });
+
+    it('costs nothing when a store notification moves none of the badge inputs', () => {
+        const selector = createLocalActivityBadgeSnapshotSelector({
+            badgesEnabled: true,
+            friendRequestCount: 0,
+            hasNonNumericInboxAttention: false,
+            sessionOptions: {
+                showPendingPermissionRequests: true,
+                showPendingUserActionRequests: true,
+                showUnread: true,
+            },
+        });
+        let renderableFieldReads = 0;
+        const renderable = createRenderable({ id: 'session1', hasUnreadMessages: true });
+        Object.defineProperty(renderable, 'seq', {
+            configurable: true,
+            enumerable: true,
+            get: () => {
+                renderableFieldReads += 1;
+                return 1;
+            },
+        });
+        const sessions = { session1: createSession({ id: 'session1' }) };
+        const sessionMessages = {};
+        const sessionListRenderables = { session1: renderable };
+        const sessionListRenderableDelta = {
+            revision: 1,
+            changedSessionIds: ['session1'],
+            removedSessionIds: [],
+            rebuiltSessionListViewData: true,
+        };
+        const first = selector(createStorageState({
+            sessions,
+            sessionMessages,
+            sessionListRenderables,
+            sessionListRenderableDelta,
+        }));
+        const readsAfterFirst = renderableFieldReads;
+
+        const second = selector(createStorageState({
+            sessions,
+            sessionMessages,
+            sessionListRenderables,
+            sessionListRenderableDelta,
+        }));
+
+        expect(second).toBe(first);
+        expect(renderableFieldReads).toBe(readsAfterFirst);
+    });
+
     it('computes badge snapshots without Object.values over store session records', () => {
         vi.useFakeTimers();
         vi.setSystemTime(1_500);
@@ -392,7 +479,7 @@ describe('createLocalActivityBadgeSnapshotSelector', () => {
         });
     });
 
-    it('invalidates the badge snapshot when projected pending session update time changes', () => {
+    it('leaves the badge subscription untouched when only a projected session update time changes', () => {
         vi.useFakeTimers();
         vi.setSystemTime(1_000_000);
         const selector = createLocalActivityBadgeSnapshotSelector({
@@ -436,8 +523,11 @@ describe('createLocalActivityBadgeSnapshotSelector', () => {
         }));
 
         expect(first.count).toBe(1);
-        expect(second).not.toBe(first);
         expect(second.count).toBe(1);
+        // `updatedAt` is part of the session activity signature, so the snapshot is
+        // re-derived — but the derived badge did not move, and this selector is the
+        // badge's React subscription, so it must not hand back a new instance.
+        expect(second).toBe(first);
     });
 
     it('counts transcript-only pending permissions from the selector state', () => {
