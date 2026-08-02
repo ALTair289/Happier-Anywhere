@@ -5881,26 +5881,12 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         if (materializeResult.providerDeliveryContractInvalid === true) {
-            if (
-                this.startedByDaemonProcess
-                && materializedMessage?.messageRole === 'user'
-                && materializedMessage.requestedAction === undefined
-            ) {
-                logger.debug('[pendingQueue] retained materialized delivery without predecessor authorization support', {
-                    sessionId: this.sessionId,
-                    localId: materializedLocalId,
-                });
-                if (materializedLocalId) {
-                    this.sourceCutoverDeferredPendingLocalIds.add(materializedLocalId);
-                }
-                return {
-                    didMaterialize: false,
-                    result: {
-                        type: 'deferred',
-                        reason: 'request_auth_source_cutover',
-                    },
-                };
-            }
+            // Both materialize transports drop the message whenever they raise this flag
+            // (`message: providerDeliveryContractInvalid ? null : message`), so an invalid
+            // provider contract is always resolved by blocking the row — a visible, actionable
+            // server state — never by parking it in local custody with no successor to inherit it.
+            // A materialization that legitimately carries no requested action arrives through the
+            // released-server contract with the flag unset and is authorized below.
             logger.debug('[pendingQueue] blocking materialized delivery with an invalid provider contract', {
                 sessionId: this.sessionId,
                 localId: materializedLocalId,
@@ -5918,19 +5904,44 @@ export class ApiSessionClient extends EventEmitter {
             && materializedMessage?.messageRole === 'user'
         ) {
             const requestedAction = materializedMessage.requestedAction;
-            const lifecycleResult = requestedAction
-                ? await this.notifyDaemonConnectedServiceTurnLifecycle(
-                    'prompt_or_steer',
-                    undefined,
-                    undefined,
-                    requestedAction,
-                )
-                : null;
-            if (lifecycleResult?.status !== 'continue') {
+            // The daemon owns turn custody for every prompt this runner delivers, including on a
+            // server contract that carries no requested action at all (released-server v0.2.1,
+            // whose materialize ack is exactly id/seq/localId). Notify unconditionally; the
+            // wrapper attaches the action and the active-turn witness only when there is one.
+            const lifecycleResult = await this.notifyDaemonConnectedServiceTurnLifecycle(
+                'prompt_or_steer',
+                undefined,
+                undefined,
+                requestedAction,
+            );
+            if (requestedAction && lifecycleResult === null) {
+                // The daemon did not answer at all (control channel down, or an unparsable reply).
+                // That is NOT a source cutover: no successor runner is coming to inherit the claim,
+                // so retaining it starves this row and every row queued behind it for the life of
+                // this runner (server-side `delivering` only clears on a successor publisher fence).
+                // Nothing was handed to the Provider, so release local custody and let the next
+                // drain rejoin the same server claim and re-authorize. Still fails closed: no
+                // delivery happens without an exact `continue`.
+                logger.debug('[pendingQueue] released materialized claim after an unanswered connected-service turn lifecycle', {
+                    sessionId: this.sessionId,
+                    localId: materializedLocalId,
+                });
+                if (materializedLocalId) {
+                    this.clearCanonicalPendingDeliveryLocalState(materializedLocalId);
+                }
+                return { didMaterialize: false, result: { type: 'retryable_transport' } };
+            }
+            if (lifecycleResult?.status === 'input_blocked') {
+                // Retention is correct only on the daemon's explicit cutover promise: a successor
+                // runner is coming and will inherit this claim. Test that positively, never as
+                // "anything that is not continue" — an unanswered daemon (handled above) and a
+                // materialization whose server contract has no action to authorize both have no
+                // successor, so parking the row there starves it and everything behind it for the
+                // life of this runner, with no server-side exit but publisher replacement.
                 logger.debug('[pendingQueue] retained materialized delivery for connected-service source cutover', {
                     sessionId: this.sessionId,
                     localId: materializedLocalId,
-                    lifecycleStatus: lifecycleResult?.status ?? 'unavailable',
+                    lifecycleStatus: lifecycleResult.status,
                 });
                 if (materializedLocalId) {
                     this.sourceCutoverDeferredPendingLocalIds.add(materializedLocalId);

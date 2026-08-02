@@ -1,3 +1,4 @@
+import axios from 'axios';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -168,6 +169,14 @@ async function waitForCurrentPendingInputContract(client: ApiSessionClient): Pro
     await Promise.resolve();
   }
   throw new Error('Timed out waiting for current Pending-input server contract');
+}
+
+async function waitForReleasedServerPendingInputContract(client: ApiSessionClient): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if ((client as any).sessionSyncPendingInputServerContract?.mode === 'released_server_v0_2_1') return;
+    await Promise.resolve();
+  }
+  throw new Error('Timed out waiting for released-server Pending-input server contract');
 }
 
 describe('ApiSessionClient session.userMessage.send delivery', () => {
@@ -1439,8 +1448,161 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledTimes(1);
       expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledTimes(1);
       expect(received).toHaveLength(0);
-      expect((client as any).canonicalPendingDeliveryByLocalId.has('fail-closed-local')).toBe(true);
+      // Fails closed on delivery, but the claim stays re-drivable: an unanswered or unparsable
+      // daemon reply is not a source cutover, and a retained claim would block the whole queue.
+      expect((client as any).sourceCutoverDeferredPendingLocalIds.has('fail-closed-local')).toBe(false);
+      expect((client as any).canonicalPendingDeliveryByLocalId.has('fail-closed-local')).toBe(false);
     } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it('re-drives a claimed prompt after an unanswered daemon lifecycle instead of retaining it forever', async () => {
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const claimedPrompt = {
+      didMaterialize: true,
+      localId: 'daemon-down-local',
+      didWrite: true,
+      pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 2 },
+      message: {
+        id: 'm-daemon-down-local',
+        seq: 21,
+        localId: 'daemon-down-local',
+        messageRole: 'user',
+        content: {
+          t: 'plain',
+          v: {
+            role: 'user',
+            content: { type: 'text', text: 'must not starve the queue' },
+            localId: 'daemon-down-local',
+          },
+        },
+        requestedAction: { v: 1, kind: 'enqueue' },
+        deliveryState: { mode: 'provider', unresolved: true },
+        createdAt: 1_000,
+        updatedAt: 1_000,
+      },
+    } as const;
+
+    const originalArgv = process.argv.slice();
+    try {
+      process.argv = [...originalArgv, '--started-by', 'daemon'];
+      const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+      await waitForCurrentPendingInputContract(client);
+      const received: any[] = [];
+      client.onUserMessage((message) => received.push(message));
+
+      materializeNextPendingQueueV2MessageMock.mockResolvedValueOnce(claimedPrompt);
+      notifyDaemonConnectedServiceTurnLifecycleMock.mockRejectedValueOnce(
+        new Error('No daemon running, no state file found'),
+      );
+
+      await expect((client as any).runMaterializeNextPendingMessageInner()).resolves.toEqual({
+        didMaterialize: false,
+        result: { type: 'retryable_transport' },
+      });
+      expect(received).toHaveLength(0);
+      expect(blockPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
+      // An unanswered daemon is not a source cutover: no successor runner is coming, so a
+      // retained claim would block every later row behind it for the life of this runner.
+      expect((client as any).sourceCutoverDeferredPendingLocalIds.has('daemon-down-local')).toBe(false);
+      expect((client as any).canonicalPendingDeliveryByLocalId.has('daemon-down-local')).toBe(false);
+
+      materializeNextPendingQueueV2MessageMock.mockResolvedValueOnce(claimedPrompt);
+      notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValueOnce({
+        status: 'continue',
+        turnCustody: { status: 'ignored_missing_exact_turn', activeTurnId: null },
+      });
+      await expect(client.materializeNextPendingMessageSafely()).resolves.toMatchObject({
+        type: 'materialized',
+        localId: 'daemon-down-local',
+      });
+      expect(received).toHaveLength(1);
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it('delivers a released-server materialization that carries no requested action instead of parking it forever', async () => {
+    // The server-v0.2.1 materialize contract has no requestedAction concept at all
+    // (its ack message carries exactly id/seq/localId) and it commits + dequeues the row
+    // atomically, so there is no claim to inherit and no successor to inherit it. Parking
+    // such a row as a source cutover loses the prompt permanently.
+    const releasedMaterializeAck = {
+      ok: true,
+      didMaterialize: true,
+      didWrite: true,
+      message: { id: 'm-released-local', seq: 9, localId: 'released-local' },
+    } as const;
+    sessionSocketStub = createApiSessionSocketStubBase({
+      connected: true,
+      emitWithAck: async (event) => {
+        if (event === 'ping') return {};
+        if (event === 'pending-materialize-next') return releasedMaterializeAck;
+        return { ok: true };
+      },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    // Released server v0.2.1: no compatibility capability block, Pending queue v2 without
+    // the provider delivery-state opt-in.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      features: {
+        sharing: {
+          pendingQueueV2: { enabled: true },
+          pendingDeliveryState: { enabled: false },
+        },
+      },
+    }), { status: 200 })));
+    const transcriptLookup = vi.spyOn(axios, 'get').mockResolvedValue({
+      status: 200,
+      data: {
+        message: {
+          id: 'm-released-local',
+          seq: 9,
+          localId: 'released-local',
+          sidechainId: null,
+          createdAt: 1_000,
+          updatedAt: 1_000,
+          content: {
+            t: 'plain',
+            v: {
+              role: 'user',
+              content: { type: 'text', text: 'released prompt' },
+              localId: 'released-local',
+            },
+          },
+        },
+      },
+    });
+    notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValue({
+      status: 'continue',
+      turnCustody: { status: 'ignored_missing_exact_turn', activeTurnId: null },
+    });
+
+    const originalArgv = process.argv.slice();
+    try {
+      process.argv = [...originalArgv, '--started-by', 'daemon'];
+      const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+      await waitForReleasedServerPendingInputContract(client);
+      const received: any[] = [];
+      client.onUserMessage((message) => received.push(message));
+
+      await expect((client as any).runMaterializeNextPendingMessageInner()).resolves.toMatchObject({
+        didMaterialize: true,
+        result: { type: 'materialized', localId: 'released-local', seq: 9 },
+      });
+      expect(received).toHaveLength(1);
+      expect(received[0]?.content?.text).toBe('released prompt');
+      // The daemon still owns turn custody for this prompt; it simply has no requested
+      // action to authorize on this server contract.
+      expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledExactlyOnceWith({
+        sessionId: 's1',
+        event: 'prompt_or_steer',
+      });
+      expect((client as any).sourceCutoverDeferredPendingLocalIds.has('released-local')).toBe(false);
+    } finally {
+      transcriptLookup.mockRestore();
       process.argv = originalArgv;
     }
   });
@@ -1547,35 +1709,22 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     }
   });
 
-  it('returns typed pre-effect deferral and retains the claim when predecessor authorization support is missing', async () => {
+  it('blocks an invalid provider contract instead of parking it in unreleasable local custody', async () => {
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,
       emitWithAckResult: { ok: true },
     });
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    // Exact shape both materialize transports produce for a row without a usable provider
+    // contract: the flag is raised and the message is dropped
+    // (pendingQueueV2Transport `message: providerDeliveryContractInvalid ? null : message`).
     materializeNextPendingQueueV2MessageMock.mockResolvedValueOnce({
       didMaterialize: true,
       localId: 'missing-support-local',
       didWrite: true,
       providerDeliveryContractInvalid: true,
+      message: null,
       pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 2 },
-      message: {
-        id: 'm-missing-support-local',
-        seq: 15,
-        localId: 'missing-support-local',
-        messageRole: 'user',
-        content: {
-          t: 'plain',
-          v: {
-            role: 'user',
-            content: { type: 'text', text: 'must remain Pending' },
-            localId: 'missing-support-local',
-          },
-        },
-        deliveryState: { mode: 'provider', unresolved: true },
-        createdAt: 1_000,
-        updatedAt: 1_000,
-      },
     });
 
     const originalArgv = process.argv.slice();
@@ -1588,16 +1737,18 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
 
       await expect((client as any).runMaterializeNextPendingMessageInner()).resolves.toEqual({
         didMaterialize: false,
-        result: {
-          type: 'deferred',
-          reason: 'request_auth_source_cutover',
-        },
+        result: { type: 'no_pending' },
       });
       expect(notifyDaemonConnectedServiceTurnLifecycleMock).not.toHaveBeenCalled();
-      expect(blockPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
       expect(received).toHaveLength(0);
-      expect((client as any).canonicalPendingDeliveryByLocalId.has('missing-support-local')).toBe(true);
-      expect((client as any).sourceCutoverDeferredPendingLocalIds.has('missing-support-local')).toBe(true);
+      // Blocked is a visible, user-actionable server state; local custody would be neither.
+      expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledTimes(1);
+      expect(blockPendingQueueV2DeliveryMock.mock.calls[0]?.[0]).toMatchObject({
+        localId: 'missing-support-local',
+        reason: 'unsupported_action',
+      });
+      expect((client as any).sourceCutoverDeferredPendingLocalIds.has('missing-support-local')).toBe(false);
+      expect((client as any).canonicalPendingDeliveryByLocalId.has('missing-support-local')).toBe(false);
     } finally {
       process.argv = originalArgv;
     }
