@@ -103,13 +103,44 @@ describe('web release runtime contract — (b) a genuine scrollbar/keyboard scro
         expect(after.scrollTop).toBe(3400 - 1200);
     });
 
-    it('GREEN: an UNTRUSTED genuine away-move still releases when it is BEYOND the pin threshold', () => {
-        // RN-web does not reliably mark scrollbar/keyboard scrolls trusted; a beyond-threshold away
-        // move (value mismatch with the last write) must still carry release authority.
+    it('GREEN: an UNTRUSTED away-move releases once it is SUSTAINED, not on the far single frame alone', () => {
+        // RN-web does not reliably mark scrollbar/keyboard scrolls trusted, so an untrusted gesture
+        // must still be able to release. Distance alone is NOT that evidence: commit ca44553f2
+        // (2026-07-09) removed `beyondPinThreshold` from untrusted release authority because a
+        // renderer-internal adjustment (Legend MVCP / alignItemsAtEnd) or a composer-inset
+        // compensation can land scrollTop arbitrarily far in ONE untrusted frame (live-captured R3
+        // root cause, 2026-07-08). Movement evidence is what releases: a sustained same-direction
+        // streak. A real scrollbar/keyboard gesture emits a continuous stream of frames, so it
+        // still releases immediately in practice — on its SECOND frame, proven here end to end.
         const model = new WebScrollRuntimeModel({ ...WEB, contentHeightPx: 4000, startPinned: true });
-        const frame = model.userScrollUpBy(900, { isTrusted: false });
-        expect(frame.genuineUserMovement).toBe(true);
+
+        // Frame 1: a far untrusted landing (900px up, well beyond the 72px threshold). Indistinguishable
+        // from a renderer/inset write on its own, so it must NOT release.
+        const farSingleFrame = model.userScrollUpBy(900, { isTrusted: false });
+        expect(farSingleFrame.genuineUserMovement).toBe(false);
+        expect(farSingleFrame.released).toBe(false);
+        expect(model.observe().distanceFromBottomPx).toBeGreaterThan(WEB.pinThresholdPx);
+        expect(model.observe().wantsPinned).toBe(true);
+
+        // Frame 2: the same reader keeps dragging. Now the movement is SUSTAINED, which is the
+        // evidence the owner requires, and the pin releases.
+        const sustainedFrame = model.userScrollUpBy(200, { isTrusted: false });
+        expect(sustainedFrame.genuineUserMovement).toBe(true);
+        expect(sustainedFrame.upwardIntent).toBe(true);
+        expect(sustainedFrame.released).toBe(true);
         expect(model.observe().wantsPinned).toBe(false);
+        expect(model.observe().scrollTop).toBe(3400 - 900 - 200);
+    });
+
+    it('RED demonstration: a far untrusted single frame and a sustained gesture must NOT be classified alike', () => {
+        // The discriminator this scenario exists for. A regression that restored `beyondPinThreshold`
+        // as untrusted release authority would classify BOTH frames below as genuine, and the
+        // composer-resize / Legend-MVCP compensation frame would silently unpin the reader again.
+        const model = new WebScrollRuntimeModel({ ...WEB, contentHeightPx: 4000, startPinned: true });
+        const far = model.userScrollUpBy(900, { isTrusted: false }).genuineUserMovement;
+        const sustained = model.userScrollUpBy(200, { isTrusted: false }).genuineUserMovement;
+        expect(far).not.toBe(sustained);
+        expect(far).toBe(false);
     });
 });
 

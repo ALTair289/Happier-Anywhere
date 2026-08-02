@@ -34,15 +34,27 @@ function resolveInstalledPackageDir() {
 
 const INSTALLED_PACKAGE_DIR = resolveInstalledPackageDir();
 
-/** A stand-in package whose runtime builds contain every documented marker. */
+/**
+ * A stand-in package whose runtime builds contain every documented marker.
+ *
+ * Each marker is repeated to its own `minOccurrences`, and an entry scoped with `builds` is written
+ * only into those builds — otherwise this generator would produce a package the real gate rejects,
+ * and every test below would be measuring the generator instead of the gate.
+ *
+ * `omitMarkerFromBuilds` drops one marker from a SUBSET of builds, which is how the scoping rules
+ * are shown to be load-bearing in both directions.
+ */
 function createFakePackage(options) {
     const omit = new Set(options?.omitMarkerIds ?? []);
     const onlyBuilds = options?.onlyBuilds ?? LEGEND_RUNTIME_BUILDS;
+    const omitFrom = options?.omitMarkerFromBuilds;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'legend-patch-markers-'));
     for (const build of onlyBuilds) {
         const body = LEGEND_PATCH_MARKERS
             .filter((entry) => !omit.has(entry.id))
-            .map((entry) => `// ${entry.marker}`)
+            .filter((entry) => !entry.builds || entry.builds.includes(build))
+            .filter((entry) => !(omitFrom?.id === entry.id && omitFrom.builds.includes(build)))
+            .flatMap((entry) => Array.from({ length: entry.minOccurrences }, () => `// ${entry.marker}`))
             .join('\n');
         fs.writeFileSync(path.join(dir, build), `${body}\n`, 'utf8');
     }
@@ -65,6 +77,7 @@ test('DISCRIMINATES: a single dropped hunk fails, and names the build and the de
 
     assert.equal(result.status, 'missing');
     // Every runtime build must report it — a hunk lost in one build is still a shipped defect.
+    // This entry is unscoped, so "every build" is all six.
     assert.equal(result.missing.length, LEGEND_RUNTIME_BUILDS.length);
     for (const item of result.missing) {
         assert.equal(item.id, 'ready-to-render-liveness');
@@ -88,6 +101,39 @@ test('DISCRIMINATES: each documented marker is independently load-bearing', () =
         assert.ok(
             result.missing.every((item) => item.id === entry.id),
             `omitting ${entry.id} must not implicate another marker`,
+        );
+    }
+});
+
+test('DISCRIMINATES: a build-scoped hunk is required of its builds and only of those', () => {
+    // Scoping is the one supported reason this gate may skip a check, so it has to be shown to be
+    // load-bearing in BOTH directions: a scoped marker that vanishes from a build it applies to
+    // must fail, and its absence from a build it does not apply to must not. A scope that only ever
+    // suppresses failures is indistinguishable from deleting the entry.
+    const scoped = LEGEND_PATCH_MARKERS.filter((entry) => entry.builds);
+    assert.ok(scoped.length > 0, 'expected at least one build-scoped marker to exercise the rule');
+
+    for (const entry of scoped) {
+        const inScope = [...entry.builds];
+        const outOfScope = LEGEND_RUNTIME_BUILDS.filter((build) => !inScope.includes(build));
+        assert.ok(outOfScope.length > 0, `${entry.id} is scoped to every build; drop the scope`);
+
+        const missingInScope = verifyVendoredLegendPatchMarkers({
+            packageDir: createFakePackage({ omitMarkerFromBuilds: { builds: inScope, id: entry.id } }),
+        });
+        assert.equal(missingInScope.status, 'missing', `${entry.id} must be required of ${inScope.join(', ')}`);
+        assert.deepEqual(
+            missingInScope.missing.map((item) => item.build).sort(),
+            [...inScope].sort(),
+            `${entry.id} must be reported for exactly the builds it is scoped to`,
+        );
+
+        // The generator already omits it everywhere out of scope; the baseline package must be ok.
+        const outOfScopeOk = verifyVendoredLegendPatchMarkers({ packageDir: createFakePackage() });
+        assert.equal(
+            outOfScopeOk.status,
+            'ok',
+            `${entry.id} must not be demanded of ${outOfScope.join(', ')}`,
         );
     }
 });

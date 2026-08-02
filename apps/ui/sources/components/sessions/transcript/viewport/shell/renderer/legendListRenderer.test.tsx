@@ -5277,10 +5277,120 @@ describe('Legend transcript renderer adapter', () => {
         capturedLegendListProps.ListFooterComponent.props.onLayout({
             nativeEvent: { layout: { height: 208, width: 800, x: 0, y: 0 } },
         });
+        // The geometry this correction would be measured in only just moved. It is spendable on
+        // the next read that agrees with this one — the bounded settle cadence is already
+        // polling (native in-motion coherence precondition, 2026-08-02).
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 209, width: 800, x: 0, y: 0 } },
+        });
         expect(assignedLegendRef.scrollToOffset).toHaveBeenCalledTimes(2);
         expect(assignedLegendRef.scrollToOffset).toHaveBeenLastCalledWith({
             animated: false,
             offset: 1_400,
+        });
+        expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
+    });
+
+    it('spends no further native tail correction while the crossover geometry is still moving', async () => {
+        // Live RED (UNIT M, 2026-08-01, send S11, iOS simulator, per-frame Legend state with
+        // stack-attributed writers): during ONE send the held-'end' residual corrector issued
+        // `api.scrollToOffset` twice from `evaluateLanding < verifyLanding <
+        // resumeHeldIntentSettle`, contributing to three writers and eleven writes in 3.4s.
+        //
+        // The one-write-per-observed-movement guard below only withholds while our own write is
+        // UNOBSERVED — `previous.currentOffset === landing.currentOffset`. Through the crossover
+        // that premise does not hold: `state.scroll` is the value Legend advances OPTIMISTICALLY
+        // inside `requestAdjust` (M measured -188.25 then +182.00 in two frames) and then declines
+        // to reconcile while `ignoreScrollFromMVCP` is armed, so a moving belief reads as
+        // "observed movement" and re-authorizes a fresh absolute write on essentially every
+        // settle frame. The tail (`contentLength - scrollLength`) is moving in the same frames.
+        //
+        // Web never reaches this evaluation for an 'end' intent at all (`verifyLanding` hands the
+        // tail to Legend's maintain-at-end lifecycle unconditionally), and its keyed corrector
+        // already refuses to spend a correction unless the reader was at rest across two
+        // consecutive reads of the same transaction. Native carried neither rule.
+        //
+        // This is a precondition on EVIDENCE, not a delay: nothing is scheduled, the bounded
+        // settle cadence is already polling, the beyond-threshold fallback still lands on the
+        // read that first observes the gap, and the next correction lands on the first read whose
+        // geometry agrees with the previous one (both asserted below).
+        setPlatformOS('ios');
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+
+        legendStateOverride = {
+            contentLength: 1_200,
+            end: 0,
+            isAtEnd: true,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+            scroll: 600,
+            scrollLength: 600,
+            start: 0,
+        };
+        const screen = await renderScreen(
+            <Renderer
+                webDomObservation={mountedWebDomObservation}
+                data={[{ id: 'row-1' }]}
+                dataKey="session-test"
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'ios',
+                })}
+                header={React.createElement('BottomSlot')}
+            />,
+        );
+        const identityHost = screen.tree.root.findByProps({ nativeID: 'legend-main-native-id' });
+        identityHost.props.onLayout({ nativeEvent: { layout: { height: 670, width: 800, x: 0, y: 0 } } });
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 40, width: 800, x: 0, y: 0 } },
+        });
+        assignedLegendRef.scrollToEnd.mockClear();
+        assignedLegendRef.scrollToOffset.mockClear();
+
+        // Crossover frame 1 — the excursion pushes past the maintain threshold. The
+        // beyond-threshold fallback is legitimately the app's, and this first read of the gap
+        // still lands it.
+        legendStateOverride = {
+            ...legendStateOverride,
+            contentLength: 1_810,
+            isAtEnd: false,
+            isNearEnd: false,
+            isWithinMaintainScrollAtEndThreshold: false,
+            scroll: 1_000,
+        };
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 192, width: 800, x: 0, y: 0 } },
+        });
+        expect(assignedLegendRef.scrollToOffset).toHaveBeenCalledTimes(1);
+        expect(assignedLegendRef.scrollToOffset).toHaveBeenLastCalledWith({
+            animated: false,
+            offset: 1_210,
+        });
+
+        // Crossover frame 2 — Legend's optimistic bookkeeping moved the believed offset AND the
+        // tail walked 8px (S11's measured 8px target gap). `state.scroll` changed, so the
+        // one-write-per-observed-movement guard reads our previous write as landed and would
+        // authorize a second absolute write; the geometry it would be measured in is still in
+        // motion, so it is not spendable evidence.
+        legendStateOverride = { ...legendStateOverride, contentLength: 1_802, scroll: 1_100 };
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 200, width: 800, x: 0, y: 0 } },
+        });
+        expect(assignedLegendRef.scrollToOffset).toHaveBeenCalledTimes(1);
+
+        // The crossover settles: this read agrees with the previous one, so the remaining
+        // beyond-threshold residual is real and the transaction corrects again. The precondition
+        // is not a latch.
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 201, width: 800, x: 0, y: 0 } },
+        });
+        expect(assignedLegendRef.scrollToOffset).toHaveBeenCalledTimes(2);
+        expect(assignedLegendRef.scrollToOffset).toHaveBeenLastCalledWith({
+            animated: false,
+            offset: 1_202,
         });
         expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
     });
@@ -6402,6 +6512,11 @@ describe('Legend transcript renderer adapter', () => {
             scroll: 1_800,
         };
         capturedLegendListProps.onLoad({ elapsedTimeInMs: 20 });
+        // The settle that the command itself opened already read the PRE-jump geometry, so this
+        // read observes a moved scroll range. The bounded settle cadence is already polling: the
+        // repair lands on the next frame, once the geometry it is measured in has stopped moving
+        // (native in-motion coherence precondition, 2026-08-02).
+        act(() => animationFrames.shift()?.(16));
         expect(assignedLegendRef.scrollToOffset).toHaveBeenLastCalledWith({
             animated: false,
             offset: 11_400,
@@ -6415,6 +6530,7 @@ describe('Legend transcript renderer adapter', () => {
             scroll: 11_400,
         };
         capturedLegendListProps.onItemSizeChanged({ index: 8, previous: 240, size: 1_240 });
+        act(() => animationFrames.shift()?.(16));
         act(() => animationFrames.shift()?.(16));
         expect(assignedLegendRef.scrollToOffset).toHaveBeenLastCalledWith({
             animated: false,

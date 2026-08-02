@@ -234,9 +234,29 @@ describe('transcript viewport controller', () => {
             reason: 'jump-to-bottom',
             mode: 'jump-to-bottom',
             force: true,
-            animated: true,
+            animated: false,
         });
         expect(controller.getMode()).toBe('jump-to-bottom');
+    });
+
+    it('resolves a bottom pin as a settled write, never an animation toward a moving target', () => {
+        // An animation fixes its target offset at issue time and lands it over many frames. While
+        // content is still hydrating that target is stale before it lands, and there is no
+        // write-time predicate that can see the growth that happens after the command - which is
+        // why this is a "do not animate" contract and not a "check the target first" contract.
+        // Measured (2026-08-01 W49 cold-reopen corpus, 11/11 events): the send takeover reaches
+        // this branch, the resulting animated `scrollToEnd` is still in flight 460-749ms later
+        // with the list's scroll transaction armed, and the platform then delivers the offset at
+        // the top. Web resolves the same intent and never animates a pin
+        // (`driver/webDom.ts` writes `{ animated: false }` on every bottom landing).
+        const controller = createTranscriptViewportController();
+
+        const command = controller.resolve({
+            type: 'jump-to-bottom',
+            sessionId: 'session-a',
+        });
+
+        expect(command).toMatchObject({ kind: 'pin-bottom', animated: false });
     });
 
     it('resolves fallback bottom pins through the controller', () => {

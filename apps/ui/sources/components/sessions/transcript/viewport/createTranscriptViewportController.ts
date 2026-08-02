@@ -43,7 +43,24 @@ export function createTranscriptViewportController(): TranscriptViewportControll
                         reason: 'jump-to-bottom',
                         mode,
                         force: true,
-                        animated: true,
+                        // A SETTLED WRITE, NOT AN ANIMATION. An animated tail write fixes its
+                        // target offset at issue time and lands it over many frames; while content
+                        // is still hydrating that target is stale before it lands, and no
+                        // write-time predicate can see growth that happens after the command.
+                        // Measured (2026-08-01 cold-reopen corpus, 11/11 events): this branch is
+                        // what the send takeover reaches, the resulting animated `scrollToEnd` was
+                        // still in flight 460-749ms later with the list's scroll transaction armed,
+                        // and the platform then delivered the offset at the top of the transcript.
+                        // Web resolves the same intent and never animates a bottom landing
+                        // (`driver/webDom.ts` writes `{ animated: false }` on every one), and it is
+                        // the platform that provably does not exhibit the defect.
+                        // Animation stays available where it is a genuine reader-initiated
+                        // transition: the jump affordance opts in through
+                        // `commandHost.executeWithAnimation`, which is the ONE seam that overrides
+                        // this flag. Every non-overriding caller - the send takeover, the
+                        // affordance's own fallback, the post-jump reconfirmation - is a
+                        // correction, and a correction must not be motion.
+                        animated: false,
                     };
                 case 'pin-bottom':
                     mode = input.mode;

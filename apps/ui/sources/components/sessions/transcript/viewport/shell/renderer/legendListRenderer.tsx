@@ -486,11 +486,11 @@ function LegendListTranscriptRendererInner<TItem>(
         intent: LegendHeldScrollIntent;
         targetOffset: number;
     }> | null>(null);
-    // The geometry the PREVIOUS web landing read of the live transaction observed. A correction
+    // The geometry the PREVIOUS landing read of the live transaction observed. A correction
     // may only be spent on evidence that is no longer in motion (see the coherence precondition
-    // in `evaluateLanding`); the app's own landed write rebases it, so correcting once never
-    // disqualifies the next correction.
-    const lastWebLandingObservationRef = React.useRef<Readonly<{
+    // in `evaluateLanding`); the app's own landed write rebases it on web, so correcting once
+    // never disqualifies the next correction.
+    const lastLandingObservationRef = React.useRef<Readonly<{
         currentOffset: number;
         intent: LegendHeldScrollIntent;
         scrollRange: number;
@@ -1615,7 +1615,7 @@ function LegendListTranscriptRendererInner<TItem>(
         };
         // Our own landed offset is the new coherence baseline: the reader did not move, we did.
         if (landedOffset !== null && typeof landing.maxOffset === 'number' && Number.isFinite(landing.maxOffset)) {
-            lastWebLandingObservationRef.current = {
+            lastLandingObservationRef.current = {
                 currentOffset: landedOffset,
                 intent,
                 scrollRange: landing.maxOffset,
@@ -1679,25 +1679,54 @@ function LegendListTranscriptRendererInner<TItem>(
             // precondition on evidence, never a delay or a suppression window: a genuine
             // residual survives into the very next settle frame — which the bounded cadence is
             // already polling — and is written there, while a one-frame seam artifact does not.
-            const previousObservation = lastWebLandingObservationRef.current;
-            const hasWebScrollRange = landing.basis === 'web-dom'
+            const previousObservation = lastLandingObservationRef.current;
+            // NATIVE HELD-'END' JOINS THE SAME PRECONDITION (Rank 2, 2026-08-02). Web never
+            // reaches this evaluation for an 'end' intent — `verifyLanding` hands the tail to
+            // Legend's maintain-at-end lifecycle unconditionally — so the guard above was
+            // web-keyed by accident of reachability, not by design. On native the SAME branch is
+            // reachable the moment an MVCP excursion pushes `isWithinMaintainScrollAtEndThreshold`
+            // false, and BOTH numbers this transaction reads are mid-transaction there:
+            // `currentOffset` is `state.scroll`, which Legend advances optimistically inside
+            // `requestAdjust` and then declines to reconcile while `ignoreScrollFromMVCP` is
+            // armed, and `maxOffset` is `contentLength - scrollLength`, which walks every commit.
+            // Measured (UNIT M, 2026-08-01, send S11): the corrector wrote absolute offsets from
+            // single in-motion reads while Legend's own compensation was mid-flight — three
+            // writers, eleven writes, 3.4s, for one send.
+            //
+            // This closes the half of that hazard the one-write-per-observed-movement guard in
+            // `writeHeldIntentResidual` cannot see: that guard only withholds while our own write
+            // is UNOBSERVED (`currentOffset` unchanged). Through a crossover `state.scroll` is
+            // swinging (M: -188.25 then +182.00 in two frames), so it reads as "observed
+            // movement" on nearly every settle frame and authorizes a fresh absolute write each
+            // time. The two rules compose: one write per observed movement, and none at all while
+            // the geometry that movement is measured in is still moving.
+            const isNativeTailLanding = !isWebFrame && intent.kind === 'end';
+            const hasComparableScrollRange = (landing.basis === 'web-dom' || isNativeTailLanding)
                 && typeof landing.maxOffset === 'number'
                 && Number.isFinite(landing.maxOffset);
-            if (hasWebScrollRange) {
-                lastWebLandingObservationRef.current = {
+            if (hasComparableScrollRange) {
+                lastLandingObservationRef.current = {
                     currentOffset: landing.currentOffset,
                     intent,
                     scrollRange: landing.maxOffset as number,
                 };
             }
+            const comparableObservation = hasComparableScrollRange
+                && previousObservation != null
+                && previousObservation.intent === intent
+                ? previousObservation
+                : null;
             // A transaction's FIRST read has nothing to disagree with; entry restore and every
-            // fresh hold must still land promptly. Only an observed CHANGE withholds.
-            const geometryStableSinceLastRead = !hasWebScrollRange
-                || previousObservation == null
-                || previousObservation.intent !== intent
+            // fresh hold must still land promptly. Only an observed CHANGE withholds. That
+            // exemption is deliberate and load-bearing on native too — nine live-captured
+            // scenarios (session-open footer race, giant-row remeasure, far jump-to-bottom
+            // repair, fling resume, clamp boundary) depend on the beyond-threshold fallback
+            // landing on the read that first observes the gap.
+            const geometryStableSinceLastRead = !hasComparableScrollRange
+                || comparableObservation === null
                 || (
-                    previousObservation.currentOffset === landing.currentOffset
-                    && previousObservation.scrollRange === landing.maxOffset
+                    comparableObservation.currentOffset === landing.currentOffset
+                    && comparableObservation.scrollRange === landing.maxOffset
                 );
             // A target already sitting on a physical clamp boundary with the viewport beyond
             // it is settled by the platform spring itself; corrections against the spring

@@ -706,6 +706,102 @@ describe('transcript lifecycle host', () => {
         expect(appOwnedReturnPlan.state.bottomFollowState.mode).toBe('following');
     });
 
+    it('keeps native bottom-follow through an app-caused excursion but releases it for a real drag', () => {
+        // NATIVE SELF-WRITE ATTRIBUTION. Native has no landed-value self-write registry and no
+        // usable `isTrusted` (RN carries it on the synthetic wrapper, never on the scroll
+        // payload), so a viewport excursion the app/renderer caused reaches this owner
+        // INDISTINGUISHABLE from a finger drag: the raw offset delta answers
+        // `movedAwayFromLiveTail: true`, and with the intent window still armed by an earlier
+        // real input the facts observer promotes it to `trustedUserMovement: true`.
+        //
+        // Attribution is therefore not owned by a per-frame registry here — it is owned by the
+        // RELEASE GATES: leaving 'following' requires independent user-ownership evidence
+        // (an open drag session, momentum, or a live touch). This test pins BOTH directions,
+        // because a guard that suppressed the excursion by suppressing away-movement outright
+        // would also strand a reader who genuinely scrolled up.
+        //
+        // Excursion shape is the measured send crossover (UNIT M, 2026-08-01): a tail-pinned
+        // reader, offset dropping ~188 px in one frame with no touch on the transcript.
+        const excursionObservation = (overrides: Readonly<{
+            bottomFollowMode: 'escaping' | 'following';
+            hasTrustedDragSession: boolean;
+        }>) => ({
+            bottomFollowMode: overrides.bottomFollowMode,
+            configuredBottomDistanceNoiseFloorPx: null,
+            contentHeightPx: 99_882,
+            distanceFromLiveTailForReleasePx: 188,
+            distanceFromLiveTailPx: 188,
+            entryRestoreConfirmedByObservation: false,
+            hasNativeContentMeasurement: true,
+            hasNativeInitialViewportApplied: true,
+            hasOpenTrustedAwayGesture: false,
+            hasRenderedItems: true,
+            hasTrustedDragSession: overrides.hasTrustedDragSession,
+            isLoaded: true,
+            isTrusted: false,
+            isWarmKeepAliveInstance: false,
+            lastNativePinOffset: null,
+            // Armed by a real input 100 ms ago: the worst case, where the app's own movement
+            // is eligible for the `trustedUserMovement` promotion.
+            lastUserScrollIntentAtMs: 900,
+            layoutHeightPx: 800,
+            movedAwayFromLiveTail: true,
+            movedTowardLiveTail: false,
+            nativeListDragActive: false,
+            nativeMomentumScrollActive: false,
+            nativeMountSettleDeadlineReached: false,
+            nativeMountSettleStable: true,
+            nowMs: 1000,
+            pendingBottomPin: false,
+            pinEnabled: true,
+            pinThresholdPx: 72,
+            platform: 'native' as const,
+            previousScrollOffsetPx: 99_082,
+            recentUserIntent: true,
+            scrollOffsetPx: 98_894,
+            sessionEntrySessionId: 'session-a',
+            sessionEntryShouldFollowBottom: true,
+            sessionId: 'session-a',
+            userIntentRecentMs: 500,
+            usesNativeFlashListBottomMaintenance: false,
+            visualBottomScrollOffset: 99_082,
+            wantsPinned: true,
+        });
+
+        const followingHost = createTranscriptLifecycleHost();
+        followingHost.enterSession({
+            platform: 'native',
+            sessionId: 'session-a',
+            shouldFollowLiveTail: true,
+        });
+        const excursionPlan = followingHost.observeScroll(excursionObservation({
+            bottomFollowMode: 'following',
+            hasTrustedDragSession: false,
+        }));
+        expect(excursionPlan.state.bottomFollowState.mode).toBe('following');
+        expect(excursionPlan.followIntent?.released).toBe(false);
+        expect(excursionPlan.followIntent?.wantsPinned).toBe(true);
+
+        // Same frame, same numbers — but a genuine finger drag opened first
+        // (`onScrollBeginDrag`, which RN never fires for a programmatic write). The reader's
+        // authority must still take the viewport off the tail.
+        const draggingHost = createTranscriptLifecycleHost();
+        draggingHost.enterSession({
+            platform: 'native',
+            sessionId: 'session-a',
+            shouldFollowLiveTail: true,
+        });
+        draggingHost.planNativeGestureTakeover({
+            sessionId: 'session-a',
+            timestampMs: 900,
+        });
+        const dragPlan = draggingHost.observeScroll(excursionObservation({
+            bottomFollowMode: 'escaping',
+            hasTrustedDragSession: true,
+        }));
+        expect(dragPlan.state.bottomFollowState.mode).toBe('released');
+    });
+
     it('groups session-entry lifecycle reset and viewport plans', () => {
         const host = createTranscriptLifecycleHost();
 

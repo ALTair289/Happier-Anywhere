@@ -278,6 +278,24 @@ describe('transcript viewport command host', () => {
         expect(bundle.recorded.filter((event) => event.type === 'scroll-write')).toHaveLength(1);
     });
 
+    it('lands a resolved bottom intent unanimated unless a caller opts into the animation', () => {
+        // The send takeover (`useTranscriptBottomFollowHost` follow-bottom-intent effect) resolves
+        // and executes without an animation override, so whatever the resolver decides IS the
+        // physical write. Only the reader-pressed jump affordance opts in via executeWithAnimation
+        // (covered above); this is the path that must stay a settled write.
+        const controller = createTranscriptViewportCommandController();
+        controller.resetForSession({ openEntryTransaction: false, sessionId: BASE_SESSION });
+        const bundle = buildDriverDeps();
+        const host = createHost({ controller, deps: bundle.deps });
+
+        const command = host.resolve({ type: 'jump-to-bottom', sessionId: BASE_SESSION });
+
+        expect(host.execute(command)).toBe(true);
+        expect(bundle.node.indexCalls).toEqual([
+            expect.objectContaining({ animated: false }),
+        ]);
+    });
+
     it('restoreWebPrependAnchor returns detailed web restore result through the command host', () => {
         setPlatform('web');
         const controller = createTranscriptViewportCommandController();
