@@ -5,7 +5,7 @@ import Animated, {
     useSharedValue,
     withSpring,
     useDerivedValue,
-    SharedValue,
+    type SharedValue,
 } from 'react-native-reanimated';
 import { runOnJS, runOnUI, scheduleOnRN } from 'react-native-worklets';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';

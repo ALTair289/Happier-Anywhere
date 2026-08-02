@@ -2,7 +2,7 @@ import * as React from 'react';
 import { Platform, View, Pressable } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
-import { SharedValue, useAnimatedReaction, runOnJS } from 'react-native-reanimated';
+import { useAnimatedReaction, runOnJS } from 'react-native-reanimated';
 import { Text } from '@/components/ui/text/Text';
 import { Icon } from '@/components/ui/icons/Icon';
 

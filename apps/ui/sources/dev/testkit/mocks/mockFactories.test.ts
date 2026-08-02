@@ -819,4 +819,77 @@ describe('UI testkit mock factories', () => {
             MaterialIcons: 'MaterialIcons',
         });
     });
+
+    // `react-native-reanimated` is mocked for every suite from `sources/dev/vitestSetup.ts`
+    // and aliased to `sources/dev/reactNativeReanimatedStub.ts`, both built from
+    // `createReanimatedModuleMock()`. When production reaches for an export the factory does
+    // not carry, every suite that renders that path fails at once with
+    // `No "<name>" export is defined on the "react-native-reanimated" mock` — which is exactly
+    // what a single new `useDerivedValue` call site did on 2026-08-01. Derive the required
+    // surface from production source so the factory cannot silently fall behind again.
+    it('creates a reanimated mock carrying every runtime export production imports', async () => {
+        const { createReanimatedModuleMock } = await import('./reanimated');
+        const {
+            collectReanimatedRuntimeImports,
+            readReanimatedStubExportNames,
+        } = await import('./reanimatedProductionSurface');
+        // The vite alias resolves `react-native-reanimated` to a stub that re-exports the factory
+        // through a hand-written named-export list — a second place the surface can drift.
+        const stubExports = readReanimatedStubExportNames();
+
+        const mock = createReanimatedModuleMock() as Record<string, unknown>;
+        const animatedDefault = mock.default as Record<string, unknown>;
+        const usage = collectReanimatedRuntimeImports();
+
+        expect(usage.namedImports.size).toBeGreaterThan(10);
+        expect(usage.files.length).toBeGreaterThan(10);
+
+        const missingNamed = [...usage.namedImports]
+            .filter((name) => mock[name] === undefined)
+            .sort();
+        const missingFromStub = [...usage.namedImports]
+            .filter((name) => !stubExports.has(name))
+            .sort();
+        const missingDefaultMembers = [...usage.defaultMembers]
+            .filter((name) => animatedDefault[name] === undefined)
+            .sort();
+
+        expect({ missingNamed, missingFromStub, missingDefaultMembers }).toEqual({
+            missingNamed: [],
+            missingFromStub: [],
+            missingDefaultMembers: [],
+        });
+
+        // Presence alone does not prove the export is usable: `ShimmerView` hands the same
+        // animated ref to a component's `ref` prop AND to `measure(...)` inside an animated
+        // style. Drive that exact shape through React so a stub that is merely defined — an
+        // object instead of a callback ref, or a `measure` that throws — still fails here.
+        const useAnimatedRef = mock.useAnimatedRef as <T,>() => { current: T | null };
+        const measure = mock.measure as (ref: unknown) => { width: number } | null;
+        const useAnimatedStyle = mock.useAnimatedStyle as <T,>(factory: () => T) => T;
+        const measured: Array<{ width: number } | null> = [];
+
+        const Probe = () => {
+            const containerRef = useAnimatedRef<unknown>();
+            const style = useAnimatedStyle(() => {
+                const box = measure(containerRef);
+                measured.push(box);
+                return { width: box ? box.width : 0 };
+            });
+            return React.createElement(animatedDefault.View as string, { ref: containerRef, style });
+        };
+
+        let probe: ReturnType<typeof renderer.create> | undefined;
+        await act(async () => {
+            probe = renderer.create(React.createElement(Probe));
+        });
+        expect(measured).toEqual([null]);
+        expect(probe?.toJSON()).toMatchObject({
+            type: animatedDefault.View,
+            props: { style: { width: 0 } },
+        });
+        await act(async () => {
+            probe?.unmount();
+        });
+    });
 });
