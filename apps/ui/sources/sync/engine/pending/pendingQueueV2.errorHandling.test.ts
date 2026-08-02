@@ -373,6 +373,45 @@ describe('pendingQueueV2 error handling', () => {
         expect(storage.getState().sessionPending[sessionId]?.messages ?? []).toEqual([]);
     });
 
+    it('retires the local projection of a discarded message without waiting for the refresh', async () => {
+        // Discard is an OWNER-driven retirement: the user asked for it and no committed twin is
+        // coming. Its two siblings (`deletePendingMessageV2`, `markPendingDeliveryHandledV2`)
+        // retire the local projection themselves; discard relied entirely on the refresh, so a
+        // refresh that does not land left a live-looking pending row for a discarded message.
+        const sessionId = 's_test_discard_retires_local_projection';
+        const localId = 'discarded-projection';
+        storage.getState().applySessions([buildSession({ sessionId, overrides: { encryptionMode: 'plain' } })]);
+        storage.getState().upsertPendingMessage(sessionId, {
+            id: localId,
+            localId,
+            createdAt: 111,
+            updatedAt: 111,
+            source: 'local_outbound',
+            deliveryStatus: 'accepted',
+            pendingOutboxScope: outboxScope,
+            pendingDeliveryStatus: 'server_queued',
+            text: 'discard me',
+            rawRecord: { role: 'user', content: { type: 'text', text: 'discard me' }, meta: {} },
+        });
+        const methods: Array<string | undefined> = [];
+
+        await discardPendingMessageV2({
+            sessionId,
+            pendingId: localId,
+            encryption: await createPendingQueueEncryption({ sessionId }),
+            request: async (_path, init) => {
+                methods.push(init?.method);
+                // The discard commits, then the refresh fails (offline/5xx) and cannot retire it.
+                return init?.method === 'POST'
+                    ? Response.json({ ok: true })
+                    : new Response(null, { status: 500 });
+            },
+        });
+
+        expect(methods).toEqual(['POST', 'GET']);
+        expect(storage.getState().sessionPending[sessionId]?.messages ?? []).toEqual([]);
+    });
+
     it.each(['.', '..'] as const)('rejects unsafe pending ID path segment %s before issuing a request', async (pendingId) => {
         const sessionId = `s_test_unsafe_pending_id_${pendingId.length}`;
         storage.getState().applySessions([buildSession({ sessionId })]);

@@ -31,11 +31,27 @@ export function shouldPreservePendingProjectionAfterCommittedUserLocalId(
  * side keyed on a separately built transcript-localId set, which is two decision-makers over one
  * handover.
  *
- * ATOMICITY (2026-07-30): the handover is already a single commit and this projection is not where
- * that is decided. `sync/store/domains/messages.ts` removes the matching non-durable pending records
- * in the SAME store update that appends the committed messages, so a subscriber never observes a
- * frame with neither row (nor one with both). This module only has to keep the durable-pending case
- * consistent with that, which is what the invariant above states.
+ * ATOMICITY (2026-08-01): the handover is a single store update and this projection is not where
+ * that is decided. MANY writers can retire a pending record — `pruneServerPendingMessages`, the
+ * bulk snapshot replacement, and every `removePendingMessage` call site in
+ * `sync/engine/pending/pendingQueueV2.ts` and `sync/sync.ts` — but only ONE of them holds the
+ * committed twin at the moment of removal: `sync/store/domains/messages.ts#applyMessages`, which
+ * removes the matching non-durable pending records in the SAME store update that appends the
+ * committed messages. Without that pairing a subscriber observes a frame with NEITHER row, which
+ * renders a transcript one row shorter and moves the viewport by a whole row height mid-send.
+ *
+ * So the two SERVER-state writers in `sync/store/domains/pending.ts` retain an accepted
+ * `local_outbound` projection that the server pending queue never owned (no `pendingOutboxScope`)
+ * and whose committed twin has not arrived, because neither writer speaks for that row. Retention
+ * is bounded by ownership and authority, not by time: a DURABLE outbox projection is addressed by
+ * the server pending queue, so "discarded" and "absent" retire it; and a locally owned row is
+ * retired the moment a server write names its localId (queued or discarded), matching
+ * `pendingQueueV2.ts#reconcileServerPendingSnapshotWithLocalOutbound`'s `serverLocalIds`.
+ *
+ * Owner-driven removal (cancel, discard, delete, send failure) goes through `removePendingMessage`
+ * and is unaffected: retention can only re-publish a row still present in the store's own bucket,
+ * never resurrect one. This module only has to keep the durable-pending case consistent with all
+ * of that, which is what the invariant above states.
  */
 export type PendingTranscriptCrossover = Readonly<{
     /** localIds whose transcript slot is still owned by a durable (server) pending row. */

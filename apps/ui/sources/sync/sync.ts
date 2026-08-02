@@ -2478,12 +2478,16 @@ class Sync {
                 throw new Error(ack.error || 'Message send rejected');
             }
 
-            // Message is committed. Remove from pending and insert into the canonical transcript
-            // (without waiting for broadcast updates, which can be missed on backgrounded devices).
-            storage.getState().removePendingMessage(sessionId, localId);
+            // Message is committed. Insert it into the canonical transcript without waiting for
+            // broadcast updates, which can be missed on backgrounded devices. `applyMessages`
+            // retires the matching pending projection in the SAME store update, so the transcript
+            // never publishes a frame with neither row; a standalone removal here would be a
+            // second writer for the same retirement.
             const committed = normalizeRawMessage(ack.id, localId, createdAt, content, { seq: ack.seq });
             if (committed) {
                 this.applyMessages(sessionId, [committed]);
+            } else {
+                storage.getState().removePendingMessage(sessionId, localId);
             }
             this.markSessionMaterializedMaxSeq(sessionId, ack.seq);
 
@@ -2861,10 +2865,12 @@ class Sync {
             const ack = rawAck ? MessageAckResponseSchema.safeParse(rawAck) : null;
 
             if (ack?.success && ack.data.ok === true) {
-                storage.getState().removePendingMessage(params.sessionId, params.localId);
+                // `applyMessages` retires the matching pending projection in the same store update.
                 const committed = normalizeRawMessage(ack.data.id, params.localId, pending.createdAt, rawRecord, { seq: ack.data.seq });
                 if (committed) {
                     this.applyMessages(params.sessionId, [committed]);
+                } else {
+                    storage.getState().removePendingMessage(params.sessionId, params.localId);
                 }
                 this.markSessionMaterializedMaxSeq(params.sessionId, ack.data.seq);
 

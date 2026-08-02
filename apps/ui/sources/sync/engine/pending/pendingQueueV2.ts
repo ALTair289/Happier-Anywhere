@@ -2357,7 +2357,8 @@ export async function discardPendingMessageV2(params: {
     isOutboxScopeCurrent?: () => boolean | Promise<boolean>;
 }): Promise<void> {
     const { sessionId, reason, encryption, request } = params;
-    const pendingId = resolvePendingServerMutationTarget(sessionId, params.pendingId, params.outboxScope).localId;
+    const mutationTarget = resolvePendingServerMutationTarget(sessionId, params.pendingId, params.outboxScope);
+    const pendingId = mutationTarget.localId;
     assertPendingOutboxTransportAllowed(sessionId, pendingId, params.outboxScope);
 
     const response = await request(`${pendingMessagePath(sessionId, pendingId)}/discard`, {
@@ -2367,6 +2368,14 @@ export async function discardPendingMessageV2(params: {
     });
     if (!response.ok) {
         assertPendingResponseOk(response, 'Failed to discard pending message');
+    }
+    // Owner-driven retirement: the discard committed, so this device already knows the row is no
+    // longer queued. Retiring it here (as `deletePendingMessageV2` and `markPendingDeliveryHandledV2`
+    // do) means the projection does not depend on the refresh below landing. It is a write into
+    // this session's bucket, so it takes the same owner-scope fence the follow-up snapshot takes.
+    if (params.isOutboxScopeCurrent === undefined || await params.isOutboxScopeCurrent()) {
+        const existing = findCurrentPendingServerMutationProjection(sessionId, mutationTarget, params.outboxScope);
+        if (existing) storage.getState().removePendingMessage(sessionId, existing.id);
     }
     await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request, outboxScope: params.outboxScope, isOutboxScopeCurrent: params.isOutboxScopeCurrent });
 }
