@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { type Fastify } from "../../types";
-import { ANDROID_UP_TO_DATE, IOS_UP_TO_DATE } from "@/versions";
 import {
     ClientVersionCheckRequestV1Schema,
     ClientVersionCheckResponseV1Schema,
@@ -8,7 +7,11 @@ import {
 import { resolveSessionSyncCompatibilityPolicy } from '@/app/clientCompatibility/policy';
 import { resolveClientVersionDecision } from '@/app/clientCompatibility/versionDecision';
 
+// Upgrade destination, not an upgrade floor: the minimum version comes solely
+// from the session-sync compatibility policy.
 const IOS_UPDATE_URL = 'https://apps.apple.com/us/app/happier-claude-codex-opencode/id6758537388';
+
+const POLICY_INVALID_ERROR = 'compatibility_policy_invalid' as const;
 
 const LegacyClientVersionCheckRequestSchema = z.object({
     platform: z.string(),
@@ -21,6 +24,12 @@ const LegacyClientVersionCheckResponseSchema = z.object({
     update_url: z.string().nullable(),
 }).strict();
 
+/**
+ * Registers the client version endpoints: a `GET` reachability probe and a
+ * `POST` upgrade check accepting both the v1 protocol body and the legacy
+ * `{ platform, version, app_id }` shape still sent by deployed native builds.
+ * Both bodies resolve through the same compatibility-policy decision.
+ */
 export function versionRoutes(app: Fastify) {
     app.get('/v1/version', {
         schema: {
@@ -39,21 +48,26 @@ export function versionRoutes(app: Fastify) {
             body: z.union([ClientVersionCheckRequestV1Schema, LegacyClientVersionCheckRequestSchema]),
             response: {
                 200: z.union([ClientVersionCheckResponseV1Schema, LegacyClientVersionCheckResponseSchema]),
+                500: z.object({ error: z.literal(POLICY_INVALID_ERROR) }),
             }
         }
-    }, async (request) => {
+    }, async (request, reply) => {
         const policy = resolveSessionSyncCompatibilityPolicy(process.env);
+        // The operator asked for enforcement but the policy could not be read, so
+        // no minimum is available. Answering `current` would silently under-report
+        // a required upgrade, so refuse rather than assert an unverified claim.
+        if (!policy.valid && policy.requestedEnforcement === 'required') {
+            return reply.code(500).send({ error: POLICY_INVALID_ERROR });
+        }
         if (!('v' in request.body)) {
             const platform = request.body.platform.toLowerCase();
             if (platform !== 'ios' && platform !== 'android') {
                 return { update_required: false, update_url: null };
             }
-            const range = platform === 'ios' ? IOS_UP_TO_DATE : ANDROID_UP_TO_DATE;
             const decision = resolveClientVersionDecision({
                 clientKind: platform === 'ios' ? 'ui-ios' : 'ui-android',
                 appVersion: request.body.version,
                 policy,
-                distributionSupportedRange: range,
                 distributionUpdateUrl: platform === 'ios' ? IOS_UPDATE_URL : null,
             });
             return {
@@ -62,16 +76,10 @@ export function versionRoutes(app: Fastify) {
             };
         }
         const { clientKind, appVersion } = request.body;
-        const nativeRange = clientKind === 'ui-ios'
-            ? IOS_UP_TO_DATE
-            : clientKind === 'ui-android'
-                ? ANDROID_UP_TO_DATE
-                : undefined;
         return resolveClientVersionDecision({
             clientKind,
             appVersion,
             policy,
-            ...(nativeRange === undefined ? null : { distributionSupportedRange: nativeRange }),
             ...(clientKind === 'ui-ios' ? { distributionUpdateUrl: IOS_UPDATE_URL } : null),
         });
     });
