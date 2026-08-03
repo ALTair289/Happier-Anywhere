@@ -5119,7 +5119,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     });
   });
 
-  it('suppresses runtime usage-limit fanout with source trace when exact source account identity is still unavailable', async () => {
+  it('still consumes committed group truth when exact source account identity is unavailable for same-account attribution', async () => {
     const now = 1_000_000;
     const credentials: Credentials = {
       token: 'happy-token',
@@ -5134,7 +5134,8 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       getConnectedServiceCredentialSealed: vi.fn(async () => null),
       registerProviderAccountUsageSnapshotSealed: vi.fn(async () => {}),
     } as unknown as QuotaApi;
-    const switchBeforeTurn = vi.fn(async () => ({ status: 'switched' as const, activeProfileId: 'backup', generation: 2 }));
+    const switchBeforeTurn = vi.fn(async () => ({ status: 'switched' as const, activeProfileId: 'backup', generation: 5 }));
+    const consumeCommittedAuthGroupGeneration = vi.fn(async () => ({ outcome: 'adopted_current' as const }));
     const readRuntimeAccountIdentity = vi.fn(async () => ({
       status: 'inexact' as const,
       reason: 'runtime_identity_probe_missing_exact_identity',
@@ -5147,6 +5148,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       now: () => now,
       randomBytes: (length: number) => randomBytes(length),
       authGroupSwitchCoordinator: { switchBeforeTurn },
+      consumeCommittedAuthGroupGeneration,
       groupSwitchCheckMinIntervalMs: 0,
       sameAccountFanoutStrategyResolver: () => 'provider_account_id',
       readRuntimeAccountIdentity,
@@ -5188,7 +5190,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     })).resolves.toEqual({
       status: 'recorded',
       fanoutCandidates: 0,
-      fanoutRequests: 0,
+      fanoutRequests: 1,
     });
 
     expect(readRuntimeAccountIdentity).toHaveBeenCalledWith({
@@ -5198,7 +5200,20 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       profileId: 'primary',
       expectedGroupGeneration: 3,
     });
+    // This path already carries the coordinator's immutable committed fact. Missing exact
+    // provider-account proof may suppress exhaustion attribution, but it must neither reselect
+    // nor prevent the current group generation from reaching the live runtime.
     expect(switchBeforeTurn).not.toHaveBeenCalled();
+    expect(consumeCommittedAuthGroupGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      committedGeneration: expect.objectContaining({
+        decisionCommittedTarget: expect.objectContaining({
+          profileId: 'backup',
+          generation: 2,
+        }),
+      }),
+      sessions: [{ sessionId: 'source', activity: 'live', fromProfileId: 'primary' }],
+      executionAuthority: 'runtime_recovery',
+    }));
     expect(diagnostics).toContainEqual(expect.objectContaining({
       event: 'quota_work_suppressed',
       phase: 'same_account_fanout',
@@ -7006,6 +7021,83 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     }));
     expect(diagnostics).not.toContainEqual(expect.objectContaining({
       reason: 'same_account_fanout_candidate_idle_deferred_to_next_spawn',
+    }));
+  });
+
+  it('applies committed group truth to every live group member even when provider-account proof differs', async () => {
+    const now = 1_000_000;
+    const credentials: Credentials = {
+      token: 'happy-token',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) },
+    };
+    const api = {
+      getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
+      getConnectedServiceQuotaSnapshotPlain: vi.fn(async () => null),
+      getConnectedServiceCredentialPlain: vi.fn(async () => null),
+      getConnectedServiceQuotaSnapshotSealed: vi.fn(async () => null),
+      getConnectedServiceCredentialSealed: vi.fn(async () => null),
+    } as unknown as QuotaApi;
+    const consumeCommittedAuthGroupGeneration = vi.fn(async () => ({ outcome: 'adopted_current' as const }));
+    const coordinator = new ConnectedServiceQuotasCoordinator({
+      api,
+      credentials,
+      quotaFetchers: [],
+      now: () => now,
+      randomBytes: (length: number) => randomBytes(length),
+      authGroupSwitchCoordinator: { switchBeforeTurn: vi.fn() },
+      sameAccountFanoutStrategyResolver: () => 'provider_account_id',
+      readRuntimeAccountIdentity: vi.fn(async ({ sessionId }: { sessionId: string }) => ({
+        status: 'verified' as const,
+        providerAccountId: sessionId === 'source' ? 'acct-old' : 'acct-other',
+        accountLabel: null,
+        proofStrength: 'exact' as const,
+        source: 'runtime_identity_probe' as const,
+        runtime: { inProviderTurn: false, safeToApply: true },
+      })),
+      consumeCommittedAuthGroupGeneration,
+    });
+
+    for (const [sessionId, pid, activeProfileId] of [
+      ['source', 701, 'old-member'],
+      ['different-account-sibling', 702, 'other-member'],
+    ] as const) {
+      coordinator.registerSpawnTarget({
+        pid,
+        sessionId,
+        connectedServicesBindingsRaw: {
+          v: 1,
+          bindingsByServiceId: {
+            'openai-codex': { source: 'connected', selection: 'group', groupId: 'team' },
+          },
+        },
+        connectedServiceSelectionsEnv: {
+          [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+            kind: 'group',
+            serviceId: 'openai-codex',
+            groupId: 'team',
+            activeProfileId,
+            fallbackProfileId: activeProfileId,
+            generation: 4,
+          }]),
+        },
+      });
+    }
+
+    await recordAccountExhaustionAndFanoutForTest(coordinator, {
+      sourceSessionId: 'source',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      exhaustedProfileId: 'old-member',
+      providerAccountId: 'acct-old',
+      resetAtMs: now + 600_000,
+      reason: 'usage_limit',
+    });
+
+    expect(consumeCommittedAuthGroupGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      sessions: expect.arrayContaining([
+        { sessionId: 'source', activity: 'live', fromProfileId: 'old-member' },
+        { sessionId: 'different-account-sibling', activity: 'live', fromProfileId: 'other-member' },
+      ]),
     }));
   });
 

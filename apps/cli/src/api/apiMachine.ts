@@ -783,7 +783,7 @@ export class ApiMachineClient {
             }
 
             if (data.body.t === 'update-account' && 'connectedServicesV2' in data.body) {
-                this.startChangesSyncWithRetry({ reason: 'reconnect' });
+                this.startChangesSyncWithRetry({ reason: 'live' });
             }
 
             if (data.body.t === 'pending-changed') {
@@ -985,14 +985,23 @@ export class ApiMachineClient {
     }
 
     private async syncChangesOnConnect(
-        opts: { reason: 'connect' | 'reconnect' },
+        opts: { reason: 'connect' | 'reconnect' | 'live' },
         signal: AbortSignal = new AbortController().signal,
     ): Promise<void> {
-        const executionAuthority = 'passive_projection' as const;
+        // A live account update is a committed runtime/user action. Preserve that authority so
+        // every live group-bound runtime consumes the generation. Startup and reconnect catch-up
+        // stay passive and cannot manufacture a restart, continuation, or provider input.
+        const executionAuthority = opts.reason === 'live'
+            ? 'runtime_recovery' as const
+            : 'passive_projection' as const;
         signal.throwIfAborted();
         try {
             await this.notifyConnectedServicesProjectionChange({
-                source: opts.reason === 'connect' ? 'startup' : 'reconnect',
+                source: opts.reason === 'connect'
+                    ? 'startup'
+                    : opts.reason === 'live'
+                        ? 'live'
+                        : 'reconnect',
                 executionAuthority,
                 signal,
                 connectedServicesV2: null,
@@ -1063,7 +1072,7 @@ export class ApiMachineClient {
 
                 // Backwards compatibility: old servers may not support /v2/changes yet (e.g. 404).
                 // On reconnect, fall back to a snapshot refresh.
-                if (opts.reason === 'reconnect') {
+                if (opts.reason === 'reconnect' || opts.reason === 'live') {
                     await this.refreshMachineFromServer(signal);
                 }
                 return;
@@ -1139,7 +1148,7 @@ export class ApiMachineClient {
         })();
     }
 
-    private startChangesSyncWithRetry(opts: { reason: 'connect' | 'reconnect' }): void {
+    private startChangesSyncWithRetry(opts: { reason: 'connect' | 'reconnect' | 'live' }): void {
         if (this.projectionSchedulingClosed) return;
         this.connectedServicesProjectionRetry.schedule(async (signal) => {
             try {

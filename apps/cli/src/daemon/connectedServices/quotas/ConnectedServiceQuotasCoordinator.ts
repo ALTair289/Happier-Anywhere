@@ -108,7 +108,6 @@ import {
 } from './proof/quotaProbeFreshProof';
 import type { ConnectedServiceRuntimeAuthApplyCapability } from '../credentials/lifecycleTypes';
 import {
-  evaluateConnectedServiceSwitchApplyPolicy,
   runtimeAuthApplyRequiresLiveIdentityProbe,
 } from '../accountGroups/switching/predictiveSoftSwitchPolicy';
 import {
@@ -797,6 +796,18 @@ export class ConnectedServiceQuotasCoordinator {
       });
       return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 };
     }
+    const generationTargets = this.listCommittedGenerationTargetsForGroup({
+      serviceId: input.serviceId,
+      groupId: input.groupId,
+      sourceSessionId: input.sourceSessionId,
+      sourceProfileId: input.exhaustedProfileId,
+      includeSource: input.sourceRequiresConvergence !== false,
+    });
+    const applyCommittedGeneration = async (): Promise<number> => await this.applyCommittedAuthGroupGeneration({
+      committedGeneration,
+      reason: 'same_provider_account_exhausted',
+      targets: generationTargets,
+    });
     const fanoutStrategy = input.resolvedFanoutStrategy
       ?? await this.resolveSameAccountFanoutStrategy({
         sourceSessionId: input.sourceSessionId,
@@ -809,7 +820,7 @@ export class ConnectedServiceQuotasCoordinator {
         phase: 'same_account_fanout',
         reason: 'same_account_fanout_strategy_not_exact_provider_account',
       });
-      return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 };
+      return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: await applyCommittedGeneration() };
     }
     const providerAccountId = trimConnectedServiceQuotaString(input.providerAccountId) ?? '';
     const sourceGroupGeneration = normalizeConnectedServiceQuotaGeneration(input.sourceGroupGeneration);
@@ -819,7 +830,7 @@ export class ConnectedServiceQuotasCoordinator {
         phase: 'same_account_fanout',
         reason: 'same_account_fanout_missing_provider_account_id',
       });
-      return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 };
+      return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: await applyCommittedGeneration() };
     }
     this.recordRuntimeAccountIdentitySelectionsFromRegistryTargets();
     const currentGroupGenerationBySessionId = this.buildCurrentGroupGenerationBySessionId({
@@ -858,19 +869,6 @@ export class ConnectedServiceQuotasCoordinator {
     });
     const candidates = this.mergeSameAccountFanoutCandidates(reconciledIndexedCandidates, coldReconciliation.candidates);
     if (candidates.length === 0) {
-      if (input.sourceRequiresConvergence === true) {
-        const fanoutRequests = await this.applyCommittedAuthGroupGeneration({
-          committedGeneration,
-          reason: 'same_provider_account_exhausted',
-          targets: [{
-            sessionId: input.sourceSessionId,
-            serviceId: input.serviceId,
-            groupId: input.groupId,
-            fromProfileId: input.exhaustedProfileId,
-          }],
-        });
-        return { status: 'recorded', fanoutCandidates: 0, fanoutRequests };
-      }
       if (indexedCandidates.length === 0 && coldReconciliation.activeCandidateCount === 0) {
         this.recordDiagnostic?.({
           event: 'quota_work_suppressed',
@@ -878,7 +876,7 @@ export class ConnectedServiceQuotasCoordinator {
           reason: 'same_account_fanout_no_matching_sessions',
         });
       }
-      return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 };
+      return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: await applyCommittedGeneration() };
     }
     if (this.isSameAccountFanoutCoalesced(input)) {
       this.recordDiagnostic?.({
@@ -886,68 +884,68 @@ export class ConnectedServiceQuotasCoordinator {
         phase: 'same_account_fanout',
         reason: 'same_provider_account_exhaustion_coalesced',
       });
-      return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 };
+      return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: await applyCommittedGeneration() };
     }
 
-    const generationTargets: Array<Readonly<{
-      sessionId: string;
-      serviceId: ConnectedServiceId;
-      groupId: string;
-      fromProfileId: string;
-    }>> = [];
     for (const candidate of candidates) {
-      const runtime = 'runtime' in candidate ? candidate.runtime ?? null : null;
       this.runtimeRegistry.invalidateRuntimeAccountIdentity(candidate.sessionId);
-      const runtimeAuthApply = await this.resolveRuntimeAuthApplyCapability({
-        sourceSessionId: input.sourceSessionId,
-        targetSessionId: candidate.sessionId,
-        serviceId: input.serviceId,
-        groupId: input.groupId,
-      });
-      const switchApplyPolicy = evaluateConnectedServiceSwitchApplyPolicy({
-        context: 'healthy_sibling',
-        reason: 'same_provider_account_exhausted',
-        turnState: runtime
-          ? {
-              inFlight: runtime.inProviderTurn === true,
-              safeToApply: runtime.safeToApply,
-            }
-          : null,
-        runtimeAuthApply,
-      });
-      const deferUntilTurnBoundary = switchApplyPolicy.status === 'defer';
-      if (deferUntilTurnBoundary) {
-        this.recordDiagnostic?.({
-          event: 'quota_work_deferred',
-          phase: 'same_account_fanout',
-          reason: 'same_account_fanout_candidate_deferred_until_turn_boundary',
-        });
-      }
-      generationTargets.push({
-        sessionId: candidate.sessionId,
-        serviceId: candidate.serviceId,
-        groupId: candidate.groupId ?? input.groupId,
-        fromProfileId: candidate.profileId,
-      });
     }
-    if (input.sourceRequiresConvergence !== false) {
-      generationTargets.push({
-        sessionId: input.sourceSessionId,
-        serviceId: input.serviceId,
-        groupId: input.groupId,
-        fromProfileId: input.exhaustedProfileId,
-      });
-    }
-    const fanoutRequests = await this.applyCommittedAuthGroupGeneration({
-      committedGeneration,
-      reason: 'same_provider_account_exhausted',
-      targets: generationTargets,
-    });
+    const fanoutRequests = await applyCommittedGeneration();
     return {
       status: 'recorded',
       fanoutCandidates: candidates.length,
       fanoutRequests,
     };
+  }
+
+  private listCommittedGenerationTargetsForGroup(input: Readonly<{
+    serviceId: ConnectedServiceId;
+    groupId: string;
+    sourceSessionId: string;
+    sourceProfileId: string;
+    includeSource: boolean;
+  }>): ReadonlyArray<Readonly<{
+    sessionId: string;
+    serviceId: ConnectedServiceId;
+    groupId: string;
+    fromProfileId: string;
+  }>> {
+    const targetsBySessionId = new Map<string, Readonly<{
+      sessionId: string;
+      serviceId: ConnectedServiceId;
+      groupId: string;
+      fromProfileId: string;
+    }>>();
+    for (const target of this.runtimeRegistry.listQuotaTargets()) {
+      const sessionId = typeof target.sessionId === 'string' ? target.sessionId.trim() : '';
+      if (!sessionId) continue;
+      const binding = target.activeBindings.find((candidate) => (
+        candidate.serviceId === input.serviceId && candidate.groupId === input.groupId
+      )) ?? extractActiveBindings(target.bindings, target.connectedServiceSelectionsEnv)
+        .find((candidate) => candidate.serviceId === input.serviceId && candidate.groupId === input.groupId);
+      if (!binding) continue;
+      targetsBySessionId.set(sessionId, {
+        sessionId,
+        serviceId: input.serviceId,
+        groupId: input.groupId,
+        fromProfileId: binding.profileId,
+      });
+    }
+    if (input.includeSource && !targetsBySessionId.has(input.sourceSessionId)) {
+      targetsBySessionId.set(input.sourceSessionId, {
+        sessionId: input.sourceSessionId,
+        serviceId: input.serviceId,
+        groupId: input.groupId,
+        fromProfileId: input.sourceProfileId,
+      });
+    } else if (input.includeSource) {
+      const source = targetsBySessionId.get(input.sourceSessionId)!;
+      targetsBySessionId.delete(input.sourceSessionId);
+      targetsBySessionId.set(input.sourceSessionId, source);
+    } else if (!input.includeSource) {
+      targetsBySessionId.delete(input.sourceSessionId);
+    }
+    return Array.from(targetsBySessionId.values());
   }
 
   private async decideAndApplyAuthGroupGeneration(input: Readonly<{
@@ -1173,7 +1171,18 @@ export class ConnectedServiceQuotasCoordinator {
         ],
         expectedGroupGeneration: sourceGroupGeneration,
       });
-      return { status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 };
+      return await this.recordAccountExhaustionAndFanout({
+        sourceSessionId: input.sourceSessionId,
+        serviceId: input.serviceId,
+        groupId,
+        exhaustedProfileId,
+        sourceGroupGeneration,
+        resetAtMs: input.resetAtMs,
+        reason: 'usage_limit',
+        committedGeneration: input.committedGeneration,
+        sourceRequiresConvergence: input.sourceRequiresConvergence,
+        resolvedFanoutStrategy: fanoutStrategy,
+      });
     }
 
     return await this.recordAccountExhaustionAndFanout({

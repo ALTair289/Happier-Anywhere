@@ -595,6 +595,46 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         }
     });
 
+    it('preserves live connected-service projection authority instead of downgrading it to reconnect catch-up', async () => {
+        const previousV2Changes = process.env.HAPPY_ENABLE_V2_CHANGES;
+        process.env.HAPPY_ENABLE_V2_CHANGES = 'false';
+        try {
+            const machine: Machine = {
+                id: 'machine-1',
+                encryptionKey: new Uint8Array(32).fill(7),
+                encryptionVariant: 'legacy',
+                metadata: null,
+                metadataVersion: 0,
+                daemonState: null,
+                daemonStateVersion: 0,
+            };
+            axiosGet.mockImplementation(async (url: string) => {
+                if (url.includes('/v1/account/profile')) return {
+                    status: 200,
+                    data: {
+                        id: 'acc-1',
+                        connectedServicesV2: [],
+                        connectedServiceCredentialRevisionsV1: [],
+                    },
+                };
+                throw new Error(`unexpected url: ${url}`);
+            });
+            const reconcile = vi.fn(async () => {});
+            const client = new ApiMachineClient('token', machine);
+            client.onConnectedServicesProjectionChange(reconcile);
+
+            await (client as any).syncChangesOnConnect({ reason: 'live' });
+
+            expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+                source: 'live',
+                executionAuthority: 'runtime_recovery',
+            }));
+        } finally {
+            if (previousV2Changes === undefined) delete process.env.HAPPY_ENABLE_V2_CHANGES;
+            else process.env.HAPPY_ENABLE_V2_CHANGES = previousV2Changes;
+        }
+    });
+
     it('retries after transient account-id failure without requiring another projection hint', async () => {
         vi.useFakeTimers();
         const previousV2Changes = process.env.HAPPY_ENABLE_V2_CHANGES;
