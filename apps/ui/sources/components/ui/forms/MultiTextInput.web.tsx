@@ -175,6 +175,7 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
     const pendingChangeTextRef = React.useRef<string | null>(null);
     const pendingChangeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastScrollRestoreKeyRef = React.useRef<string | null>(null);
+    const lastReportedContentHeightRef = React.useRef<number | null>(null);
     const normalizedMaxHeight = normalizeWebTextareaMaxHeight(maxHeight);
     const [textareaHeight, setTextareaHeight] = React.useState<number | undefined>(
         () => (value.length > WEB_TEXTAREA_AUTOSIZE_VALUE_LENGTH_LIMIT ? normalizedMaxHeight : undefined),
@@ -259,6 +260,13 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
         return text;
     }, [emitChangeText]);
 
+    const notifyContentHeightChange = React.useCallback((height: number) => {
+        if (!onContentHeightChange) return;
+        if (lastReportedContentHeightRef.current === height) return;
+        lastReportedContentHeightRef.current = height;
+        onContentHeightChange(height);
+    }, [onContentHeightChange]);
+
     const applyTextareaHeight = React.useCallback((node: HTMLTextAreaElement, nextValueLength = liveValueRef.current.length) => {
         if (nextValueLength > WEB_TEXTAREA_AUTOSIZE_VALUE_LENGTH_LIMIT) {
             // No collapse-to-measure for oversized text (that double reflow is
@@ -272,7 +280,7 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
             const measuredContentHeight = Number.isFinite(node.scrollHeight) && node.scrollHeight > 0
                 ? Math.ceil(node.scrollHeight)
                 : normalizedMaxHeight;
-            onContentHeightChange?.(Math.max(measuredContentHeight, normalizedMaxHeight));
+            notifyContentHeightChange(Math.max(measuredContentHeight, normalizedMaxHeight));
             node.style.height = `${normalizedMaxHeight}px`;
             setTextareaHeight((current) => (current === normalizedMaxHeight ? current : normalizedMaxHeight));
             return;
@@ -301,7 +309,7 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
         try {
             node.style.height = 'auto';
             const measuredHeight = Number.isFinite(node.scrollHeight) ? Math.ceil(node.scrollHeight) : normalizedMaxHeight;
-            onContentHeightChange?.(measuredHeight);
+            notifyContentHeightChange(measuredHeight);
             const nextHeight = Math.min(normalizedMaxHeight, Math.max(0, measuredHeight));
             node.style.height = `${nextHeight}px`;
             setTextareaHeight((current) => (current === nextHeight ? current : nextHeight));
@@ -315,7 +323,7 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
                 node.scrollTop = previousScrollTop;
             }
         }
-    }, [normalizedMaxHeight, onContentHeightChange]);
+    }, [normalizedMaxHeight, notifyContentHeightChange]);
 
     React.useLayoutEffect(() => {
         const node = textareaRef.current;

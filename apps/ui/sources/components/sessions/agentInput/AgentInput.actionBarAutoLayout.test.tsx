@@ -514,6 +514,40 @@ describe('AgentInput (action bar auto layout)', () => {
         expect(findExpansionToggleButtons().length).toBeGreaterThan(0);
     });
 
+    it('keeps the composer height reporter stable across web layout-only rerenders', async () => {
+        layoutMockState.platform = 'web';
+        layoutMockState.width = 900;
+        layoutMockState.height = 700;
+        vi.resetModules();
+        const { act } = await import('react-test-renderer');
+        const { AgentInput } = await import('./AgentInput');
+        const renderAgentInput = () => (
+            <AgentInput
+                sessionId="session-1"
+                value=""
+                placeholder="Type"
+                onChangeText={() => {}}
+                onSend={() => {}}
+                autocompletePrefixes={[]}
+                autocompleteSuggestions={async () => []}
+                inputMaxHeight={200}
+                maxPanelHeight={700}
+            />
+        );
+
+        const screen = await renderScreen(renderAgentInput());
+
+        const firstInput = screen.tree.root.findByType('MultiTextInput');
+        const firstHeightReporter = firstInput.props.onContentHeightChange;
+
+        act(() => {
+            firstHeightReporter(220);
+        });
+
+        const nextInput = screen.tree.root.findByType('MultiTextInput');
+        expect(nextInput.props.onContentHeightChange).toBe(firstHeightReporter);
+    });
+
     it('shows the existing-session input expansion toggle only when content exceeds the collapsed cap', async () => {
         layoutMockState.platform = 'ios';
         vi.resetModules();

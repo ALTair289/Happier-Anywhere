@@ -1203,6 +1203,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         && props.inputExpansion.collapsedMaxHeight > 0
         ? props.inputExpansion.collapsedMaxHeight
         : null;
+    const handleInputContentHeightChange = React.useCallback((height: number) => {
+        updateNullableLayoutHeight(setInputContentHeightPx, height);
+    }, []);
     const hasInputExpansion = Boolean(props.inputExpansion);
     React.useEffect(() => {
         setInputExpansionToggleVisible((currentVisible) => {
@@ -2922,9 +2925,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 maxHeight={resolvedInputMaxHeight}
                 editable={!props.disabled}
                 onFilesPasted={props.onAttachmentsAdded}
-                onContentHeightChange={(height) => {
-                    updateNullableLayoutHeight(setInputContentHeightPx, height);
-                }}
+                onContentHeightChange={handleInputContentHeightChange}
             />
             {props.inputExpansion && shouldShowInputExpansionToggle ? (
                 <Pressable

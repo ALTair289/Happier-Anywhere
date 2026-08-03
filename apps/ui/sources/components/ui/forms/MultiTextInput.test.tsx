@@ -508,6 +508,78 @@ describe('MultiTextInput', () => {
         expect(() => tree.findByProps({ 'data-testid': 'composer-input-large-value-preview' })).toThrow();
     });
 
+    it('dedupes web content height reports before notifying callers', async () => {
+        const { MultiTextInput } = await import('./MultiTextInput.web');
+        const onContentHeightChange = vi.fn();
+        const mockTextarea = {
+            value: 'line',
+            selectionStart: 4,
+            selectionEnd: 4,
+            scrollTop: 0,
+            scrollHeight: 88,
+            style: {} as Record<string, string>,
+            setSelectionRange: vi.fn(),
+            dispatchEvent: vi.fn(),
+            focus: vi.fn(),
+            blur: vi.fn(),
+            getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 40 }),
+        };
+
+        let tree: renderer.ReactTestRenderer | null = null;
+        await act(async () => {
+            tree = renderer.create(
+                <MultiTextInput
+                    testID="composer-input"
+                    value="line"
+                    maxHeight={144}
+                    onChangeText={() => {}}
+                    onContentHeightChange={onContentHeightChange}
+                />,
+                {
+                    createNodeMock: (element) => {
+                        if (element.type === 'textarea') return mockTextarea;
+                        return null;
+                    },
+                },
+            );
+        });
+
+        expect(onContentHeightChange).toHaveBeenCalledTimes(1);
+        expect(onContentHeightChange).toHaveBeenCalledWith(88);
+
+        await act(async () => {
+            tree!.update(
+                <MultiTextInput
+                    testID="composer-input"
+                    value="line"
+                    maxHeight={144}
+                    onChangeText={() => {}}
+                    onContentHeightChange={onContentHeightChange}
+                    textStyle={{ fontSize: 15 }}
+                />,
+            );
+        });
+
+        expect(onContentHeightChange).toHaveBeenCalledTimes(1);
+
+        mockTextarea.scrollHeight = 96;
+        await act(async () => {
+            tree!.update(
+                <MultiTextInput
+                    testID="composer-input"
+                    value="line"
+                    maxHeight={144}
+                    onChangeText={() => {}}
+                    onContentHeightChange={onContentHeightChange}
+                    textStyle={{ fontSize: 16 }}
+                />,
+            );
+        });
+
+        expect(onContentHeightChange).toHaveBeenCalledTimes(2);
+        expect(onContentHeightChange).toHaveBeenLastCalledWith(96);
+    });
+
     it('reports true web content height for oversized text so the expand toggle can appear', async () => {
         // The oversized branch skips the collapse-to-measure autosize pass and
         // used to report the CLAMPED max height as the content height. The
