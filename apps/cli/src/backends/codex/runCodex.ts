@@ -1793,7 +1793,13 @@ export async function runCodex(opts: {
                         chatgptPlanType: readChatGptPlanType(requestParams),
                     });
                 } catch (error) {
-                    const classification = createOpenAiCodexBridgeRefreshFailureClassification(refreshSelection);
+                    const classification = createOpenAiCodexBridgeRefreshFailureClassification(
+                        refreshSelection,
+                        error && typeof error === 'object' ? error as Readonly<{
+                            errorCode?: string;
+                            credentialHealthStatus?: string;
+                        }> : undefined,
+                    );
                     const recoveryReport = await reportConnectedServiceRuntimeAuthFailureToDaemon({
                         sessionId: session.sessionId,
                         switchesThisTurn: 0,

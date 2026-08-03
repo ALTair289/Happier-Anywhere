@@ -45,7 +45,6 @@ export function createCodexChatGptBridgeRefreshHooks(input: Readonly<{
   const { capabilities } = input;
   return {
     serviceId: 'openai-codex',
-    refreshUnavailableErrorCode: 'connected_service_chatgpt_refresh_unavailable',
     resolveProfileId: (selection) =>
       resolveCodexChatGptAuthTokensRefreshProfileId(toCodexChatGptAuthTokensRefreshSelection(selection)),
     probeCurrentToken: async (binding) => {

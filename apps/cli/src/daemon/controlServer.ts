@@ -47,8 +47,13 @@ import {
 import { resolveBrokerBridgeEffectiveSelection } from './connectedServices/broker/brokerBridgeEffectiveSelectionRegistry';
 import {
   CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED,
+  ConnectedServiceCredentialRefreshError,
   isConnectedServiceBridgeSelectionAuthorizationError,
 } from './connectedServices/refresh/ConnectedServiceRefreshCoordinator';
+import {
+  ConnectedServiceBridgeRefreshFailureResponseSchema,
+  buildConnectedServiceBridgeRefreshFailureResponse,
+} from './connectedServices/refresh/bridgeRefreshFailureContract';
 import { TrackedSession } from './types';
 import {
   StopSessionResultSchema,
@@ -1494,6 +1499,7 @@ export function createDaemonControlApp({
         }),
         401: authSchema401,
         403: brokerBridgeAuthzDeniedSchema,
+        409: ConnectedServiceBridgeRefreshFailureResponseSchema,
         501: z.object({
           ok: z.literal(false),
           errorCode: z.literal('connected_service_chatgpt_refresh_handler_unavailable'),
@@ -1541,12 +1547,18 @@ export function createDaemonControlApp({
         failingAccessTokenFingerprint: request.body.failingAccessTokenFingerprint ?? null,
       });
     } catch (error) {
-      if (!isConnectedServiceBridgeSelectionAuthorizationError(error)) throw error;
-      reply.code(403);
-      return {
-        ok: false as const,
-        errorCode: CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED as typeof CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED,
-      };
+      if (isConnectedServiceBridgeSelectionAuthorizationError(error)) {
+        reply.code(403);
+        return {
+          ok: false as const,
+          errorCode: CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED as typeof CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED,
+        };
+      }
+      if (error instanceof ConnectedServiceCredentialRefreshError) {
+        reply.code(409);
+        return buildConnectedServiceBridgeRefreshFailureResponse(error.diagnostic);
+      }
+      throw error;
     }
     return {
       ok: true as const,
@@ -1573,6 +1585,7 @@ export function createDaemonControlApp({
         }),
         401: authSchema401,
         403: brokerBridgeAuthzDeniedSchema,
+        409: ConnectedServiceBridgeRefreshFailureResponseSchema,
         501: z.object({
           ok: z.literal(false),
           errorCode: z.literal('connected_service_claude_subscription_refresh_handler_unavailable'),
@@ -1619,12 +1632,18 @@ export function createDaemonControlApp({
         failingAccessTokenFingerprint: request.body.failingAccessTokenFingerprint ?? null,
       });
     } catch (error) {
-      if (!isConnectedServiceBridgeSelectionAuthorizationError(error)) throw error;
-      reply.code(403);
-      return {
-        ok: false as const,
-        errorCode: CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED as typeof CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED,
-      };
+      if (isConnectedServiceBridgeSelectionAuthorizationError(error)) {
+        reply.code(403);
+        return {
+          ok: false as const,
+          errorCode: CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED as typeof CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED,
+        };
+      }
+      if (error instanceof ConnectedServiceCredentialRefreshError) {
+        reply.code(409);
+        return buildConnectedServiceBridgeRefreshFailureResponse(error.diagnostic);
+      }
+      throw error;
     }
     return {
       ok: true as const,

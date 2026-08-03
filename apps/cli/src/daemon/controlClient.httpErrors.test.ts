@@ -4,6 +4,7 @@ import { reloadConfiguration } from '@/configuration';
 import { writeDaemonState, clearDaemonStateForTests } from '@/persistence';
 import * as controlClient from '@/daemon/controlClient';
 import {
+  DaemonConnectedServiceRefreshError,
   notifyDaemonConnectedServiceTurnLifecycle,
   requestDaemonSessionConnectedServiceAuthSwitch,
   resolveDaemonSpawnSessionByNonce,
@@ -573,6 +574,50 @@ describe('daemon control client (HTTP error responses)', () => {
     }
   });
 
+  it('preserves reconnect-required credential health from the daemon refresh bridge', async () => {
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh') {
+        req.resume();
+        res.statusCode = 409;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({
+          ok: false,
+          errorCode: 'connected_service_credential_reconnect_required',
+          credentialHealthStatus: 'needs_reauth',
+        }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+
+    try {
+      const { port } = await listen(server);
+      tmpHomeDir = await createTempDir('happier-daemon-client-refresh-health-test-');
+      envScope.patch({ HAPPIER_HOME_DIR: tmpHomeDir });
+      reloadConfiguration();
+      writeDaemonState({
+        pid: process.pid,
+        httpPort: port,
+        startedAt: Date.now(),
+        startedWithCliVersion: 'test',
+        controlToken: 'test-token',
+      });
+
+      await expect(controlClient.refreshDaemonOpenAiCodexChatGptAuthTokensForBridge({
+        sessionId: 'sess_1',
+        selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'work' },
+        chatgptPlanType: 'plus',
+      })).rejects.toMatchObject({
+        name: DaemonConnectedServiceRefreshError.name,
+        errorCode: 'connected_service_credential_reconnect_required',
+        credentialHealthStatus: 'needs_reauth',
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it('posts forced Claude subscription refresh bridge requests to daemon control server', async () => {
     let observedBody: Record<string, unknown> | null = null;
     let observedAuthToken: string | undefined;
@@ -649,6 +694,50 @@ describe('daemon control client (HTTP error responses)', () => {
       });
       expect(observedAuthToken).toBe('test-token');
       expect(observedAuthToken).not.toBe(deriveConnectedServiceBrokerRefreshToken('test-token'));
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('preserves reconnect-required credential health from the Claude daemon refresh bridge', async () => {
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh') {
+        req.resume();
+        res.statusCode = 409;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({
+          ok: false,
+          errorCode: 'connected_service_credential_reconnect_required',
+          credentialHealthStatus: 'needs_reauth',
+        }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+
+    try {
+      const { port } = await listen(server);
+      tmpHomeDir = await createTempDir('happier-daemon-client-claude-refresh-health-test-');
+      envScope.patch({ HAPPIER_HOME_DIR: tmpHomeDir });
+      reloadConfiguration();
+      writeDaemonState({
+        pid: process.pid,
+        httpPort: port,
+        startedAt: Date.now(),
+        startedWithCliVersion: 'test',
+        controlToken: 'test-token',
+      });
+
+      await expect(controlClient.refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridge({
+        sessionId: 'sess_1',
+        selection: { kind: 'profile', serviceId: 'claude-subscription', profileId: 'work' },
+        forceRefresh: true,
+      })).rejects.toMatchObject({
+        name: DaemonConnectedServiceRefreshError.name,
+        errorCode: 'connected_service_credential_reconnect_required',
+        credentialHealthStatus: 'needs_reauth',
+      });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

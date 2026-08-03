@@ -20,7 +20,6 @@ export function createClaudeSubscriptionBridgeRefreshHooks(input: Readonly<{
   const { capabilities } = input;
   return {
     serviceId: 'claude-subscription',
-    refreshUnavailableErrorCode: 'connected_service_claude_refresh_unavailable',
     resolveProfileId: (selection) =>
       selection.kind === 'group' ? selection.activeProfileId : selection.profileId,
     probeCurrentToken: async (binding) => {

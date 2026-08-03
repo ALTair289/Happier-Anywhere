@@ -58,7 +58,6 @@ export type ConnectedServiceBridgeCurrentTokenProbe<TResponse> =
  */
 export type ConnectedServiceBridgeRefreshProfileHooks<TResponse> = Readonly<{
   serviceId: ConnectedServiceId;
-  refreshUnavailableErrorCode: string;
   resolveProfileId: (selection: ConnectedServiceChildSelection) => string;
   probeCurrentToken: (
     binding: BoundProfile,

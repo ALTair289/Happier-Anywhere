@@ -26,6 +26,7 @@ import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '../connectedServic
 import { normalizeMaterializationKeyForPath } from '../materialize/normalizeMaterializationKeyForPath';
 import { buildDefaultConnectedServiceCredentialLifecycleDescriptor } from '../credentials/lifecycleTypes';
 import { ConnectedServiceRuntimeRegistry } from '../runtimeRegistry/registry';
+import { computeConnectedServiceAccessTokenFingerprint } from './credentialFreshness/tokenFingerprint';
 
 const { spawnSpy } = vi.hoisted(() => ({
   spawnSpy: vi.fn(),
@@ -3113,6 +3114,90 @@ afterEach(() => {
       expectedCredentialRevision: expect.any(String),
       health: expect.objectContaining({ status: 'connected', reconnectRequired: false }),
     });
+  });
+
+  it('adopts a newer current Codex token despite stale predecessor reauth health', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-refresh-bridge-newer-token-'));
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-bridge-newer-token-'));
+    const credentials: Credentials = {
+      token: 'happy-token',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(20) },
+    };
+    if (credentials.encryption.type !== 'legacy') throw new Error('fixture');
+    const now = 1_000_000;
+    const currentAccessToken = 'newer-current-access';
+    const record = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      kind: 'oauth',
+      expiresAt: now + 60 * 60_000,
+      oauth: {
+        accessToken: currentAccessToken,
+        refreshToken: 'newer-current-refresh',
+        idToken: 'id',
+        scope: null,
+        tokenType: 'Bearer',
+        providerAccountId: 'chatgpt-account',
+        providerEmail: 'alice@example.com',
+      },
+    });
+    const sealedCiphertext = sealAccountScopedBlobCiphertext({
+      kind: 'connected_service_credential',
+      material: { type: 'legacy', secret: credentials.encryption.secret },
+      payload: record,
+      randomBytes: (length) => randomBytes(length),
+    });
+    const api = {
+      getConnectedServiceCredentialSealed: vi.fn(async () => ({
+        sealed: { format: 'account_scoped_v1' as const, ciphertext: sealedCiphertext },
+        metadata: { kind: 'oauth', providerEmail: 'alice@example.com', providerAccountId: 'chatgpt-account', expiresAt: now + 60 * 60_000 },
+      })),
+      listConnectedServiceProfiles: vi.fn(async () => ({
+        serviceId: 'openai-codex',
+        profiles: [{ profileId: 'work', status: 'needs_reauth' as const }],
+      })),
+      acquireConnectedServiceRefreshLease: vi.fn(async () => ({ acquired: true, leaseUntil: now + 60_000 })),
+      registerConnectedServiceCredentialSealed: vi.fn(async () => {}),
+      updateConnectedServiceCredentialHealth: vi.fn(async () => {}),
+    } as unknown as ApiClient;
+    completeCredentialAuthorityBoundaryFixture(api);
+    const fetchMock = vi.fn(async () => {
+      throw new Error('a newer canonical token must be adopted without rotating its refresh token');
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+    const coordinator = new ConnectedServiceRefreshCoordinator({
+      api,
+      credentials,
+      machineIdProvider: () => 'machine-1',
+      ownerIdProvider: () => 'machine-1:daemon-a',
+      activeServerDir,
+      baseDir,
+      refreshWindowMs: 5 * 60_000,
+      refreshLeaseMs: 30_000,
+      now: () => now,
+    });
+    coordinator.registerSpawnTarget({
+      pid: 126,
+      agentId: 'codex',
+      sessionId: 'happy-session-bridge-newer-token',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: { 'openai-codex': { source: 'connected', profileId: 'work' } },
+      },
+      materializationKey: 'happy-session-bridge-newer-token',
+    });
+
+    await expect(coordinator.refreshOpenAiCodexChatGptTokensForBridge({
+      sessionId: 'happy-session-bridge-newer-token',
+      selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'work' },
+      chatgptPlanType: 'plus',
+      forceRefresh: true,
+      failingAccessTokenFingerprint: computeConnectedServiceAccessTokenFingerprint('predecessor-access'),
+    })).resolves.toEqual(expect.objectContaining({ accessToken: currentAccessToken }));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(api.acquireConnectedServiceRefreshLease).not.toHaveBeenCalled();
   });
 
   it('serves the session-owned Codex profile and IGNORES a caller-named foreign profile (identity-only authz)', async () => {

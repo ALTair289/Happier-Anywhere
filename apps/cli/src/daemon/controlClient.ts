@@ -25,6 +25,10 @@ import {
   type ClaudeSubscriptionAuthTokensRefreshSelection,
 } from '@/backends/claude/connectedServices/claudeSubscriptionAuthTokensRefreshBridgeContract';
 import {
+  ConnectedServiceBridgeRefreshFailureResponseSchema,
+  type ConnectedServiceBridgeRefreshFailureResponse,
+} from './connectedServices/refresh/bridgeRefreshFailureContract';
+import {
   deriveConnectedServiceBrokerRefreshToken,
   deriveConnectedServiceRunMaterializeToken,
 } from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
@@ -413,6 +417,27 @@ async function daemonPost(path: string, body?: any, options: DaemonPostOptions =
   }
 }
 
+export class DaemonConnectedServiceRefreshError extends Error {
+  readonly errorCode: ConnectedServiceBridgeRefreshFailureResponse['errorCode'];
+  readonly credentialHealthStatus: ConnectedServiceBridgeRefreshFailureResponse['credentialHealthStatus'];
+
+  constructor(response: ConnectedServiceBridgeRefreshFailureResponse) {
+    super(response.errorCode);
+    this.name = 'DaemonConnectedServiceRefreshError';
+    this.errorCode = response.errorCode;
+    this.credentialHealthStatus = response.credentialHealthStatus;
+  }
+}
+
+function throwDaemonConnectedServiceRefreshErrorIfPresent(result: unknown): void {
+  const response = ConnectedServiceBridgeRefreshFailureResponseSchema.safeParse(
+    result && typeof result === 'object' && 'response' in result
+      ? (result as { response?: unknown }).response
+      : result,
+  );
+  if (response.success) throw new DaemonConnectedServiceRefreshError(response.data);
+}
+
 export async function notifyDaemonSessionStarted(
   sessionId: string,
   metadata: Metadata,
@@ -582,6 +607,7 @@ export async function refreshDaemonOpenAiCodexChatGptAuthTokensForBridge(
     // sessionId-keyed request shape.
   }, options);
   if (result?.error) {
+    throwDaemonConnectedServiceRefreshErrorIfPresent(result);
     throw new Error(String(result.error));
   }
   const parsed = CodexChatGptAuthTokensRefreshResponseSchema.safeParse(
@@ -610,6 +636,7 @@ export async function refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridg
     // SEC-F1: session mode uses the MASTER control token (see Codex twin above).
   }, options);
   if (result?.error) {
+    throwDaemonConnectedServiceRefreshErrorIfPresent(result);
     throw new Error(String(result.error));
   }
   const parsed = ClaudeSubscriptionAuthTokensRefreshResponseSchema.safeParse(

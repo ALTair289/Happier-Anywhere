@@ -49,6 +49,27 @@ describe('resolveOpenAiCodexDaemonRefreshSelection', () => {
     });
   });
 
+  it('classifies a typed reconnect-required bridge failure as auth expired', () => {
+    const resolution = {
+      selection: {
+        kind: 'profile' as const,
+        serviceId: 'openai-codex' as const,
+        profileId: 'work',
+      },
+      recoveryGroupId: 'main',
+    };
+
+    expect(createOpenAiCodexBridgeRefreshFailureClassification(resolution, {
+      errorCode: 'connected_service_credential_reconnect_required',
+      credentialHealthStatus: 'needs_reauth',
+    })).toMatchObject({
+      kind: 'auth_expired',
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      groupId: 'main',
+    });
+  });
+
   it('falls back to child env when session metadata has no connected binding', () => {
     expect(resolveOpenAiCodexDaemonRefreshSelection({
       [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{

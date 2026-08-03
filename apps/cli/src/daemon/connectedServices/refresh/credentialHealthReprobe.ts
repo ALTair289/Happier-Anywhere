@@ -24,6 +24,7 @@ export function shouldBlockRefreshForCredentialHealth(reason: ConnectedServiceRe
   return reason === 'scheduled'
     || reason === 'spawn_preflight'
     || reason === 'runtime_auth_failure'
+    || reason === 'provider_auth_bridge'
     || reason === 'quota_bridge';
 }
 

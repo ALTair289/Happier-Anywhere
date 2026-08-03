@@ -409,8 +409,8 @@ export class ConnectedServiceRefreshCoordinator {
         failingAccessTokenFingerprint: input.failingAccessTokenFingerprint,
       });
       if (
-        credentialHealthAllowsAdoption
-        && (input.forceRefresh !== true || forceDecision.kind === 'adopt_current')
+        (input.forceRefresh === true && forceDecision.kind === 'adopt_current')
+        || (credentialHealthAllowsAdoption && input.forceRefresh !== true)
       ) {
         if (input.forceRefresh === true) {
           await this.distributeRefreshedBinding(binding);
@@ -431,10 +431,10 @@ export class ConnectedServiceRefreshCoordinator {
       { force: true, reason: 'provider_auth_bridge' },
     );
     if (updated.status !== 'refreshed' || updated.credential?.kind !== 'oauth') {
-      throw new Error(input.hooks.refreshUnavailableErrorCode);
+      throw new ConnectedServiceCredentialRefreshError(updated.diagnostic);
     }
     if (!updated.credentialRevision) {
-      throw new Error(input.hooks.refreshUnavailableErrorCode);
+      throw new ConnectedServiceCredentialRefreshError(updated.diagnostic);
     }
     return await input.hooks.finalizeRefreshedResponse({
       binding,

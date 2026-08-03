@@ -36,6 +36,7 @@ import { readRuntimeAuthFailureReportOutboxItems } from './connectedServices/run
 import type { ConnectedServiceRuntimeFailureClassification } from './connectedServices/runtimeAuth/types';
 import { authorizeConnectedServiceRuntimeAuthFailureSource } from './connectedServices/runtimeAuth/handleConnectedServiceRuntimeAuthFailureForSession';
 import { resolveCurrentCodexRuntimeAuthFailureSource } from './connectedServices/runtimeAuth/resolveCurrentCodexRuntimeAuthFailureSource';
+import { ConnectedServiceCredentialRefreshError } from './connectedServices/refresh/ConnectedServiceRefreshCoordinator';
 
 function createDeferred<T>(): Readonly<{
   promise: Promise<T>;
@@ -49,6 +50,103 @@ function createDeferred<T>(): Readonly<{
 }
 
 describe('createDaemonControlApp connected-service runtime auth handling', () => {
+  it('returns typed reconnect-required bridge failure instead of HTTP 500', async () => {
+    const handleCodexChatGptAuthTokensRefresh = vi.fn(async () => {
+      throw new ConnectedServiceCredentialRefreshError({
+        serviceId: 'openai-codex',
+        profileId: 'work',
+        reason: 'provider_auth_bridge',
+        status: 'blocked_by_credential_health',
+        refreshWindowMs: 60_000,
+      });
+    });
+    const app = createDaemonControlApp({
+      getChildren: () => [],
+      machineId: 'machine',
+      stopSession: async () => ({ status: 'not_found' as const }),
+      spawnSession: async () => ({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+        errorMessage: 'unused',
+      }),
+      requestShutdown: () => {},
+      onHappySessionWebhook: () => {},
+      controlToken: 'token',
+      handleCodexChatGptAuthTokensRefresh,
+    });
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: {
+          sessionId: 'sess_1',
+          selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'work' },
+          chatgptPlanType: 'plus',
+          forceRefresh: true,
+        },
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({
+        ok: false,
+        errorCode: 'connected_service_credential_reconnect_required',
+        credentialHealthStatus: 'needs_reauth',
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns the same typed reconnect-required failure for the Claude refresh bridge', async () => {
+    const handleClaudeSubscriptionAuthTokensRefresh = vi.fn(async () => {
+      throw new ConnectedServiceCredentialRefreshError({
+        serviceId: 'claude-subscription',
+        profileId: 'work',
+        reason: 'provider_auth_bridge',
+        status: 'blocked_by_credential_health',
+        refreshWindowMs: 60_000,
+      });
+    });
+    const app = createDaemonControlApp({
+      getChildren: () => [],
+      machineId: 'machine',
+      stopSession: async () => ({ status: 'not_found' as const }),
+      spawnSession: async () => ({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+        errorMessage: 'unused',
+      }),
+      requestShutdown: () => {},
+      onHappySessionWebhook: () => {},
+      controlToken: 'token',
+      handleClaudeSubscriptionAuthTokensRefresh,
+    });
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: {
+          sessionId: 'sess_1',
+          selection: { kind: 'profile', serviceId: 'claude-subscription', profileId: 'work' },
+          forceRefresh: true,
+        },
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({
+        ok: false,
+        errorCode: 'connected_service_credential_reconnect_required',
+        credentialHealthStatus: 'needs_reauth',
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('returns retryable intake failure when exact source verification is temporarily unavailable', async () => {
     const handleConnectedServiceRuntimeAuthFailure = vi.fn();
     const app = createDaemonControlApp({

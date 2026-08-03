@@ -87,10 +87,17 @@ export function resolveOpenAiCodexDaemonRefreshSelection(
 
 export function createOpenAiCodexBridgeRefreshFailureClassification(
   resolution: OpenAiCodexDaemonRefreshSelectionResolution,
+  failure?: Readonly<{
+    errorCode?: string;
+    credentialHealthStatus?: string;
+  }>,
 ): ConnectedServiceRuntimeFailureClassification {
   const { selection } = resolution;
   return {
-    kind: 'refresh_failed',
+    kind: failure?.errorCode === 'connected_service_credential_reconnect_required'
+      && failure.credentialHealthStatus === 'needs_reauth'
+      ? 'auth_expired'
+      : 'refresh_failed',
     serviceId: 'openai-codex',
     profileId: selection.kind === 'group' ? selection.activeProfileId : selection.profileId,
     groupId: selection.kind === 'group' ? selection.groupId : resolution.recoveryGroupId,
