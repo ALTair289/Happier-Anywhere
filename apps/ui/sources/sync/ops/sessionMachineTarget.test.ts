@@ -112,6 +112,114 @@ describe('sessionMachineTarget', () => {
         });
     });
 
+    it('uses the mapped machine root for an active sandbox workspace while retaining its agent root', async () => {
+        const { readDisplayPathForSession, readMachineTargetForSession } = await import('./sessionMachineTarget');
+        getStateSpy.mockReturnValue({
+            sessions: {
+                s1: {
+                    active: true,
+                    metadata: {
+                        machineId: 'm1',
+                        path: '/home/coder/project',
+                        sessionWorkspaceLocationV1: {
+                            v: 1,
+                            machineId: 'm1',
+                            agentPath: '/home/coder/project',
+                            machinePath: '/Users/alice/project',
+                        },
+                    },
+                },
+            },
+            machines: {
+                m1: {
+                    id: 'm1',
+                    active: true,
+                    activeAt: 1,
+                    metadata: { host: 'mbp-host' },
+                },
+            },
+            getProjectForSession: () => null,
+        });
+
+        expect(readMachineTargetForSession('s1')).toEqual({
+            machineId: 'm1',
+            basePath: '/Users/alice/project',
+            agentBasePath: '/home/coder/project',
+        });
+        expect(readDisplayPathForSession({
+            sessionId: 's1',
+            metadata: getStateSpy().sessions.s1.metadata,
+        })).toBe('/home/coder/project');
+    });
+
+    it('does not reuse a sandbox mapping after the session machine is replaced', async () => {
+        const { readMachineTargetForSession } = await import('./sessionMachineTarget');
+        getStateSpy.mockReturnValue({
+            sessions: {
+                s1: {
+                    active: false,
+                    metadata: {
+                        machineId: 'm-old',
+                        path: '/home/coder/project',
+                        sessionWorkspaceLocationV1: {
+                            v: 1,
+                            machineId: 'm-old',
+                            agentPath: '/home/coder/project',
+                            machinePath: '/Users/alice/project',
+                        },
+                    },
+                },
+            },
+            machines: {
+                'm-old': {
+                    id: 'm-old',
+                    active: false,
+                    activeAt: 1,
+                    replacedByMachineId: 'm-new',
+                    metadata: { host: 'old-host' },
+                },
+                'm-new': {
+                    id: 'm-new',
+                    active: true,
+                    activeAt: 2,
+                    metadata: { host: 'new-host' },
+                },
+            },
+            getProjectForSession: () => ({
+                key: {
+                    machineId: 'm-new',
+                    path: '/Volumes/new/project',
+                },
+            }),
+        });
+
+        expect(readMachineTargetForSession('s1')).toEqual({
+            machineId: 'm-new',
+            basePath: '/Volumes/new/project',
+        });
+    });
+
+    it('rebases absolute agent paths as well as relative paths onto the mapped machine root', async () => {
+        const { resolveMachinePathFromSessionBase } = await import('./sessionMachineTarget');
+        const input = {
+            basePath: 'C:\\Users\\alice\\project',
+            agentBasePath: '/home/coder/project',
+        };
+
+        expect(resolveMachinePathFromSessionBase({
+            ...input,
+            requestPath: '/home/coder/project/docs/report.md',
+        })).toBe('C:\\Users\\alice\\project\\docs\\report.md');
+        expect(resolveMachinePathFromSessionBase({
+            ...input,
+            requestPath: 'docs/report.md',
+        })).toBe('C:\\Users\\alice\\project\\docs/report.md');
+        expect(resolveMachinePathFromSessionBase({
+            ...input,
+            requestPath: '/home/coder/project-sibling/report.md',
+        })).toBe('/home/coder/project-sibling/report.md');
+    });
+
     it('falls back to project key metadata for inactive sessions', async () => {
         const { readMachineTargetForSession } = await import('./sessionMachineTarget');
         getStateSpy.mockReturnValue({
@@ -362,6 +470,8 @@ describe('sessionMachineTarget', () => {
         expect(readMachineTargetForSession('s1')).toBeNull();
         expect(readMachineControlTargetForSession('s1')).toEqual({
             machineId: 'm-session',
+            originMachineId: 'm-session',
+            replaced: false,
             basePath: '/workspace/repo',
             confidence: 'metadata_direct',
         });
