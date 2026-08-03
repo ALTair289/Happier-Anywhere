@@ -265,7 +265,7 @@ export const COMMAND_HELP_RELEASE_INTERNALS = {
   },
 
   'release-verify-artifacts': {
-    summary: 'Verify checksums/signatures and optionally smoke-test release artifacts (advanced helper).',
+    summary: 'Verify checksums/signatures, attest native CLI versions, and optionally smoke-test release artifacts (advanced helper).',
     usage:
       'node scripts/pipeline/run.mjs release-verify-artifacts [--artifacts-dir <dir>] [--checksums <path>] [--public-key <path>] [--skip-smoke]',
     options: [
@@ -277,7 +277,7 @@ export const COMMAND_HELP_RELEASE_INTERNALS = {
       '--artifacts-dir <dir>             Script flag (default: dist/release-assets).',
       '--checksums <path>                Script flag; defaults to first checksums-*.txt found.',
       '--public-key <path>               Script flag; or set MINISIGN_PUBLIC_KEY.',
-      '--skip-smoke                      Script flag.',
+      '--skip-smoke                      Skip optional smoke tests; native CLI version attestation still runs.',
     ],
     bullets: ['This is safety-critical; prefer running it in CI in addition to local runs.'],
     examples: [

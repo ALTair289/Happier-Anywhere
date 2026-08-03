@@ -1,7 +1,7 @@
 // @ts-check
 
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -20,6 +20,25 @@ const MANIFEST_PUBLISH_SCRIPT_RELATIVE_PATH = 'scripts/pipeline/release/publish-
  */
 function withinRepo(repoRoot, rel) {
   return path.resolve(repoRoot, rel);
+}
+
+/**
+ * @param {string} packageJsonPath
+ * @param {string} nextVersion
+ * @returns {() => void}
+ */
+function patchPackageVersion(packageJsonPath, nextVersion) {
+  const raw = readFileSync(packageJsonPath, 'utf8');
+  const parsed = JSON.parse(raw);
+  const previousVersion = String(parsed.version ?? '').trim();
+  if (!previousVersion) {
+    throw new Error(`package.json missing version: ${packageJsonPath}`);
+  }
+  parsed.version = nextVersion;
+  writeFileSync(packageJsonPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+  return () => {
+    writeFileSync(packageJsonPath, raw, 'utf8');
+  };
 }
 
 /**
@@ -99,91 +118,106 @@ export async function prepareBinaryReleaseAssets(params) {
   }
 
   const opts = { dryRun: params.dryRun === true };
-  await ensureCleanBinaryArtifactsDir(repoRoot, productSpec, opts);
+  const packageJsonPath = withinRepo(repoRoot, productSpec.packageJsonPath);
+  /** @type {null | (() => void)} */
+  let restoreVersion = null;
+  try {
+    if (productSpec.patchPackageVersionOnRolling && channel !== 'stable') {
+      if (opts.dryRun) {
+        console.log(`[dry-run] patch ${path.relative(repoRoot, packageJsonPath)} version -> ${version}`);
+      } else {
+        restoreVersion = patchPackageVersion(packageJsonPath, version);
+      }
+    }
 
-  if (params.candidateDir) {
-    if (productSpec.id !== 'server') throw new Error('candidate finalization is supported only for server runtime assets');
-    if (opts.dryRun) {
-      console.log(`[dry-run] validate opaque candidate files from ${params.candidateDir}`);
+    await ensureCleanBinaryArtifactsDir(repoRoot, productSpec, opts);
+
+    if (params.candidateDir) {
+      if (productSpec.id !== 'server') throw new Error('candidate finalization is supported only for server runtime assets');
+      if (opts.dryRun) {
+        console.log(`[dry-run] validate opaque candidate files from ${params.candidateDir}`);
+      } else {
+        await finalizeServerRuntimeCandidate({
+          candidateDir: params.candidateDir,
+          outDir: withinRepo(repoRoot, productSpec.artifactsDir),
+          version,
+          authorizedSha: String(params.authorizedSha ?? ''),
+          sign: async (checksumsPath) => {
+            await maybeSignFile({ path: checksumsPath, trustedComment: `happier-server ${version} ${channel}` });
+          },
+        });
+      }
     } else {
-      await finalizeServerRuntimeCandidate({
-        candidateDir: params.candidateDir,
-        outDir: withinRepo(repoRoot, productSpec.artifactsDir),
-        version,
-        authorizedSha: String(params.authorizedSha ?? ''),
-        sign: async (checksumsPath) => {
-          await maybeSignFile({ path: checksumsPath, trustedComment: `happier-server ${version} ${channel}` });
+      runBinaryAssetStep(opts, process.execPath, [productSpec.buildScriptPath, '--channel', channel, '--version', version], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          ...params.env,
         },
       });
     }
-  } else {
-    runBinaryAssetStep(opts, process.execPath, [productSpec.buildScriptPath, '--channel', channel, '--version', version], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        ...params.env,
+
+    runBinaryAssetStep(
+      opts,
+      process.execPath,
+      [
+        MANIFEST_PUBLISH_SCRIPT_RELATIVE_PATH,
+        `--product=${productSpec.manifestProduct}`,
+        '--channel',
+        channel,
+        '--version',
+        version,
+        '--artifacts-dir',
+        productSpec.artifactsDir,
+        '--out-dir',
+        productSpec.manifestOutDir,
+        '--assets-base-url',
+        assetsBaseUrl,
+        '--commit-sha',
+        commitSha,
+        '--workflow-run-id',
+        String(params.workflowRunId ?? ''),
+      ],
+      { cwd: repoRoot },
+    );
+
+    const artifactVerifyTarget = resolveArtifactVerifyTarget({
+      repoRoot,
+      source: { kind: 'local-build', ref: productSpec.artifactsDir },
+      options: {
+        product: productSpec.id,
+        version,
+        releaseChannel: channel,
+        skipSmoke: params.skipSmoke === true,
       },
     });
-  }
 
-  runBinaryAssetStep(
-    opts,
-    process.execPath,
-    [
-      MANIFEST_PUBLISH_SCRIPT_RELATIVE_PATH,
-      `--product=${productSpec.manifestProduct}`,
-      '--channel',
-      channel,
-      '--version',
-      version,
-      '--artifacts-dir',
-      productSpec.artifactsDir,
-      '--out-dir',
-      productSpec.manifestOutDir,
-      '--assets-base-url',
-      assetsBaseUrl,
-      '--commit-sha',
-      commitSha,
-      '--workflow-run-id',
-      String(params.workflowRunId ?? ''),
-    ],
-    { cwd: repoRoot },
-  );
-
-  const artifactVerifyTarget = resolveArtifactVerifyTarget({
-    repoRoot,
-    source: { kind: 'local-build', ref: productSpec.artifactsDir },
-    options: {
-      product: productSpec.id,
-      version,
-      releaseChannel: channel,
-      skipSmoke: params.skipSmoke === true,
-    },
-  });
-
-  if (!opts.dryRun) {
-    for (const expectedPath of artifactVerifyTarget.preflightPaths) {
-      if (!existsSync(expectedPath)) {
-        throw new Error(`Missing expected artifact: ${path.relative(repoRoot, expectedPath)}`);
+    if (!opts.dryRun) {
+      for (const expectedPath of artifactVerifyTarget.preflightPaths) {
+        if (!existsSync(expectedPath)) {
+          throw new Error(`Missing expected artifact: ${path.relative(repoRoot, expectedPath)}`);
+        }
       }
+    } else {
+      console.log(`[dry-run] would verify artifacts under ${path.relative(repoRoot, artifactVerifyTarget.artifactsDir)}`);
     }
-  } else {
-    console.log(`[dry-run] would verify artifacts under ${path.relative(repoRoot, artifactVerifyTarget.artifactsDir)}`);
-  }
 
-  const artifactVerifyExecution = resolveArtifactVerifyExecution({
-    repoRoot,
-    source: { kind: 'local-build', ref: productSpec.artifactsDir },
-    options: {
-      product: productSpec.id,
-      version,
-      releaseChannel: channel,
-      skipSmoke: params.skipSmoke === true,
-    },
-  });
-  runBinaryAssetStep(opts, artifactVerifyExecution.command, artifactVerifyExecution.args, {
-    cwd: artifactVerifyExecution.cwd,
-  });
+    const artifactVerifyExecution = resolveArtifactVerifyExecution({
+      repoRoot,
+      source: { kind: 'local-build', ref: productSpec.artifactsDir },
+      options: {
+        product: productSpec.id,
+        version,
+        releaseChannel: channel,
+        skipSmoke: params.skipSmoke === true,
+      },
+    });
+    runBinaryAssetStep(opts, artifactVerifyExecution.command, artifactVerifyExecution.args, {
+      cwd: artifactVerifyExecution.cwd,
+    });
+  } finally {
+    if (restoreVersion) restoreVersion();
+  }
 }
 
 /**

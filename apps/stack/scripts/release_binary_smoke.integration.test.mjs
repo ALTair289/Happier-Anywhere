@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -96,7 +96,9 @@ test('compiled happier and server binaries execute from isolated cwd', async (t)
   }
 
   const repoRoot = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
-  const version = `0.0.0-smoke.${Date.now()}`;
+  const cliPackage = JSON.parse(await readFile(join(repoRoot, 'apps', 'cli', 'package.json'), 'utf8'));
+  const version = String(cliPackage.version ?? '').trim();
+  assert.ok(version, 'expected apps/cli/package.json to declare a version');
 
   const buildCli = runWithHardTimeout(
     process.execPath,
@@ -135,11 +137,8 @@ test('compiled happier and server binaries execute from isolated cwd', async (t)
   });
   assert.equal(cliVersion.status, 0, formatSpawnSyncResult(cliVersion));
   assert.equal(didCommandTimeout(cliVersion), false, formatSpawnSyncResult(cliVersion));
-  const versionText = `${cliVersion.stdout || ''}${cliVersion.stderr || ''}`.trim();
-  assert.ok(
-    /version/i.test(versionText) || /^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$/.test(versionText),
-    `expected CLI version output, got: ${versionText || '<empty>'}`,
-  );
+  const versionText = String(cliVersion.stdout || '').trim();
+  assert.equal(versionText, version, `expected CLI version ${version}, got: ${versionText || '<empty>'}`);
 
   if (isLinuxTarget(target)) {
     const buildServer = runWithHardTimeout(

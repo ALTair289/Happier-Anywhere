@@ -197,6 +197,160 @@ test('verify-artifacts includes stdout in smoke failures when stderr is empty', 
   }
 });
 
+test('verify-artifacts rejects a CLI version mismatch even when optional smoke tests are skipped', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'happier-verify-artifacts-cli-version-'));
+  try {
+    const artifactsDir = join(workspace, 'artifacts');
+    const stageRoot = join(workspace, 'stage');
+    const archivePlatform = normalizeArchivePlatform(process.platform);
+    const archiveArch = normalizeArchiveArch(process.arch);
+    const expectedVersion = '1.2.3';
+    const embeddedVersion = '1.2.3-preview.99';
+    const archiveStem = `happier-v${expectedVersion}-${archivePlatform}-${archiveArch}`;
+    const stageDir = join(stageRoot, archiveStem);
+    const archivePath = join(artifactsDir, `${archiveStem}.tar.gz`);
+    const checksumsPath = join(artifactsDir, `checksums-happier-v${expectedVersion}.txt`);
+
+    await mkdir(stageDir, { recursive: true });
+    await mkdir(artifactsDir, { recursive: true });
+    await writeFile(
+      join(stageDir, 'happier'),
+      `#!/usr/bin/env bash\nprintf '%s\\n' '${embeddedVersion}'\n`,
+      { encoding: 'utf-8', mode: 0o755 },
+    );
+
+    execFileSync('tar', ['-czf', archivePath, '-C', stageRoot, archiveStem], { cwd: repoRoot });
+    await writeFile(
+      checksumsPath,
+      `${await sha256(archivePath)}  ${archiveStem}.tar.gz\n`,
+      'utf-8',
+    );
+
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [
+            verifyArtifactsPath,
+            '--artifacts-dir',
+            artifactsDir,
+            '--checksums',
+            checksumsPath,
+            '--skip-smoke',
+          ],
+          { cwd: repoRoot, encoding: 'utf-8', stdio: 'pipe' },
+        ),
+      /version mismatch.*expected 1\.2\.3.*got 1\.2\.3-preview\.99/i,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('verify-artifacts accepts a CLI binary whose version matches its archive version', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'happier-verify-artifacts-cli-version-match-'));
+  try {
+    const artifactsDir = join(workspace, 'artifacts');
+    const stageRoot = join(workspace, 'stage');
+    const archivePlatform = normalizeArchivePlatform(process.platform);
+    const archiveArch = normalizeArchiveArch(process.arch);
+    const version = '1.2.3-preview.99';
+    const archiveStem = `happier-v${version}-${archivePlatform}-${archiveArch}`;
+    const stageDir = join(stageRoot, archiveStem);
+    const archivePath = join(artifactsDir, `${archiveStem}.tar.gz`);
+    const checksumsPath = join(artifactsDir, `checksums-happier-v${version}.txt`);
+
+    await mkdir(stageDir, { recursive: true });
+    await mkdir(artifactsDir, { recursive: true });
+    await writeFile(
+      join(stageDir, 'happier'),
+      `#!/usr/bin/env bash\nprintf '%s\\n' '${version}'\n`,
+      { encoding: 'utf-8', mode: 0o755 },
+    );
+
+    execFileSync('tar', ['-czf', archivePath, '-C', stageRoot, archiveStem], { cwd: repoRoot });
+    await writeFile(
+      checksumsPath,
+      `${await sha256(archivePath)}  ${archiveStem}.tar.gz\n`,
+      'utf-8',
+    );
+
+    execFileSync(
+      process.execPath,
+      [
+        verifyArtifactsPath,
+        '--artifacts-dir',
+        artifactsDir,
+        '--checksums',
+        checksumsPath,
+        '--skip-smoke',
+      ],
+      { cwd: repoRoot, encoding: 'utf-8', stdio: 'pipe' },
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('verify-artifacts rejects a CLI that times out before its version can be attested', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'happier-verify-artifacts-cli-version-timeout-'));
+  try {
+    const artifactsDir = join(workspace, 'artifacts');
+    const stageRoot = join(workspace, 'stage');
+    const archivePlatform = normalizeArchivePlatform(process.platform);
+    const archiveArch = normalizeArchiveArch(process.arch);
+    const version = '1.2.3';
+    const archiveStem = `happier-v${version}-${archivePlatform}-${archiveArch}`;
+    const stageDir = join(stageRoot, archiveStem);
+    const archivePath = join(artifactsDir, `${archiveStem}.tar.gz`);
+    const checksumsPath = join(artifactsDir, `checksums-happier-v${version}.txt`);
+
+    await mkdir(stageDir, { recursive: true });
+    await mkdir(artifactsDir, { recursive: true });
+    await writeFile(
+      join(stageDir, 'happier'),
+      [
+        '#!/usr/bin/env bash',
+        "printf 'version %s\\n' '1.2.3-preview.99'",
+        'while true; do sleep 1; done',
+        '',
+      ].join('\n'),
+      { encoding: 'utf-8', mode: 0o755 },
+    );
+
+    execFileSync('tar', ['-czf', archivePath, '-C', stageRoot, archiveStem], { cwd: repoRoot });
+    await writeFile(
+      checksumsPath,
+      `${await sha256(archivePath)}  ${archiveStem}.tar.gz\n`,
+      'utf-8',
+    );
+
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [
+            verifyArtifactsPath,
+            '--artifacts-dir',
+            artifactsDir,
+            '--checksums',
+            checksumsPath,
+            '--skip-smoke',
+          ],
+          {
+            cwd: repoRoot,
+            encoding: 'utf-8',
+            stdio: 'pipe',
+            env: { ...process.env, HAPPIER_RELEASE_BINARY_SMOKE_TIMEOUT_MS: '500' },
+          },
+        ),
+      /smoke test timed out/i,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('verify-artifacts hard-times-out packaged server binaries that ignore SIGTERM', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'happier-verify-artifacts-timeout-'));
   try {

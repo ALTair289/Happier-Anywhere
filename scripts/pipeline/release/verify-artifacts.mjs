@@ -8,6 +8,7 @@ import { basename, join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
 import { fileSha256 } from './lib/release-files.mjs';
+import { parseArtifactFilename } from './lib/manifests.mjs';
 import { parseArgs } from './lib/release-arguments.mjs';
 import { shouldSmokeTestReleaseArtifact } from './publishing/artifact-smoke-compatibility.mjs';
 import { terminateProcessTreeByPid } from '../../testing/process/processTree.mjs';
@@ -137,6 +138,7 @@ async function runSmokeCommand({ command, args, cwd, env, timeoutMs }) {
 }
 
 async function smokeTestArchive({ archivePath }) {
+  const artifact = parseArtifactFilename(basename(archivePath));
   const scratch = await mkdtemp(join(tmpdir(), 'happier-release-smoke-'));
   try {
     execOrThrow('tar', ['-xzf', archivePath, '-C', scratch], { stdio: 'ignore' });
@@ -177,6 +179,9 @@ async function smokeTestArchive({ archivePath }) {
     const timedOut = result.timedOut === true;
     if (timedOut) {
       const output = formatSmokeOutput(result);
+      if (artifact?.product === 'happier') {
+        throw new Error(`[release] smoke test timed out for ${archivePath}: ${output.trim()}`);
+      }
       if (serverBinary) {
         if (/ERR_MODULE_NOT_FOUND|Cannot find module/i.test(output)) {
           throw new Error(`[release] smoke test failed for ${archivePath}: ${output.trim()}`);
@@ -190,6 +195,14 @@ async function smokeTestArchive({ archivePath }) {
     }
     if ((result.status ?? 1) !== 0) {
       throw new Error(`[release] smoke test failed for ${archivePath}: ${formatSmokeOutput(result)}`);
+    }
+    if (artifact?.product === 'happier') {
+      const actualVersion = String(result.stdout ?? '').trim();
+      if (actualVersion !== artifact.version) {
+        throw new Error(
+          `[release] CLI version mismatch for ${archivePath}: expected ${artifact.version}, got ${actualVersion || '<empty>'}`,
+        );
+      }
     }
   } finally {
     await rm(scratch, { recursive: true, force: true });
@@ -227,12 +240,16 @@ async function main() {
     execOrThrow('minisign', ['-Vm', checksumsPath, '-p', pubKeyPath], { stdio: 'inherit' });
   }
 
-  if (!flags.has('--skip-smoke')) {
-    for (const entry of entries) {
-      if (!entry.name.endsWith('.tar.gz')) continue;
-      if (!shouldSmokeTestReleaseArtifact({ archiveName: entry.name })) continue;
-      await smokeTestArchive({ archivePath: join(artifactsDir, entry.name) });
-    }
+  const skipOptionalSmoke = flags.has('--skip-smoke');
+  const cliVersionAttestations = [];
+  for (const entry of entries) {
+    if (!entry.name.endsWith('.tar.gz')) continue;
+    if (!shouldSmokeTestReleaseArtifact({ archiveName: entry.name })) continue;
+    const artifact = parseArtifactFilename(entry.name);
+    const requiresCliVersionAttestation = artifact?.product === 'happier';
+    if (skipOptionalSmoke && !requiresCliVersionAttestation) continue;
+    await smokeTestArchive({ archivePath: join(artifactsDir, entry.name) });
+    if (requiresCliVersionAttestation) cliVersionAttestations.push(entry.name);
   }
 
   console.log(JSON.stringify({
@@ -240,7 +257,8 @@ async function main() {
     artifactsDir,
     checksumsPath,
     verified: entries.map((entry) => entry.name),
-    smoke: !flags.has('--skip-smoke'),
+    smoke: !skipOptionalSmoke,
+    cliVersionAttestations,
   }, null, 2));
 }
 

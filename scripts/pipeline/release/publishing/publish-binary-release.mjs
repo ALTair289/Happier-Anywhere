@@ -86,25 +86,6 @@ function run(opts, cmd, args, extra) {
 }
 
 /**
- * @param {string} packageJsonPath
- * @param {string} nextVersion
- * @returns {() => void}
- */
-function patchPackageVersion(packageJsonPath, nextVersion) {
-  const raw = fs.readFileSync(packageJsonPath, 'utf8');
-  const parsed = JSON.parse(raw);
-  const previousVersion = String(parsed.version ?? '').trim();
-  if (!previousVersion) {
-    throw new Error(`package.json missing version: ${packageJsonPath}`);
-  }
-  parsed.version = nextVersion;
-  fs.writeFileSync(packageJsonPath, JSON.stringify(parsed, null, 2) + '\n', 'utf8');
-  return () => {
-    fs.writeFileSync(packageJsonPath, raw, 'utf8');
-  };
-}
-
-/**
  * @param {string} repoRoot
  * @param {ReturnType<typeof getBinaryPublishProductSpec>} productSpec
  */
@@ -346,92 +327,75 @@ export async function publishBinaryReleaseMain(options = {}) {
     return;
   }
 
-  const packageJsonPath = withinRepo(repoRoot, productSpec.packageJsonPath);
-  /** @type {null | (() => void)} */
-  let restoreVersion = null;
-  try {
-    if (productSpec.patchPackageVersionOnRolling && channel !== 'stable') {
-      if (opts.dryRun) {
-        console.log(`[dry-run] patch ${path.relative(repoRoot, packageJsonPath)} version -> ${version}`);
-      } else {
-        restoreVersion = patchPackageVersion(packageJsonPath, version);
-      }
-    }
+  const repoSlug = resolveGitHubRepoSlug({ repoRoot, env: process.env });
+  if (!repoSlug) {
+    throw new Error(
+      [
+        'Unable to resolve GitHub repo slug for manifest URL generation.',
+        'Set GH_REPO=owner/repo (recommended) or ensure git remote.origin.url points at github.com.',
+      ].join('\n'),
+    );
+  }
+  const assetsBaseUrl = `https://github.com/${repoSlug}/releases/download/${versionTag}`;
 
-    const repoSlug = resolveGitHubRepoSlug({ repoRoot, env: process.env });
-    if (!repoSlug) {
-      throw new Error(
-        [
-          'Unable to resolve GitHub repo slug for manifest URL generation.',
-          'Set GH_REPO=owner/repo (recommended) or ensure git remote.origin.url points at github.com.',
-        ].join('\n'),
-      );
-    }
-    const assetsBaseUrl = `https://github.com/${repoSlug}/releases/download/${versionTag}`;
+  // Artifact preparation owns build-only workspace dependencies. Keep it out of the
+  // pre-install version-allocation path used by the release actor guard.
+  const { prepareBinaryReleaseAssets } = await import('./prepare-binary-assets.mjs');
+  await prepareBinaryReleaseAssets({
+    repoRoot,
+    productId: productSpec.id,
+    channel,
+    version,
+    assetsBaseUrl,
+    commitSha: targetSha,
+    workflowRunId: String(process.env.GITHUB_RUN_ID ?? ''),
+    skipSmoke: phase === 'finalize-candidate',
+    dryRun: opts.dryRun,
+    env: {
+      HAPPIER_EMBEDDED_POLICY_ENV: process.env.HAPPIER_EMBEDDED_POLICY_ENV ?? embeddedPolicy,
+    },
+    ...(phase === 'finalize-candidate' ? {
+      candidateDir: String(values['candidate-dir'] ?? ''),
+      authorizedSha,
+    } : {}),
+  });
 
-    // Artifact preparation owns build-only workspace dependencies. Keep it out of the
-    // pre-install version-allocation path used by the release actor guard.
-    const { prepareBinaryReleaseAssets } = await import('./prepare-binary-assets.mjs');
-    await prepareBinaryReleaseAssets({
-      repoRoot,
-      productId: productSpec.id,
-      channel,
-      version,
-      assetsBaseUrl,
-      commitSha: targetSha,
-      workflowRunId: String(process.env.GITHUB_RUN_ID ?? ''),
-      skipSmoke: phase === 'finalize-candidate',
-      dryRun: opts.dryRun,
-      env: {
-        HAPPIER_EMBEDDED_POLICY_ENV: process.env.HAPPIER_EMBEDDED_POLICY_ENV ?? embeddedPolicy,
-      },
-      ...(phase === 'finalize-candidate' ? {
-        candidateDir: String(values['candidate-dir'] ?? ''),
-        authorizedSha,
-      } : {}),
-    });
+  const artifactsDir = withinRepo(repoRoot, productSpec.artifactsDir);
 
-    const artifactsDir = withinRepo(repoRoot, productSpec.artifactsDir);
+  run(opts, process.execPath, [
+    GITHUB_RELEASE_SCRIPT_RELATIVE_PATH,
+    '--tag', versionTag,
+    '--title', versionTitle,
+    '--target-sha', targetSha,
+    '--prerelease', prerelease,
+    '--rolling-tag', 'false',
+    '--generate-notes', 'true',
+    '--notes', versionNotes,
+    '--assets-dir', path.relative(repoRoot, artifactsDir),
+    '--clobber', 'false',
+    '--prune-assets', 'false',
+    '--release-message', releaseMessage,
+    ...(opts.dryRun ? ['--dry-run'] : []),
+  ], { cwd: repoRoot });
 
-    run(opts, process.execPath, [
-      GITHUB_RELEASE_SCRIPT_RELATIVE_PATH,
-      '--tag', versionTag,
-      '--title', versionTitle,
-      '--target-sha', targetSha,
-      '--prerelease', prerelease,
-      '--rolling-tag', 'false',
-      '--generate-notes', 'true',
-      '--notes', versionNotes,
-      '--assets-dir', path.relative(repoRoot, artifactsDir),
-      '--clobber', 'false',
-      '--prune-assets', 'false',
-      '--release-message', releaseMessage,
-      ...(opts.dryRun ? ['--dry-run'] : []),
-    ], { cwd: repoRoot });
+  run(opts, process.execPath, [
+    ROLLING_PROMOTION_SCRIPT_RELATIVE_PATH,
+    '--source-tag', versionTag,
+    '--rolling-tag', rollingTag,
+    '--title', rollingTitle,
+    '--target-sha', targetSha,
+    '--prerelease', prerelease,
+    '--notes', notes,
+    '--release-message', releaseMessage,
+    '--repo', repoSlug,
+    '--public-key', RELEASE_PUBLIC_KEY_RELATIVE_PATH,
+    ...(opts.dryRun ? ['--dry-run'] : []),
+  ], { cwd: repoRoot });
 
-    run(opts, process.execPath, [
-      ROLLING_PROMOTION_SCRIPT_RELATIVE_PATH,
-      '--source-tag', versionTag,
-      '--rolling-tag', rollingTag,
-      '--title', rollingTitle,
-      '--target-sha', targetSha,
-      '--prerelease', prerelease,
-      '--notes', notes,
-      '--release-message', releaseMessage,
-      '--repo', repoSlug,
-      '--public-key', RELEASE_PUBLIC_KEY_RELATIVE_PATH,
-      ...(opts.dryRun ? ['--dry-run'] : []),
-    ], { cwd: repoRoot });
-
-    if (!opts.dryRun && productSpec.id === 'cli') {
-      console.log(`[pipeline] published GitHub rolling release: ${rollingTag}`);
-      console.log(`[pipeline] published GitHub versioned release: ${versionTag}`);
-      console.log(`[pipeline] note: GitHub may not update 'Published' timestamps for rolling releases; verify assets on tag '${rollingTag}'.`);
-    }
-  } finally {
-    if (restoreVersion) {
-      restoreVersion();
-    }
+  if (!opts.dryRun && productSpec.id === 'cli') {
+    console.log(`[pipeline] published GitHub rolling release: ${rollingTag}`);
+    console.log(`[pipeline] published GitHub versioned release: ${versionTag}`);
+    console.log(`[pipeline] note: GitHub may not update 'Published' timestamps for rolling releases; verify assets on tag '${rollingTag}'.`);
   }
 }
 
