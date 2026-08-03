@@ -51,7 +51,7 @@ import { runRefreshDiagnosticAction } from '@/utils/system/userInteractionDiagno
 import { DEFAULT_AGENT_ID, isAgentId } from '@/agents/catalog/catalog';
 import { DropdownMenu } from '@/components/ui/forms/dropdown/DropdownMenu';
 import { WINDOWS_REMOTE_SESSION_LAUNCH_MODE_OPTIONS } from '@/sync/domains/session/spawn/windowsRemoteSessionLaunchModeOptions';
-import { readDisplayMachineTargetForSession } from '@/sync/ops/sessionMachineTarget';
+import { readDisplayMachineTargetForSession, readMachineControlTargetForSession } from '@/sync/ops/sessionMachineTarget';
 import { resolveMachineSpawnReadiness } from '@/sync/domains/machines/identity/resolveMachineSpawnReadiness';
 import { Icon } from '@/components/ui/icons/Icon';
 import {
@@ -476,8 +476,12 @@ export default function MachineDetailScreen() {
     const recentPaths = useMemo(() => {
         const paths = new Set<string>();
         machineSessions.forEach(session => {
-            if (session.metadata?.path) {
-                paths.add(session.metadata.path);
+            const machineTarget = readMachineControlTargetForSession(session.id);
+            const path = machineTarget?.machineId === machineId
+                ? machineTarget.basePath
+                : session.metadata?.path;
+            if (path) {
+                paths.add(path);
             }
         });
         return Array.from(paths).sort();

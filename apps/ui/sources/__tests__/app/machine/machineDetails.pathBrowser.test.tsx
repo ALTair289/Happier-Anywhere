@@ -172,6 +172,7 @@ vi.mock('@/sync/ops/sessionMachineTarget', async (importOriginal) => {
     return {
         ...actual,
         readMachineTargetForSession: readTarget,
+        readMachineControlTargetForSession: readTarget,
         readDisplayMachineTargetForSession: (input: { sessionId?: string | null }) =>
             input.sessionId ? readTarget(input.sessionId) : null,
     };
@@ -273,6 +274,40 @@ describe('MachineDetailScreen path browser', () => {
         expect(mockState.itemSpy).toHaveBeenCalledWith(
             expect.objectContaining({
                 title: '~/workspace/rebound',
+            }),
+        );
+    });
+
+    it('lists the machine-visible recent path when the session path belongs to an agent sandbox', async () => {
+        mockState.sessionsState = [
+            {
+                id: 'session-1',
+                active: true,
+                seq: 1,
+                createdAt: 1,
+                updatedAt: 20,
+                metadata: {
+                    machineId: 'machine-1',
+                    path: '/home/coder/project',
+                    homeDir: '/Users/test',
+                },
+            },
+        ];
+        mockState.projectForSession = {
+            'session-1': {
+                key: {
+                    machineId: 'machine-1',
+                    path: '/Users/test/workspace/project',
+                },
+            },
+        };
+
+        const { default: MachineDetailScreen } = await import('@/app/(app)/machine/[id]');
+        await renderScreen(React.createElement(MachineDetailScreen));
+
+        expect(mockState.itemSpy).toHaveBeenCalledWith(
+            expect.objectContaining({
+                title: '~/workspace/project',
             }),
         );
     });
