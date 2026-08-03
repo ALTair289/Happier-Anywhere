@@ -13,6 +13,7 @@ import {
     MoveSessionFolderAssignmentsResponseSchema,
     ReorderSessionOrganizationResponseSchema,
     SESSION_ORGANIZATION_MAX_SCOPED_SNAPSHOT_IDS,
+    SESSION_ORGANIZATION_SNAPSHOT_VERSION,
     SessionFolderAssignmentListResponseSchema,
     SessionOrganizationSnapshotRequestSchema,
     SessionOrganizationSnapshotResponseSchema,
@@ -115,6 +116,22 @@ function looksLikeMissingSessionOrganizationRoute(status: number, raw: unknown):
         );
 }
 
+function emptySessionOrganizationSnapshotResponse(): SessionOrganizationSnapshotResponse {
+    return SessionOrganizationSnapshotResponseSchema.parse({
+        snapshot: {
+            schemaVersion: SESSION_ORGANIZATION_SNAPSHOT_VERSION,
+            version: 0,
+            pins: [],
+            folders: [],
+            folderAssignments: [],
+            tags: [],
+            tagAssignments: [],
+            orderEntries: [],
+            labels: [],
+        },
+    });
+}
+
 async function fetchSessionOrganizationRoute(params: Readonly<{
     credentials: AuthCredentials;
     serverUrl?: string;
@@ -175,7 +192,14 @@ export async function fetchSessionOrganizationSnapshot(params: Readonly<{
         path: `${SESSION_ORGANIZATION_ROUTE}${buildSnapshotQuery(params.request)}`,
         init: { headers: authHeaders(params.credentials) },
     });
-    return parseJsonResponse(response, SessionOrganizationSnapshotResponseSchema, 'Failed to fetch session organization snapshot');
+    const raw = await readJsonBody(response);
+    if (!response.ok) {
+        if (looksLikeMissingSessionOrganizationRoute(response.status, raw)) {
+            return emptySessionOrganizationSnapshotResponse();
+        }
+        throw new HappyError(readErrorMessage(raw, 'Failed to fetch session organization snapshot'), false);
+    }
+    return parseJsonBody(raw, SessionOrganizationSnapshotResponseSchema, 'Failed to fetch session organization snapshot');
 }
 
 export async function importLegacySessionOrganization(params: Readonly<{

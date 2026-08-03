@@ -4,5 +4,7 @@ export function isSessionSyncHttpRoute(routePath: string): boolean {
         || routePath === '/v1/sessions'
         || routePath.startsWith('/v1/sessions/')
         || routePath === '/v2/sessions'
-        || routePath.startsWith('/v2/sessions/');
+        || routePath.startsWith('/v2/sessions/')
+        || routePath === '/v2/session-organization'
+        || routePath.startsWith('/v2/session-organization/');
 }

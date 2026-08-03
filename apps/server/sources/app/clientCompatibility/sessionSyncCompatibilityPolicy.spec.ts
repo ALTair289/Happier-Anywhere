@@ -274,6 +274,8 @@ describe('session-sync route inventory', () => {
         '/v1/sessions/:sessionId/messages',
         '/v2/sessions',
         '/v2/sessions/:sessionId',
+        '/v2/session-organization',
+        '/v2/session-organization/tags',
         '/v2/changes',
         '/v2/cursor',
     ])('protects %s', (route) => {

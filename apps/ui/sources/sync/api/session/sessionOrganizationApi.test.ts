@@ -119,6 +119,21 @@ describe('sessionOrganizationApi', () => {
         });
     });
 
+    it('returns an empty compatibility snapshot when the organization route is missing', async () => {
+        const { fetchSessionOrganizationSnapshot } = await import('./sessionOrganizationApi');
+        mocks.serverFetch.mockResolvedValueOnce(jsonResponse({
+            error: 'Not found',
+            path: '/v2/session-organization',
+        }, 404));
+
+        const response = await fetchSessionOrganizationSnapshot({ credentials });
+
+        expect(response.snapshot.version).toBe(0);
+        expect(response.snapshot.pins).toEqual([]);
+        expect(response.snapshot.folderAssignments).toEqual([]);
+        expect(response.snapshot.tagAssignments).toEqual([]);
+    });
+
     it('rejects malformed snapshot responses at the API boundary', async () => {
         const { fetchSessionOrganizationSnapshot } = await import('./sessionOrganizationApi');
         mocks.serverFetch.mockResolvedValueOnce(jsonResponse({ snapshot: { version: 'not-a-number' } }));
