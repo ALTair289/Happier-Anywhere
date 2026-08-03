@@ -43,7 +43,11 @@ export async function sessionRipgrep(
             try {
                 const request: SessionRipgrepRequest = {
                     args,
-                    cwd: resolveMachinePathFromSessionBase({ basePath: machineTarget.basePath, requestPath: cwd }),
+                    cwd: resolveMachinePathFromSessionBase({
+                        basePath: machineTarget.basePath,
+                        agentBasePath: machineTarget.agentBasePath,
+                        requestPath: cwd,
+                    }),
                 };
                 const response = await apiSocket.machineRPC<SessionRipgrepResponse, SessionRipgrepRequest>(
                     machineTarget.machineId,

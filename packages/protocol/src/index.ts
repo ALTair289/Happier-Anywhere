@@ -1666,6 +1666,16 @@ export {
 } from './sessionMetadata/sessionPermissionModes.js';
 
 export {
+  SESSION_WORKSPACE_LOCATION_METADATA_KEY,
+  SessionWorkspaceLocationV1Schema,
+  type SessionWorkspaceLocationV1,
+  createSessionWorkspaceLocationV1Schema,
+  buildSessionWorkspaceLocationV1,
+  readSessionWorkspaceLocationFromMetadata,
+  resolveSessionWorkspaceRootForMachine,
+} from './sessionMetadata/sessionWorkspaceLocationV1.js';
+
+export {
   SessionMessageMetaSchema,
   SESSION_USER_MESSAGE_DELIVERY_INTENT_META_KEY,
   type SessionMessageMeta,

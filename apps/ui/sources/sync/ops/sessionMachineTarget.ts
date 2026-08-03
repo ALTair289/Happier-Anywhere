@@ -1,4 +1,4 @@
-import { isSameMachineLocality } from '@happier-dev/protocol';
+import { isSameMachineLocality, resolveSessionWorkspaceRootForMachine } from '@happier-dev/protocol';
 import { isRpcMethodNotAvailableError, isRpcMethodNotFoundError, type RpcErrorCarrier } from '@happier-dev/protocol/rpcErrors';
 import { resolveSessionMachineRpcTarget } from '@/sync/domains/session/resolveSessionReachableMachineId';
 import { resolveSessionDisplayTarget } from '@/sync/domains/machines/identity/resolveSessionMachineTargets';
@@ -7,12 +7,14 @@ import type { Machine } from '@/sync/domains/state/storageTypes';
 import type { MachineDisplayRenderable } from '@/sync/domains/machines/machineDisplayRenderable';
 import { resolveSessionMachineId } from '@/sync/domains/session/directSessions/resolveSessionMachineId';
 import { normalizeKnownProjectMachineId } from '@/sync/runtime/orchestration/projectManager';
+import { resolvePathRelativeToRoot } from '@/utils/path/resolvePathRelativeToRoot';
 
 type SessionTargetMetadataLike = Readonly<{
   machineId?: string | null;
   path?: string | null;
   host?: string | null;
   homeDir?: string | null;
+  sessionWorkspaceLocationV1?: unknown;
   directSessionV1?: Readonly<{
     v?: number;
     providerId?: string | null;
@@ -37,7 +39,14 @@ export type SessionMachineTargetState = MachineTargetLikeState;
 export type SessionMachineControlTarget = Readonly<{
   machineId: string;
   basePath: string;
+  agentBasePath?: string;
   confidence: 'reachable' | 'metadata_direct';
+}>;
+
+export type SessionMachineTarget = Readonly<{
+  machineId: string;
+  basePath: string;
+  agentBasePath?: string;
 }>;
 
 type MachineControlCandidate = Readonly<{
@@ -113,7 +122,7 @@ function resolveLegacyHostMachineTarget(input: Readonly<{
 export function resolveMachineTargetForSessionFromState(
   state: SessionMachineTargetState,
   sessionId: string,
-): { machineId: string; basePath: string } | null {
+): SessionMachineTarget | null {
   const session = state.sessions?.[sessionId];
   const metadata = session?.metadata ?? null;
   const project = typeof state.getProjectForSession === 'function' ? state.getProjectForSession(sessionId) : null;
@@ -131,11 +140,30 @@ export function resolveMachineTargetForSessionFromState(
     projectPath: normalizeNonEmptyString(project?.key?.path),
     machines,
   });
-  return target ?? resolveLegacyHostMachineTarget({
+  const resolvedTarget = target ?? resolveLegacyHostMachineTarget({
     metadata,
     projectMachineId,
     machines,
   });
+  return resolveWorkspaceLocationForMachineTarget(metadata, resolvedTarget);
+}
+
+function resolveWorkspaceLocationForMachineTarget(
+  metadata: SessionTargetMetadataLike,
+  target: Readonly<{ machineId: string; basePath: string }> | null,
+): SessionMachineTarget | null {
+  if (!target) return null;
+  const resolved = resolveSessionWorkspaceRootForMachine({
+    metadata,
+    machineId: target.machineId,
+    candidatePath: target.basePath,
+  });
+  if (!resolved.agentPath || resolved.machinePath === resolved.agentPath) return target;
+  return {
+    machineId: target.machineId,
+    basePath: resolved.machinePath,
+    agentBasePath: resolved.agentPath,
+  };
 }
 
 function hasKnownUnavailableMachineState(machine: MachineControlCandidate | undefined): boolean {
@@ -184,9 +212,13 @@ function resolveStaleInactiveMachineControlTarget(input: Readonly<{
   });
   if (!activeMachine) return null;
 
-  return {
+  const workspaceTarget = resolveWorkspaceLocationForMachineTarget(input.metadata, {
     machineId: activeMachine.id,
     basePath,
+  });
+  if (!workspaceTarget) return null;
+  return {
+    ...workspaceTarget,
     confidence: 'reachable',
   };
 }
@@ -248,16 +280,17 @@ export function resolveMachineControlTargetForSessionFromState(
     return null;
   }
 
+  const workspaceTarget = resolveWorkspaceLocationForMachineTarget(session?.metadata ?? null, displayTarget);
+  if (!workspaceTarget) return null;
   return {
-    machineId: displayTarget.machineId,
-    basePath: displayTarget.basePath,
+    ...workspaceTarget,
     confidence: 'metadata_direct',
   };
 }
 
 export function readMachineTargetForSession(
   sessionId: string,
-): { machineId: string; basePath: string } | null {
+): SessionMachineTarget | null {
   return resolveMachineTargetForSessionFromState(storage.getState() as SessionMachineTargetState, sessionId);
 }
 
@@ -366,14 +399,27 @@ export function readDisplayPathForSession(input: Readonly<{
   });
 }
 
-export function resolveMachinePathFromSessionBase(input: { basePath: string; requestPath?: string }): string {
+export function resolveMachinePathFromSessionBase(input: {
+  basePath: string;
+  agentBasePath?: string;
+  requestPath?: string;
+}): string {
   const requestPath = input.requestPath;
   if (!requestPath || requestPath === '.') return input.basePath;
   if (requestPath.startsWith('~')) return requestPath;
 
   const isAbsolutePosix = requestPath.startsWith('/');
   const isAbsoluteWindows = /^[a-zA-Z]:[\\/]/.test(requestPath) || requestPath.startsWith('\\\\');
-  if (isAbsolutePosix || isAbsoluteWindows) return requestPath;
+  if (isAbsolutePosix || isAbsoluteWindows) {
+    const relative = input.agentBasePath
+      ? resolvePathRelativeToRoot({ path: requestPath, root: input.agentBasePath })
+      : null;
+    if (relative === null) return requestPath;
+    if (relative === '.') return input.basePath;
+    const separator = input.basePath.includes('\\') ? '\\' : '/';
+    const base = input.basePath.endsWith(separator) ? input.basePath.slice(0, -1) : input.basePath;
+    return `${base}${separator}${relative.replace(/[\\/]/g, separator)}`;
+  }
 
   const separator = input.basePath.includes('\\') ? '\\' : '/';
   const base = input.basePath.endsWith(separator) ? input.basePath.slice(0, -1) : input.basePath;

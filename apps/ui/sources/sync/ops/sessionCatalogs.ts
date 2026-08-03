@@ -49,7 +49,7 @@ async function listVendorPluginCatalog(
 ): Promise<SessionVendorPluginCatalogListResponseV1 | undefined> {
     try {
         const response = isInactiveSession(sessionId)
-            ? await listInactiveVendorPluginCatalog(sessionId, cwd)
+            ? await listInactiveVendorPluginCatalog(sessionId)
             : await sessionRpcWithServerScope<unknown, { cwd?: string }>({
                 sessionId,
                 serverId: resolvePreferredServerIdForSessionId(sessionId),
@@ -70,7 +70,7 @@ async function listSkillCatalog(
 ): Promise<SessionSkillCatalogListResponseV1 | undefined> {
     try {
         const response = isInactiveSession(sessionId)
-            ? await listInactiveSkillCatalog(sessionId, cwd)
+            ? await listInactiveSkillCatalog(sessionId)
             : await sessionRpcWithServerScope<unknown, { cwd?: string }>({
                 sessionId,
                 serverId: resolvePreferredServerIdForSessionId(sessionId),
@@ -85,25 +85,25 @@ async function listSkillCatalog(
     return undefined;
 }
 
-async function listInactiveVendorPluginCatalog(sessionId: string, cwd: string | undefined): Promise<unknown> {
+async function listInactiveVendorPluginCatalog(sessionId: string): Promise<unknown> {
     const target = readMachineControlTargetForSession(sessionId);
     if (!target) return undefined;
     return await machineRpcWithServerScope<unknown, { sessionId: string; cwd?: string }>({
         machineId: target.machineId,
         serverId: resolvePreferredServerIdForSessionId(sessionId),
         method: RPC_METHODS.DAEMON_SESSION_VENDOR_PLUGIN_CATALOG_LIST,
-        payload: { sessionId, ...(cwd ? { cwd } : {}) },
+        payload: { sessionId, cwd: target.basePath },
     });
 }
 
-async function listInactiveSkillCatalog(sessionId: string, cwd: string | undefined): Promise<unknown> {
+async function listInactiveSkillCatalog(sessionId: string): Promise<unknown> {
     const target = readMachineControlTargetForSession(sessionId);
     if (!target) return undefined;
     return await machineRpcWithServerScope<unknown, { sessionId: string; cwd?: string }>({
         machineId: target.machineId,
         serverId: resolvePreferredServerIdForSessionId(sessionId),
         method: RPC_METHODS.DAEMON_SESSION_SKILL_CATALOG_LIST,
-        payload: { sessionId, ...(cwd ? { cwd } : {}) },
+        payload: { sessionId, cwd: target.basePath },
     });
 }
 

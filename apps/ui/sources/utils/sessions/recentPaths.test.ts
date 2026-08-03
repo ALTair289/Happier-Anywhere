@@ -27,6 +27,12 @@ function createSession(input: Readonly<{
     machineId: string;
     path: string;
     updatedAt?: number;
+    sessionWorkspaceLocationV1?: Readonly<{
+        v: 1;
+        machineId: string;
+        agentPath: string;
+        machinePath: string;
+    }>;
 }>): Session {
     return {
         id: input.id,
@@ -41,6 +47,7 @@ function createSession(input: Readonly<{
             homeDir: '/Users/test',
             host: 'host.local',
             flavor: 'claude',
+            ...(input.sessionWorkspaceLocationV1 ? { sessionWorkspaceLocationV1: input.sessionWorkspaceLocationV1 } : {}),
         },
         metadataVersion: 1,
         agentState: null,
@@ -65,6 +72,28 @@ describe('getRecentPathsForMachine', () => {
             },
             getProjectForSession: () => null,
         };
+    });
+
+    it('lists the machine-visible root for a session whose agent uses a sandbox path', async () => {
+        const { getRecentPathsForMachine } = await import('./recentPaths');
+        const session = createSession({
+            id: 'session-1',
+            machineId: 'machine-target',
+            path: '/home/coder/project',
+            sessionWorkspaceLocationV1: {
+                v: 1,
+                machineId: 'machine-target',
+                agentPath: '/home/coder/project',
+                machinePath: '/Users/alice/project',
+            },
+        });
+        storageState.sessions = { [session.id]: session };
+
+        expect(getRecentPathsForMachine({
+            machineId: 'machine-target',
+            recentMachinePaths: [],
+            sessions: [session],
+        })).toEqual(['/Users/alice/project']);
     });
 
     it('does not include same-host session paths that have no explicit replacement', async () => {

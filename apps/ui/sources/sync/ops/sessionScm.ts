@@ -84,7 +84,11 @@ async function callScmPreferMachine<
     const machineTarget = readMachineControlTargetForSession(sessionId);
 
     if (machineTarget) {
-        const cwd = resolveMachinePathFromSessionBase({ basePath: machineTarget.basePath, requestPath: request.cwd });
+        const cwd = resolveMachinePathFromSessionBase({
+            basePath: machineTarget.basePath,
+            agentBasePath: machineTarget.agentBasePath,
+            requestPath: request.cwd,
+        });
         try {
             return await runMachineScmRpc<T, R>(
                 machineTarget.machineId,

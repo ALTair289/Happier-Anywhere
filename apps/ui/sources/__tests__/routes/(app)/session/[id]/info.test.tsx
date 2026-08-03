@@ -1186,6 +1186,45 @@ describe('/session/[id]/info', () => {
         }));
     });
 
+    it('seeds a new session with the machine-visible workspace root when the display root is sandbox-local', async () => {
+        readMachineTargetForSessionSpy.mockReturnValue({
+            machineId: 'machine-1',
+            basePath: '/Users/alice/project',
+            agentBasePath: '/home/coder/project',
+        });
+        readDisplayMachineTargetForSessionSpy.mockReturnValue({
+            machineId: 'machine-1',
+            basePath: '/home/coder/project',
+        });
+        mockSession = {
+            id: 'session-1',
+            active: true,
+            accessLevel: null,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            seq: 1,
+            metadata: {
+                machineId: 'machine-1',
+                path: '/home/coder/project',
+                flavor: 'codex',
+            },
+        };
+
+        const screen = await renderInfoScreen();
+        screen.pressByTestId('session-info-new-session-same-setup');
+
+        const pushArg = routerPushSpy.mock.calls[0]?.[0] as any;
+        expect(pushArg.params).toEqual(expect.objectContaining({
+            machineId: 'machine-1',
+            directory: '/Users/alice/project',
+        }));
+        const tempData = peekTempData<NewSessionData>(pushArg.params.dataId);
+        expect(tempData).toEqual(expect.objectContaining({
+            machineId: 'machine-1',
+            directory: '/Users/alice/project',
+        }));
+    });
+
     it('always shows the View session log action even when developer mode is disabled', async () => {
         mockServerId = 'server-b';
         mockSession = {

@@ -8,6 +8,7 @@ import type { DaemonSpawnHooks } from '../spawnHooks';
 import { buildAuthEnvUnexpandedErrorMessage, findUnexpandedAuthEnvironmentReferences } from './authEnvValidation';
 import { resolveCodexBackendModeForRun } from '@/backends/codex/utils/resolveCodexBackendModeForRun';
 import { SESSION_REQUESTED_DIRECTORY_ENV } from '@/agent/runtime/resolveRequestedSessionDirectory';
+import { SESSION_MACHINE_WORKSPACE_PATH_ENV } from '@/agent/runtime/sessionWorkspaceLocation';
 import {
   HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY,
   serializeSessionConnectedServicesBindingsForEnv,
@@ -34,6 +35,7 @@ const DAEMON_OWNED_CHILD_ENV_KEYS = new Set<string>([
   'HAPPIER_LOCAL_SERVER_URL',
   'HAPPIER_DAEMON_SERVICE_INSTANCE_ID',
   'HAPPIER_DAEMON_SERVICE_SERVER_URL',
+  SESSION_MACHINE_WORKSPACE_PATH_ENV,
 ]);
 
 function stripDaemonOwnedChildEnvOverrides(input: Record<string, string>): Record<string, string> {
@@ -257,6 +259,7 @@ export async function resolveSpawnChildEnvironment(params: {
       connectedServiceMaterializationIdentityJson;
   }
   extraEnvForChild[SESSION_REQUESTED_DIRECTORY_ENV] = params.options.directory;
+  extraEnvForChild[SESSION_MACHINE_WORKSPACE_PATH_ENV] = params.options.directory;
   if (
     effectiveCodexBackendMode === 'mcp'
     || effectiveCodexBackendMode === 'acp'

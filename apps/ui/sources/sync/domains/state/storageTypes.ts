@@ -10,6 +10,7 @@ import {
     createSessionTerminalMetadataSchema,
     createProviderSessionInfoV1Schema,
     createSessionSystemSessionV1Schema,
+    createSessionWorkspaceLocationV1Schema,
     type PendingDeliveryBlockedReason,
     type PrimaryTurnStatusV1,
     type SessionRuntimeActivityState,
@@ -39,6 +40,7 @@ const MetadataObjectSchema = z.object({
         updatedAt: z.number()
     }).optional(),
     machineId: z.string().optional(),
+    sessionWorkspaceLocationV1: createSessionWorkspaceLocationV1Schema(z).optional(),
     handoffV1: z.object({
         v: z.literal(1),
         sourceMachineId: z.string(),

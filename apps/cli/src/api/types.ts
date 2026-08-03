@@ -26,6 +26,7 @@ import type {
   SessionTranscriptObservationV1,
   SessionTranscriptObservationAckV1,
   SessionTranscriptObservationCapabilityAckV1,
+  SessionWorkspaceLocationV1,
 } from '@happier-dev/protocol'
 import {
   ContentPublicKeyFingerprintSchema,
@@ -539,6 +540,7 @@ export type Metadata = {
     updatedAt: number
   },
   machineId?: string,
+  sessionWorkspaceLocationV1?: SessionWorkspaceLocationV1,
   claudeSessionId?: string, // Claude Code session ID
   claudeTranscriptPath?: string | null, // Claude Code transcript path (hooks)
   claudeLastCheckpointId?: string | null, // Claude SDK file checkpoint UUID (remote)

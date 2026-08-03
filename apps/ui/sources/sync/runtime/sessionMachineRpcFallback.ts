@@ -24,6 +24,7 @@ export { INACTIVE_SESSION_RPC_UNAVAILABLE_ERROR };
 export type SessionMachineRpcTarget = Readonly<{
     machineId: string;
     basePath: string;
+    agentBasePath?: string;
 }>;
 
 export type SessionMachineRpcFailure = Readonly<{
@@ -418,7 +419,11 @@ export function rebasePathRequestToMachineTarget<TRequest extends Readonly<{ pat
 }>): TRequest {
     return {
         ...input.request,
-        path: resolveMachinePathFromSessionBase({ basePath: input.machineTarget.basePath, requestPath: input.request.path }),
+        path: resolveMachinePathFromSessionBase({
+            basePath: input.machineTarget.basePath,
+            agentBasePath: input.machineTarget.agentBasePath,
+            requestPath: input.request.path,
+        }),
     };
 }
 
@@ -441,6 +446,7 @@ export function rebaseWorkspaceRootRequestToMachineTarget<TRequest extends Reado
         ...input.request,
         workspaceRootPath: resolveMachinePathFromSessionBase({
             basePath: input.machineTarget.basePath,
+            agentBasePath: input.machineTarget.agentBasePath,
             requestPath: '.',
         }),
     };
@@ -452,7 +458,15 @@ export function rebaseFromToRequestToMachineTarget<TRequest extends Readonly<{ f
 }>): TRequest {
     return {
         ...input.request,
-        from: resolveMachinePathFromSessionBase({ basePath: input.machineTarget.basePath, requestPath: input.request.from }),
-        to: resolveMachinePathFromSessionBase({ basePath: input.machineTarget.basePath, requestPath: input.request.to }),
+        from: resolveMachinePathFromSessionBase({
+            basePath: input.machineTarget.basePath,
+            agentBasePath: input.machineTarget.agentBasePath,
+            requestPath: input.request.from,
+        }),
+        to: resolveMachinePathFromSessionBase({
+            basePath: input.machineTarget.basePath,
+            agentBasePath: input.machineTarget.agentBasePath,
+            requestPath: input.request.to,
+        }),
     };
 }

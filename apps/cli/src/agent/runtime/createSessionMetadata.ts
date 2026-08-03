@@ -39,6 +39,7 @@ import {
     parseSessionConnectedServiceMaterializationIdentityJson,
 } from './sessionConnectedServiceMaterializationIdentityEnv';
 import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
+import { buildSessionWorkspaceLocationFromEnvironment } from './sessionWorkspaceLocation';
 
 /**
  * Backend flavor identifier for session metadata.
@@ -166,14 +167,20 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         consumeSessionEnv(HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY),
     );
     const sessionConfigOptionOverrides = parseSessionConfigOptionOverridesFromEnvironment();
+    const sessionPath = resolveRequestedSessionDirectory({ requestedDirectory: opts.directory });
+    const sessionWorkspaceLocationV1 = buildSessionWorkspaceLocationFromEnvironment({
+        machineId: opts.machineId,
+        agentPath: sessionPath,
+    });
     const metadataBase: Metadata = {
-        path: resolveRequestedSessionDirectory({ requestedDirectory: opts.directory }),
+        path: sessionPath,
         host: os.hostname(),
         version: packageJson.version,
         os: os.platform(),
         ...(opts.terminalRuntime ? { terminal: buildTerminalMetadataFromRuntimeFlags(opts.terminalRuntime) } : {}),
         ...(profileIdEnv !== undefined ? { profileId } : {}),
         machineId: opts.machineId,
+        sessionWorkspaceLocationV1,
         homeDir: os.homedir(),
         happyHomeDir: configuration.happyHomeDir,
         happyLibDir: projectPath(),

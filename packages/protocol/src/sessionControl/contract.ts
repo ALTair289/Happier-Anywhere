@@ -29,6 +29,10 @@ import {
   PROVIDER_ACCOUNT_USAGE_REFS_METADATA_KEY,
   ProviderAccountUsageRefsV1Schema,
 } from '../sessionMetadata/providerAccountUsageRefsV1.js';
+import {
+  createSessionWorkspaceLocationV1Schema,
+  SESSION_WORKSPACE_LOCATION_METADATA_KEY,
+} from '../sessionMetadata/sessionWorkspaceLocationV1.js';
 
 const LEGACY_CONNECTED_SERVICE_QUOTA_REFS_METADATA_KEY = 'connectedServiceQuotaRefsV1' as const;
 export {
@@ -237,6 +241,7 @@ export function createSessionMetadataSchema(zod: typeof z) {
   return zod
     .object({
       systemSessionV1: createSessionSystemSessionV1Schema(zod).optional(),
+      [SESSION_WORKSPACE_LOCATION_METADATA_KEY]: createSessionWorkspaceLocationV1Schema(zod).optional(),
       // Remote-dev does not yet have the registered session-state field catalog used by dev.
       // This metadata key is the compatible storage binding for runtime.usageLimitRecovery.
       [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: SessionUsageLimitRecoveryV1Schema.optional(),

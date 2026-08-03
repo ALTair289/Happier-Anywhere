@@ -588,9 +588,13 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
         });
     }, [session.id, session.updatedAt, session.metadata]);
     const reachableMachineId = reachableMachineTarget?.machineId ?? null;
-    const newSessionSeedMachineId = displayMachineTarget?.machineId
+    const newSessionSeedTarget = reachableMachineTarget
+        && (!displayMachineTarget || reachableMachineTarget.machineId === displayMachineTarget.machineId)
+        ? reachableMachineTarget
+        : displayMachineTarget;
+    const newSessionSeedMachineId = newSessionSeedTarget?.machineId
         ?? (typeof session.metadata?.machineId === 'string' ? session.metadata.machineId : null);
-    const newSessionSeedDirectory = displayMachineTarget?.basePath
+    const newSessionSeedDirectory = newSessionSeedTarget?.basePath
         ?? (typeof session.metadata?.path === 'string' ? session.metadata.path : null);
     const displayMachineId = displayMachineTarget?.machineId ?? null;
     const sessionLogPath = React.useMemo(() => {
