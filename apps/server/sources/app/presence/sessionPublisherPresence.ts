@@ -30,7 +30,7 @@ export interface PublisherBinding {
 }
 
 export type RegisterPublisherResult =
-    | { status: "registered"; committedFence: Date; activeAt: Date; activity: Extract<ActivityInTxResult, { status: "applied" | "unchanged" }>; participantCursors: readonly SessionParticipantCursor[] }
+    | { status: "registered"; committedFence: Date; publisherGeneration: bigint; activeAt: Date; activity: Extract<ActivityInTxResult, { status: "applied" | "unchanged" }>; participantCursors: readonly SessionParticipantCursor[] }
     | { status: "rejected"; reason: "not_found" | "unauthorized" | "archived" | "revision_overflow" | "contention" };
 export type TouchPublisherResult =
     | { status: "touched"; committedFence: Date; activeAt: Date; participantCursors: readonly SessionParticipantCursor[] }
@@ -56,7 +56,9 @@ export type ClosePublisherResult =
     | { status: "rejected"; reason: "not_found" | "unauthorized" | "archived" };
 export interface ExplicitMachineStopTarget {
     readonly binding: PublisherBinding;
-    readonly committedFence: Date;
+    readonly authority:
+        | Readonly<{ kind: "generation"; publisherGeneration: bigint }>
+        | Readonly<{ kind: "legacy-heartbeat"; committedFence: Date }>;
 }
 export type CaptureExplicitMachineStopResult =
     | { status: "captured"; target: ExplicitMachineStopTarget }
@@ -76,6 +78,7 @@ export type CurrentPublisherResult =
 interface Registration {
     binding: PublisherBinding;
     committedFence: Date;
+    publisherGeneration: bigint;
 }
 
 interface RegistrationAttempt {
@@ -95,6 +98,8 @@ function publisherIntentKey(binding: PublisherBinding, snapshot: SessionRuntimeA
 
 class RegistrationContentionError extends Error {}
 
+const MAX_PUBLISHER_GENERATION = 9_223_372_036_854_775_807n;
+
 export function createSessionPublisherPresence(options: Readonly<{ now?: () => Date }> = {}) {
     const now = options.now ?? (() => new Date());
     const registrations = new WeakMap<object, Registration>();
@@ -113,13 +118,16 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
         return await inTx(async (tx): Promise<RegisterPublisherResult> => {
             const session = await tx.session.findUnique({
                 where: { id: binding.sessionId },
-                select: { archivedAt: true, lastActiveAt: true },
+                select: { archivedAt: true, lastActiveAt: true, publisherGeneration: true },
             });
             if (!session) return { status: "rejected", reason: "not_found" };
             if (!await hasCurrentSessionScopedMachineAccessInTx({ tx, ...binding })) {
                 return { status: "rejected", reason: "unauthorized" };
             }
             if (session.archivedAt !== null) return { status: "rejected", reason: "archived" };
+            if (session.publisherGeneration >= MAX_PUBLISHER_GENERATION) {
+                return { status: "rejected", reason: "revision_overflow" };
+            }
 
             await blockInheritedProviderDeliveryClaims({ tx, sessionId: binding.sessionId });
 
@@ -131,17 +139,24 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
             if (activity.status === "rejected") return activity;
 
             const committedFence = new Date(Math.max(now().getTime(), session.lastActiveAt.getTime() + 1));
+            const publisherGeneration = session.publisherGeneration + 1n;
             const updated = await tx.session.updateMany({
                 where: {
                     id: binding.sessionId,
                     archivedAt: null,
                     lastActiveAt: session.lastActiveAt,
+                    publisherGeneration: session.publisherGeneration,
                 },
-                data: { active: true, lastActiveAt: committedFence },
+                data: {
+                    active: true,
+                    lastActiveAt: committedFence,
+                    publisherGeneration,
+                    publisherGenerationLastActiveAt: committedFence,
+                },
             });
             if (updated.count === 0) throw new RegistrationContentionError();
             const participantCursors = await markSessionParticipantsChanged({ tx, sessionId: binding.sessionId });
-            return { status: "registered", committedFence, activeAt: committedFence, activity, participantCursors };
+            return { status: "registered", committedFence, publisherGeneration, activeAt: committedFence, activity, participantCursors };
         });
     };
 
@@ -166,6 +181,7 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
             registrations.set(params.socket, {
                 binding: { ...params.binding },
                 committedFence: new Date(result.committedFence.getTime()),
+                publisherGeneration: result.publisherGeneration,
             });
         }
         return result;
@@ -197,22 +213,88 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
         }
     };
 
-    const closeBindingAtFence = async (params: Readonly<{
+    type PublisherCloseAuthority =
+        | Readonly<{ kind: "heartbeat"; committedFence: Date; publisherGeneration: bigint }>
+        | Readonly<{ kind: "legacy-heartbeat"; committedFence: Date }>
+        | Readonly<{ kind: "generation"; publisherGeneration: bigint }>;
+
+    const closeBinding = async (params: Readonly<{
         binding: PublisherBinding;
-        committedFence: Date;
+        authority: PublisherCloseAuthority;
         mutationId: string;
     }>): Promise<ClosePublisherResult> => await inTx(async (tx): Promise<ClosePublisherResult> => {
         const session = await tx.session.findUnique({
             where: { id: params.binding.sessionId },
-            select: { active: true, archivedAt: true, lastActiveAt: true },
+            select: {
+                active: true,
+                archivedAt: true,
+                lastActiveAt: true,
+                publisherGeneration: true,
+                publisherGenerationLastActiveAt: true,
+            },
         });
         if (!session) return { status: "rejected", reason: "not_found" };
         if (!await hasCurrentSessionScopedMachineAccessInTx({ tx, ...params.binding })) {
             return { status: "rejected", reason: "unauthorized" };
         }
         if (session.archivedAt !== null) return { status: "rejected", reason: "archived" };
-        if (session.lastActiveAt.getTime() !== params.committedFence.getTime()) return { status: "superseded" };
-        if (!session.active) return { status: "already_inactive" };
+        if (
+            params.authority.kind !== "legacy-heartbeat"
+            && session.publisherGeneration !== params.authority.publisherGeneration
+        ) {
+            return { status: "superseded" };
+        }
+        if (
+            (
+                params.authority.kind !== "legacy-heartbeat"
+                && session.publisherGenerationLastActiveAt !== null
+                && session.publisherGenerationLastActiveAt.getTime() !== session.lastActiveAt.getTime()
+            )
+            || (
+                params.authority.kind !== "generation"
+                && session.lastActiveAt.getTime() !== params.authority.committedFence.getTime()
+            )
+        ) {
+            return { status: "superseded" };
+        }
+        if (!session.active) {
+            if (
+                params.authority.kind !== "legacy-heartbeat"
+                && session.publisherGenerationLastActiveAt !== null
+            ) {
+                const terminalized = await tx.session.updateMany({
+                    where: {
+                        id: params.binding.sessionId,
+                        active: false,
+                        archivedAt: null,
+                        lastActiveAt: session.lastActiveAt,
+                        publisherGeneration: params.authority.publisherGeneration,
+                        publisherGenerationLastActiveAt: session.lastActiveAt,
+                    },
+                    data: { publisherGenerationLastActiveAt: null },
+                });
+                if (terminalized.count === 0) return { status: "superseded" };
+            }
+            return { status: "already_inactive" };
+        }
+        const updated = await tx.session.updateMany({
+            where: {
+                id: params.binding.sessionId,
+                active: true,
+                archivedAt: null,
+                lastActiveAt: params.authority.kind === "generation"
+                    ? session.lastActiveAt
+                    : params.authority.committedFence,
+                ...(params.authority.kind !== "legacy-heartbeat"
+                    ? {
+                        publisherGeneration: params.authority.publisherGeneration,
+                        publisherGenerationLastActiveAt: session.lastActiveAt,
+                    }
+                    : {}),
+            },
+            data: { active: false, publisherGenerationLastActiveAt: null },
+        });
+        if (updated.count === 0) return { status: "superseded" };
         const turnResult = await applyLatestSessionTurnEndInTx({
             tx,
             sessionId: params.binding.sessionId,
@@ -225,18 +307,6 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
         });
         if (activity.status === "rejected") {
             throw new Error(`Failed to record Runtime Activity observer loss: ${activity.reason}`);
-        }
-        if (session.active) {
-            const updated = await tx.session.updateMany({
-                where: {
-                    id: params.binding.sessionId,
-                    active: true,
-                    archivedAt: null,
-                    lastActiveAt: params.committedFence,
-                },
-                data: { active: false },
-            });
-            if (updated.count === 0) return { status: "superseded" };
         }
         const participantCursors = await markSessionParticipantsChanged({
             tx,
@@ -266,7 +336,13 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
     }>): Promise<CaptureExplicitMachineStopResult> => await inTx(async (tx): Promise<CaptureExplicitMachineStopResult> => {
         const session = await tx.session.findUnique({
             where: { id: params.binding.sessionId },
-            select: { active: true, archivedAt: true, lastActiveAt: true },
+            select: {
+                active: true,
+                archivedAt: true,
+                lastActiveAt: true,
+                publisherGeneration: true,
+                publisherGenerationLastActiveAt: true,
+            },
         });
         if (!session) return { status: "rejected", reason: "not_found" };
         if (!await hasCurrentSessionScopedMachineAccessInTx({ tx, ...params.binding })) {
@@ -274,21 +350,33 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
         }
         if (session.archivedAt !== null) return { status: "rejected", reason: "archived" };
         if (!session.active) return { status: "already_inactive" };
+        const authority = session.publisherGeneration > 0n
+            && session.publisherGenerationLastActiveAt?.getTime() === session.lastActiveAt.getTime()
+            ? {
+                kind: "generation" as const,
+                publisherGeneration: session.publisherGeneration,
+            }
+            : {
+                kind: "legacy-heartbeat" as const,
+                committedFence: new Date(session.lastActiveAt.getTime()),
+            };
         return {
             status: "captured",
             target: {
                 binding: { ...params.binding },
-                committedFence: new Date(session.lastActiveAt.getTime()),
+                authority,
             },
         };
     });
 
     const finalizeExplicitMachineStop = async (params: Readonly<{
         target: ExplicitMachineStopTarget;
-    }>): Promise<ClosePublisherResult> => await closeBindingAtFence({
+    }>): Promise<ClosePublisherResult> => await closeBinding({
         binding: params.target.binding,
-        committedFence: params.target.committedFence,
-        mutationId: `explicit-machine-stop:${params.target.committedFence.getTime()}`,
+        authority: params.target.authority,
+        mutationId: params.target.authority.kind === "generation"
+            ? `explicit-machine-stop:generation:${params.target.authority.publisherGeneration}`
+            : `explicit-machine-stop:legacy-heartbeat:${params.target.authority.committedFence.getTime()}`,
     });
 
     const closePublisher = (params: Readonly<{ socket: object }>): Promise<ClosePublisherResult> => {
@@ -297,9 +385,13 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
         const result = serialize(params.socket, async (): Promise<ClosePublisherResult> => {
             const registration = registrations.get(params.socket);
             if (!registration) return { status: "superseded" };
-            return await closeBindingAtFence({
+            return await closeBinding({
                 binding: registration.binding,
-                committedFence: registration.committedFence,
+                authority: {
+                    kind: "heartbeat",
+                    committedFence: registration.committedFence,
+                    publisherGeneration: registration.publisherGeneration,
+                },
                 mutationId: `publisher-close:${registration.committedFence.getTime()}`,
             });
         });
@@ -322,14 +414,24 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
             const result = await inTx(async (tx): Promise<TouchPublisherResult> => {
                 const session = await tx.session.findUnique({
                     where: { id: registration.binding.sessionId },
-                    select: { active: true, archivedAt: true, lastActiveAt: true },
+                    select: {
+                        active: true,
+                        archivedAt: true,
+                        lastActiveAt: true,
+                        publisherGeneration: true,
+                        publisherGenerationLastActiveAt: true,
+                    },
                 });
                 if (!session) return { status: "rejected", reason: "not_found" };
                 if (!await hasCurrentSessionScopedMachineAccessInTx({ tx, ...registration.binding })) {
                     return { status: "rejected", reason: "unauthorized" };
                 }
                 if (session.archivedAt !== null) return { status: "rejected", reason: "archived" };
-                if (session.lastActiveAt.getTime() !== registration.committedFence.getTime()) {
+                if (
+                    session.publisherGeneration !== registration.publisherGeneration
+                    || session.lastActiveAt.getTime() !== registration.committedFence.getTime()
+                    || session.publisherGenerationLastActiveAt?.getTime() !== registration.committedFence.getTime()
+                ) {
                     return { status: "superseded" };
                 }
 
@@ -340,8 +442,14 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
                         active: session.active,
                         archivedAt: null,
                         lastActiveAt: registration.committedFence,
+                        publisherGeneration: registration.publisherGeneration,
+                        publisherGenerationLastActiveAt: registration.committedFence,
                     },
-                    data: { active: true, lastActiveAt: committedFence },
+                    data: {
+                        active: true,
+                        lastActiveAt: committedFence,
+                        publisherGenerationLastActiveAt: committedFence,
+                    },
                 });
                 if (updated.count === 0) return { status: "superseded" };
                 const participantCursors = await markSessionParticipantsChanged({
@@ -359,6 +467,7 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
                 registrations.set(params.socket, {
                     binding: registration.binding,
                     committedFence: new Date(result.committedFence.getTime()),
+                    publisherGeneration: registration.publisherGeneration,
                 });
             }
             return result;
@@ -385,6 +494,8 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
                     active: true,
                     archivedAt: true,
                     lastActiveAt: true,
+                    publisherGeneration: true,
+                    publisherGenerationLastActiveAt: true,
                     runtimeActivityState: true,
                     runtimeActivityActiveCount: true,
                     runtimeActivityObservedAt: true,
@@ -397,7 +508,12 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
                 return { status: "rejected", reason: "unauthorized" };
             }
             if (session.archivedAt !== null) return { status: "rejected", reason: "archived" };
-            if (!session.active || session.lastActiveAt.getTime() !== registration.committedFence.getTime()) {
+            if (
+                !session.active
+                || session.publisherGeneration !== registration.publisherGeneration
+                || session.lastActiveAt.getTime() !== registration.committedFence.getTime()
+                || session.publisherGenerationLastActiveAt?.getTime() !== registration.committedFence.getTime()
+            ) {
                 return { status: "superseded" };
             }
             return {
@@ -499,14 +615,24 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
                 return await inTx(async (tx) => {
                     const session = await tx.session.findUnique({
                         where: { id: registration.binding.sessionId },
-                        select: { active: true, archivedAt: true, lastActiveAt: true },
+                        select: {
+                            active: true,
+                            archivedAt: true,
+                            lastActiveAt: true,
+                            publisherGeneration: true,
+                            publisherGenerationLastActiveAt: true,
+                        },
                     });
                     if (!session) return { status: "rejected", reason: "not_found" } as const;
                     if (!await hasCurrentSessionScopedMachineAccessInTx({ tx, ...registration.binding })) {
                         return { status: "rejected", reason: "unauthorized" } as const;
                     }
                     if (session.archivedAt !== null) return { status: "rejected", reason: "archived" } as const;
-                    if (session.lastActiveAt.getTime() !== registration.committedFence.getTime()) {
+                    if (
+                        session.publisherGeneration !== registration.publisherGeneration
+                        || session.lastActiveAt.getTime() !== registration.committedFence.getTime()
+                        || session.publisherGenerationLastActiveAt?.getTime() !== registration.committedFence.getTime()
+                    ) {
                         return { status: "rejected", reason: "superseded" } as const;
                     }
                     const activity = await writeSessionRuntimeActivityProjectionInTx({

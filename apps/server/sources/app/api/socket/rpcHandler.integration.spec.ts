@@ -702,7 +702,7 @@ describe("rpcHandler", () => {
     const method = `machine-1:${RPC_METHODS.STOP_SESSION}`;
     const capturedTarget = {
       binding: { accountId: "user-1", machineId: "machine-1", sessionId: "sess_1" },
-      committedFence: new Date(1_000),
+      authority: { kind: "generation", publisherGeneration: 1n },
     };
     const finalizeExplicitMachineStop = vi.fn().mockResolvedValue({ status: "already_inactive" });
     const targetEmitWithAck = vi.fn().mockResolvedValue({
@@ -764,7 +764,7 @@ describe("rpcHandler", () => {
     const callerSocket = createFakeSocket({ id: "caller-socket" });
     const capturedTarget = {
       binding: { accountId: "user-1", machineId: "machine-1", sessionId: "sess_1" },
-      committedFence: new Date(1_000),
+      authority: { kind: "generation", publisherGeneration: 1n },
     };
     const captureExplicitMachineStop = vi.fn().mockResolvedValue({
       status: "captured",
@@ -840,7 +840,7 @@ describe("rpcHandler", () => {
             status: "captured",
             target: {
               binding: { accountId: "user-1", machineId: "machine-1", sessionId: "sess_1" },
-              committedFence: new Date(1_000),
+              authority: { kind: "generation", publisherGeneration: 1n },
             },
           }),
           finalizeExplicitMachineStop,
@@ -899,7 +899,7 @@ describe("rpcHandler", () => {
             status: "captured",
             target: {
               binding: { accountId: "user-1", machineId: "machine-1", sessionId: "sess_1" },
-              committedFence: new Date(1_000),
+              authority: { kind: "generation", publisherGeneration: 1n },
             },
           }),
           finalizeExplicitMachineStop,
@@ -984,7 +984,7 @@ describe("rpcHandler", () => {
               status: "captured",
               target: {
                 binding: { accountId: "user-1", machineId: "machine-1", sessionId: "sess_1" },
-                committedFence: new Date(1_000),
+                authority: { kind: "generation", publisherGeneration: 1n },
               },
             }),
             finalizeExplicitMachineStop,

@@ -18,4 +18,14 @@ describe("Session publisher presence schema ownership", () => {
     ])("defaults Session.active to false in %s", (schemaPath) => {
         expect(readSessionModel(schemaPath)).toMatch(/\bactive\s+Boolean\s+@default\(false\)/);
     });
+
+    it.each([
+        "prisma/schema.prisma",
+        "prisma/mysql/schema.prisma",
+        "prisma/sqlite/schema.prisma",
+    ])("stores publisher generation separately from heartbeat freshness in %s", (schemaPath) => {
+        const model = readSessionModel(schemaPath);
+        expect(model).toMatch(/\bpublisherGeneration\s+BigInt\s+@default\(0\)/);
+        expect(model).toMatch(/\bpublisherGenerationLastActiveAt\s+DateTime\?/);
+    });
 });
