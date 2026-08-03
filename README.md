@@ -25,6 +25,8 @@ Whether you’re stepping away for a coffee or switching devices mid-task, Happi
 
 **[Join the Discord](https://discord.gg/W6Pb8KuHfg)** to hear all of the latest news about Happier, report issues, discuss new ideas and request features. It would truly make us _happier_ to hear your thoughts and feedback! ;)
 
+<h3 align="center"><a href="https://github.com/happier-dev/happier/discussions/226">Latest Happier project update</a></h3>
+
 ## Installation
 
 ### Step 1: Download App

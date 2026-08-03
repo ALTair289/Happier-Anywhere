@@ -452,6 +452,9 @@ describe("session publisher presence on SQLite", () => {
             runtimeActivityState: "unknown",
             runtimeActivityActiveCount: 0,
         });
+
+        await expect(presence.finalizeExplicitMachineStop({ target: captured.target }))
+            .resolves.toEqual({ status: "already_inactive" });
     });
 
     it("does not let a completed explicit stop close a successor publisher that registered meanwhile", async () => {

@@ -9,8 +9,11 @@ import {
     RPC_ERROR_MESSAGES,
     type SocketRpcAuthorizationContext,
 } from "@happier-dev/protocol/rpc";
-import { StopSessionResultSchema } from "@happier-dev/protocol";
-import { SOCKET_RPC_EVENTS } from "@happier-dev/protocol/socketRpc";
+import {
+    SOCKET_RPC_EVENTS,
+    SOCKET_RPC_TRANSPORT_RESPONSE_ENVELOPE_VERSION_V1,
+    SocketRpcTransportResponseEnvelopeV1Schema,
+} from "@happier-dev/protocol/socketRpc";
 import { checkSessionAccess, requireAccessLevel } from "@/app/share/accessControl";
 import { resolveRpcForwardTimeoutMs } from "./rpcForwardTimeout";
 import { resolveRpcMethodAvailabilityGraceMs, resolveRpcMethodAvailabilityPollMs } from "./rpcMethodAvailabilityGrace";
@@ -114,6 +117,37 @@ function readMachineIdPrefix(method: string): string | null {
     return method.slice(0, separatorIndex);
 }
 
+function canRegisterMachineScopedRpcMethod(socket: Socket, method: string): boolean {
+    const machineId = readMachineScopedSocketMachineId(socket);
+    if (!machineId) return true;
+    const methodMachineId = readMachineIdPrefix(method);
+    return methodMachineId === null || methodMachineId === machineId;
+}
+
+function isExplicitMachineStopTargetSocket(params: Readonly<{
+    socket: Socket;
+    request: Readonly<{ machineId: string }>;
+}>): boolean {
+    return readMachineScopedSocketMachineId(params.socket) === params.request.machineId;
+}
+
+function readExplicitMachineStopTargetMismatch(params: Readonly<{
+    socket: Socket;
+    request: Readonly<{ machineId: string }> | null;
+}>): Readonly<{ ok: false; error: string; errorCode: string }> | null {
+    if (!params.request || isExplicitMachineStopTargetSocket({
+        socket: params.socket,
+        request: params.request,
+    })) {
+        return null;
+    }
+    return {
+        ok: false,
+        error: RPC_ERROR_MESSAGES.METHOD_NOT_AVAILABLE,
+        errorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
+    };
+}
+
 function readExplicitMachineStopRequest(method: string, value: unknown): Readonly<{
     machineId: string;
     sessionId: string;
@@ -201,7 +235,10 @@ export function rpcHandler(
                 return;
             }
 
-            if (!canRegisterSessionScopedRpcMethod({ socket, method })) {
+            if (
+                !canRegisterSessionScopedRpcMethod({ socket, method })
+                || !canRegisterMachineScopedRpcMethod(socket, method)
+            ) {
                 socket.emit(SOCKET_RPC_EVENTS.ERROR, { type: 'register', error: 'Forbidden' });
                 return;
             }
@@ -342,6 +379,12 @@ export function rpcHandler(
                 method,
                 params: callParams,
                 ...(rpcAuthorization ? { authorization: rpcAuthorization } : {}),
+                ...(explicitMachineStopRequest
+                    ? {
+                        transportResponseEnvelopeVersion:
+                            SOCKET_RPC_TRANSPORT_RESPONSE_ENVELOPE_VERSION_V1,
+                    }
+                    : {}),
             });
             const lookupInMemoryTargetSocket = (): Socket | null => {
                 if (targetUserId === userId && !allRpcListeners.has(userId)) {
@@ -349,13 +392,23 @@ export function rpcHandler(
                 }
                 return allRpcListeners.get(targetUserId)?.get(method) ?? null;
             };
+            // Explicit machine-stop lifecycle work is independent from whether the caller
+            // supplied an acknowledgement callback, so every successful forward runs it.
             const forwardTargetResponse = async (targetResponse: unknown) => {
-                const forwarded = forwardedRpcTargetResponse({ method, targetResponse });
+                const envelope = explicitMachineStopRequest
+                    ? SocketRpcTransportResponseEnvelopeV1Schema.safeParse(targetResponse)
+                    : null;
+                const targetResult = envelope?.success ? envelope.data.result : targetResponse;
+                const forwarded = forwardedRpcTargetResponse({ method, targetResponse: targetResult });
                 if (!explicitMachineStopRequest || explicitMachineStopCapture?.status !== "captured") {
                     return forwarded;
                 }
-                const stopResult = StopSessionResultSchema.safeParse(targetResponse);
-                if (!stopResult.success || stopResult.data.status !== "stopped") return forwarded;
+                const didProveStopped = (
+                    envelope?.success
+                    && envelope.data.acknowledgement?.kind === "session.stop"
+                    && envelope.data.acknowledgement.status === "stopped"
+                );
+                if (!didProveStopped) return forwarded;
                 const presence = ctx.sessionPublisherPresence;
                 if (!presence) {
                     return {
@@ -447,7 +500,17 @@ export function rpcHandler(
                         targetSocketId = awaited.targetSocketId;
                         targetSocket = awaited.targetSocket ?? targetSocket;
                     }
-                    const fallbackSocket = targetSocket ?? lookupInMemoryTargetSocket();
+                    const fallbackCandidate = targetSocket ?? lookupInMemoryTargetSocket();
+                    const fallbackSocket = (
+                        fallbackCandidate
+                        && (
+                            !explicitMachineStopRequest
+                            || !targetSocketId
+                            || fallbackCandidate.id === targetSocketId
+                        )
+                    )
+                        ? fallbackCandidate
+                        : null;
                     if (fallbackSocket && fallbackSocket.connected) {
                         if (fallbackSocket === socket) {
                             if (callback) {
@@ -460,6 +523,14 @@ export function rpcHandler(
                         }
 
                         const fallbackMachineId = readMachineScopedSocketMachineId(fallbackSocket);
+                        const fallbackStopTargetMismatch = readExplicitMachineStopTargetMismatch({
+                            socket: fallbackSocket,
+                            request: explicitMachineStopRequest,
+                        });
+                        if (fallbackStopTargetMismatch) {
+                            callback?.(fallbackStopTargetMismatch);
+                            return;
+                        }
                         if (fallbackMachineId) {
                             const fallbackMachine = await validateCurrentMachineSocket({
                                 accountId: targetUserId,
@@ -487,9 +558,11 @@ export function rpcHandler(
                             SOCKET_RPC_EVENTS.REQUEST,
                             buildForwardedRequest(),
                         );
-                        if (callback) {
-                            callback(await forwardTargetResponse(response));
-                        }
+                        // Evaluated before the optional call: `callback?.(await ...)` would
+                        // short-circuit its argument and skip the stop lifecycle entirely
+                        // when the caller emitted without an acknowledgement.
+                        const forwardedResponse = await forwardTargetResponse(response);
+                        callback?.(forwardedResponse);
                         return;
                     }
                     if (!targetSocketId) {
@@ -516,7 +589,7 @@ export function rpcHandler(
                     }
 
                     attemptedTargetSocketId = targetSocketId;
-                    if (resolveSocketRpcProviderStartingMethod(method)) {
+                    if (resolveSocketRpcProviderStartingMethod(method) || explicitMachineStopRequest) {
                         const currentTargets = await ctx.io.in(targetSocketId).fetchSockets();
                         const currentTarget = currentTargets.find((candidate) => candidate.id === targetSocketId);
                         if (!currentTarget) {
@@ -529,6 +602,14 @@ export function rpcHandler(
                             return;
                         }
                         const currentMachineId = readMachineScopedSocketMachineId(currentTarget as unknown as Socket);
+                        const currentStopTargetMismatch = readExplicitMachineStopTargetMismatch({
+                            socket: currentTarget as unknown as Socket,
+                            request: explicitMachineStopRequest,
+                        });
+                        if (currentStopTargetMismatch) {
+                            callback?.(currentStopTargetMismatch);
+                            return;
+                        }
                         if (!currentMachineId) {
                             const upgradeRequired = buildPrivilegedRpcUpgradeRequiredResponse(
                                 currentTarget as unknown as Socket,
@@ -585,9 +666,8 @@ export function rpcHandler(
                     }
                     const response = Array.isArray(responses) ? responses[0] : responses;
 
-                    if (callback) {
-                        callback(await forwardTargetResponse(response));
-                    }
+                    const forwardedResponse = await forwardTargetResponse(response);
+                    callback?.(forwardedResponse);
                     return;
                 }
 
@@ -623,6 +703,14 @@ export function rpcHandler(
                 }
 
                 const targetMachineId = readMachineScopedSocketMachineId(targetSocket);
+                const stopTargetMismatch = readExplicitMachineStopTargetMismatch({
+                    socket: targetSocket,
+                    request: explicitMachineStopRequest,
+                });
+                if (stopTargetMismatch) {
+                    callback?.(stopTargetMismatch);
+                    return;
+                }
                 if (targetMachineId) {
                     const targetMachine = await validateCurrentMachineSocket({
                         accountId: targetUserId,
@@ -652,9 +740,8 @@ export function rpcHandler(
                     buildForwardedRequest(),
                 );
 
-                if (callback) {
-                    callback(await forwardTargetResponse(response));
-                }
+                const forwardedResponse = await forwardTargetResponse(response);
+                callback?.(forwardedResponse);
 
             } catch (error) {
                 const errorMsg = error instanceof Error ? error.message : 'RPC call failed';

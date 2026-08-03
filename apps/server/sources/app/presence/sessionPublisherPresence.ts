@@ -212,6 +212,7 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
         }
         if (session.archivedAt !== null) return { status: "rejected", reason: "archived" };
         if (session.lastActiveAt.getTime() !== params.committedFence.getTime()) return { status: "superseded" };
+        if (!session.active) return { status: "already_inactive" };
         const turnResult = await applyLatestSessionTurnEndInTx({
             tx,
             sessionId: params.binding.sessionId,
