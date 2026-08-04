@@ -3689,15 +3689,11 @@ export class ApiSessionClient extends EventEmitter {
             : await request();
     }
 
-    /**
-     * Send message to session
-     * @param body - Message body (can be MessageContent or raw content for agent messages)
-     */
-    sendClaudeSessionMessage(body: RawJSONLines, meta?: Record<string, unknown>) {
-        if (isToolTraceEnabled()) {
-            recordClaudeToolTraceEvents({ sessionId: this.sessionId, body });
-        }
-
+    private prepareClaudeSessionMessage(body: RawJSONLines, meta?: Record<string, unknown>): {
+        content: MessageContent;
+        localId: string;
+        sidechainId: string | null;
+    } {
         this.outboundShapeLogger.log('claude:raw-jsonl', body);
 
         const sidechainId = (() => {
@@ -3734,24 +3730,14 @@ export class ApiSessionClient extends EventEmitter {
         this.outboundShapeLogger.log('claude:session-content', content);
         logger.debugLargeJson('[SOCKET] Sending message through socket:', content)
 
-        this.logSendWhileDisconnected('Claude session message', { type: body.type });
-
-        const payload = this.buildOutboundSessionMessagePayload(content);
-        const localId = buildClaudeJsonlLocalId(body);
-        this.observeTurnAssistantTextFromSessionContent(content, {
-            source: 'ephemeral',
-            localId,
+        return {
+            content,
+            localId: buildClaudeJsonlLocalId(body),
             sidechainId,
-            provider: 'claude',
-        });
-        this.commitSessionMessageBestEffort({
-            message: payload,
-            localId,
-            sidechainId,
-            messageRole: resolveClaudeSessionMessageRole(body),
-            logErrorMessage: '[SOCKET] Failed to commit Claude session message (non-fatal)',
-        });
+        };
+    }
 
+    private applyClaudeSessionMessageAuxiliaryEffects(body: RawJSONLines): void {
         // Track usage from assistant messages
         if (body.type === 'assistant' && body.message?.usage) {
             try {
@@ -3776,6 +3762,57 @@ export class ApiSessionClient extends EventEmitter {
                 'summary_message',
             );
         }
+    }
+
+    /**
+     * Send message to session
+     * @param body - Message body (can be MessageContent or raw content for agent messages)
+     */
+    sendClaudeSessionMessage(body: RawJSONLines, meta?: Record<string, unknown>) {
+        if (isToolTraceEnabled()) {
+            recordClaudeToolTraceEvents({ sessionId: this.sessionId, body });
+        }
+        const { content, localId, sidechainId } = this.prepareClaudeSessionMessage(body, meta);
+
+        this.logSendWhileDisconnected('Claude session message', { type: body.type });
+
+        const payload = this.buildOutboundSessionMessagePayload(content);
+        this.observeTurnAssistantTextFromSessionContent(content, {
+            source: 'ephemeral',
+            localId,
+            sidechainId,
+            provider: 'claude',
+        });
+        this.commitSessionMessageBestEffort({
+            message: payload,
+            localId,
+            sidechainId,
+            messageRole: resolveClaudeSessionMessageRole(body),
+            logErrorMessage: '[SOCKET] Failed to commit Claude session message (non-fatal)',
+        });
+
+        this.applyClaudeSessionMessageAuxiliaryEffects(body);
+    }
+
+    async sendClaudeSessionMessageCommitted(
+        body: RawJSONLines,
+        meta?: Record<string, unknown>,
+    ): Promise<SessionMessageCommitResult> {
+        const { content, localId, sidechainId } = this.prepareClaudeSessionMessage(body, meta);
+        requireExactCommitLocalId(localId);
+
+        this.logSendWhileDisconnected('Claude session message', { type: body.type });
+        const result = requireExactCommitResult(await this.enqueueMessageCommit(() =>
+            this.commitSessionMessage({
+                message: this.buildOutboundSessionMessagePayload(content),
+                localId,
+                sidechainId,
+                messageRole: resolveClaudeSessionMessageRole(body),
+                requireCommit: true,
+                requireWriteDisposition: true,
+            }),
+        ), localId);
+        return result;
     }
 
     recordClaudeJsonlMessageConsumed(body: RawJSONLines, meta?: Record<string, unknown>): void {

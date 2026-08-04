@@ -492,6 +492,65 @@ describe('ApiSessionClient message commit queue', () => {
     ]);
   });
 
+  it('awaits Claude transcript custody and reports an idempotent duplicate', async () => {
+    vi.resetModules();
+    supervisorStartCount = 0;
+    const firstAck = createDeferred<Ack>();
+    const messagePayloads: any[] = [];
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAck: async (event: string, payload: any) => {
+        if (event !== 'message') return { ok: true };
+        messagePayloads.push(payload);
+        if (messagePayloads.length === 1) return await firstAck.promise;
+        return { ok: true, id: 'claude-message-1', seq: 43, localId: payload.localId, didWrite: false };
+      },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const { ApiSessionClient } = await import('./sessionClient');
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    const message = {
+      type: 'assistant' as const,
+      uuid: 'claude-assistant-1',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'caught up' }] },
+    };
+
+    let commitResolved = false;
+    const commit = Promise.resolve().then(() => client.sendClaudeSessionMessageCommitted(message)).then((result) => {
+      commitResolved = true;
+      return result;
+    });
+    await flushMicrotasks();
+
+    expect(commitResolved).toBe(false);
+    expect(messagePayloads[0]).toEqual(expect.objectContaining({
+      localId: 'claude-jsonl:main:assistant:claude-assistant-1',
+      messageRole: 'agent',
+    }));
+
+    firstAck.resolve({
+      ok: true,
+      id: 'claude-message-1',
+      seq: 43,
+      localId: 'claude-jsonl:main:assistant:claude-assistant-1',
+      didWrite: true,
+    });
+    await expect(commit).resolves.toEqual({
+      localId: 'claude-jsonl:main:assistant:claude-assistant-1',
+      messageId: 'claude-message-1',
+      seq: 43,
+      didWrite: true,
+    });
+
+    await expect(client.sendClaudeSessionMessageCommitted(message)).resolves.toEqual({
+      localId: 'claude-jsonl:main:assistant:claude-assistant-1',
+      messageId: 'claude-message-1',
+      seq: 43,
+      didWrite: false,
+    });
+  });
+
   it('fails closed for exact session-event ACKs with missing disposition or mismatched identity', async () => {
     vi.resetModules();
     supervisorStartCount = 0;

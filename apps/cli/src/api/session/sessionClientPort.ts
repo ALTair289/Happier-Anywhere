@@ -30,6 +30,7 @@ import type {
 } from '@happier-dev/protocol';
 import type { EphemeralSendResult } from './ephemeralSendOutcome';
 import type { RuntimeActivitySnapshotTail } from './mutations/createSessionMutationOutbox';
+import type { SessionMessageCommitResult } from './sessionMessageCommitResult';
 
 export type MaterializeNextPendingResult =
   | {
@@ -67,6 +68,7 @@ export interface SessionClientPort {
 
   sendSessionEvent(event: SessionEventMessage, id?: string): void;
   sendClaudeSessionMessage(message: RawJSONLines, meta?: Record<string, unknown>): void;
+  sendClaudeSessionMessageCommitted?(message: RawJSONLines, meta?: Record<string, unknown>): Promise<SessionMessageCommitResult>;
   recordClaudeJsonlMessageConsumed?(message: RawJSONLines, meta?: Record<string, unknown>): void;
   setSessionRuntimeControls?(controls: SessionRuntimeControls | null): void;
   registerSessionRuntimeControls?(controls: Partial<SessionRuntimeControls> | null): () => void;
