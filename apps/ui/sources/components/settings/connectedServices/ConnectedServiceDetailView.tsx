@@ -559,7 +559,7 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
 
   const accountsContent = (
     <>
-      <ItemGroup title={serviceLabel}>
+      <ItemGroup title={serviceLabel} columns={2}>
         {sortedProfiles.length === 0 ? (
           <EmptyState
             testID="connected-services-accounts:empty"
@@ -567,7 +567,7 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
             title={t('connectedServices.detail.profiles.empty')}
           />
         ) : null}
-        {sortedProfiles.map((row, index) => {
+        {sortedProfiles.map((row) => {
           const { profileId, rawStatus, status, record } = row;
           const isDefault = profileId === defaultProfileId;
           const kind = record.kind === 'token' ? 'token' : record.kind === 'oauth' ? 'oauth' : null;
@@ -604,7 +604,6 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
               onToggleDefault={() => void handleToggleDefaultProfile(profileId)}
               poolLabels={poolLabels}
               actions={actions}
-              showDivider={index < sortedProfiles.length - 1}
             />
           );
         })}
