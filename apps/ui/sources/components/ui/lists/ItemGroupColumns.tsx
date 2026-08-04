@@ -21,6 +21,14 @@ export type ItemGroupColumnsProps = Readonly<{
     children: React.ReactNode;
     columns?: 1 | 2 | 3;
     collapseBelow?: ViewportClass;
+    /**
+     * Explicit resolved column count, bypassing the viewport-class rule.
+     *
+     * Callers that must know the count BEFORE rendering — e.g. to distribute
+     * rows into per-column stacks — resolve it themselves and pass it down, so
+     * the layout and the distribution can never disagree.
+     */
+    activeColumns?: number;
     style?: StyleProp<ViewStyle>;
     paddingHorizontal?: number;
     paddingVertical?: number;
@@ -54,7 +62,7 @@ const stylesheet = StyleSheet.create(() => ({
     },
 }));
 
-function resolveActiveColumns(params: Readonly<{
+export function resolveItemGroupActiveColumns(params: Readonly<{
     viewportClass: ViewportClass;
     columns: number;
     collapseBelow: ViewportClass;
@@ -68,11 +76,13 @@ export const ItemGroupColumns = React.memo<ItemGroupColumnsProps>((props) => {
     const { width, height } = useWindowDimensions();
     const styles = stylesheet;
     const viewportClass = resolveViewportClass({ width, height });
-    const activeColumns = resolveActiveColumns({
-        viewportClass,
-        columns: props.columns ?? 2,
-        collapseBelow: props.collapseBelow ?? 'medium',
-    });
+    const activeColumns = props.activeColumns != null
+        ? Math.max(1, Math.floor(props.activeColumns))
+        : resolveItemGroupActiveColumns({
+            viewportClass,
+            columns: props.columns ?? 2,
+            collapseBelow: props.collapseBelow ?? 'medium',
+        });
     const contextValue = React.useMemo<ItemGroupColumnsContextValue>(() => ({
         activeColumns,
     }), [activeColumns]);

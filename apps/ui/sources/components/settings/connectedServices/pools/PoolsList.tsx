@@ -432,7 +432,7 @@ export const PoolsList = React.memo(function PoolsList(props: PoolsListProps) {
     return (
         <>
             {staleErrorBanner}
-            <ItemGroup title={t('connectedServices.pools.title')}>
+            <ItemGroup title={t('connectedServices.pools.title')} columns={2}>
                 {pools.map((group) => (
                     <PoolRow
                         key={group.groupId}

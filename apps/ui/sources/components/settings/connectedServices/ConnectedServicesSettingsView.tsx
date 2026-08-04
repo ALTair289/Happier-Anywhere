@@ -248,7 +248,7 @@ export const ConnectedServicesSettingsView = React.memo(function ConnectedServic
 
   return (
     <ItemList>
-      <ItemGroup title={t('connectedServices.title')}>
+      <ItemGroup title={t('connectedServices.title')} columns={2}>
         {services.length === 0 && serviceRows.length === 0 ? (
           <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
             <Text style={{ color: theme.colors.text.secondary }}>{t('connectedServices.list.empty')}</Text>

@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, expect, it } from 'vitest';
-import { withItemGroupDividers } from './ItemGroup.dividers';
+import { withItemGroupDividers, withItemGroupStandaloneRows } from './ItemGroup.dividers';
 import { ItemGroupRowPositionProvider } from './ItemGroupRowPosition';
 
 type FragmentProps = {
@@ -100,5 +100,66 @@ describe('withItemGroupDividers', () => {
 
         const processed = withItemGroupDividers(children);
         expect(collectShowDividers(processed)).toEqual([true, false]);
+    });
+});
+
+function collectRowPositions(nodes: ReadonlyArray<React.ReactNode>) {
+    return nodes.map((node) => {
+        if (!React.isValidElement(node) || node.type !== ItemGroupRowPositionProvider) return null;
+        return (node as React.ReactElement<{ value: unknown }>).props.value;
+    });
+}
+
+describe('withItemGroupStandaloneRows', () => {
+    it('gives every row both edge positions so all four corners round', () => {
+        const children = React.createElement(
+            React.Fragment,
+            null,
+            React.createElement(TestItem, { id: 'a' }),
+            React.createElement(TestItem, { id: 'b' }),
+            React.createElement(TestItem, { id: 'c' }),
+        );
+
+        const rows = withItemGroupStandaloneRows(children);
+        expect(rows).toHaveLength(3);
+        expect(collectRowPositions(rows)).toEqual([
+            { isFirst: true, isLast: true },
+            { isFirst: true, isLast: true },
+            { isFirst: true, isLast: true },
+        ]);
+    });
+
+    it('suppresses dividers because the gap between cards separates them', () => {
+        const children = React.createElement(
+            React.Fragment,
+            null,
+            React.createElement(TestItem, { id: 'a', showDivider: true }),
+            React.createElement(TestItem, { id: 'b' }),
+        );
+
+        expect(collectShowDividers(withItemGroupStandaloneRows(children))).toEqual([false, false]);
+    });
+
+    it('flattens fragments and drops primitive children, matching the divider walk', () => {
+        const children = React.createElement(
+            React.Fragment,
+            null,
+            '\n   ',
+            React.createElement(TestItem, { id: 'a' }),
+            React.createElement(
+                React.Fragment,
+                null,
+                React.createElement(TestItem, { id: 'b' }),
+                React.createElement(TestItem, { id: 'c' }),
+            ),
+            0,
+        );
+
+        expect(withItemGroupStandaloneRows(children)).toHaveLength(3);
+    });
+
+    it('returns no rows when there is nothing renderable', () => {
+        expect(withItemGroupStandaloneRows(null)).toEqual([]);
+        expect(withItemGroupStandaloneRows('text-only')).toEqual([]);
     });
 });
