@@ -54,7 +54,7 @@ describe('usePreparedStreamingMarkdown', () => {
         expect(hook.getCurrent()).toBe(markdown);
     });
 
-    it('ignores stale async streaming repair results after newer markdown arrives', async () => {
+    it('ignores async streaming repair results for markdown the stream did not continue from', async () => {
         vi.useFakeTimers();
         const { usePreparedStreamingMarkdown } = await import('./usePreparedStreamingMarkdown');
         const first = makeLargeMarkdown(' first **half');
@@ -82,6 +82,11 @@ describe('usePreparedStreamingMarkdown', () => {
 
         expect(hook.getCurrent()).toBe(second);
 
+        repairState.pending[0]?.resolve('first repaired');
+        await flushHookEffects();
+
+        expect(hook.getCurrent()).toBe(second);
+
         await flushHookEffects({
             cycles: 1,
             turns: 1,
@@ -93,11 +98,99 @@ describe('usePreparedStreamingMarkdown', () => {
         await flushHookEffects();
 
         expect(hook.getCurrent()).toBe('second repaired');
+    });
 
-        repairState.pending[0]?.resolve('first repaired');
+    it('keeps rendering repaired prose when a newer chunk has not been repaired yet', async () => {
+        vi.useFakeTimers();
+        const { usePreparedStreamingMarkdown } = await import('./usePreparedStreamingMarkdown');
+        const body = `${'x'.repeat(STREAMING_MARKDOWN_ASYNC_REPAIR_MIN_CHARS)}\n\n`;
+        const openLink = `${body}See [the docs](https://exa`;
+        const repairedOpenLink = `${body}See the docs`;
+        const nextChunk = `${openLink}mple`;
+
+        const hook = await renderHook(
+            ({ markdown }) => usePreparedStreamingMarkdown({
+                markdown,
+                mode: 'streaming',
+            }),
+            { initialProps: { markdown: openLink } },
+        );
+
+        await flushHookEffects({
+            cycles: 1,
+            turns: 1,
+            advanceTimersMs: STREAMING_MARKDOWN_ASYNC_REPAIR_DEBOUNCE_MS,
+        });
+        repairState.pending[0]?.resolve(repairedOpenLink);
         await flushHookEffects();
 
-        expect(hook.getCurrent()).toBe('second repaired');
+        expect(hook.getCurrent()).toBe(repairedOpenLink);
+
+        await hook.rerender({ markdown: nextChunk });
+
+        expect(hook.getCurrent()).not.toContain('](https://');
+        expect(hook.getCurrent()).toContain('See the docs');
+    });
+
+    it('repairs large streaming markdown even while chunks keep arriving faster than the debounce', async () => {
+        vi.useFakeTimers();
+        const { usePreparedStreamingMarkdown } = await import('./usePreparedStreamingMarkdown');
+        const body = 'x'.repeat(STREAMING_MARKDOWN_ASYNC_REPAIR_MIN_CHARS);
+        const appendedTokens = [' Here', ' is', ' **bo', 'ld', ' prose', ' that', ' keeps', ' going'];
+        const chunkAt = (count: number) => `${body}${appendedTokens.slice(0, count).join('')}`;
+        const lastChunk = chunkAt(appendedTokens.length);
+
+        const hook = await renderHook(
+            ({ markdown }) => usePreparedStreamingMarkdown({
+                markdown,
+                mode: 'streaming',
+            }),
+            { initialProps: { markdown: chunkAt(1) } },
+        );
+
+        let resolvedRequests = 0;
+        for (let count = 2; count <= appendedTokens.length; count++) {
+            await hook.rerender({ markdown: chunkAt(count) });
+            await flushHookEffects({
+                cycles: 1,
+                turns: 1,
+                advanceTimersMs: STREAMING_MARKDOWN_ASYNC_REPAIR_DEBOUNCE_MS - 8,
+            });
+            while (resolvedRequests < repairState.pending.length) {
+                const request = repairState.pending[resolvedRequests];
+                resolvedRequests++;
+                request?.resolve(`${request.markdown}**`);
+            }
+            await flushHookEffects();
+        }
+
+        expect(resolvedRequests).toBeGreaterThan(0);
+        expect(hook.getCurrent()).not.toBe(lastChunk);
+        expect(hook.getCurrent().endsWith('**')).toBe(true);
+    });
+
+    it('does not fall back to raw markdown when streaming crosses the async repair threshold', async () => {
+        vi.useFakeTimers();
+        const { usePreparedStreamingMarkdown } = await import('./usePreparedStreamingMarkdown');
+        const body = 'x'.repeat(STREAMING_MARKDOWN_ASYNC_REPAIR_MIN_CHARS - 24);
+        const belowThreshold = `${body} a **bo`;
+        const aboveThreshold = `${body} a **bold and more text arrives`;
+
+        const hook = await renderHook(
+            ({ markdown }) => usePreparedStreamingMarkdown({
+                markdown,
+                mode: 'streaming',
+            }),
+            { initialProps: { markdown: belowThreshold } },
+        );
+
+        const belowPrepared = hook.getCurrent();
+        expect(belowPrepared).toBe(`${belowThreshold}**`);
+
+        await hook.rerender({ markdown: aboveThreshold });
+
+        expect(hook.getCurrent()).not.toBe(aboveThreshold);
+        expect(hook.getCurrent()).toBe(belowPrepared);
     });
 
     it('coalesces rapid large streaming markdown repairs to the latest payload', async () => {

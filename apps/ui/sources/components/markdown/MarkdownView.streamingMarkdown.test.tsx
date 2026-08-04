@@ -63,11 +63,14 @@ describe('MarkdownView (streaming markdown)', () => {
         markdownCodeBlockState.nextMountId = 0;
     });
 
-    it('repairs incomplete links as text while streaming', async () => {
+    it('repairs an incomplete link into a link with a placeholder destination while streaming', async () => {
+        // The half-streamed URL must never reach the renderer, and the label must already
+        // be a link: streaming it as prose and re-parenting it when `)` arrives remounts
+        // the reveal span and replays its opacity keyframe on every link.
         const screen = await renderStreamingMarkdown('Look at [docs](https://exa');
 
-        expect(visibleText(screen)).toContain('Look at docs');
-        expect(visibleText(screen)).not.toContain('(https://exa');
+        expect(visibleText(screen)).toBe('Look at [docs](streamdown:incomplete-link)');
+        expect(visibleText(screen)).not.toContain('https://exa');
     }, 60_000);
 
     it('repairs incomplete bold spans before passing prose to the enriched renderer', async () => {

@@ -593,7 +593,7 @@ index c6c73b0..397b78a 100644
    return /*#__PURE__*/_jsx("div", {
      style: wrapperStyle,
 diff --git a/node_modules/react-native-enriched-markdown/lib/module/web/parseMarkdown.js b/node_modules/react-native-enriched-markdown/lib/module/web/parseMarkdown.js
-index 7604c13..cec61ad 100644
+index 7604c13..011e0e6 100644
 --- a/node_modules/react-native-enriched-markdown/lib/module/web/parseMarkdown.js
 +++ b/node_modules/react-native-enriched-markdown/lib/module/web/parseMarkdown.js
 @@ -1,32 +1,171 @@
@@ -775,6 +775,7 @@ index 7604c13..cec61ad 100644
 +  return JSON.parse(JSON.stringify(ast));
  }
  //# sourceMappingURL=parseMarkdown.js.map
+\ No newline at end of file
 diff --git a/node_modules/react-native-enriched-markdown/lib/module/web/renderers/BlockRenderers.js b/node_modules/react-native-enriched-markdown/lib/module/web/renderers/BlockRenderers.js
 index 5bdaee9..ab8bc37 100644
 --- a/node_modules/react-native-enriched-markdown/lib/module/web/renderers/BlockRenderers.js
@@ -920,10 +921,10 @@ index 0000000..74504cf
 +export * from '../../typescript/src/web/streamingReveal';
 diff --git a/node_modules/react-native-enriched-markdown/lib/module/web/streamingReveal.js b/node_modules/react-native-enriched-markdown/lib/module/web/streamingReveal.js
 new file mode 100644
-index 0000000..f8682a8
+index 0000000..0bf3a53
 --- /dev/null
 +++ b/node_modules/react-native-enriched-markdown/lib/module/web/streamingReveal.js
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,179 @@
 +"use strict";
 +
 +import { createElement } from 'react';
@@ -1016,9 +1017,22 @@ index 0000000..f8682a8
 +  return Math.max(params.commonPrefixLength, params.currentComparisonTextLength - revealWindow);
 +}
 +export function updateStreamingRevealRanges(params) {
-+  const retainedRanges = params.activeRanges.filter(range => range.expiresAtMs > params.nowMs && range.start < params.currentComparisonText.length).map(range => ({
++  const commonPrefixLength = readCommonPrefixLength(params.previousComparisonText, params.currentComparisonText);
++
++  // A range's start/end are offsets into the rendered comparison text of the
++  // render that CREATED it, and ranges outlive that render (they are carried
++  // forward for ttlMs so the reveal keyframe can finish). The rendered text is
++  // not append-only while markdown streams, so as soon as the common prefix
++  // collapses those offsets denote different characters: a range created over
++  // '**beta' keeps animating as 'beta', and on the raw/repaired markdown flip a
++  // range slides onto words that were painted long ago and replays their
++  // opacity keyframe. Rebase every carried-forward range onto the region that is
++  // byte-identical in both renders — the common prefix — and discard the rest,
++  // which described text that no longer exists. A genuine append leaves the whole
++  // previous text as the common prefix, so ordinary retention is untouched.
++  const retainedRanges = params.activeRanges.filter(range => range.expiresAtMs > params.nowMs && range.start < commonPrefixLength).map(range => ({
 +    ...range,
-+    end: Math.min(range.end, params.currentComparisonText.length)
++    end: Math.min(range.end, commonPrefixLength)
 +  }));
 +
 +  // A mount — a remount above all — starts with no baseline: previousComparisonText
@@ -1033,7 +1047,6 @@ index 0000000..f8682a8
 +  if (params.previousComparisonText === '' && params.currentComparisonText.length > 0) {
 +    return mergeRevealRanges(retainedRanges);
 +  }
-+  const commonPrefixLength = readCommonPrefixLength(params.previousComparisonText, params.currentComparisonText);
 +  const revealFloor = resolveStreamingRevealFloor({
 +    commonPrefixLength,
 +    currentComparisonTextLength: params.currentComparisonText.length,
@@ -1966,10 +1979,10 @@ index dca24cf..e6662ba 100644
        renderChildren={renderChildren}
 diff --git a/node_modules/react-native-enriched-markdown/src/web/streamingReveal.ts b/node_modules/react-native-enriched-markdown/src/web/streamingReveal.ts
 new file mode 100644
-index 0000000..ac600d9
+index 0000000..7b1a56e
 --- /dev/null
 +++ b/node_modules/react-native-enriched-markdown/src/web/streamingReveal.ts
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,305 @@
 +import { createElement, type ReactNode } from 'react';
 +import type { ASTNode, NodeType, RenderCapabilities } from './types';
 +
@@ -2134,12 +2147,28 @@ index 0000000..ac600d9
 +  previousSourceLength?: number;
 +  currentSourceLength?: number;
 +}>): readonly StreamingRevealRange[] {
++  const commonPrefixLength = readCommonPrefixLength(
++    params.previousComparisonText,
++    params.currentComparisonText
++  );
++
++  // A range's start/end are offsets into the rendered comparison text of the
++  // render that CREATED it, and ranges outlive that render (they are carried
++  // forward for ttlMs so the reveal keyframe can finish). The rendered text is
++  // not append-only while markdown streams, so as soon as the common prefix
++  // collapses those offsets denote different characters: a range created over
++  // '**beta' keeps animating as 'beta', and on the raw/repaired markdown flip a
++  // range slides onto words that were painted long ago and replays their
++  // opacity keyframe. Rebase every carried-forward range onto the region that is
++  // byte-identical in both renders — the common prefix — and discard the rest,
++  // which described text that no longer exists. A genuine append leaves the whole
++  // previous text as the common prefix, so ordinary retention is untouched.
 +  const retainedRanges = params.activeRanges.filter((range) =>
 +    range.expiresAtMs > params.nowMs &&
-+    range.start < params.currentComparisonText.length
++    range.start < commonPrefixLength
 +  ).map((range) => ({
 +    ...range,
-+    end: Math.min(range.end, params.currentComparisonText.length),
++    end: Math.min(range.end, commonPrefixLength),
 +  }));
 +
 +  // A mount — a remount above all — starts with no baseline: previousComparisonText
@@ -2158,10 +2187,6 @@ index 0000000..ac600d9
 +    return mergeRevealRanges(retainedRanges);
 +  }
 +
-+  const commonPrefixLength = readCommonPrefixLength(
-+    params.previousComparisonText,
-+    params.currentComparisonText
-+  );
 +  const revealFloor = resolveStreamingRevealFloor({
 +    commonPrefixLength,
 +    currentComparisonTextLength: params.currentComparisonText.length,
