@@ -38,9 +38,23 @@ function fixture({ missingRolling = false } = {}) {
   mkdirSync(bin);
   mkdirSync(source);
   mkdirSync(rolling);
-  const archiveName = 'happier-v1.2.3-preview.4-linux-x64.tar.gz';
-  const archive = Buffer.from('immutable archive bytes\n');
-  writeFileSync(join(source, archiveName), archive);
+  const archivePlatform = process.platform === 'darwin' ? 'darwin' : 'linux';
+  const archiveArch = process.arch === 'arm64' ? 'arm64' : 'x64';
+  const archiveName = `happier-v1.2.3-preview.4-${archivePlatform}-${archiveArch}.tar.gz`;
+  const archiveStem = archiveName.slice(0, -'.tar.gz'.length);
+  const archiveStage = join(root, 'archive-stage');
+  const archiveRoot = join(archiveStage, archiveStem);
+  mkdirSync(archiveRoot, { recursive: true });
+  writeExecutable(
+    join(archiveRoot, 'happier'),
+    '#!/bin/sh\nprintf \'%s\\n\' \'1.2.3-preview.4\'\n',
+  );
+  execFileSync('tar', ['-czf', join(source, archiveName), '-C', archiveStage, archiveStem], {
+    cwd: repoRoot,
+    stdio: 'pipe',
+  });
+  const archive = readFileSync(join(source, archiveName));
+  rmSync(archiveStage, { recursive: true, force: true });
   const checksumsName = 'checksums-happier-v1.2.3-preview.4.txt';
   writeFileSync(join(source, checksumsName), `${sha256(archive)}  ${archiveName}\n`);
   writeFileSync(join(source, `${checksumsName}.minisig`), 'signature\n');
@@ -218,6 +232,7 @@ exit 2
   return {
     root,
     bin,
+    archiveName,
     log,
     rolling,
     uploadCounter,
@@ -279,7 +294,7 @@ test('failed rolling replacement leaves tag and notes unchanged, then the same-v
       [
         'checksums-happier-v1.2.3-preview.4.txt',
         'checksums-happier-v1.2.3-preview.4.txt.minisig',
-        'happier-v1.2.3-preview.4-linux-x64.tar.gz',
+        testFixture.archiveName,
       ],
     );
     for (const name of readdirSync(testFixture.rolling)) {
