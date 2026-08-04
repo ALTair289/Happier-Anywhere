@@ -222,6 +222,38 @@ test('hstack help command routing retains bundled workspace preflight repair', a
   }
 });
 
+test('hstack wrapper keeps dependency-free dev-target commands responsive during workspace builds', async () => {
+  const rootDir = stackRootDirFromMeta(import.meta.url);
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'hstack-wrapper-dev-targets-skip-'));
+  try {
+    const { loaderPath, syncMarkerPath } = createBundledSyncFixture(rootDir, fixtureDir, {
+      simulateMissingUpdateUntilSync: true,
+    });
+    const res = await runNodeCapture(
+      [join(rootDir, 'bin', 'hstack.mjs'), 'dev-targets', 'path', '--stack=repo-test'],
+      {
+        cwd: rootDir,
+        env: {
+          ...process.env,
+          HAPPIER_STACK_CLI_ROOT_DISABLE: '1',
+          HAPPIER_STACK_UPDATE_CHECK: '0',
+          NODE_OPTIONS: `--experimental-loader=${loaderPath}`,
+        },
+      },
+    );
+
+    assert.equal(res.code, 0, `expected exit 0, got ${res.code}\nstderr:\n${res.stderr}\nstdout:\n${res.stdout}`);
+    assert.match(res.stdout, /repo-test/);
+    assert.equal(
+      existsSync(syncMarkerPath),
+      false,
+      'dependency-free dev-target commands must not wait for unrelated bundled workspace publication',
+    );
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test('hstack service mode exits successfully before preflight when its explicit stack env is missing', async () => {
   const rootDir = stackRootDirFromMeta(import.meta.url);
   const fixtureDir = mkdtempSync(join(tmpdir(), 'hstack-wrapper-missing-service-env-'));

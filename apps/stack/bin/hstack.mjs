@@ -355,8 +355,13 @@ async function main() {
     return;
   }
 
-  await refreshLocalBundledWorkspacePackages(cliRootDir);
-  await maybeAutoUpdateNotice(cliRootDir, cmd);
+  // Dev-target configuration and SSH diagnostics use only Stack-local modules.
+  // Keep them available while an unrelated CLI/workspace publication owns the
+  // shared build lock (notably for inspecting or repairing a running target).
+  if (cmd !== 'dev-targets') {
+    await refreshLocalBundledWorkspacePackages(cliRootDir);
+    await maybeAutoUpdateNotice(cliRootDir, cmd);
+  }
 
   if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
     const target = rest[0];
