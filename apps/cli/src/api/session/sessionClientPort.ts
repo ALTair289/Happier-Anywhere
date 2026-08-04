@@ -22,6 +22,7 @@ import type {
 } from './pendingQueueV2Transport';
 import type {
   PendingProviderAction,
+  SessionTranscriptObservationProvenanceV1,
   SessionPendingQueueDeliveryTiming,
   SessionSystemRecord,
   SessionSystemRecordKind,
@@ -30,7 +31,6 @@ import type {
 } from '@happier-dev/protocol';
 import type { EphemeralSendResult } from './ephemeralSendOutcome';
 import type { RuntimeActivitySnapshotTail } from './mutations/createSessionMutationOutbox';
-import type { SessionMessageCommitResult } from './sessionMessageCommitResult';
 
 export type MaterializeNextPendingResult =
   | {
@@ -43,7 +43,7 @@ export type MaterializeNextPendingResult =
     deliveryState?: PendingMaterializationDeliveryState;
   }
   | { type: 'no_pending' }
-  | { type: 'retryable_transport' }
+  | { type: 'retryable_transport'; retryAfterMs?: number }
   | { type: 'auth_failure'; statusCode: 401 | 403 }
   | {
     type: 'deferred';
@@ -68,7 +68,15 @@ export interface SessionClientPort {
 
   sendSessionEvent(event: SessionEventMessage, id?: string): void;
   sendClaudeSessionMessage(message: RawJSONLines, meta?: Record<string, unknown>): void;
-  sendClaudeSessionMessageCommitted?(message: RawJSONLines, meta?: Record<string, unknown>): Promise<SessionMessageCommitResult>;
+  sendClaudeSessionMessageCommitted?(
+    message: RawJSONLines,
+    opts: Readonly<{
+      createdAt: number;
+      updatedAt?: number;
+      provenance: SessionTranscriptObservationProvenanceV1;
+      meta?: Record<string, unknown>;
+    }>,
+  ): Promise<Readonly<{ persisted: boolean; delivered: boolean }>>;
   recordClaudeJsonlMessageConsumed?(message: RawJSONLines, meta?: Record<string, unknown>): void;
   setSessionRuntimeControls?(controls: SessionRuntimeControls | null): void;
   registerSessionRuntimeControls?(controls: Partial<SessionRuntimeControls> | null): () => void;

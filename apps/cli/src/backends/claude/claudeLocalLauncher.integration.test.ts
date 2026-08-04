@@ -158,10 +158,8 @@ function createLocalHarness(options?: {
     },
     sendClaudeSessionMessage: vi.fn(),
     sendClaudeSessionMessageCommitted: vi.fn(async () => ({
-      localId: 'claude-jsonl:main:assistant:test',
-      messageId: 'message-test',
-      seq: 1,
-      didWrite: true,
+      persisted: true,
+      delivered: true,
     })),
     fetchCommittedClaudeJsonlMessageBaseline: vi.fn(async () => ({
       keys: new Set<string>(),

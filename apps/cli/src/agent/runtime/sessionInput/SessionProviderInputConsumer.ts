@@ -508,6 +508,7 @@ async function waitForNextInput<Mode, Message>(
   },
 ): Promise<MessageBatch<Mode, Message> | null> {
   const metadataWaitRetryBackoffMs = opts.metadataWaitRetryBackoffMs ?? DEFAULT_SESSION_METADATA_WAIT_RETRY_BACKOFF_MS;
+  let timedMaterializationRejoinConsumed = false;
 
   while (true) {
     if (opts.abortSignal.aborted || !opts.isProviderInputAdmissionOpen()) {
@@ -542,7 +543,7 @@ async function waitForNextInput<Mode, Message>(
       return existingBatch;
     }
 
-    await materializePendingMessage(opts);
+    const materializationRetryAfterMs = await materializePendingMessage(opts);
     if (!opts.isProviderInputAdmissionOpen()) return null;
 
     const materializedBatch = await collectQueuedBatch(opts.messageQueue, opts.abortSignal);
@@ -554,6 +555,27 @@ async function waitForNextInput<Mode, Message>(
         return null;
       }
       return materializedBatch;
+    }
+
+    if (materializationRetryAfterMs !== null && !timedMaterializationRejoinConsumed) {
+      timedMaterializationRejoinConsumed = true;
+      const retryOrWake = await Promise.race([
+        wakePromise.then((winner) => ({ kind: 'wake' as const, winner })),
+        waitForSessionMetadataRetryBackoff({
+          abortSignal: controller.signal,
+          backoffMs: materializationRetryAfterMs,
+        }).then(() => ({ kind: 'retry' as const })),
+      ]);
+      controller.abort('sessionProviderInputConsumer-materialization-retry');
+      opts.abortSignal.removeEventListener('abort', onAbort);
+      if (opts.abortSignal.aborted || !opts.isProviderInputAdmissionOpen()) return null;
+      if (retryOrWake.kind === 'wake') {
+        if (retryOrWake.winner.kind === 'queue' && !retryOrWake.winner.hasMessages) return null;
+        if (retryOrWake.winner.kind === 'meta' && retryOrWake.winner.ok) {
+          await callMetadataUpdate(opts.onMetadataUpdate);
+        }
+      }
+      continue;
     }
 
     try {
@@ -608,12 +630,12 @@ async function materializePendingMessage<Mode, Message>(
     abortSignal: AbortSignal;
     isProviderInputAdmissionOpen: () => boolean;
   },
-): Promise<void> {
+): Promise<number | null> {
   const reconcileWhenEmpty = opts.reconcileWhenEmpty ?? 'skip';
   let activeTurnSteerability = readActiveTurnSteerability(opts);
   let result: PendingMaterializationResult;
   try {
-    if (!opts.isProviderInputAdmissionOpen()) return;
+    if (!opts.isProviderInputAdmissionOpen()) return null;
     activeTurnSteerability = readActiveTurnSteerability(opts);
     const pendingQueueDeliveryTiming = readPendingQueueDeliveryTiming(opts);
     result = await materializeWithRuntimeActivityTail(
@@ -630,7 +652,7 @@ async function materializePendingMessage<Mode, Message>(
       opts.abortSignal.aborted
       && error instanceof Error
       && error.name === 'AbortError'
-    ) return;
+    ) return null;
     if (readAuthenticationStatus(error) !== null) {
       throw new PendingQueueMaterializationAuthError();
     }
@@ -642,7 +664,7 @@ async function materializePendingMessage<Mode, Message>(
         reason: 'unknown',
       });
     }
-    return;
+    return null;
   }
   logInputConsumerMaterializationDecision({
     source: 'waitForNextInput',
@@ -652,7 +674,7 @@ async function materializePendingMessage<Mode, Message>(
   });
   if (result.type === 'materialized') {
     // The transcript update path owns queue delivery; do not synthesize a provider batch from the pending payload.
-    return;
+    return null;
   }
   if (result.type === 'auth_failure') {
     throw new PendingQueueMaterializationAuthError();
@@ -660,7 +682,9 @@ async function materializePendingMessage<Mode, Message>(
   if (result.type === 'deferred' && result.reason === 'supervisor_auth_failed') {
     throw new PendingQueueMaterializationAuthError();
   }
-  return;
+  return result.type === 'retryable_transport' && result.retryAfterMs !== undefined
+    ? result.retryAfterMs
+    : null;
 }
 
 function withDefaultDrainOptions(

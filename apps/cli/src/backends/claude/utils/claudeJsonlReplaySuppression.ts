@@ -1,3 +1,5 @@
+import { readClaudeJsonlTimestampMs } from './claudeJsonlTimestamp';
+
 const JSONL_RESET_REPLAY_SUPPRESS_SKEW_MS = 30_000;
 
 export function resolveClaudeJsonlResetReplaySuppressBeforeMs(params: Readonly<{
@@ -19,19 +21,9 @@ export function isClaudeJsonlReplaySuppressedValue(
   suppressBeforeMs: number | null | undefined,
 ): boolean {
   if (typeof suppressBeforeMs !== 'number') return false;
-  const rawTimestamp = value && typeof value === 'object'
-    ? (value as Record<string, unknown>).timestamp
-    : undefined;
-  const timestampMs = typeof rawTimestamp === 'string' ? Date.parse(rawTimestamp) : Number.NaN;
+  const timestampMs = readClaudeJsonlTimestampMs(value);
   // Fail closed: replay rows without parseable timestamps cannot be proven newer than the cutoff.
-  return !Number.isFinite(timestampMs) || timestampMs < suppressBeforeMs;
-}
-
-function readClaudeJsonlTimestampMs(value: unknown): number {
-  const rawTimestamp = value && typeof value === 'object'
-    ? (value as Record<string, unknown>).timestamp
-    : undefined;
-  return typeof rawTimestamp === 'string' ? Date.parse(rawTimestamp) : Number.NaN;
+  return timestampMs === null || timestampMs < suppressBeforeMs;
 }
 
 export type ClaudeJsonlResetReplaySuppressor = Readonly<{
@@ -60,7 +52,7 @@ export function createClaudeJsonlResetReplaySuppressor(params: Readonly<{
     shouldSuppress(value) {
       if (typeof suppressBeforeMs !== 'number') return false;
       const timestampMs = readClaudeJsonlTimestampMs(value);
-      if (Number.isFinite(timestampMs) && timestampMs >= suppressBeforeMs) {
+      if (timestampMs !== null && timestampMs >= suppressBeforeMs) {
         suppressBeforeMs = null;
         return false;
       }

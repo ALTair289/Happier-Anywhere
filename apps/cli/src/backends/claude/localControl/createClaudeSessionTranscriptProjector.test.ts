@@ -95,10 +95,8 @@ function createSessionFixture(): Readonly<{
       getMetadataSnapshot: () => metadata,
       sendClaudeSessionMessage: vi.fn(),
       sendClaudeSessionMessageCommitted: vi.fn(async () => ({
-        localId: 'historical-row',
-        messageId: 'historical-message',
-        seq: 1,
-        didWrite: true,
+        persisted: true,
+        delivered: true,
       })),
       sendSessionEvent: vi.fn((event: unknown, id?: string) => {
         sessionEventCalls.push({ event, id });
@@ -121,11 +119,13 @@ function buildAssistantRow(params: Readonly<{
   uuid: string;
   model?: string;
   isSidechain?: boolean;
+  timestamp?: string;
 }>): RawJSONLines {
   return {
     uuid: params.uuid,
     type: 'assistant',
     ...(params.isSidechain !== undefined ? { isSidechain: params.isSidechain } : {}),
+    ...(params.timestamp !== undefined ? { timestamp: params.timestamp } : {}),
     message: {
       id: `msg_${params.uuid}`,
       role: 'assistant',
@@ -196,15 +196,74 @@ describe('createClaudeSessionTranscriptProjector model adoption', () => {
       logPrefix: '[test]',
     });
 
-    await projector.observeCommitted(buildAssistantRow({
+    const timestamp = '2026-08-04T10:11:12.345Z';
+    const historicalRow = buildAssistantRow({
       uuid: 'historical-assistant',
       model: 'claude-stale-model',
-    }));
+      timestamp,
+    });
 
-    expect(fixture.session.client.sendClaudeSessionMessageCommitted).toHaveBeenCalledOnce();
+    await projector.observeCommitted(historicalRow);
+
+    expect(fixture.session.client.sendClaudeSessionMessageCommitted).toHaveBeenCalledWith(
+      historicalRow,
+      {
+        createdAt: Date.parse(timestamp),
+        updatedAt: Date.parse(timestamp),
+        provenance: { kind: 'non_dependent', source: 'history' },
+      },
+    );
     expect(fixture.getMetadata().sessionModelsV1).toBeUndefined();
     expect(fixture.getUpdateMetadataCallCount()).toBe(0);
     expect(fixture.getSessionEventCalls()).toEqual([]);
+  });
+
+  it('does not fabricate source chronology for historical rows without a provider timestamp', async () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    await projector.observeCommitted(buildAssistantRow({
+      uuid: 'historical-assistant-without-timestamp',
+      model: 'claude-stale-model',
+    }));
+
+    expect(fixture.session.client.sendClaudeSessionMessageCommitted).not.toHaveBeenCalled();
+  });
+
+  it('does not fabricate a durable identity for historical rows without a provider id', async () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    await projector.observeCommitted({
+      type: 'progress',
+      timestamp: '2026-08-04T10:11:12.345Z',
+      status: 'running',
+    } as RawJSONLines);
+
+    expect(fixture.session.client.sendClaudeSessionMessageCommitted).not.toHaveBeenCalled();
+  });
+
+  it('does not release historical recovery before the observation is server-acknowledged', async () => {
+    const fixture = createSessionFixture();
+    vi.mocked(fixture.session.client.sendClaudeSessionMessageCommitted!).mockResolvedValueOnce({
+      persisted: true,
+      delivered: false,
+    });
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    await expect(projector.observeCommitted(buildAssistantRow({
+      uuid: 'historical-assistant-awaiting-delivery',
+      timestamp: '2026-08-04T10:11:12.345Z',
+    }))).rejects.toThrow('server-acknowledged');
   });
 
   it('adopts the effective model from non-sidechain assistant transcript rows into session models metadata', () => {

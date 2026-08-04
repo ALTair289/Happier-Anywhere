@@ -6,6 +6,8 @@ import { logger } from '@/ui/logger';
 import type { Session } from '../session';
 import type { RawJSONLines } from '../types';
 import { createClaudeRawMessageTurnDiffBridge } from '../utils/createClaudeRawMessageTurnDiffBridge';
+import { buildClaudeJsonlMessageKey } from '../utils/claudeJsonlMessageKey';
+import { readClaudeJsonlTimestampMs } from '../utils/claudeJsonlTimestamp';
 import { isClaudeInternalTranscriptMessage } from '../utils/isClaudeInternalTranscriptMessage';
 import { buildClaudeTodoWriteWorkState, createClaudeTaskToolWorkStateTracker } from '../workState/claudeWorkState';
 import { createClaudeGoalWorkStateSource } from '../workState/claudeGoalSource';
@@ -328,13 +330,36 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
       });
     },
     async observeCommitted(message) {
+      if (!buildClaudeJsonlMessageKey(message)) {
+        logger.debug(`${params.logPrefix}: skipped historical Claude transcript row without trustworthy provider identity`, {
+          type: message.type,
+        });
+        return;
+      }
+      const sourceTimestampMs = readClaudeJsonlTimestampMs(message);
+      if (sourceTimestampMs === null) {
+        logger.debug(`${params.logPrefix}: skipped historical Claude transcript row without trustworthy source chronology`, {
+          type: message.type,
+          uuid: readString((message as Record<string, unknown>).uuid),
+        });
+        return;
+      }
       const commits: Promise<unknown>[] = [];
       observeWithVisibleSender(message, (visibleMessage) => {
         const commit = params.session.client.sendClaudeSessionMessageCommitted;
         if (!commit) {
           throw new Error('Claude transcript committed-custody transport is unavailable');
         }
-        commits.push(commit.call(params.session.client, visibleMessage));
+        const visibleTimestampMs = readClaudeJsonlTimestampMs(visibleMessage) ?? sourceTimestampMs;
+        commits.push(commit.call(params.session.client, visibleMessage, {
+          createdAt: visibleTimestampMs,
+          updatedAt: visibleTimestampMs,
+          provenance: { kind: 'non_dependent', source: 'history' },
+        }).then((result) => {
+          if (!result.persisted || !result.delivered) {
+            throw new Error('Claude historical transcript observation was not server-acknowledged');
+          }
+        }));
       }, { historicalReplay: true });
       await Promise.all(commits);
     },

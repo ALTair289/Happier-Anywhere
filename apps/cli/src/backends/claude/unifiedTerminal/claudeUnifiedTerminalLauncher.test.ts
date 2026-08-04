@@ -132,10 +132,8 @@ function createSession(overrides: Readonly<{
       sendSessionEvent: vi.fn(),
       sendClaudeSessionMessage: vi.fn(),
       sendClaudeSessionMessageCommitted: vi.fn(async () => ({
-        localId: 'claude-jsonl:main:assistant:historical-row',
-        messageId: 'historical-message',
-        seq: 1,
-        didWrite: true,
+        persisted: true,
+        delivered: true,
       })),
       getMetadataSnapshot: vi.fn(() => overrides.metadata ?? {}),
       recordClaudeJsonlMessageConsumed: vi.fn(),
@@ -1105,6 +1103,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
       await opts.onHistoricalMessage?.({
         type: 'assistant',
         uuid: 'historical-row',
+        timestamp: '2026-08-04T10:11:12.345Z',
         message: { role: 'assistant', content: [{ type: 'text', text: 'caught up' }] },
       });
     });
@@ -1116,10 +1115,17 @@ describe('claudeUnifiedTerminalLauncher', () => {
       },
     });
 
-    expect(session.client.sendClaudeSessionMessageCommitted).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'assistant',
-      uuid: 'historical-row',
-    }));
+    expect(session.client.sendClaudeSessionMessageCommitted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'assistant',
+        uuid: 'historical-row',
+      }),
+      {
+        createdAt: Date.parse('2026-08-04T10:11:12.345Z'),
+        updatedAt: Date.parse('2026-08-04T10:11:12.345Z'),
+        provenance: { kind: 'non_dependent', source: 'history' },
+      },
+    );
     expect(session.client.sendClaudeSessionMessage).not.toHaveBeenCalled();
   });
 

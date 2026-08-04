@@ -180,6 +180,7 @@ import {
     materializeNextPendingQueueV2Message,
     blockPendingQueueV2Delivery,
     PendingQueueAcceptedSettlementError,
+    PendingQueueMaterializationTransportAmbiguousError,
     isAcceptedPendingQueueV2DeliveryNotFound,
     readAcceptedPendingQueueV2DeliveryRetryDirective,
     resolveAcceptedPendingQueueV2Delivery,
@@ -3798,23 +3799,27 @@ export class ApiSessionClient extends EventEmitter {
 
     async sendClaudeSessionMessageCommitted(
         body: RawJSONLines,
-        meta?: Record<string, unknown>,
-    ): Promise<SessionMessageCommitResult> {
-        const { content, localId, sidechainId } = this.prepareClaudeSessionMessage(body, meta);
+        opts: Readonly<{
+            createdAt: number;
+            updatedAt?: number;
+            provenance: SessionTranscriptObservationProvenanceV1;
+            meta?: Record<string, unknown>;
+        }>,
+    ): Promise<Readonly<{ persisted: boolean; delivered: boolean }>> {
+        const { content, localId, sidechainId } = this.prepareClaudeSessionMessage(body, opts.meta);
         requireExactCommitLocalId(localId);
 
         this.logSendWhileDisconnected('Claude session message', { type: body.type });
-        const result = requireExactCommitResult(await this.enqueueMessageCommit(() =>
-            this.commitSessionMessage({
-                message: this.buildOutboundSessionMessagePayload(content),
-                localId,
-                sidechainId,
-                messageRole: resolveClaudeSessionMessageRole(body),
-                requireCommit: true,
-                requireWriteDisposition: true,
-            }),
-        ), localId);
-        return result;
+        return await this.sessionMutationOutbox.enqueueTranscriptMessage(createTranscriptMessageAppendMutation({
+            sessionId: this.sessionId,
+            localId,
+            content: this.buildOutboundSessionMessagePayload(content),
+            sidechainId,
+            messageRole: resolveClaudeSessionMessageRole(body),
+            createdAt: opts.createdAt,
+            updatedAt: opts.updatedAt ?? opts.createdAt,
+            provenance: opts.provenance,
+        }));
     }
 
     recordClaudeJsonlMessageConsumed(body: RawJSONLines, meta?: Record<string, unknown>): void {
@@ -5796,7 +5801,18 @@ export class ApiSessionClient extends EventEmitter {
                     sessionId: this.sessionId,
                     error: serializeAxiosErrorForLog(error),
                 });
-                return { didMaterialize: false, result: { type: 'retryable_transport' } };
+                return {
+                    didMaterialize: false,
+                    result: {
+                        type: 'retryable_transport',
+                        // A timed-out socket acknowledgement may have committed the exact frozen
+                        // claim on the server. Ask the consumer to rejoin that same claim after a
+                        // short delay; other transport failures remain connection-event driven.
+                        ...(error instanceof PendingQueueMaterializationTransportAmbiguousError
+                            ? { retryAfterMs: 250 }
+                            : {}),
+                    },
+                };
             }
         }
         if (!isServerContractCurrent()) {

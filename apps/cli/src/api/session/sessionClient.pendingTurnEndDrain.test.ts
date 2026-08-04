@@ -14,7 +14,10 @@ import {
   setActiveAccountSettingsSnapshot,
 } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 import type { SessionMutationOutbox } from './mutations/createSessionMutationOutbox';
-import { PendingQueueAcceptedSettlementError } from './pendingQueueV2Transport';
+import {
+  PendingQueueAcceptedSettlementError,
+  PendingQueueMaterializationTransportAmbiguousError,
+} from './pendingQueueV2Transport';
 const providerInputOutcomeObservers = new WeakMap<object, (outcome: Readonly<{ kind: 'accepted'; localId: string }>) => void>();
 
 function providerInputOutcomeObserver(client: any) {
@@ -1644,7 +1647,9 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
       pendingVersion: 1,
     });
     await client.sessionTurnLifecycle.beginTurn({ provider: 'claude', observedAt: Date.now() });
-    const transportFailure = new Error('materialize transport down');
+    const transportFailure = new PendingQueueMaterializationTransportAmbiguousError(
+      new Error('materialize acknowledgement timed out'),
+    );
     materializeNextMock
       .mockRejectedValueOnce(transportFailure)
       .mockResolvedValueOnce({
@@ -1681,7 +1686,7 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
 
     await expect(client.materializeNextPendingMessageSafely({
       activeTurnSteerability: 'steerable',
-    })).resolves.toEqual({ type: 'retryable_transport' });
+    })).resolves.toEqual({ type: 'retryable_transport', retryAfterMs: 250 });
     expect((client as unknown as { pendingMaterializeRetryWakeTimer?: unknown }).pendingMaterializeRetryWakeTimer)
       .toBeUndefined();
 

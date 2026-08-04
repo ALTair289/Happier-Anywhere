@@ -1190,6 +1190,73 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     expect(firstResult).toMatchObject({ message: 'recovered' });
   });
 
+  it('rejoins an ambiguously acknowledged materialization after its requested backoff without a new eligibility event', async () => {
+    vi.useFakeTimers();
+    try {
+      const abortController = new AbortController();
+      const messageQueue = new MessageQueue2<TestMode>(() => 'hash');
+      const materializeNextPendingMessageSafely = vi
+        .fn<() => Promise<MaterializeNextPendingResult>>()
+        .mockResolvedValueOnce({ type: 'retryable_transport', retryAfterMs: 1_000 })
+        .mockImplementationOnce(async () => {
+          messageQueue.push('rejoined frozen claim', { id: 'mode' });
+          return { type: 'materialized', localId: 'rejoined-local', seq: 1, content: null };
+        });
+      const consumer = createSessionProviderInputConsumer({
+        messageQueue,
+        session: {
+          materializeNextPendingMessageSafely,
+          waitForPendingEligibilityUpdate: () => new Promise<boolean>(() => {}),
+        },
+      } as Parameters<typeof createSessionProviderInputConsumer<TestMode, string>>[0]);
+
+      const waiting = consumer.waitForNextInput({ abortSignal: abortController.signal });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(waiting).resolves.toMatchObject({ message: 'rejoined frozen claim' });
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps timer-driven ambiguous materialization rejoin at one attempt until another wake', async () => {
+    vi.useFakeTimers();
+    try {
+      const abortController = new AbortController();
+      const materializeNextPendingMessageSafely = vi
+        .fn<() => Promise<MaterializeNextPendingResult>>()
+        .mockResolvedValue({ type: 'retryable_transport', retryAfterMs: 1_000 });
+      const consumer = createSessionProviderInputConsumer({
+        messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
+        session: {
+          materializeNextPendingMessageSafely,
+          waitForPendingEligibilityUpdate: () => new Promise<boolean>(() => {}),
+        },
+      } as Parameters<typeof createSessionProviderInputConsumer<TestMode, string>>[0]);
+
+      const waiting = consumer.waitForNextInput({ abortSignal: abortController.signal });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(2);
+
+      abortController.abort();
+      await expect(waiting).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('re-reads locally applied delivery timing after each eligibility event', async () => {
     const abortController = new AbortController();
     const eligibilityWake = createDeferred<boolean>();
@@ -1312,7 +1379,7 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
       const abortController = new AbortController();
       const materializeNextPendingMessageSafely = vi
         .fn<() => Promise<MaterializeNextPendingResult>>()
-        .mockResolvedValue({ type: 'retryable_transport' } as MaterializeNextPendingResult);
+        .mockResolvedValue({ type: 'retryable_transport', retryAfterMs: 1_000 } as MaterializeNextPendingResult);
       const consumer = createSessionProviderInputConsumer({
         messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
         session: {

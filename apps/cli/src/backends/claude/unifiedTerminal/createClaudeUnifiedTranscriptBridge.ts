@@ -14,6 +14,7 @@ import type { ClaudeUnifiedStartableDisposable } from './_types';
 import { createJsonlFollowController, type JsonlFollowController } from '@/agent/localControl/jsonlFollowController';
 import type { JsonlFollowerMetricEvent } from '@/agent/localControl/jsonlFollowMetrics';
 import { createClaudeJsonlResetReplaySuppressor } from '../utils/claudeJsonlReplaySuppression';
+import { readClaudeJsonlTimestampMs } from '../utils/claudeJsonlTimestamp';
 import { wasClaudeSessionHookIdentityReported } from './createReplayableHookSubscription';
 
 type ClaudeUnifiedTranscriptBridgeSessionFound = (sessionId: string, data: SessionHookData) => void;
@@ -61,13 +62,6 @@ function readTranscriptString(message: RawJSONLines, key: string): string | null
   return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null;
 }
 
-function readTranscriptTimestampMs(message: RawJSONLines): number | null {
-  const timestamp = readTranscriptString(message, 'timestamp');
-  if (!timestamp) return null;
-  const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function shouldForwardResumeTranscriptToLifecycle(
   message: RawJSONLines,
   resumeLiveTranscriptAfterMsBySessionId: ReadonlyMap<string, number>,
@@ -76,7 +70,7 @@ function shouldForwardResumeTranscriptToLifecycle(
   if (!sessionId) return true;
   const liveAfterMs = resumeLiveTranscriptAfterMsBySessionId.get(sessionId);
   if (liveAfterMs === undefined) return true;
-  const timestampMs = readTranscriptTimestampMs(message);
+  const timestampMs = readClaudeJsonlTimestampMs(message);
   if (timestampMs === null) return true;
   return timestampMs >= liveAfterMs;
 }
@@ -89,7 +83,7 @@ function shouldForwardFreshResumeTranscriptToMessage(
   if (!sessionId) return true;
   const liveAfterMs = resumeLiveTranscriptAfterMsBySessionId.get(sessionId);
   if (liveAfterMs === undefined) return true;
-  const timestampMs = readTranscriptTimestampMs(message);
+  const timestampMs = readClaudeJsonlTimestampMs(message);
   if (timestampMs === null) return false;
   return timestampMs >= liveAfterMs;
 }

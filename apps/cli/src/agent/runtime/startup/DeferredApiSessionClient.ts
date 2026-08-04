@@ -446,7 +446,8 @@ export class DeferredApiSessionClient {
     reconcileWhenEmpty?: PendingQueueReconcileWhenEmpty;
   }): Promise<MaterializeNextPendingResult> {
     return await this.withAttachedTarget(
-      (t) => t.materializeNextPendingMessageSafely?.(opts) ?? Promise.resolve({ type: 'retryable_transport' as const }),
+      (t): Promise<MaterializeNextPendingResult> => t.materializeNextPendingMessageSafely?.(opts)
+        ?? Promise.resolve({ type: 'retryable_transport' as const }),
       { type: 'deferred' as const, reason: 'supervisor_offline' as const },
     );
   }
