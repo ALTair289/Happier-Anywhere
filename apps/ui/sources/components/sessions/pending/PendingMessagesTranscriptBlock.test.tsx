@@ -160,6 +160,11 @@ vi.mock('@/sync/domains/features/featureDecisionRuntime', async (importOriginal)
                     status: 'ready' as const,
                     features: {
                         capabilities: {
+                            session: {
+                                pendingInput: {
+                                    protocolVersion: 1,
+                                },
+                            },
                             compatibility: {
                                 pendingInput: {
                                     currentPendingInputProtocolVersion: 1,
@@ -757,7 +762,8 @@ describe('PendingMessagesTranscriptBlock', () => {
         expect(sessionAbort).not.toHaveBeenCalled();
     });
 
-    it('does not offer provider replay actions while server delivery is in progress', async () => {
+    it('offers duplicate-safe send-as-new recovery but no direct provider replay while server delivery is in progress', async () => {
+        modalConfirm.mockResolvedValue(true);
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         sessionValue = {
             thinking: true,
@@ -788,12 +794,18 @@ describe('PendingMessagesTranscriptBlock', () => {
 
         expect(screen.findByTestId('pendingMessages.retryDelivery:p1')).toBeNull();
         expect(screen.findByTestId('pendingMessages.markDeliveryHandled:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.sendDeliveryAsNew:p1')).toBeTruthy();
         expect(screen.findByTestId('pendingMessages.discardDelivery:p1')).toBeNull();
         expect(screen.findByTestId('pendingMessages.remove:p1')).toBeNull();
         expect(screen.findByTestId('pendingMessages.steerNow:p1')).toBeNull();
         expect(screen.findByTestId('pendingMessages.sendNow:p1')).toBeNull();
         expect(sendPendingMessageNow).not.toHaveBeenCalled();
         expect(sessionAbort).not.toHaveBeenCalled();
+
+        await screen.pressByTestIdAsync('pendingMessages.sendDeliveryAsNew:p1');
+
+        expect(sendPendingDeliveryAsNew).toHaveBeenCalledWith('s1', 'p1');
+        expect(sendPendingMessageNow).not.toHaveBeenCalled();
     });
 
     it('labels exact Claude-native custody as Queued in Claude', async () => {

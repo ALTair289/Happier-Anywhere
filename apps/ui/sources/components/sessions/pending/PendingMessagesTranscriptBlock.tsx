@@ -693,6 +693,8 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         const usesDeliveryResolutionActions = hasPendingDeliveryResolutionState(deliveryVisualState);
         const providerEffectPossible = isPendingMessageProviderEffectPossible(message);
         const isUncertainDelivery = deliveryVisualState.kind === 'delivery_uncertain';
+        const isServerDeliveryInProgress = message.pendingDeliveryStatus === 'server_delivering'
+            || deliveryVisualState.kind === 'delivering';
         const canRemoveDelivery = usesDeliveryResolutionActions && !providerEffectPossible;
         const isSendFailed = deliveryVisualState.kind === 'send_failed';
         const isCancellationState = deliveryVisualState.kind === 'cancelling' || deliveryVisualState.kind === 'cancel_failed';
@@ -764,6 +766,8 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                         icon: <Icon name="archive" size={16} color={theme.colors.text.secondary} />,
                         disabled: deliveryActionBusy,
                     });
+                }
+                if (isUncertainDelivery || isServerDeliveryInProgress) {
                     items.push({
                         id: 'sendDeliveryAsNew',
                         testID: `pendingMessages.sendDeliveryAsNew:${message.id}`,
@@ -1008,6 +1012,15 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                         accessibilityLabel={t('session.pendingMessages.actions.retrySend')}
                                         icon="arrow-clockwise"
                                         onPress={() => handleRetrySend(message)}
+                                        disabled={deliveryActionBusy}
+                                    />
+                                ) : null}
+                                {usesDeliveryResolutionActions && (isUncertainDelivery || isServerDeliveryInProgress) ? (
+                                    <IconAction
+                                        testID={`pendingMessages.sendDeliveryAsNew:${message.id}`}
+                                        accessibilityLabel={t('session.pendingMessages.actions.sendAsNew')}
+                                        icon="paper-plane"
+                                        onPress={() => handleSendDeliveryAsNew(message)}
                                         disabled={deliveryActionBusy}
                                     />
                                 ) : null}
