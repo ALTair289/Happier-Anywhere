@@ -15,7 +15,6 @@ function concurrentReviewError() {
 test('automatic beta review defers when another build in the train is already under review', async () => {
   const logs = [];
   await ensureBetaReviewSubmission({
-    token: 'token',
     build: { id: 'build-264', relationships: {} },
     submitBetaReview: 'auto',
     request: async () => {
@@ -31,7 +30,6 @@ test('automatic beta review defers when another build in the train is already un
 test('explicit beta review submission fails when another build is already under review', async () => {
   await assert.rejects(
     ensureBetaReviewSubmission({
-      token: 'token',
       build: { id: 'build-264', relationships: {} },
       submitBetaReview: 'true',
       request: async () => {
@@ -49,7 +47,6 @@ test('automatic beta review does not hide unrelated App Store Connect errors', a
   });
   await assert.rejects(
     ensureBetaReviewSubmission({
-      token: 'token',
       build: { id: 'build-264', relationships: {} },
       submitBetaReview: 'auto',
       request: async () => {

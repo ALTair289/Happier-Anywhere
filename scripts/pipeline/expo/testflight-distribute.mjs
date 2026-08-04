@@ -120,14 +120,14 @@ async function ascRequest(input) {
 }
 
 /**
- * @param {{ token: string; url: string }} input
+ * @param {{ request: (input: { method?: string; url: string; body?: unknown }) => Promise<any>; url: string }} input
  * @returns {Promise<any[]>}
  */
 async function ascListAll(input) {
   const rows = [];
   let nextUrl = input.url;
   while (nextUrl) {
-    const body = await ascRequest({ token: input.token, url: nextUrl });
+    const body = await input.request({ url: nextUrl });
     rows.push(...(Array.isArray(body?.data) ? body.data : []));
     nextUrl = String(body?.links?.next ?? '').trim();
   }
@@ -253,11 +253,11 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function resolveBuildForDistribution({ token, ascAppId, buildNumber, appVersion, waitProcessing, timeoutSeconds }) {
+async function resolveBuildForDistribution({ request, ascAppId, buildNumber, appVersion, waitProcessing, timeoutSeconds }) {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (true) {
     const url = buildAscBuildsListUrl({ ascAppId, limit: 200 });
-    const body = await ascRequest({ token, url });
+    const body = await request({ url });
     const builds = Array.isArray(body?.data) ? body.data : [];
     const included = Array.isArray(body?.included) ? body.included : [];
     const preReleaseVersions = getIncludedMap(included, 'preReleaseVersions');
@@ -306,8 +306,8 @@ async function resolveBuildForDistribution({ token, ascAppId, buildNumber, appVe
   }
 }
 
-async function resolveExternalGroups({ token, ascAppId, externalGroupNames }) {
-  const groups = await ascListAll({ token, url: buildAscBaseUrl(`/v1/apps/${ascAppId}/betaGroups?limit=200`) });
+async function resolveExternalGroups({ request, ascAppId, externalGroupNames }) {
+  const groups = await ascListAll({ request, url: buildAscBaseUrl(`/v1/apps/${ascAppId}/betaGroups?limit=200`) });
   const resolved = resolveExternalGroupSelections({ groups, selections: externalGroupNames });
   return resolved.map((group, index) => {
     if (!group) fail(`Unable to find external TestFlight group '${externalGroupNames[index]}' for app ${ascAppId}.`);
@@ -315,7 +315,7 @@ async function resolveExternalGroups({ token, ascAppId, externalGroupNames }) {
   });
 }
 
-async function attachBuildToGroups({ token, build, groups }) {
+async function attachBuildToGroups({ request, build, groups }) {
   const existingGroupIds = new Set(
     (Array.isArray(build?.relationships?.betaGroups?.data) ? build.relationships.betaGroups.data : [])
       .map((entry) => String(entry?.id ?? '').trim())
@@ -325,8 +325,7 @@ async function attachBuildToGroups({ token, build, groups }) {
   for (const group of groups) {
     const groupId = String(group?.id ?? '').trim();
     if (!groupId || existingGroupIds.has(groupId)) continue;
-    await ascRequest({
-      token,
+    await request({
       method: 'POST',
       url: buildAscBaseUrl(`/v1/betaGroups/${groupId}/relationships/builds`),
       body: {
@@ -420,26 +419,29 @@ async function main() {
 
   if (dryRun) return;
 
-  const token = createJwt({
+  const ascCredentials = {
     issuerId: ascApiKeyIssuerId,
     keyId: ascApiKeyId,
     privateKeyPem: normalizeAscPrivateKeyPem(privateKeyRaw),
+  };
+  const request = (input) => ascRequest({
+    ...input,
+    token: createJwt(ascCredentials),
   });
   const build = await resolveBuildForDistribution({
-    token,
+    request,
     ascAppId,
     buildNumber,
     appVersion,
     waitProcessing,
     timeoutSeconds,
   });
-  const groups = await resolveExternalGroups({ token, ascAppId, externalGroupNames: externalGroups });
-  await attachBuildToGroups({ token, build, groups });
+  const groups = await resolveExternalGroups({ request, ascAppId, externalGroupNames: externalGroups });
+  await attachBuildToGroups({ request, build, groups });
   await ensureBetaReviewSubmission({
-    token,
     build,
     submitBetaReview,
-    request: ascRequest,
+    request,
     buildAscBaseUrl,
   });
 }

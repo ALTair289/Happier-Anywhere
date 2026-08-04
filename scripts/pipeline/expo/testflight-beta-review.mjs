@@ -16,10 +16,9 @@ function hasAscErrorCode(error, code) {
 
 /**
  * @param {{
- *   token: string;
  *   build: any;
  *   submitBetaReview: 'auto' | 'true' | 'false';
- *   request: (input: { token: string; method: string; url: string; body: unknown }) => Promise<unknown>;
+ *   request: (input: { method: string; url: string; body: unknown }) => Promise<unknown>;
  *   buildAscBaseUrl?: (pathname: string) => string;
  *   log?: (message: string) => void;
  * }} input
@@ -39,7 +38,6 @@ export async function ensureBetaReviewSubmission(input) {
   ));
   try {
     await input.request({
-      token: input.token,
       method: 'POST',
       url: buildAscBaseUrl('/v1/betaAppReviewSubmissions'),
       body: {
