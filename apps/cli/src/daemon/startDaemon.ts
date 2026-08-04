@@ -4792,9 +4792,9 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         }>) => async (generationInput: Readonly<{
           sessionId: string;
           serviceId: ConnectedServiceId;
-          groupId: string;
+          groupId: string | null;
           activeProfileId: string | null;
-          generation: number;
+          generation: number | null;
           credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
           reason: string;
           switchReason: ConnectedServiceSessionAuthSwitchReason;
@@ -4917,6 +4917,9 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               return lifecycleDescriptor.runtimeAuthApply;
             },
             restartSession: async (restartTracked) => {
+              if (generationInput.groupId === null || generationInput.generation === null) {
+                throw new Error('connected_service_direct_profile_restart_requires_lifecycle_owner');
+              }
               if (pidToTrackedSession.get(restartTracked.pid) !== restartTracked) {
                 const spawnOptions = restartTracked.spawnOptions;
                 if (!spawnOptions?.existingSessionId) {
@@ -4968,6 +4971,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             hotApply: createSessionConnectedServiceAuthHotApply(),
             recoverAfterRuntimeAuthSwitch: recoverTrackedSessionConnectedServiceRuntimeAuthSwitch,
             continueAfterRuntimeAuthSwitch: async (continuationInput) => {
+              if (generationInput.groupId === null || generationInput.generation === null) return;
               const correlationKey = {
                 sessionId: generationInput.sessionId,
                 serviceId,
@@ -5080,17 +5084,27 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               bindings: {
                 v: 1,
                 bindingsByServiceId: {
-                  [serviceId]: {
-                    source: 'connected',
-                    selection: 'group',
-                    groupId: generationInput.groupId,
-                    profileId: activeProfileId,
-                  },
+                  [serviceId]: generationInput.groupId === null
+                    ? {
+                        source: 'connected',
+                        selection: 'profile',
+                        profileId: activeProfileId,
+                      }
+                    : {
+                        source: 'connected',
+                        selection: 'group',
+                        groupId: generationInput.groupId,
+                        profileId: activeProfileId,
+                      },
                 },
               },
-              expectedGroupGenerationByServiceId: {
-                [serviceId]: generationInput.generation,
-              },
+              ...(generationInput.groupId === null || generationInput.generation === null
+                ? { rematerializeServiceId: serviceId }
+                : {
+                    expectedGroupGenerationByServiceId: {
+                      [serviceId]: generationInput.generation,
+                    },
+                  }),
             },
           });
           return result.ok
@@ -6676,7 +6690,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_RESTART_ENABLED,
         true,
       );
-      const onAuthUpdated = createConnectedServicesAuthUpdatedRestartHandler({
+      const restartAfterAuthUpdated = createConnectedServicesAuthUpdatedRestartHandler({
             restartRequestedPids: connectedServicesRestartRequestedPids,
             pidToTrackedSession,
             restartEnabled: restartOnAuthUpdate,
@@ -6744,6 +6758,61 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               logger.debug('[DAEMON RUN] Connected-service credential refresh restart blocked', diagnostic);
             },
           });
+      const applyRefreshedConnectedServiceAuth = buildConnectedServiceApplyAuthGeneration({
+        commitAccountSwitchEvents: false,
+        deferCorrelatedContinuationSettlement: true,
+        executionAuthority: 'passive_projection',
+      });
+      const onAuthUpdated: NonNullable<
+        ConstructorParameters<typeof ConnectedServiceRefreshCoordinator>[0]['onAuthUpdated']
+      > = async (event) => {
+        if (event.mutation === 'deleted') {
+          await restartAfterAuthUpdated(event);
+          return { appliedRuntimeIdentityKeys: new Set<string>() };
+        }
+
+        const appliedSessionIds = new Set<string>();
+        const appliedRuntimeIdentityKeys = new Set<string>();
+        for (const target of event.affectedTargets) {
+          const sessionId = String(target.sessionId ?? '').trim();
+          if (!sessionId || appliedSessionIds.has(sessionId)) continue;
+          const selection = target.selectionsByServiceId.get(event.binding.serviceId);
+          if (!selection) continue;
+          const activeProfileId = selection.kind === 'profile'
+            ? selection.profileId
+            : selection.activeProfileId;
+          if (activeProfileId !== event.binding.profileId) continue;
+
+          const result = await applyRefreshedConnectedServiceAuth({
+            sessionId,
+            serviceId: event.binding.serviceId,
+            groupId: selection.kind === 'group' ? selection.groupId : null,
+            activeProfileId,
+            generation: selection.kind === 'group' ? selection.generation : null,
+            credentialRevision: event.credentialRevision,
+            reason: event.trigger,
+            switchReason: 'automatic_runtime_failure',
+            fromProfileId: activeProfileId,
+          });
+          if (!result.ok) {
+            if (result.errorCode === 'restart_disallowed_by_execution_policy') continue;
+            throw new Error(`connected_service_refreshed_auth_application_failed:${result.errorCode ?? 'unknown'}`);
+          }
+          if (result.action !== 'hot_applied') continue;
+          appliedSessionIds.add(sessionId);
+          for (const affectedTarget of event.affectedTargets) {
+            if (
+              affectedTarget.sessionId === sessionId
+              && affectedTarget.pid === target.pid
+            ) {
+              appliedRuntimeIdentityKeys.add(affectedTarget.runtimeIdentityKey);
+            }
+          }
+        }
+
+        await restartAfterAuthUpdated(event);
+        return { appliedRuntimeIdentityKeys };
+      };
       const refreshStartup = startConnectedServiceRefreshStartup({
         env: process.env,
         api,

@@ -980,6 +980,7 @@ afterEach(() => {
     expect(onAuthUpdated).toHaveBeenCalledWith({
       binding: { serviceId: 'openai-codex', profileId: 'work' },
       affectedTargets: [expect.objectContaining({ pid: 456, agentId: 'codex' })],
+      credentialRevision: null,
       mutation: 'deleted',
       trigger: 'reconnect_propagation',
     });
@@ -1361,6 +1362,7 @@ afterEach(() => {
     expect(onAuthUpdated).toHaveBeenCalledWith({
       binding: { serviceId: 'claude-subscription', profileId: 'work' },
       affectedTargets: [expect.objectContaining({ pid: 125, agentId: 'claude' })],
+      credentialRevision: 'csr_0000000000000000000001',
       trigger: 'refresh_triggered_restart',
     });
   });
@@ -1483,6 +1485,7 @@ afterEach(() => {
     expect(onAuthUpdated).toHaveBeenCalledWith({
       binding: { serviceId: 'claude-subscription', profileId: 'work' },
       affectedTargets: [expect.objectContaining({ pid: 125, agentId: 'claude' })],
+      credentialRevision: null,
       trigger: 'refresh_triggered_restart',
     });
   });
@@ -1721,6 +1724,7 @@ afterEach(() => {
     expect(onAuthUpdated).toHaveBeenCalledWith({
       binding: { serviceId: 'claude-subscription', profileId: 'work' },
       affectedTargets: [expect.objectContaining({ pid: 126, agentId: 'claude' })],
+      credentialRevision: null,
       trigger: 'refresh_triggered_restart',
     });
   });

@@ -2,6 +2,7 @@ import {
   ConnectedServiceCredentialRevisionV1Schema,
   type AccountSettings,
   type ConnectedServiceCredentialRecordV1,
+  type ConnectedServiceCredentialRevisionV1,
   type ConnectedServiceExecutionAuthorityV1,
   type ConnectedServiceId,
 } from '@happier-dev/protocol';
@@ -120,6 +121,18 @@ function bindingKey(binding: BoundProfile): string {
   return `${binding.serviceId}/${binding.profileId}`;
 }
 
+export type ConnectedServiceAuthUpdatedApplicationResult = Readonly<{
+  /** Runtime identities whose exact refreshed credential was accepted by the live application owner. */
+  appliedRuntimeIdentityKeys: ReadonlySet<string>;
+}>;
+
+type RefreshedBindingDistributionResult = RematerializedTargetsResult &
+  ConnectedServiceAuthUpdatedApplicationResult;
+
+const EMPTY_AUTH_UPDATED_APPLICATION_RESULT: ConnectedServiceAuthUpdatedApplicationResult = Object.freeze({
+  appliedRuntimeIdentityKeys: new Set<string>(),
+});
+
 /**
  * A forced caller may adopt an already-in-flight refresh only when that refresh actually
  * exercised (or attempted) a rotation. A `not_needed` early-return performed no rotation, so a
@@ -191,7 +204,10 @@ export class ConnectedServiceRefreshCoordinator {
   private readonly runtimeRegistry: ConnectedServiceRuntimeRegistry;
   private readonly inFlightRefreshes = new Map<string, Promise<ConnectedServiceCredentialRefreshResult>>();
   private readonly inFlightRefreshRematerializations = new Map<string, Promise<RematerializedTargetsResult>>();
-  private readonly inFlightRefreshAuthUpdatedNotifications = new Map<string, Promise<void>>();
+  private readonly inFlightRefreshAuthUpdatedNotifications = new Map<
+    string,
+    Promise<ConnectedServiceAuthUpdatedApplicationResult>
+  >();
   /** RR-1 reentrancy guard: bindings currently mid-distribution on the 'refreshed' completion path. */
   private readonly distributingRefreshedBindings = new Set<string>();
   /** Last by-construction distribution; runtime recovery consumes it instead of materializing twice. */
@@ -219,9 +235,11 @@ export class ConnectedServiceRefreshCoordinator {
     onAuthUpdated?: (event: Readonly<{
       binding: BoundProfile;
       affectedTargets: ReadonlyArray<SpawnTarget>;
+      credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
       mutation?: 'replaced' | 'deleted';
       trigger: 'refresh_triggered_restart' | 'reconnect_propagation';
-    }>) => void | Promise<void>;
+    }>) => void | ConnectedServiceAuthUpdatedApplicationResult
+      | Promise<void | ConnectedServiceAuthUpdatedApplicationResult>;
     onCredentialHealthNotification?: (event: Readonly<{
       diagnostic: ConnectedServiceCredentialRefreshDiagnostic;
       healthStatus: ConnectedServiceCredentialHealthNotificationStatus;
@@ -641,7 +659,12 @@ export class ConnectedServiceRefreshCoordinator {
       }));
     }
     if (rematerialization.rematerializedTargets.length > 0) {
-      await this.notifyAuthUpdatedForRefreshedBinding(binding, rematerialization.rematerializedTargets);
+      const refreshedRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(result.credentialRevision);
+      await this.notifyAuthUpdatedForRefreshedBinding(
+        binding,
+        refreshedRevision.success ? refreshedRevision.data : null,
+        rematerialization.rematerializedTargets,
+      );
     }
     return result;
   }
@@ -685,6 +708,7 @@ export class ConnectedServiceRefreshCoordinator {
       await this.params.onAuthUpdated?.({
         binding,
         affectedTargets,
+        credentialRevision: null,
         mutation: 'deleted',
         trigger: 'reconnect_propagation',
       });
@@ -695,17 +719,25 @@ export class ConnectedServiceRefreshCoordinator {
     await this.params.onAuthUpdated?.({
       binding,
       affectedTargets,
+      credentialRevision: input.credentialBoundary.credentialRevision,
       mutation: 'replaced',
       trigger: 'reconnect_propagation',
     });
   }
 
-  private async distributeRefreshedBinding(binding: BoundProfile): Promise<RematerializedTargetsResult> {
+  private async distributeRefreshedBinding(
+    binding: BoundProfile,
+    credentialRevision: ConnectedServiceCredentialRevisionV1 | null = null,
+  ): Promise<RefreshedBindingDistributionResult> {
     const rematerialization = await this.rematerializeTargetsForBindingAfterRefresh(binding);
-    if (rematerialization.rematerializedTargets.length > 0) {
-      await this.notifyAuthUpdatedForRefreshedBinding(binding, rematerialization.rematerializedTargets);
-    }
-    return rematerialization;
+    const application = rematerialization.rematerializedTargets.length > 0
+      ? await this.notifyAuthUpdatedForRefreshedBinding(
+        binding,
+        credentialRevision,
+        rematerialization.rematerializedTargets,
+      )
+      : EMPTY_AUTH_UPDATED_APPLICATION_RESULT;
+    return { ...rematerialization, ...application };
   }
 
   private async maybeRefreshBinding(binding: BoundProfile, now: number): Promise<void> {
@@ -914,11 +946,9 @@ export class ConnectedServiceRefreshCoordinator {
       if (!this.distributingRefreshedBindings.has(distributionKey)) {
         this.distributingRefreshedBindings.add(distributionKey);
         try {
-          const distribution = await this.distributeRefreshedBinding(binding);
+          const distribution = await this.distributeRefreshedBinding(binding, credentialRevision);
           this.lastRefreshedDistributionByKey.set(distributionKey, distribution);
-          const appliedRuntimeIdentityKeys = new Set(
-            distribution.rematerializedTargets.map((target) => target.runtimeIdentityKey),
-          );
+          const appliedRuntimeIdentityKeys = distribution.appliedRuntimeIdentityKeys;
           if (appliedRuntimeIdentityKeys.size > 0) {
             this.runtimeRegistry.adoptCredentialRevisionForProfile({
               serviceId: binding.serviceId,
@@ -1526,24 +1556,27 @@ export class ConnectedServiceRefreshCoordinator {
 
   private async notifyAuthUpdatedForRefreshedBinding(
     binding: BoundProfile,
+    credentialRevision: ConnectedServiceCredentialRevisionV1 | null,
     affectedTargets: ReadonlyArray<SpawnTarget>,
-  ): Promise<void> {
-    if (affectedTargets.length === 0) return;
+  ): Promise<ConnectedServiceAuthUpdatedApplicationResult> {
+    if (affectedTargets.length === 0 || !this.params.onAuthUpdated) {
+      return EMPTY_AUTH_UPDATED_APPLICATION_RESULT;
+    }
     const key = bindingKey(binding);
     const existing = this.inFlightRefreshAuthUpdatedNotifications.get(key);
     if (existing) {
-      await existing;
-      return;
+      return await existing;
     }
 
-    const promise = Promise.resolve(this.params.onAuthUpdated?.({
+    const promise = Promise.resolve(this.params.onAuthUpdated({
       binding,
       affectedTargets,
+      credentialRevision,
       trigger: 'refresh_triggered_restart',
-    }));
+    })).then((result) => result ?? EMPTY_AUTH_UPDATED_APPLICATION_RESULT);
     this.inFlightRefreshAuthUpdatedNotifications.set(key, promise);
     try {
-      await promise;
+      return await promise;
     } finally {
       queueMicrotask(() => {
         if (this.inFlightRefreshAuthUpdatedNotifications.get(key) === promise) {

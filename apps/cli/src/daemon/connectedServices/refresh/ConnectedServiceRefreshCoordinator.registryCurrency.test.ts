@@ -41,7 +41,7 @@ function activeRevision(
 }
 
 describe('ConnectedServiceRefreshCoordinator runtime-registry currency', () => {
-  it('updates every matching live session and execution-run binding after same-profile refresh adoption', async () => {
+  it('advances only runtime bindings confirmed by the live application owner', async () => {
     const now = 1_000_000;
     const credentials: Credentials = {
       token: 'happy-token',
@@ -179,6 +179,13 @@ describe('ConnectedServiceRefreshCoordinator runtime-registry currency', () => {
       },
       now: () => now,
       runtimeRegistry,
+      onAuthUpdated: async ({ affectedTargets }) => ({
+        appliedRuntimeIdentityKeys: new Set(
+          affectedTargets
+            .filter((target) => target.materializationKey === 'matching-session')
+            .map((target) => target.runtimeIdentityKey),
+        ),
+      }),
     });
 
     await expect(coordinator.refreshConnectedServiceCredentialForSpawnPreflight({
@@ -190,19 +197,13 @@ describe('ConnectedServiceRefreshCoordinator runtime-registry currency', () => {
       credentialRevision: refreshedRevision,
     });
 
-    expect(adoptCredentialRevision).toHaveBeenCalledTimes(1);
-    expect(adoptCredentialRevision).toHaveBeenCalledWith(expect.objectContaining({
-      serviceId: 'openai-codex',
-      profileId: 'work',
-      credentialRevision: refreshedRevision,
-      runtimeIdentityKeys: expect.any(Set),
-    }));
+    expect(adoptCredentialRevision).toHaveBeenCalledOnce();
     expect(activeRevision(runtimeRegistry, { kind: 'session', pid: 101 }, 'openai-codex')).toBe(refreshedRevision);
     expect(activeRevision(
       runtimeRegistry,
       { kind: 'execution_run', runKey: 'execution_run:matching' },
       'openai-codex',
-    )).toBe(refreshedRevision);
+    )).toBe(sourceRevision);
     expect(activeRevision(runtimeRegistry, { kind: 'session', pid: 202 }, 'openai-codex')).toBe(sourceRevision);
     expect(activeRevision(
       runtimeRegistry,
