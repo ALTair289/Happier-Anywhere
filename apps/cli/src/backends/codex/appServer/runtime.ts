@@ -1805,9 +1805,12 @@ export function createCodexAppServerRuntime(params: Readonly<{
         void params.pendingQueue.pumpPendingWhileActive({
             abortSignal: controller.signal,
             maxPopPerWake: params.pendingQueue.maxPopPerWake,
-            shouldContinue: () => canSteerPrompt() && (params.pendingQueue?.shouldDrainPendingMessages?.() ?? true),
+            // Once the native turn exists, keep the consumer armed through terminal-settling
+            // windows too. The server remains the sole owner of whether a row is eligible and
+            // whether it resolves to steer or interrupt-and-send.
+            shouldContinue: () => pendingTurn !== null && (params.pendingQueue?.shouldDrainPendingMessages?.() ?? true),
             logPrefix: '[CodexAppServer]',
-            reason: 'active-turn-steerable',
+            reason: 'active-turn',
         }).catch((error) => {
             logger.debug('[codex-app-server] Active-turn Pending pump stopped after non-fatal error', error);
         }).finally(() => {
@@ -1829,7 +1832,6 @@ export function createCodexAppServerRuntime(params: Readonly<{
     };
     const markActiveTurnNonSteerable = (): void => {
         activeTurnAcceptsSteer = false;
-        stopActiveTurnPendingPump();
         publishInFlightSteerAvailabilityIfChanged();
     };
     const clearActiveTurnSteerability = (): void => {

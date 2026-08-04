@@ -4192,6 +4192,10 @@ describe('createCodexAppServerRuntime', () => {
 
     it('marks a completed turn as non-steerable while completion is still settling', async () => {
         const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-steer-settle-');
+        const activeTurnPendingPump: {
+            signal?: AbortSignal;
+            resolve?: () => void;
+        } = {};
 
         envScope.patch({
             HAPPIER_CODEX_APP_SERVER_TURN_COMPLETION_SETTLE_MS: '1000',
@@ -4201,6 +4205,16 @@ describe('createCodexAppServerRuntime', () => {
             directory: root,
             onThinkingChange: vi.fn(),
             session: { updateMetadata: vi.fn() } as any,
+            pendingQueue: {
+                drainPending: vi.fn(async () => ({ materialized: 0, stoppedReason: 'no_pending' as const })),
+                pumpPendingWhileActive: vi.fn(async ({ abortSignal }) => {
+                    activeTurnPendingPump.signal = abortSignal;
+                    await new Promise<void>((resolve) => {
+                        activeTurnPendingPump.resolve = resolve;
+                        abortSignal.addEventListener('abort', resolve, { once: true });
+                    });
+                }),
+            },
         });
         const steerableRuntime = runtime as typeof runtime & { canSteerPrompt?: () => boolean };
 
@@ -4220,8 +4234,11 @@ describe('createCodexAppServerRuntime', () => {
         });
 
         expect(runtime.isTurnInFlight()).toBe(true);
+        expect(activeTurnPendingPump.signal?.aborted).toBe(false);
         await expect(runtime.steerPrompt('late-nudge')).rejects.toThrow('Codex app-server active turn is not steerable');
         await sendPromptPromise;
+        expect(activeTurnPendingPump.signal?.aborted).toBe(true);
+        activeTurnPendingPump.resolve?.();
     });
 
     it('keeps an active app-server turn steerable when the selected session mode changes', async () => {
