@@ -2425,6 +2425,65 @@ describe('Legend transcript renderer adapter', () => {
         expect(scenario.root.scrollTop).toBe(6_500);
     });
 
+    it('adopts an unattributed viewport move under a renderer-captured hold instead of writing the reader back', async () => {
+        // Live web scroll-back, reproduced 39/364 trials across 26 sessions (2026-08-04 sweep):
+        // the reader scrolls, stops, and the transcript walks back 29-150px (100-300px with a
+        // real trackpad). Attributed writer stack:
+        //   tryWriteScrollTop <- writeWebScrollTopAndObserve <- recordProgrammaticScrollTopWrite
+        //   <- evaluateLanding <- verifyLanding <- monitorHeldIntentThroughLayoutSettle
+        // 29/34 (and 106/108 under A/B) of those writes fired with ZERO row remeasure and ZERO
+        // content-size change: the renderer had displaced nothing, so there was nothing to
+        // correct. A renderer-CAPTURED reading hold is armed at the reader's own position and
+        // exists only to keep the renderer from displacing them; viewport movement it cannot
+        // attribute to a renderer geometry change is the reader's and must be ADOPTED.
+        const scenario = await mountWebInertiaScenario();
+
+        // Wheel detaches; the next scroll frame captures the reading hold at the rest position.
+        scenario.setNowMs(2_000);
+        capturedLegendListProps.onWheel({ deltaY: -120 });
+        scenario.root.setObservedUserPosition(7_000);
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 7_000 } } });
+        expect(getShellRef(scenario.listRef).hasLiveWebHold?.({ kind: 'item', itemId: 'row-1' })).toBe(true);
+
+        // The viewport moves 116px further with the layout completely static — no row
+        // remeasure, no content-size change, no scroll-range change — and past every input
+        // evidence window, so the movement classifier cannot attribute the frame at all.
+        scenario.setNowMs(2_500);
+        scenario.root.scrollTop = 6_884;
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 6_884 } } });
+        expect(scenario.webMovementFacts.at(-1)).toMatchObject({ isGenuineUserMovement: false });
+
+        // Settle to stability: the corrector must spend nothing.
+        act(() => scenario.animationFrames.splice(0).forEach((callback) => callback(32)));
+        act(() => scenario.animationFrames.splice(0).forEach((callback) => callback(48)));
+        expect(scenario.root.scrollTop).toBe(6_884);
+    });
+
+    it('still corrects a renderer-captured hold when renderer geometry displaces its anchor', async () => {
+        // The other half of the same contract: the hold exists because row remeasurement and
+        // content growth genuinely do displace a parked reader (the 2026-08-04 positive control
+        // injected +37px above the viewport and observed rowResize(rel=above) -> rowMove ->
+        // content +37). Requiring evidence must not disarm the correction that evidence buys.
+        const scenario = await mountWebInertiaScenario();
+
+        scenario.setNowMs(2_000);
+        capturedLegendListProps.onWheel({ deltaY: -120 });
+        scenario.root.setObservedUserPosition(7_000);
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 7_000 } } });
+        expect(getShellRef(scenario.listRef).hasLiveWebHold?.({ kind: 'item', itemId: 'row-1' })).toBe(true);
+
+        // A row ABOVE the reader grows 116px: the anchor row moves down in the viewport while
+        // the scroll offset stands still, and the content grows with it.
+        scenario.setNowMs(2_500);
+        scenario.root.scrollHeight = 10_116;
+        scenario.root.setObservedUserPosition(7_000, 216);
+        capturedLegendListProps.onItemSizeChanged({ index: 0, previous: 240, size: 356 });
+
+        act(() => scenario.animationFrames.splice(0).forEach((callback) => callback(32)));
+        act(() => scenario.animationFrames.splice(0).forEach((callback) => callback(48)));
+        expect(scenario.root.scrollTop).toBe(7_116);
+    });
+
     it('does not let a stale at-end observation overwrite keyboard takeover before the default scroll lands (AUD-002)', async () => {
         // Live AUD-002 (2026-07-12): from exact tail, trusted PageUp detached the viewport
         // 277px, then the held-tail machinery returned it to ~11px from the tail ~118ms
@@ -3211,22 +3270,29 @@ describe('Legend transcript renderer adapter', () => {
         // Input quiets before the cold commit lands (S-D: no writes inside the live margin).
         nowMs += 300;
 
-        // Cold page commits. Legend's MVCP replay compensates with estimate error: an external
-        // (non-renderer, non-user) write leaves the viewport displaced 61px and emits a
-        // cause-less scroll event. That event must NOT re-baseline the live anchor hold.
+        // Cold page commits: 500px of older content lands ABOVE the reader, so the content grows
+        // and the held row's CONTENT-space position moves with it (the geometry a prepend
+        // actually produces — modelling it as a bare offset write would be indistinguishable
+        // from the reader scrolling, which is the one movement this hold must never fight).
         await screen.update(render([{ id: 'older' }, { id: 'newest' }, { id: 'oldest' }]));
-        root.scrollTop = 61;
-        expect(anchor.top).toBeLessThan(135);
-        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 61 } } });
+        root.scrollHeight = 10_500;
+        item.top += 500;
+        anchor.top += 500;
+        // Legend's MVCP replay compensates with estimate error: it scrolls 439 instead of 500,
+        // leaving the viewport displaced 61px, and emits a cause-less scroll event. That event
+        // must NOT re-baseline the live anchor hold.
+        root.scrollTop = 439;
+        expect(anchor.top).toBe(196);
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 439 } } });
 
         // The next measurement signal resumes the held transaction: it must restore the
-        // PRE-COMMIT baseline (anchor back to 135), not adopt the displaced 74px position.
+        // PRE-COMMIT baseline (anchor back to 135), not adopt the displaced 196px position.
         capturedLegendListProps.onItemSizeChanged({ index: 0, previous: 240, size: 301 });
         act(() => animationFrames.splice(0).forEach((callback) => callback(16)));
         act(() => animationFrames.splice(0).forEach((callback) => callback(32)));
 
         expect(anchor.top).toBe(135);
-        expect(root.scrollTop).toBe(0);
+        expect(root.scrollTop).toBe(500);
     });
 
     it('defers viewport-exceeding keyed residual writes until a second read confirms them', async () => {

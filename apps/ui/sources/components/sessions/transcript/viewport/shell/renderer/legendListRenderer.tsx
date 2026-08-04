@@ -495,6 +495,16 @@ function LegendListTranscriptRendererInner<TItem>(
         intent: LegendHeldScrollIntent;
         scrollRange: number;
     }> | null>(null);
+    // The geometry a RENDERER-CAPTURED web reading hold last observed, plus the standing
+    // misalignment it has ADOPTED as its own zero. See `resolveWebKeyedHoldCorrection`.
+    const capturedWebHoldObservationRef = React.useRef<Readonly<{
+        adoptedResidualPx: number;
+        anchorContentOffset: number;
+        currentOffset: number;
+        estimateBasis: boolean;
+        intent: LegendHeldScrollIntent;
+        scrollRange: number;
+    }> | null>(null);
     const pendingWebTailMaterializationKeyRef = React.useRef<string | null>(null);
     // One materialization scroll EVER per DATASET identity (`dataKey`): after a successful
     // mount, the measured residual owner re-mounts a flapped-out tail by scrolling — a second
@@ -1633,6 +1643,105 @@ function LegendListTranscriptRendererInner<TItem>(
         return true;
     }, [isWebFrame, props.webDomObservation, resolveHeldIntentIndex]);
 
+    /**
+     * A CORRECTION IS ONLY SPENDABLE ON DISPLACEMENT THE RENDERER CAUSED.
+     *
+     * Two different jobs are armed through the same keyed web hold, and only one of them may
+     * write an absolute target:
+     *
+     * - PLACEMENT (`holdWebEntryAnchor`, jump/restore landings): the driver names where the row
+     *   must sit. Its residual is a debt the transaction owes and must pay, including against a
+     *   pure offset displacement with no geometry change — Legend replaying a stale target-window
+     *   end is exactly that (live sequential A->B, 2026-07-24), and nothing else can repair it.
+     * - STABILIZATION (`armWebVisibleAnchorHold`): the renderer captures the reader's CURRENT
+     *   viewport so row remeasurement and content growth cannot displace them. It is armed at
+     *   zero residual by construction, so it owes nothing and has no absolute target to restore.
+     *
+     * Conflating them is the web scroll-back (reproduced 39/364 trials over 26 sessions,
+     * 2026-08-04; suppressing this one write took it to 0/36, Fisher p=7.9e-13). A stabilization
+     * hold whose baseline has gone stale reports the whole staleness as a residual and the first
+     * still frame writes the reader backwards — 29/34 of the captured writes fired with ZERO row
+     * remeasure and ZERO content-size change, so there was nothing to correct. The web
+     * landed-offset guard cannot see it: every moved frame reads as "an external writer moved
+     * us", including the reader's own.
+     *
+     * The invariant that separates them is physical, not an attribution heuristic (web wheel
+     * attribution dies before the browser's own smooth-scroll tail does, which is why the
+     * baseline goes stale in the first place): the anchor's CONTENT-space position and the
+     * scroll range cannot be changed by the reader scrolling — only the renderer moves them.
+     * So while a captured hold's own geometry stands still, viewport movement under it is the
+     * reader's: ADOPT the standing misalignment as the new zero and correct only what the
+     * renderer changes afterwards. This withholds an unjustified write; it is not a suppression
+     * window, delay, or cover, and the correction the hold exists for is unaffected.
+     */
+    const resolveWebKeyedHoldCorrection = React.useCallback((
+        intent: LegendHeldScrollIntent,
+        landing: LegendHeldIntentLanding,
+    ): LegendHeldIntentLanding => {
+        if (
+            landing.basis !== 'web-dom'
+            || intent.kind !== 'anchor'
+            || intent.anchor.reason !== 'renderer-capture'
+            || typeof landing.maxOffset !== 'number'
+            || !Number.isFinite(landing.maxOffset)
+        ) {
+            return landing;
+        }
+        const scrollRange = landing.maxOffset;
+        const estimateBasis = landing.estimateBasis === true;
+        const rawResidual = landing.rawResidual ?? landing.residual;
+        const anchorContentOffset = landing.currentOffset + rawResidual;
+        const previous = capturedWebHoldObservationRef.current?.intent === intent
+            ? capturedWebHoldObservationRef.current
+            : null;
+        // Compared at the corridor's own alignment resolution, not by identity: `scrollTop` is
+        // fractional under display scaling while the DOM alignment delta is truncated to whole
+        // px, so an exact comparison would read sub-pixel quantization of the reader's own
+        // scroll as renderer displacement — the defect, back for every fractional offset.
+        const readerMovedUnderStaticHoldGeometry =
+            previous !== null
+            && landing.currentOffset !== previous.currentOffset
+            && Math.abs(anchorContentOffset - previous.anchorContentOffset)
+                < LEGEND_HELD_INTENT_ALIGNMENT_EPSILON_PX
+            && Math.abs(scrollRange - previous.scrollRange)
+                < LEGEND_HELD_INTENT_ALIGNMENT_EPSILON_PX
+            // Our own landed write is not the reader moving; it is this transaction paying a
+            // correction, and adopting it would forgive an unfinished (clamped) one.
+            && !(
+                lastHeldIntentCorrectionRef.current?.intent === intent
+                && lastHeldIntentCorrectionRef.current.landedOffset === landing.currentOffset
+            );
+        // A landing-BASIS change (the anchor row leaving or re-entering the mounted window, so
+        // the misalignment switches between Legend's position estimate and DOM truth) is a
+        // change of measuring stick, never evidence that the renderer displaced the reader.
+        // A captured hold owes no placement debt, so it re-zeroes on the new basis instead of
+        // carrying an estimate-derived residual into a DOM-truth write, or vice versa.
+        const basisChanged = previous !== null && previous.estimateBasis !== estimateBasis;
+        const adoptedResidualPx = readerMovedUnderStaticHoldGeometry || basisChanged
+            ? rawResidual
+            : previous?.adoptedResidualPx ?? 0;
+        capturedWebHoldObservationRef.current = {
+            adoptedResidualPx,
+            anchorContentOffset,
+            currentOffset: landing.currentOffset,
+            estimateBasis,
+            intent,
+            scrollRange,
+        };
+        if (adoptedResidualPx === 0) return landing;
+        const correctableResidual = rawResidual - adoptedResidualPx;
+        const targetOffset = Math.max(
+            0,
+            Math.min(landing.currentOffset + correctableResidual, scrollRange),
+        );
+        return {
+            ...landing,
+            rawResidual: correctableResidual,
+            residual: targetOffset - landing.currentOffset,
+            targetOffset,
+        };
+    }, []);
+
     const requestHeldIntentSettle = React.useCallback((
         options?: Readonly<{ deferFirstVerification?: boolean }>,
     ) => {
@@ -1652,8 +1761,11 @@ function LegendListTranscriptRendererInner<TItem>(
         if (entryPlacementActive) {
             lastEntryPlacementExactAlignmentRef.current = false;
         }
-        const evaluateLanding = (landing: LegendHeldIntentLanding): boolean => {
+        const evaluateLanding = (observedLanding: LegendHeldIntentLanding): boolean => {
             if (heldScrollIntentRef.current !== intent) return false;
+            // Every read of a renderer-captured hold updates its observation baseline, so the
+            // reader's movement is adopted even across frames this transaction cannot write on.
+            const landing = resolveWebKeyedHoldCorrection(intent, observedLanding);
             if (entryPlacementActive) {
                 lastEntryPlacementExactAlignmentRef.current = false;
             }
@@ -1926,21 +2038,29 @@ function LegendListTranscriptRendererInner<TItem>(
         }
 
         resumeHeldIntentSettle(options?.deferFirstVerification === true);
-    }, [cancelScheduledHeldIntentSettle, finishEntryPlacement, isUserScrollInputLive, isWebFrame, readHeldIntentLanding, requestNativePhysicalEntryLanding, requestWebHeldEndMaterialization, requestWebKeyedIdentityMaterialization, setHeldScrollIntent, writeHeldIntentResidual]);
+    }, [cancelScheduledHeldIntentSettle, finishEntryPlacement, isUserScrollInputLive, isWebFrame, readHeldIntentLanding, requestNativePhysicalEntryLanding, requestWebHeldEndMaterialization, requestWebKeyedIdentityMaterialization, resolveWebKeyedHoldCorrection, setHeldScrollIntent, writeHeldIntentResidual]);
 
     const installWebEntryAnchor = React.useCallback((anchor: TranscriptRendererEntryAnchorHold) => {
         if (!isWebFrame) return;
         const nowMs = Date.now();
-        setHeldScrollIntent({
+        const intent: LegendHeldScrollIntent = {
             anchor,
             identityExpiresAtMs: nowMs + LEGEND_HELD_TARGET_IDENTITY_MS,
             kind: 'anchor',
-        });
+        };
+        setHeldScrollIntent(intent);
         heldIntentSettleUntilRef.current = nowMs + LEGEND_HELD_INTENT_SETTLE_MS;
         lastHeldIntentCorrectionRef.current = null;
+        capturedWebHoldObservationRef.current = null;
+        // SEED THE HOLD'S OBSERVATION AT ARM TIME, not at its first settle read: the settle
+        // verifier withholds every read while user scroll input is live, so a hold armed during
+        // the reader's own gesture would otherwise take its first observation AFTER they had
+        // already moved and would read that movement as renderer displacement — the defect.
+        const armedLanding = readHeldIntentLanding(intent);
+        if (armedLanding) resolveWebKeyedHoldCorrection(intent, armedLanding);
         cancelScheduledHeldIntentSettle();
         requestHeldIntentSettle();
-    }, [cancelScheduledHeldIntentSettle, isWebFrame, requestHeldIntentSettle, setHeldScrollIntent]);
+    }, [cancelScheduledHeldIntentSettle, isWebFrame, readHeldIntentLanding, requestHeldIntentSettle, resolveWebKeyedHoldCorrection, setHeldScrollIntent]);
 
     const holdWebEntryAnchor = React.useCallback((anchor: TranscriptRendererEntryAnchorHold) => {
         // A completed jump/restore landing starts a new command phase. Momentum evidence from
@@ -1962,7 +2082,10 @@ function LegendListTranscriptRendererInner<TItem>(
         if (!anchor) return false;
         // This is a continuation of the current viewport observation (including an inertia
         // re-baseline), not a new command phase, so preserve freshly classified user evidence.
-        installWebEntryAnchor(anchor);
+        // The capture reason is load-bearing, not telemetry: it marks a STABILIZATION hold taken
+        // at the reader's own position, which owes no placement debt and may therefore only
+        // correct displacement the renderer causes (`resolveWebKeyedHoldCorrection`).
+        installWebEntryAnchor({ ...anchor, reason: 'renderer-capture' });
         return true;
     }, [installWebEntryAnchor, readWebScrollMetrics]);
 
