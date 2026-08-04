@@ -2,7 +2,6 @@ import axios from 'axios';
 import * as z from 'zod';
 import { createAuthenticationHttpStatusError, createHttpStatusError, isAuthenticationStatus } from './client/httpStatusError';
 import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
-import { buildCurrentCliClientCompatibilityHttpHeaders } from './clientCompatibility/cliClientCompatibility';
 
 export const ChangeEntrySchema = z.object({
   cursor: z.number().int().min(0),
@@ -84,7 +83,6 @@ export async function fetchChanges(opts: {
       headers: {
         Authorization: `Bearer ${opts.token}`,
         'Content-Type': 'application/json',
-        ...buildCurrentCliClientCompatibilityHttpHeaders(opts.clientKind ?? 'cli'),
       },
       params: { after, limit },
       timeout: 15_000,

@@ -28,10 +28,6 @@ import { isServerFeatureEnabledForRequest } from "@/app/features/catalog/serverF
 import { readMachineTransferFeatureEnv } from "@/app/features/catalog/readFeatureEnv";
 import { readSessionScopedSocketBinding, resolveSessionScopedSocketBinding } from "./socket/sessionScopedBinding";
 import { createMachineSocketOwnershipRegistry } from "./socket/machineSocketOwnershipRegistry";
-import {
-    buildSessionSyncSocketUpgradeError,
-    evaluateSessionSyncSocketCompatibility,
-} from "@/app/clientCompatibility/socketEnforcement";
 import { createSessionPublisherPresence } from "@/app/presence/sessionPublisherPresence";
 import { registerSessionRuntimeActivitySnapshotSocketEvent } from "@/app/session/runtimeActivity/socketEvents";
 import { publishSessionPublisherLifecycleUpdate } from "@/app/session/runtimeActivity/publishPublisherLifecycleUpdate";
@@ -177,16 +173,7 @@ export function startSocket(app: Fastify) {
             }));
         }
 
-        const compatibility = evaluateSessionSyncSocketCompatibility(
-            socket.handshake.auth,
-            process.env,
-            clientType,
-        );
         const socketData = readHappierSocketData(socket);
-        socketData.sessionSyncCompatibility = compatibility;
-        if (!compatibility.evaluation.accepted) {
-            return next(buildSessionSyncSocketUpgradeError(compatibility.evaluation));
-        }
 
         if (clientType === 'machine-scoped') {
             const machine = await db.machine.findFirst({
@@ -320,7 +307,6 @@ export function startSocket(app: Fastify) {
         eventRouter.addConnection(userId, connection);
         incrementWebSocketConnection(connection.connectionType);
 
-        const compatibility = socketData.sessionSyncCompatibility;
         // Join Socket.IO rooms for multi-process fanout (Phase 5).
         // Note: we keep the existing in-memory routing for now; rooms are a forward-compat hook.
         socket.join(getSocketRooms({
@@ -440,7 +426,7 @@ export function startSocket(app: Fastify) {
                 connection,
             });
         }
-        if (connection.connectionType === "session-scoped" && compatibility?.evaluation.accepted) {
+        if (connection.connectionType === "session-scoped") {
             if (sessionBinding) {
                 if (sessionBinding.proof === "machine-access-key" && sessionBinding.machineId) {
                     registerSessionRuntimeActivitySnapshotSocketEvent({

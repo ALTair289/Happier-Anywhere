@@ -38,9 +38,12 @@ An existing same-concept split-brain in the touched corridor must be consolidate
 - New readers accept supported old shapes; new writes use the canonical current shape.
 - Old readers need to accept new writes only when coexistence, independent component rollout, or rollback makes that direction reachable.
 - New clients talking to old servers must capability-negotiate or degrade safely instead of assuming the new contract.
-- Old clients talking to new servers must retain their released wire and semantic expectations.
+- Old clients talking to new servers retain released behavior for ordinary compatible changes and for every operation the new server can still execute safely. A major incompatible server change may require a newer client for the affected operation, but that support boundary is an explicit developer/product decision—not an agent-selected default.
 - Persisted-state changes consider both old-writer → new-reader and, when rollback/coexistence is supported, new-writer → old-reader.
-- For an incompatible transition, prefer prepare/expand → activate/migrate → contract. Do not activate new writes until every supported old reader that can encounter them is ready.
+- Prefer operation-scoped graceful degradation over connection-wide rejection: admit the old client, keep unaffected reads and writes available, and return a typed upgrade requirement only when the requested operation cannot be performed safely. Reject the whole connection only when no authenticated operation can be made safe.
+- For an incompatible transition, prefer prepare/expand → activate/migrate → contract when mixed-version coexistence or rollback is an approved requirement. Do not assume that old clients must read new writes merely because the server is self-hosted.
+
+Before adding dual writers, parallel persisted formats, rollout modes, operator flags, socket-drain protocols, or a mandatory client floor, compare their lifetime cost with the actual user behavior required. If preserving old-client/new-server behavior for a major change would require substantial machinery, stop and obtain an explicit developer/product decision among: operation-scoped degradation, a documented client update requirement, or the heavier compatibility transition. An agent must not silently choose either forced upgrades or heavy compatibility machinery. This exception is for genuinely incompatible, high-cost transitions; routine server changes must remain compatible and must not manufacture client-update requirements.
 
 ## Proportionate matrix
 

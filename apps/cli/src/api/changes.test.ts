@@ -10,7 +10,7 @@ describe('fetchChanges', () => {
     vi.clearAllMocks();
   });
 
-  it('uses the live runtime env endpoint instead of stale loaded configuration', async () => {
+  it('uses the canonical active server endpoint loaded by configuration', async () => {
     vi.stubEnv('HAPPIER_SERVER_URL', 'http://127.0.0.1:41001');
     vi.stubEnv('HAPPIER_LOCAL_SERVER_URL', '');
     vi.stubEnv('HAPPIER_PUBLIC_SERVER_URL', '');
@@ -29,7 +29,7 @@ describe('fetchChanges', () => {
 
     await fetchChanges({ token: 't', after: 0 });
 
-    expect((axios.get as any).mock.calls[0]?.[0]).toBe('http://127.0.0.1:52002/v2/changes');
+    expect((axios.get as any).mock.calls[0]?.[0]).toBe('http://127.0.0.1:41001/v2/changes');
   });
 
   it('parses ok response', async () => {
@@ -49,15 +49,19 @@ describe('fetchChanges', () => {
     expect(result.response.changes).toHaveLength(1);
   });
 
-  it('declares the caller-specific sync role instead of hardcoding the session runner', async () => {
+  it('does not send retired connection-wide compatibility headers', async () => {
     const { fetchChanges } = await import('./changes');
     (axios.get as any).mockResolvedValue({ status: 200, data: { changes: [], nextCursor: 0 } });
 
     await fetchChanges({ token: 't', after: 0, clientKind: 'daemon' });
 
-    expect((axios.get as any).mock.calls[0]?.[1]?.headers).toMatchObject({
-      'x-happier-client-kind': 'daemon',
+    const headers = (axios.get as any).mock.calls[0]?.[1]?.headers;
+    expect(headers).toMatchObject({
+      Authorization: 'Bearer t',
+      'Content-Type': 'application/json',
     });
+    expect(headers).not.toHaveProperty('x-happier-client-kind');
+    expect(headers).not.toHaveProperty('x-happier-client-declaration-v1');
   });
 
   it('parses cursor-gone (410)', async () => {

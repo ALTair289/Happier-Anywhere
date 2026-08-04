@@ -42,7 +42,6 @@ import {
   DEFAULT_SHARING_CAPABILITIES,
   SharingCapabilitiesSchema,
 } from './sharingCapabilities.js';
-import { ClientCompatibilityCapabilitiesV1Schema } from '../../../clientCompatibility/serverRequirementsV1.js';
 import {
   ConnectedServicesCapabilitiesSchema,
   DEFAULT_CONNECTED_SERVICES_CAPABILITIES,
@@ -54,7 +53,6 @@ export const CapabilitiesSchema = z.object({
   pets: PetsCapabilitiesSchema.optional().default(DEFAULT_PETS_CAPABILITIES),
   encryption: EncryptionCapabilitiesSchema.optional().default(DEFAULT_ENCRYPTION_CAPABILITIES),
   server: ServerCapabilitiesSchema.optional().default(DEFAULT_SERVER_CAPABILITIES),
-  compatibility: ClientCompatibilityCapabilitiesV1Schema.optional(),
   serverIdentity: ServerIdentityCapabilitiesSchema.optional().default(DEFAULT_SERVER_IDENTITY_CAPABILITIES),
   machines: z
     .object({

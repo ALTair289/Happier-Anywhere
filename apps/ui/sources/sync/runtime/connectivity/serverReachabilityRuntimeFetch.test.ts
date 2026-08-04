@@ -115,7 +115,7 @@ describe('runtimeFetchWithServerReachability', () => {
         expect(runtimeFetchMock.mock.calls.some(([input]) => String(input).endsWith('/v1/account/profile'))).toBe(true);
         const profileCall = runtimeFetchMock.mock.calls.find(([input]) => String(input).endsWith('/v1/account/profile'));
         const profileHeaders = new Headers(profileCall?.[1]?.headers);
-        expect(profileHeaders.get('x-happier-session-sync-protocol')).toBe('2');
+        expect(profileHeaders.get('x-happier-session-sync-protocol')).toBeNull();
     });
 
     it('uses the Bearer token from Authorization header for reachability probing when token param is null', async () => {

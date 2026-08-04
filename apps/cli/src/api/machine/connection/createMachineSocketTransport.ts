@@ -7,7 +7,6 @@ import type { MachineInstallationProofV1 } from '@happier-dev/protocol';
 import type { DaemonToServerEvents, ServerToDaemonEvents } from '@/api/machine/socketTypes';
 import { createSocketTransportAdapter } from '@/api/connection/createSocketTransportAdapter';
 import { getSocketIoProxyOptions } from '@/utils/proxy/socketIoProxy';
-import { buildCurrentCliClientCompatibilitySocketAuth } from '@/api/clientCompatibility/cliClientCompatibility';
 
 export function createMachineSocketTransport(params: Readonly<{
   serverUrl: string;
@@ -33,7 +32,6 @@ export function createMachineSocketTransport(params: Readonly<{
     ...(params.transports ? { transports: params.transports } : null),
     auth: {
       ...buildMachineScopedSocketAuth(params),
-      ...buildCurrentCliClientCompatibilitySocketAuth('daemon'),
     },
     path: '/v1/updates',
     reconnection: false,

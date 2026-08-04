@@ -93,8 +93,6 @@ describe('sessionControl.sessionSystemRecordsHttp', () => {
         headers: expect.objectContaining({
           Authorization: 'Bearer token-1',
           'Idempotency-Key': 'memory:summary_shard:v1:1-2',
-          'x-happier-client-kind': 'session-runner',
-          'x-happier-session-sync-protocol': '2',
         }),
       }),
     );
@@ -167,8 +165,6 @@ describe('sessionControl.sessionSystemRecordsHttp', () => {
       'http://server.example.test/v2/sessions/sess-1/system-records',
       expect.objectContaining({
         headers: expect.objectContaining({
-          'x-happier-client-kind': 'session-runner',
-          'x-happier-session-sync-protocol': '2',
         }),
         params: {
           namespace: 'memory',
@@ -231,7 +227,6 @@ describe('sessionControl.sessionSystemRecordsHttp', () => {
         error: 'client-upgrade-required',
         requirement: {
           v: 1,
-          minimumSessionSyncProtocolVersion: 2,
           clientKind: 'session-runner',
           minimumAppVersion: '9.0.0',
           updateUrl: null,

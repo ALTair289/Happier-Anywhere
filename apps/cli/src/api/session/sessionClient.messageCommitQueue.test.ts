@@ -719,6 +719,20 @@ describe('ApiSessionClient message commit queue', () => {
   it('records committed user message seqs from pending queue materialization acks', async () => {
     vi.resetModules();
     supervisorStartCount = 0;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      features: {
+        sharing: {
+          pendingQueueV2: { enabled: true },
+          pendingDeliveryState: { enabled: true },
+        },
+      },
+      capabilities: {
+        session: {
+          runtimeActivity: { protocolVersion: 2 },
+          pendingInput: { protocolVersion: 1 },
+        },
+      },
+    }), { status: 200 })));
     materializeNextPendingQueueV2MessageStub = async () => ({
       didMaterialize: true,
       localId: 'pending-user-1',
@@ -739,15 +753,20 @@ describe('ApiSessionClient message commit queue', () => {
       const { ApiSessionClient } = await import('./sessionClient');
       const client = new ApiSessionClient('tok', createPlainSessionFixture({
         id: 's1',
+        metadata: createTestMetadata({ machineId: 'machine-1' }),
         pendingCount: 1,
         pendingVersion: 1,
       }));
+      await expect.poll(
+        () => (client as any).sessionSyncPendingInputServerContract?.pendingInput,
+      ).toBe('v1');
       expectCommittedUserMessageSeqApi(client);
 
       await expect(client.popPendingMessage()).resolves.toBe(true);
       expect(client.getCommittedUserMessageSeq('pending-user-1')).toBe(55);
     } finally {
       materializeNextPendingQueueV2MessageStub = null;
+      vi.unstubAllGlobals();
     }
   });
 

@@ -7,7 +7,6 @@ import {
 } from './serverReachabilitySupervisorPool';
 import { isAuthenticationResponseStatus } from './authErrors';
 import { readServerReachabilityWaitTimeoutMs } from './serverReachabilityTuning';
-import { buildUiClientCompatibilityHttpHeaders } from '@/sync/runtime/clientCompatibility/uiClientCompatibility';
 import { observeUiClientUpgradeRequiredResponse } from '@/sync/runtime/clientCompatibility/uiClientUpgradeRequired';
 
 function tryParseUrl(raw: string, base?: string): URL | null {
@@ -45,9 +44,6 @@ export async function runtimeFetchWithServerReachability(params: Readonly<{
     signal?: AbortSignal;
 }>): Promise<Response> {
     const headers = new Headers(params.init.headers ?? {});
-    for (const [name, value] of Object.entries(buildUiClientCompatibilityHttpHeaders())) {
-        headers.set(name, value);
-    }
     const explicitAuthHeader = headers.get('Authorization') ?? '';
     const bearerTokenFromHeader = (() => {
         const header = explicitAuthHeader.trim();

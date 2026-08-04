@@ -50,8 +50,8 @@ describe('serverFetch runtime fetch override', () => {
         expect(overrideFetch).toHaveBeenCalledTimes(1);
         const requestInit = overrideFetch.mock.calls[0]?.[1];
         const headers = new Headers(requestInit?.headers);
-        expect(headers.get('x-happier-session-sync-protocol')).toBe('2');
-        expect(headers.get('x-happier-client-kind')).toMatch(/^ui-/);
+        expect(headers.has('x-happier-session-sync-protocol')).toBe(false);
+        expect(headers.has('x-happier-client-kind')).toBe(false);
         expect(globalFetchMock).not.toHaveBeenCalled();
     });
 });

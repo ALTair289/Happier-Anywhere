@@ -18,28 +18,13 @@ let sessionSocketStub: ApiSessionSocketStub | null = null;
 let userSocketStub: ApiSessionSocketStub | null = null;
 let materializedEnqueueCallCount = 0;
 
-const CURRENT_PENDING_INPUT_COMPATIBILITY = {
-  v: 1,
-  compatibility: {
-    v: 1,
-    sessionSync: {
-      v: 1,
-      enforcement: 'observe',
-      minimumSessionSyncProtocolVersion: 1,
-      currentSessionSyncProtocolVersion: 2,
-      declarationTransport: 'headers-v1',
-    },
-    pendingInput: { currentPendingInputProtocolVersion: 1 },
-  },
-} as const;
-
 function createApiSessionSocketStub(
   options: Parameters<typeof createApiSessionSocketStubBase>[0] = {},
 ): ApiSessionSocketStub {
   return createApiSessionSocketStubBase({
     ...options,
     emitWithAck: async (event, payload, socket) => {
-      if (event === 'ping') return CURRENT_PENDING_INPUT_COMPATIBILITY;
+      if (event === 'ping') return { v: 1 };
       if (options.emitWithAck) return await options.emitWithAck(event, payload, socket);
       return options.emitWithAckResult ?? { ok: true, id: 'm1', seq: 1, localId: 'l1' };
     },
@@ -165,7 +150,7 @@ function createProviderInputOutcomeProducer(
 
 async function waitForCurrentPendingInputContract(client: ApiSessionClient): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if ((client as any).sessionSyncPendingInputServerContract?.mode === 'session_sync_v2_pending_input_v1') return;
+    if ((client as any).sessionSyncPendingInputServerContract?.pendingInput === 'v1') return;
     await Promise.resolve();
   }
   throw new Error('Timed out waiting for current Pending-input server contract');
@@ -173,7 +158,7 @@ async function waitForCurrentPendingInputContract(client: ApiSessionClient): Pro
 
 async function waitForReleasedServerPendingInputContract(client: ApiSessionClient): Promise<void> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    if ((client as any).sessionSyncPendingInputServerContract?.mode === 'released_server_v0_2_1') return;
+    if ((client as any).sessionSyncPendingInputServerContract?.pendingInput === 'released_server_v0_2_1') return;
     await Promise.resolve();
   }
   throw new Error('Timed out waiting for released-server Pending-input server contract');
@@ -189,7 +174,10 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
         },
       },
       capabilities: {
-        compatibility: CURRENT_PENDING_INPUT_COMPATIBILITY.compatibility,
+        session: {
+          runtimeActivity: { protocolVersion: 2 },
+          pendingInput: { protocolVersion: 1 },
+        },
       },
     }), { status: 200 })));
     enqueuePendingQueueV2MessageViaHttpMock.mockReset();

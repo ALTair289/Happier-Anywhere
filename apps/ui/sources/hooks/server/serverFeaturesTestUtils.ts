@@ -2,7 +2,7 @@ import { vi } from 'vitest';
 
 import {
     CURRENT_PENDING_INPUT_PROTOCOL_VERSION,
-    CURRENT_SESSION_SYNC_PROTOCOL_VERSION,
+    SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY,
     DEFAULT_PETS_CAPABILITIES,
     DEFAULT_SESSION_CAPABILITIES,
     type FeaturesResponse,
@@ -166,17 +166,13 @@ export function buildServerFeaturesResponse(overrides: FixtureOverrides = {}): F
         },
         capabilities: {
             connectedServices: { credentialDelete: { revisionGuard: false } },
-            compatibility: {
-                v: 1,
-                sessionSync: {
-                    v: 1,
-                    enforcement: 'observe',
-                    minimumSessionSyncProtocolVersion: CURRENT_SESSION_SYNC_PROTOCOL_VERSION,
-                    currentSessionSyncProtocolVersion: CURRENT_SESSION_SYNC_PROTOCOL_VERSION,
-                    declarationTransport: 'headers-v1',
+            session: {
+                ...DEFAULT_SESSION_CAPABILITIES,
+                runtimeActivity: {
+                    protocolVersion: SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY,
                 },
                 pendingInput: {
-                    currentPendingInputProtocolVersion: CURRENT_PENDING_INPUT_PROTOCOL_VERSION,
+                    protocolVersion: CURRENT_PENDING_INPUT_PROTOCOL_VERSION,
                 },
             },
             bugReports: {
@@ -225,7 +221,6 @@ export function buildServerFeaturesResponse(overrides: FixtureOverrides = {}): F
             oauth: {
                 providers: oauthProviders,
             },
-            session: DEFAULT_SESSION_CAPABILITIES,
             auth: {
                 methods: [],
                 signup: { methods: [{ id: 'anonymous', enabled: true }] },

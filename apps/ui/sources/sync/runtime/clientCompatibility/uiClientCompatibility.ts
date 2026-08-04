@@ -1,12 +1,3 @@
-import {
-    CURRENT_SESSION_SYNC_PROTOCOL_VERSION,
-    ClientCompatibilityDeclarationV1Schema,
-    buildClientCompatibilityHttpHeadersV1,
-    buildClientCompatibilitySocketAuthV1,
-    type ClientCompatibilityDeclarationV1,
-    type ClientCompatibilityHttpHeadersV1,
-    type ClientCompatibilitySocketAuthV1,
-} from '@happier-dev/protocol';
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 
@@ -20,7 +11,13 @@ type ResolveUiClientCompatibilityDeclarationInput = Readonly<{
     releaseChannel: string | null;
 }>;
 
-function resolveUiClientKind(input: Pick<ResolveUiClientCompatibilityDeclarationInput, 'platformOs' | 'isDesktop'>): ClientCompatibilityDeclarationV1['clientKind'] {
+type UiClientVersionIdentity = Readonly<{
+    clientKind: 'ui-web' | 'ui-ios' | 'ui-android' | 'ui-desktop';
+    appVersion: string;
+    releaseChannel?: string;
+}>;
+
+function resolveUiClientKind(input: Pick<ResolveUiClientCompatibilityDeclarationInput, 'platformOs' | 'isDesktop'>): UiClientVersionIdentity['clientKind'] {
     if (input.isDesktop) return 'ui-desktop';
     if (input.platformOs === 'ios') return 'ui-ios';
     if (input.platformOs === 'android') return 'ui-android';
@@ -45,19 +42,17 @@ function normalizeReleaseChannel(value: string | null): string | undefined {
 
 export function resolveUiClientCompatibilityDeclaration(
     input: ResolveUiClientCompatibilityDeclarationInput,
-): ClientCompatibilityDeclarationV1 {
-    return ClientCompatibilityDeclarationV1Schema.parse({
-        v: 1,
+): UiClientVersionIdentity {
+    return {
         clientKind: resolveUiClientKind(input),
         appVersion: normalizeAppVersion(input.appVersion, input.nativeApplicationVersion),
         ...(normalizeReleaseChannel(input.releaseChannel)
             ? { releaseChannel: normalizeReleaseChannel(input.releaseChannel) }
             : {}),
-        sessionSyncProtocolVersion: CURRENT_SESSION_SYNC_PROTOCOL_VERSION,
-    });
+    };
 }
 
-export function readCurrentUiClientCompatibilityDeclaration(): ClientCompatibilityDeclarationV1 {
+export function readCurrentUiClientCompatibilityDeclaration(): UiClientVersionIdentity {
     const requestHeaders = Constants.expoConfig?.updates?.requestHeaders;
     const configuredReleaseChannel = requestHeaders && typeof requestHeaders === 'object'
         ? (requestHeaders as Record<string, unknown>)['expo-channel-name']
@@ -71,16 +66,4 @@ export function readCurrentUiClientCompatibilityDeclaration(): ClientCompatibili
             ? configuredReleaseChannel
             : String(process.env.EXPO_PUBLIC_APP_ENV ?? process.env.APP_ENV ?? '').trim() || null,
     });
-}
-
-export function buildUiClientCompatibilityHttpHeaders(
-    declaration: ClientCompatibilityDeclarationV1 = readCurrentUiClientCompatibilityDeclaration(),
-): ClientCompatibilityHttpHeadersV1 {
-    return buildClientCompatibilityHttpHeadersV1(declaration);
-}
-
-export function buildUiClientCompatibilitySocketAuth(
-    declaration: ClientCompatibilityDeclarationV1 = readCurrentUiClientCompatibilityDeclaration(),
-): ClientCompatibilitySocketAuthV1 {
-    return buildClientCompatibilitySocketAuthV1(declaration);
 }

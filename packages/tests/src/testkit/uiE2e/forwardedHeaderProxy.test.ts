@@ -47,23 +47,11 @@ describe('startForwardedHeaderProxy', () => {
       headers: {
         origin: 'http://127.0.0.1:4011',
         'access-control-request-method': 'GET',
-        'access-control-request-headers': [
-          'x-happier-client-kind',
-          'x-happier-client-version',
-          'x-happier-client-release-channel',
-          'x-happier-session-sync-protocol',
-        ].join(','),
+        'access-control-request-headers': 'authorization,content-type',
       },
     });
     expect(preflight.status).toBe(204);
-    expect(preflight.headers.get('access-control-allow-headers')).toBe([
-      'authorization',
-      'content-type',
-      'x-happier-client-kind',
-      'x-happier-client-version',
-      'x-happier-client-release-channel',
-      'x-happier-session-sync-protocol',
-    ].join(','));
+    expect(preflight.headers.get('access-control-allow-headers')).toBe('authorization,content-type');
 
     const proxyUrl = new URL(proxy.baseUrl);
     const socket = connect(Number(proxyUrl.port), proxyUrl.hostname);

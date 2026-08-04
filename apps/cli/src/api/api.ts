@@ -81,7 +81,6 @@ import type {
   SealedProviderAccountUsageSnapshotV1,
 } from '@happier-dev/protocol';
 import { resolveSessionCreateEncryptionMode } from '@/api/session/resolveSessionCreateEncryptionMode';
-import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 import { createScmConnectedAccountCredentialResolver } from './connectedServices/scmConnectedAccountCredentialResolver';
 import { resolveMachineRegistrationIdentity } from '@/daemon/machineIdentity/resolveMachineRegistrationIdentity';
 import { consumeMachineReplacementCandidateAfterRegistration } from '@/daemon/machineIdentity/machineReplacementCandidates';
@@ -467,7 +466,6 @@ export class ApiClient {
             headers: {
               'Authorization': `Bearer ${this.credential.token}`,
               'Content-Type': 'application/json',
-              ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
             },
             timeout: 60000 // 1 minute timeout for very bad network connections
           }

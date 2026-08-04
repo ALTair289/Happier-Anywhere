@@ -233,7 +233,6 @@ describe('serverScopedRpcSocketPool', () => {
                 error: 'client-upgrade-required',
                 requirement: {
                     v: 1,
-                    minimumSessionSyncProtocolVersion: 2,
                     clientKind: 'ui-web',
                     minimumAppVersion: '0.3.0',
                     updateUrl: null,

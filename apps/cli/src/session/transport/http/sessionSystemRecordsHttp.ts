@@ -13,10 +13,7 @@ import {
 } from '@happier-dev/protocol';
 
 import { createHttpStatusError, isAuthenticationStatus } from '@/api/client/httpStatusError';
-import {
-  buildCurrentCliClientCompatibilityHttpHeaders,
-  throwIfCliClientUpgradeRequired,
-} from '@/api/clientCompatibility/cliClientCompatibility';
+import { throwIfCliClientUpgradeRequired } from '@/api/clientCompatibility/cliClientCompatibility';
 import { configuration } from '@/configuration';
 import { resolveServerHttpBaseUrl } from './serverHttpBaseUrl';
 
@@ -50,7 +47,6 @@ function buildHeaders(token: string, extra?: Record<string, string>): Record<str
   return {
     Authorization: `Bearer ${token}`,
     'Content-Type': 'application/json',
-    ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     ...(extra ?? {}),
   };
 }

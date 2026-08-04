@@ -46,8 +46,6 @@ describe('sessionMessageCatchUp (plaintext envelopes)', () => {
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: 'Bearer t',
-          'x-happier-client-kind': 'session-runner',
-          'x-happier-session-sync-protocol': '2',
         }),
       }),
     );

@@ -4,14 +4,6 @@ import {
     ClientVersionCheckRequestV1Schema,
     ClientVersionCheckResponseV1Schema,
 } from '@happier-dev/protocol';
-import { resolveSessionSyncCompatibilityPolicy } from '@/app/clientCompatibility/policy';
-import { resolveClientVersionDecision } from '@/app/clientCompatibility/versionDecision';
-
-// Upgrade destination, not an upgrade floor: the minimum version comes solely
-// from the session-sync compatibility policy.
-const IOS_UPDATE_URL = 'https://apps.apple.com/us/app/happier-claude-codex-opencode/id6758537388';
-
-const POLICY_INVALID_ERROR = 'compatibility_policy_invalid' as const;
 
 const LegacyClientVersionCheckRequestSchema = z.object({
     platform: z.string(),
@@ -28,7 +20,8 @@ const LegacyClientVersionCheckResponseSchema = z.object({
  * Registers the client version endpoints: a `GET` reachability probe and a
  * `POST` upgrade check accepting both the v1 protocol body and the legacy
  * `{ platform, version, app_id }` shape still sent by deployed native builds.
- * Both bodies resolve through the same compatibility-policy decision.
+ * This endpoint reports distribution update state only. Protocol capabilities
+ * are negotiated independently through `/v1/features`.
  */
 export function versionRoutes(app: Fastify) {
     app.get('/v1/version', {
@@ -48,39 +41,12 @@ export function versionRoutes(app: Fastify) {
             body: z.union([ClientVersionCheckRequestV1Schema, LegacyClientVersionCheckRequestSchema]),
             response: {
                 200: z.union([ClientVersionCheckResponseV1Schema, LegacyClientVersionCheckResponseSchema]),
-                500: z.object({ error: z.literal(POLICY_INVALID_ERROR) }),
             }
         }
-    }, async (request, reply) => {
-        const policy = resolveSessionSyncCompatibilityPolicy(process.env);
-        // The operator asked for enforcement but the policy could not be read, so
-        // no minimum is available. Answering `current` would silently under-report
-        // a required upgrade, so refuse rather than assert an unverified claim.
-        if (!policy.valid && policy.requestedEnforcement === 'required') {
-            return reply.code(500).send({ error: POLICY_INVALID_ERROR });
-        }
+    }, async (request) => {
         if (!('v' in request.body)) {
-            const platform = request.body.platform.toLowerCase();
-            if (platform !== 'ios' && platform !== 'android') {
-                return { update_required: false, update_url: null };
-            }
-            const decision = resolveClientVersionDecision({
-                clientKind: platform === 'ios' ? 'ui-ios' : 'ui-android',
-                appVersion: request.body.version,
-                policy,
-                distributionUpdateUrl: platform === 'ios' ? IOS_UPDATE_URL : null,
-            });
-            return {
-                update_required: decision.status !== 'current',
-                update_url: decision.status === 'current' ? null : decision.updateUrl,
-            };
+            return { update_required: false, update_url: null } as const;
         }
-        const { clientKind, appVersion } = request.body;
-        return resolveClientVersionDecision({
-            clientKind,
-            appVersion,
-            policy,
-            ...(clientKind === 'ui-ios' ? { distributionUpdateUrl: IOS_UPDATE_URL } : null),
-        });
+        return { v: 1, status: 'current' } as const;
     });
 }

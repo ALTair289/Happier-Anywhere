@@ -2,7 +2,6 @@ import { io } from 'socket.io-client';
 
 import { canonicalizeServerUrl } from '@/sync/domains/server/url/serverUrlCanonical';
 import { resolveSocketIoTransports } from '@/sync/runtime/socketIoTransports';
-import { buildUiClientCompatibilitySocketAuth } from '@/sync/runtime/clientCompatibility/uiClientCompatibility';
 import { applyUiClientUpgradeRequired } from '@/sync/runtime/clientCompatibility/uiClientUpgradeRequired';
 import {
     reportServerUnreachable,
@@ -167,7 +166,6 @@ export function createServerScopedRpcSocketPool(overrides?: Partial<Deps>): Read
                     token: params.token,
                     clientType: 'user-scoped' as const,
                     clientPurpose: 'scoped-rpc' as const,
-                    ...buildUiClientCompatibilitySocketAuth(),
                 },
                 forceNew: true,
                 ...(transports ? { transports } : null),

@@ -528,7 +528,6 @@ describe('ApiMachineClient reconnect race handling', () => {
                 error: 'client-upgrade-required',
                 requirement: {
                     v: 1,
-                    minimumSessionSyncProtocolVersion: 2,
                     clientKind: 'daemon',
                     minimumAppVersion: '9.0.0',
                     updateUrl: null,

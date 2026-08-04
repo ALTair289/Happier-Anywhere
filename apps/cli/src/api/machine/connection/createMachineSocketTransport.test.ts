@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const ioMock = vi.hoisted(() => vi.fn(() => ({
+const ioMock = vi.hoisted(() => vi.fn((_url: string, _options: { auth?: Record<string, unknown> }) => ({
   on: vi.fn(),
 })));
 
@@ -45,12 +45,8 @@ describe('createMachineSocketTransport', () => {
           algorithm: 'ed25519',
           signature: 'signature',
         },
-        clientCompatibility: expect.objectContaining({
-          v: 1,
-          clientKind: 'daemon',
-          sessionSyncProtocolVersion: 2,
-        }),
       }),
     }));
+    expect(ioMock.mock.calls[0]?.[1]?.auth).not.toHaveProperty('clientCompatibility');
   });
 });

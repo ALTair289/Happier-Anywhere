@@ -11,7 +11,6 @@ import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBas
 import { decodeBase64, decrypt } from '../encryption';
 import { SessionMessageContentSchema, type PermissionMode } from '../types';
 import { extractSemanticTranscriptItem } from '@/session/services/transcript/extractSemanticTranscriptItem';
-import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 
 type EncryptionVariant = 'legacy' | 'dataKey';
 
@@ -42,7 +41,6 @@ export async function fetchRecentTranscriptTextItemsForAcpImportFromServer(
       headers: {
         Authorization: `Bearer ${params.token}`,
         'Content-Type': 'application/json',
-        ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
       },
       params: { limit: take, roles: 'user,agent' },
       timeout: 10_000,
@@ -98,7 +96,6 @@ export async function fetchLatestUserPermissionIntentFromEncryptedTranscript(
       headers: {
         Authorization: `Bearer ${params.token}`,
         'Content-Type': 'application/json',
-        ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
       },
       params: { limit: take, role: 'user' },
       timeout: 10_000,
@@ -170,7 +167,6 @@ export async function hasCommittedUserMessageAfterMs(params: Readonly<{
       headers: {
         Authorization: `Bearer ${params.token}`,
         'Content-Type': 'application/json',
-        ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
       },
       params: { limit: take, role: 'user' },
       timeout: 10_000,

@@ -2,8 +2,6 @@ import { Fastify } from "../types";
 import { log } from "@/utils/logging/log";
 import { auth } from "@/app/auth/auth";
 import { enforceLoginEligibility } from "@/app/auth/enforceLoginEligibility";
-import { enforceSessionSyncCompatibilityForHttpRequest } from "@/app/clientCompatibility/httpEnforcement";
-import { isSessionSyncHttpRoute } from "@/app/clientCompatibility/routeInventory";
 import { redactPublicShareCapabilityUrl } from "@happier-dev/protocol";
 
 function shouldLogAuthDecoratorDiagnostics(): boolean {
@@ -54,11 +52,6 @@ export function enableAuthentication(app: Fastify) {
                 log({ module: 'auth-decorator' }, `Auth success - user: ${verified.userId}`);
             }
             request.userId = verified.userId;
-            const routePath = request.routeOptions?.url ?? request.url.split('?', 1)[0];
-            if (typeof routePath === 'string' && isSessionSyncHttpRoute(routePath)) {
-                const accepted = await enforceSessionSyncCompatibilityForHttpRequest(request, reply, process.env);
-                if (!accepted) return;
-            }
         } catch (error) {
             return reply.code(401).send({ error: 'Authentication failed' });
         }

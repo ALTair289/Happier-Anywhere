@@ -21,14 +21,14 @@ import { resolveEncryptionFeature } from '../encryptionFeature';
 import { resolveE2eeFeature } from '../e2eeFeature';
 import { resolveServerUrlCapabilitiesFeature } from '../serverUrlCapabilitiesFeature';
 import { resolveServerRetentionCapabilitiesFeature } from '../serverRetentionCapabilitiesFeature';
-import { resolveClientCompatibilityFeature } from '../clientCompatibilityFeature';
+import { resolveSessionProtocolCapabilitiesFeature } from '../sessionProtocolCapabilitiesFeature';
 
 export type ServerFeatureResolver = (env: NodeJS.ProcessEnv) => FeaturesPayloadDelta;
 
-export const serverFeatureRegistry: readonly ServerFeatureResolver[] = Object.freeze([
+const serverFeatureResolvers = [
     (env) => resolveServerUrlCapabilitiesFeature(env),
     (env) => resolveServerRetentionCapabilitiesFeature(env),
-    (env) => resolveClientCompatibilityFeature(env),
+    () => resolveSessionProtocolCapabilitiesFeature(),
     (env) => resolveBugReportsFeature(env),
     (env) => resolveAutomationsFeature(env),
     (env) => resolveSharingFeature(env),
@@ -48,4 +48,7 @@ export const serverFeatureRegistry: readonly ServerFeatureResolver[] = Object.fr
     (env) => resolveAuthFeature(env),
     (env) => resolveEncryptionFeature(env),
     (env) => resolveE2eeFeature(env),
-]);
+] satisfies readonly ServerFeatureResolver[];
+
+export const serverFeatureRegistry: readonly ServerFeatureResolver[] =
+    Object.freeze(serverFeatureResolvers);

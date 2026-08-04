@@ -63,6 +63,8 @@ import {
 } from './mutations/runtimeActivitySnapshotSessionMutationPublisher';
 import {
     createSessionSyncPendingInputServerContractController,
+    supportsPendingInputV1,
+    supportsRuntimeActivityV2,
     type SessionSyncPendingInputServerContractResult,
 } from '@/api/clientCompatibility/sessionSyncPendingInputServerContract';
 import { fetchSessionByIdCompat } from '@/session/transport/http/sessionsHttp';
@@ -1242,7 +1244,7 @@ export class ApiSessionClient extends EventEmitter {
                 if (isReconnect) {
                     this.reassertSessionPresenceAfterReconnect();
                 }
-                if (serverContract.mode === 'session_sync_v2_pending_input_v1') {
+                if (supportsRuntimeActivityV2(serverContract)) {
                     await this.runtimeActivitySnapshotPublisher[RUNTIME_ACTIVITY_DESIRED_REOFFER_REQUEST]().catch((error) => {
                         logger.debug('[API] Failed to reoffer Runtime Activity snapshot on reconnect', {
                             error: serializeAxiosErrorForLog(error),
@@ -4846,7 +4848,7 @@ export class ApiSessionClient extends EventEmitter {
      * @param handler - Handler function that returns the updated metadata
      */
     private isCurrentPendingInputServerContract(): boolean {
-        return this.sessionSyncPendingInputServerContract?.mode === 'session_sync_v2_pending_input_v1';
+        return supportsPendingInputV1(this.sessionSyncPendingInputServerContract);
     }
 
     private normalizeProviderAcceptedUserMessageLocalIds(localIds: readonly string[] | null | undefined): string[] {
@@ -5712,11 +5714,14 @@ export class ApiSessionClient extends EventEmitter {
         if (serverContract.mode === 'auth_failed') {
             return { didMaterialize: false, result: { type: 'auth_failure', statusCode: 401 } };
         }
-        if (serverContract.mode === 'indeterminate') {
+        if (
+            serverContract.pendingInput === 'indeterminate'
+            || serverContract.pendingInput === 'unsupported'
+        ) {
             return { didMaterialize: false, result: { type: 'retryable_transport' } };
         }
         let materializeResult: PendingQueueMaterializeNextResult;
-        if (serverContract.mode === 'released_server_v0_2_1') {
+        if (serverContract.pendingInput === 'released_server_v0_2_1') {
             const releasedResult = await continuePendingQueueV2OnReleasedServer({
                 contract: serverContract,
                 getServerContract: () => this.sessionSyncPendingInputServerContract,
@@ -5798,7 +5803,7 @@ export class ApiSessionClient extends EventEmitter {
             return {
                 didMaterialize: false,
                 result: {
-                    type: serverContract.mode === 'released_server_v0_2_1'
+                    type: serverContract.pendingInput === 'released_server_v0_2_1'
                         ? 'no_pending'
                         : 'retryable_transport',
                 },
@@ -6012,7 +6017,7 @@ export class ApiSessionClient extends EventEmitter {
             return {
                 didMaterialize: false,
                 result: {
-                    type: serverContract.mode === 'released_server_v0_2_1'
+                    type: serverContract.pendingInput === 'released_server_v0_2_1'
                         ? 'no_pending'
                         : 'retryable_transport',
                 },

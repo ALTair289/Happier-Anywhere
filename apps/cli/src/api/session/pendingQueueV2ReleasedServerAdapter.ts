@@ -30,7 +30,7 @@ function isExactContractCurrent(params: Readonly<{
     getSocket: () => unknown;
     hasCurrentLocalRuntimeAuthority: () => boolean;
 }>): boolean {
-    return params.contract.mode === 'released_server_v0_2_1'
+    return params.contract.pendingInput === 'released_server_v0_2_1'
         && params.getServerContract() === params.contract
         && params.contract.sessionConnectionEpoch === params.getSessionConnectionEpoch()
         && params.contract.socket === params.getSocket()

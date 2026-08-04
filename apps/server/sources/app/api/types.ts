@@ -1,7 +1,6 @@
 import { FastifyBaseLogger, FastifyInstance } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { IncomingMessage, Server, ServerResponse } from "http";
-import type { SessionSyncCompatibilityEvaluation } from "@/app/clientCompatibility/decision";
 
 export type Fastify = FastifyInstance<
     Server<typeof IncomingMessage, typeof ServerResponse>,
@@ -15,7 +14,6 @@ declare module 'fastify' {
     interface FastifyRequest {
         userId: string;
         startTime?: number;
-        sessionSyncCompatibility?: SessionSyncCompatibilityEvaluation;
     }
     interface FastifyInstance {
         authenticate: any;

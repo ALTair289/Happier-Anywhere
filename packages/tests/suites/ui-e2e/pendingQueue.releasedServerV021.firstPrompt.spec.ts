@@ -19,7 +19,6 @@ import { createRunDirs } from '../../src/testkit/runDir';
 import { authenticateAndStartDaemon } from '../../src/testkit/uiE2e/authenticateAndStartDaemon';
 import { createSessionFromNewSessionComposer } from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
 import { waitForDaemonMachineIdFromCliSettings } from '../../src/testkit/uiE2e/daemonMachineId';
-import { startForwardedHeaderProxy } from '../../src/testkit/uiE2e/forwardedHeaderProxy';
 import {
   gotoCommittedWithRetries,
   normalizeLoopbackBaseUrl,
@@ -88,7 +87,6 @@ describeReleasedServer(releasedServerSuiteName, () => {
   const fakeClaudeLogPath = resolve(suiteDir, 'fake-claude.jsonl');
 
   let server: StartedReleasedServerLight | null = null;
-  let browserCompatibilityProxy: Awaited<ReturnType<typeof startForwardedHeaderProxy>> | null = null;
   let ui: StartedUiWeb | null = null;
   let uiBaseUrl: string | null = null;
   let daemon: StartedDaemon | null = null;
@@ -103,19 +101,12 @@ describeReleasedServer(releasedServerSuiteName, () => {
       manifestPath: releasedServerArtifact.manifestPath,
       expectedArchiveSha256: releasedServerArtifact.expectedArchiveSha256,
     });
-    // server-v0.2.1 predates the current UI compatibility declaration headers in its
-    // browser CORS allowlist. Keep every HTTP/socket request on the real released
-    // server and alter only browser transport CORS response headers at this seam.
-    browserCompatibilityProxy = await startForwardedHeaderProxy({
-      targetBaseUrl: server.baseUrl,
-      identityHeaders: {},
-    });
     ui = await startUiWeb({
       testDir: suiteDir,
       env: {
         ...process.env,
         EXPO_PUBLIC_DEBUG: '1',
-        EXPO_PUBLIC_HAPPIER_SERVER_URL: browserCompatibilityProxy.baseUrl,
+        EXPO_PUBLIC_HAPPIER_SERVER_URL: server.baseUrl,
         EXPO_PUBLIC_HAPPY_STORAGE_SCOPE: `e2e-c1-old-server-${run.runId}`,
       },
     });
@@ -126,13 +117,12 @@ describeReleasedServer(releasedServerSuiteName, () => {
     test.setTimeout(120_000);
     await daemon?.stop().catch(() => {});
     await ui?.stop().catch(() => {});
-    await browserCompatibilityProxy?.stop().catch(() => {});
     await server?.stop().catch(() => {});
   });
 
   test('uses a real new-session submit to enqueue and deliver the first prompt once', async ({ page }) => {
     test.setTimeout(720_000);
-    if (!server || !browserCompatibilityProxy || !uiBaseUrl) throw new Error('missing released-server/UI fixtures');
+    if (!server || !uiBaseUrl) throw new Error('missing released-server/UI fixtures');
 
     const providerObservationStartedAt = Date.now();
     const browserDiagnostics: string[] = [];
@@ -146,7 +136,7 @@ describeReleasedServer(releasedServerSuiteName, () => {
         page,
         testDir: suiteDir,
         cliHomeDir,
-        serverUrl: browserCompatibilityProxy.baseUrl,
+        serverUrl: server.baseUrl,
         cliServerUrl: server.baseUrl,
         uiBaseUrl,
         initialUiReadyTimeoutMs: 180_000,

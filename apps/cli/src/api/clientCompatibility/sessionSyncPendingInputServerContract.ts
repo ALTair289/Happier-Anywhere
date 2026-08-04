@@ -2,28 +2,30 @@ import {
     FeaturesResponseSchema,
     PENDING_INPUT_PROTOCOL_VERSION_V1,
     SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY,
-    SessionSyncPendingInputCompatibilityPingAckV1Schema,
 } from '@happier-dev/protocol';
 
 import { normalizeBaseUrl } from '@/diagnostics/httpClient';
 
+export type RuntimeActivityServerContract = 'v2' | 'legacy' | 'unsupported' | 'indeterminate';
+export type PendingInputServerContract = 'v1' | 'released_server_v0_2_1' | 'unsupported' | 'indeterminate';
+
+/**
+ * Retained only as a compatibility projection for callers that have not yet
+ * consumed the two independent capability fields. New decisions must use
+ * `runtimeActivity` or `pendingInput` directly.
+ */
 export type SessionSyncPendingInputServerContractMode =
     | 'session_sync_v2_pending_input_v1'
     | 'released_server_v0_2_1'
     | 'indeterminate'
     | 'auth_failed';
 
-type ProbeSocket = Readonly<{
-    connected?: boolean;
-}>;
-
-type PingAckEmitter = Readonly<{
-    timeout?: (timeoutMs: number) => PingAckEmitter;
-    emitWithAck: (event: 'ping') => Promise<unknown>;
-}>;
+type ProbeSocket = Readonly<{ connected?: boolean }>;
 
 export type SessionSyncPendingInputServerContractResult = Readonly<{
     mode: SessionSyncPendingInputServerContractMode;
+    runtimeActivity: RuntimeActivityServerContract;
+    pendingInput: PendingInputServerContract;
     sessionConnectionEpoch: number;
     socket: ProbeSocket;
 }>;
@@ -34,50 +36,80 @@ type ContractProbe = Readonly<{
     machineId: string | null | undefined;
 }>;
 
-type HttpCandidate = 'session_sync_v2_pending_input_v1' | 'released_server_v0_2_1';
+type CapabilitySelection = Readonly<{
+    runtimeActivity: RuntimeActivityServerContract;
+    pendingInput: PendingInputServerContract;
+}>;
 
-function classifySuccessfulHttpPayload(raw: unknown): HttpCandidate | null {
-    const features = FeaturesResponseSchema.safeParse(raw);
-    if (!features.success) return null;
+const INDETERMINATE: CapabilitySelection = Object.freeze({
+    runtimeActivity: 'indeterminate',
+    pendingInput: 'indeterminate',
+});
 
-    const compatibility = features.data.capabilities.compatibility;
-    const sessionSyncVersion = compatibility?.sessionSync.currentSessionSyncProtocolVersion;
-    const pendingInputVersion = compatibility?.pendingInput?.currentPendingInputProtocolVersion;
+function isReleasedServerV021(features: ReturnType<typeof FeaturesResponseSchema.parse>): boolean {
+    return features.capabilities.session.runtimeActivity === undefined
+        && features.capabilities.session.pendingInput === undefined
+        && features.features.sharing.pendingQueueV2.enabled === true
+        && features.features.sharing.pendingDeliveryState.enabled !== true;
+}
+
+export function resolveSessionServerCapabilities(raw: unknown): CapabilitySelection {
+    const parsed = FeaturesResponseSchema.safeParse(raw);
+    if (!parsed.success) return INDETERMINATE;
+
+    if (isReleasedServerV021(parsed.data)) {
+        return {
+            runtimeActivity: 'legacy',
+            pendingInput: 'released_server_v0_2_1',
+        };
+    }
+
+    const runtimeActivityVersion =
+        parsed.data.capabilities.session.runtimeActivity?.protocolVersion;
+    const pendingInputVersion =
+        parsed.data.capabilities.session.pendingInput?.protocolVersion;
+    return {
+        runtimeActivity:
+            typeof runtimeActivityVersion === 'number'
+            && runtimeActivityVersion >= SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY
+                ? 'v2'
+                : 'unsupported',
+        pendingInput:
+            typeof pendingInputVersion === 'number'
+            && pendingInputVersion >= PENDING_INPUT_PROTOCOL_VERSION_V1
+                ? 'v1'
+                : 'unsupported',
+    };
+}
+
+function projectLegacyMode(
+    selection: CapabilitySelection,
+): SessionSyncPendingInputServerContractMode {
     if (
-        typeof sessionSyncVersion === 'number'
-        && sessionSyncVersion >= SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY
-        && typeof pendingInputVersion === 'number'
-        && pendingInputVersion >= PENDING_INPUT_PROTOCOL_VERSION_V1
+        selection.runtimeActivity === 'v2'
+        && selection.pendingInput === 'v1'
     ) {
         return 'session_sync_v2_pending_input_v1';
     }
-
     if (
-        compatibility === undefined
-        && features.data.features.sharing.pendingQueueV2.enabled === true
-        && features.data.features.sharing.pendingDeliveryState.enabled !== true
+        selection.runtimeActivity === 'legacy'
+        && selection.pendingInput === 'released_server_v0_2_1'
     ) {
         return 'released_server_v0_2_1';
     }
-
-    return null;
+    return 'indeterminate';
 }
 
-function isExactEmptyObject(value: unknown): value is Record<string, never> {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    return (prototype === Object.prototype || prototype === null) && Object.keys(value).length === 0;
+export function supportsRuntimeActivityV2(
+    result: SessionSyncPendingInputServerContractResult | null | undefined,
+): boolean {
+    return result?.runtimeActivity === 'v2';
 }
 
-function socketProvesCurrentContract(rawAck: unknown): boolean {
-    const ack = SessionSyncPendingInputCompatibilityPingAckV1Schema.safeParse(rawAck);
-    if (!ack.success) return false;
-    const sessionSyncVersion = ack.data.compatibility.sessionSync.currentSessionSyncProtocolVersion;
-    const pendingInputVersion = ack.data.compatibility.pendingInput?.currentPendingInputProtocolVersion;
-    return typeof sessionSyncVersion === 'number'
-        && sessionSyncVersion >= SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY
-        && typeof pendingInputVersion === 'number'
-        && pendingInputVersion >= PENDING_INPUT_PROTOCOL_VERSION_V1;
+export function supportsPendingInputV1(
+    result: SessionSyncPendingInputServerContractResult | null | undefined,
+): boolean {
+    return result?.pendingInput === 'v1';
 }
 
 export function createSessionSyncPendingInputServerContractController(options: Readonly<{
@@ -96,9 +128,11 @@ export function createSessionSyncPendingInputServerContractController(options: R
 
     const result = (
         probe: ContractProbe,
-        mode: SessionSyncPendingInputServerContractMode,
+        selection: CapabilitySelection,
+        forcedMode?: 'auth_failed',
     ): SessionSyncPendingInputServerContractResult => ({
-        mode,
+        mode: forcedMode ?? projectLegacyMode(selection),
+        ...selection,
         sessionConnectionEpoch: probe.sessionConnectionEpoch,
         socket: probe.socket,
     });
@@ -109,13 +143,12 @@ export function createSessionSyncPendingInputServerContractController(options: R
         attempt: NonNullable<typeof active>,
     ): Promise<SessionSyncPendingInputServerContractResult> {
         if (!probe.machineId?.trim() || probe.socket.connected !== true) {
-            return result(probe, 'indeterminate');
+            return result(probe, INDETERMINATE);
         }
 
         const abortController = new AbortController();
         const timer = setTimeout(() => abortController.abort(), timeoutMs);
         timer.unref?.();
-        let rawFeatures: unknown;
         try {
             const response = await fetchImpl(`${normalizeBaseUrl(options.serverUrl)}/v1/features`, {
                 method: 'GET',
@@ -124,56 +157,29 @@ export function createSessionSyncPendingInputServerContractController(options: R
                 signal: abortController.signal,
             });
             if (!isCurrent(attempt) || probe.socket.connected !== true) {
-                return result(probe, 'indeterminate');
+                return result(probe, INDETERMINATE);
             }
-            if (response.status === 401 || response.status === 403) return result(probe, 'auth_failed');
-            if (!response.ok) return result(probe, 'indeterminate');
-            rawFeatures = await response.json();
+            if (response.status === 401 || response.status === 403) {
+                return result(probe, INDETERMINATE, 'auth_failed');
+            }
+            if (!response.ok) return result(probe, INDETERMINATE);
+            const selection = resolveSessionServerCapabilities(await response.json());
             if (!isCurrent(attempt) || probe.socket.connected !== true) {
-                return result(probe, 'indeterminate');
+                return result(probe, INDETERMINATE);
             }
+            return result(probe, selection);
         } catch {
-            return result(probe, 'indeterminate');
+            return result(probe, INDETERMINATE);
         } finally {
             clearTimeout(timer);
         }
-
-        const httpCandidate = classifySuccessfulHttpPayload(rawFeatures);
-        if (httpCandidate === null) return result(probe, 'indeterminate');
-
-        let rawAck: unknown;
-        try {
-            // Socket.IO's overloaded event map is adapted only at this transport boundary.
-            const emitter = probe.socket as unknown as PingAckEmitter;
-            const socket = emitter.timeout?.(timeoutMs) ?? emitter;
-            rawAck = await socket.emitWithAck('ping');
-        } catch {
-            return result(probe, 'indeterminate');
-        }
-        if (!isCurrent(attempt) || probe.socket.connected !== true) {
-            return result(probe, 'indeterminate');
-        }
-
-        if (
-            httpCandidate === 'session_sync_v2_pending_input_v1'
-            && socketProvesCurrentContract(rawAck)
-        ) {
-            return result(probe, 'session_sync_v2_pending_input_v1');
-        }
-        if (
-            httpCandidate === 'released_server_v0_2_1'
-            && isExactEmptyObject(rawAck)
-        ) {
-            return result(probe, 'released_server_v0_2_1');
-        }
-        return result(probe, 'indeterminate');
     }
 
     return {
         resolve(probe: ContractProbe): Promise<SessionSyncPendingInputServerContractResult> {
             if (!probe.machineId?.trim() || probe.socket.connected !== true) {
                 active = null;
-                return Promise.resolve(result(probe, 'indeterminate'));
+                return Promise.resolve(result(probe, INDETERMINATE));
             }
             if (
                 active?.sessionConnectionEpoch === probe.sessionConnectionEpoch
@@ -187,7 +193,16 @@ export function createSessionSyncPendingInputServerContractController(options: R
                 socket: probe.socket,
                 promise: null,
             };
-            const promise = run(probe, attempt);
+            const promise = run(probe, attempt).then((result) => {
+                if (
+                    active === attempt
+                    && result.runtimeActivity === 'indeterminate'
+                    && result.pendingInput === 'indeterminate'
+                ) {
+                    active = null;
+                }
+                return result;
+            });
             attempt.promise = promise;
             active = attempt;
             return promise;
@@ -206,7 +221,7 @@ export function createSessionSyncPendingInputServerContractController(options: R
             const sessionConnectionEpoch = probe?.sessionConnectionEpoch ?? invalidated?.sessionConnectionEpoch;
             const socket = probe?.socket ?? invalidated?.socket;
             return sessionConnectionEpoch !== undefined && socket
-                ? { mode: 'indeterminate', sessionConnectionEpoch, socket }
+                ? result({ sessionConnectionEpoch, socket, machineId: null }, INDETERMINATE)
                 : null;
         },
     };

@@ -25,9 +25,6 @@ import {
     formatCurrentMachineSocketError,
     validateCurrentMachineSocket,
 } from "@/app/machines/validateCurrentMachineSocket";
-import {
-    revalidateSessionSyncSocketCompatibility,
-} from "@/app/clientCompatibility/socketEnforcement";
 import { readHappierSocketData } from "./socketData";
 import type {
     CaptureExplicitMachineStopResult,
@@ -164,28 +161,6 @@ function readExplicitMachineStopRequest(method: string, value: unknown): Readonl
     return { machineId, sessionId: trimmedSessionId };
 }
 
-function revalidatePrivilegedRpcTargetCompatibility(socket: Socket, method: string) {
-    if (!resolveSocketRpcProviderStartingMethod(method)) return null;
-    const socketData = readHappierSocketData(socket);
-    return revalidateSessionSyncSocketCompatibility(
-        socketData.clientType === 'machine-scoped' && socketData.sessionSyncCompatibility
-            ? socketData.sessionSyncCompatibility.parseResult
-            : { status: 'missing' },
-        process.env,
-        'machine-scoped',
-    );
-}
-
-function buildPrivilegedRpcUpgradeRequiredResponse(socket: Socket, method: string) {
-    const compatibility = revalidatePrivilegedRpcTargetCompatibility(socket, method);
-    if (compatibility === null || compatibility.accepted) return null;
-    return {
-        ok: false as const,
-        error: 'client-upgrade-required',
-        ...(compatibility.upgradeRequired ?? {}),
-    };
-}
-
 function buildForbiddenRpcResponse() {
     return {
         ok: false,
@@ -245,22 +220,6 @@ export function rpcHandler(
 
             const machineId = readMachineScopedSocketMachineId(socket);
             if (machineId) {
-                if (resolveSocketRpcProviderStartingMethod(method)) {
-                    const compatibility = readHappierSocketData(socket).sessionSyncCompatibility;
-                    const currentCompatibility = revalidateSessionSyncSocketCompatibility(
-                        compatibility?.parseResult ?? { status: 'missing' },
-                        process.env,
-                        'machine-scoped',
-                    );
-                    if (!currentCompatibility.accepted) {
-                        socket.emit(SOCKET_RPC_EVENTS.ERROR, {
-                            type: 'register',
-                            error: 'client-upgrade-required',
-                            ...(currentCompatibility.upgradeRequired ?? {}),
-                        });
-                        return;
-                    }
-                }
                 const currentMachine = await validateCurrentMachineSocket({ accountId: userId, machineId });
                 if (!currentMachine.ok) {
                     socket.emit(SOCKET_RPC_EVENTS.ERROR, {
@@ -548,12 +507,6 @@ export function rpcHandler(
                             }
                         }
 
-                        const upgradeRequired = buildPrivilegedRpcUpgradeRequiredResponse(fallbackSocket, method);
-                        if (upgradeRequired) {
-                            callback?.(upgradeRequired);
-                            return;
-                        }
-
                         const response = await fallbackSocket.timeout(forwardTimeoutMs).emitWithAck(
                             SOCKET_RPC_EVENTS.REQUEST,
                             buildForwardedRequest(),
@@ -611,11 +564,7 @@ export function rpcHandler(
                             return;
                         }
                         if (!currentMachineId) {
-                            const upgradeRequired = buildPrivilegedRpcUpgradeRequiredResponse(
-                                currentTarget as unknown as Socket,
-                                method,
-                            );
-                            callback?.(upgradeRequired ?? {
+                            callback?.({
                                 ok: false,
                                 error: RPC_ERROR_MESSAGES.METHOD_NOT_AVAILABLE,
                                 errorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
@@ -632,14 +581,6 @@ export function rpcHandler(
                                 error: formatCurrentMachineSocketError(currentMachine.reason),
                                 errorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
                             });
-                            return;
-                        }
-                        const upgradeRequired = buildPrivilegedRpcUpgradeRequiredResponse(
-                            currentTarget as unknown as Socket,
-                            method,
-                        );
-                        if (upgradeRequired) {
-                            callback?.(upgradeRequired);
                             return;
                         }
                     }
@@ -726,12 +667,6 @@ export function rpcHandler(
                         }
                         return;
                     }
-                }
-
-                const upgradeRequired = buildPrivilegedRpcUpgradeRequiredResponse(targetSocket, method);
-                if (upgradeRequired) {
-                    callback?.(upgradeRequired);
-                    return;
                 }
 
                 // Forward the RPC request to the target socket using emitWithAck (single-process path).

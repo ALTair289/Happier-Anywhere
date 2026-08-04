@@ -208,7 +208,6 @@ describe('ApiMachineClient connect ordering', () => {
       error: 'client-upgrade-required',
       requirement: {
         v: 1,
-        minimumSessionSyncProtocolVersion: 2,
         clientKind: 'daemon',
         minimumAppVersion: '0.3.0',
         updateUrl: null,

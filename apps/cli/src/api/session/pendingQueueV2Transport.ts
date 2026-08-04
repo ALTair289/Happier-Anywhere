@@ -3,7 +3,6 @@ import type { Socket } from 'socket.io-client';
 
 import { classifyServerEndpointError } from '@/api/client/classifyServerEndpointError';
 import { isAuthenticationError } from '@/api/client/httpStatusError';
-import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 import type { ClientToServerEvents, ServerToClientEvents } from '../types';
 import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 import { emitSocketWithAck } from '@/session/transport/shared/socketAck';
@@ -149,7 +148,6 @@ export type PendingQueueBlockedDelivery = Readonly<{
 
 function buildSessionRunnerHttpHeaders(token: string, contentType?: 'application/json') {
     return {
-        ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
         Authorization: `Bearer ${token}`,
         ...(contentType ? { 'Content-Type': contentType } : {}),
     };

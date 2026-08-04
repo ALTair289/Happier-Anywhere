@@ -9,7 +9,6 @@ const payload = {
     error: 'client-upgrade-required',
     requirement: {
         v: 1,
-        minimumSessionSyncProtocolVersion: 2,
         clientKind: 'ui-ios',
         minimumAppVersion: '0.3.0',
         updateUrl: 'https://apps.example.test/happier',

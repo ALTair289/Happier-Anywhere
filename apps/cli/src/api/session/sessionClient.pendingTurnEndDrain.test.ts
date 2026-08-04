@@ -173,20 +173,7 @@ async function createClient(
     emitWithAck: (event, payload, socket) => {
       if (event === 'ping') {
         if (options.serverContractMode === 'released') return {};
-        return {
-          v: 1,
-          compatibility: {
-            v: 1,
-            sessionSync: {
-              v: 1,
-              enforcement: 'observe',
-              minimumSessionSyncProtocolVersion: 1,
-              currentSessionSyncProtocolVersion: 2,
-              declarationTransport: 'headers-v1',
-            },
-            pendingInput: { currentPendingInputProtocolVersion: 1 },
-          },
-        };
+        return { v: 1 };
       }
       return customEmitWithAck?.(event, payload, socket) ?? { ok: true };
     },
@@ -353,16 +340,9 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
         },
       },
       capabilities: {
-        compatibility: {
-          v: 1,
-          sessionSync: {
-            v: 1,
-            enforcement: 'observe',
-            minimumSessionSyncProtocolVersion: 1,
-            currentSessionSyncProtocolVersion: 2,
-            declarationTransport: 'headers-v1',
-          },
-          pendingInput: { currentPendingInputProtocolVersion: 1 },
+        session: {
+          runtimeActivity: { protocolVersion: 2 },
+          pendingInput: { protocolVersion: 1 },
         },
       },
     }), { status: 200 })));
@@ -456,6 +436,8 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     const contract = (client as any).sessionSyncPendingInputServerContract;
     expect(contract).toEqual({
       mode: 'session_sync_v2_pending_input_v1',
+      runtimeActivity: 'v2',
+      pendingInput: 'v1',
       sessionConnectionEpoch: 1,
       socket: sessionSocketStub,
     });

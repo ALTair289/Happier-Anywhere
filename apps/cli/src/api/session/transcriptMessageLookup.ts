@@ -9,7 +9,6 @@ import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBas
 import { SessionMessageContentSchema, type SessionMessageContent } from '../types';
 import { readAuthenticationStatus, readHttpStatus } from '@/api/client/httpStatusError';
 import { TranscriptRecoveryCoordinator, type TranscriptRecoveryResult } from './recovery/TranscriptRecoveryCoordinator';
-import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 import { readPendingLocalId } from '@happier-dev/protocol';
 
@@ -38,7 +37,6 @@ function createAxiosGetConfig(params: { token: string; timeoutMs?: number }) {
         headers: {
             Authorization: `Bearer ${params.token}`,
             'Content-Type': 'application/json',
-            ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
         },
         timeout: params.timeoutMs ?? configuration.transcriptLookupRequestTimeoutMs,
         ...(configuration.transcriptLookupKeepAliveEnabled

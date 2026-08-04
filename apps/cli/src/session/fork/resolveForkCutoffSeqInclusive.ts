@@ -6,7 +6,6 @@ import { configuration } from '@/configuration';
 import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 import { resolveSessionEncryptionContextFromCredentials } from '@/session/transport/encryption/sessionEncryptionContext';
 import { decryptTranscriptRows } from '@/session/replay/decryptTranscriptRows';
-import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 
 type RawTranscriptRow = Readonly<{
   seq?: unknown;
@@ -35,7 +34,6 @@ export async function resolveForkCutoffSeqInclusive(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.credentials.token}`,
       'Content-Type': 'application/json',
-      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     params: { limit: 1, beforeSeq: targetSeqInclusive + 1 },
     timeout: configuration.sessionControlHttpTimeoutMs,

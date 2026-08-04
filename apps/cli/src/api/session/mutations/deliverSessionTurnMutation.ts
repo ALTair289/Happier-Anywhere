@@ -1,5 +1,4 @@
 import axios from 'axios';
-import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 
 import { isAuthenticationError } from '@/api/client/httpStatusError';
 import { reloadConfiguration } from '@/configuration';
@@ -282,7 +281,6 @@ async function tryHttpSessionTurnMutation(params: Readonly<{
                 headers: {
                     Authorization: `Bearer ${params.token}`,
                     'Content-Type': 'application/json',
-                    ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
                 },
                 timeout: 10_000,
             },

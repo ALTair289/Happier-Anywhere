@@ -144,8 +144,6 @@ describe('Api server error handling', () => {
                 expect.any(Object),
                 expect.objectContaining({
                     headers: expect.objectContaining({
-                        'x-happier-client-kind': 'session-runner',
-                        'x-happier-session-sync-protocol': '2',
                     }),
                 }),
             );

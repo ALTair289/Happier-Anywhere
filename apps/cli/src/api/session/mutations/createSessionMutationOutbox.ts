@@ -50,8 +50,9 @@ import {
 } from './sessionMutationTypes';
 import type { SessionMutationDeadLetterEntry } from './sessionMutationPersistence';
 import { isAuthoritativeSessionMutationKind } from './sessionMutationDurabilityPolicy';
-import type {
-    SessionSyncPendingInputServerContractResult,
+import {
+    supportsRuntimeActivityV2,
+    type SessionSyncPendingInputServerContractResult,
 } from '@/api/clientCompatibility/sessionSyncPendingInputServerContract';
 
 export type SessionMutationSocket = {
@@ -692,7 +693,7 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationJourna
             return result;
         }
         if (mutation.kind === 'transcript_message_append') {
-            if (sessionSyncPendingInputServerContract?.mode === 'released_server_v0_2_1') {
+            if (sessionSyncPendingInputServerContract?.pendingInput === 'released_server_v0_2_1') {
                 return await deliverTranscriptMessageMutationToReleasedServerV021({
                     socket: params.getSocket(),
                     mutation: mutation.payload,
@@ -765,8 +766,8 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationJourna
             for (let index = 0; index < batch.length; index += 1) {
                 const mutation = batch[index];
                 if (mutation.kind === 'runtime_activity_snapshot') {
-                    if (sessionSyncPendingInputServerContract?.mode !== 'session_sync_v2_pending_input_v1') {
-                        if (sessionSyncPendingInputServerContract?.mode === 'released_server_v0_2_1') {
+                    if (!supportsRuntimeActivityV2(sessionSyncPendingInputServerContract)) {
+                        if (sessionSyncPendingInputServerContract?.runtimeActivity === 'legacy') {
                             didChange = true;
                             runtimeActivityRetirementAfterPersist = mutation.admissionOrder;
                             refreshInFlightMutations(index + 1);
@@ -978,7 +979,7 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationJourna
                 mutation.kind !== 'runtime_activity_snapshot'
                 || (
                     runtimeActivitySnapshotInitialized
-                    && sessionSyncPendingInputServerContract?.mode === 'session_sync_v2_pending_input_v1'
+                    && supportsRuntimeActivityV2(sessionSyncPendingInputServerContract)
                 )
             ));
             if (!closed && hasDeliverableMutation) {
@@ -1180,9 +1181,9 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationJourna
         async setSessionSyncPendingInputServerContract(result) {
             await ready;
             if (closed || sessionSyncPendingInputServerContract === result) return;
-            const previousMode = sessionSyncPendingInputServerContract?.mode ?? 'indeterminate';
+            const previousRuntimeActivity = sessionSyncPendingInputServerContract?.runtimeActivity;
             sessionSyncPendingInputServerContract = result;
-            if (result.mode === 'released_server_v0_2_1' && previousMode !== result.mode) await flush('flush');
+            if (result.runtimeActivity === 'legacy' && previousRuntimeActivity !== 'legacy') await flush('flush');
         },
         readRuntimeActivitySnapshotTail() {
             return runtimeActivityTail;

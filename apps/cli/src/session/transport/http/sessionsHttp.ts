@@ -21,10 +21,7 @@ import {
   buildSessionDetailRequestPurpose,
   type SessionSnapshotRefreshReasonInput,
 } from '@/api/session/sessionSnapshotRefreshReason';
-import {
-  buildCurrentCliClientCompatibilityHttpHeaders,
-  throwIfCliClientUpgradeRequired,
-} from '@/api/clientCompatibility/cliClientCompatibility';
+import { throwIfCliClientUpgradeRequired } from '@/api/clientCompatibility/cliClientCompatibility';
 
 export type RawSessionRecord = V2SessionByIdResponse['session'];
 export type RawSessionListRow = V2SessionListResponse['sessions'][number];
@@ -85,7 +82,6 @@ async function getSessionByIdResponse(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
-      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
       'X-Happier-Request-Purpose': requestPurpose,
     },
     timeout: configuration.sessionControlHttpTimeoutMs,
@@ -180,7 +176,6 @@ export async function patchSessionMetadata(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
-      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     timeout: configuration.sessionControlHttpTimeoutMs,
     validateStatus: () => true,
@@ -252,7 +247,6 @@ export async function fetchSessionsPage(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
-      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     params: params.activeOnly
       ? { ...(limit ? { limit } : {}) }
@@ -319,7 +313,6 @@ export async function commitSessionStoredMessage(params: Readonly<{
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
       'Idempotency-Key': params.localId,
-      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     timeout: 20_000,
     validateStatus: () => true,
@@ -392,7 +385,6 @@ export async function getOrCreateSessionByTag(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.credentials.token}`,
       'Content-Type': 'application/json',
-      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     timeout: 60_000,
     validateStatus: () => true,
@@ -429,7 +421,6 @@ async function postArchiveMutation(params: Readonly<{
       headers: {
         Authorization: `Bearer ${params.token}`,
         'Content-Type': 'application/json',
-        ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
       },
       timeout: 10_000,
       validateStatus: () => true,

@@ -23,7 +23,6 @@ describe('ApiSessionClient connection supervision', () => {
                 error: 'client-upgrade-required',
                 requirement: {
                     v: 1,
-                    minimumSessionSyncProtocolVersion: 2,
                     clientKind: 'session-runner',
                     minimumAppVersion: '9.0.0',
                     updateUrl: null,

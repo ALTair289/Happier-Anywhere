@@ -74,15 +74,11 @@ describe('createSyncSocketTransport', () => {
             'https://api.example.test',
             expect.objectContaining({
                 path: '/v1/updates/',
-                auth: expect.objectContaining({
+                auth: {
                     token: 'token-a',
                     clientType: 'user-scoped',
                     clientPurpose: 'sync',
-                    clientCompatibility: expect.objectContaining({
-                        v: 1,
-                        sessionSyncProtocolVersion: 2,
-                    }),
-                }),
+                },
                 transports: ['websocket'],
                 forceNew: true,
                 multiplex: false,
@@ -135,7 +131,6 @@ describe('createSyncSocketTransport', () => {
                 error: 'client-upgrade-required',
                 requirement: {
                     v: 1,
-                    minimumSessionSyncProtocolVersion: 2,
                     clientKind: 'ui-web',
                     minimumAppVersion: '0.3.0',
                     updateUrl: null,

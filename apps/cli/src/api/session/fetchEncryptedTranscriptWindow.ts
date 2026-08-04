@@ -4,7 +4,6 @@ import { createAuthenticationHttpStatusError, isAuthenticationStatus } from '@/a
 import { configuration } from '@/configuration';
 import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 import { SessionMessageContentSchema, type SessionMessageContent } from '../types';
-import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 
 export type TranscriptRow = Readonly<{
   seq: number;
@@ -69,7 +68,6 @@ export async function fetchEncryptedTranscriptPageAfterSeq(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
-      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     params: { afterSeq: params.afterSeq, limit: params.limit },
     timeout: resolveTranscriptFetchTimeoutMs(params.timeoutMs),
@@ -98,7 +96,6 @@ export async function fetchEncryptedTranscriptPageLatest(params: Readonly<{
     headers: {
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
-      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     params: { limit: params.limit },
     timeout: resolveTranscriptFetchTimeoutMs(params.timeoutMs),

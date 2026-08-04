@@ -32,7 +32,6 @@ import { bugReportDiagnosticsRoutes } from "./routes/diagnostics/bugReportDiagno
 import { automationRoutes } from "./routes/automations/automationRoutes";
 import { V2_SESSION_LIST_SERVER_TIMING_REQUEST_HEADER } from "./routes/session/v2SessionListServerTiming";
 import { resolveApiRateLimitPluginOptions, resolveApiTrustProxy } from "./utils/apiRateLimitPolicy";
-import { CLIENT_COMPATIBILITY_HTTP_HEADERS_V1 } from "@happier-dev/protocol";
 
 export function resolveApiListenHost(env: Record<string, string | undefined>): string {
     const host = (env.HAPPIER_SERVER_HOST ?? env.HAPPY_SERVER_HOST ?? '').toString().trim();
@@ -44,7 +43,6 @@ export const API_CORS_ALLOWED_HEADERS = [
     'authorization',
     'content-type',
     V2_SESSION_LIST_SERVER_TIMING_REQUEST_HEADER,
-    ...Object.values(CLIENT_COMPATIBILITY_HTTP_HEADERS_V1),
 ];
 export const API_CORS_EXPOSED_HEADERS = [
     'server-timing',

@@ -1,22 +1,8 @@
 import { z } from 'zod';
 
-export const SESSION_SYNC_PROTOCOL_VERSION_V1 = 1 as const;
 export const SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY = 2 as const;
-export const CURRENT_SESSION_SYNC_PROTOCOL_VERSION = 2 as const;
 export const PENDING_INPUT_PROTOCOL_VERSION_V1 = 1 as const;
 export const CURRENT_PENDING_INPUT_PROTOCOL_VERSION = PENDING_INPUT_PROTOCOL_VERSION_V1;
-
-export const SessionSyncProtocolVersionSchema = z
-  .number()
-  .int()
-  .min(SESSION_SYNC_PROTOCOL_VERSION_V1)
-  .max(Number.MAX_SAFE_INTEGER);
-
-export const PendingInputProtocolVersionSchema = z
-  .number()
-  .int()
-  .min(PENDING_INPUT_PROTOCOL_VERSION_V1)
-  .max(Number.MAX_SAFE_INTEGER);
 
 export const ClientKindSchema = z.enum([
   'ui-web',
@@ -61,27 +47,3 @@ export const SafeHttpsUrlSchema = z
       return false;
     }
   }, 'Expected a safe HTTPS URL');
-
-export const ClientKindAppVersionMapV1Schema = z
-  .object({
-    'ui-web': ClientAppVersionSchema.optional(),
-    'ui-ios': ClientAppVersionSchema.optional(),
-    'ui-android': ClientAppVersionSchema.optional(),
-    'ui-desktop': ClientAppVersionSchema.optional(),
-    cli: ClientAppVersionSchema.optional(),
-    daemon: ClientAppVersionSchema.optional(),
-    'session-runner': ClientAppVersionSchema.optional(),
-  })
-  .strict();
-
-export const ClientKindUpgradeUrlMapV1Schema = z
-  .object({
-    'ui-web': SafeHttpsUrlSchema.optional(),
-    'ui-ios': SafeHttpsUrlSchema.optional(),
-    'ui-android': SafeHttpsUrlSchema.optional(),
-    'ui-desktop': SafeHttpsUrlSchema.optional(),
-    cli: SafeHttpsUrlSchema.optional(),
-    daemon: SafeHttpsUrlSchema.optional(),
-    'session-runner': SafeHttpsUrlSchema.optional(),
-  })
-  .strict();

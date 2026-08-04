@@ -60,7 +60,7 @@ describe('createConcurrentServerSocketTransport', () => {
     it('configures socket.io to avoid Manager cache retention', async () => {
         vi.resetModules();
         const socket = createSocketStub();
-        const ioSpy = vi.fn(() => socket);
+        const ioSpy = vi.fn((_url: string, _options: { auth?: Record<string, unknown> }) => socket);
         vi.doMock('socket.io-client', () => ({
             io: ioSpy,
         }));
@@ -79,10 +79,6 @@ describe('createConcurrentServerSocketTransport', () => {
                     token: 'token-a',
                     clientType: 'user-scoped',
                     clientPurpose: 'concurrent-server-cache',
-                    clientCompatibility: expect.objectContaining({
-                        v: 1,
-                        sessionSyncProtocolVersion: 2,
-                    }),
                 }),
                 forceNew: true,
                 multiplex: false,
@@ -91,6 +87,7 @@ describe('createConcurrentServerSocketTransport', () => {
                 autoConnect: false,
             }),
         );
+        expect(ioSpy.mock.calls[0]?.[1]?.auth).not.toHaveProperty('clientCompatibility');
     });
 
     it('handles upgrade-required connect errors without classifying the server as unreachable', async () => {
@@ -113,7 +110,6 @@ describe('createConcurrentServerSocketTransport', () => {
                 error: 'client-upgrade-required',
                 requirement: {
                     v: 1,
-                    minimumSessionSyncProtocolVersion: 2,
                     clientKind: 'ui-web',
                     minimumAppVersion: '0.3.0',
                     updateUrl: null,

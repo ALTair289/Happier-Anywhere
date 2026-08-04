@@ -28,20 +28,12 @@ function currentFeatures(params: Readonly<{ includePendingInput?: boolean }> = {
         },
         capabilities: {
             ...base.capabilities,
-            compatibility: {
-                v: 1,
-                sessionSync: {
-                    v: 1,
-                    enforcement: 'observe',
-                    minimumSessionSyncProtocolVersion: 1,
-                    currentSessionSyncProtocolVersion: 2,
-                    declarationTransport: 'headers-v1',
-                },
-                ...(params.includePendingInput === false ? {} : {
-                    pendingInput: {
-                        currentPendingInputProtocolVersion: PENDING_INPUT_PROTOCOL_VERSION_V1,
-                    },
-                }),
+            session: {
+                ...base.capabilities.session,
+                runtimeActivity: { protocolVersion: 2 },
+                pendingInput: params.includePendingInput === false
+                    ? undefined
+                    : { protocolVersion: PENDING_INPUT_PROTOCOL_VERSION_V1 },
             },
         },
     };

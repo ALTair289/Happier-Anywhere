@@ -26,14 +26,9 @@ describe('protocol package root exports', () => {
         })).toEqual({ decision: 'allow', revision: 3 });
     });
 
-    it('exports the canonical client-compatibility owner', () => {
-        expect(protocol.CURRENT_SESSION_SYNC_PROTOCOL_VERSION).toBe(2);
-        expect(protocol.ClientCompatibilityDeclarationV1Schema.parse({
-            v: 1,
-            clientKind: 'ui-web',
-            appVersion: '0.2.10',
-            sessionSyncProtocolVersion: 2,
-        })).toMatchObject({ clientKind: 'ui-web', sessionSyncProtocolVersion: 2 });
+    it('exports independent session capability thresholds', () => {
+        expect(protocol.SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY).toBe(2);
+        expect(protocol.PENDING_INPUT_PROTOCOL_VERSION_V1).toBe(1);
         expect(protocol.CLIENT_UPGRADE_REQUIRED_HTTP_STATUS).toBe(426);
     });
 

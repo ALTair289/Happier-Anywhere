@@ -5,40 +5,21 @@ import { BUILT_IN_PET_IDS_V1, PET_SYNC_SUPPORTED_MEDIA_TYPES_V1 } from '../../..
 import { CapabilitiesSchema } from './capabilitiesSchema.js';
 
 describe('CapabilitiesSchema (server capabilities)', () => {
-  it('parses session-sync compatibility as a sibling of strict server capabilities', () => {
+  it('parses independent Runtime Activity and Pending-input session capabilities', () => {
     const parsed = CapabilitiesSchema.parse({
-      compatibility: {
-        v: 1,
-        sessionSync: {
-          v: 1,
-          enforcement: 'required',
-          minimumSessionSyncProtocolVersion: 2,
-          currentSessionSyncProtocolVersion: 2,
-          declarationTransport: 'headers-v1',
-        },
+      session: {
+        runtimeActivity: { protocolVersion: 2 },
         pendingInput: {
-          currentPendingInputProtocolVersion: 1,
+          protocolVersion: 1,
         },
       },
     });
 
-    expect(parsed.compatibility?.sessionSync).toMatchObject({
-      enforcement: 'required',
-      minimumSessionSyncProtocolVersion: 2,
-    });
-    expect(parsed.compatibility?.pendingInput).toEqual({ currentPendingInputProtocolVersion: 1 });
+    expect(parsed.session.runtimeActivity).toEqual({ protocolVersion: 2 });
+    expect(parsed.session.pendingInput).toEqual({ protocolVersion: 1 });
     expect(CapabilitiesSchema.safeParse({
       server: {
-        compatibility: {
-          v: 1,
-          sessionSync: {
-            v: 1,
-            enforcement: 'required',
-            minimumSessionSyncProtocolVersion: 2,
-            currentSessionSyncProtocolVersion: 2,
-            declarationTransport: 'headers-v1',
-          },
-        },
+        runtimeActivity: { protocolVersion: 2 },
       },
     }).success).toBe(false);
   });

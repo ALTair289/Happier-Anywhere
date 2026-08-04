@@ -8,7 +8,6 @@ import {
     isAuthenticationStatus,
     readAuthenticationStatus,
 } from '../client/httpStatusError';
-import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 type SessionHistoryReplayProvenance = Readonly<{
@@ -40,7 +39,6 @@ export async function catchUpSessionMessagesAfterSeq(params: {
         try {
             response = await axios.get(`${serverUrl}/v1/sessions/${params.sessionId}/messages`, {
                 headers: {
-                    ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
                     Authorization: `Bearer ${params.token}`,
                     'Content-Type': 'application/json',
                 },

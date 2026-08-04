@@ -1,6 +1,5 @@
 import type { Socket } from "socket.io";
 
-import type { SessionSyncSocketCompatibilityResult } from "@/app/clientCompatibility/socketEnforcement";
 import type { SessionScopedSocketBinding } from "./sessionScopedBinding";
 
 export interface HappierSocketData {
@@ -10,7 +9,6 @@ export interface HappierSocketData {
     sessionId?: string;
     machineId?: string;
     sessionScopedBinding?: SessionScopedSocketBinding;
-    sessionSyncCompatibility?: SessionSyncSocketCompatibilityResult;
 }
 
 /** The sole typed view of Socket.IO's application-owned per-socket data bag. */
