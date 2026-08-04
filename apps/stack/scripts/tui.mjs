@@ -44,9 +44,9 @@ import { mergeEnvForTuiSummary } from './utils/tui/summary_env.mjs';
 import { hasStackCredentials } from './utils/auth/daemon_gate.mjs';
 import { applyTuiStackAuthScopeEnv } from './utils/tui/stack_scope_env.mjs';
 import { buildDaemonAuthNotice, parseStartDaemonFlagFromEnv } from './utils/tui/daemon_auth_notice.mjs';
-import { detachTuiStdinForChild, waitForEnter } from './utils/tui/stdin_handoff.mjs';
+import { ensureTuiStdinMode, runWithTuiStdinHandoff } from './utils/tui/stdin_handoff.mjs';
 import { waitForHappierHealthOk } from './utils/server/server.mjs';
-import { buildTuiAuthArgs, shouldHoldAfterAuthExit } from './utils/tui/actions.mjs';
+import { buildTuiAuthArgs, buildTuiAuthExitNotice } from './utils/tui/actions.mjs';
 import { reconcileDaemonPaneAfterDaemonStarts } from './utils/tui/daemon_pane_reconcile.mjs';
 import { buildScriptPtyArgs } from './utils/tui/script_pty_command.mjs';
 import { resolveTuiChildTerminationPlan } from './utils/tui/child_termination_plan.mjs';
@@ -924,6 +924,7 @@ async function main() {
     if (summaryTimer) clearInterval(summaryTimer);
     summaryTimer = setInterval(() => {
       if (!paused) {
+        ensureTuiStdinMode(process.stdin);
         void refreshSummary();
       }
     }, 1000);
@@ -965,22 +966,9 @@ async function main() {
     }
     process.stdout.write('\n');
     if (!internalServerUrl) {
-      process.stdout.write(
-        `[auth] waiting for the stack server timed out (${Math.round((Number.isFinite(waitTimeoutMs) ? waitTimeoutMs : 45_000) / 1000)}s).\n` +
-          `[auth] The stack may still be starting. Check the "local" / "server" panes, then press "a" again.\n\n` +
-          `Press Enter to return to TUI...`
+      logOrch(
+        `auth: waiting for the stack server timed out (${Math.round((Number.isFinite(waitTimeoutMs) ? waitTimeoutMs : 45_000) / 1000)}s); check local/server, then press a again`,
       );
-      try {
-        process.stdin.setRawMode(false);
-      } catch {
-        // ignore
-      }
-      try {
-        process.stdin.resume();
-      } catch {
-        // ignore
-      }
-      await waitForEnter({ stdin: process.stdin, timeoutMs: 120_000 });
       paused = false;
       startSummaryTimer();
       await refreshSummary();
@@ -992,22 +980,7 @@ async function main() {
     const healthOk = await waitForHappierHealthOk(internalServerUrl, { timeoutMs: 45_000, intervalMs: 300 });
     process.stdout.write(healthOk ? ' ✓\n' : ' (timeout)\n');
     if (!healthOk) {
-      process.stdout.write(
-        `[auth] server did not become healthy in time.\n` +
-          `[auth] Check the "local" / "server" panes, then press "a" again.\n\n` +
-          `Press Enter to return to TUI...`
-      );
-      try {
-        process.stdin.setRawMode(false);
-      } catch {
-        // ignore
-      }
-      try {
-        process.stdin.resume();
-      } catch {
-        // ignore
-      }
-      await waitForEnter({ stdin: process.stdin, timeoutMs: 120_000 });
+      logOrch('auth: server did not become healthy in time; check local/server, then press a again');
       paused = false;
       startSummaryTimer();
       await refreshSummary();
@@ -1015,40 +988,25 @@ async function main() {
       return;
     }
 
-    const handoff = detachTuiStdinForChild({ stdin: process.stdin, onData });
-
-    const authResult = await new Promise((resolvePromise) => {
-      const proc = spawn(process.execPath, authArgs, { cwd: rootDir, env: process.env, stdio: 'inherit' });
-      proc.on('exit', (code, signal) => resolvePromise({ code, signal }));
-      proc.on('error', () => resolvePromise({ code: 1, signal: null }));
-    });
-
-    let hold = shouldHoldAfterAuthExit(authResult);
-
-    if (hold) {
-      try {
-        process.stdout.write(
-          `\n[auth] finished (code=${authResult?.code ?? 'null'}, sig=${authResult?.signal ?? 'null'}). Press Enter to return to TUI...`
-        );
-        // Re-enable stdin reads (in cooked mode) for the one-line prompt.
-        try {
-          process.stdin.setRawMode(false);
-        } catch {
-          // ignore
-        }
-        try {
-          process.stdin.resume();
-        } catch {
-          // ignore
-        }
-        await waitForEnter({ stdin: process.stdin, timeoutMs: 120_000 });
-      } catch {
-        // ignore
-      }
+    let authResult;
+    try {
+      authResult = await runWithTuiStdinHandoff({
+        stdin: process.stdin,
+        onData,
+        run: () => new Promise((resolvePromise) => {
+          const proc = spawn(process.execPath, authArgs, { cwd: rootDir, env: process.env, stdio: 'inherit' });
+          proc.on('exit', (code, signal) => resolvePromise({ code, signal }));
+          proc.on('error', () => resolvePromise({ code: 1, signal: null }));
+        }),
+      });
+    } catch (error) {
+      authResult = { code: 1, signal: null };
+      logOrch(`auth: failed to start (${error instanceof Error ? error.message : String(error)})`);
     }
 
     paused = false;
-    handoff.restoreForTui();
+    const authExitNotice = buildTuiAuthExitNotice(authResult);
+    if (authExitNotice) logOrch(authExitNotice);
 
     // Restart summary refresh.
     startSummaryTimer();
@@ -1488,8 +1446,7 @@ async function main() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
+  ensureTuiStdinMode(process.stdin);
   const onData = (d) => {
     const s = d.toString('utf-8');
     if (s === '\u0003' || s === 'q') {
