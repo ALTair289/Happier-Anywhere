@@ -6,6 +6,7 @@ import { SPAWN_SESSION_ERROR_CODES } from '@happier-dev/protocol';
 import { logger } from '@/ui/logger';
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
 import {
+  persistOpenCodeBrokerLoadHandshakeObservation,
   resetOpenCodeBrokerLoadHandshakesForTests,
   resolveOpenCodeBrokerLoadHandshakeStatus,
 } from '@/backends/opencode/brokerPlugin';
@@ -3998,7 +3999,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
     }
   });
 
-  it('records the broker load handshake under the SCOPED token and exposes it via the loaded-status query (F4)', async () => {
+  it('durably binds the OpenCode load handshake before acknowledging it so daemon B can recover without an A readiness query', async () => {
     resetOpenCodeBrokerLoadHandshakesForTests();
     const identity = 'opencode|connected|broker:1|openai-codex:p:';
     const loadNonce = 'spawn-control-server-test';
@@ -4056,6 +4057,10 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       requestShutdown: () => {},
       onHappySessionWebhook: () => {},
       controlToken,
+      persistOpenCodeBrokerLoadHandshakeObservation: async (expectation) =>
+        await persistOpenCodeBrokerLoadHandshakeObservation(expectation, {
+          managedOpenCodeActivationStateDeps: activationDeps,
+        }),
       resolveOpenCodeBrokerLoadHandshakeStatus: async (expectation) =>
         await resolveOpenCodeBrokerLoadHandshakeStatus(expectation, {
           managedOpenCodeActivationStateDeps: activationDeps,
@@ -4082,6 +4087,23 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       });
       expect(masterRejected.statusCode).toBe(401);
 
+      // A handshake whose exact generation cannot yet be durably bound is not acknowledged. The
+      // same one-shot observation can be presented again after its current broker authority is usable.
+      brokerStateUsable = false;
+      const notPersisted = await appA.inject({
+        method: 'POST',
+        url: '/connected-service-auth/broker/loaded',
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        payload: { ...statusPayload, processPid: 4242 },
+      });
+      expect(notPersisted.statusCode).toBe(503);
+      expect(notPersisted.json()).toEqual({
+        ok: false,
+        errorCode: 'connected_service_broker_activation_proof_unavailable',
+      });
+      expect(states.get('managed-child')?.brokerActivationProof).toBeUndefined();
+
+      brokerStateUsable = true;
       const registered = await appA.inject({
         method: 'POST',
         url: '/connected-service-auth/broker/loaded',
@@ -4091,28 +4113,9 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       expect(registered.statusCode).toBe(200);
       expect(registered.json()).toEqual({ ok: true, result: { acknowledged: true } });
 
-      // A Map hit is not enough while the current atomic broker descriptor is unusable.
-      brokerStateUsable = false;
-      const persistenceFailed = await appA.inject({
-        method: 'POST',
-        url: '/connected-service-auth/opencode-broker/loaded-status',
-        headers: { 'x-happier-daemon-token': 'token' },
-        payload: statusPayload,
-      });
-      expect(persistenceFailed.statusCode).toBe(200);
-      expect(persistenceFailed.json()).toEqual({ ok: true, observed: false });
-
-      // Once the exact process and current broker descriptor are proven, the real managed-child
-      // owner commits the bounded activation fact.
-      brokerStateUsable = true;
-      const after = await appA.inject({
-        method: 'POST',
-        url: '/connected-service-auth/opencode-broker/loaded-status',
-        headers: { 'x-happier-daemon-token': 'token' },
-        payload: statusPayload,
-      });
-      expect(after.statusCode).toBe(200);
-      expect(after.json()).toEqual({ ok: true, observed: true });
+      // This is the durability boundary: no loaded-status/readiness call has run after the one-shot
+      // plugin handshake. A successful acknowledgement must already have committed the exact proof
+      // to the existing managed-child generation owner.
       expect(states.get('managed-child')?.brokerActivationProof).toEqual(expect.objectContaining({
         loadNonce,
         processPid: 4242,

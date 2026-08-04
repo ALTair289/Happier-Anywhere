@@ -17,9 +17,9 @@ import {
   OPEN_CODE_BROKER_LOAD_NONCE_ENV,
   OPEN_CODE_BROKER_PROVIDERS,
   OPEN_CODE_BROKER_SELECTIONS_ENV,
-  ensureOpenCodeBrokerPluginAssets,
   parseOpenCodeBrokerSelections,
-} from '@/backends/opencode/brokerPlugin';
+} from '@/backends/opencode/brokerPlugin/openCodeBrokerPluginEnv';
+import { ensureOpenCodeBrokerPluginAssets } from '@/backends/opencode/brokerPlugin/openCodeBrokerPluginAssets';
 import { resolveOpenCodeManagedServerTrackedPid } from './resolveOpenCodeManagedServerTrackedPid';
 import { terminateManagedOpenCodeServerPidBestEffort } from './terminateManagedOpenCodeServerPidBestEffort';
 import { waitForOpenCodeServerHealth } from './waitForOpenCodeServerHealth';

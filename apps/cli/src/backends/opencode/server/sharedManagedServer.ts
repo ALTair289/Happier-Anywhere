@@ -466,9 +466,9 @@ async function isExactManagedOpenCodeBrokerActivationState(
 /**
  * Associate a current-daemon exact load observation with the one verified managed child state.
  *
- * The observation remains process-local until the first readiness query. Persisting it here—after
- * process/start/command/owner/state proof and before Provider dispatch—gives a replacement daemon a
- * bounded child-generation fact without creating a second registry or retaining daemon authority.
+ * The handshake producer persists the observation here—after process/start/command/owner/state
+ * proof and before acknowledging success—so a replacement daemon receives a bounded child-generation
+ * fact without creating a second registry or retaining daemon authority.
  */
 export async function persistManagedOpenCodeBrokerActivationProof(
   observation: OpenCodeBrokerLoadHandshakeObservation,

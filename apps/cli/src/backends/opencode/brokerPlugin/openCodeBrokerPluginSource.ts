@@ -269,28 +269,34 @@ async function brokeredFetch(input, init) {
 let handshakeSent = false;
 async function sendLoadHandshake() {
   if (handshakeSent) return;
-  handshakeSent = true;
   try {
     const selectionIdentity = process.env[SELECTION_IDENTITY_ENV];
     if (typeof selectionIdentity !== "string" || selectionIdentity.trim().length === 0) return;
     const loadNonce = process.env[LOAD_NONCE_ENV];
     if (typeof loadNonce !== "string" || loadNonce.trim().length === 0) return;
+    const selections = readJsonEnv(SELECTIONS_ENV) || {};
+    const providers = ["openai", "anthropic"].filter((provider) => selections[provider]);
+    if (providers.length === 0) return;
     const daemonEndpoint = readCurrentBrokerEndpoint();
-    await fetch("http://127.0.0.1:" + daemonEndpoint.httpPort + LOADED_HANDSHAKE_PATH, {
+    const response = await fetch("http://127.0.0.1:" + daemonEndpoint.httpPort + LOADED_HANDSHAKE_PATH, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-happier-daemon-token": daemonEndpoint.scopedToken },
       body: JSON.stringify({
         runtimeKind: "opencode_managed_server",
         selectionIdentity: selectionIdentity,
         loadNonce: loadNonce,
-        providers: [PROVIDER],
+        providers: providers,
         pluginVersion: process.env[PLUGIN_VERSION_ENV] || PLUGIN_VERSION,
         processPid: process.pid,
       }),
       signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(2000) : undefined,
-    }).catch(() => {});
+    });
+    // Only the daemon's durable managed-child acknowledgement consumes this one-shot signal. A
+    // failed request remains eligible if OpenCode invokes the plugin factory again; no retry owner,
+    // timer, or heartbeat is introduced here.
+    if (response.ok) handshakeSent = true;
   } catch (error) {
-    // Swallow: the handshake is advisory; auth still flows via the loader + bridge.
+    // Swallow: auth still flows via the loader + bridge, and a later factory invocation can retry.
   }
 }
 

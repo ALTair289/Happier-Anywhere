@@ -19,6 +19,7 @@ const REFRESH_TOKEN_SENTINEL = 'refresh-token-MUST-NOT-LEAK';
 const MASTER_CONTROL_TOKEN_SENTINEL = 'master-control-token-MUST-NOT-LEAK';
 
 type BrokerHooks = {
+  factory: () => Promise<{ auth: { provider: string; loader: BrokerHooks['loader'] } }>;
   loader: (getAuth: () => Promise<unknown>) => Promise<Record<string, unknown>>;
   provider: string;
   raw: Record<string, unknown>;
@@ -29,9 +30,14 @@ async function loadBrokerPlugin(provider: 'openai' | 'anthropic'): Promise<Broke
   const file = join(dir, `broker-${provider}-${Math.random().toString(36).slice(2)}.mjs`);
   await writeFile(file, buildOpenCodeBrokerPluginSource(provider), 'utf8');
   const mod = await import(pathToFileURL(file).href);
-  const factory = mod.default as () => Promise<{ auth: { provider: string; loader: BrokerHooks['loader'] } }>;
+  const factory = mod.default as BrokerHooks['factory'];
   const hooks = await factory();
-  return { loader: hooks.auth.loader, provider: hooks.auth.provider, raw: hooks as unknown as Record<string, unknown> };
+  return {
+    factory,
+    loader: hooks.auth.loader,
+    provider: hooks.auth.provider,
+    raw: hooks as unknown as Record<string, unknown>,
+  };
 }
 
 async function writeBrokerStateFile(token: string): Promise<string> {
@@ -187,6 +193,7 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
     process.env[OPEN_CODE_BROKER_STATE_PATH_ENV] = await writeBrokerStateFile(MASTER_CONTROL_TOKEN_SENTINEL);
     process.env[OPEN_CODE_BROKER_SELECTIONS_ENV] = serializeOpenCodeBrokerSelections({
       openai: { serviceId: 'openai-codex', profileId: 'codex-pro', accountId: null, planType: 'pro' },
+      anthropic: { serviceId: 'claude-subscription', profileId: 'claude-pro', accountId: null, planType: null },
     });
     const selectionIdentity = `opencode|connected|broker:${OPEN_CODE_BROKER_PLUGIN_VERSION}|openai-codex:codex-pro:`;
     process.env.HAPPIER_OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY = selectionIdentity;
@@ -212,10 +219,50 @@ describe('openCodeBrokerPluginSource (generated artifact, exercised live)', () =
       const body = JSON.parse(handshake!.body);
       expect(body.selectionIdentity).toBe(selectionIdentity);
       expect(body.loadNonce).toBe('opencode-spawn-1');
-      expect(body.providers).toContain('openai');
+      // Every generated provider leaf reports the complete managed-child provider set so the
+      // handshake producer can durably bind one exact generation without waiting for later status
+      // polling to aggregate process-local observations.
+      expect(body.providers).toEqual(['openai', 'anthropic']);
       // No-leak: the handshake never carries the MASTER control token (header or body).
       expect(handshake!.headers.get('x-happier-daemon-token')).not.toBe(MASTER_CONTROL_TOKEN_SENTINEL);
       expect(handshake!.body).not.toContain(MASTER_CONTROL_TOKEN_SENTINEL);
+    } finally {
+      delete process.env.HAPPIER_OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY;
+      delete process.env.HAPPIER_OPENCODE_BROKER_LOAD_NONCE;
+    }
+  });
+
+  it('does not consume the one-shot handshake until the daemon acknowledges durable activation proof', async () => {
+    process.env[OPEN_CODE_BROKER_STATE_PATH_ENV] = await writeBrokerStateFile('tok');
+    process.env[OPEN_CODE_BROKER_SELECTIONS_ENV] = serializeOpenCodeBrokerSelections({
+      openai: { serviceId: 'openai-codex', profileId: 'p', accountId: null, planType: null },
+    });
+    process.env.HAPPIER_OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY =
+      `opencode|connected|broker:${OPEN_CODE_BROKER_PLUGIN_VERSION}|openai-codex:p:`;
+    process.env.HAPPIER_OPENCODE_BROKER_LOAD_NONCE = 'opencode-spawn-retry';
+    let handshakeCalls = 0;
+    globalThis.fetch = vi.fn(async (input: unknown) => {
+      if (String(input).includes('/connected-service-auth/broker/loaded')) {
+        handshakeCalls += 1;
+        return new Response('{}', { status: handshakeCalls === 1 ? 503 : 200 });
+      }
+      return new Response('ok', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    try {
+      const { factory } = await loadBrokerPlugin('openai');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(handshakeCalls).toBe(1);
+
+      // OpenCode may invoke the plugin factory again. A rejected durability boundary must leave the
+      // same generated one-shot eligible; the successful second acknowledgement consumes it.
+      await factory();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(handshakeCalls).toBe(2);
+
+      await factory();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(handshakeCalls).toBe(2);
     } finally {
       delete process.env.HAPPIER_OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY;
       delete process.env.HAPPIER_OPENCODE_BROKER_LOAD_NONCE;

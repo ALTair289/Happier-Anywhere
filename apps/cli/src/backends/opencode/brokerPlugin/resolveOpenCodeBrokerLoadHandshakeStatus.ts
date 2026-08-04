@@ -16,12 +16,51 @@ import {
   OPEN_CODE_BROKER_PROVIDERS,
 } from './openCodeBrokerPluginEnv';
 
+function resolveManagedOpenCodeBrokerActivationExpectation(
+  expectation: OpenCodeBrokerLoadHandshakeKey,
+): ManagedOpenCodeBrokerActivationExpectation | null {
+  if (expectation.runtimeKind !== 'opencode_managed_server') return null;
+  const providers = OPEN_CODE_BROKER_PROVIDERS.filter((provider) =>
+    expectation.providers.includes(provider));
+  if (providers.length !== expectation.providers.length) return null;
+  return {
+    runtimeKind: 'opencode_managed_server',
+    selectionIdentity: expectation.selectionIdentity,
+    loadNonce: expectation.loadNonce,
+    providers,
+    pluginVersion: expectation.pluginVersion,
+  };
+}
+
+/**
+ * Bind the current daemon's exact OpenCode load observation to the existing managed-child
+ * generation owner. The handshake route awaits this boundary before it acknowledges the plugin.
+ */
+export async function persistOpenCodeBrokerLoadHandshakeObservation(
+  expectation: OpenCodeBrokerLoadHandshakeKey,
+  options: Readonly<{
+    managedOpenCodeActivationStateDeps?: ManagedOpenCodeBrokerActivationStateDeps;
+  }> = {},
+): Promise<boolean> {
+  if (isOpenCodeBrokerLoadHandshakeConflicted(expectation)) return false;
+  const openCodeExpectation = resolveManagedOpenCodeBrokerActivationExpectation(expectation);
+  if (!openCodeExpectation) return false;
+  const observation = readOpenCodeBrokerLoadHandshakeObservation(expectation);
+  if (!observation) return false;
+  return options.managedOpenCodeActivationStateDeps
+    ? await persistManagedOpenCodeBrokerActivationProof(
+      observation,
+      options.managedOpenCodeActivationStateDeps,
+    )
+    : await persistCurrentManagedOpenCodeBrokerActivationProof(observation);
+}
+
 /**
  * One readiness decision for both broker children.
  *
- * OpenCode can outlive its daemon independently, so the exact current observation is persisted in
- * and later rehydrated from the existing verified managed-child state. Pi's stdio subprocess cannot
- * be independently adopted; only its current daemon Map observation is valid.
+ * OpenCode can outlive its daemon independently, so readiness consumes only the proof already
+ * persisted by the acknowledged handshake. Pi's stdio subprocess cannot be independently adopted;
+ * only its current daemon Map observation is valid.
  */
 export async function resolveOpenCodeBrokerLoadHandshakeStatus(
   expectation: OpenCodeBrokerLoadHandshakeKey,
@@ -36,28 +75,13 @@ export async function resolveOpenCodeBrokerLoadHandshakeStatus(
     return observation !== null;
   }
 
-  const providers = OPEN_CODE_BROKER_PROVIDERS.filter((provider) =>
-    expectation.providers.includes(provider));
-  if (providers.length !== expectation.providers.length) return false;
-  const openCodeExpectation: ManagedOpenCodeBrokerActivationExpectation = {
-    runtimeKind: 'opencode_managed_server',
-    selectionIdentity: expectation.selectionIdentity,
-    loadNonce: expectation.loadNonce,
-    providers,
-    pluginVersion: expectation.pluginVersion,
-  };
+  const openCodeExpectation = resolveManagedOpenCodeBrokerActivationExpectation(expectation);
+  if (!openCodeExpectation) return false;
   if (options.managedOpenCodeActivationStateDeps) {
-    return observation
-      ? await persistManagedOpenCodeBrokerActivationProof(
-        observation,
-        options.managedOpenCodeActivationStateDeps,
-      )
-      : await rehydrateManagedOpenCodeBrokerActivationProof(
-        openCodeExpectation,
-        options.managedOpenCodeActivationStateDeps,
-      );
+    return await rehydrateManagedOpenCodeBrokerActivationProof(
+      openCodeExpectation,
+      options.managedOpenCodeActivationStateDeps,
+    );
   }
-  return observation
-    ? await persistCurrentManagedOpenCodeBrokerActivationProof(observation)
-    : await rehydrateCurrentManagedOpenCodeBrokerActivationProof(openCodeExpectation);
+  return await rehydrateCurrentManagedOpenCodeBrokerActivationProof(openCodeExpectation);
 }

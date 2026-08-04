@@ -1,5 +1,4 @@
 import axios from 'axios';
-import { buildCurrentCliClientCompatibilityHttpHeaders } from '@/api/clientCompatibility/cliClientCompatibility';
 import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 
 import {
@@ -89,7 +88,6 @@ async function fetchSingleHappyTranscriptRow(params: {
     headers: {
       Authorization: `Bearer ${params.token}`,
       'Content-Type': 'application/json',
-      ...buildCurrentCliClientCompatibilityHttpHeaders('session-runner'),
     },
     params: {
       limit: 1,

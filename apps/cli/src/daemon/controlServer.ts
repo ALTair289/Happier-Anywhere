@@ -28,6 +28,7 @@ import {
   OPEN_CODE_BROKER_LOADED_HANDSHAKE_PATH,
   OpenCodeBrokerLoadHandshakeRequestSchema,
   OpenCodeBrokerLoadHandshakeStatusRequestSchema,
+  persistOpenCodeBrokerLoadHandshakeObservation as persistOpenCodeBrokerLoadHandshakeObservationDefault,
   recordOpenCodeBrokerLoadHandshake,
   resolveOpenCodeBrokerLoadHandshakeStatus as resolveOpenCodeBrokerLoadHandshakeStatusDefault,
 } from '@/backends/opencode/brokerPlugin';
@@ -405,6 +406,7 @@ export function createDaemonControlApp({
   handleClaudeSubscriptionAuthTokensRefresh,
   handleExecutionRunConnectedServiceMaterialize,
   handleExecutionRunConnectedServiceRelease,
+  persistOpenCodeBrokerLoadHandshakeObservation = persistOpenCodeBrokerLoadHandshakeObservationDefault,
   resolveOpenCodeBrokerLoadHandshakeStatus = resolveOpenCodeBrokerLoadHandshakeStatusDefault,
   runtimeAuthRecoveryScheduler,
   isShuttingDown,
@@ -437,6 +439,7 @@ export function createDaemonControlApp({
     pid: number;
     materializationKey: string;
   }>) => Promise<Readonly<{ released: boolean }>>;
+  persistOpenCodeBrokerLoadHandshakeObservation?: typeof persistOpenCodeBrokerLoadHandshakeObservationDefault;
   resolveOpenCodeBrokerLoadHandshakeStatus?: typeof resolveOpenCodeBrokerLoadHandshakeStatusDefault;
   handleConnectedServiceRuntimeAuthFailure?: (input: Readonly<{
     sessionId: string;
@@ -1737,10 +1740,14 @@ export function createDaemonControlApp({
       response: {
         200: z.object({ ok: z.literal(true), result: z.object({ acknowledged: z.literal(true) }) }),
         401: authSchema401,
+        503: z.object({
+          ok: z.literal(false),
+          errorCode: z.literal('connected_service_broker_activation_proof_unavailable'),
+        }),
       },
     },
     preHandler: requireBrokerRefreshAuth,
-  }, async (request) => {
+  }, async (request, reply) => {
     recordOpenCodeBrokerLoadHandshake({
       runtimeKind: request.body.runtimeKind,
       selectionIdentity: request.body.selectionIdentity,
@@ -1749,6 +1756,22 @@ export function createDaemonControlApp({
       pluginVersion: request.body.pluginVersion,
       processPid: request.body.processPid,
     });
+    if (request.body.runtimeKind === 'opencode_managed_server') {
+      const persisted = await persistOpenCodeBrokerLoadHandshakeObservation({
+        runtimeKind: request.body.runtimeKind,
+        selectionIdentity: request.body.selectionIdentity,
+        loadNonce: request.body.loadNonce,
+        providers: request.body.providers,
+        pluginVersion: request.body.pluginVersion,
+      });
+      if (!persisted) {
+        reply.code(503);
+        return {
+          ok: false as const,
+          errorCode: 'connected_service_broker_activation_proof_unavailable' as const,
+        };
+      }
+    }
     return { ok: true as const, result: { acknowledged: true as const } };
   });
 
