@@ -37,6 +37,7 @@ import {
 } from './unifiedTerminal/telemetry';
 import { createClaudeSessionTranscriptProjector } from './localControl/createClaudeSessionTranscriptProjector';
 import { createClaudeWorkflowActivitySourceForSession } from './workflows/createClaudeWorkflowActivitySourceForSession';
+import { loadClaudeJsonlReplayBaseline } from './utils/loadClaudeJsonlReplayBaseline';
 
 function upsertClaudePermissionModeArgs(
     args: string[] | undefined,
@@ -167,15 +168,31 @@ export async function claudeLocalLauncher(
         });
         const unifiedTelemetry = createClaudeUnifiedTelemetrySink();
 
+        const resumesKnownClaudeSession = Boolean(session.sessionId || session.transcriptPath);
+        const replayBaseline = resumesKnownClaudeSession
+            ? await loadClaudeJsonlReplayBaseline({
+                loadCommittedBaseline: session.client.fetchCommittedClaudeJsonlMessageBaseline?.bind(session.client),
+                resumesKnownClaudeSession: true,
+                logPrefix: '[local]',
+            })
+            : null;
+
         // Create scanner
             const scanner = await createSessionScanner({
         sessionId: session.sessionId,
         transcriptPath: session.transcriptPath,
         claudeConfigDir: resolveClaudeConfigDirOverride(process.env),
         workingDirectory: session.path,
-        onMessage: (message) => {
-            transcriptProjector.observe(message);
-            lifecycleTracker.observeTranscript(message);
+        initialProcessedMessageKeys: replayBaseline?.initialProcessedMessageKeys,
+        replayInitialMessages: resumesKnownClaudeSession,
+        replaySuppressRowsBeforeMs: replayBaseline?.replaySuppressRowsBeforeMs ?? null,
+        onMessage: async (message, observation) => {
+            if (observation?.historicalReplay) {
+                await transcriptProjector.observeCommitted(message);
+            } else {
+                transcriptProjector.observe(message);
+                lifecycleTracker.observeTranscript(message);
+            }
         },
         // Native Claude `/goal` source (plan H7): goal_status attachments + the
         // system/init slash_commands are dropped before `onMessage` (F2 gate), so

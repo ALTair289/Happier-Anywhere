@@ -7,12 +7,7 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '@/ui/logger';
 import { getProjectPath } from '../utils/path';
-
-// Allowance for clock skew between Claude JSONL row timestamps (runner machine clock) and the
-// server commit times that bound the committed-keys baseline coverage window (Lane N4). A
-// genuinely-missed row is written minutes before the respawn while the coverage window usually
-// reaches hours back, so a generous allowance keeps backfill intact.
-const COMMITTED_BASELINE_COVERAGE_SKEW_MS = 10 * 60_000;
+import { loadClaudeJsonlReplayBaseline } from '../utils/loadClaudeJsonlReplayBaseline';
 import type { SessionHookData } from '../utils/startHookServer';
 import type { ClaudeUnifiedSessionHookSubscription } from './createClaudeUnifiedHookLifecycleBridge';
 import type { ClaudeUnifiedStartableDisposable } from './_types';
@@ -150,7 +145,8 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
   transcriptPath?: string | null | undefined;
   workingDirectory: string;
   claudeConfigDir?: string | null | undefined;
-  onMessage?: ((message: RawJSONLines) => void) | undefined;
+  onMessage?: ((message: RawJSONLines) => void | Promise<void>) | undefined;
+  onHistoricalMessage?: ((message: RawJSONLines) => void | Promise<void>) | undefined;
   onTranscriptMessage?: ((message: RawJSONLines) => void) | undefined;
   onRawTranscriptValue?: ((
     value: unknown,
@@ -391,24 +387,13 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
       const resumesKnownClaudeSession = Boolean(opts.sessionId || opts.transcriptPath);
       if (waitForSessionStartHook) {
         await startKnownResumeRawFollower();
-        try {
-          const baseline = await Promise.resolve(opts.loadCommittedClaudeJsonlMessageBaseline?.())
-            ?? { keys: new Set<string>(), complete: true, oldestCoveredAtMs: null };
-          committedClaudeJsonlMessageKeys = baseline.keys;
-          if (!baseline.complete && typeof baseline.oldestCoveredAtMs === 'number' && Number.isFinite(baseline.oldestCoveredAtMs)) {
-            replaySuppressRowsBeforeMs = baseline.oldestCoveredAtMs - COMMITTED_BASELINE_COVERAGE_SKEW_MS;
-          }
-        } catch (error) {
-          // Fail CLOSED for resumes (Lane N4, incident pid-44935): without a baseline we cannot
-          // distinguish committed history from missed rows, and replay-as-new floods the session
-          // with duplicates. Suppressing the initial snapshot only degrades downtime backfill,
-          // never correctness; live rows keep flowing. Fresh sessions have no committed history
-          // to duplicate, so they keep the normal replay.
-          if (resumesKnownClaudeSession) {
-            replaySuppressRowsBeforeMs = Number.POSITIVE_INFINITY;
-          }
-          logger.debug('[unified]: committed Claude JSONL baseline unavailable; suppressing resume replay (fail-closed)', error);
-        }
+        const baseline = await loadClaudeJsonlReplayBaseline({
+          loadCommittedBaseline: opts.loadCommittedClaudeJsonlMessageBaseline,
+          resumesKnownClaudeSession,
+          logPrefix: '[unified]',
+        });
+        committedClaudeJsonlMessageKeys = baseline.initialProcessedMessageKeys;
+        replaySuppressRowsBeforeMs = baseline.replaySuppressRowsBeforeMs;
       }
       if (disposed) {
         pendingSessionStarts.length = 0;
@@ -429,7 +414,7 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
           : opts.transcriptPath,
         claudeConfigDir: opts.claudeConfigDir,
         workingDirectory: opts.workingDirectory,
-        onMessage: (message) => {
+        onMessage: async (message, observation) => {
           const lifecycleOwnedByCurrentRunner = shouldForwardResumeTranscriptToLifecycle(
             message,
             resumeLiveTranscriptAfterMsBySessionId,
@@ -438,7 +423,10 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
             shouldForwardFreshResumeTranscriptToMessage(message, freshResumeLiveMessageAfterMsBySessionId)
             && !shouldSuppressPriorEraFailedTurnVisibleReplay(message, lifecycleOwnedByCurrentRunner)
           ) {
-            opts.onMessage?.(message);
+            const handler = observation?.historicalReplay === true
+              ? (opts.onHistoricalMessage ?? opts.onMessage)
+              : opts.onMessage;
+            await handler?.(message);
           }
           if (lifecycleOwnedByCurrentRunner) {
             opts.onTranscriptMessage?.(message);
@@ -454,7 +442,7 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
         onTranscriptMissing: opts.onTranscriptMissing,
         transcriptMissingWarningMs: opts.transcriptMissingWarningMs,
         initialProcessedMessageKeys: committedClaudeJsonlMessageKeys,
-        replayInitialMessages: waitForSessionStartHook && !prebindKnownResumeTranscript,
+        replayInitialMessages: waitForSessionStartHook,
         replaySuppressRowsBeforeMs,
         discoverNewSessions: waitForSessionStartHook && !knownResumeSessionId && !opts.transcriptPath,
         bindToFirstSession: waitForSessionStartHook,

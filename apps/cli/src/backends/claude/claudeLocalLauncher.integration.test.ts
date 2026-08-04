@@ -157,6 +157,17 @@ function createLocalHarness(options?: {
       invokeLocal: vi.fn(async () => ({})),
     },
     sendClaudeSessionMessage: vi.fn(),
+    sendClaudeSessionMessageCommitted: vi.fn(async () => ({
+      localId: 'claude-jsonl:main:assistant:test',
+      messageId: 'message-test',
+      seq: 1,
+      didWrite: true,
+    })),
+    fetchCommittedClaudeJsonlMessageBaseline: vi.fn(async () => ({
+      keys: new Set<string>(),
+      complete: true,
+      oldestCoveredAtMs: null,
+    })),
     sendAgentMessage: vi.fn(),
     sendAgentMessageCommitted: vi.fn(async () => {}),
     sendSessionEvent,
@@ -258,6 +269,38 @@ describe('claudeLocalLauncher', () => {
       { state: 'idle', activeCount: 0 },
       'claude-local-provider-observer-installed',
     );
+  });
+
+  it('configures local resume scanning to backfill only uncommitted Claude rows before provider startup', async () => {
+    const order: string[] = [];
+    const { session, client } = createLocalHarness();
+    session.sessionId = 'claude-resume-session';
+    session.transcriptPath = '/tmp/claude-resume-session.jsonl';
+    client.fetchCommittedClaudeJsonlMessageBaseline = vi.fn(async () => {
+      order.push('baseline-loaded');
+      return {
+        keys: new Set(['main:assistant:already-committed']),
+        complete: true,
+        oldestCoveredAtMs: null,
+      };
+    });
+    mockCreateSessionScanner.mockImplementationOnce(async (options) => {
+      order.push('scanner-installed');
+      expect(options.replayInitialMessages).toBe(true);
+      expect(Array.from(options.initialProcessedMessageKeys ?? [])).toEqual([
+        'main:assistant:already-committed',
+      ]);
+      expect(options.replaySuppressRowsBeforeMs).toBeNull();
+      return createSessionScannerStub();
+    });
+    mockClaudeLocal.mockImplementationOnce(async () => {
+      order.push('provider-started');
+    });
+
+    const { claudeLocalLauncher } = await import('./claudeLocalLauncher');
+    await claudeLocalLauncher(session);
+
+    expect(order).toEqual(['baseline-loaded', 'scanner-installed', 'provider-started']);
   });
 
   it('arms workflow startup reconciliation only after the local transcript observer installs', async () => {

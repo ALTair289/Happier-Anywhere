@@ -121,6 +121,7 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
   workflowActivitySource?: ClaudeWorkflowActivitySource | null;
 }>): Readonly<{
   observe(message: RawJSONLines): void;
+  observeCommitted(message: RawJSONLines): Promise<void>;
   observeRaw(
     value: unknown,
     observation?: Readonly<{ historicalReplay?: boolean }>,
@@ -145,10 +146,13 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
   reset(): void;
 }> {
   const workflowActivitySource = params.workflowActivitySource ?? null;
+  let sendVisibleMessage = (message: RawJSONLines): void => {
+    params.session.client.sendClaudeSessionMessage(message);
+  };
   const turnDiffBridge = createClaudeRawMessageTurnDiffBridge({
     getSessionId: () => params.session.sessionId ?? params.session.client.sessionId ?? 'unknown',
     sendMessage: (message) => {
-      params.session.client.sendClaudeSessionMessage(message);
+      sendVisibleMessage(message);
     },
   });
   const publishWorkStateSnapshot = (snapshot: ClaudeLocalWorkStateSnapshot): void => {
@@ -289,21 +293,50 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
     }));
   };
 
-  return {
-    observe(message) {
-      maybeAdoptEffectiveModel(message);
-      maybeProjectWorkState(message);
-      maybeEmitCompactionEvents(message);
-      const rateLimitDetails = mapClaudeRateLimitEventToUsageDetails(message);
-      if (rateLimitDetails) surfaceRateLimit(rateLimitDetails);
+  const observeWithVisibleSender = (
+    message: RawJSONLines,
+    sender: (visibleMessage: RawJSONLines) => void,
+    options?: Readonly<{ historicalReplay?: boolean }>,
+  ): void => {
+      const previousSender = sendVisibleMessage;
+      sendVisibleMessage = sender;
+      try {
+      if (options?.historicalReplay !== true) {
+        maybeAdoptEffectiveModel(message);
+        maybeProjectWorkState(message);
+        maybeEmitCompactionEvents(message);
+        const rateLimitDetails = mapClaudeRateLimitEventToUsageDetails(message);
+        if (rateLimitDetails) surfaceRateLimit(rateLimitDetails);
+      }
       if (isClaudeInternalTranscriptMessage(message)) {
         return;
       }
       const bridged = turnDiffBridge.observe(message);
       if (bridged) {
-        params.session.client.sendClaudeSessionMessage(bridged);
+        sendVisibleMessage(bridged);
         turnDiffBridge.flushAfterForwardIfNeeded();
       }
+      } finally {
+        sendVisibleMessage = previousSender;
+      }
+  };
+
+  return {
+    observe(message) {
+      observeWithVisibleSender(message, (visibleMessage) => {
+        params.session.client.sendClaudeSessionMessage(visibleMessage);
+      });
+    },
+    async observeCommitted(message) {
+      const commits: Promise<unknown>[] = [];
+      observeWithVisibleSender(message, (visibleMessage) => {
+        const commit = params.session.client.sendClaudeSessionMessageCommitted;
+        if (!commit) {
+          throw new Error('Claude transcript committed-custody transport is unavailable');
+        }
+        commits.push(commit.call(params.session.client, visibleMessage));
+      }, { historicalReplay: true });
+      await Promise.all(commits);
     },
     // Raw transcript channel (plan H7): the scanner forwards every parsed JSONL
     // value here BEFORE its visible-transcript filtering, so `attachment`

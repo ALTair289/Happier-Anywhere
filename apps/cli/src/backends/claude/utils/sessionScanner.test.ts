@@ -17,6 +17,14 @@ async function waitFor(predicate: () => boolean, timeoutMs: number = 2000, inter
   throw new Error('Timed out waiting for condition')
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve
+  })
+  return { promise, resolve }
+}
+
 function getFirstTextFromContent(content: unknown): string | null {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return null
@@ -486,6 +494,46 @@ describe('sessionScanner', () => {
     expect(collectedMessages).toHaveLength(1)
     expect(collectedMessages[0].type).toBe('assistant')
     expect(collectedMessages[0].uuid).toBe('missing_during_runner_restart')
+  })
+
+  it('does not finish initial replay until asynchronous message handling is acknowledged', async () => {
+    const altProjectDir = join(testDir, 'alt-project-committed-replay-ack')
+    await mkdir(altProjectDir, { recursive: true })
+
+    const sessionId = '22222222-2222-2222-2222-222222222229'
+    const transcriptPath = join(altProjectDir, `${sessionId}.jsonl`)
+    await writeFile(
+      transcriptPath,
+      JSON.stringify({
+        type: 'assistant',
+        uuid: 'missing_requires_ack',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'must commit before ready' }] },
+      }) + '\n',
+    )
+
+    const replayAck = createDeferred<void>()
+    let scannerReady = false
+    const scannerPromise = createSessionScanner({
+      sessionId,
+      transcriptPath,
+      workingDirectory: testDir,
+      initialProcessedMessageKeys: new Set<string>(),
+      replayInitialMessages: true,
+      onMessage: async (_message, observation) => {
+        expect(observation).toEqual({ historicalReplay: true })
+        await replayAck.promise
+      },
+    }).then((createdScanner) => {
+      scannerReady = true
+      return createdScanner
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(scannerReady).toBe(false)
+
+    replayAck.resolve()
+    scanner = await scannerPromise
+    expect(scannerReady).toBe(true)
   })
 
   it('suppresses control-command XML rows in replay and live follow mode while keeping genuine user backfill', async () => {

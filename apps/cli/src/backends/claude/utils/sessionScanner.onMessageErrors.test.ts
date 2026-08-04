@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createSessionScanner } from './sessionScanner'
-import { mkdir, writeFile, rm } from 'node:fs/promises'
+import { appendFile, mkdir, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { existsSync } from 'node:fs'
@@ -54,10 +54,14 @@ describe('sessionScanner onMessage errors', () => {
 
   it('logs and continues when onMessage callback throws', async () => {
     const debugSpy = vi.spyOn(logger, 'debug')
+    const sessionId = '93a9705e-bc6a-406d-8dce-8acc014dedbd'
+    const sessionFile = join(projectDir, `${sessionId}.jsonl`)
+    await writeFile(sessionFile, '')
 
     let didThrow = false
     scanner = await createSessionScanner({
-      sessionId: null,
+      sessionId,
+      transcriptPath: sessionFile,
       workingDirectory: testDir,
       transcriptMissingWarningMs: 0,
       onMessage: () => {
@@ -66,13 +70,9 @@ describe('sessionScanner onMessage errors', () => {
       },
     })
 
-    const sessionId = '93a9705e-bc6a-406d-8dce-8acc014dedbd'
-    const sessionFile = join(projectDir, `${sessionId}.jsonl`)
-    await writeFile(sessionFile, JSON.stringify({ type: 'user', uuid: 'u1', message: { content: 'hi' } }) + '\n')
-    scanner.onNewSession(sessionId)
+    await appendFile(sessionFile, JSON.stringify({ type: 'user', uuid: 'u1', message: { content: 'hi' } }) + '\n')
 
     await waitFor(() => didThrow)
     await waitFor(() => debugSpy.mock.calls.some((c) => String(c[0]).includes('[SESSION_SCANNER] onMessage callback threw')))
   })
 })
-

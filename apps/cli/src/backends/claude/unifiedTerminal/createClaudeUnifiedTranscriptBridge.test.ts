@@ -1525,8 +1525,11 @@ describe('createClaudeUnifiedTranscriptBridge', () => {
   it('seeds hook-driven resume backfill from committed Claude JSONL keys', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'happier-claude-unified-transcript-committed-keys-'));
     tempDirs.push(dir);
-    const transcriptPath = join(dir, 'sess_committed_keys.jsonl');
-    await mkdir(dir, { recursive: true });
+    const workspaceDir = join(dir, 'workspace');
+    const claudeConfigDir = join(dir, 'claude-config');
+    const projectDir = getProjectPath(workspaceDir, claudeConfigDir);
+    const transcriptPath = join(projectDir, 'sess_committed_keys.jsonl');
+    await mkdir(projectDir, { recursive: true });
     await writeFile(transcriptPath, '');
 
     await appendJsonl(transcriptPath, {
@@ -1554,8 +1557,9 @@ describe('createClaudeUnifiedTranscriptBridge', () => {
     const onMessage = vi.fn();
     const bridge = createClaudeUnifiedTranscriptBridge({
       sessionId: 'sess_committed_keys',
-      transcriptPath,
-      workingDirectory: dir,
+      transcriptPath: null,
+      workingDirectory: workspaceDir,
+      claudeConfigDir,
       onMessage,
       loadCommittedClaudeJsonlMessageBaseline: async () => ({
         keys: new Set(['main:assistant:already_committed']),

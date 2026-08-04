@@ -48,7 +48,10 @@ export async function createSessionScanner(opts: {
      */
     claudeConfigDir?: string | null,
     workingDirectory: string
-    onMessage: (message: RawJSONLines) => void
+    onMessage: (
+        message: RawJSONLines,
+        observation?: Readonly<{ historicalReplay: boolean }>,
+    ) => unknown
     onRawJsonlValue?: ((
         value: unknown,
         observation: Readonly<{ historicalReplay: boolean }>,
@@ -525,10 +528,10 @@ export async function createSessionScanner(opts: {
         return rowSessionId.length > 0 && rowSessionId !== boundSessionId;
     }
 
-    function processSessionMessage(
+    async function processSessionMessage(
         file: RawJSONLines,
         replayOpts?: Readonly<{ suppressBeforeMs?: number | null; suppressSideEffects?: boolean | undefined }>,
-    ): boolean {
+    ): Promise<boolean> {
         // Hard per-row provider-session filter (incident pid-14419): once this scanner is bound
         // to a Claude session, rows belonging to ANY other session must be structurally impossible
         // to import or observe (no transcript emit, no sidechain/team-inbox collection).
@@ -567,13 +570,17 @@ export async function createSessionScanner(opts: {
             }
             if (action?.type === 'rewrite') {
                 shapeLogger.log('emit:rewritten-task-notification', action.message);
-                opts.onMessage(action.message);
+                await opts.onMessage(action.message, { historicalReplay: replayOpts?.suppressSideEffects === true });
             } else {
                 shapeLogger.log(`emit:${String((file as any)?.type ?? 'unknown')}`, file);
-                opts.onMessage(file);
+                await opts.onMessage(file, { historicalReplay: replayOpts?.suppressSideEffects === true });
             }
             return true;
         } catch (err) {
+            if (replayOpts?.suppressSideEffects === true) {
+                processedMessageKeys.delete(key);
+                throw err;
+            }
             logger.debug('[SESSION_SCANNER] onMessage callback threw:', err);
             return false;
         }
@@ -591,7 +598,7 @@ export async function createSessionScanner(opts: {
         observeRawJsonlValueForTrustedSession(session, value, { historicalReplay: false });
         const parsed = parseClaudeJsonlValue(value);
         if (!parsed) return false;
-        return processSessionMessage(parsed, replayOpts);
+        return await processSessionMessage(parsed, replayOpts);
     }
 
     async function readSnapshotStartOffsetBytes(session: string): Promise<number> {
@@ -622,7 +629,7 @@ export async function createSessionScanner(opts: {
         let sent = 0;
         for (const file of sessionMessages) {
             if (!isMainSessionAllowed(session)) break;
-            if (processSessionMessage(normalizeClaudeToolUseNamesInRawJsonLines(file), replayOpts)) sent += 1;
+            if (await processSessionMessage(normalizeClaudeToolUseNamesInRawJsonLines(file), replayOpts)) sent += 1;
             else skipped += 1;
         }
         if (sessionMessages.length > 0) {

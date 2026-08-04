@@ -374,9 +374,9 @@ export async function claudeUnifiedTerminalLauncher(
     session: session.client,
     logPrefix: '[unified]',
     acceptedPromptEchoWindowMs: configuration.claudeUnifiedTerminalAcceptedPromptEchoWindowMs,
-    onMessage: (message) => {
-      transcriptProjector.observe(message);
-    },
+      onMessage: (message) => {
+        transcriptProjector.observe(message);
+      },
     onReady: (context) => {
       readyHandler(context);
     },
@@ -878,6 +878,10 @@ export async function claudeUnifiedTerminalLauncher(
       dialogChoiceBroker,
       expectedExistingTerminalHostAttachmentId,
       ...binding.sessionOptions,
+      onHistoricalMessage: async (message) => {
+        if (binding.shouldSuppressTranscriptMessage(message)) return;
+        await transcriptProjector.observeCommitted(message);
+      },
       onProviderLaunchStarting: () => startupLifecycle.onProviderLaunchStarting(),
       onProviderSessionStarted: () => {
         startupLifecycle.onProviderSessionStarted();

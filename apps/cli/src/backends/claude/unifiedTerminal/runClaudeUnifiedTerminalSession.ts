@@ -283,7 +283,8 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   runtimeActivityAdapter?: ReturnType<typeof createClaudeProviderRuntimeActivityAdapter> | null | undefined;
   onWorkflowActivityObserverReady?: (() => void) | null | undefined;
   providerActivityLedger?: ReturnType<typeof createClaudeProviderActivityLedger> | undefined;
-  onMessage?: ((message: RawJSONLines) => void) | undefined;
+  onMessage?: ((message: RawJSONLines) => void | Promise<void>) | undefined;
+  onHistoricalMessage?: ((message: RawJSONLines) => void | Promise<void>) | undefined;
   /**
    * Raw transcript channel (plan H7): every parsed JSONL value BEFORE the scanner's
    * visible-transcript filtering. Native Claude `/goal` state is a `goal_status`
@@ -2251,20 +2252,30 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             },
           })
         : undefined;
-      const transcriptBridge = opts.runtimeActivityAdapter || opts.onMessage || opts.onSessionFound || lifecycleBridge
+      const forwardVisibleTranscriptMessage = async (
+        message: RawJSONLines,
+        handler: ((message: RawJSONLines) => void | Promise<void>) | undefined,
+      ): Promise<void> => {
+        if (acceptedPromptTranscriptDiscovery.consumeAcceptedPromptTranscriptEcho(message)) {
+          opts.onTranscriptMessageSuppressed?.(message);
+          return;
+        }
+        await handler?.(message);
+      };
+      const transcriptBridge = opts.runtimeActivityAdapter || opts.onMessage || opts.onHistoricalMessage || opts.onSessionFound || lifecycleBridge
         ? createClaudeUnifiedTranscriptBridge({
             sessionId: opts.sessionId ?? null,
             transcriptPath: opts.transcriptPath,
             workingDirectory: opts.path,
             claudeConfigDir: resolveClaudeConfigDirOverride(process.env),
             onMessage: opts.onMessage
-              ? (message) => {
-                  if (acceptedPromptTranscriptDiscovery.consumeAcceptedPromptTranscriptEcho(message)) {
-                    opts.onTranscriptMessageSuppressed?.(message);
-                    return;
-                  }
-                  opts.onMessage?.(message);
-                }
+              ? (message) => forwardVisibleTranscriptMessage(message, opts.onMessage)
+              : undefined,
+            onHistoricalMessage: opts.onHistoricalMessage || opts.onMessage
+              ? (message) => forwardVisibleTranscriptMessage(
+                  message,
+                  opts.onHistoricalMessage ?? opts.onMessage,
+                )
               : undefined,
             onTranscriptMessage: (message) => {
               if (!confirmPromptAcceptedFromTranscript([message])) {

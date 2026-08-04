@@ -131,6 +131,12 @@ function createSession(overrides: Readonly<{
       sessionId: 'happy-session-id',
       sendSessionEvent: vi.fn(),
       sendClaudeSessionMessage: vi.fn(),
+      sendClaudeSessionMessageCommitted: vi.fn(async () => ({
+        localId: 'claude-jsonl:main:assistant:historical-row',
+        messageId: 'historical-message',
+        seq: 1,
+        didWrite: true,
+      })),
       getMetadataSnapshot: vi.fn(() => overrides.metadata ?? {}),
       recordClaudeJsonlMessageConsumed: vi.fn(),
       bindProviderInputOutcomeProducer: vi.fn(() => vi.fn()),
@@ -1088,6 +1094,33 @@ describe('claudeUnifiedTerminalLauncher', () => {
       type: 'assistant',
       uuid: 'assistant-reply',
     }));
+  });
+
+  it('uses durable committed custody for historical resume backfill rows', async () => {
+    setProcessTty(false);
+    const session = createSession();
+    mocks.runClaudeUnifiedTerminalSession.mockImplementationOnce(async (opts: {
+      onHistoricalMessage?: (message: unknown) => Promise<void>;
+    }) => {
+      await opts.onHistoricalMessage?.({
+        type: 'assistant',
+        uuid: 'historical-row',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'caught up' }] },
+      });
+    });
+
+    await claudeUnifiedTerminalLauncher(session, {
+      initialMode: {
+        permissionMode: 'default',
+        claudeUnifiedTerminalHost: 'auto',
+      },
+    });
+
+    expect(session.client.sendClaudeSessionMessageCommitted).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'assistant',
+      uuid: 'historical-row',
+    }));
+    expect(session.client.sendClaudeSessionMessage).not.toHaveBeenCalled();
   });
 
   it('does not persist Claude compact summary or compact local-command artifacts from unified transcripts', async () => {

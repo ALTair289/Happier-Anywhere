@@ -94,6 +94,12 @@ function createSessionFixture(): Readonly<{
       sessionId: 'happy-session-id',
       getMetadataSnapshot: () => metadata,
       sendClaudeSessionMessage: vi.fn(),
+      sendClaudeSessionMessageCommitted: vi.fn(async () => ({
+        localId: 'historical-row',
+        messageId: 'historical-message',
+        seq: 1,
+        didWrite: true,
+      })),
       sendSessionEvent: vi.fn((event: unknown, id?: string) => {
         sessionEventCalls.push({ event, id });
       }),
@@ -183,6 +189,24 @@ describe('createClaudeSessionTranscriptProjector compaction events', () => {
 });
 
 describe('createClaudeSessionTranscriptProjector model adoption', () => {
+  it('durably projects historical rows without adopting stale live runtime state', async () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    await projector.observeCommitted(buildAssistantRow({
+      uuid: 'historical-assistant',
+      model: 'claude-stale-model',
+    }));
+
+    expect(fixture.session.client.sendClaudeSessionMessageCommitted).toHaveBeenCalledOnce();
+    expect(fixture.getMetadata().sessionModelsV1).toBeUndefined();
+    expect(fixture.getUpdateMetadataCallCount()).toBe(0);
+    expect(fixture.getSessionEventCalls()).toEqual([]);
+  });
+
   it('adopts the effective model from non-sidechain assistant transcript rows into session models metadata', () => {
     const fixture = createSessionFixture();
     const projector = createClaudeSessionTranscriptProjector({
