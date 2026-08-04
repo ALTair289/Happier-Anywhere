@@ -366,6 +366,37 @@ function findDropdown(screen: Awaited<ReturnType<typeof renderPoolDetail>>, test
         .find((node) => node.props.itemTrigger?.itemProps?.testID === testID);
 }
 
+/** The membership multi-select — the only menu that stays open across selections. */
+function findMembersDropdown(screen: Awaited<ReturnType<typeof renderPoolDetail>>) {
+    return screen.tree.root
+        .findAllByType('DropdownMenu' as never)
+        .find((node) => node.props.closeOnSelect === false);
+}
+
+/**
+ * Drives the membership multi-select the way a user does: open the menu, toggle
+ * the given profiles, then close it — which is what commits the batch.
+ */
+async function editMembership(
+    screen: Awaited<ReturnType<typeof renderPoolDetail>>,
+    toggledProfileIds: ReadonlyArray<string>,
+) {
+    await act(async () => {
+        findMembersDropdown(screen)?.props.onOpenChange?.(true);
+        await flushAsyncHandlers();
+    });
+    for (const profileId of toggledProfileIds) {
+        await act(async () => {
+            findMembersDropdown(screen)?.props.onSelect?.(profileId);
+            await flushAsyncHandlers();
+        });
+    }
+    await act(async () => {
+        findMembersDropdown(screen)?.props.onOpenChange?.(false);
+        await flushAsyncHandlers();
+    });
+}
+
 /** Expand the "Advanced" disclosure so its lesser-used controls render. */
 async function expandAdvanced(screen: Awaited<ReturnType<typeof renderPoolDetail>>) {
     await act(async () => {
@@ -445,17 +476,7 @@ describe('PoolDetailView', () => {
         })];
         const screen = await renderPoolDetail();
 
-        await screen.pressByTestIdAsync('connected-services-pool-detail:add-member');
-        const pickerButtons = modalSpies.alert.mock.calls[0]?.[2] as
-            | ReadonlyArray<{ text?: string; onPress?: () => void }>
-            | undefined;
-        const backupOption = pickerButtons?.find((button) => button.text?.includes('backup'));
-        expect(backupOption).toBeTruthy();
-
-        await act(async () => {
-            backupOption?.onPress?.();
-            await flushAsyncHandlers();
-        });
+        await editMembership(screen, ['backup']);
 
         expect(authGroupApiSpies.addConnectedServiceAuthGroupMemberV3).toHaveBeenCalledWith(
             expect.objectContaining({ token: 't' }),
@@ -468,6 +489,8 @@ describe('PoolDetailView', () => {
                 expectedGeneration: 2,
             },
         );
+        // Adding alone is not destructive, so it must not raise a confirmation.
+        expect(modalSpies.confirm).not.toHaveBeenCalled();
     });
 
     it('allows retryable refresh-failure profiles to be added to a pool', async () => {
@@ -488,17 +511,11 @@ describe('PoolDetailView', () => {
         };
         const screen = await renderPoolDetail();
 
-        await screen.pressByTestIdAsync('connected-services-pool-detail:add-member');
-        const pickerButtons = modalSpies.alert.mock.calls[0]?.[2] as
-            | ReadonlyArray<{ text?: string; onPress?: () => void }>
-            | undefined;
-        const retryableOption = pickerButtons?.find((button) => button.text?.includes('retryable'));
-        expect(retryableOption).toBeTruthy();
+        const candidateIds = (findMembersDropdown(screen)?.props.items as ReadonlyArray<{ id: string }>)
+            .map((item) => item.id);
+        expect(candidateIds).toContain('retryable');
 
-        await act(async () => {
-            retryableOption?.onPress?.();
-            await flushAsyncHandlers();
-        });
+        await editMembership(screen, ['retryable']);
 
         expect(authGroupApiSpies.addConnectedServiceAuthGroupMemberV3).toHaveBeenCalledWith(
             expect.objectContaining({ token: 't' }),
@@ -535,21 +552,73 @@ describe('PoolDetailView', () => {
         );
     });
 
-    it('opens the searchable batch membership editor pre-selecting the current members', async () => {
+    it('offers one multi-select listing members and joinable non-members, with members checked', async () => {
+        profileState.current = {
+            connectedServicesV2: [
+                {
+                    serviceId: 'openai-codex',
+                    profiles: [
+                        { profileId: 'work', status: 'connected', providerEmail: 'work@example.com' },
+                        { profileId: 'backup', status: 'connected', providerEmail: 'backup@example.com' },
+                        { profileId: 'extra', status: 'connected', providerEmail: 'extra@example.com' },
+                    ],
+                },
+            ],
+        };
         const screen = await renderPoolDetail();
 
-        await screen.pressByTestIdAsync('connected-services-pool-detail:edit-members');
+        const dropdown = findMembersDropdown(screen);
+        expect((dropdown?.props.items as ReadonlyArray<{ id: string }>).map((item) => item.id))
+            .toEqual(['work', 'backup', 'extra']);
+        // The two superseded affordances are gone: no alert-picker, no second modal.
+        expect(screen.findByTestId('connected-services-pool-detail:add-member')).toBeFalsy();
+        expect(screen.findByTestId('connected-services-pool-detail:edit-members')).toBeFalsy();
+    });
 
-        expect(modalSpies.show).toHaveBeenCalledTimes(1);
-        const config = modalSpies.show.mock.calls[0]?.[0] as unknown as {
-            props: {
-                candidates: ReadonlyArray<{ profileId: string }>;
-                initialSelectedProfileIds: ReadonlyArray<string>;
-                onSubmit: (next: ReadonlyArray<string>) => void;
-            };
-        };
-        expect(config.props.initialSelectedProfileIds).toEqual(['work', 'backup']);
-        expect(config.props.candidates.map((candidate) => candidate.profileId)).toEqual(['work', 'backup']);
+    it('labels the members trigger with a title and a count, never an unbounded name list', async () => {
+        const screen = await renderPoolDetail();
+
+        const trigger = findMembersDropdown(screen)?.props.trigger as (
+            (state: { toggle: () => void; open: boolean }) => React.ReactElement<{
+                title?: string;
+                subtitle?: string;
+                detail?: string;
+            }>
+        );
+        const row = trigger({ toggle: () => {}, open: false });
+
+        expect(row.props.title).toBe('connectedServices.detail.groupActions.manageMembersTitle');
+        expect(row.props.subtitle).toBe('connectedServices.detail.groupActions.manageMembersSubtitle');
+        // `detail` renders in the row's RIGHT section with no width cap, so a
+        // joined member list there squeezes the title out of the row entirely.
+        expect(row.props.detail).toBeUndefined();
+    });
+
+    it('commits nothing while the menu is open, so a multi-toggle edit is one batch', async () => {
+        modalSpies.confirm.mockResolvedValue(true);
+        const screen = await renderPoolDetail();
+
+        await act(async () => {
+            findMembersDropdown(screen)?.props.onOpenChange?.(true);
+            await flushAsyncHandlers();
+        });
+        await act(async () => {
+            findMembersDropdown(screen)?.props.onSelect?.('backup');
+            await flushAsyncHandlers();
+        });
+
+        expect(authGroupApiSpies.removeConnectedServiceAuthGroupMemberV3).not.toHaveBeenCalled();
+        expect(authGroupApiSpies.addConnectedServiceAuthGroupMemberV3).not.toHaveBeenCalled();
+    });
+
+    it('confirms once before committing a batch that removes members, and applies nothing when declined', async () => {
+        modalSpies.confirm.mockResolvedValue(false);
+        const screen = await renderPoolDetail();
+
+        await editMembership(screen, ['backup']);
+
+        expect(modalSpies.confirm).toHaveBeenCalledTimes(1);
+        expect(authGroupApiSpies.removeConnectedServiceAuthGroupMemberV3).not.toHaveBeenCalled();
     });
 
     it('batch-applies the membership diff (add + remove) through the canonical mutations, threading the generation', async () => {
@@ -580,16 +649,10 @@ describe('PoolDetailView', () => {
         }));
         authGroupApiSpies.addConnectedServiceAuthGroupMemberV3.mockImplementation(async () => createAuthoritativeGroup({ generation: 4 }));
 
+        modalSpies.confirm.mockResolvedValue(true);
         const screen = await renderPoolDetail();
-        await screen.pressByTestIdAsync('connected-services-pool-detail:edit-members');
-        const config = modalSpies.show.mock.calls[0]?.[0] as unknown as {
-            props: { onSubmit: (next: ReadonlyArray<string>) => void };
-        };
 
-        await act(async () => {
-            config.props.onSubmit(['work', 'extra']);
-            await flushAsyncHandlers();
-        });
+        await editMembership(screen, ['backup', 'extra']);
 
         // Remove threads the starting generation (2).
         expect(authGroupApiSpies.removeConnectedServiceAuthGroupMemberV3).toHaveBeenCalledWith(
@@ -616,20 +679,16 @@ describe('PoolDetailView', () => {
         expect(modalSpies.alert).not.toHaveBeenCalled();
     });
 
-    it('applies no membership mutation when the editor diff is empty', async () => {
+    it('applies no membership mutation when the draft ends up matching the current members', async () => {
         const screen = await renderPoolDetail();
-        await screen.pressByTestIdAsync('connected-services-pool-detail:edit-members');
-        const config = modalSpies.show.mock.calls[0]?.[0] as unknown as {
-            props: { onSubmit: (next: ReadonlyArray<string>) => void };
-        };
 
-        await act(async () => {
-            config.props.onSubmit(['work', 'backup']);
-            await flushAsyncHandlers();
-        });
+        // Toggle off then back on: the net diff is empty, so nothing is committed
+        // and no destructive confirmation is raised.
+        await editMembership(screen, ['backup', 'backup']);
 
         expect(authGroupApiSpies.addConnectedServiceAuthGroupMemberV3).not.toHaveBeenCalled();
         expect(authGroupApiSpies.removeConnectedServiceAuthGroupMemberV3).not.toHaveBeenCalled();
+        expect(modalSpies.confirm).not.toHaveBeenCalled();
     });
 
     it('does not render pool-not-found while the first authoritative group load is pending', async () => {

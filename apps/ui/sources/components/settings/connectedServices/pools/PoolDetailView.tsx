@@ -34,6 +34,7 @@ import {
     removeConnectedServiceAuthGroupMemberV3,
     setConnectedServiceAuthGroupActiveProfileV3,
 } from '@/sync/api/account/apiConnectedServiceAuthGroupsV3';
+import { PoolMembersSelectField, type PoolMembershipCandidate } from './PoolMembersSelectField';
 import { sync } from '@/sync/sync';
 import { useProfile, useSettings } from '@/sync/store/hooks';
 import { t } from '@/text';
@@ -70,7 +71,6 @@ import { resolveConnectedServiceDisplayName } from '../model/resolveConnectedSer
 import { commitPoolMemberReorder, computePoolMemberPriorities, type ReorderableGroup } from './commitPoolMemberReorder';
 import { commitPoolMembershipBatch } from './commitPoolMembershipBatch';
 import { PoolMembersDropOverlay } from './PoolMembersDropOverlay';
-import { PoolMembershipEditorModal, type PoolMembershipCandidate } from './PoolMembershipEditorModal';
 import { Icon } from '@/components/ui/icons/Icon';
 
 type GroupStrategy = ConnectedServiceAuthGroupPolicyV1['strategy'];
@@ -201,15 +201,6 @@ function isConnectedProfile(profile: ConnectedServiceGroupProfileLike): boolean 
     );
 }
 
-function resolveNextMemberPriority(group: ConnectedServiceAuthGroupV1): number {
-    if (group.members.length === 0) return 100;
-    const maxPriority = group.members.reduce(
-        (max, member) => Math.max(max, Number.isFinite(member.priority) ? member.priority : 0),
-        0,
-    );
-    return Math.max(100, maxPriority + 100);
-}
-
 /**
  * Pool ("auth group") detail view. The new canonical replacement for
  * `ConnectedServiceGroupDetailView`: members render as the shared
@@ -265,17 +256,6 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
         : accountFallbackEnabled
             ? undefined
             : t('connectedServices.detail.groupActions.accountFallbackDisabled');
-    const availableMemberProfiles = React.useMemo(() => {
-        if (!group) return [];
-        const memberProfileIds = new Set(group.members.map((member) => member.profileId));
-        return profiles.filter((candidate) => {
-            const profileId = readProfileId(candidate);
-            return profileId.length > 0
-                && isConnectedProfile(candidate)
-                && !memberProfileIds.has(profileId);
-        });
-    }, [group, profiles]);
-
     // Numeric overlay shared values for the single list-level drop indicator.
     const overlayVisible = useSharedValue(0);
     const overlayKind = useSharedValue<TreeDropOverlayKind>(TREE_DROP_OVERLAY_KIND_NONE);
@@ -508,41 +488,6 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
         }));
     }, [group, runGroupMutation, serviceId]);
 
-    const handleAddMember = React.useCallback(() => {
-        if (!serviceId || !group || availableMemberProfiles.length === 0) return;
-        const priority = resolveNextMemberPriority(group);
-        Modal.alert(
-            t('connectedServices.detail.groupActions.addMember'),
-            t('connectedServices.detail.groupActions.addMemberSubtitle'),
-            [
-                ...availableMemberProfiles.map((profile) => {
-                    const profileId = readProfileId(profile);
-                    const title = resolveConnectedServiceGroupProfileTitle({
-                        serviceId,
-                        profileId,
-                        labelsByKey: settings.connectedServicesProfileLabelByKey,
-                        profiles,
-                    });
-                    return {
-                        text: title,
-                        style: 'default' as const,
-                        onPress: () => {
-                            void runGroupMutation(() => addConnectedServiceAuthGroupMemberV3(ensureCredentials(), {
-                                serviceId,
-                                groupId: group.groupId,
-                                profileId,
-                                priority,
-                                enabled: true,
-                                expectedGeneration: group.generation,
-                            }));
-                        },
-                    };
-                }),
-                { text: t('common.cancel'), style: 'cancel' as const },
-            ],
-        );
-    }, [availableMemberProfiles, group, profiles, runGroupMutation, serviceId, settings.connectedServicesProfileLabelByKey]);
-
     const handleRemoveMember = React.useCallback(async (profileId: string) => {
         if (!serviceId || !group) return;
         const ok = await Modal.confirm(
@@ -649,25 +594,6 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
             await Modal.alert(t('common.error'), resolveConnectedServiceSettingsErrorMessage(e));
         }
     }, [group, loadGroups, serviceId, upsertGroup]);
-
-    const handleEditMembers = React.useCallback(() => {
-        if (!serviceId || !group) return;
-        Modal.show({
-            component: PoolMembershipEditorModal,
-            props: {
-                candidates: membershipCandidates,
-                initialSelectedProfileIds: group.members.map((member) => member.profileId),
-                onSubmit: (next) => { void handleCommitMembership(next); },
-            },
-            chrome: {
-                kind: 'card',
-                title: t('connectedServices.detail.groupActions.membersTitle'),
-                subtitle: t('connectedServices.detail.groupActions.membersSubtitle'),
-                dimensions: { size: 'lg' },
-            },
-            closeOnBackdrop: true,
-        });
-    }, [group, handleCommitMembership, membershipCandidates, serviceId]);
 
     const handleSetActiveMember = React.useCallback(async (profileId: string) => {
         if (!serviceId || !group || !fallbackControlsEnabled) return;
@@ -810,6 +736,11 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
         () => sortedMembers.map((member) => ({ id: member.profileId })),
         [sortedMembers],
     );
+    /** Authoritative membership, in fallback order — the multi-select's baseline. */
+    const memberProfileIds = React.useMemo(
+        () => sortedMembers.map((member) => member.profileId),
+        [sortedMembers],
+    );
 
     const reorder = useListInlineReorder({
         items: memberItems,
@@ -890,7 +821,6 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
         .map((item) => sortedMembers.find((member) => member.profileId === item.id))
         .filter((member): member is (typeof sortedMembers)[number] => member != null);
     const memberCount = orderedMembers.length;
-    const canAddMember = availableMemberProfiles.length > 0;
 
     return (
         <ItemList testID="connected-services-pool-detail">
@@ -1048,23 +978,11 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                             showChevron={false}
                         />
                     )}
-                <Item
-                    testID="connected-services-pool-detail:add-member"
-                    title={t('connectedServices.detail.groupActions.addMember')}
-                    subtitle={canAddMember
-                        ? t('connectedServices.detail.groupActions.addMemberSubtitle')
-                        : t('connectedServices.detail.groupActions.noProfilesAvailable')}
-                    icon={<Icon name="plus-circle" size={20} color={theme.colors.accent.blue} />}
-                    disabled={!canAddMember}
-                    onPress={canAddMember ? handleAddMember : undefined}
-                />
-                <Item
-                    testID="connected-services-pool-detail:edit-members"
-                    title={t('connectedServices.detail.groupActions.membersTitle')}
-                    subtitle={t('connectedServices.detail.groupActions.membersSubtitle')}
-                    icon={<Icon name="users" size={20} color={theme.colors.accent.blue} />}
-                    disabled={membershipCandidates.length === 0}
-                    onPress={membershipCandidates.length === 0 ? undefined : handleEditMembers}
+                <PoolMembersSelectField
+                    testID="connected-services-pool-detail:members-select"
+                    candidates={membershipCandidates}
+                    selectedProfileIds={memberProfileIds}
+                    onCommit={(next) => { void handleCommitMembership(next); }}
                 />
             </ItemGroup>
 
