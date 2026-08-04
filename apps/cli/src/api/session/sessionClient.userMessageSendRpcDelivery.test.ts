@@ -1448,16 +1448,24 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledTimes(1);
       expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledTimes(1);
       expect(received).toHaveLength(0);
-      // Fails closed on delivery, but the claim stays re-drivable: an unanswered or unparsable
-      // daemon reply is not a source cutover, and a retained claim would block the whole queue.
+      // An unanswered or unparsable daemon reply is not a source cutover. Resolve the server
+      // claim as a reversible pre-acceptance block, retaining only the local correlation needed
+      // by the explicit Retry action.
+      expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledExactlyOnceWith({
+        token: 'tok',
+        sessionId: 's1',
+        localId: 'fail-closed-local',
+        reason: 'provider_unavailable_before_acceptance',
+      });
       expect((client as any).sourceCutoverDeferredPendingLocalIds.has('fail-closed-local')).toBe(false);
-      expect((client as any).canonicalPendingDeliveryByLocalId.has('fail-closed-local')).toBe(false);
+      expect((client as any).canonicalPendingDeliveryByLocalId.has('fail-closed-local')).toBe(true);
+      expect((client as any).serverBlockedCanonicalPendingDeliveryLocalIds.has('fail-closed-local')).toBe(true);
     } finally {
       process.argv = originalArgv;
     }
   });
 
-  it('re-drives a claimed prompt after an unanswered daemon lifecycle instead of retaining it forever', async () => {
+  it('blocks a claimed prompt durably when the daemon lifecycle request is unanswered', async () => {
     sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
     const claimedPrompt = {
@@ -1500,31 +1508,28 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
 
       await expect((client as any).runMaterializeNextPendingMessageInner()).resolves.toEqual({
         didMaterialize: false,
-        result: { type: 'retryable_transport' },
+        result: { type: 'no_pending' },
       });
       expect(received).toHaveLength(0);
-      expect(blockPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
-      // An unanswered daemon is not a source cutover: no successor runner is coming, so a
-      // retained claim would block every later row behind it for the life of this runner.
-      expect((client as any).sourceCutoverDeferredPendingLocalIds.has('daemon-down-local')).toBe(false);
-      expect((client as any).canonicalPendingDeliveryByLocalId.has('daemon-down-local')).toBe(false);
-
-      materializeNextPendingQueueV2MessageMock.mockResolvedValueOnce(claimedPrompt);
-      notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValueOnce({
-        status: 'continue',
-        turnCustody: { status: 'ignored_missing_exact_turn', activeTurnId: null },
-      });
-      await expect(client.materializeNextPendingMessageSafely()).resolves.toMatchObject({
-        type: 'materialized',
+      expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledExactlyOnceWith({
+        token: 'tok',
+        sessionId: 's1',
         localId: 'daemon-down-local',
+        reason: 'provider_unavailable_before_acceptance',
       });
-      expect(received).toHaveLength(1);
+      // An unanswered daemon is neither provider acceptance nor an explicit source cutover.
+      // The durable blocked row remains locally correlated for the existing explicit Retry
+      // action, instead of becoming an invisible delivering claim or an automatic retry loop.
+      expect((client as any).sourceCutoverDeferredPendingLocalIds.has('daemon-down-local')).toBe(false);
+      expect((client as any).canonicalPendingDeliveryByLocalId.has('daemon-down-local')).toBe(true);
+      expect((client as any).serverBlockedCanonicalPendingDeliveryLocalIds.has('daemon-down-local')).toBe(true);
+      expect(materializeNextPendingQueueV2MessageMock).toHaveBeenCalledTimes(1);
     } finally {
       process.argv = originalArgv;
     }
   });
 
-  it('delivers a released-server materialization that carries no requested action instead of parking it forever', async () => {
+  it('delivers a released-server materialization without an action even when daemon notification is unavailable', async () => {
     // The server-v0.2.1 materialize contract has no requestedAction concept at all
     // (its ack message carries exactly id/seq/localId) and it commits + dequeues the row
     // atomically, so there is no claim to inherit and no successor to inherit it. Parking
@@ -1575,10 +1580,9 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
         },
       },
     });
-    notifyDaemonConnectedServiceTurnLifecycleMock.mockResolvedValue({
-      status: 'continue',
-      turnCustody: { status: 'ignored_missing_exact_turn', activeTurnId: null },
-    });
+    notifyDaemonConnectedServiceTurnLifecycleMock.mockRejectedValue(
+      new Error('No daemon running, no state file found'),
+    );
 
     const originalArgv = process.argv.slice();
     try {
@@ -1594,8 +1598,9 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       });
       expect(received).toHaveLength(1);
       expect(received[0]?.content?.text).toBe('released prompt');
-      // The daemon still owns turn custody for this prompt; it simply has no requested
-      // action to authorize on this server contract.
+      // This exact released contract has no action-authorization field and has already
+      // atomically committed + dequeued the row. Notification remains best-effort; parking
+      // the prompt on a missing daemon would lose it because no server claim remains.
       expect(notifyDaemonConnectedServiceTurnLifecycleMock).toHaveBeenCalledExactlyOnceWith({
         sessionId: 's1',
         event: 'prompt_or_steer',

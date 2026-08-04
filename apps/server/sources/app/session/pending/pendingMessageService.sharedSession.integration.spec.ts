@@ -2211,7 +2211,10 @@ describe("pendingMessageService (shared sessions)", () => {
         })).resolves.toEqual({ ok: false, error: "action-conflict" });
     });
 
-    it("retries the same pending row after the provider rejects it before acceptance", async () => {
+    it.each([
+        "provider_rejected_before_acceptance",
+        "provider_unavailable_before_acceptance",
+    ] as const)("retries the same pending row after a reversible pre-acceptance block (%s)", async (blockedReason) => {
         const owner = await createAccount("requested-action-provider-rejected-owner");
         const session = await createSession(owner.id);
         const localId = `requested-action-provider-rejected-${randomUUID()}`;
@@ -2227,7 +2230,7 @@ describe("pendingMessageService (shared sessions)", () => {
             actorUserId: owner.id,
             sessionId: session.id,
             localId,
-            reason: "provider_rejected_before_acceptance",
+            reason: blockedReason,
         });
         await db.sessionPendingMessage.update({
             where: { sessionId_localId: { sessionId: session.id, localId } },

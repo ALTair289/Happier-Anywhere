@@ -5954,19 +5954,25 @@ export class ApiSessionClient extends EventEmitter {
             if (requestedAction && lifecycleResult === null) {
                 // The daemon did not answer at all (control channel down, or an unparsable reply).
                 // That is NOT a source cutover: no successor runner is coming to inherit the claim,
-                // so retaining it starves this row and every row queued behind it for the life of
-                // this runner (server-side `delivering` only clears on a successor publisher fence).
-                // Nothing was handed to the Provider, so release local custody and let the next
-                // drain rejoin the same server claim and re-authorize. Still fails closed: no
-                // delivery happens without an exact `continue`.
-                logger.debug('[pendingQueue] released materialized claim after an unanswered connected-service turn lifecycle', {
+                // and nothing was handed to the Provider. Resolve the durable claim as a visible,
+                // reversible pre-acceptance block. Clearing only process-local custody cannot wake
+                // the Pending consumer and can strand the server row in `delivering`; a durable
+                // block also preserves the existing explicit Retry path without a blind retry loop.
+                logger.debug('[pendingQueue] blocking materialized claim after an unanswered connected-service turn lifecycle', {
                     sessionId: this.sessionId,
                     localId: materializedLocalId,
                 });
-                if (materializedLocalId) {
-                    this.clearCanonicalPendingDeliveryLocalState(materializedLocalId);
-                }
-                return { didMaterialize: false, result: { type: 'retryable_transport' } };
+                const didBlock = materializedLocalId
+                    ? await this.blockPendingQueueDeliveryLocalId(
+                        materializedLocalId,
+                        'provider_unavailable_before_acceptance',
+                        { canonicalOnly: false },
+                    )
+                    : false;
+                return {
+                    didMaterialize: false,
+                    result: { type: didBlock ? 'no_pending' : 'retryable_transport' },
+                };
             }
             if (lifecycleResult?.status === 'input_blocked') {
                 // Retention is correct only on the daemon's explicit cutover promise: a successor

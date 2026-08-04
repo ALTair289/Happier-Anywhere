@@ -703,10 +703,13 @@ export async function updatePendingRequestedAction(params: {
                 && existing.deliveryBlockedReason === "steering_unavailable"
                 && (currentActionValue.kind === "steer_now" || currentActionValue.kind === "steer_if_active")
                 && requestedActionResult.data.kind === "send_now";
-            const retriesProviderRejectedBeforeAcceptance =
+            const retriesReversiblePreAcceptanceBlock =
                 existing.deliveryState === "blocked"
-                && existing.deliveryBlockedReason === "provider_rejected_before_acceptance";
-            if (releasesSteeringUnavailableBlock || retriesProviderRejectedBeforeAcceptance) {
+                && (
+                    existing.deliveryBlockedReason === "provider_rejected_before_acceptance"
+                    || existing.deliveryBlockedReason === "provider_unavailable_before_acceptance"
+                );
+            if (releasesSteeringUnavailableBlock || retriesReversiblePreAcceptanceBlock) {
                 const updated = await tx.sessionPendingMessage.updateMany({
                     where: {
                         sessionId,
