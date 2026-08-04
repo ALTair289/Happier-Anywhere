@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1628,6 +1628,33 @@ test('watch signature distinguishes same-size edits within one millisecond', asy
   const second = readDevReloadWatchChangeSignature([sourcePath]);
   const secondAsync = await readDevReloadWatchChangeSignatureAsync([sourcePath]);
 
+  assert.equal(firstAsync, first);
+  assert.equal(secondAsync, second);
+  assert.notEqual(second, first);
+});
+
+test('watch signature detects a same-size replacement whose mtime is preserved', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-dev-reload-signature-preserved-mtime-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  const sourcePath = join(root, 'runtime.ts');
+
+  await writeFile(sourcePath, 'one\n', 'utf-8');
+  await utimes(sourcePath, 1_000, 1_000);
+  const firstStat = await stat(sourcePath, { bigint: true });
+  const first = readDevReloadWatchChangeSignature([sourcePath]);
+  const firstAsync = await readDevReloadWatchChangeSignatureAsync([sourcePath]);
+
+  await writeFile(sourcePath, 'two\n', 'utf-8');
+  await utimes(sourcePath, 1_000, 1_000);
+  const secondStat = await stat(sourcePath, { bigint: true });
+  const second = readDevReloadWatchChangeSignature([sourcePath]);
+  const secondAsync = await readDevReloadWatchChangeSignatureAsync([sourcePath]);
+
+  assert.equal(secondStat.size, firstStat.size);
+  assert.equal(secondStat.mtimeNs, firstStat.mtimeNs);
+  assert.notEqual(secondStat.ctimeNs, firstStat.ctimeNs);
   assert.equal(firstAsync, first);
   assert.equal(secondAsync, second);
   assert.notEqual(second, first);
