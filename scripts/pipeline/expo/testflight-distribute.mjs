@@ -16,7 +16,7 @@ import {
 } from './mobile-release-environments.mjs';
 import { buildAscBuildsListUrl } from './testflight-asc-builds-url.mjs';
 import { buildEasBuildViewArgs } from './testflight-eas-cli-args.mjs';
-import { resolveExternalGroupSelections } from './testflight-group-resolution.mjs';
+import { isAscResourceId, resolveExternalGroupSelections } from './testflight-group-resolution.mjs';
 import { readIosIpaMetadata } from './read-ios-ipa-metadata.mjs';
 import { ensureBetaReviewSubmission } from './testflight-beta-review.mjs';
 
@@ -307,7 +307,10 @@ async function resolveBuildForDistribution({ request, ascAppId, buildNumber, app
 }
 
 async function resolveExternalGroups({ request, ascAppId, externalGroupNames }) {
-  const groups = await ascListAll({ request, url: buildAscBaseUrl(`/v1/apps/${ascAppId}/betaGroups?limit=200`) });
+  const needsNameLookup = externalGroupNames.some((selection) => !isAscResourceId(selection));
+  const groups = needsNameLookup
+    ? await ascListAll({ request, url: buildAscBaseUrl(`/v1/apps/${ascAppId}/betaGroups?limit=200`) })
+    : [];
   const resolved = resolveExternalGroupSelections({ groups, selections: externalGroupNames });
   return resolved.map((group, index) => {
     if (!group) fail(`Unable to find external TestFlight group '${externalGroupNames[index]}' for app ${ascAppId}.`);
@@ -332,7 +335,8 @@ async function attachBuildToGroups({ request, build, groups }) {
         data: [{ type: 'builds', id: String(build?.id ?? '').trim() }],
       },
     });
-    console.log(`[pipeline] attached build ${String(build?.id ?? '').trim()} to TestFlight group ${String(group?.attributes?.name ?? '').trim()}`);
+    const groupLabel = String(group?.attributes?.name ?? '').trim() || groupId;
+    console.log(`[pipeline] attached build ${String(build?.id ?? '').trim()} to TestFlight group ${groupLabel}`);
   }
 }
 

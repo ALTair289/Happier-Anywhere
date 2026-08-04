@@ -40,10 +40,8 @@ globalThis.fetch = async (url, init = {}) => {
       included: [{ type: 'preReleaseVersions', id: 'version-1', attributes: { version: '0.2.10' } }],
     });
   }
-  if (pathname.endsWith('/betaGroups')) {
-    return Response.json({ data: [{ type: 'betaGroups', id: 'group-1', attributes: { name: 'External Testers' } }] });
-  }
-  if (pathname.endsWith('/relationships/builds')) return Response.json({});
+  if (pathname === '/v1/betaGroups/78315e16-c539-43ae-a65e-4f465dccaf68/relationships/builds') return Response.json({});
+  if (pathname === '/v1/betaAppReviewSubmissions') return Response.json({ data: { type: 'betaAppReviewSubmissions', id: 'submission-1' } });
   return Response.json({ errors: [{ code: 'UNEXPECTED_TEST_URL', detail: pathname }] }, { status: 500 });
 };
 `,
@@ -57,11 +55,11 @@ globalThis.fetch = async (url, init = {}) => {
         preloadPath,
         'scripts/pipeline/expo/testflight-distribute.mjs',
         '--environment=dev',
-        '--external-groups=External Testers',
+        '--external-groups=78315e16-c539-43ae-a65e-4f465dccaf68',
         '--build-number=271',
         '--app-version=0.2.10',
         '--wait-processing=false',
-        '--submit-beta-review=false',
+        '--submit-beta-review=true',
       ],
       {
         cwd: repoRoot,
