@@ -550,6 +550,7 @@ vi.mock('@/sync/sync', () => ({
 
 vi.mock('@/sync/ops/sessionMachineTarget', () => ({
     readMachineTargetForSession: (sessionId: string) => readMachineTargetForSessionMock(sessionId),
+    readMachineControlTargetForSession: (sessionId: string) => readMachineTargetForSessionMock(sessionId),
     readDisplayMachineTargetForSession: (input: { sessionId?: string | null; metadata?: { machineId?: string | null; path?: string | null } | null }) => {
         const sessionId = typeof input.sessionId === 'string' ? input.sessionId : '';
         const mockedTarget = sessionId ? readMachineTargetForSessionMock(sessionId) : null;
@@ -2947,6 +2948,65 @@ describe('SessionsList (native virtualization)', () => {
             params: {
                 machineId: 'machine-target',
                 directory: '/repo',
+                spawnServerId: 'server_a',
+            },
+        });
+    });
+
+    it('rebases the project add action onto the reachable machine workspace', async () => {
+        rememberLastProjectSessionSelections = false;
+        storageState.sessions.seed_sess = {
+            ...sessionA,
+            id: 'seed_sess',
+            metadata: {
+                ...sessionA.metadata,
+                machineId: 'machine-target',
+                path: '/home/coder/repo',
+            },
+        };
+        readMachineTargetForSessionMock.mockImplementation((sessionId: string) =>
+            sessionId === 'seed_sess'
+                ? {
+                    machineId: 'machine-target',
+                    basePath: '/Users/test/repo',
+                    agentBasePath: '/home/coder/repo',
+                    confidence: 'reachable',
+                }
+                : null,
+        );
+        mockVisibleSessionListViewData = [
+            {
+                type: 'header',
+                title: '/home/coder/repo',
+                headerKind: 'project',
+                groupKey: 'server:server_a:active:project:abc',
+                workspaceKey: 'wl_abc',
+                seedSessionId: 'seed_sess',
+                workspaceScopeHint: {
+                    serverId: 'server_a',
+                    machineId: 'machine-target',
+                    rootPath: '/home/coder/repo',
+                },
+                serverId: 'server_a',
+                serverName: 'Server A',
+            },
+        ];
+
+        const screen = await renderSessionsList();
+        const addButton = expectPresent(
+            findPressableByAccessibilityLabel(screen, 'machine.launchNewSessionInDirectory'),
+            'expected project add action',
+        );
+
+        await act(async () => {
+            addButton.props.onPress();
+        });
+
+        expect(routerPushSpy).toHaveBeenCalledWith({
+            pathname: '/new',
+            params: {
+                machineId: 'machine-target',
+                directory: '/Users/test/repo',
                 spawnServerId: 'server_a',
             },
         });

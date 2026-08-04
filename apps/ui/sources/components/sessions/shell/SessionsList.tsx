@@ -150,6 +150,7 @@ import {
 } from './selection/sessionListSelectionKeys';
 import { SessionListSelectionActionBarHost } from './selection/SessionListSelectionActionBar';
 import { Icon } from '@/components/ui/icons/Icon';
+import { readMachineControlTargetForSession } from '@/sync/ops/sessionMachineTarget';
 
 export { ProjectGroupHeader } from './ProjectGroupHeader';
 export { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
@@ -1214,18 +1215,24 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
         const seedSession = seedSessionId
             ? ((storage.getState() as any)?.sessions?.[seedSessionId] as Session | undefined)
             : undefined;
+        const seedMachineTarget = seedSessionId
+            ? readMachineControlTargetForSession(seedSessionId)
+            : null;
+        const directory = seedMachineTarget?.machineId === workspaceScopeHint.machineId
+            ? seedMachineTarget.basePath
+            : workspaceScopeHint.rootPath;
         if (rememberLastProjectSessionSelections && seedSession) {
             const dataId = storeTempData(buildNewSessionTempDataFromSessionConfiguration({
                 session: seedSession,
                 machineId: workspaceScopeHint.machineId,
-                directoryOverride: workspaceScopeHint.rootPath,
+                directoryOverride: directory,
             }));
             router.push({
                 pathname: '/new',
                 params: {
                     dataId,
                     machineId: workspaceScopeHint.machineId,
-                    directory: workspaceScopeHint.rootPath,
+                    directory,
                     ...(workspaceScopeHint.serverId ? { spawnServerId: workspaceScopeHint.serverId } : {}),
                 },
             } as any);
@@ -1235,7 +1242,7 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
             pathname: '/new',
             params: {
                 machineId: workspaceScopeHint.machineId,
-                directory: workspaceScopeHint.rootPath,
+                directory,
                 ...(workspaceScopeHint.serverId ? { spawnServerId: workspaceScopeHint.serverId } : {}),
             },
         } as any);
