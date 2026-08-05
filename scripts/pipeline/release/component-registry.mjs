@@ -42,7 +42,7 @@ export const components = Object.freeze({
   },
   server: {
     id: 'server',
-    changedPrefixes: ['apps/server/', 'packages/relay-server/'],
+    changedPrefixes: ['apps/server/', 'packages/relay-server/', 'packages/privacy-kit/'],
   },
   stack: {
     id: 'stack',

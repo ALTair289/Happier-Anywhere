@@ -985,6 +985,7 @@ test('buildServerBinaryArtifactPayload stages the compiled binary and runtime si
     assert.equal(result.migrationEntrypoint, undefined);
     assert.equal(compileCalls.length, 1);
     assert.deepEqual(runCalls, [
+      { cmd: process.execPath, args: ['apps/server/scripts/buildSharedDeps.mjs', '--quiet'] },
       { cmd: 'yarn', args: ['--cwd', 'apps/server', '-s', 'generate:providers'] },
       { cmd: process.execPath, args: ['apps/ui/scripts/ensureWorkspacePackagesBuilt.mjs'] },
       { cmd: 'yarn', args: ['--cwd', 'apps/ui', '-s', 'expo', 'export', '--platform', 'web', '--output-dir', 'dist'] },
@@ -1490,6 +1491,7 @@ test('buildServerBinaryArtifactPayload builds ui-web dist when it is missing', a
     });
 
     assert.deepEqual(runCalls, [
+      { cmd: process.execPath, args: ['apps/server/scripts/buildSharedDeps.mjs', '--quiet'] },
       { cmd: 'yarn', args: ['--cwd', 'apps/server', '-s', 'generate:providers'] },
       { cmd: process.execPath, args: ['apps/ui/scripts/ensureWorkspacePackagesBuilt.mjs'] },
       { cmd: 'yarn', args: ['--cwd', 'apps/ui', '-s', 'expo', 'export', '--platform', 'web', '--output-dir', 'dist'] },
@@ -1559,6 +1561,7 @@ test('buildServerBinaryArtifactPayload rebuilds ui-web dist even when a stale di
     });
 
     assert.deepEqual(runCalls, [
+      { cmd: process.execPath, args: ['apps/server/scripts/buildSharedDeps.mjs', '--quiet'] },
       { cmd: 'yarn', args: ['--cwd', 'apps/server', '-s', 'generate:providers'] },
       { cmd: process.execPath, args: ['apps/ui/scripts/ensureWorkspacePackagesBuilt.mjs'] },
       { cmd: 'yarn', args: ['--cwd', 'apps/ui', '-s', 'expo', 'export', '--platform', 'web', '--output-dir', 'dist'] },

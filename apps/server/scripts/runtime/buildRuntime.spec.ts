@@ -68,7 +68,7 @@ describe('buildServerRuntime', () => {
     expect(bundleText).not.toMatch(/import\s*\{[^}]+\}\s*from\s*"@prisma\/client"/);
   });
 
-  it('bundles privacy-kit so runtime ASN schema registration does not depend on vendored module graph layout', async () => {
+  it('bundles the private privacy-kit workspace while keeping its runtime dependencies explicit', async () => {
     const outDir = await mkdtemp(join(tmpdir(), 'happier-server-runtime-build-privacy-kit-'));
     tempDirs.push(outDir);
 

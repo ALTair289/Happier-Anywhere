@@ -9,7 +9,7 @@ function createPackageJsonText(): string {
       scripts: {
         test: 'yarn -s test:unit',
         'test:import-cycles': 'yarn workspace @happier-dev/cli test:import-cycles',
-        'test:unit': 'yarn workspace @happier-dev/protocol test && yarn workspace @happier-dev/transfers test && yarn workspace @happier-dev/agents test && yarn workspace @happier-dev/cli-common test && yarn workspace @happier-dev/connection-supervisor test && yarn workspace @happier-dev/bootstrap test && yarn workspace @happier-dev/app test && yarn workspace @happier-dev/cli test:unit && yarn --cwd apps/server test:unit && yarn --cwd packages/relay-server test && yarn --cwd apps/stack test:unit',
+        'test:unit': 'yarn workspace privacy-kit test && yarn workspace @happier-dev/protocol test && yarn workspace @happier-dev/transfers test && yarn workspace @happier-dev/agents test && yarn workspace @happier-dev/cli-common test && yarn workspace @happier-dev/connection-supervisor test && yarn workspace @happier-dev/bootstrap test && yarn workspace @happier-dev/app test && yarn workspace @happier-dev/cli test:unit && yarn --cwd apps/server test:unit && yarn --cwd packages/relay-server test && yarn --cwd apps/stack test:unit',
         'test:integration': 'yarn workspace @happier-dev/app test:integration && yarn workspace @happier-dev/cli test:integration && yarn --cwd apps/server test:integration && yarn --cwd apps/stack test:integration',
         'test:e2e:core:fast': 'yarn workspace @happier-dev/tests test:core:fast',
         'test:e2e:core:slow': 'yarn workspace @happier-dev/tests test:core:slow',
@@ -38,6 +38,7 @@ function createWorkflowText(): string {
 jobs:
   testing:
     steps:
+      - run: yarn workspace privacy-kit test
       - run: yarn workspace @happier-dev/protocol test
       - run: yarn workspace @happier-dev/transfers test
       - run: yarn workspace @happier-dev/agents test

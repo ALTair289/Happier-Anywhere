@@ -36,6 +36,7 @@ const CANONICAL_LANE_PARITY: readonly ParityDefinition[] = Object.freeze([
     rootScriptName: 'test',
     docsCommands: ['yarn test'],
     workflowCommands: [
+      'yarn workspace privacy-kit test',
       'yarn workspace @happier-dev/protocol test',
       'yarn workspace @happier-dev/transfers test',
       'yarn workspace @happier-dev/agents test',
