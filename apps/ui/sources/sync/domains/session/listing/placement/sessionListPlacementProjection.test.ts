@@ -249,6 +249,46 @@ describe('projectSessionListPlacement', () => {
         });
     });
 
+    it('promotes generic unread activity when an older ready event is already behind the read cursor', () => {
+        expect(projectSessionListPlacement({
+            nowMs: 10_000,
+            session: makeSession({
+                seq: 742,
+                lastViewedSessionSeq: 738,
+                hasUnreadMessages: true,
+                meaningfulActivityAt: 7_390,
+                latestTurnStatus: 'completed',
+                latestTurnStatusObservedAt: 7_000,
+                latestReadyEventSeq: 110,
+                latestReadyEventAt: 1_100,
+            }),
+        })).toEqual({
+            kind: 'unread',
+            timestamp: 7_390,
+            retainedWorking: false,
+        });
+    });
+
+    it('keeps a newer ready event authoritative over generic unread placement', () => {
+        expect(projectSessionListPlacement({
+            nowMs: 10_000,
+            session: makeSession({
+                seq: 742,
+                lastViewedSessionSeq: 738,
+                hasUnreadMessages: true,
+                meaningfulActivityAt: 7_390,
+                latestTurnStatus: 'completed',
+                latestTurnStatusObservedAt: 7_000,
+                latestReadyEventSeq: 742,
+                latestReadyEventAt: 7_400,
+            }),
+        })).toEqual({
+            kind: 'ready',
+            timestamp: 7_400,
+            retainedWorking: false,
+        });
+    });
+
     it('promotes an inactive failed session only while it has unread activity', () => {
         expect(projectSessionListPlacement({
             nowMs: 10_000,

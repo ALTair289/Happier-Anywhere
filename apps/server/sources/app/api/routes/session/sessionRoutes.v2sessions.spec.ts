@@ -12,6 +12,7 @@ import {
     resetSessionRouteMocks,
     sessionFindFirst,
     sessionFindMany,
+    sessionLastViewedSessionSeqFieldRef,
     sessionPinFindMany,
 } from "./sessionRoutes.testkit";
 import {
@@ -168,6 +169,51 @@ describe("sessionRoutes v2 sessions snapshot", () => {
             runtimeActivityObservedAt: 1_444,
         });
         expect(mapped).not.toHaveProperty("runtimeActivitySourceClass");
+    });
+
+    it("hydrates generic unread sessions into the initial attention page and excludes read ready candidates", async () => {
+        const unreadClaudeRow = {
+            ...pagedSessionRow("claude-unread", { meaningfulActivityAt: new Date(7_390) }),
+            seq: 742,
+            lastViewedSessionSeq: 738,
+            latestReadyEventSeq: 110,
+            latestReadyEventAt: new Date(1_100),
+            latestTurnStatus: "completed",
+            latestTurnStatusObservedAt: BigInt(7_000),
+        };
+        const readReadyRow = {
+            ...unreadClaudeRow,
+            id: "read-ready",
+            lastViewedSessionSeq: 742,
+        };
+        sessionPinFindMany.mockResolvedValue([]);
+        sessionFindMany
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([unreadClaudeRow, readReadyRow])
+            .mockResolvedValueOnce([]);
+
+        const route = await createSessionRouteTestBuilder("GET", "/v2/sessions");
+        const { response } = await route.invoke({
+            query: { includeAttention: true, limit: 10 },
+        });
+
+        expect(response).toEqual(expect.objectContaining({
+            sessions: [expect.objectContaining({ id: "claude-unread" })],
+        }));
+        expect(sessionFindMany).toHaveBeenCalledTimes(4);
+        expect(sessionFindMany).toHaveBeenNthCalledWith(3, expect.objectContaining({
+            where: expect.objectContaining({
+                archivedAt: null,
+                AND: [{
+                    OR: expect.arrayContaining([
+                        { lastViewedSessionSeq: null, seq: { gt: 0 } },
+                        { seq: { gt: sessionLastViewedSessionSeqFieldRef } },
+                    ]),
+                }],
+            }),
+            take: DEFAULT_V2_SESSION_LIST_INITIAL_ATTENTION_ROW_LIMIT + 1,
+        }));
     });
 
 

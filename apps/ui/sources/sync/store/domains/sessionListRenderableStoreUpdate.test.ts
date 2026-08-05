@@ -109,6 +109,30 @@ describe('sessionListRenderableStoreUpdate', () => {
         expect(plan.attentionPromotionFieldChangeCount).toBe(1);
     });
 
+    it('rebuilds list data when a manual unread patch enters attention placement', () => {
+        const previous = makeRenderable('s1', {
+            seq: 742,
+            lastViewedSessionSeq: 742,
+            latestReadyEventSeq: 110,
+            hasUnreadMessages: false,
+        });
+        const plan = planSessionListRenderablePatches({
+            previousRenderables: { s1: previous },
+            patches: [{
+                sessionId: 's1',
+                patch: {
+                    lastViewedSessionSeq: 738,
+                    hasUnreadMessages: true,
+                },
+            }],
+            isSessionListViewDataUninitialized: false,
+            rebuildOnAttentionPromotionFieldsChange: true,
+        });
+
+        expect(plan.needsSessionListViewDataRebuild).toBe(true);
+        expect(plan.attentionPromotionFieldChangeCount).toBe(1);
+    });
+
     it('does not rebuild list data for heartbeat-only thinking freshness changes while promotion state is unchanged', () => {
         const now = Date.now();
         const previous = makeRenderable('s1', {

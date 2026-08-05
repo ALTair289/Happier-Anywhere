@@ -8,10 +8,14 @@ import {
 
 export const ATTENTION_PROMOTION_GROUP_KEY_V1 = 'attention-promotion-v1';
 
+export type SessionListRetainedAttentionPlacement = Readonly<{
+    key: string;
+    reason: SessionListAttentionPromotionReason;
+}>;
+
 export type SessionListAttentionPromotionOptions = Readonly<{
     mode: SessionListAttentionPromotionMode;
-    activeSessionKey?: string | null;
-    retainSessionKeys?: ReadonlySet<string> | ReadonlyArray<string> | null;
+    retainedPlacements?: ReadonlyArray<SessionListRetainedAttentionPlacement> | null;
 }>;
 
 export type SessionListWorkingPlacementOptions = Readonly<{

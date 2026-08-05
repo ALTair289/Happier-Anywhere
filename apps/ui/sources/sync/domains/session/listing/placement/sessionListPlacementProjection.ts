@@ -72,6 +72,9 @@ export function projectSessionListPlacement(params: Readonly<{
             ),
         );
     }
+    if (params.session.hasUnreadMessages === true) {
+        return createPlacement('unread', resolveSessionListUnreadPlacementTimestamp(params.session));
+    }
 
     const retainedWorking = shouldRetainSessionListWorkingPlacement({
         session: params.session,
@@ -140,6 +143,17 @@ export function resolveSessionListActionRequiredPlacementTimestamp(session: Pick
 >): number | null {
     return normalizePlacementTimestamp(
         session.pendingRequestObservedAt,
+        session.updatedAt,
+        session.createdAt,
+    );
+}
+
+export function resolveSessionListUnreadPlacementTimestamp(session: Pick<
+    SessionListRenderableSession,
+    'meaningfulActivityAt' | 'updatedAt' | 'createdAt'
+>): number | null {
+    return normalizePlacementTimestamp(
+        session.meaningfulActivityAt,
         session.updatedAt,
         session.createdAt,
     );

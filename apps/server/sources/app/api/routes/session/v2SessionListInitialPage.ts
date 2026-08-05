@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { db } from "@/storage/db";
 import {
     createV2SessionListPage,
     findV2SessionListRows,
@@ -37,12 +38,6 @@ function hasUnreadSessionActivity(row: V2SessionListRowCompat): boolean {
     return sessionSeq > (readNumberField(row, "lastViewedSessionSeq") ?? 0);
 }
 
-function hasUnreadReadyEvent(row: V2SessionListRowCompat): boolean {
-    const latestReadyEventSeq = readNumberField(row, "latestReadyEventSeq");
-    if (latestReadyEventSeq === null) return false;
-    return latestReadyEventSeq > (readNumberField(row, "lastViewedSessionSeq") ?? 0);
-}
-
 function hasPrimarySessionFailure(row: V2SessionListRowCompat): boolean {
     if (parseStoredSessionLatestTurnStatus(row.latestTurnStatus) !== "failed") return false;
     const issue = parseStoredSessionRuntimeIssue(row.lastRuntimeIssue);
@@ -55,7 +50,14 @@ function isDurableAttentionRow(row: V2SessionListRowCompat): boolean {
     return row.pendingPermissionRequestCount > 0
         || row.pendingUserActionRequestCount > 0
         || hasPrimarySessionFailure(row)
-        || hasUnreadReadyEvent(row);
+        || hasUnreadSessionActivity(row);
+}
+
+function createUnreadSessionActivityWhereBranches(): Prisma.SessionWhereInput[] {
+    return [
+        { lastViewedSessionSeq: null, seq: { gt: 0 } },
+        { seq: { gt: db.session.fields.lastViewedSessionSeq } },
+    ];
 }
 
 function createAttentionRowsWhere(): Prisma.SessionWhereInput {
@@ -63,8 +65,8 @@ function createAttentionRowsWhere(): Prisma.SessionWhereInput {
         archivedAt: null,
         AND: [{
             OR: [
+                ...createUnreadSessionActivityWhereBranches(),
                 { latestTurnStatus: "failed" },
-                { latestReadyEventSeq: { not: null } },
                 { pendingPermissionRequestCount: { gt: 0 } },
                 { pendingUserActionRequestCount: { gt: 0 } },
             ],

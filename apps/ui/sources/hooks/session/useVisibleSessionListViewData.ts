@@ -23,6 +23,7 @@ import {
     normalizeSessionListWorkingPlacementMode,
     type SessionListAttentionPromotionMode,
     type SessionListAttentionPromotionOptions,
+    type SessionListRetainedAttentionPlacement,
     type SessionListWorkingPlacementMode,
     type SessionListWorkingPlacementOptions,
 } from '@/sync/domains/session/listing/attentionPromotion/sessionListAttentionPromotion';
@@ -53,7 +54,7 @@ const DISABLED_ATTENTION_PROMOTION_OPTIONS: SessionListAttentionPromotionOptions
 const DISABLED_WORKING_PLACEMENT_OPTIONS: SessionListWorkingPlacementOptions = Object.freeze({
     mode: 'off',
 });
-const EMPTY_ATTENTION_RETAIN_KEYS: ReadonlyArray<string> = Object.freeze([]);
+const EMPTY_RETAINED_ATTENTION_PLACEMENTS: ReadonlyArray<SessionListRetainedAttentionPlacement> = Object.freeze([]);
 const EMPTY_WORKING_RETAIN_KEYS: ReadonlyArray<string> = Object.freeze([]);
 const EMPTY_SELECTED_SESSION_LIST_SERVER_IDS: ReadonlyArray<string> = Object.freeze([]);
 const EMPTY_OPEN_APPROVAL_SESSION_ID_SET: ReadonlySet<string> = Object.freeze(new Set<string>());
@@ -167,7 +168,7 @@ function buildVisibleSessionListIndexForState(
     storageFilter: SessionListStorageFilter,
     hideInactiveSessions: boolean,
     options: Readonly<{
-        retainAttentionSessionKeys?: ReadonlyArray<string>;
+        retainedAttentionPlacements?: ReadonlyArray<SessionListRetainedAttentionPlacement>;
         retainWorkingSessionKeys?: ReadonlyArray<string>;
         nowMs?: number;
     }> = {},
@@ -205,7 +206,7 @@ function buildVisibleSessionListIndexForState(
         attentionPromotion: state.sessionListAttentionPromotionMode !== 'off'
             ? {
                 mode: state.sessionListAttentionPromotionMode,
-                retainSessionKeys: options.retainAttentionSessionKeys,
+                retainedPlacements: options.retainedAttentionPlacements,
             }
             : DISABLED_ATTENTION_PROMOTION_OPTIONS,
         workingPlacement: state.sessionListWorkingPlacementMode !== 'off'
@@ -227,7 +228,7 @@ function buildVisibleSessionListViewData(
     storageFilter: SessionListStorageFilter,
     hideInactiveSessions: boolean,
     options: Readonly<{
-        retainAttentionSessionKeys?: ReadonlyArray<string>;
+        retainedAttentionPlacements?: ReadonlyArray<SessionListRetainedAttentionPlacement>;
         retainWorkingSessionKeys?: ReadonlyArray<string>;
         nowMs?: number;
     }> = {},
@@ -251,22 +252,25 @@ function buildSessionListSessionKey(item: Extract<SessionListViewItem, { type: '
     return `${serverId}:${sessionId}`;
 }
 
-function collectRetainedAttentionSessionKeys(params: Readonly<{
+function collectRetainedAttentionPlacements(params: Readonly<{
     previousVisible: ReadonlyArray<SessionListViewItem> | null | undefined;
     activeSessionId: string | null | undefined;
     mode: SessionListAttentionPromotionMode;
-}>): ReadonlyArray<string> {
-    if (params.mode === 'off') return EMPTY_ATTENTION_RETAIN_KEYS;
+}>): ReadonlyArray<SessionListRetainedAttentionPlacement> {
+    if (params.mode === 'off') return EMPTY_RETAINED_ATTENTION_PLACEMENTS;
     const activeSessionId = typeof params.activeSessionId === 'string' ? params.activeSessionId.trim() : '';
-    if (!activeSessionId || !params.previousVisible) return EMPTY_ATTENTION_RETAIN_KEYS;
+    if (!activeSessionId || !params.previousVisible) return EMPTY_RETAINED_ATTENTION_PLACEMENTS;
     for (const item of params.previousVisible) {
         if (item.type !== 'session') continue;
         if (item.groupKind !== 'attention' && !item.attentionPromotionReason) continue;
         if (item.session.id !== activeSessionId) continue;
         const key = buildSessionListSessionKey(item);
-        return key ? [key] : EMPTY_ATTENTION_RETAIN_KEYS;
+        const reason = item.attentionPromotionReason;
+        return key && reason
+            ? [{ key, reason }]
+            : EMPTY_RETAINED_ATTENTION_PLACEMENTS;
     }
-    return EMPTY_ATTENTION_RETAIN_KEYS;
+    return EMPTY_RETAINED_ATTENTION_PLACEMENTS;
 }
 
 function collectRetainedWorkingSessionKeys(params: Readonly<{
@@ -347,7 +351,7 @@ function useVisibleSessionListComputation(
             previousVisibleRef.current,
             options.retainedSessionListViewData,
         );
-        const retainAttentionSessionKeys = collectRetainedAttentionSessionKeys({
+        const retainedAttentionPlacements = collectRetainedAttentionPlacements({
             previousVisible,
             activeSessionId: options.activeSessionId,
             mode: state.sessionListAttentionPromotionMode,
@@ -358,7 +362,7 @@ function useVisibleSessionListComputation(
         });
         const buildWithHiddenFilter = (hideInactiveSessions: boolean) =>
             buildVisibleSessionListViewData(state, storageFilter, hideInactiveSessions, {
-                retainAttentionSessionKeys,
+                retainedAttentionPlacements,
                 retainWorkingSessionKeys,
                 nowMs: runtimeNowMs,
             });

@@ -6,6 +6,7 @@ import type { SessionListRenderableSession } from '../sessionListRenderable';
 import {
     projectSessionListPlacement,
     resolveSessionListActionRequiredPlacementTimestamp,
+    resolveSessionListUnreadPlacementTimestamp,
 } from '../placement/sessionListPlacementProjection';
 import {
     normalizeSessionListPlacementKey,
@@ -18,6 +19,7 @@ import {
     normalizeSessionListWorkingPlacementMode,
     type SessionListAttentionPromotionOptions,
     type SessionListAttentionPromotionReason,
+    type SessionListRetainedAttentionPlacement,
     type SessionListWorkingPlacementOptions,
 } from './sessionListAttentionPromotion';
 
@@ -43,12 +45,15 @@ type SessionRunEntry = Readonly<{
     originalIndex: number;
 }>;
 
+const EMPTY_RETAINED_ATTENTION_REASONS: ReadonlyMap<string, SessionListAttentionPromotionReason> = new Map();
+
 type PlacementLane<Reason extends PlacementReason> = Readonly<{
     resolveCandidate: (params: Readonly<{
         item: SessionIndexItem;
         originalIndex: number;
         retainedKeys: ReadonlySet<string>;
         retainedKeyRanks: ReadonlyMap<string, number>;
+        retainedAttentionReasons: ReadonlyMap<string, SessionListAttentionPromotionReason>;
         retainedWorkingKeys: ReadonlySet<string>;
         resolveSessionRow: ResolveSessionListIndexRow;
         nowMs: number;
@@ -63,6 +68,7 @@ const ATTENTION_REASON_PRIORITY: Readonly<Record<SessionListAttentionPromotionRe
     permission_required: 1,
     failed: 2,
     ready: 3,
+    unread: 4,
 };
 
 function normalizeRetainedKeys(retained: ReadonlySet<string> | ReadonlyArray<string> | null | undefined): ReadonlySet<string> {
@@ -85,12 +91,24 @@ function buildRetainedKeyRanks(retained: ReadonlySet<string> | ReadonlyArray<str
     return ranks;
 }
 
-function resolveWorkingPlacementRetainedKeys(
-    options: SessionListWorkingPlacementOptions | undefined,
-): SessionListWorkingRetentionKeySource {
-    return (options as (SessionListWorkingPlacementOptions & {
-        retainSessionKeys?: SessionListWorkingRetentionKeySource;
-    }) | undefined)?.retainSessionKeys;
+function normalizeRetainedAttentionPlacements(
+    placements: ReadonlyArray<SessionListRetainedAttentionPlacement> | null | undefined,
+): Readonly<{
+    keys: ReadonlyArray<string>;
+    reasons: ReadonlyMap<string, SessionListAttentionPromotionReason>;
+}> {
+    if (!placements || placements.length === 0) {
+        return { keys: [], reasons: EMPTY_RETAINED_ATTENTION_REASONS };
+    }
+    const keys: string[] = [];
+    const reasons = new Map<string, SessionListAttentionPromotionReason>();
+    for (const placement of placements) {
+        const key = placement.key.trim();
+        if (!key || reasons.has(key)) continue;
+        keys.push(key);
+        reasons.set(key, placement.reason);
+    }
+    return { keys, reasons };
 }
 
 function compareAttentionCandidates(
@@ -121,6 +139,9 @@ function resolveAttentionCandidateFallbackTimestamp(
     if (reason === 'action_required' || reason === 'permission_required') {
         return resolveSessionListActionRequiredPlacementTimestamp(row) ?? 0;
     }
+    if (reason === 'unread') {
+        return resolveSessionListUnreadPlacementTimestamp(row) ?? 0;
+    }
     const candidates = reason === 'failed'
         ? [row.lastRuntimeIssue?.occurredAt, row.latestTurnStatusObservedAt]
         : [row.latestReadyEventAt, row.latestTurnStatusObservedAt];
@@ -137,6 +158,7 @@ function resolveAttentionCandidate(params: Readonly<{
     originalIndex: number;
     retainedKeys: ReadonlySet<string>;
     retainedKeyRanks: ReadonlyMap<string, number>;
+    retainedAttentionReasons: ReadonlyMap<string, SessionListAttentionPromotionReason>;
     retainedWorkingKeys: ReadonlySet<string>;
     resolveSessionRow: ResolveSessionListIndexRow;
     nowMs: number;
@@ -155,10 +177,12 @@ function resolveAttentionCandidate(params: Readonly<{
         || placement.kind === 'working'
         ? null
         : placement.kind;
-    if (!reason && !params.retainedKeys.has(key)) return null;
+    const retainedReason = params.retainedAttentionReasons.get(key) ?? null;
+    if (!reason && !retainedReason) return null;
     if (!reason && placement.kind === 'working') return null;
 
-    const resolvedReason = reason ?? 'ready';
+    const resolvedReason = reason ?? retainedReason;
+    if (!resolvedReason) return null;
     return {
         item: params.item,
         key,
@@ -177,6 +201,7 @@ function resolveWorkingCandidate(params: Readonly<{
     originalIndex: number;
     retainedKeys: ReadonlySet<string>;
     retainedKeyRanks: ReadonlyMap<string, number>;
+    retainedAttentionReasons: ReadonlyMap<string, SessionListAttentionPromotionReason>;
     resolveSessionRow: ResolveSessionListIndexRow;
     nowMs: number;
 }>): PlacementCandidate<WorkingPlacementCandidateReason> | null {
@@ -288,6 +313,7 @@ export type SessionListIndexWorkingPlacementResult = Readonly<{
 function buildSessionListIndexGlobalPlacement<Reason extends PlacementReason>(params: Readonly<{
     source: ReadonlyArray<SessionListIndexItem>;
     retainedKeys?: ReadonlySet<string> | ReadonlyArray<string> | null;
+    retainedAttentionReasons?: ReadonlyMap<string, SessionListAttentionPromotionReason>;
     retainedWorkingKeys?: SessionListWorkingRetentionKeySource;
     resolveSessionRow: ResolveSessionListIndexRow;
     lane: PlacementLane<Reason>;
@@ -309,6 +335,7 @@ function buildSessionListIndexGlobalPlacement<Reason extends PlacementReason>(pa
             originalIndex,
             retainedKeys,
             retainedKeyRanks,
+            retainedAttentionReasons: params.retainedAttentionReasons ?? EMPTY_RETAINED_ATTENTION_REASONS,
             retainedWorkingKeys,
             resolveSessionRow: params.resolveSessionRow,
             nowMs: params.nowMs,
@@ -345,6 +372,7 @@ function reorderSessionRunWithinGroup<Reason extends PlacementReason>(params: Re
     entries: ReadonlyArray<SessionRunEntry>;
     retainedKeys: ReadonlySet<string>;
     retainedKeyRanks: ReadonlyMap<string, number>;
+    retainedAttentionReasons: ReadonlyMap<string, SessionListAttentionPromotionReason>;
     retainedWorkingKeys: ReadonlySet<string>;
     resolveSessionRow: ResolveSessionListIndexRow;
     lane: PlacementLane<Reason>;
@@ -360,6 +388,7 @@ function reorderSessionRunWithinGroup<Reason extends PlacementReason>(params: Re
             originalIndex: entry.originalIndex,
             retainedKeys: params.retainedKeys,
             retainedKeyRanks: params.retainedKeyRanks,
+            retainedAttentionReasons: params.retainedAttentionReasons,
             retainedWorkingKeys: params.retainedWorkingKeys,
             resolveSessionRow: params.resolveSessionRow,
             nowMs: params.nowMs,
@@ -390,6 +419,7 @@ function reorderSessionRunWithinGroup<Reason extends PlacementReason>(params: Re
 function applySessionListIndexPlacementWithinGroups<Reason extends PlacementReason>(params: Readonly<{
     source: ReadonlyArray<SessionListIndexItem>;
     retainedKeys?: ReadonlySet<string> | ReadonlyArray<string> | null;
+    retainedAttentionReasons?: ReadonlyMap<string, SessionListAttentionPromotionReason>;
     retainedWorkingKeys?: SessionListWorkingRetentionKeySource;
     resolveSessionRow: ResolveSessionListIndexRow;
     lane: PlacementLane<Reason>;
@@ -412,6 +442,7 @@ function applySessionListIndexPlacementWithinGroups<Reason extends PlacementReas
             entries: run,
             retainedKeys,
             retainedKeyRanks,
+            retainedAttentionReasons: params.retainedAttentionReasons ?? EMPTY_RETAINED_ATTENTION_REASONS,
             retainedWorkingKeys,
             resolveSessionRow: params.resolveSessionRow,
             lane: params.lane,
@@ -444,10 +475,12 @@ export function buildSessionListIndexAttentionPromotion(params: Readonly<{
     if (normalizeSessionListAttentionPromotionMode(params.options?.mode) !== 'global' || !params.options) {
         return null;
     }
+    const retained = normalizeRetainedAttentionPlacements(params.options.retainedPlacements);
 
     const result = buildSessionListIndexGlobalPlacement({
         source: params.source,
-        retainedKeys: params.options.retainSessionKeys,
+        retainedKeys: retained.keys,
+        retainedAttentionReasons: retained.reasons,
         resolveSessionRow: params.resolveSessionRow,
         lane: ATTENTION_LANE,
         nowMs: params.nowMs,
@@ -480,7 +513,7 @@ export function buildSessionListIndexWorkingPlacement(params: Readonly<{
 
     const result = buildSessionListIndexGlobalPlacement({
         source: params.source,
-        retainedKeys: params.retainedKeys ?? resolveWorkingPlacementRetainedKeys(params.options),
+        retainedKeys: params.retainedKeys,
         resolveSessionRow: params.resolveSessionRow,
         lane: WORKING_LANE,
         nowMs: params.nowMs,
@@ -509,10 +542,12 @@ export function applySessionListIndexAttentionPromotionWithinGroups(params: Read
     if (normalizeSessionListAttentionPromotionMode(params.options?.mode) !== 'withinGroups' || !params.options) {
         return params.source as SessionListIndexItem[];
     }
+    const retained = normalizeRetainedAttentionPlacements(params.options.retainedPlacements);
 
     return applySessionListIndexPlacementWithinGroups({
         source: params.source,
-        retainedKeys: params.options.retainSessionKeys,
+        retainedKeys: retained.keys,
+        retainedAttentionReasons: retained.reasons,
         resolveSessionRow: params.resolveSessionRow,
         lane: ATTENTION_LANE,
         nowMs: params.nowMs,
@@ -532,7 +567,7 @@ export function applySessionListIndexWorkingPlacementWithinGroups(params: Readon
 
     return applySessionListIndexPlacementWithinGroups({
         source: params.source,
-        retainedKeys: params.retainedKeys ?? resolveWorkingPlacementRetainedKeys(params.options),
+        retainedKeys: params.retainedKeys,
         resolveSessionRow: params.resolveSessionRow,
         lane: WORKING_LANE,
         nowMs: params.nowMs,

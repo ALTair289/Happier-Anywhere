@@ -1256,6 +1256,162 @@ describe('computeVisibleSessionListIndex', () => {
         ]);
     });
 
+    it.each(['global', 'withinGroups'] as const)(
+        'moves generic unread sessions into attention placement in %s mode and restores them when read',
+        (mode) => {
+            const groupKey = 'server:s1:day:2026-02-17';
+            const source: SessionListIndexItem[] = [
+                { type: 'header', headerKind: 'date', title: 'Today', serverId: 's1', groupKey },
+                { type: 'session', sessionId: 'claude-unread', serverId: 's1', section: 'inactive', groupKey, groupKind: 'date' },
+                { type: 'session', sessionId: 'quiet', serverId: 's1', section: 'inactive', groupKey, groupKind: 'date' },
+            ];
+            const claudeSession = makeSessionRow('claude-unread', {
+                seq: 742,
+                lastViewedSessionSeq: 738,
+                hasUnreadMessages: true,
+                meaningfulActivityAt: 7_390,
+                latestTurnStatus: 'completed',
+                latestTurnStatusObservedAt: 7_000,
+                latestReadyEventSeq: 110,
+                latestReadyEventAt: 1_100,
+            });
+            const common = {
+                source,
+                hideInactiveSessions: false,
+                pinnedSessionKeysV1: [],
+                sessionListGroupOrderV1: {},
+                sessionListOrderingModeV1: 'custom' as const,
+                presentation: { enabled: false, presentation: 'grouped' as const, selectedServerIds: [] },
+                attentionPromotion: { mode },
+            };
+
+            const unreadResult = computeVisibleSessionListIndex({
+                ...common,
+                resolveSessionRow: makeResolver({
+                    's1:claude-unread': claudeSession,
+                    's1:quiet': makeSessionRow('quiet'),
+                }),
+            })!;
+            const unreadItem = unreadResult.find((item) => item.type === 'session' && item.sessionId === 'claude-unread');
+
+            expect(unreadItem).toMatchObject({
+                groupKind: mode === 'global' ? 'attention' : 'date',
+                attentionPromotionReason: 'unread',
+            });
+            if (mode === 'global') {
+                expect(unreadResult[0]).toMatchObject({ type: 'header', headerKind: 'attention' });
+            }
+
+            const readResult = computeVisibleSessionListIndex({
+                ...common,
+                resolveSessionRow: makeResolver({
+                    's1:claude-unread': {
+                        ...claudeSession,
+                        lastViewedSessionSeq: 742,
+                        hasUnreadMessages: false,
+                    },
+                    's1:quiet': makeSessionRow('quiet'),
+                }),
+            })!;
+            const readItem = readResult.find((item) => item.type === 'session' && item.sessionId === 'claude-unread');
+
+            expect(readItem).toMatchObject({ groupKind: 'date' });
+            expect(readItem?.type === 'session' ? readItem.attentionPromotionReason : undefined).toBeUndefined();
+            expect(readResult.some((item) => item.type === 'header' && item.headerKind === 'attention')).toBe(false);
+        },
+    );
+
+    it('preserves a selected unread row reason and exact attention position until navigation releases retention', () => {
+        const groupKey = 'server:s1:day:2026-02-17';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'date', title: 'Today', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'existing-ready', serverId: 's1', section: 'inactive', groupKey, groupKind: 'date' },
+            { type: 'session', sessionId: 'selected-unread', serverId: 's1', section: 'inactive', groupKey, groupKind: 'date' },
+            { type: 'session', sessionId: 'other-unread', serverId: 's1', section: 'inactive', groupKey, groupKind: 'date' },
+        ];
+        const selectedUnread = makeSessionRow('selected-unread', {
+            seq: 742,
+            hasUnreadMessages: true,
+            meaningfulActivityAt: 200,
+            latestReadyEventSeq: 110,
+            latestReadyEventAt: 100,
+            lastViewedSessionSeq: 738,
+        });
+        const rows = {
+            's1:existing-ready': makeSessionRow('existing-ready', {
+                latestReadyEventSeq: 50,
+                latestReadyEventAt: 50,
+                lastViewedSessionSeq: 1,
+            }),
+            's1:selected-unread': selectedUnread,
+            's1:other-unread': makeSessionRow('other-unread', {
+                seq: 500,
+                hasUnreadMessages: true,
+                meaningfulActivityAt: 150,
+                latestReadyEventSeq: 100,
+                latestReadyEventAt: 40,
+                lastViewedSessionSeq: 101,
+            }),
+        };
+        const common = {
+            source,
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: [],
+            sessionListGroupOrderV1: {},
+            sessionListOrderingModeV1: 'custom' as const,
+            presentation: { enabled: false, presentation: 'grouped' as const, selectedServerIds: [] },
+        };
+        const summarizeAttention = (items: ReadonlyArray<SessionListIndexItem>) => items
+            .filter((item): item is Extract<SessionListIndexItem, { type: 'session' }> => item.type === 'session' && item.groupKind === 'attention')
+            .map((item) => `${item.sessionId}:${item.attentionPromotionReason ?? 'none'}`);
+
+        const initial = computeVisibleSessionListIndex({
+            ...common,
+            resolveSessionRow: makeResolver(rows),
+            attentionPromotion: { mode: 'global' },
+        })!;
+        expect(summarizeAttention(initial)).toEqual([
+            'existing-ready:ready',
+            'selected-unread:unread',
+            'other-unread:unread',
+        ]);
+
+        const readRows = {
+            ...rows,
+            's1:selected-unread': {
+                ...selectedUnread,
+                lastViewedSessionSeq: 742,
+                hasUnreadMessages: false,
+            },
+        };
+        const retained = computeVisibleSessionListIndex({
+            ...common,
+            resolveSessionRow: makeResolver(readRows),
+            attentionPromotion: {
+                mode: 'global',
+                retainedPlacements: [{ key: 's1:selected-unread', reason: 'unread' }],
+            },
+        })!;
+        expect(summarizeAttention(retained)).toEqual([
+            'existing-ready:ready',
+            'selected-unread:unread',
+            'other-unread:unread',
+        ]);
+
+        const released = computeVisibleSessionListIndex({
+            ...common,
+            resolveSessionRow: makeResolver(readRows),
+            attentionPromotion: { mode: 'global' },
+        })!;
+        expect(summarizeAttention(released)).toEqual([
+            'existing-ready:ready',
+            'other-unread:unread',
+        ]);
+        expect(released.find((item) => item.type === 'session' && item.sessionId === 'selected-unread')).toMatchObject({
+            groupKind: 'date',
+        });
+    });
+
     it('promotes completed turns even when stale thinking flags remain', () => {
         const groupKey = 'server:s1:day:2026-02-17';
         const source: SessionListIndexItem[] = [

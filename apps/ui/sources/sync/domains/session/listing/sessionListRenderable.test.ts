@@ -942,12 +942,20 @@ describe('didSessionListRenderableAttentionPromotionFieldsChange', () => {
         }, now)).toBe(true);
     });
 
-    it('ignores unread-only changes so unread sessions do not reorder the list', () => {
+    it('detects unread placement changes without rebuilding for unrelated unread-stable updates', () => {
         const previous = buildRenderable({ id: 's_unread_only', hasUnreadMessages: false });
 
         expect(didSessionListRenderableAttentionPromotionFieldsChange(previous, {
             ...previous,
             hasUnreadMessages: true,
+        })).toBe(true);
+        expect(didSessionListRenderableAttentionPromotionFieldsChange({
+            ...previous,
+            hasUnreadMessages: true,
+        }, {
+            ...previous,
+            hasUnreadMessages: true,
+            seq: previous.seq + 1,
         })).toBe(false);
     });
 
