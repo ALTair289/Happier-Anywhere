@@ -100,8 +100,12 @@ const stylesheet = StyleSheet.create((theme, runtime) => {
         contentContainerInner: {
             borderRadius: Platform.select({ ios: 10, default: 16 }),
         },
+        // NOTE: no `marginHorizontal` here. The columns root is `width: '100%'`,
+        // and margin sits OUTSIDE a resolved width — the grid would occupy
+        // 100% + 2*margin and overrun the single card's box. The matching inset
+        // is applied as PADDING via the `paddingHorizontal` prop instead.
         columnsBody: {
-            marginHorizontal: Platform.select(ITEM_GROUP_CONTENT_MARGIN_HORIZONTAL_PX),
+            width: '100%',
         },
         columnStack: {
             width: '100%',
@@ -188,7 +192,7 @@ const ItemGroupColumnedBody = React.memo(function ItemGroupColumnedBody(props: R
         <ItemGroupColumns
             activeColumns={columnStacks.length}
             style={[styles.columnsBody, props.containerStyle]}
-            paddingHorizontal={0}
+            paddingHorizontal={Platform.select(ITEM_GROUP_CONTENT_MARGIN_HORIZONTAL_PX)}
             paddingVertical={0}
             columnGap={ITEM_GROUP_COLUMN_GAP_PX}
             rowGap={ITEM_GROUP_COLUMN_ROW_GAP_PX}

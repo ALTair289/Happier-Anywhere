@@ -43,6 +43,12 @@ function Row(props: { id: string; showDivider?: boolean }) {
 
 type Screen = Awaited<ReturnType<typeof renderScreen>>;
 
+function flattenStyle(style: unknown): Record<string, unknown> {
+    if (Array.isArray(style)) return Object.assign({}, ...style.map((entry) => flattenStyle(entry)));
+    if (style && typeof style === 'object') return style as Record<string, unknown>;
+    return {};
+}
+
 function readRowIds(screen: Screen): string[] {
     return screen.findAllByType('RowStub' as never).map((row) => row.props.id as string);
 }
@@ -114,6 +120,22 @@ describe('ItemGroup columns', () => {
         const screen = await renderGroup(THREE_ROWS, 2);
 
         expect(readColumnStackIds(screen)).toEqual([['a', 'c'], ['b']]);
+    });
+
+    it('insets the columns grid inside its own width, so two columns never outgrow one card', async () => {
+        shared.windowWidth = 1280;
+        const { Platform } = await import('react-native');
+        const { ITEM_GROUP_CONTENT_MARGIN_HORIZONTAL_PX } = await import('./itemGroupSpacing');
+        const contentMargin = Platform.select(ITEM_GROUP_CONTENT_MARGIN_HORIZONTAL_PX);
+
+        const screen = await renderGroup(THREE_ROWS, 2);
+        const grid = screen.findAllByType('ItemGroupColumns' as never)[0];
+
+        // The grid root is `width: '100%'`. A horizontal MARGIN sits outside that
+        // resolved width, so the grid would occupy 100% + 2*margin and overflow
+        // the single card's box. The inset has to be padding, which is inside it.
+        expect(grid?.props.paddingHorizontal).toBe(contentMargin);
+        expect(flattenStyle(grid?.props.style)).not.toHaveProperty('marginHorizontal');
     });
 
     it('drops dividers in the multi-column layout because each row is its own card', async () => {
