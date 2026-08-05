@@ -527,7 +527,6 @@ export async function startReleasedServerLight(params: Readonly<{
       USERPROFILE: homeDir,
       XDG_CONFIG_HOME: configDir,
       HANDY_MASTER_SECRET: randomBytes(32).toString('base64url'),
-      HAPPIER_AUTH_SEED_COMPAT_ATTEMPTS: '32',
       AUTH_ANONYMOUS_SIGNUP_ENABLED: 'true',
     };
 

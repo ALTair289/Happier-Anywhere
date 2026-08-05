@@ -253,7 +253,6 @@ describe('released server-light artifact lifecycle', () => {
       HAPPIER_DB_PROVIDER: 'sqlite',
       HAPPY_DB_PROVIDER: 'sqlite',
       HAPPIER_SQLITE_AUTO_MIGRATE: '1',
-      HAPPIER_AUTH_SEED_COMPAT_ATTEMPTS: '32',
       HAPPIER_SQLITE_MIGRATIONS_DIR: resolve(started.runtimeRoot, 'prisma/sqlite/migrations'),
       PRISMA_QUERY_ENGINE_LIBRARY: resolve(
         started.runtimeRoot,
