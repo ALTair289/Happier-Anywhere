@@ -156,7 +156,6 @@ import { NotificationOff01Icon } from '@hugeicons/core-free-icons';
 import { OctagonXIcon } from '@hugeicons/core-free-icons';
 import { PaintBoardIcon } from '@hugeicons/core-free-icons';
 import { PaintBrush01Icon } from '@hugeicons/core-free-icons';
-import { PanelLeftIcon } from '@hugeicons/core-free-icons';
 import { PanelRightCloseIcon } from '@hugeicons/core-free-icons';
 import { PanelRightOpenIcon } from '@hugeicons/core-free-icons';
 import { PauseCircleIcon } from '@hugeicons/core-free-icons';
@@ -192,6 +191,7 @@ import { Share01Icon } from '@hugeicons/core-free-icons';
 import { Shield01Icon } from '@hugeicons/core-free-icons';
 import { ShuffleIcon } from '@hugeicons/core-free-icons';
 import { SidebarLeft01Icon } from '@hugeicons/core-free-icons';
+import { SidebarRight01Icon } from '@hugeicons/core-free-icons';
 import { SlidersHorizontalIcon } from '@hugeicons/core-free-icons';
 import { SmartPhone01Icon } from '@hugeicons/core-free-icons';
 import { SmileIcon } from '@hugeicons/core-free-icons';
@@ -417,10 +417,10 @@ export const HUGE_ICON_REGISTRY = {
     'shield': Shield01Icon,
     'shield-check': SecurityCheckIcon,
     'shuffle': ShuffleIcon,
-    'sidebar': SidebarLeft01Icon,
+    'sidebar-left-close': SidebarLeft01Icon,
+    'sidebar-left-open': SidebarRight01Icon,
     'sidebar-right-close': PanelRightCloseIcon,
     'sidebar-right-open': PanelRightOpenIcon,
-    'sidebar-simple': PanelLeftIcon,
     'sign-in': Login01Icon,
     'sign-out': Logout01Icon,
     'skip-back': PreviousIcon,

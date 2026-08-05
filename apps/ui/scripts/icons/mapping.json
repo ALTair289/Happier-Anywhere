@@ -1,5 +1,7 @@
 {
   "#alias:octagon-x": "prohibit",
+  "#alias:sidebar-left-close": "sidebar",
+  "#alias:sidebar-left-open": "sidebar-simple",
   "#alias:sidebar-right-close": "sidebar",
   "#alias:sidebar-right-open": "sidebar-simple",
   "accessibility": "wheelchair",
@@ -259,8 +261,6 @@
   "shield-checkmark": "shield-check",
   "shield-half": "shield",
   "shuffle": "shuffle",
-  "sidebar-collapse": "sidebar",
-  "sidebar-expand": "sidebar-simple",
   "sparkles": "sparkle",
   "speedometer": "speedometer",
   "square": "square",

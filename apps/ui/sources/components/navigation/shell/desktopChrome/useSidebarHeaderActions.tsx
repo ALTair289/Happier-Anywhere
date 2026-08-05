@@ -12,6 +12,7 @@ import { useFriendRequests } from '@/sync/domains/state/storage';
 import { runGuardedNavigation } from '@/utils/navigation/runGuardedNavigation';
 import { fireAndForget } from '@/utils/system/fireAndForget';
 import { desktopSidebarChromeStyles } from './desktopSidebarChromeStyles';
+import { DESKTOP_SIDEBAR_CHROME_ICON_GLYPH_SIZE_PX } from './desktopChromeMetrics';
 import { Icon, ICON_SIZE } from '@/components/ui/icons/Icon';
 
 type SidebarHeaderActionsResult = Readonly<{
@@ -125,7 +126,14 @@ export function useSidebarHeaderActions(): SidebarHeaderActionsResult {
                 inlineTestID: 'sidebar-inbox-button',
                 icon: (
                     <View style={styles.topNotificationButton}>
-                        <Icon name="mailbox" size={ICON_SIZE.md} color={theme.colors.chrome.header.foreground} />
+                        {/* The one glyph in the top strip that is built here rather than named, so
+                            it has to reach for the strip's size itself or it stays behind when the
+                            others move. */}
+                        <Icon
+                            name="mailbox"
+                            size={DESKTOP_SIDEBAR_CHROME_ICON_GLYPH_SIZE_PX}
+                            color={theme.colors.chrome.header.foreground}
+                        />
                         {inboxHasContent ? <View style={styles.topIndicatorDot} /> : null}
                     </View>
                 ),

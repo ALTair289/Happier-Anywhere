@@ -578,10 +578,12 @@ export const SessionDetailsPanel = React.memo((props: SessionDetailsPanelProps) 
                                 : t('session.detailsPanel.openRightSidebarA11y')
                         }
                     >
+                        {/* `edge="right"`: this toggles the RIGHT pane, and without it the glyph
+                            draws a panel on the opposite side of the screen from the one it opens. */}
                         {rightPaneOpen ? (
-                            <SidebarCollapseIcon size={18} color={theme.colors.text.secondary} />
+                            <SidebarCollapseIcon edge="right" size={18} color={theme.colors.text.secondary} />
                         ) : (
-                            <SidebarExpandIcon size={18} color={theme.colors.text.secondary} />
+                            <SidebarExpandIcon edge="right" size={18} color={theme.colors.text.secondary} />
                         )}
                     </IconAction>
                 ) : null}

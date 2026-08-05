@@ -64,7 +64,7 @@ export type IconProps = Readonly<{
      *
      * Phosphor-only, deliberately: HugeIcons ships purpose-built right-edge glyphs, so mirroring
      * there would turn a correct icon backwards. A concept that needs both edges names both
-     * (`sidebar-simple` / `sidebar-right-open`) and each family answers with what it has.
+     * (`sidebar-left-open` / `sidebar-right-open`) and each family answers with what it has.
      */
     mirrored?: boolean;
     style?: StyleProp<ViewStyle>;

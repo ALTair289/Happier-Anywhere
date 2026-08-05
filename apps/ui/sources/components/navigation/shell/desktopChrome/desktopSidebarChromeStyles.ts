@@ -8,7 +8,6 @@ import {
     DESKTOP_SIDEBAR_CHROME_TOP_ICON_GAP_PX,
     DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_BUTTON_SIZE_PX,
     DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_DISABLED_OPACITY,
-    DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_GLYPH_SIZE_PX,
     DESKTOP_SIDEBAR_CHROME_TOP_NAV_ICON_OPACITY,
     DESKTOP_SIDEBAR_CHROME_TOP_NOTIFICATION_DOT_RIGHT_PX,
     DESKTOP_SIDEBAR_CHROME_TOP_NOTIFICATION_DOT_SIZE_PX,
@@ -186,9 +185,6 @@ export const desktopSidebarChromeStyles = StyleSheet.create((theme) => ({
         alignItems: 'center',
         justifyContent: 'center',
         opacity: DESKTOP_SIDEBAR_CHROME_TOP_SETTINGS_ICON_OPACITY,
-    },
-    leftSidebarCollapseIcon: {
-        transform: [{ translateY: 1 }, { scaleX: -1 }],
     },
     notificationButton: {
         position: 'relative',
