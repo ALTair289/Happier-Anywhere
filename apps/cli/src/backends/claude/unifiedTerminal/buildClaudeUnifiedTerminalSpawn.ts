@@ -33,7 +33,7 @@ import {
   resolveClaudeTerminalCliOptions,
   type ClaudeTerminalCliOptionsDiagnostic,
 } from '../cli/terminalOptions';
-import { claudeCliFlagCanConsumeValue } from '../cli/flagArity';
+import { claudeCliFlagCanConsumeNextArg } from '../cli/flagArity';
 
 export type ClaudeUnifiedTerminalSpawn = Readonly<{
   spawnArgv: readonly string[];
@@ -169,12 +169,10 @@ function appendClaudeArgsWithoutManagedPromptAndSpawnMode(
     }
     if (!arg.startsWith('-')) continue;
     target.push(arg);
-    if (claudeCliFlagCanConsumeValue(arg) && index + 1 < input.length) {
-      const value = input[index + 1];
-      if (typeof value === 'string') {
-        target.push(value);
-        index += 1;
-      }
+    const value = index + 1 < input.length ? input[index + 1] : undefined;
+    if (claudeCliFlagCanConsumeNextArg(arg, value)) {
+      target.push(value!);
+      index += 1;
     }
   }
 }

@@ -44,6 +44,8 @@ export function claudeCliFlagHasOptionalValue(flag: string): boolean {
     return flagsWithOptionalValue.has(flag);
 }
 
-export function claudeCliFlagCanConsumeValue(flag: string): boolean {
-    return claudeCliFlagHasRequiredValue(flag) || claudeCliFlagHasOptionalValue(flag);
+export function claudeCliFlagCanConsumeNextArg(flag: string, nextArg: string | undefined): boolean {
+    if (nextArg === undefined) return false;
+    if (claudeCliFlagHasRequiredValue(flag)) return true;
+    return claudeCliFlagHasOptionalValue(flag) && !nextArg.startsWith('-');
 }

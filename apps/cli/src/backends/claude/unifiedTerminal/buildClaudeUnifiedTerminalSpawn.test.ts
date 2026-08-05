@@ -164,6 +164,42 @@ describe('buildClaudeUnifiedTerminalSpawn', () => {
     ]);
   });
 
+  it('does not let bare --resume consume a following permission flag', async () => {
+    const spawn = await buildClaudeUnifiedTerminalSpawn({
+      path: '/workspace/project',
+      first: {
+        message: 'hello',
+        mode: {
+          permissionMode: 'yolo',
+        },
+      },
+      claudeArgs: ['--resume', '--permission-mode', 'bypassPermissions'],
+      hookPluginDir: '/tmp/hook-plugin',
+      deps: {
+        resolveClaudeCliPath: () => '/usr/local/bin/claude',
+        isClaudeCliJavaScriptFile: () => false,
+        ensureClaudeJsRuntimeExecutable: async () => '/managed/node',
+        claudeLocalLauncherPath: '/happier/scripts/claude_local_launcher.cjs',
+        terminalLaunchSpecRunnerPath: '/happier/scripts/terminal_launch_spec_runner.cjs',
+        resolveCommandInvocation: ({ command, args }) => ({ command, args: [...args] }),
+      },
+    });
+
+    const launchSpec = await readLaunchSpecFromSpawn(spawn);
+    const launchArgs = launchSpec.args ?? [];
+    const permissionIndexes = launchArgs
+      .map((arg, index) => arg === '--permission-mode' ? index : -1)
+      .filter((index) => index >= 0);
+
+    expect(permissionIndexes).toHaveLength(1);
+    expect(launchArgs[permissionIndexes[0]! + 1]).toBe('bypassPermissions');
+    expect(launchArgs.indexOf('--resume')).toBeLessThan(permissionIndexes[0]!);
+    expect(launchArgs.slice(launchArgs.indexOf('--plugin-dir'), launchArgs.indexOf('--plugin-dir') + 2)).toEqual([
+      '--plugin-dir',
+      '/tmp/hook-plugin',
+    ]);
+  });
+
   it('uses the managed JavaScript runtime wrapper when the resolved Claude CLI is a JavaScript file', async () => {
     const spawn = await buildClaudeUnifiedTerminalSpawn({
       path: '/workspace/project',

@@ -23,7 +23,7 @@ import { configuration } from '@/configuration';
 import { isolateClaudeRuntimeAuthEnv } from './spawn/isolateClaudeRuntimeAuthEnv';
 import { logClaudeRuntimeAuthEnvDiagnostic } from './spawn/logClaudeRuntimeAuthEnvDiagnostic';
 import { HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR } from '@/daemon/spawn/spawnExplicitEnvKeysMarker';
-import { claudeCliFlagCanConsumeValue } from './cli/flagArity';
+import { claudeCliFlagCanConsumeNextArg } from './cli/flagArity';
 
 /**
  * Error thrown when the Claude process exits with a non-zero exit code.
@@ -340,8 +340,9 @@ export async function claudeLocal(opts: {
                     }
                     if (arg.startsWith('-')) {
                         flagArgs.push(arg);
-                        if (claudeCliFlagCanConsumeValue(arg) && i + 1 < opts.claudeArgs.length) {
-                            flagArgs.push(opts.claudeArgs[i + 1]!);
+                        const nextArg = i + 1 < opts.claudeArgs.length ? opts.claudeArgs[i + 1] : undefined;
+                        if (claudeCliFlagCanConsumeNextArg(arg, nextArg)) {
+                            flagArgs.push(nextArg!);
                             i++;
                         }
                         continue;

@@ -752,6 +752,31 @@ describe('claudeLocal --continue handling', () => {
         expect(spawnArgs[permissionIndex + 1]).toBe('bypassPermissions');
     });
 
+    it('does not let bare --resume consume a following permission flag', async () => {
+        await claudeLocal({
+            abort: new AbortController().signal,
+            sessionId: null,
+            path: '/tmp',
+            onSessionFound,
+            hookPluginDir: '/tmp/hook-plugin',
+            hookSettingsPath: '/tmp/hooks.json',
+            claudeArgs: ['--resume', '--permission-mode', 'bypassPermissions'],
+        });
+
+        const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+        const permissionIndexes = spawnArgs
+            .map((arg, index) => arg === '--permission-mode' ? index : -1)
+            .filter((index) => index >= 0);
+
+        expect(permissionIndexes).toHaveLength(1);
+        expect(spawnArgs[permissionIndexes[0]! + 1]).toBe('bypassPermissions');
+        expect(spawnArgs.indexOf('--resume')).toBeLessThan(permissionIndexes[0]!);
+        expect(spawnArgs.slice(spawnArgs.indexOf('--plugin-dir'), spawnArgs.indexOf('--plugin-dir') + 2)).toEqual([
+            '--plugin-dir',
+            '/tmp/hook-plugin',
+        ]);
+    });
+
     it('normalizes --dangerously-skip-permissions so resumed launches keep --resume before the permission flag', async () => {
         await claudeLocal({
             abort: new AbortController().signal,
